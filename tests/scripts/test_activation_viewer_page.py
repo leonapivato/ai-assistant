@@ -2,8 +2,9 @@
 
 What the server's JSON cannot say: that the page puts an entry's raw text into the
 document as text, that a round's calls each show their own verdict, that a round's
-drawer shows the tools its request offered, and that a drawer shows only what the last
-click asked for, however its loads interleave. The viewer is
+drawer shows the tools its request offered, that a model call opens readable with its
+raw entries a tab away and each part copies as plain text, and that a drawer shows only
+what the last click asked for, however its loads interleave. The viewer is
 bound on loopback over a record written by ADR-0314's store, and driven by the suite's
 one shared browser (ADR-0216 §3).
 """
@@ -31,6 +32,7 @@ from _activation_record import (
     viewer,
     write_record,
 )
+from _model_call_record import ADDED, CALLS, LABELS, ODD, ROUND_1_INPUT, write_calls
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -50,8 +52,8 @@ _SHOWN: Final = 10_000
 
 @pytest.fixture
 def record(tmp_path: Path) -> Path:
-    """A record written by ADR-0314's store."""
-    return write_record(tmp_path)
+    """A record written by ADR-0314's store, its model calls' activations beside it."""
+    return write_calls(write_record(tmp_path))
 
 
 @pytest.fixture
@@ -62,9 +64,13 @@ def server(record: Path) -> Iterator[Any]:
 
 
 @contextlib.asynccontextmanager
-async def _page(browser: Browser) -> AsyncIterator[Page]:
+async def _page(
+    browser: Browser, *, width: int = 1280, permissions: list[str] | None = None
+) -> AsyncIterator[Page]:
     """A fresh page in its own context, closed when the case is done with it."""
-    context = await browser.new_context(viewport={"width": 1280, "height": 860})
+    context = await browser.new_context(
+        viewport={"width": width, "height": 860}, permissions=permissions or []
+    )
     try:
         yield await context.new_page()
     finally:
@@ -197,12 +203,15 @@ async def test_a_drawer_shows_only_what_the_last_click_asked_for(
         await page.locator(".tl-lane .bar.call").first.click()
         headings = page.locator("#drawer-body .sec h3")
         await expect(headings.first).to_have_text("understanding · given", timeout=_SHOWN)
+        readable = page.locator("#drawer-read .call-head h2")
+        await expect(readable).to_have_text("Understanding", timeout=_SHOWN)
         released.set()
         # Long enough for act-1's two held loads to land, were they drawn.
         await page.wait_for_timeout(500)
         shown = await headings.all_text_contents()
         assert all(not one.startswith("planning") for one in shown), shown
         await expect(page.locator("#drawer-title")).not_to_contain_text("planning")
+        await expect(readable).to_have_text("Understanding")
 
 
 async def test_a_span_of_a_century_draws_a_handful_of_ticks(
@@ -273,3 +282,142 @@ async def test_an_activation_that_stops_writing_stops_reading_as_running(
         title = await page.locator(".tl-lane .bar.call").first.get_attribute("title")
         assert title is not None
         assert "no returned entry was recorded" in title
+
+
+# --- §3:3: a model call, readable --------------------------------------------------------
+
+
+async def _open_round(page: Page, port: int, number: int) -> Locator:
+    await _open(page, port, CALLS)
+    await page.locator(".round").nth(number - 1).click()
+    readable = page.locator("#drawer-read")
+    await expect(readable.locator(".call-head h2")).to_have_text(
+        f"Planning · round {number}", timeout=_SHOWN
+    )
+    return readable
+
+
+async def test_a_model_call_opens_readable_with_its_raw_entries_a_tab_away(
+    server: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser) as page:
+        readable = await _open_round(page, server.port, 1)
+        told = readable.locator("#call-told .part")
+        await expect(told).to_have_count(3)
+        # The record's raw text, as text: the instructions' second paragraph carries it.
+        await expect(told.nth(1).locator(".part-text")).to_have_text(LABELS)
+        assert await page.locator("img").count() == 0
+        keys = readable.locator("#call-given details.part > summary .name")
+        await expect(keys).to_have_text(list(ROUND_1_INPUT))
+        await expect(readable.locator("#call-tools .part-head .name")).to_have_text(
+            ["web_search", "send_email", "planning_round"]
+        )
+        await expect(readable.locator("#call-did")).to_contain_text("12,345")
+        await expect(readable.locator("#call-did .part-head .name")).to_have_text(
+            [
+                "1 · Thinking (the provider's summary)",
+                "2 · Text",
+                "3 · Call · web_search",
+                "4 · Episode notes",
+                "5 · Asks named",
+            ]
+        )
+        await expect(page.locator("#drawer-body")).to_be_hidden()
+        await page.locator("#tab-raw").click()
+        await expect(readable).to_be_hidden()
+        await expect(page.locator("#drawer-body")).to_contain_text("Whole body")
+        await page.locator("#tab-read").click()
+        await expect(readable).to_be_visible()
+
+
+async def test_a_parts_copy_control_copies_its_plain_text(
+    server: Any, gateway_browser: Browser
+) -> None:
+    granted = ["clipboard-read", "clipboard-write"]
+    async with _page(gateway_browser, permissions=granted) as page:
+        readable = await _open_round(page, server.port, 1)
+        copy = readable.locator("#call-told .part").nth(1).locator(".copy")
+        await copy.click()
+        await expect(copy).to_have_text("Copied")
+        assert await page.evaluate("navigator.clipboard.readText()") == LABELS
+        stories = readable.locator("#call-given details.part").nth(2)
+        await stories.locator(".copy").click()
+        copied = await page.evaluate("navigator.clipboard.readText()")
+        assert copied == '"stories": ' + json.dumps(ROUND_1_INPUT["stories"], indent=1)
+        # A copy control inside a part's summary copies without opening the part.
+        assert await stories.get_attribute("open") is None
+
+
+async def test_round_to_round_shows_the_diff_of_each_changed_part(
+    server: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser) as page:
+        readable = await _open_round(page, server.port, 2)
+        changes = readable.locator("#call-changes")
+        await expect(changes).to_contain_text("since round 1")
+        await expect(changes.locator(".part-head .name")).to_have_text(
+            ["instructions", "input · rounds", "input · results", "tool · send_email"]
+        )
+        await expect(changes.locator(".diff .add").first).to_have_text("+" + ADDED)
+        await expect(changes).to_contain_text("Unchanged: input · understood")
+        await page.locator("#drawer-close").click()
+        await page.locator(".round").first.click()
+        await expect(page.locator("#drawer-read #call-changes")).to_contain_text(
+            "none before it", timeout=_SHOWN
+        )
+
+
+async def test_understandings_call_says_its_usage_is_not_recorded(
+    server: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser) as page:
+        await _open(page, server.port, CALLS)
+        await page.locator(".tl-lane").nth(2).locator(".bar.call").first.click()
+        did = page.locator("#drawer-read #call-did")
+        await expect(did).to_contain_text("records no token usage", timeout=_SHOWN)
+        await expect(did).to_contain_text("#3090")
+        await expect(did).not_to_contain_text("input tokens")
+        headings = page.locator("#drawer-read #call-told .part-heading")
+        await expect(headings).to_have_text(["What to return", "RULES"])
+
+
+async def test_a_call_of_other_shapes_says_what_it_cannot_read(
+    server: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser) as page:
+        await _open(page, server.port, ODD)
+        await page.locator("details.card > summary").click()
+        rows = page.locator("#entries .entry-row")
+        await rows.first.click()
+        readable = page.locator("#drawer-read")
+        await expect(readable).to_contain_text("no list of messages", timeout=_SHOWN)
+        await expect(readable).to_contain_text("no response parts")
+        await expect(readable).not_to_contain_text("did not read as expected")
+        # A request whose body is no object is still a call, its body shown raw.
+        await page.locator("#drawer-close").click()
+        await rows.last.click()
+        await expect(page.locator("#drawer-body")).to_contain_text("not an object", timeout=_SHOWN)
+        await expect(page.locator("#drawer-tabs")).to_be_visible()
+        await page.locator("#drawer-close").click()
+        await page.evaluate("location.hash = 'act-1'")
+        await expect(page.locator("#d-input")).to_have_text(HOSTILE, timeout=_SHOWN)
+        # A step is no model call: it opens its raw entry alone.
+        await page.locator(".tl-lane").first.locator(".pt, .bar").first.click()
+        await expect(page.locator("#drawer-body .sec h3").first).to_be_visible(timeout=_SHOWN)
+        await expect(page.locator("#drawer-tabs")).to_be_hidden()
+        await expect(page.locator("#drawer-read")).to_be_hidden()
+
+
+async def test_a_model_call_reads_at_a_phones_width_with_no_sideways_scroll(
+    server: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser, width=390) as page:
+        await _open(page, server.port, CALLS)
+        await page.locator(".round").nth(1).click()
+        readable = page.locator("#drawer-read")
+        await expect(readable.locator("#call-changes .diff")).to_have_count(2, timeout=_SHOWN)
+        box = await page.locator("#drawer").bounding_box()
+        assert box is not None
+        assert box["width"] <= 390
+        wide = await readable.evaluate("node => node.scrollWidth - node.clientWidth")
+        assert wide <= 0
