@@ -42,6 +42,26 @@ from _activation_record import (
     viewer,
     write_record,
 )
+from _model_call_record import (
+    ADDED,
+    CALLS,
+    CALLS_RULE,
+    DIGEST_GIVEN_LINE,
+    DIGEST_RETURNED_LINE,
+    LABELS,
+    ODD,
+    ODD_ENTRIES,
+    ROLE,
+    ROUND_1_GIVEN,
+    ROUND_1_INPUT,
+    ROUND_1_RETURNED_LINE,
+    ROUND_2_GIVEN,
+    SEND_EMAIL,
+    UNDERSTANDING_GIVEN,
+    UNDERSTANDING_RETURNED,
+    WEB_SEARCH,
+    write_calls,
+)
 
 
 @pytest.fixture
@@ -199,6 +219,8 @@ def test_it_answers_get_alone(server: Any, method: str) -> None:
         "/favicon.ico",
         "/api/activations",
         "/api/activation?id=act-1",
+        "/api/call?id=act-1&line=0",
+        "/api/call?id=act-1&line=1000",
         "/nowhere",
     ],
 )
@@ -241,6 +263,8 @@ def test_an_activation_is_named_by_a_listed_id_never_a_path(server: Any, record:
         assert status == 404, name
         status, _headers, _body = _request(server.port, f"/api/entry?id={name}&line=0")
         assert status == 404, name
+        status, _headers, _body = _request(server.port, f"/api/call?id={name}&line=0")
+        assert status == 404, name
 
 
 def test_serving_leaves_the_record_unchanged(server: Any, record: Path) -> None:
@@ -256,6 +280,8 @@ def test_serving_leaves_the_record_unchanged(server: Any, record: Path) -> None:
         "/api/activation?id=act-2",
         "/api/entry?id=act-1&line=0",
         "/api/entry?id=act-2&line=1",
+        "/api/call?id=act-1&line=3",
+        "/api/call?id=act-1&line=4",
     ):
         _request(server.port, path)
     assert _snapshot(root) == before
@@ -738,3 +764,257 @@ def test_a_response_never_crosses_into_another_rounds_step() -> None:
     )
     pending = next(one for one in shown["items"] if one["kind"] == "call")
     assert pending["tone"] == "pending"
+
+
+# --- §3:3: a model call, readable beside its bodies ---------------------------------------
+
+
+@pytest.fixture
+def calls(record: Path) -> Path:
+    """The record, with the activation of model calls and the odd one written beside it."""
+    return write_calls(record)
+
+
+def _call(port: int, activation_id: str, line: int) -> Any:
+    return _get_json(port, f"/api/call?id={activation_id}&line={line}")
+
+
+def _paragraphs(view: Any) -> list[str]:
+    return [part["text"] for section in view["told"]["sections"] for part in section["parts"]]
+
+
+def test_a_planning_call_reads_as_told_given_offered_and_done(server: Any, calls: Path) -> None:
+    view = _call(server.port, CALLS, ROUND_1_GIVEN)
+    assert (view["source"], view["round"]) == ("planning", 1)
+    assert (view["given"], view["returned"]) == (ROUND_1_GIVEN, ROUND_1_RETURNED_LINE)
+    # What it was told: the instructions, a paragraph to a part, each sized and estimated.
+    assert _paragraphs(view) == [ROLE, LABELS, CALLS_RULE]
+    first = view["told"]["sections"][0]["parts"][0]
+    assert (first["n"], first["chars"], first["tokens"]) == (
+        1,
+        len(ROLE),
+        viewer.estimate(len(ROLE)),
+    )
+    # What it was given: the user message's JSON, a key to a part, its lists counted.
+    (message,) = view["input"]
+    assert (message["role"], message["form"]) == ("user", "json")
+    keys = {one["key"]: one for one in message["keys"]}
+    assert list(keys) == list(ROUND_1_INPUT)
+    assert keys["stories"]["kind"] == "list · 2 items"
+    assert keys["stories"]["chars"] == len(json.dumps(ROUND_1_INPUT["stories"]))
+    assert {"path": "stories[].notes", "lists": 2, "items": 2} in keys["stories"]["lists"]
+    assert json.loads(keys["stories"]["text"]) == ROUND_1_INPUT["stories"]
+    # What it could do: the tools offered to the provider, the reserved one last.
+    tools = view["tools"]
+    assert tools["from"] == "returned"
+    assert [(one["name"], one["reserved"]) for one in tools["tools"]] == [
+        ("web_search", False),
+        ("send_email", False),
+        ("planning_round", True),
+    ]
+    assert json.loads(tools["tools"][0]["schema"]) == WEB_SEARCH["parameters"]
+    # What it did: the response's parts in order, the round tool's as its notes and asks.
+    did = view["did"]
+    assert [(one["kind"], one["title"]) for one in did["parts"]] == [
+        ("thinking", "Thinking (the provider's summary)"),
+        ("text", "Text"),
+        ("call", "Call · web_search"),
+        ("notes", "Episode notes"),
+        ("asks", "Asks named"),
+    ]
+    assert json.loads(did["parts"][2]["text"]) == {"query": "flights to Lisbon"}
+    assert did["parts"][2]["id"] == "c1"
+    assert did["parts"][3]["text"] == "Looking for flights."
+    assert did["parts"][4]["items"] == ["c0"]
+    assert did["usage"] == {"input": 12_345, "output": 456, "cache read": 10_000, "cache write": 0}
+    assert view["notes"] == []
+    # The same call, asked for by its returned entry.
+    assert _call(server.port, CALLS, ROUND_1_RETURNED_LINE) == view
+
+
+def test_understandings_call_says_it_records_no_usage(server: Any, calls: Path) -> None:
+    view = _call(server.port, CALLS, UNDERSTANDING_RETURNED)
+    assert view["given"] == UNDERSTANDING_GIVEN
+    sections = view["told"]["sections"]
+    assert [one["heading"] for one in sections] == [None, "What to return", "RULES"]
+    assert [[part["n"] for part in one["parts"]] for one in sections] == [[1], [2], [3]]
+    assert view["tools"] is None
+    assert view["changes"] is None
+    did = view["did"]
+    assert did["usage"] is None
+    assert "#3090" in did["usage_note"]
+    assert [one["kind"] for one in did["parts"]] == ["reply"]
+    assert json.loads(did["parts"][0]["text"]) == {"meaning": "find a flight"}
+
+
+def test_a_digest_parts_call_shows_its_question_reply_and_dropped_items(
+    server: Any, calls: Path
+) -> None:
+    view = _call(server.port, CALLS, DIGEST_GIVEN_LINE)
+    assert view["returned"] == DIGEST_RETURNED_LINE
+    assert view["about"] == {
+        "question": "Which flight is cheapest?",
+        "result": "r1",
+        "part": "1 of 1",
+    }
+    assert [one["key"] for one in view["input"][0]["keys"]] == ["question", "records"]
+    assert [one["title"] for one in view["did"]["parts"]] == ["Reply", "Dropped evidence"]
+    assert view["did"]["usage"] is None
+    assert view["round"] is None
+
+
+def test_a_round_shows_what_changed_in_its_request_since_the_round_before(
+    server: Any, calls: Path
+) -> None:
+    assert _call(server.port, CALLS, ROUND_1_GIVEN)["changes"] is None
+    changes = _call(server.port, CALLS, ROUND_2_GIVEN)["changes"]
+    assert (changes["against"], changes["against_round"]) == (ROUND_1_GIVEN, 1)
+    shown = {one["part"]: one for one in changes["parts"]}
+    assert {name: one["change"] for name, one in shown.items()} == {
+        "instructions": "changed",
+        "input · understood": "unchanged",
+        "input · place": "unchanged",
+        "input · stories": "unchanged",
+        "input · rounds": "changed",
+        "input · results": "added",
+        "tool · web_search": "unchanged",
+        "tool · send_email": "removed",
+    }
+    # A changed paragraph is its own line of the diff; the others are its context.
+    diff = shown["instructions"]["diff"]["lines"]
+    assert [one for one in diff if one.startswith(("+", "-"))] == ["+" + ADDED]
+    assert " " + CALLS_RULE in diff
+    assert any(one.startswith('+  "round": 1') for one in shown["input · rounds"]["diff"]["lines"])
+    assert shown["input · rounds"]["before"] == len("[]")
+    assert shown["tool · send_email"]["before"] == len(json.dumps(SEND_EMAIL))
+
+
+def test_a_call_the_record_holds_half_of_says_what_is_missing() -> None:
+    given = viewer.Entry(0, "planning", "given", 1.0, "", {"messages": [], "tools": [WEB_SEARCH]})
+    returned = viewer.Entry(1, "understanding", "returned", 2.0, "", {"reply": "ok"})
+    pending = viewer.model_call([given], 0)
+    assert pending is not None
+    assert pending["returned"] is None
+    assert pending["did"] is None
+    # With no returned entry, the tools are the request's own.
+    assert pending["tools"]["from"] == "given"
+    assert any("No returned entry" in one for one in pending["notes"])
+    lone = viewer.model_call([returned], 0)
+    assert lone is not None
+    assert (lone["given"], lone["told"], lone["input"]) == (None, None, None)
+    assert any("No given entry" in one for one in lone["notes"])
+    assert lone["did"]["parts"][0]["text"] == "ok"
+
+
+def test_a_line_that_is_no_model_call_has_no_call_view(server: Any, calls: Path) -> None:
+    read = viewer.Record(calls).lines(CALLS)
+    assert read is not None
+    lines = read[0]
+    for number, line in enumerate(lines):
+        is_call = (
+            isinstance(line, viewer.Entry)
+            and line.source in {"understanding", "planning", "digesting"}
+            and line.kind in {"given", "returned"}
+        )
+        assert (viewer.model_call(lines, number) is not None) == is_call, number
+    for path in (
+        f"/api/call?id={CALLS}&line=2",
+        f"/api/call?id={CALLS}&line=6",
+        f"/api/call?id={CALLS}&line={len(lines)}",
+        f"/api/call?id={CALLS}&line=-1",
+        f"/api/call?id={CALLS}&line=x",
+        f"/api/call?id={CALLS}",
+        f"/api/call?id=act-1&line={len(ACTIVATION) + len(FOREIGN_LINES)}",
+    ):
+        status, _headers, _body = _request(server.port, path)
+        assert status == 404, path
+
+
+def test_bodies_of_other_shapes_lose_their_parts_and_say_so(server: Any, calls: Path) -> None:
+    read = viewer.Record(calls).lines(ODD)
+    assert read is not None
+    lines = read[0]
+    views = [viewer.model_call(lines, number) for number in range(len(lines))]
+    json.dumps(views, allow_nan=False)
+    # Messages that are no list: nothing to split, and said so.
+    first = views[0]
+    assert first is not None
+    assert (first["told"], first["input"]) == (None, None)
+    assert any("no list of messages" in one for one in first["notes"])
+    # Unnamed tools are counted and left out; a response with no parts says so.
+    assert first["tools"] == {"from": "returned", "tools": [], "unnamed": 2}
+    assert "no response parts" in first["did"]["odd"]
+    # Content that is not text is still shown, as JSON, and marked.
+    odd = views[2]
+    assert odd is not None
+    assert [(one["form"], one.get("odd")) for one in odd["input"]] == [("text", True)] * 2
+    assert "no reply" in odd["did"]["odd"]
+    # Text that is not JSON stays text; a failed response shows its failure.
+    text = views[5]
+    assert text is not None
+    assert text["input"] == [
+        {"index": 1, "role": "user", "form": "text", "text": "{not json", "chars": 9, "tokens": 3}
+    ]
+    assert text["did"]["failure"] == "ModelError boom"
+    # A body that is no object: the call stands, its request unread.
+    last = views[len(ODD_ENTRIES)]
+    assert last is not None
+    assert last["input"] is None
+    # The line that is not JSON is no call.
+    assert views[-1] is None
+    status, _headers, _body = _request(server.port, f"/api/call?id={ODD}&line={len(lines) - 1}")
+    assert status == 404
+
+
+def test_every_odd_body_reads_as_a_call_or_none_and_never_fails() -> None:
+    lines = [viewer.parse_line(number, raw) for number, raw in enumerate(_odd_lines())]
+    for number in range(len(lines)):
+        json.dumps(viewer.model_call(lines, number), allow_nan=False)
+
+
+def test_instructions_split_at_paragraphs_under_the_headings_they_have() -> None:
+    text = (
+        "Opening paragraph,\nwith a line break inside it.\n\n"
+        "# A Markdown heading\n"
+        "and its first paragraph.\n\n"
+        "Note: a lead-in is no heading\nwhere its paragraph goes on.\n\n"
+        "Standing alone:\n\n"
+        "Under it.\n\n\n"
+        "  \n\n"
+        "IN CAPITALS\n\n"
+        "Last."
+    )
+    sections = viewer.instruction_sections(text)
+    assert [(one["heading"], [part["text"] for part in one["parts"]]) for one in sections] == [
+        (None, ["Opening paragraph,\nwith a line break inside it."]),
+        (
+            "A Markdown heading",
+            [
+                "and its first paragraph.",
+                "Note: a lead-in is no heading\nwhere its paragraph goes on.",
+            ],
+        ),
+        ("Standing alone", ["Under it."]),
+        ("IN CAPITALS", ["Last."]),
+    ]
+    assert viewer.instruction_sections("") == []
+
+
+def test_a_large_request_is_split_and_compared_within_bounds() -> None:
+    paragraphs = [f"Paragraph {number}: " + "word " * 40 for number in range(viewer.MAX_PARTS + 50)]
+    sections = viewer.instruction_sections("\n\n".join(paragraphs))
+    parts = sections[0]["parts"]
+    assert len(parts) == viewer.MAX_PARTS + 1
+    assert parts[-1]["rest"] is True
+    assert parts[-1]["text"].startswith(f"Paragraph {viewer.MAX_PARTS}:")
+    # A diff longer than the view shows is cut, and one too large to draw is not drawn.
+    before = "\n".join(f"line {number}" for number in range(viewer.DIFF_LINES * 2))
+    after = "\n".join(f"line {number}!" for number in range(viewer.DIFF_LINES * 2))
+    cut = viewer.text_diff(before, after)
+    assert (len(cut["lines"]), cut["cut"]) == (viewer.DIFF_LINES, True)
+    huge = viewer.text_diff("x" * (viewer.DIFF_CHARS + 1), "y")
+    assert (huge["lines"], huge["too_large"]) == ([], True)
+
+
+def test_a_token_estimate_is_characters_over_four_rounded_up() -> None:
+    assert [viewer.estimate(chars) for chars in (0, 1, 4, 5, 10_700)] == [0, 1, 1, 2, 2_675]
