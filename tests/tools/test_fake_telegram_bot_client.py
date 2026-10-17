@@ -105,6 +105,27 @@ async def test_an_offset_forgets_what_it_confirms_and_nothing_else() -> None:
     assert [update.update_id for update in fake.held] == [12]
 
 
+async def test_an_unknown_poll_may_have_confirmed_its_offset() -> None:
+    """Telegram received it, so its offset took effect: the case a reader survives."""
+    fake = FakeTelegramBotClient().hold(an_update(10), an_update(11))
+    fake.fail_next(TelegramFailure.UNKNOWN)
+
+    outcome = await fake.poll(attempt=ATTEMPT, offset=11, wait=A_WAIT, timeout=A_BOUND)
+
+    assert outcome.failure is TelegramFailure.UNKNOWN
+    assert [update.update_id for update in fake.held] == [11]
+
+
+async def test_a_poll_that_never_left_confirms_nothing() -> None:
+    """Not written, so Telegram never saw the offset."""
+    fake = FakeTelegramBotClient().hold(an_update(10), an_update(11))
+    fake.fail_next(TelegramFailure.NOT_WRITTEN)
+
+    await fake.poll(attempt=ATTEMPT, offset=11, wait=A_WAIT, timeout=A_BOUND)
+
+    assert [update.update_id for update in fake.held] == [10, 11]
+
+
 async def test_a_delivered_unknown_is_in_the_chat_and_still_unknown() -> None:
     """The half of *unknown* the caller cannot see, made arrangeable (§6:4)."""
     fake = FakeTelegramBotClient().fail_next(TelegramFailure.UNKNOWN, delivered=True)

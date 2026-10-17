@@ -1,10 +1,8 @@
-"""ADR-0323's `core` shapes for the Bot API client: the split rule and the outcomes.
+"""ADR-0323's `core` shapes for the Bot API client: the length measure and the outcomes.
 
-§6:6's split is a rule both sides of the line need — the writer cuts, and the client
-refuses what was not cut — so it is pinned here, on its own, by the properties §6:6
-states: no part longer than one message, the parts holding the whole text in order,
-and the cut taken at the latest paragraph break, else line break, else whitespace,
-and at the limit only where a run has no break.
+The outcomes carry their invariants as validators, so a send that is done without an
+id, a poll not done that took updates in, or a wait on anything but a rate limit cannot
+be constructed by any implementation or any caller.
 """
 
 from __future__ import annotations
@@ -23,124 +21,15 @@ from ai_assistant.core.types import (
     TelegramSendOutcome,
     TelegramUpdate,
     telegram_length,
-    telegram_message_parts,
 )
 
-LIMIT = TELEGRAM_MESSAGE_LIMIT
 
-
-def _holds_the_whole(parts: tuple[str, ...], text: str) -> bool:
-    """The parts, joined, are the text: §6:6's "the whole text in order"."""
-    return "".join(parts) == text
-
-
-def test_a_text_within_the_limit_is_one_part() -> None:
-    """Nothing to cut."""
-    assert telegram_message_parts("hello\n\nworld") == ("hello\n\nworld",)
-
-
-def test_a_text_at_the_limit_is_one_part() -> None:
-    """Exactly one message's worth is one message."""
-    text = "x" * LIMIT
-
-    assert telegram_message_parts(text) == (text,)
-
-
-def test_a_long_text_is_cut_at_its_latest_paragraph_break() -> None:
-    """Paragraphs first (§6:6)."""
-    first, second, third = ("a" * 1500, "b" * 1500, "c" * 1500)
-    text = f"{first}\n\n{second}\n\n{third}"
-
-    parts = telegram_message_parts(text)
-
-    assert parts == (f"{first}\n\n{second}\n\n", third)
-    assert _holds_the_whole(parts, text)
-
-
-def test_a_paragraph_longer_than_a_part_is_cut_at_a_line_break() -> None:
-    """Then lines (§6:6)."""
-    text = "a" * 3000 + "\n" + "b" * 3000
-
-    parts = telegram_message_parts(text)
-
-    assert parts == ("a" * 3000 + "\n", "b" * 3000)
-
-
-def test_a_line_longer_than_a_part_is_cut_between_words() -> None:
-    """Then words (§6:6), never inside one while a space is there."""
-    text = "word " * 2000
-
-    parts = telegram_message_parts(text)
-
-    assert all(part.endswith(" ") for part in parts[:-1])
-    assert all(telegram_length(part) <= LIMIT for part in parts)
-    assert _holds_the_whole(parts, text)
-
-
-def test_a_run_with_no_break_is_cut_at_the_limit() -> None:
-    """And at the limit only where a run of text has no break (§6:6)."""
-    text = "x" * (LIMIT * 2 + 10)
-
-    parts = telegram_message_parts(text)
-
-    assert [len(part) for part in parts] == [LIMIT, LIMIT, 10]
-
-
-def test_characters_outside_the_bmp_count_twice() -> None:
-    """Telegram measures UTF-16, so an emoji takes two of the 4,096."""
-    emoji = "\U0001f600"
-    text = emoji * LIMIT
-
-    parts = telegram_message_parts(text)
-
-    assert telegram_length(emoji) == 2
-    assert [telegram_length(part) for part in parts] == [LIMIT, LIMIT]
-    assert _holds_the_whole(parts, text)
-
-
-def test_a_cut_never_leaves_a_part_of_whitespace_alone() -> None:
-    """A part that would hold only whitespace carries nothing Telegram can show."""
-    text = "a" + " " * (LIMIT * 2) + "b"
-
-    parts = telegram_message_parts(text)
-
-    assert all(part.strip() for part in parts)
-    assert parts[0].startswith("a")
-    assert parts[-1].endswith("b")
-
-
-def test_a_leading_break_is_not_taken_as_the_cut() -> None:
-    """A break with no text before it would make an empty part."""
-    text = "\n\n" + "x" * (LIMIT + 5)
-
-    parts = telegram_message_parts(text)
-
-    assert all(part.strip() for part in parts)
-    assert _holds_the_whole(parts, text)
-
-
-def test_a_text_of_whitespace_has_no_parts() -> None:
-    """Nothing to send."""
-    assert telegram_message_parts("  \n\n  ") == ()
-    assert telegram_message_parts("") == ()
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "para.\n\n" * 1500,
-        ("line\n" * 900 + "\n") * 3,
-        "mixed words\nand lines\n\nand paragraphs " * 400,
-        "\U0001f600 " * 3000,
-    ],
-)
-def test_every_part_fits_and_together_they_are_the_text(text: str) -> None:
-    """§6:6's two properties, over texts of every shape."""
-    parts = telegram_message_parts(text)
-
-    assert len(parts) > 1
-    assert all(0 < telegram_length(part) <= LIMIT for part in parts)
-    assert _holds_the_whole(parts, text)
+def test_length_is_counted_in_utf16_units() -> None:
+    """Telegram measures UTF-16, so an emoji takes two of the 4,096 (§6:6)."""
+    assert telegram_length("hello") == 5
+    assert telegram_length("\U0001f600") == 2
+    assert telegram_length("é") == 1
+    assert TELEGRAM_MESSAGE_LIMIT == 4096
 
 
 # --- the outcomes ----------------------------------------------------------------

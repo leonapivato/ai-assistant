@@ -12058,10 +12058,10 @@ class TelegramBotClient(Protocol):
         One ``sendMessage`` call, and **never a retry**: whether to send again is the
         caller's, read off the outcome's
         :attr:`~ai_assistant.core.types.TelegramFailure.retryable` (§6:3). A text
-        longer than one Telegram message is not this member's to cut: the caller
-        sends each of :func:`~ai_assistant.core.types.telegram_message_parts`, so that
-        each part is one call with its own outcome, and a message cut short between
-        parts is recorded as what it is (§6:6).
+        longer than one Telegram message is not this member's to cut: the writer cuts
+        it into parts by §6:6's rule and sends each, so that each part is one call
+        with its own outcome, and a message cut short between parts is recorded as
+        what it is (§6:6).
 
         Args:
             attempt: The id of the durable record the caller claimed for this
