@@ -20,13 +20,12 @@ lapses" — is the cost of not having; the third exists because §5 makes displa
 a generated passphrase a refusal rather than a courtesy.
 
 **What is not here is the OS keyring cache, and that is a decision.** §5 says the
-tool *may* cache the passphrase in the keyring — permissive, not required — and
-the machinery that clause presumes does not exist yet: ADR-0004 §3's
-``SecretStore`` has no contract on ``main``, and the ADR that would give it one is
-in flight in another lane. Building a private keyring seam here would be
-inventing the surface that decision is about, and adding a keyring dependency to
-carry it. ``--passphrase-file`` buys the unattended run the cache was wanted for
-without either. Filed rather than silently skipped; see the lane's PR.
+tool *may* cache the passphrase in the keyring — permissive, not required. The
+seam a cache would go through exists (ADR-0125's ``SecretStore``), so this is not
+waiting on anything: ``--passphrase-file`` already buys the unattended run the
+cache was wanted for, and a cache would turn §5's "at most once for a given store
+of cached passphrases" from a vacuous clause into behaviour to design. Issue #904
+records the decision not to build it.
 """
 
 from __future__ import annotations
