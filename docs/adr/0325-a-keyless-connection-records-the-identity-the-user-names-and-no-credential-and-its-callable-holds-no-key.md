@@ -1,6 +1,6 @@
 # 325. A keyless connection records the identity the user names and no credential, and its callable holds no key
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-17
 - Scope: `tools/`, the connection model: a connection shape for an outside source that needs no credential, reusable by every such source. Tracker: [#2396](https://github.com/leonapivato/ai-assistant/issues/2396), batch [#3113](https://github.com/leonapivato/ai-assistant/issues/3113).
 - Dependency: ADR-0148, ADR-0149 and ADR-0151, as their status lines leave them, and ADR-0125, which this decision does not touch.
