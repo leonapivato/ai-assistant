@@ -1,6 +1,6 @@
 # 133. A producer's read is a third use of a source, and the user grants it separately
 
-- Status: Partially superseded by ADR-0294 (§2:3's subset of the three, for a new grant; §6:6's help text naming all three) and ADR-0318 (§2:3's subset, in `FACET`)
+- Status: Partially superseded by ADR-0294 (§2:3's subset of the three, for a new grant; §6:6's help text naming all three) and ADR-0318 (§2:3's subset, in `FACET`) and ADR-0324 (§2:3's subset, in the addition alone)
 - Date: 2026-08-11
 - **Note (2026-08-11, UTC): ratified, on the second flip.** `Proposed` →
   `Accepted` on the content this ADR merges with, after both required reviews
@@ -91,6 +91,14 @@
   independence of the members included. This replacement takes effect on ratification
   of ADR-0318. This reciprocal header record accompanies the numbered draft under
   ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-17 by ADR-0324 — one scope. §2:3's subset, in the addition
+  alone: `GrantScope` gains `PULL`, reading the source when an activation pulls it, so a
+  scope names a non-empty subset of the uses with `PULL` among them, and a new grant names a
+  non-empty subset of `NOTIFY` and `PULL` (ADR-0324 §6:1, §6:4). §2:3's rule that no use
+  implies, outranks or contains another stands and binds `PULL`, and every other clause
+  stands. This replacement takes effect on ratification of ADR-0324. This reciprocal header
+  record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and
+  the ratified body below are preserved.
 
 ## Context
 
