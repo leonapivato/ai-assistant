@@ -526,3 +526,45 @@ async def test_a_fixed_line_telegram_refused_is_still_answered_and_never_sent_ag
     sends = [one for one in line.fake.calls if one.method == SEND_MESSAGE]
     assert len(sends) == 1
     assert line.sent() == []
+
+
+async def test_a_reply_to_the_last_part_of_a_long_message_finds_its_question_whole() -> None:
+    """§4:13, §6:2: the message's position is its last part's, and the window holds it whole."""
+    memory = FakeMemoryStore(now=lambda: AT)
+    channel = line_channel(REFERENCE, CHAT)
+    long_text = "\n\n".join("p" * 3990 for _ in range(5)) + "\n\nWould you prefer Tuesday?"
+    await memory.add(
+        _line_episode(
+            "act-long",
+            (RecordedInputMessage(text="Tell me everything.", sent_at=AT, position=20),),
+            rounds=(("round:1", long_text),),
+            channel=channel,
+        )
+    )
+
+    async def written(
+        place: str, activations: Sequence[str], positions: Sequence[int] | None
+    ) -> Mapping[int, WrittenBy]:
+        return {
+            26: WrittenBy(
+                activation_id="act-long",
+                asked=AskedIn(round="round:1", parts=(1,)),
+                round="round:1",
+            )
+        }
+
+    line = _Line(memory=memory, written=written)
+    quoted = TelegramQuotedMessage(
+        message_id=26, sender_id=1, sender_is_bot=True, text="Would you prefer Tuesday?"
+    )
+    line.fake.hold(text(30, "Tuesday", message_id=30, reply_to=quoted))
+    line.start()
+    await line.until(lambda: bool(line.inputs), what="the input was taken in")
+    await line.stop()
+
+    window = line.inputs[0].window
+    (said,) = [one for one in window.messages if one.position == 26]
+    assert said.text == long_text, "the whole message, its question at its end"
+    assert said.text.endswith("Would you prefer Tuesday?")
+    assert window.asked == {26: AskedIn(round="round:1", parts=(1,))}
+    assert window.input_messages[0].replies_to == 26
