@@ -1489,8 +1489,12 @@ def test_the_real_export_refuses_a_lockfile_pyproject_has_outgrown(tmp_path: Pat
     out = tmp_path / "out"
     out.mkdir()
 
-    with pytest.raises(_MODULE.DeployError, match="needs to be updated"):
+    # What uv says depends on its cache — "needs to be updated" when it can
+    # re-resolve offline, "no solution found" when it cannot — so the assertion
+    # is the refusal itself, and that nothing was exported.
+    with pytest.raises(_MODULE.DeployError, match="uv failed"):
         _MODULE.export_locked(repo, out, git(repo, "rev-parse", "HEAD"))
+    assert not (out / _MODULE.LOCKED_REQUIREMENTS).exists()
 
 
 def _written_marker(command: str) -> str:
