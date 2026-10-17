@@ -1,6 +1,6 @@
 # 323. A Telegram chat with the owner's bot is a line to the assistant, and connecting it approves what the line carries
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-17
 - Scope: [#2819](https://github.com/leonapivato/ai-assistant/issues/2819), the messaging line, Telegram first; batch [#3113](https://github.com/leonapivato/ai-assistant/issues/3113), lane L1. It decides the Telegram kind on ADR-0292's model, how its calls leave the hub, and what they may carry.
 - Dependency: the phases, the authority milestone (ADR-0321, ADR-0322) and the conversation channel (ADR-0293), all Accepted and built on `main` at `e3beb99d`.
