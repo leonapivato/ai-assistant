@@ -3580,6 +3580,81 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- The Telegram line (ADR-0323 §3, §11) ------------------------------
+    # **Two settings name the line, and one without the other is refused at load**
+    # (§3:2). The line exists only while both are set and the connection they name is
+    # active (§3:3); which connection is active is the store's, read per call by the
+    # Bot API client, and so is not validated here — `send_email_connection`'s clause
+    # for its reason.
+    #
+    # The rest are the poll's wait and the line's bounds (§11:10 to §11:13). Each has a
+    # working default, because nothing is armed by them: they bound the line's calls
+    # only once the two settings above have created it. What is *required and has no
+    # default* is the bound the client is handed on each call (§11:10, ADR-0241 §1),
+    # and the line's reader and writer hand it these.
+    telegram_connection: str | None = Field(
+        default=None,
+        description=(
+            "The connection reference of the owner's Telegram bot — the handle "
+            "`assistant connect` minted when the bot's token was given as the "
+            "credential (ADR-0323 §3). Set it together with telegram_user_id, or set "
+            "neither and the line does not exist."
+        ),
+    )
+    telegram_user_id: _OptionalIntegerSetting = Field(
+        default=None,
+        ge=1,
+        lt=2**63,
+        description=(
+            "The owner's own Telegram account id, which a bot such as @userinfobot "
+            "shows (ADR-0323 §3). Messages from this account in its private chat with "
+            "the bot are the owner's, and that chat is the only one the line writes "
+            "to. Set it together with telegram_connection."
+        ),
+    )
+    telegram_poll_wait: _DurationSetting = Field(
+        default=timedelta(seconds=30),
+        gt=timedelta(0),
+        description=(
+            "How long each poll asks Telegram to hold the request open while no "
+            "message is waiting (ADR-0323 §11:10). Telegram takes whole seconds, so a "
+            "fraction is dropped rather than rounded up. Strictly positive, and "
+            "strictly below telegram_poll_bound."
+        ),
+    )
+    telegram_poll_bound: _DurationSetting = Field(
+        default=timedelta(seconds=45),
+        gt=timedelta(0),
+        description=(
+            "The most one poll may take, its whole work included: after it the poll "
+            "is cancelled, its outcome is unknown and the line polls again (ADR-0323 "
+            "§11:10 to §11:11). Strictly greater than telegram_poll_wait, by the margin "
+            "a slow answer needs."
+        ),
+    )
+    telegram_send_bound: _DurationSetting = Field(
+        default=timedelta(seconds=15),
+        gt=timedelta(0),
+        description=(
+            "The most one send to Telegram may take — a message part or a typing "
+            "indicator. A send cut off after its request was written is unknown and "
+            "never retried (ADR-0323 §6:4, §11:12). Strictly positive."
+        ),
+    )
+    telegram_max_response_bytes: _IntegerSetting = Field(
+        default=8 * 1024 * 1024,
+        ge=1,
+        lt=2**63,
+        description=(
+            "The most octets one Telegram response may take off the channel — its "
+            "status line and headers included — enforced on the read itself and "
+            "before any part of it is parsed (ADR-0323 §11:13). A response beyond it "
+            "is abandoned and refused, never truncated. The default holds a poll's "
+            "hundred updates at Telegram's longest messages, each with the message "
+            "it replies to."
+        ),
+    )
+
     # --- The simulated booking provider (ADR-0273 §1, §5) -----------------
     # **Absent by default, and absence is the whole-or-absent shape these settings
     # already use rather than a boolean flag.** ADR-0273 §1: a deployment supplying
@@ -4101,6 +4176,7 @@ class Settings(BaseSettings):
         "web_search_origin",
         "forecast_connection",
         "forecast_origin",
+        "telegram_connection",
     )
     @classmethod
     def _is_not_blank(cls, value: str | None) -> str | None:
@@ -4154,6 +4230,50 @@ class Settings(BaseSettings):
             f"the connected account it sends as and the endpoint it submits to "
             f"(ADR-0148 §6), so set {missing} as well or unset {set_one} to leave the "
             f"tool unregistered"
+        )
+        raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def _the_telegram_line_is_whole_or_absent(self) -> Settings:
+        """Refuse one of the line's two settings without the other (ADR-0323 §3:2).
+
+        The clause above, one field pair along: a bot with nobody to talk to, or an
+        account with no bot to talk through, is a state the line cannot be in, and
+        an owner who set one believes the line is up while nothing reads it.
+
+        Raises:
+            ValueError: If exactly one of the two is set.
+        """
+        connection, user = self.telegram_connection, self.telegram_user_id
+        if (connection is None) == (user is None):
+            return self
+        set_one = "telegram_connection" if user is None else "telegram_user_id"
+        missing = "telegram_user_id" if user is None else "telegram_connection"
+        msg = (
+            f"{set_one} is set and {missing} is not; the Telegram line needs both the "
+            f"connected bot and the owner's account (ADR-0323 §3:2), so set {missing} "
+            f"as well or unset {set_one} to leave the line off"
+        )
+        raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def _the_telegram_poll_bound_exceeds_its_wait(self) -> Settings:
+        """Refuse a poll bound that does not exceed the wait (ADR-0323 §11:10).
+
+        A bound at or below the wait would cut off every poll on which no message
+        arrived, while Telegram was still holding it open as asked: each would end
+        unknown, and the line would be a loop of cancelled requests.
+
+        Raises:
+            ValueError: If ``telegram_poll_bound`` is not strictly greater than
+                ``telegram_poll_wait``.
+        """
+        if self.telegram_poll_bound > self.telegram_poll_wait:
+            return self
+        msg = (
+            f"telegram_poll_bound={self.telegram_poll_bound} must be strictly greater "
+            f"than telegram_poll_wait={self.telegram_poll_wait}: a poll is bounded by "
+            f"more than the time Telegram is asked to hold it (ADR-0323 §11:10)"
         )
         raise ValueError(msg)
 
