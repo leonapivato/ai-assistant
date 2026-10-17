@@ -8462,9 +8462,14 @@ def _render_decision(decision: PermissionDecision) -> None:
     the yes, how, when, the part this call is, what the approval covers and when it
     ends — through :func:`_render_approval`, after the resolution and before the
     authorisation that points at it. Such a row is an ``ALLOW`` under a yes or route
-    (a)'s fresh ``CONFIRM`` (§4:7), and on the second the resolving row's
-    ``resolves`` names a ruling, not the question you answered, so it is labelled a
-    ruling there.
+    (a)'s fresh ``CONFIRM`` (§4:7).
+
+    **What a row resolves is labelled a ruling, on every row.** ADR-0186 §7 asks that
+    a decision whose ``resolves`` is set *name* the ``CONFIRM`` it answers, and the
+    row names it by id. Whether that ``CONFIRM`` was ever put to you as a question is
+    not on the row: route (a) resolves the confirm ruled fresh in your yes's activation
+    (§4:7), and where ``ActionPolicy.resolve`` refuses it the ``DENY`` names no
+    approval (§4:3), so the absence of one establishes nothing (#3073).
 
     **An ``ALLOW`` also says what authorised it, in three states** (ADR-0193 §11) —
     :func:`_authorisation_line`, appended after §7's own fields and displacing none
@@ -8492,13 +8497,12 @@ def _render_decision(decision: PermissionDecision) -> None:
         "[dim](a digest, never the arguments)[/]"
     )
     if decision.resolves is not None:
-        if approval is None:
-            _print(f"  [bold]Answers the question:[/] {_safe(decision.resolves)}")
-        else:
-            _print(
-                f"  [bold]Resolves the ruling:[/] {_safe(decision.resolves)} [dim](ruled "
-                "again after your yes; the question your yes answered is named below)[/]"
-            )
+        after_a_yes = (
+            " [dim](ruled again after your yes; the question your yes answered is named below)[/]"
+            if approval is not None
+            else ""
+        )
+        _print(f"  [bold]Resolves the ruling:[/] {_safe(decision.resolves)}{after_a_yes}")
     if approval is not None and decision.approved_part is not None:
         _render_approval(approval, decision.approved_part)
     if decision.ruling.outcome is PermissionOutcome.ALLOW:

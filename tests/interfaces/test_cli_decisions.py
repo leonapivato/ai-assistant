@@ -921,7 +921,7 @@ def test_a_resolving_decision_names_the_question_it_answers(
         _decision("d-answer", resolves="d-ask"),
         _decision("d-ask", outcome=PermissionOutcome.CONFIRM),
     )
-    assert "Answers the question: d-ask" in rendered
+    assert "Resolves the ruling: d-ask" in rendered
     assert "needed your yes" in rendered
 
 
@@ -1046,7 +1046,7 @@ def test_an_allow_under_a_yes_names_the_yes_and_not_a_decision_you_took(
         "Resolves the ruling: d-fresh (ruled again after your yes; the question your "
         "yes answered is named below)"
     ) in rendered
-    assert "Answers the question:" not in rendered
+    assert "Answers the question" not in rendered
     for line in _APPROVAL_LINES:
         assert rendered.count(line) == 2
     assert _basis_line(output) == (
@@ -1087,21 +1087,51 @@ def test_an_allow_the_policy_granted_under_a_yes_still_names_the_yes(
 def test_a_resolving_allow_with_no_approval_renders_as_it_did(
     output: StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A row written before ADR-0321 names no approval, and keeps its wording.
+    """A row written before ADR-0321 names no approval, and keeps its basis wording.
 
     Its confirm was answered by the user directly, so "a decision you took" is still
-    the row's truth; only a row naming a yes is rendered as the yes.
+    the row's truth; only a row naming a yes is rendered as the yes. What it resolves
+    is labelled a ruling, as on every row.
     """
     rendered = _listing(
         output,
         monkeypatch,
         _decision("d-answer", resolves="d-ask", authorised_by="d-ask"),
     )
-    assert "Answers the question: d-ask" in rendered
+    assert "Resolves the ruling: d-ask" in rendered
     assert "Your yes:" not in rendered
     assert _basis_line(output) == (
         "Authorised by: a decision you took about this call, recorded as d-ask"
     )
+
+
+def test_route_a_s_refused_resolution_names_a_ruling_and_not_a_question(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0321 §4:3, §4:7: route (a)'s resolve may deny, and that deny names no yes.
+
+    The ``DENY`` resolves the fresh confirm, which was never put to you, and carries no
+    approval (a yes never overrides a deny, §4:12). With the confirm on the page and
+    with it outside the page alike, what it resolves is labelled a ruling and nothing
+    claims a question you answered.
+    """
+    _, fresh = _route_a_pair()
+    refused = _decision(
+        "d-deny",
+        outcome=PermissionOutcome.DENY,
+        reason="outside policy",
+        resolves="d-fresh",
+    )
+    with_the_confirm = _listing(output, monkeypatch, refused, fresh)
+    output.seek(0)
+    output.truncate()
+    alone = _listing(output, monkeypatch, refused)
+    for rendered in (with_the_confirm, alone):
+        assert "Resolves the ruling: d-fresh" in rendered
+        assert "Answers the question" not in rendered
+        assert "Authorised by:" not in rendered
+    assert "ruled again after your yes; the question" not in alone
+    assert "Your yes:" not in alone
 
 
 # --- §8: one test per bar ----------------------------------------------------
@@ -1722,7 +1752,7 @@ def test_a_resolving_row_carrying_no_authorisation_is_the_third_state(
         _decision("d-answer", resolves="d-ask"),
         _decision("d-ask", outcome=PermissionOutcome.CONFIRM),
     )
-    assert "Answers the question: d-ask" in rendered
+    assert "Resolves the ruling: d-ask" in rendered
     assert _basis_line(output) == (
         "Authorised by: the policy's own rules, resting on no decision of yours"
     )
