@@ -645,6 +645,86 @@ async def test_a_message_with_no_text_asking_several_is_the_fixed_line_and_the_n
     )
 
 
+#: #3103: what planning's text ends with, the fixed line in its own words, and the
+#: whitespace it may carry, in the shapes the backstop drops.
+_OWN_FIXED_LINES: Final = (
+    f"{_YES}",
+    f"{_YES}  \n\n",
+    f"  {_YES}",
+    "NEEDS YOUR YES:",
+    "needs your yes",
+    "Needs your yes :",
+)
+
+
+@pytest.mark.parametrize("own", _OWN_FIXED_LINES, ids=repr)
+async def test_a_fixed_line_planning_wrote_at_its_end_is_dropped(own: str) -> None:
+    """#3103: the fixed line appears once, though planning wrote its own at its end."""
+    earlier = _proposed(_SLOT)
+    planned, _ = await _asked(
+        asks=("1.1",),
+        outcomes=(_needs_you(earlier.id, "c1", _booking()),),
+        rounds=(earlier,),
+        text=f"I'll book the table at 19:00 if you say yes.\n\n{own}",
+    )
+    assert planned.message == (
+        f'I\'ll book the table at 19:00 if you say yes.\n\n{_YES}\nbook — slot: "{_SLOT}"'
+    )
+    assert planned.message.casefold().count("needs your yes") == 1
+    assert planned.round.text == planned.message
+
+
+async def test_a_text_that_is_only_the_fixed_line_leaves_the_fixed_line_and_the_exact_line() -> (
+    None
+):
+    """#3103, #3094: dropping planning's copy leaves no text, so the message is the question."""
+    earlier = _proposed(_SLOT)
+    planned, _ = await _asked(
+        asks=("1.1",),
+        outcomes=(_needs_you(earlier.id, "c1", _booking()),),
+        rounds=(earlier,),
+        text=f"\n{_YES}\n",
+    )
+    assert planned.message == f'{_YES}\nbook — slot: "{_SLOT}"'
+    assert planned.round.text == planned.message
+
+
+async def test_a_fixed_line_planning_wrote_mid_text_is_left_as_written() -> None:
+    """#3103: only a last line is dropped; a mention anywhere else is planning's to keep."""
+    earlier = _proposed(_SLOT)
+    text = f"Shall I book it?\n{_YES}\nis what you'll see below, with the details."
+    planned, _ = await _asked(
+        asks=("1.1",),
+        outcomes=(_needs_you(earlier.id, "c1", _booking()),),
+        rounds=(earlier,),
+        text=text,
+    )
+    assert planned.message == f'{text}\n\n{_YES}\nbook — slot: "{_SLOT}"'
+
+
+async def test_a_last_line_that_only_mentions_the_fixed_line_is_left_as_written() -> None:
+    """#3103: a last line is dropped only where it is the fixed line, nothing more."""
+    earlier = _proposed(_SLOT)
+    text = f'Shall I book it? Look under "{_YES}" below.'
+    planned, _ = await _asked(
+        asks=("1.1",),
+        outcomes=(_needs_you(earlier.id, "c1", _booking()),),
+        rounds=(earlier,),
+        text=text,
+    )
+    assert planned.message == f'{text}\n\n{_YES}\nbook — slot: "{_SLOT}"'
+
+
+async def test_a_message_asking_nothing_keeps_a_fixed_line_planning_wrote() -> None:
+    """#3103: the backstop runs only where code adds the fixed line itself."""
+    earlier = _proposed(_SLOT)
+    text = f"Shall I book it?\n\n{_YES}"
+    planned, _ = await _asked(
+        asks=(), outcomes=(_needs_you(earlier.id, "c1", _booking()),), rounds=(earlier,), text=text
+    )
+    assert planned.message == text
+
+
 async def test_a_message_asking_nothing_carries_no_fixed_line() -> None:
     """The fixed line is code's only above exact lines: a round asking nothing has none."""
     earlier = _proposed(_SLOT)
