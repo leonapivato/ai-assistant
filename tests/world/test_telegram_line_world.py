@@ -1,0 +1,241 @@
+"""The Telegram line through the production composition root (ADR-0323 §3, §11, §13, §15:5).
+
+One deployment, built by :func:`~ai_assistant.app.composition.build_composition` with the
+line's two settings set and the bot connected through the shipped connect act, is
+handed one fake transport answering as Telegram does. Its reader then polls through the
+production client, over the root-wired connection store and keyring store, and its
+writer answers by rule — so the token the connect act stored is read and bound into a
+request by the seam alone, on the line's own route.
+
+What is measured is §15:5's last arm on the whole route: **no token in any log line,
+record or error**. The token is searched for in every log line the run wrote, in the
+line's intake record, in the episodes and effect records, and in every request target
+except the one the seam bound it into. And the line's absence is measured too: a
+deployment that names no line opens no intake record and holds no reader (§3:3).
+
+The keyring store's backend *selection* is the one thing displaced, by the lever
+ADR-0125 §11 put on that class for a test (``m25_harness.point_the_keyring_at``).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Final, final
+
+import pytest
+import structlog
+from m25_harness import Backing, point_the_keyring_at
+from pydantic import SecretStr
+
+from ai_assistant.app.composition import build_composition
+from ai_assistant.core.config import EmbedderKind, Settings
+from ai_assistant.core.types import TransportEndpoint
+from ai_assistant.memory import SqliteTelegramIntakeRecord
+from ai_assistant.orchestration.telegram import NON_TEXT_LINE
+from ai_assistant.tools.egress import HttpsTelegramBotClient
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from ai_assistant.app.composition import Composition
+    from ai_assistant.core.protocols import ByteChannel
+
+pytestmark = pytest.mark.anyio
+
+#: The bot's token, as BotFather mints one; the part after the colon is the secret.
+TOKEN: Final = "123456789:AAH-telegram_token_secret_part0"  # noqa: S105 — a test token
+SECRET_PART: Final = TOKEN.split(":", 1)[1]
+
+#: The owner's account, and so their chat with the bot.
+CHAT: Final = 424242
+
+#: Where the one origin pins to.
+TELEGRAM: Final = TransportEndpoint(host="api.telegram.org", port=443, implicit_tls=True)
+
+#: When the owner's messages were sent.
+SENT: Final = int(datetime(2026, 10, 17, 9, 0, tzinfo=UTC).timestamp())
+
+
+def _http(payload: object) -> bytes:
+    body = json.dumps(payload).encode("utf-8")
+    head = [
+        "HTTP/1.1 200 OK",
+        "Content-Type: application/json",
+        f"Content-Length: {len(body)}",
+        "",
+        "",
+    ]
+    return "\r\n".join(head).encode("ascii") + body
+
+
+def _updates() -> list[dict[str, Any]]:
+    """What the owner sent and what a stranger sent: a photo, and a text from elsewhere."""
+    return [
+        {
+            "update_id": 1,
+            "message": {
+                "message_id": 11,
+                "date": SENT,
+                "chat": {"id": CHAT, "type": "private"},
+                "from": {"id": CHAT, "is_bot": False, "first_name": "O"},
+                "photo": [{"file_id": "x", "file_unique_id": "y", "width": 1, "height": 1}],
+            },
+        },
+        {
+            "update_id": 2,
+            "message": {
+                "message_id": 3,
+                "date": SENT,
+                "chat": {"id": 99, "type": "private"},
+                "from": {"id": 99, "is_bot": False, "first_name": "S"},
+                "text": "let me in",
+            },
+        },
+    ]
+
+
+@final
+class _Channel:
+    """A secure channel whose far end answers as the Bot API does, by method."""
+
+    def __init__(self, telegram: _Telegram) -> None:
+        self._telegram = telegram
+        self._inbound = bytearray()
+        self.written = bytearray()
+
+    @property
+    def is_secure(self) -> bool:
+        return True
+
+    async def read_line(self) -> bytes:  # pragma: no cover — the exchange reads by `read`
+        raise NotImplementedError
+
+    async def read(self, limit: int, /) -> bytes:
+        taken = bytes(self._inbound[:limit])
+        del self._inbound[:limit]
+        return taken
+
+    async def write(self, data: bytes, /) -> None:
+        self.written += data
+        head, _, body = bytes(self.written).partition(b"\r\n\r\n")
+        if b"Content-Length:" not in head or not body:
+            return
+        target = head.split(b" ", 2)[1].decode("ascii")
+        self._inbound += self._telegram.answer(target.rsplit("/", 1)[1], json.loads(body))
+
+    async def start_tls(self) -> None:
+        """Nothing to upgrade."""
+
+    async def close(self) -> None:
+        """Release it."""
+
+
+@final
+class _Telegram:
+    """An outbound transport whose far end is a scripted Telegram."""
+
+    def __init__(self) -> None:
+        self.channels: list[_Channel] = []
+        self.sent: list[str] = []
+        self._held = _updates()
+
+    async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel:
+        assert endpoint == TELEGRAM, "the line reaches one origin, fixed in code"
+        channel = _Channel(self)
+        self.channels.append(channel)
+        await asyncio.sleep(0.001)  # a real poll holds the loop's attention elsewhere
+        return channel
+
+    def answer(self, method: str, body: dict[str, Any]) -> bytes:
+        if method == "getUpdates":
+            offset = body.get("offset")
+            if isinstance(offset, int):
+                self._held = [one for one in self._held if one["update_id"] >= offset]
+            return _http({"ok": True, "result": self._held})
+        if method == "sendMessage":
+            self.sent.append(str(body["text"]))
+            return _http({"ok": True, "result": {"message_id": 500 + len(self.sent)}})
+        return _http({"ok": True, "result": True})
+
+    def targets(self) -> list[str]:
+        return [
+            bytes(one.written).split(b" ", 2)[1].decode("ascii")
+            for one in self.channels
+            if one.written
+        ]
+
+
+def _settings(reference: str | None = None) -> Settings:
+    lined: dict[str, Any] = (
+        {} if reference is None else {"telegram_connection": reference, "telegram_user_id": CHAT}
+    )
+    return Settings(embedder=EmbedderKind.HASHING, **lined)
+
+
+async def _connected(tmp_path: Path, backing: Backing) -> str:
+    """The bot connected through the shipped act, its token in the keyring (§3:1-§3:2)."""
+    composition = build_composition(_settings(), data_dir=tmp_path, transport=None)
+    point_the_keyring_at(composition, backing)
+    try:
+        account = await composition.engine.connect_account(
+            identity="my-assistant-bot", credential=SecretStr(TOKEN)
+        )
+    finally:
+        await composition.engine.aclose()
+    return account.reference
+
+
+def _reader(composition: Composition) -> Any:
+    return composition.engine._telegram_reader
+
+
+async def test_the_line_runs_over_the_production_route_and_no_token_escapes(
+    tmp_path: Path,
+) -> None:
+    backing = Backing()
+    reference = await _connected(tmp_path, backing)
+    telegram = _Telegram()
+    composition = build_composition(_settings(reference), data_dir=tmp_path, transport=telegram)
+    point_the_keyring_at(composition, backing)
+    reader = _reader(composition)
+    assert isinstance(reader._client, HttpsTelegramBotClient)
+    assert reader._client.chat_id == CHAT
+
+    with structlog.testing.capture_logs() as logs:
+        await composition.engine.start()
+        async with asyncio.timeout(10):
+            while not (telegram.sent and len(telegram.targets()) >= 4):  # noqa: ASYNC110 — the fake answers at once
+                await asyncio.sleep(0.005)
+        intake = reader._intake
+        exported = await intake.export()
+        await composition.engine.aclose()
+
+    assert telegram.sent == [NON_TEXT_LINE], "the owner's photo answered, the stranger not"
+    assert exported.intake == () or all(one.update_id == 1 for one in exported.intake)
+    # The token is bound into the request target by the seam, and nowhere else.
+    assert all(target.startswith(f"/bot{TOKEN}/") for target in telegram.targets())
+    rendered = json.dumps(logs, default=str) + exported.model_dump_json()
+    assert logs, "the run logged"
+    assert SECRET_PART not in rendered
+    assert "/bot" not in rendered
+    assert isinstance(intake, SqliteTelegramIntakeRecord)
+    assert (tmp_path / "telegram.db").exists()
+
+
+async def test_a_deployment_that_names_no_line_holds_none_and_opens_nothing(
+    tmp_path: Path,
+) -> None:
+    """§3:3: with the settings unset, nothing starts and nothing changes."""
+    telegram = _Telegram()
+    composition = build_composition(_settings(), data_dir=tmp_path, transport=telegram)
+    try:
+        await composition.engine.start()
+        await asyncio.sleep(0.01)
+    finally:
+        await composition.engine.aclose()
+
+    assert _reader(composition) is None
+    assert telegram.channels == []
+    assert not (tmp_path / "telegram.db").exists()

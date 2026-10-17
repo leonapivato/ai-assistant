@@ -109,6 +109,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.phase_path import PhasePath
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
+    from ai_assistant.orchestration.telegram import TelegramLineSeams
     from ai_assistant.orchestration.understanding import UnderstandingStage
     from ai_assistant.testing.invoker import FakeToolImplementation
 
@@ -301,6 +302,9 @@ class Harness:
         # ADR-0314 §4:4's sink, which the controller of every pass writes through.
         # `None` is every other case's deployment: the diagnostic record off.
         diagnostics: DiagnosticSink | None = None,
+        # ADR-0323's Telegram line, over its fakes. `None` is every other case's
+        # deployment: no line, and nothing of it starts.
+        telegram: TelegramLineSeams | None = None,
     ) -> None:
         # ADR-0200's two seams, wired **together** or not at all — the engine refuses
         # half a pipeline. Defaulted to the canonical fakes, and kept on the harness so
@@ -422,6 +426,7 @@ class Harness:
             chat_reader=phases is not None if chat_reader is None else chat_reader,
             phases=None if phases is None else phases(self),
             diagnostics=diagnostics,
+            telegram=telegram,
         )
 
 
@@ -2021,12 +2026,13 @@ class _TrackedScan(ast.NodeVisitor):
                 assert seam.attr == "method"
                 assert isinstance(seam.value, ast.Name)
                 assert seam.value.id == "projection"
-            elif self._scope[-1] == "_read_in":
-                # ADR-0293 §6: the chat's reader admits its activation from no public
-                # call — it is the channel's own spoke — so the seam it is traced under
-                # is the reader's, a literal, and is no public operation's.
+            elif self._scope[-1] in _READERS:
+                # ADR-0293 §6, ADR-0323 §2:2: a channel's reader admits its activation
+                # from no public call — it is the channel's own spoke — so the seam it
+                # is traced under is the reader's, a literal, and is no public
+                # operation's.
                 assert isinstance(seam, ast.Constant)
-                assert seam.value == "chat_reader"
+                assert seam.value == _READERS[self._scope[-1]]
             else:
                 literal = seam.value if isinstance(seam, ast.Constant) else None
                 self.found.append((self._scope[-1], literal if isinstance(literal, str) else None))
@@ -2040,6 +2046,11 @@ class _TrackedScan(ast.NodeVisitor):
             assert isinstance(projected_label.value, str)
             self.found.append((self._scope[-1], projected_label.value))
         self.generic_visit(node)
+
+
+#: The engine's spokes that admit an activation from no public call, by the method that
+#: admits it, and the seam each is traced under (ADR-0293 §6, ADR-0323 §2:2).
+_READERS: Final = {"_read_in": "chat_reader", "_line_read_in": "telegram_reader"}
 
 
 def _tracked_scan() -> _TrackedScan:

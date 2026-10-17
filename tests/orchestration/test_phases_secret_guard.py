@@ -386,7 +386,12 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     **Understanding's windows** (ADR-0276 §3, ADR-0293 §6:4). ``SuppliedWindow``
     and ``TranscriptWindow``, with ``TranscriptMessage`` and
     ``DeletedMessage``, are the channel's own material: the messages people wrote,
-    their positions, authors and identifiers, and the records above.
+    their positions, authors and identifiers, and the records above. The Telegram
+    line's window carries its messages as ``LineMessage`` (ADR-0323 §10): a position,
+    a time, an author, the text and what it replies to; and its trigger records each
+    message it took in as ``RecordedInputMessage``, with a forward's original sender as
+    ``ClaimedAuthor`` — a name and an id Telegram reported (§4:10, §5:4). The bot's
+    token never reaches any of them: the client binds it in ``tools/`` (§11:8).
 
     **The audience** (ADR-0203, ADR-0204). ``UnboundedAudienceSupply`` and
     ``BoundedAudienceSupply`` filter what is rendered and are never rendered: a set of
@@ -440,6 +445,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ChannelContext",
         "ChannelContextItem",
         "ChannelIdentity",
+        "ClaimedAuthor",
         "DeletedMessage",
         "DigestItem",
         "Digested",
@@ -451,6 +457,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "EpisodicMemory",
         "EvidenceItem",
         "HeldResult",
+        "LineMessage",
         "Message",
         "NewConversation",
         "OfferedTool",
@@ -473,6 +480,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "QuestionPart",
         "RecalledItem",
         "RecordedChannelTrigger",
+        "RecordedInputMessage",
         "RecordedSpeechInput",
         "RecordedTextInput",
         "RefusedCall",
