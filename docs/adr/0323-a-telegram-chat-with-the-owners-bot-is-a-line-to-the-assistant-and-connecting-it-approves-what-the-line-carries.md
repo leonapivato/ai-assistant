@@ -336,9 +336,9 @@ reply may not have reached you.
 
 **Endings.**
 
-> **Normative.** An activation started from the chat that cannot finish writes the fixed
-> *couldn't finish* message into the chat, where and as ADR-0293 §9:1 and ADR-0307 §3:7 write
-> it into a conversation.
+> **Normative.** An activation started from the chat writes the fixed *couldn't finish* message
+> into the chat in exactly the cases, and in the form, ADR-0317 §2–§3 decide for a
+> conversation.
 
 > **Normative.** After a restart, for a chat whose last activation the restart cut off, the
 > writer sends one fixed message by rule: "I was interrupted before I could answer. Send it
