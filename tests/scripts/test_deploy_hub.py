@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
 import shutil
 import sys
 import tomllib
@@ -1122,7 +1123,11 @@ def _assert_every_install_is_no_deps(text: str) -> None:
 class _FakeBox:
     """Answers every local and remote command one deploy issues, and records them."""
 
+    #: The most recent box, for a test whose deploy raised before returning it.
+    last: _FakeBox
+
     def __init__(self, plan: Any, *, marker: str, version: str = "0.1.0") -> None:
+        _FakeBox.last = self
         self.plan = plan
         self.marker = marker
         self.version = version
@@ -1486,3 +1491,98 @@ def test_the_real_export_refuses_a_lockfile_pyproject_has_outgrown(tmp_path: Pat
 
     with pytest.raises(_MODULE.DeployError, match="needs to be updated"):
         _MODULE.export_locked(repo, out, git(repo, "rev-parse", "HEAD"))
+
+
+def _written_marker(command: str) -> str:
+    """The marker body a marker-writing remote command puts in place.
+
+    Unwrapped the way the two shells do it: the ssh argv's remote command is a
+    `su -c` whose argument is the inner command line, and in that line the body
+    is the word after `printf %s`.
+    """
+    inner = shlex.split(command)[-1]
+    words = shlex.split(inner)
+    return words[words.index("%s") + 1]
+
+
+def test_a_failed_locked_install_leaves_no_marker_vouching_for_the_old_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Commit A is deployed; B moves uv.lock. B's locked set installs and then
+    # its wheel install fails. Had the marker still named A, redeploying A would
+    # diff A's lockfile against itself, keep the venv, and run A on B's set.
+    repo = _repo(tmp_path)
+    deployed = _bump_lockfile(repo)
+    box_run = _FakeBox.run_local
+
+    def _run_local(self: _FakeBox, argv: list[str], **kwargs: Any) -> str:
+        if "pip install" in " ".join(argv):
+            self.issued.append(" ".join(argv))
+            raise _MODULE.DeployError("ssh failed: the wheel would not install")
+        return box_run(self, argv, **kwargs)
+
+    monkeypatch.setattr(_FakeBox, "run_local", _run_local)
+
+    with pytest.raises(_MODULE.DeployError, match="the wheel would not install"):
+        _deploy_against(repo, monkeypatch, marker=f"commit={deployed}\n")
+    box = _FakeBox.last
+
+    unmark = next(i for i, c in enumerate(box.issued) if "deps=unknown" in c)
+    install = next(i for i, c in enumerate(box.issued) if "pip install" in c)
+    assert unmark < install
+    assert not any("commit=" in c for c in box.issued[install:])
+    # What the box is left holding reads as UNKNOWN, so the redeploy of A takes
+    # the locked path rather than keeping the venv B half-replaced.
+    left = _written_marker(box.issued[unmark])
+    assert _MODULE.marker_commit(left) is None
+    reason = _MODULE._rule_on_dependencies(
+        _plan(repo, "--wheel", "/elsewhere/w.whl", "--wheel-commit", deployed),
+        repo,
+        deployed,
+        left,
+        "0.1.0\n",
+    )
+    assert reason is not None
+
+
+def test_the_routine_path_does_not_withdraw_the_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Its install touches the wheel alone, so the marker's dependency claim
+    # stays true however the install ends.
+    repo = _repo(tmp_path)
+    head = git(repo, "rev-parse", "HEAD")
+
+    box = _deploy_against(repo, monkeypatch, marker=f"commit={head}\n")
+
+    assert not any("deps=unknown" in c for c in box.issued)
+
+
+def test_a_dirty_deployed_marker_is_not_proof_of_the_committed_set(tmp_path: Path) -> None:
+    # Deploy A with a modified uv.lock under --allow-dirty: the locked path
+    # installs the TREE's lockfile and records A-dirty. Restore the tree to A
+    # and deploy again: A's committed lockfile diffed against A is empty, and
+    # keeping the venv would run A on the dirty set.
+    repo = _repo(tmp_path)
+    head = git(repo, "rev-parse", "HEAD")
+
+    reason = _MODULE._rule_on_dependencies(
+        _plan(repo), repo, head, f"commit={head}-dirty\nwheel_sha256=ff\n", "0.1.0\n"
+    )
+
+    assert reason is not None
+    assert "was dirty" in reason
+
+
+@pytest.mark.parametrize(
+    ("text", "dirty"),
+    [
+        ("commit=abc1234-dirty\n", True),
+        ("commit=abc1234\n", False),
+        ("ece6d22d-dirty\n", True),
+        ("ece6d22d\n", False),
+        ("", False),
+    ],
+)
+def test_a_dirty_marker_is_recognised_in_both_formats(text: str, dirty: bool) -> None:
+    assert _MODULE.marker_is_dirty(text) is dirty
