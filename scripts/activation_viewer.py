@@ -29,6 +29,13 @@ importing the standard library alone (ADR-0316 §2). It depends on ADR-0314 §6:
 alone: one JSON object holding ``activation_id``, ``source``, ``kind``, ``recorded_at``
 and ``body``. The body keys it reads for the list and the timeline are hints (§5:2):
 where one is missing, the hint is lost and the entry is still shown whole.
+
+A model call (understanding's, a planning round's, a digest part's) also opens
+readable: what it was told, split into its paragraphs; what it was given, its JSON a
+key to a part; the tools it could call; what it did, part by part, with its usage
+where the entry keeps one; and, for a planning round, what changed in its request
+since the round before. Each part has its size, a token estimate, and a copy control;
+the raw entries are one tab away.
 """
 
 from __future__ import annotations
@@ -1075,7 +1082,7 @@ def _readable(text: str) -> str:
     if not stripped.startswith(("{", "[")):
         return text
     try:
-        return _pretty(json.loads(stripped, parse_constant=_refuse_constant))
+        return _pretty(json.loads(stripped, parse_constant=_refuse_constant, parse_float=_finite))
     except _UNPARSABLE:
         return text
 
