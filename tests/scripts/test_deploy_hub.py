@@ -17,7 +17,9 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import sys
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -214,11 +216,18 @@ def test_no_box_specific_value_is_hardcoded(tmp_path: Path) -> None:
     assert _staged(plan).startswith("/srv/stage/deploy-hub-")
 
 
-def test_with_deps_drops_the_no_deps_flag(tmp_path: Path) -> None:
+def test_with_deps_is_the_locked_path_and_never_an_index_resolve(tmp_path: Path) -> None:
+    # Issue #2511: `--with-deps` used to drop `--no-deps` and let uv resolve the
+    # wheel's requirements against the index, which pulled forty-odd packages
+    # newer than uv.lock onto the hub. It now forces the locked set instead.
     plan = _dry_run(_repo(tmp_path), "--with-deps")
 
-    assert "--no-deps" not in plan
-    assert "--force-reinstall" in plan
+    assert "uv export --locked --offline --no-dev --no-emit-project" in plan
+    assert "--no-deps -r /tmp/deploy-hub-" in plan
+    assert "--no-deps --force-reinstall" in plan
+    # Only the locked plan: there is no routine alternative left to print.
+    assert "# otherwise" not in plan
+    _assert_every_install_is_no_deps(plan)
 
 
 @pytest.mark.parametrize(
@@ -836,37 +845,34 @@ def test_an_uncommitted_lockfile_is_visible(tmp_path: Path) -> None:
     assert _MODULE.lockfile_uncommitted(repo)
 
 
-def test_an_uncommitted_lockfile_refuses_a_no_deps_install(tmp_path: Path) -> None:
+def test_an_uncommitted_lockfile_takes_the_locked_path(tmp_path: Path) -> None:
     # With --allow-dirty the deployed commit is HEAD, so `git diff HEAD HEAD` sees
     # nothing — the commit range reads clean while the wheel being built needs a
-    # dependency the box does not have. The refusal runs before the box is
-    # contacted at all, which is why this needs no remote.
+    # dependency the box does not have. A marker that would otherwise show the
+    # lockfile unchanged does not rescue it.
     repo = _repo(tmp_path)
+    head = git(repo, "rev-parse", "HEAD")
     (repo / "uv.lock").write_text("version = 2\n")
 
-    with pytest.raises(_MODULE.DeployError, match=r"uv\.lock is modified"):
-        _MODULE._check_drift(_plan(repo, "--allow-dirty"), repo, "HEAD")
+    reason = _MODULE._rule_on_dependencies(
+        _plan(repo, "--allow-dirty"), repo, f"{head}-dirty", f"commit={head}\n", "0.1.0\n"
+    )
+
+    assert reason is not None
+    assert "uv.lock is modified in the working tree" in reason
 
 
-def test_with_deps_accepts_an_uncommitted_lockfile(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_supplied_wheel_ignores_this_trees_uncommitted_lockfile(tmp_path: Path) -> None:
+    # A supplied wheel did not come from this tree, so this tree's lockfile says
+    # nothing about what it needs; its attested commit's lockfile does.
     repo = _repo(tmp_path)
+    head = git(repo, "rev-parse", "HEAD")
     (repo / "uv.lock").write_text("version = 2\n")
-    reads: list[list[str]] = []
+    plan = _plan(repo, "--wheel", "/elsewhere/w.whl", "--wheel-commit", head)
 
-    def _record(argv: list[str], **_kwargs: object) -> str:
-        reads.append(argv)
-        return ""
+    reason = _MODULE._rule_on_dependencies(plan, repo, head, f"commit={head}\n", "0.1.0\n")
 
-    monkeypatch.setattr(_MODULE, "_run_local", _record)
-
-    # Reaches the marker read rather than refusing — and the read is stubbed,
-    # because a unit test does not contact a host (CONTRIBUTING.md, "Testing").
-    _MODULE._check_drift(_plan(repo, "--allow-dirty", "--with-deps"), repo, "HEAD")
-
-    assert len(reads) == 1
-    assert reads[0][0] == "ssh"
+    assert reason is None
 
 
 def test_allow_dirty_records_the_commit_as_dirty(tmp_path: Path) -> None:
@@ -999,8 +1005,9 @@ def test_the_brackets_carry_this_runs_token_so_a_banner_cannot_imitate_them(
     first = re.findall(r"MARKER_BEGIN_(\w+)", _rendered(repo, monkeypatch, "1111aaaa"))
     second = re.findall(r"MARKER_BEGIN_(\w+)", _rendered(repo, monkeypatch, "2222bbbb"))
 
-    assert first == ["1111aaaa"]
-    assert second == ["2222bbbb"]
+    # Once per install mode the dry run prints, and always this run's token.
+    assert set(first) == {"1111aaaa"}
+    assert set(second) == {"2222bbbb"}
 
 
 @pytest.mark.parametrize(
@@ -1039,19 +1046,21 @@ def test_a_banner_that_prints_a_marker_of_its_own_is_not_this_runs_marker() -> N
     assert _MODULE.marker_body(hostile, "tok") == ""
 
 
-def test_the_drift_check_reads_the_marker_through_the_brackets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_the_drift_check_reads_the_marker_through_the_brackets(tmp_path: Path) -> None:
     # End to end for the same blocker: a banner naming a commit this clone really
-    # holds must still leave drift UNKNOWN, not clean.
+    # holds must still leave drift UNKNOWN, not clean — and unknown installs the
+    # locked set rather than trusting the venv.
     repo = _repo(tmp_path)
     real = git(repo, "rev-parse", "--short", "HEAD")
     plan = _plan(repo)
     banner = f"Last login from {real}\nMARKER_BEGIN_{plan.token}\n\nMARKER_END_{plan.token}\n"  # type: ignore[attr-defined]
-    monkeypatch.setattr(_MODULE, "_run_local", lambda *_a, **_k: banner)
 
-    assert _MODULE._check_drift(plan, repo, "HEAD") == ""
-    assert "no deployed-commit marker" in capsys.readouterr().err
+    marker = _MODULE.marker_body(banner, plan.token)  # type: ignore[attr-defined]
+
+    assert marker == ""
+    reason = _MODULE._rule_on_dependencies(plan, repo, "HEAD", marker, "0.1.0\n")
+    assert reason is not None
+    assert "no deployed-commit marker" in reason
 
 
 def test_a_marker_that_swallows_its_own_closing_bracket_reads_as_less_not_more() -> None:
@@ -1084,3 +1093,396 @@ def test_a_hostile_marker_path_is_quoted_in_the_scratch_name_too(tmp_path: Path)
     assert "> ~; touch" not in plan
     assert "mv -f ~; touch" not in plan
     assert "rm -f ~; touch" not in plan
+
+
+# --------------------------------------------------------------------------- #
+# The locked set: the box runs what uv.lock says (issue #2511)                 #
+# --------------------------------------------------------------------------- #
+#
+# The run below is the real `_deploy`, with the two seams every remote step goes
+# through — `_run_local` and `_probe` — answered by a fake box. `uv build` and
+# `uv export` are answered there too, so nothing here builds, resolves or
+# contacts a host; the real export is exercised on its own, offline, further down.
+
+LOCKED = _MODULE.LOCKED_REQUIREMENTS
+_LOCKED_SET = (
+    "anthropic==0.117.0 \\\n"
+    "    --hash=sha256:451a0a6905f11dff7663d13e4ee5dbf909eb8942b1d049803c7b937a13ac47ec\n"
+    "    # via pydantic-ai-slim\n"
+)
+
+
+def _assert_every_install_is_no_deps(text: str) -> None:
+    """No `pip install` anywhere in ``text`` may resolve dependencies."""
+    for segment in re.split(r"&&|\n", text):
+        if "pip install" in segment:
+            assert "--no-deps" in segment, segment
+
+
+class _FakeBox:
+    """Answers every local and remote command one deploy issues, and records them."""
+
+    def __init__(self, plan: Any, *, marker: str, version: str = "0.1.0") -> None:
+        self.plan = plan
+        self.marker = marker
+        self.version = version
+        self.issued: list[str] = []
+        #: The cwd each `uv export` ran in.
+        self.exports: list[Path | None] = []
+        #: Remote path -> the bytes scp put there.
+        self.staged: dict[str, bytes] = {}
+
+    def run_local(self, argv: list[str], *, check: bool = True, cwd: Path | None = None) -> str:
+        del check
+        self.issued.append(" ".join(argv))
+        if argv[:2] == ["uv", "build"]:
+            out = Path(argv[argv.index("--out-dir") + 1])
+            (out / "ai_assistant-0.1.0-py3-none-any.whl").write_bytes(b"the built wheel")
+        elif argv[:2] == ["uv", "export"]:
+            self.exports.append(cwd)
+            Path(argv[argv.index("--output-file") + 1]).write_text(_LOCKED_SET)
+        elif argv[0] == "scp":
+            self.staged[argv[2].split(":", 1)[1]] = Path(argv[1]).read_bytes()
+        else:
+            return self._remote(self.issued[-1])
+        return ""
+
+    def _remote(self, text: str) -> str:
+        token = self.plan.token
+        if "MARKER_BEGIN_" in text:
+            return f"Welcome\nMARKER_BEGIN_{token}\n{self.marker}\n\nMARKER_END_{token}\n"
+        if "import ai_assistant" in text:
+            return f"Welcome\n{self.version}\n"
+        if "INVOCATION_ID" in text:
+            return "INVOCATION_ID=inv\n"
+        return ""
+
+    def probe(self, argv: list[str]) -> tuple[int, str, str]:
+        self.issued.append(" ".join(argv))
+        text = self.issued[-1]
+        if "sha256sum" in text:
+            answers = []
+            for label, path in (
+                ("STAGED_SHA256=", self.plan.staged),
+                ("STAGED_REQUIREMENTS_SHA256=", self.plan.staged_requirements),
+            ):
+                if path in self.staged:
+                    answers.append(f"{label}{hashlib.sha256(self.staged[path]).hexdigest()}")
+            return 0, "\n".join(answers) + "\n", ""
+        if "is-active" in text:
+            return 0, "UNIT_STATE=active\n", ""
+        if "journalctl" in text:
+            return 0, "hub_ready jobs=[]\n", ""
+        return 0, "", ""
+
+    def installs(self) -> list[str]:
+        return [command for command in self.issued if "pip install" in command]
+
+
+def _deploy_against(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *args: str,
+    marker: str,
+    version: str = "0.1.0",
+) -> _FakeBox:
+    """Run a real deploy of ``repo`` against a fake box and return what it saw."""
+    parsed = _MODULE._parser().parse_args(["hub.example", "--repo", str(repo), *args])
+    plan = _MODULE.Plan(parsed, _MODULE.wheel_name(repo))
+    box = _FakeBox(plan, marker=marker, version=version)
+    monkeypatch.setattr(_MODULE, "_run_local", box.run_local)
+    monkeypatch.setattr(_MODULE, "_probe", box.probe)
+    commit = _MODULE._deployed_commit(parsed, repo)
+
+    _MODULE._deploy(plan, repo, commit)
+    return box
+
+
+def _bump_lockfile(repo: Path) -> str:
+    """Commit a lockfile move and return the commit it moved FROM."""
+    deployed = git(repo, "rev-parse", "HEAD")
+    (repo / "uv.lock").write_text("version = 2\n")
+    git(repo, "commit", "-qam", "bump deps")
+    return deployed
+
+
+def test_a_lockfile_move_installs_the_exported_locked_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The ec0a23d4 deploy: uv.lock moved, so the venv's set is stale. The remedy
+    # is the lockfile's own set, exported here and shipped beside the wheel.
+    repo = _repo(tmp_path)
+    deployed = _bump_lockfile(repo)
+
+    box = _deploy_against(repo, monkeypatch, marker=f"commit={deployed}\n")
+
+    assert box.exports == [repo.resolve()]
+    staged = box.plan.staged_requirements
+    assert box.staged[staged].decode() == _LOCKED_SET
+    [install] = box.installs()
+    assert f"--no-deps -r {staged} && " in install
+    assert install.index("-r ") < install.index("--force-reinstall")
+    assert any("deps=locked" in command for command in box.issued)
+
+
+def test_the_locked_set_is_what_is_installed_and_nothing_is_resolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path)
+    deployed = _bump_lockfile(repo)
+
+    box = _deploy_against(repo, monkeypatch, marker=f"commit={deployed}\n")
+
+    # The file installed from is the very file the export wrote, byte for byte,
+    # and the box was made to prove it held that file before anything installed.
+    digest = hashlib.sha256(_LOCKED_SET.encode()).hexdigest()
+    verify = next(c for c in box.issued if "STAGED_REQUIREMENTS_SHA256=" in c)
+    assert box.issued.index(verify) < box.issued.index(box.installs()[0])
+    assert box.staged[box.plan.staged_requirements] == _LOCKED_SET.encode()
+    assert digest == hashlib.sha256(box.staged[box.plan.staged_requirements]).hexdigest()
+    # Every install is --no-deps, so uv on the box has nothing to resolve; and
+    # nothing anywhere in the run locks, compiles or resolves.
+    _assert_every_install_is_no_deps("\n".join(box.issued))
+    for resolver in ("uv lock", "pip compile", "uv sync", "--upgrade"):
+        assert not any(resolver in command for command in box.issued), resolver
+    # Both staged files go with the directory.
+    unstage = next(c for c in box.issued if "rmdir" in c)
+    assert box.plan.staged_requirements in unstage
+
+
+def test_a_first_deploy_into_an_empty_venv_gets_its_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No marker, nothing installed: there is no dependency set to keep, and a
+    # --no-deps wheel alone would not even import.
+    repo = _repo(tmp_path)
+
+    box = _deploy_against(repo, monkeypatch, marker="", version="(not installed)")
+
+    assert len(box.exports) == 1
+    [install] = box.installs()
+    assert f"-r {box.plan.staged_requirements}" in install
+
+
+def test_an_absent_marker_alone_takes_the_locked_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Unknown is not clean: something is installed, but nothing shows what set it
+    # was installed against.
+    box = _deploy_against(_repo(tmp_path), monkeypatch, marker="")
+
+    assert len(box.exports) == 1
+
+
+def test_an_empty_venv_takes_the_locked_path_whatever_the_marker_says(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A venv recreated under a marker that survived it: the marker shows uv.lock
+    # unchanged, and the venv holds nothing that the marker describes.
+    repo = _repo(tmp_path)
+    head = git(repo, "rev-parse", "HEAD")
+
+    box = _deploy_against(repo, monkeypatch, marker=f"commit={head}\n", version="(not installed)")
+
+    assert len(box.exports) == 1
+
+
+def test_a_deployed_commit_this_clone_lacks_takes_the_locked_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = _deploy_against(_repo(tmp_path), monkeypatch, marker=f"commit={'0' * 40}\n")
+
+    assert len(box.exports) == 1
+
+
+def test_an_unchanged_lockfile_deploys_as_cheaply_as_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The routine deploy: code moved, uv.lock did not. No export, one file
+    # staged, one install command, and that command is exactly today's.
+    repo = _repo(tmp_path)
+    deployed = git(repo, "rev-parse", "HEAD")
+    (repo / "f.txt").write_text("code only\n")
+    git(repo, "commit", "-qam", "code only")
+
+    box = _deploy_against(repo, monkeypatch, marker=f"commit={deployed}\n")
+
+    assert box.exports == []
+    assert list(box.staged) == [box.plan.staged]
+    assert sum(command.startswith("scp ") for command in box.issued) == 1
+    [install] = box.installs()
+    assert install.endswith(
+        "su - assistant -c '~/.local/bin/uv pip install --python ~/venv/bin/python "
+        f"--no-deps --force-reinstall {box.plan.staged}'"
+    )
+    assert LOCKED not in " ".join(box.issued)
+    assert any("deps=kept" in command for command in box.issued)
+
+
+def test_with_deps_forces_the_locked_set_over_an_unchanged_lockfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The way to put a drifted box back on uv.lock without waiting for a move.
+    repo = _repo(tmp_path)
+    head = git(repo, "rev-parse", "HEAD")
+
+    box = _deploy_against(repo, monkeypatch, "--with-deps", marker=f"commit={head}\n")
+
+    assert len(box.exports) == 1
+    assert f"-r {box.plan.staged_requirements}" in box.installs()[0]
+
+
+def test_a_supplied_wheel_exports_its_attested_commits_lockfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The checkout need not be at the commit the wheel came from, so the lockfile
+    # exported is read out of git at that commit, not off the working tree.
+    repo = _repo(tmp_path)
+    attested = git(repo, "rev-parse", "HEAD")
+    (repo / "uv.lock").write_text("version = 2\n")
+    git(repo, "commit", "-qam", "lockfile moved after the wheel was built")
+    wheel = tmp_path / "ai_assistant-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"a supplied wheel")
+    seen: dict[str, str] = {}
+    box_run = _FakeBox.run_local
+
+    def _run_local(self: _FakeBox, argv: list[str], **kwargs: Any) -> str:
+        if argv[:2] == ["uv", "export"]:
+            project = Path(kwargs["cwd"])
+            seen["lock"] = (project / "uv.lock").read_text()
+            seen["pyproject"] = (project / "pyproject.toml").read_text()
+        return box_run(self, argv, **kwargs)
+
+    monkeypatch.setattr(_FakeBox, "run_local", _run_local)
+
+    box = _deploy_against(
+        repo, monkeypatch, "--wheel", str(wheel), "--wheel-commit", attested, marker=""
+    )
+
+    assert len(box.exports) == 1
+    assert box.exports[0] != repo.resolve()
+    assert seen == {"lock": "version = 1\n", "pyproject": _PYPROJECT}
+
+
+def test_a_failed_export_stops_the_deploy_before_the_box_is_touched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path)
+    deployed = _bump_lockfile(repo)
+    box_run = _FakeBox.run_local
+
+    def _run_local(self: _FakeBox, argv: list[str], **kwargs: Any) -> str:
+        if argv[:2] == ["uv", "export"]:
+            self.issued.append(" ".join(argv))
+            raise _MODULE.DeployError("uv failed: the lockfile needs to be updated")
+        return box_run(self, argv, **kwargs)
+
+    monkeypatch.setattr(_FakeBox, "run_local", _run_local)
+    parsed = _MODULE._parser().parse_args(["hub.example", "--repo", str(repo)])
+    plan = _MODULE.Plan(parsed, _MODULE.wheel_name(repo))
+    box = _FakeBox(plan, marker=f"commit={deployed}\n")
+    monkeypatch.setattr(_MODULE, "_run_local", box.run_local)
+    monkeypatch.setattr(_MODULE, "_probe", box.probe)
+
+    with pytest.raises(_MODULE.DeployError, match="lockfile needs to be updated"):
+        _MODULE._deploy(plan, repo, git(repo, "rev-parse", "HEAD"))
+
+    assert not any("mkdir" in c or c.startswith("scp ") or "uv build" in c for c in box.issued)
+
+
+def test_an_export_with_no_pinned_requirement_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An empty file installs nothing and would still read as the locked set.
+    def _run_local(argv: list[str], **_kwargs: object) -> str:
+        Path(argv[argv.index("--output-file") + 1]).write_text("# nothing here\n")
+        return ""
+
+    monkeypatch.setattr(_MODULE, "_run_local", _run_local)
+    out = tmp_path / "out"
+    out.mkdir()
+
+    with pytest.raises(_MODULE.DeployError, match="no pinned requirement"):
+        _MODULE.export_locked(_repo(tmp_path), out, None)
+
+
+def test_a_truncated_locked_set_is_caught_before_the_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _plan(_repo(tmp_path), "--with-deps")
+    answers = "STAGED_SHA256=cafe1234\nSTAGED_REQUIREMENTS_SHA256=deadbeef\n"
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (0, answers, ""))
+
+    with pytest.raises(_MODULE.DeployError, match="staged locked set is not the one"):
+        _MODULE._assert_staged(plan, "cafe1234", "0123abcd")
+
+
+def test_the_dry_run_shows_both_installs_without_with_deps(tmp_path: Path) -> None:
+    # A dry run never reads the marker, so it cannot know which install a real
+    # run takes; it shows the routine one and then the locked one.
+    plan = _dry_run(_repo(tmp_path))
+    routine, _, locked = plan.partition("# otherwise")
+
+    assert "uv export" not in routine
+    assert "-r " not in routine
+    assert "uv export --locked --offline --no-dev --no-emit-project" in locked
+    assert f"/{LOCKED} && " in locked
+    _assert_every_install_is_no_deps(plan)
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv is not on PATH")
+def test_the_real_export_pins_exactly_what_uv_lock_records(tmp_path: Path) -> None:
+    # The export the deploy runs, for real and offline, over this repository's
+    # own pyproject.toml and uv.lock committed into a throwaway clone: every
+    # requirement is one pinned version with its hashes, and the versions are
+    # the lockfile's — anthropic among them, the package #2511 saw jump a major.
+    source = Path(__file__).parents[2]
+    repo = tmp_path / "clone"
+    init_repo(repo)
+    for name in ("pyproject.toml", "uv.lock"):
+        shutil.copyfile(source / name, repo / name)
+    git(repo, "add", "pyproject.toml", "uv.lock")
+    git(repo, "commit", "-qm", "the real project")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    exported = _MODULE.export_locked(repo, out, git(repo, "rev-parse", "HEAD"))
+
+    lock = tomllib.loads((source / "uv.lock").read_text())
+    locked = {(p["name"], p["version"]) for p in lock["package"] if "version" in p}
+    requirements = [
+        line.rstrip(" \\")
+        for line in exported.read_text().splitlines()
+        if line and not line.startswith((" ", "#"))
+    ]
+    assert requirements
+    for requirement in requirements:
+        name, _, rest = requirement.partition("==")
+        version = rest.split(";", 1)[0].strip()
+        assert (name.strip(), version) in locked, requirement
+    anthropic = next(version for name, version in locked if name == "anthropic")
+    assert any(r.startswith(f"anthropic=={anthropic}") for r in requirements)
+    assert "--hash=sha256:" in exported.read_text()
+    # The project itself is the wheel, never a line of the locked set.
+    assert not any(r.startswith("ai-assistant") for r in requirements)
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv is not on PATH")
+def test_the_real_export_refuses_a_lockfile_pyproject_has_outgrown(tmp_path: Path) -> None:
+    # The wheel's requirements come from pyproject.toml. A lockfile that does not
+    # record one of them would export a set the wheel is missing a package from.
+    source = Path(__file__).parents[2]
+    repo = tmp_path / "clone"
+    init_repo(repo)
+    pyproject = (source / "pyproject.toml").read_text()
+    assert "dependencies = [\n" in pyproject
+    outgrown = pyproject.replace("dependencies = [\n", 'dependencies = [\n    "six>=1",\n', 1)
+    (repo / "pyproject.toml").write_text(outgrown)
+    shutil.copyfile(source / "uv.lock", repo / "uv.lock")
+    git(repo, "add", "pyproject.toml", "uv.lock")
+    git(repo, "commit", "-qm", "a requirement the lockfile never recorded")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    with pytest.raises(_MODULE.DeployError, match="needs to be updated"):
+        _MODULE.export_locked(repo, out, git(repo, "rev-parse", "HEAD"))
