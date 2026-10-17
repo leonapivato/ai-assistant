@@ -35,10 +35,12 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import difflib
 import hashlib
 import json
 import math
 import os
+import re
 import stat
 import sys
 import threading
@@ -487,6 +489,7 @@ class _Timeline:
     round_starts: list[float] = field(default_factory=list)
     spans: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
     rounds: dict[int, dict[str, object]] = field(default_factory=dict)
+    pairs: dict[int, int | None] = field(default_factory=dict)
 
     def round_of(self, at: float) -> int | None:
         number = bisect.bisect_right(self.round_starts, at)
@@ -676,6 +679,7 @@ class _Timeline:
             run = _text(_mapping(given.body).get("run"))
             label = f"{run} run" if run else label
         lines = [given.line] if returned is None else [given.line, returned.line]
+        self.pairs[given.line] = None if returned is None else returned.line
         self._item(
             given, kind="call", start=given.at, end=None if returned is None else returned.at,
             label=label, tone=tone, lines=lines,
@@ -990,6 +994,561 @@ def entry_of(lines: Sequence[Line], number: int) -> dict[str, object] | None:
     }
 
 
+# --- a model call, readable ------------------------------------------------------------
+# What a model was told, given and offered, and what it did, read from a given entry and
+# the returned entry paired with it, beside the bodies shown whole (ADR-0316 §3:3). Every
+# key read here is a hint (§5:2): where one is missing or of another shape, its part is
+# left out and said so, and the raw entries still show the bodies whole.
+
+#: The sources whose given and returned entries are a model call.
+MODEL_SOURCES: Final = frozenset({"understanding", "planning", "digesting"})
+
+#: Characters per token, for the estimate the view shows where the record counts none.
+CHARS_PER_TOKEN: Final = 4
+
+#: The most parts a text or an object splits into; the rest is kept as one last part.
+MAX_PARTS: Final = 400
+
+#: The longest text either side of a changed part may be for its diff to be drawn.
+DIFF_CHARS: Final = 400_000
+
+#: The most lines one changed part's diff shows.
+DIFF_LINES: Final = 800
+
+#: How deep, and how many, a value's nested lists are counted.
+LIST_DEPTH: Final = 6
+LIST_PATHS: Final = 40
+
+#: The longest line a block may be and still read as a heading.
+HEADING_CHARS: Final = 80
+
+#: What a returned entry that keeps the reply alone says of its usage (#3090).
+NO_USAGE: Final = (
+    "This entry records no token usage: understanding's and digesting's returned entries "
+    "keep the reply alone (#3090)."
+)
+
+_BLANK_LINE: Final = re.compile(r"\n[ \t]*\n")
+_MARKDOWN_HEADING: Final = re.compile(r"#{1,6}[ \t]+(\S.*?)[ \t#]*")
+
+#: The usage a provider's response carries, as pydantic-ai names it, and as shown.
+_USAGE_KEYS: Final = (
+    ("input_tokens", "input"),
+    ("output_tokens", "output"),
+    ("cache_read_tokens", "cache read"),
+    ("cache_write_tokens", "cache write"),
+)
+
+
+def estimate(chars: int) -> int:
+    """A token count estimated from a length in characters: an estimate, never a count."""
+    return math.ceil(chars / CHARS_PER_TOKEN)
+
+
+def _sized(text: str, **shown: object) -> dict[str, object]:
+    return {**shown, "text": text, "chars": len(text), "tokens": estimate(len(text))}
+
+
+def _pretty(value: object) -> str:
+    return json.dumps(value, indent=1, ensure_ascii=False)
+
+
+def _sent(value: object) -> int:
+    """A value's length as a request carries it: JSON, compact, ASCII with escapes."""
+    return len(json.dumps(value, ensure_ascii=True))
+
+
+def _object_in(text: str) -> dict[str, object] | None:
+    """The JSON object a message's text is, or ``None`` where it is not one."""
+    if not text.lstrip().startswith("{"):
+        return None
+    try:
+        value = json.loads(text, parse_constant=_refuse_constant, parse_float=_finite)
+    except _UNPARSABLE:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _readable(text: str) -> str:
+    """A reply's text, laid out where it is JSON and kept as it is where it is not."""
+    stripped = text.strip()
+    if not stripped.startswith(("{", "[")):
+        return text
+    try:
+        return _pretty(json.loads(stripped, parse_constant=_refuse_constant))
+    except _UNPARSABLE:
+        return text
+
+
+def _heading(line: str, *, alone: bool) -> str | None:
+    """A block's first line as a heading, where the text makes it one.
+
+    A Markdown heading is one wherever it stands; a short line standing alone as its
+    block is one where it ends in a colon or is written in capitals.
+    """
+    stripped = line.strip()
+    marked = _MARKDOWN_HEADING.fullmatch(stripped)
+    if marked is not None:
+        return marked.group(1)
+    if not alone or len(stripped) > HEADING_CHARS:
+        return None
+    if stripped.endswith(":") or stripped.isupper():
+        return stripped.rstrip(":").strip() or None
+    return None
+
+
+def instruction_sections(text: str) -> list[dict[str, object]]:
+    """Instructions split into their parts: paragraphs, under the headings they have.
+
+    Args:
+        text: The instructions, as the request's system messages carry them.
+
+    Returns:
+        Each section's heading, or ``None`` before the first, and its parts, numbered
+        in order across the sections, each with its size and a token estimate.
+    """
+    blocks = [one.strip("\n") for one in _BLANK_LINE.split(text.replace("\r\n", "\n"))]
+    blocks = [one for one in blocks if one.strip()]
+    sections: list[dict[str, object]] = [{"heading": None, "parts": []}]
+    number = 0
+    for index, block in enumerate(blocks):
+        parts = _sequence_of(sections[-1])
+        if number >= MAX_PARTS:
+            parts.append(_sized("\n\n".join(blocks[index:]), n=number + 1, rest=True))
+            break
+        first, newline, after = block.partition("\n")
+        found = _heading(first, alone=not newline)
+        text = block
+        if found is not None:
+            sections.append({"heading": found, "parts": []})
+            text = after.strip("\n")
+            if not text.strip():
+                continue
+        number += 1
+        _sequence_of(sections[-1]).append(_sized(text, n=number))
+    return [one for one in sections if one["heading"] is not None or one["parts"]]
+
+
+def _sequence_of(section: dict[str, object]) -> list[dict[str, object]]:
+    parts = section["parts"]
+    assert isinstance(parts, list)  # noqa: S101 — built just above, always a list
+    return parts
+
+
+def _kind_of(value: object) -> str:
+    if isinstance(value, dict):
+        return f"object · {len(value)} {'key' if len(value) == 1 else 'keys'}"
+    if isinstance(value, list):
+        return f"list · {len(value)} {'item' if len(value) == 1 else 'items'}"
+    if isinstance(value, str):
+        return "text"
+    if isinstance(value, bool) or value is None:
+        return json.dumps(value)
+    return "number"
+
+
+def nested_lists(value: object, path: str) -> list[dict[str, object]]:
+    """Every list a value holds, by its path, with how many it holds.
+
+    Args:
+        value: A top-level value of a request's JSON.
+        path: Its key.
+
+    Returns:
+        Each path's lists and their items in all, as ``stories[].notes`` for the
+        notes of every story; at most :data:`LIST_PATHS` paths, :data:`LIST_DEPTH` deep.
+    """
+    found: dict[str, list[int]] = {}
+    pending: list[tuple[object, str, int]] = [(value, path, 0)]
+    while pending:
+        one, where, depth = pending.pop()
+        if depth > LIST_DEPTH:
+            continue
+        if isinstance(one, list):
+            if where in found or len(found) < LIST_PATHS:
+                found.setdefault(where, []).append(len(one))
+            pending.extend((item, f"{where}[]", depth + 1) for item in reversed(one))
+        elif isinstance(one, dict):
+            pending.extend(
+                (item, f"{where}.{key}", depth + 1) for key, item in reversed(one.items())
+            )
+    return [
+        {"path": where, "lists": len(counts), "items": sum(counts)}
+        for where, counts in found.items()
+    ]
+
+
+def _messages_of(body: object) -> list[tuple[str, object]] | None:
+    listed = _mapping(body).get("messages")
+    if not isinstance(listed, list):
+        return None
+    shown: list[tuple[str, object]] = []
+    for one in listed:
+        message = _mapping(one)
+        role = message.get("role")
+        shown.append((role if isinstance(role, str) else "message", message.get("content")))
+    return shown
+
+
+def _told(messages: Sequence[tuple[str, object]]) -> dict[str, object] | None:
+    """What the request told the model: its system messages, split into their parts."""
+    texts = [content for role, content in messages if role == "system"]
+    if not texts:
+        return None
+    text = "\n\n".join(one if isinstance(one, str) else _pretty(one) for one in texts)
+    return {
+        "messages": len(texts),
+        "chars": len(text),
+        "tokens": estimate(len(text)),
+        "sections": instruction_sections(text),
+    }
+
+
+def _given(messages: Sequence[tuple[str, object]]) -> list[dict[str, object]]:
+    """What the request gave the model: every other message, its JSON split by key."""
+    shown: list[dict[str, object]] = []
+    others = [(role, content) for role, content in messages if role != "system"]
+    for index, (role, content) in enumerate(others, 1):
+        about: dict[str, object] = {"index": index, "role": role}
+        if not isinstance(content, str):
+            shown.append({**about, "form": "text", "odd": True, **_sized(_pretty(content))})
+            continue
+        document = _object_in(content)
+        if document is None:
+            shown.append({**about, "form": "text", **_sized(content)})
+            continue
+        keys: list[dict[str, object]] = []
+        items = list(document.items())
+        for key, value in items[:MAX_PARTS]:
+            size = _sent(value)
+            keys.append(
+                {
+                    "key": key,
+                    "kind": _kind_of(value),
+                    "chars": size,
+                    "tokens": estimate(size),
+                    "lists": nested_lists(value, key),
+                    "text": _pretty(value),
+                }
+            )
+        if len(items) > MAX_PARTS:
+            rest = dict(items[MAX_PARTS:])
+            keys.append({"key": "…", "kind": _kind_of(rest), "rest": True, **_sized(_pretty(rest))})
+        shown.append(
+            {
+                **about,
+                "form": "json",
+                "chars": len(content),
+                "tokens": estimate(len(content)),
+                "keys": keys,
+            }
+        )
+    return shown
+
+
+def _tools(listed: object, origin: str) -> dict[str, object] | None:
+    """The tools a request offered, by name and description, their schemas apart."""
+    if not isinstance(listed, list):
+        return None
+    tools: list[dict[str, object]] = []
+    for one in listed:
+        tool = _mapping(one)
+        name = _text(tool.get("name"))
+        if not name:
+            continue
+        schema = tool.get("parameters")
+        size = _sent(one)
+        tools.append(
+            {
+                "name": name,
+                "description": _text(tool.get("description")) or "",
+                "schema": None if schema is None else _pretty(schema),
+                "chars": size,
+                "tokens": estimate(size),
+                "reserved": name == ROUND_TOOL,
+            }
+        )
+    return {"from": origin, "tools": tools, "unnamed": len(listed) - len(tools)}
+
+
+def _usage(value: object) -> dict[str, int] | None:
+    usage = _mapping(value)
+    shown: dict[str, int] = {}
+    for key, label in _USAGE_KEYS:
+        count = usage.get(key)
+        if isinstance(count, int) and not isinstance(count, bool):
+            shown[label] = count
+    return shown or None
+
+
+def _round_tool_parts(arguments: object, call_id: str | None) -> list[dict[str, object]]:
+    """The round's own tool's call, as the notes and the asks it carries."""
+    held = _mapping(arguments)
+    parts: list[dict[str, object]] = []
+    notes = held.get("notes")
+    if isinstance(notes, str):
+        parts.append(_sized(notes, kind="notes", title="Episode notes"))
+    asks = held.get("asks")
+    if isinstance(asks, list):
+        named = [one if isinstance(one, str) else _pretty(one) for one in asks]
+        parts.append({**_sized("\n".join(named), kind="asks", title="Asks named"), "items": named})
+    if not isinstance(arguments, dict) or set(held) - {"notes", "asks"}:
+        parts.append(
+            _sized(_pretty(arguments), kind="call", title=f"Call · {ROUND_TOOL}", id=call_id)
+        )
+    return parts
+
+
+def _response_part(part: object) -> list[dict[str, object]]:
+    """One part of a provider's response, as the view shows it."""
+    shown = _mapping(part)
+    kind = shown.get("part_kind")
+    content = shown.get("content")
+    if kind == "text" and isinstance(content, str):
+        return [_sized(content, kind="text", title="Text")]
+    if kind == "thinking":
+        text = content if isinstance(content, str) else ""
+        return [_sized(text, kind="thinking", title="Thinking (the provider's summary)")]
+    if kind == "tool-call":
+        name = _text(shown.get("tool_name")) or "?"
+        call_id = _text(shown.get("tool_call_id"))
+        arguments = _arguments(shown.get("args"))
+        if name == ROUND_TOOL:
+            return _round_tool_parts(arguments, call_id)
+        shown_args = shown.get("args") if arguments is None else arguments
+        return [_sized(_pretty(shown_args), kind="call", title=f"Call · {name}", id=call_id)]
+    title = kind if isinstance(kind, str) else "part"
+    return [_sized(_pretty(part), kind="other", title=title)]
+
+
+def _did(source: str, body: object) -> dict[str, object]:
+    """What the model did: the response's parts in order, its usage, and any failure."""
+    held = _mapping(body)
+    parts: list[dict[str, object]] = []
+    did: dict[str, object] = {"parts": parts}
+    if "failure" in held:
+        did["failure"] = _failure_text(held.get("failure"))
+    if source == "planning":
+        response = _mapping(held.get("response"))
+        listed = response.get("parts")
+        for part in _sequence(listed):
+            parts.extend(_response_part(part))
+        did["usage"] = _usage(response.get("usage"))
+        if did["usage"] is None:
+            did["usage_note"] = "This response records no token usage."
+        did["read_as_round"] = held.get("read_as_round")
+        did["finish_reason"] = _text(response.get("finish_reason"))
+        did["model"] = _text(response.get("model_name"))
+        if not isinstance(listed, list) and "failure" not in held:
+            did["odd"] = "This entry holds no response parts to read."
+        return did
+    reply = held.get("reply")
+    if isinstance(reply, str):
+        parts.append(_sized(_readable(reply), kind="reply", title="Reply"))
+    dropped = held.get("dropped")
+    if isinstance(dropped, list) and dropped:
+        parts.append(_sized(_pretty(dropped), kind="other", title="Dropped evidence"))
+    if held.get("digest") == "failed":
+        did["failure"] = "the digest failed" + (
+            f": {held['reason']}" if isinstance(held.get("reason"), str) else ""
+        )
+    if not parts and "failure" not in did:
+        did["odd"] = "This entry holds no reply to read."
+    did["usage"] = None
+    did["usage_note"] = NO_USAGE
+    return did
+
+
+def request_parts(body: object) -> dict[str, tuple[str, int]]:
+    """A request's parts by name, for comparing it with another request.
+
+    The instructions are one part, every top-level key of a message's JSON one, and
+    every tool the request offered one.
+
+    Returns:
+        Each part's text as it is compared, a paragraph or a JSON line to a line, and
+        its size as the view's other sections give it.
+    """
+    parts: dict[str, tuple[str, int]] = {}
+    messages = _messages_of(body) or []
+    told = [one if isinstance(one, str) else _pretty(one) for r, one in messages if r == "system"]
+    if told:
+        # One paragraph to a line, so the diff of a changed paragraph is that paragraph.
+        joined = "\n\n".join(told)
+        blocks = [one.strip("\n") for one in _BLANK_LINE.split(joined.replace("\r\n", "\n"))]
+        parts["instructions"] = ("\n".join(one for one in blocks if one.strip()), len(joined))
+    others = [(role, content) for role, content in messages if role != "system"]
+    for index, (role, content) in enumerate(others, 1):
+        prefix = "input" if len(others) == 1 else f"message {index} ({role})"
+        document = _object_in(content) if isinstance(content, str) else None
+        if document is None:
+            text = content if isinstance(content, str) else _pretty(content)
+            parts[prefix] = (text, len(text))
+            continue
+        for key, value in document.items():
+            parts[f"{prefix} · {key}"] = (_pretty(value), _sent(value))
+    for one in _sequence(_mapping(body).get("tools")):
+        tool = _mapping(one)
+        name = _text(tool.get("name"))
+        if name:
+            description = _text(tool.get("description")) or ""
+            text = description + "\n\n" + _pretty(tool.get("parameters"))
+            parts[f"tool · {name}"] = (text, _sent(one))
+    return parts
+
+
+def text_diff(before: str, after: str) -> dict[str, object]:
+    """A changed part's line diff, unified, cut at :data:`DIFF_LINES` lines."""
+    if len(before) > DIFF_CHARS or len(after) > DIFF_CHARS:
+        return {"lines": [], "cut": False, "too_large": True}
+    diff = difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
+    lines = [one for one in diff if not one.startswith(("--- ", "+++ "))]
+    return {"lines": lines[:DIFF_LINES], "cut": len(lines) > DIFF_LINES, "too_large": False}
+
+
+def compare_requests(before: object, after: object) -> list[dict[str, object]]:
+    """What changed from one request to the next, part by part.
+
+    Args:
+        before: The earlier request's body.
+        after: The later request's body.
+
+    Returns:
+        Every part of either, in the later request's order and then the removed ones:
+        added, removed, changed (with its diff) or unchanged, and its size.
+    """
+    old, new = request_parts(before), request_parts(after)
+    shown: list[dict[str, object]] = []
+    for name, (text, size) in new.items():
+        if name not in old:
+            shown.append({"part": name, "change": "added", "after": size})
+            continue
+        was, was_size = old[name]
+        if was == text:
+            shown.append({"part": name, "change": "unchanged", "after": size})
+            continue
+        shown.append(
+            {
+                "part": name,
+                "change": "changed",
+                "before": was_size,
+                "after": size,
+                "diff": text_diff(was, text),
+            }
+        )
+    shown += [
+        {"part": name, "change": "removed", "before": size}
+        for name, (_text_of, size) in old.items()
+        if name not in new
+    ]
+    return shown
+
+
+def _about(source: str, body: object) -> dict[str, object]:
+    """What names a call beside its round: a digest's question, result and part."""
+    if source != "digesting":
+        return {}
+    held = _mapping(body)
+    shown = {key: held[key] for key in ("question", "result") if isinstance(held.get(key), str)}
+    part, parts = held.get("part"), held.get("parts")
+    if isinstance(part, int) and isinstance(parts, int):
+        shown["part"] = f"{part} of {parts}"
+    return shown
+
+
+def model_call(lines: Sequence[Line], number: int) -> dict[str, object] | None:
+    """One model call, readable: told, given, offered, done, and changed since the last.
+
+    Args:
+        lines: The activation's complete lines.
+        number: The line of the call's given entry or of its returned one.
+
+    Returns:
+        ``None`` where that line is no model source's given or returned entry; else the
+        call's parts, each with its size, and what the record does not hold, said.
+    """
+    if not 0 <= number < len(lines):
+        return None
+    picked = lines[number]
+    if not (
+        isinstance(picked, Entry)
+        and picked.source in MODEL_SOURCES
+        and picked.kind in {"given", "returned"}
+    ):
+        return None
+    built = _Timeline(lines)
+    built.build()
+    given, returned = _pair_of(built, lines, picked)
+    anchor = given or picked
+    notes: list[str] = []
+    view: dict[str, object] = {
+        "source": picked.source,
+        "round": built.round_of(anchor.at) if picked.source == "planning" else None,
+        "given": None if given is None else given.line,
+        "returned": None if returned is None else returned.line,
+        "at": _ms(anchor.at),
+        "took": None if given is None or returned is None else _ms(returned.at - given.at),
+        "about": _about(picked.source, anchor.body),
+        "told": None,
+        "input": None,
+        "tools": None,
+        "did": None,
+        "changes": None,
+        "notes": notes,
+    }
+    if given is None:
+        notes.append("No given entry was recorded for this call: what it was told is not here.")
+    else:
+        messages = _messages_of(given.body)
+        if messages is None:
+            notes.append("The given entry holds no list of messages; the raw entry shows it.")
+        else:
+            view["told"] = _told(messages)
+            view["input"] = _given(messages)
+        if picked.source == "planning":
+            view["changes"] = _changes(built, given)
+    if returned is None:
+        notes.append("No returned entry was recorded for this call: what it did is not here.")
+    else:
+        view["did"] = _did(picked.source, returned.body)
+        view["tools"] = _tools(_mapping(returned.body).get("offered_tools"), "returned")
+        if _mapping(returned.body).get("offered_tools_unprepared") is not None:
+            notes.append("The offered tools are as the round built them, not as prepared.")
+    if view["tools"] is None and given is not None:
+        view["tools"] = _tools(_mapping(given.body).get("tools"), "given")
+    return view
+
+
+def _pair_of(
+    built: _Timeline, lines: Sequence[Line], picked: Entry
+) -> tuple[Entry | None, Entry | None]:
+    """A call's given entry and its returned one, as the timeline paired them."""
+    if picked.kind == "given":
+        paired = built.pairs.get(picked.line)
+        found = None if paired is None else lines[paired]
+        return picked, found if isinstance(found, Entry) else None
+    paired = next((one for one, back in built.pairs.items() if back == picked.line), None)
+    found = None if paired is None else lines[paired]
+    return (found if isinstance(found, Entry) else None), picked
+
+
+def _changes(built: _Timeline, given: Entry) -> dict[str, object] | None:
+    """What changed in a planning request since the request before it, if any."""
+    earlier = [
+        one
+        for one in built.entries
+        if one.source == "planning" and one.kind == "given" and one.line < given.line
+    ]
+    if not earlier:
+        return None
+    before = earlier[-1]
+    return {
+        "against": before.line,
+        "against_round": built.round_of(before.at),
+        "parts": compare_requests(before.body, given.body),
+    }
+
+
 # --- the server ------------------------------------------------------------------------
 
 
@@ -1138,6 +1697,15 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return
         self._json({**timeline(activation_id, lines), "version": version, "now": _now()})
 
+    def _call(self, query: Mapping[str, str]) -> None:
+        read = self.server.record.lines(query.get("id", ""))
+        number = query.get("line", "")
+        shown = model_call(read[0], int(number)) if read is not None and number.isdigit() else None
+        if shown is None:
+            self._json({"error": "no such model call"}, HTTPStatus.NOT_FOUND)
+            return
+        self._json(shown)
+
     def _entry(self, query: Mapping[str, str]) -> None:
         read = self.server.record.lines(query.get("id", ""))
         number = query.get("line", "")
@@ -1159,6 +1727,7 @@ _ROUTES: Final[dict[str, Callable[[ViewerHandler, Mapping[str, str]], None]]] = 
     "/api/activations": ViewerHandler._activations,
     "/api/activation": ViewerHandler._activation,
     "/api/entry": ViewerHandler._entry,
+    "/api/call": ViewerHandler._call,
     "/favicon.ico": ViewerHandler._no_icon,
 }
 
@@ -1212,8 +1781,13 @@ PAGE: Final = """<!doctype html>
 <aside class="drawer" id="drawer" hidden>
   <div class="drawer-head">
     <div class="drawer-title" id="drawer-title"></div>
+    <div class="drawer-tabs" id="drawer-tabs" hidden>
+      <button class="tab" id="tab-read" type="button" aria-pressed="true">Readable</button>
+      <button class="tab" id="tab-raw" type="button" aria-pressed="false">Raw entries</button>
+    </div>
     <button class="close" id="drawer-close" type="button" aria-label="Close">&times;</button>
   </div>
+  <div class="drawer-body" id="drawer-read" hidden></div>
   <div class="drawer-body" id="drawer-body"></div>
 </aside>
 </body>
@@ -1520,6 +2094,76 @@ button { font: inherit; }
   margin-bottom: 10px;
   cursor: pointer;
 }
+[hidden] { display: none !important; }
+.drawer.wide { width: min(1100px, 100%); }
+.drawer-head { gap: 10px; flex-wrap: wrap; }
+.drawer-title { flex: 1 1 auto; min-width: 0; }
+.drawer-tabs { display: flex; gap: 4px; }
+.tab {
+  border: 1px solid var(--line); background: none; color: var(--muted); border-radius: 6px;
+  padding: 2px 10px; cursor: pointer; font-size: 12px;
+}
+.tab[aria-pressed="true"] {
+  background: var(--select); color: var(--ink); border-color: var(--accent);
+}
+.call-head h2 { font-size: 16px; margin: 10px 0 2px; }
+.call-head .m { color: var(--muted); font-size: 12px; }
+.call-stats { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.call-nav { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 6px; }
+.call-nav button {
+  font-size: 12px; border: 1px solid var(--line); background: var(--bg); color: var(--accent);
+  border-radius: 999px; padding: 1px 10px; cursor: pointer;
+}
+.call-sec { margin-top: 18px; scroll-margin-top: 8px; }
+.call-sec > .sec-head {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--line); padding-bottom: 4px; margin-bottom: 6px;
+}
+.call-sec > .sec-head h3 {
+  font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--ink); margin: 0;
+}
+.call-sec > .sec-head .m { color: var(--muted); font-size: 12px; }
+.call-sec > .sec-head .copy { margin-left: auto; }
+.part-heading { font-size: 13px; margin: 12px 0 4px; color: var(--planning); }
+.part {
+  border: 1px solid var(--line); border-radius: 8px; margin: 6px 0; background: var(--panel);
+  min-width: 0;
+}
+.part-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 4px 8px;
+  font-size: 12px; color: var(--muted);
+}
+.part > .part-head { border-bottom: 1px solid var(--line); }
+details.part:not([open]) > summary.part-head { border-bottom: none; }
+details.part > summary { cursor: pointer; list-style: none; }
+details.part > summary::-webkit-details-marker { display: none; }
+details.part > summary::before { content: "\u25b8"; color: var(--muted); }
+details.part[open] > summary::before { content: "\u25be"; }
+.part-head .name { color: var(--ink); font-weight: 600; font-family: var(--mono); }
+.part-head .end { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
+.part-head .size { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.part-head .tag {
+  font-size: 11px; border: 1px solid currentColor; border-radius: 999px; padding: 0 6px;
+}
+.part-text { white-space: pre-wrap; word-break: break-word; padding: 6px 10px; line-height: 1.5; }
+.part-text.thinking { border-left: 3px solid var(--planning); }
+.part pre { margin: 6px 8px; }
+.part .lists {
+  font-size: 12px; color: var(--muted); padding: 4px 10px 0; font-family: var(--mono);
+}
+.copy {
+  font-size: 11px; border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+  border-radius: 4px; padding: 0 7px; cursor: pointer; line-height: 18px;
+}
+.copy:hover { border-color: var(--accent); }
+.fail { color: var(--failed); }
+.diff span { display: block; }
+.diff .add { color: var(--acting); background: rgba(47, 157, 85, .10); }
+.diff .del { color: var(--failed); background: rgba(210, 60, 60, .10); }
+.diff .hunk { color: var(--muted); }
+.ch-added { color: var(--acting); } .ch-removed { color: var(--failed); }
+.ch-changed { color: var(--needs); }
+.asks { display: flex; flex-wrap: wrap; gap: 5px; padding: 6px 10px; }
 @media (max-width: 760px) {
   .layout { grid-template-columns: 1fr; height: auto; }
   .list-pane { border-right: none; }
@@ -1963,7 +2607,14 @@ SCRIPT: Final = r"""
     $("drawer-title").textContent = title;
     const body = $("drawer-body");
     clear(body);
+    clear($("drawer-read"));
+    // A model call opens readable, its entries whole one tab away (ADR-0316 \u00a73:3).
+    const call = callLine(id, lines);
+    $("drawer-tabs").hidden = call === null;
+    $("drawer").classList.toggle("wide", call !== null);
+    showTab(call === null ? "raw" : "read");
     $("drawer").hidden = false;
+    if (call !== null) loadCall(generation, id, call);
     for (const line of lines) {
       const holder = el("div");
       body.appendChild(holder);
@@ -1986,6 +2637,392 @@ SCRIPT: Final = r"""
   function closeDrawer() {
     drawn += 1;
     $("drawer").hidden = true;
+  }
+
+  function showTab(tab) {
+    $("drawer-read").hidden = tab !== "read";
+    $("drawer-body").hidden = tab !== "raw";
+    $("tab-read").setAttribute("aria-pressed", String(tab === "read"));
+    $("tab-raw").setAttribute("aria-pressed", String(tab === "raw"));
+  }
+
+  // --- a model call, readable --------------------------------------------------------
+  const MODEL_SOURCES = ["understanding", "planning", "digesting"];
+  const SOURCE_NAMES = { understanding: "Understanding", planning: "Planning",
+    digesting: "Digesting" };
+  // The first of the lines a click opens that is a model call's given or returned entry.
+  function callLine(id, lines) {
+    const d = state.detail;
+    if (!d || d.id !== id) return null;
+    for (const line of lines) {
+      const e = d.entries.find((one) => one.line === line);
+      if (e && MODEL_SOURCES.includes(e.source) && (e.kind === "given" || e.kind === "returned")) {
+        return line;
+      }
+    }
+    return null;
+  }
+  async function loadCall(generation, id, line) {
+    const holder = $("drawer-read");
+    holder.appendChild(el("p", "note", "Loading\u2026"));
+    let view;
+    try {
+      view = await getJson("/api/call?id=" + encodeURIComponent(id)
+        + "&line=" + encodeURIComponent(line));
+    } catch (error) {
+      if (generation !== drawn) return;
+      clear(holder);
+      holder.appendChild(el("p", "note", "Could not load that call."));
+      return;
+    }
+    if (generation !== drawn) return;
+    clear(holder);
+    if (view === null) {
+      holder.appendChild(el("p", "note", "That call is no longer in the record."));
+      return;
+    }
+    try {
+      renderCall(holder, view);
+    } catch (error) {
+      holder.appendChild(el("p", "note",
+        "This call did not read as expected; the raw entries show it whole."));
+    }
+  }
+  function num(n) { return typeof n === "number" ? n.toLocaleString("en-US") : String(n); }
+  function size(chars, tokens) {
+    let text = num(chars) + " chars";
+    if (tokens !== undefined && tokens !== null) {
+      text += " \u00b7 \u2248" + num(tokens) + " tokens (est.)";
+    }
+    return text;
+  }
+  async function copyText(text, button) {
+    let done = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        done = true;
+      }
+    } catch (error) {
+      done = false;
+    }
+    if (!done) {
+      const area = el("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      try {
+        done = document.execCommand("copy");
+      } catch (error) {
+        done = false;
+      }
+      document.body.removeChild(area);
+    }
+    button.textContent = done ? "Copied" : "Copy failed";
+    setTimeout(() => { button.textContent = "Copy"; }, 1500);
+  }
+  // A copy control: copies plain text, built when it is clicked.
+  function copyButton(what, text) {
+    const button = el("button", "copy", "Copy");
+    button.type = "button";
+    button.title = "Copy " + what + " as plain text";
+    button.setAttribute("aria-label", "Copy " + what);
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      copyText(typeof text === "function" ? text() : text, button);
+    });
+    return button;
+  }
+  function callSec(holder, key, title, meta, copied) {
+    const box = el("section", "call-sec");
+    box.id = "call-" + key;
+    const head = el("div", "sec-head");
+    head.appendChild(el("h3", null, title));
+    if (meta) head.appendChild(el("span", "m", meta));
+    if (copied) head.appendChild(copyButton(title.toLowerCase(), copied));
+    box.appendChild(head);
+    holder.appendChild(box);
+    return box;
+  }
+  // One part: a head naming it, its size and a copy control, and its text wrapped or laid
+  // out; collapsed where it is long data rather than prose.
+  function part(parent, opts) {
+    const box = el(opts.collapsed === undefined ? "div" : "details", "part");
+    if (opts.collapsed === false) box.open = true;
+    const head = el(opts.collapsed === undefined ? "div" : "summary", "part-head");
+    if (opts.name) head.appendChild(el("span", "name", opts.name));
+    for (const tag of opts.tags || []) {
+      head.appendChild(el("span", "tag " + (tag.cls || ""), tag.text));
+    }
+    if (opts.meta) head.appendChild(el("span", null, opts.meta));
+    const end = el("span", "end");
+    end.appendChild(el("span", "size", opts.size || ""));
+    end.appendChild(copyButton(opts.what || opts.name || "this part", opts.copy));
+    head.appendChild(end);
+    box.appendChild(head);
+    parent.appendChild(box);
+    return box;
+  }
+  function prose(parent, text, cls) {
+    parent.appendChild(el("div", "part-text" + (cls ? " " + cls : ""), text));
+  }
+  function plural(n, one, many) { return num(n) + " " + (n === 1 ? one : many); }
+
+  function renderCall(holder, v) {
+    const head = el("div", "call-head");
+    let title = SOURCE_NAMES[v.source] || v.source;
+    if (v.round) title += " \u00b7 round " + v.round;
+    if (v.about && v.about.part) title += " \u00b7 part " + v.about.part;
+    head.appendChild(el("h2", null, title));
+    const where = [];
+    where.push(v.given === null ? "no given entry" : "given line " + v.given);
+    where.push(v.returned === null ? "no returned entry" : "returned line " + v.returned);
+    if (v.took !== null && v.took !== undefined) where.push("took " + duration(v.took));
+    head.appendChild(el("div", "m", where.join(" \u00b7 ")));
+    holder.appendChild(head);
+    if (v.about && (v.about.question || v.about.result)) {
+      kv(holder, [["question", v.about.question], ["result", v.about.result]]);
+    }
+    for (const note of v.notes || []) holder.appendChild(el("p", "note", note));
+    const stats = el("div", "call-stats");
+    const stat = (text) => stats.appendChild(el("span", "chip", text));
+    if (v.told) stat("told " + size(v.told.chars, v.told.tokens));
+    const input = v.input || [];
+    if (input.length) {
+      const chars = input.reduce((n, m) => n + (m.chars || 0), 0);
+      stat("given " + size(chars, input.reduce((n, m) => n + (m.tokens || 0), 0)));
+    }
+    if (v.tools) stat(plural(v.tools.tools.length, "tool", "tools"));
+    const usage = v.did && v.did.usage;
+    if (usage) {
+      stat(Object.entries(usage).map(([k, n]) => k + " " + num(n)).join(" \u00b7 ") + " tokens");
+    }
+    holder.appendChild(stats);
+    const nav = el("nav", "call-nav");
+    const keys = [["told", "Told"], ["given", "Given"], ["tools", "Could do"], ["did", "Did"]];
+    if (v.source === "planning") keys.push(["changes", "Changed"]);
+    for (const [key, label] of keys) {
+      const go = el("button", null, label);
+      go.type = "button";
+      go.addEventListener("click", () => {
+        const target = document.getElementById("call-" + key);
+        if (target) target.scrollIntoView({ block: "start" });
+      });
+      nav.appendChild(go);
+    }
+    holder.appendChild(nav);
+    renderTold(holder, v);
+    renderGiven(holder, v);
+    renderTools(holder, v);
+    renderDid(holder, v);
+    if (v.source === "planning") renderChanges(holder, v);
+  }
+
+  // Why a request's part is not shown, where the record does not hold it to read.
+  function unread(v, what) {
+    if (v.given === null) return "No given entry was recorded, so what it was " + what
+      + " is not here.";
+    if (v.input === null) return "The given entry holds no list of messages to read; "
+      + "the raw entries show it whole.";
+    return null;
+  }
+  function renderTold(holder, v) {
+    const told = v.told;
+    const all = () => told.sections.map((s) => (s.heading ? s.heading + "\n\n" : "")
+      + s.parts.map((p) => p.text).join("\n\n")).join("\n\n");
+    const box = callSec(holder, "told", "What it was told",
+      told ? size(told.chars, told.tokens) + " \u00b7 the instructions" : null, told ? all : null);
+    if (!told) {
+      box.appendChild(el("p", "note", unread(v, "told")
+        || "This request carries no system message."));
+      return;
+    }
+    for (const s of told.sections) {
+      if (s.heading) box.appendChild(el("h4", "part-heading", s.heading));
+      for (const p of s.parts) {
+        const one = part(box, { name: p.rest ? "the rest" : "\u00b6" + p.n,
+          what: "paragraph " + p.n, size: size(p.chars, p.tokens), copy: p.text });
+        prose(one, p.text);
+      }
+    }
+  }
+
+  function keyText(k) { return JSON.stringify(k.key) + ": " + k.text; }
+  function messageText(m) {
+    return m.form === "json" ? m.keys.map(keyText).join("\n\n") : m.text;
+  }
+  function renderGiven(holder, v) {
+    const input = v.input || [];
+    const box = callSec(holder, "given", "What it was given",
+      input.length ? plural(input.length, "message", "messages") + " after the instructions" : null,
+      input.length ? () => input.map(messageText).join("\n\n") : null);
+    if (!input.length) {
+      box.appendChild(el("p", "note", unread(v, "given")
+        || "This request carries no message beside its instructions."));
+      return;
+    }
+    for (const m of input) {
+      let label = (m.role || "message") + " message " + m.index;
+      label += m.form === "json"
+        ? " \u00b7 one JSON object, " + plural(m.keys.length, "key", "keys")
+        : " \u00b7 text";
+      if (m.odd) label += " \u00b7 its content is not text";
+      const sub = el("div", "part-heading", label + " \u00b7 " + size(m.chars, m.tokens));
+      box.appendChild(sub);
+      if (m.form !== "json") {
+        const one = part(box, { name: "text", what: "message " + m.index,
+          size: size(m.chars, m.tokens), copy: m.text });
+        prose(one, m.text);
+        continue;
+      }
+      for (const k of m.keys) {
+        const one = part(box, { name: k.key, meta: k.kind, collapsed: true,
+          what: "\u201c" + k.key + "\u201d", size: size(k.chars, k.tokens), copy: keyText(k) });
+        const lists = (k.lists || []).filter((l) => l.path !== k.key || k.lists.length > 1);
+        if (lists.length) {
+          const counted = lists.map((l) => l.path + ": " + plural(l.items, "item", "items")
+            + (l.lists > 1 ? " in " + num(l.lists) + " lists" : ""));
+          one.appendChild(el("div", "lists", counted.join(" \u00b7 ")));
+        }
+        pre(one, k.text);
+      }
+    }
+  }
+
+  function toolText(t) {
+    return t.name + "\n\n" + t.description + (t.schema ? "\n\n" + t.schema : "");
+  }
+  function renderTools(holder, v) {
+    const tools = v.tools;
+    const list = tools ? tools.tools : [];
+    let meta = null;
+    if (tools) {
+      meta = plural(list.length, "tool", "tools") + (tools.from === "returned"
+        ? " \u00b7 as offered to the provider"
+        : " \u00b7 as the request built them; no returned entry says what the provider was sent");
+    }
+    const box = callSec(holder, "tools", "What it could do", meta,
+      list.length ? () => list.map(toolText).join("\n\n---\n\n") : null);
+    if (!tools) {
+      box.appendChild(el("p", "note", v.source === "planning"
+        ? "No list of tools is recorded for this call."
+        : "This call offers no tools: it is a completion."));
+      return;
+    }
+    if (tools.unnamed) {
+      box.appendChild(el("p", "note", plural(tools.unnamed, "tool", "tools")
+        + " with no name are left out here; the raw entries show them."));
+    }
+    for (const t of list) {
+      const tags = t.reserved ? [{ text: "reserved: the round's own tool" }] : [];
+      const one = part(box, { name: t.name, tags, what: "tool " + t.name,
+        size: size(t.chars, t.tokens), copy: toolText(t) });
+      prose(one, t.description || "(no description)");
+      if (t.schema) {
+        const schema = el("details", "part");
+        const summary = el("summary", "part-head");
+        summary.appendChild(el("span", null, "Schema"));
+        summary.appendChild(el("span", "size", num(t.schema.length) + " chars"));
+        schema.appendChild(summary);
+        pre(schema, t.schema);
+        schema.style.margin = "4px 8px 8px";
+        one.appendChild(schema);
+      }
+    }
+  }
+
+  function didText(p) { return p.title + "\n\n" + p.text; }
+  function renderDid(holder, v) {
+    const did = v.did;
+    const box = callSec(holder, "did", "What it did",
+      did ? plural(did.parts.length, "part", "parts") + " in order" : null,
+      did && did.parts.length ? () => did.parts.map(didText).join("\n\n") : null);
+    if (!did) {
+      box.appendChild(el("p", "note",
+        "No returned entry was recorded, so what it did is not here."));
+      return;
+    }
+    if (did.failure) box.appendChild(el("p", "fail", "failed: " + did.failure));
+    if (did.odd) box.appendChild(el("p", "note", did.odd));
+    if (did.usage) {
+      kv(box, Object.entries(did.usage).map(([k, n]) => [k + " tokens", num(n)]));
+    } else if (did.usage_note) {
+      box.appendChild(el("p", "note", did.usage_note));
+    }
+    const facts = [["model", did.model], ["finish reason", did.finish_reason],
+      ["read as a round", did.read_as_round]].filter(([, x]) => x !== undefined && x !== null);
+    if (facts.length) kv(box, facts);
+    did.parts.forEach((p, index) => {
+      const one = part(box, { name: (index + 1) + " \u00b7 " + p.title, what: p.title.toLowerCase(),
+        meta: p.id ? "call id " + p.id : null, size: size(p.chars, p.tokens), copy: didText(p) });
+      if (p.kind === "asks") {
+        const asks = el("div", "asks");
+        for (const name of p.items || []) asks.appendChild(el("span", "chip", name));
+        if (!(p.items || []).length) asks.appendChild(el("span", "note", "none"));
+        one.appendChild(asks);
+      } else if (p.kind === "call" || p.kind === "other" || p.kind === "reply") {
+        pre(one, p.text);
+      } else {
+        prose(one, p.text || "(no text returned)", p.kind === "thinking" ? "thinking" : null);
+      }
+    });
+  }
+
+  function diffText(d) { return d.lines.join("\n"); }
+  function renderChanges(holder, v) {
+    const changes = v.changes;
+    const moved = changes ? changes.parts.filter((p) => p.change !== "unchanged") : [];
+    let meta = null;
+    if (changes) {
+      const count = (what) => changes.parts.filter((p) => p.change === what).length;
+      const against = changes.against_round
+        ? "round " + changes.against_round : "line " + changes.against;
+      meta = "since " + against + "\u2019s request \u00b7 "
+        + ["changed", "added", "removed", "unchanged"]
+          .map((what) => count(what) + " " + what).join(", ");
+    }
+    const box = callSec(holder, "changes", "Round to round", meta,
+      moved.length ? () => moved.map((p) => p.part + " (" + p.change + ")"
+        + (p.diff ? "\n" + diffText(p.diff) : "")).join("\n\n") : null);
+    if (!changes) {
+      box.appendChild(el("p", "note", v.given === null
+        ? "No given entry was recorded, so there is no request to compare."
+        : "This is the activation's first planning request: there is none before it to compare."));
+      return;
+    }
+    if (!moved.length) box.appendChild(el("p", "note", "Nothing in the request changed."));
+    for (const p of moved) {
+      const sizes = p.change === "changed" ? num(p.before) + " \u2192 " + num(p.after) + " chars"
+        : num(p.change === "removed" ? p.before : p.after) + " chars";
+      const one = part(box, { name: p.part, tags: [{ text: p.change, cls: "ch-" + p.change }],
+        what: p.part + "\u2019s change", size: sizes,
+        copy: p.diff ? diffText(p.diff) : p.part + " (" + p.change + ")" });
+      if (!p.diff) {
+        prose(one, p.change === "added" ? "New in this request; it is shown in full above."
+          : "In the request before, and not in this one.");
+        continue;
+      }
+      if (p.diff.too_large) {
+        prose(one, "Too large to compare here; both requests show it whole.");
+        continue;
+      }
+      const shown = el("pre", "diff");
+      for (const line of p.diff.lines) {
+        const cls = line.startsWith("+") ? "add" : line.startsWith("-") ? "del"
+          : line.startsWith("@@") ? "hunk" : null;
+        shown.appendChild(el("span", cls, line || " "));
+      }
+      one.appendChild(shown);
+      if (p.diff.cut) prose(one, "The diff is cut here; both requests show the part whole.");
+    }
+    const same = changes.parts.filter((p) => p.change === "unchanged");
+    if (same.length) {
+      box.appendChild(el("p", "note", "Unchanged: " + same.map((p) => p.part).join(", ")));
+    }
   }
 
   function sec(parent, title) {
@@ -2211,6 +3248,8 @@ SCRIPT: Final = r"""
   }
   document.addEventListener("DOMContentLoaded", () => {
     $("drawer-close").addEventListener("click", closeDrawer);
+    $("tab-read").addEventListener("click", () => showTab("read"));
+    $("tab-raw").addEventListener("click", () => showTab("raw"));
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") closeDrawer();
     });
