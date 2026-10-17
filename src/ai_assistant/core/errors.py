@@ -1908,3 +1908,22 @@ class TransportError(AssistantError):
     refusal may name is the condition — a host, a port, a bound that was
     exceeded, an error type — and never an octet that was written or read.
     """
+
+
+class TelegramIntakeRecordError(AssistantError):
+    """The Telegram line's intake record could not do what it was asked (ADR-0323 §5:8).
+
+    Its own class in the :class:`AssistantError` hierarchy, as
+    :class:`ConversationStoreError` is the hub chat's: the line's bookkeeping — which
+    updates the reader took in or answered, and the records of the line's own calls
+    (§13:2) — is none of the things the existing errors name, and a reader that
+    wants to catch a fault of its own record without catching a memory one has no
+    other way to say so.
+
+    It covers a store fault, an attempt the record holds no call under, a call
+    finished twice, and an attempt id the id factory kept minting taken until the
+    retry budget ran out. A malformed *argument* is not this error: it is a
+    ``ValueError``, raised before anything is read. Where a member has a spelling
+    for refusal — the ``None`` of a fixed reply that may not be sent — that spelling
+    is used and nothing is raised.
+    """

@@ -217,7 +217,11 @@ if TYPE_CHECKING:
         StorySummaryView,
         StoryView,
         StoryViewPage,
+        TelegramCallRecord,
+        TelegramIntake,
+        TelegramIntakeExport,
         TelegramOutcome,
+        TelegramPollClaim,
         TelegramPollOutcome,
         TelegramSendOutcome,
         ToolCall,
@@ -12123,5 +12127,296 @@ class TelegramBotClient(Protocol):
                 anything is read.
             CancelledError: Re-raised after the channel is closed, when the call is
                 cancelled from outside (ADR-0060 §1).
+        """
+        ...
+
+
+@runtime_checkable
+class TelegramIntakeRecord(Protocol):
+    """The Telegram line's own durable record: its intake, and its own calls (ADR-0323).
+
+    **Two records of the line's, kept in one store because one step needs both.**
+
+    * **The intake record** (§5:8 to §5:10), the reader's bookkeeping as
+      :class:`ConversationStore`'s ``take_in`` is the hub chat's (ADR-0293 §6:6 to
+      §6:9): which updates the reader took in, by their Telegram update ids and by
+      which activation, and which non-text messages it answered. It holds no message
+      text, no sender and no time. An update from another account or chat is not
+      input and is recorded nowhere (§5:2): the reader confirms it through the offset
+      alone.
+    * **The line's own call records** (§13:2): every call the line makes other than
+      an activation's message — a poll, a typing indicator, the fixed reply to a
+      non-text message and the fixed message after a restart — is claimed here before
+      it is sent, under an attempt id this record mints, and finished here with its
+      outcome. An activation's message is claimed on its effect record instead
+      (§11:3, ADR-0306 §5:4), and nothing here touches one. A claim left with no
+      outcome, as after a crash, is never resolved by guessing: no member writes an
+      outcome but :meth:`finish`, and none treats an open claim as done or as not
+      done.
+
+    They share a store because answering a non-text message *is* claiming its fixed
+    reply: §5:9's "never answered again" and §13:2's "claimed before it is sent" are
+    one fact, written in one indivisible step by :meth:`claim_reply`. And a poll's
+    offset is the intake record's (§12): :meth:`claim_poll` hands the poll the offset
+    to send, so what a poll confirms is only what this record holds as dealt with
+    (§11:11).
+
+    **The confirm rule** (§5:6). The reader confirms an update to Telegram once it is
+    dealt with — input once its activation is admitted and :meth:`take_in` has
+    marked it, a non-text message once :meth:`claim_reply` has answered it, and an
+    update that is not input once it is seen. The reader, which holds the updates,
+    says when every update up to an id is dealt with (:meth:`confirm_through`); the
+    record owes Telegram that confirmation until a poll carrying it comes back done,
+    and then owes nothing, so a later poll sends no offset at all.
+
+    **What it keeps.** An update Telegram has forgotten is never handed back, so once
+    a poll whose offset confirmed it comes back done, the record drops the update and
+    every finished fixed-reply record for it: what was kept to tell a repeat from a
+    new update has nothing left to tell. Of the finished polls and typing indicators,
+    each implementation keeps a bounded number, the newest, and drops the rest. **A
+    claim with no outcome is never dropped**, and neither is a restart's fixed
+    message, whatever its outcome; :meth:`clear` erases everything. How long a poll's
+    or a typing indicator's record is kept is the implementation's (§13:2); like
+    every record of the line, it is the user's data and is purged with it.
+
+    **The mutation exclusion is this seam's obligation and not a caller's**, as
+    :class:`ConversationStore`'s is: every member that writes observes the record,
+    decides and writes as one indivisible step, against every other member, across
+    processes as well as coroutines. An implementation meets it its own way — an
+    in-memory one with a lock, a SQLite-backed one with an ``IMMEDIATE``
+    transaction.
+
+    **Every read returns a detached snapshot**: the exchanged types are frozen
+    pydantic models, and each mapping returned is fresh.
+
+    Every member raises :class:`~ai_assistant.core.errors.TelegramIntakeRecordError`
+    for a store fault. A malformed argument is a ``ValueError``, raised before
+    anything is read. Cancelling any member is governed by this module's
+    cancellation clause (ADR-0060). Input observation (ADR-0065) binds it too: every
+    argument is immutable except the caller-owned ``update_ids`` sequences of
+    :meth:`take_in` and :meth:`recorded`, which an implementation reads once,
+    before its first ``await``.
+
+    A Tier 1 store under ``Settings.data_dir``, so the assistant's own store
+    (ADR-0155 §1:2): implementations persist **locally only**.
+
+    **A BREAKING contract change under golden rule 5**, decided by ADR-0323 §15's
+    second contract seam and landing with its conformance suite, its canonical fake
+    in :mod:`ai_assistant.testing` and its store (``CONTRIBUTING.md`` → "Adding a
+    Protocol", ADR-0137 §2).
+    """
+
+    # --- the intake record (§5:6, §5:8 to §5:10) ------------------------------------
+
+    async def take_in(self, update_ids: Sequence[int], *, activation_id: str) -> tuple[int, ...]:
+        """Record that ``activation_id`` took in the updates ``update_ids`` name (§5:8).
+
+        Called when the activation is admitted (§5:6, ADR-0293 §6:8). In one step it
+        marks each named update the record does not hold; an update already taken in
+        keeps the activation that took it in first, and an update answered is never
+        taken in (§5:9). So after a restart the updates an interrupted activation took
+        in are not taken in again (§5:10). No text is held.
+
+        Args:
+            update_ids: At most 1000 update ids, each an ``int`` in ``[0, 2**63)``;
+                duplicates are permitted.
+            activation_id: The activation that took them in; a non-blank ``str``.
+
+        Returns:
+            The update ids this call marked, ascending.
+
+        Raises:
+            ValueError: Before any I/O, if ``update_ids`` is a ``str`` or not a
+                sequence, holds more than 1000 ids or one outside ``[0, 2**63)`` or
+                not an ``int``, or ``activation_id`` is not a non-blank ``str``.
+            TelegramIntakeRecordError: If the record cannot be written.
+        """
+        ...
+
+    async def recorded(self, update_ids: Sequence[int]) -> Mapping[int, TelegramIntake]:
+        """Return what the record holds of each named update, where it holds one (§5:8).
+
+        How the reader tells a repeat from a new update before it admits an
+        activation: an update the record holds was dealt with, by the activation an
+        entry taken in names or by the fixed line an entry answered records. Keyed by
+        update id; an update the record holds nothing of is simply missing. A fresh
+        mapping on every call.
+
+        Raises:
+            ValueError: Before any I/O, as :meth:`take_in`'s ``update_ids``.
+            TelegramIntakeRecordError: If the record cannot be read, or a stored row
+                is corrupt.
+        """
+        ...
+
+    async def confirm_through(self, update_id: int) -> None:
+        """Record that every update up to and including ``update_id`` is dealt with.
+
+        The reader's statement under §5:6, made once it has dealt with each update
+        Telegram handed it up to this one: taken in, answered, or seen and not input.
+        From then the record owes Telegram the confirmation, and the next poll it
+        claims carries the offset ``update_id + 1`` (:meth:`claim_poll`) until one
+        comes back done. **It never lowers what is owed**: a lower id where a higher
+        one is owed changes nothing.
+
+        Args:
+            update_id: An ``int`` in ``[0, 2**63 - 1)``.
+
+        Raises:
+            ValueError: Before any I/O, if ``update_id`` is not such an ``int``.
+            TelegramIntakeRecordError: If the record cannot be written.
+        """
+        ...
+
+    # --- the line's own call records (§13:2) -----------------------------------------
+
+    async def claim_poll(self) -> TelegramPollClaim:
+        """Claim a poll's record, and hand it the offset it is to send (§5:6, §13:2).
+
+        One step: it mints an attempt and records the claim with the offset the
+        record owes Telegram, or ``None`` where it owes none, which the poll then
+        sends unchanged. So a poll confirms only what :meth:`confirm_through` said is
+        dealt with (§11:11).
+
+        Returns:
+            The claim: its attempt and its offset.
+
+        Raises:
+            TelegramIntakeRecordError: If the record cannot be written, or the id
+                factory kept minting an attempt already held.
+        """
+        ...
+
+    async def claim_typing(self, activation_id: str) -> str:
+        """Claim the record of one typing indicator shown for ``activation_id`` (§6:7).
+
+        Always claims: the writer renews the indicator while the activation runs,
+        and each renewal is a call of its own.
+
+        Args:
+            activation_id: The activation the indicator is shown for.
+
+        Returns:
+            The claimed record's attempt.
+
+        Raises:
+            ValueError: Before any I/O, if ``activation_id`` is not a non-blank
+                ``str``.
+            TelegramIntakeRecordError: If the record cannot be written, or the id
+                factory kept minting an attempt already held.
+        """
+        ...
+
+    async def claim_reply(self, update_id: int) -> str | None:
+        """Answer the non-text message ``update_id`` carries, by claiming its fixed reply.
+
+        One step that is both §5:8's "which non-text messages it answered" and
+        §13:2's claim: from it the record holds the update answered, so it is never
+        taken in, and a duplicate fetch sends no second fixed line (§5:9). It claims
+        nothing, and answers ``None``, where the update was taken in, or where a
+        fixed reply to it was already claimed and has not come back with a failure
+        Telegram did not get or said it did not send — that is, where a reply is
+        claimed with no outcome, was sent, may have been sent, or was refused for
+        good. Where every earlier reply came back retryable
+        (:attr:`~ai_assistant.core.types.TelegramFailure.retryable`, §6:3), it claims
+        a new one, which is the retry.
+
+        Args:
+            update_id: The update the non-text message came in, an ``int`` in
+                ``[0, 2**63)``.
+
+        Returns:
+            The claimed record's attempt, or ``None`` where no reply may be sent.
+
+        Raises:
+            ValueError: Before any I/O, if ``update_id`` is not such an ``int``.
+            TelegramIntakeRecordError: If the record cannot be written, or the id
+                factory kept minting an attempt already held.
+        """
+        ...
+
+    async def claim_interrupted(self, activation_id: str) -> str | None:
+        """Claim the fixed message reporting that a restart cut ``activation_id`` off.
+
+        §6:10's one message by rule, claimed once per activation, under the same rule
+        as :meth:`claim_reply`: ``None`` where a message for the activation is
+        claimed with no outcome, was sent, may have been, or was refused for good,
+        and a new claim where every earlier one came back retryable. Which
+        activation a restart cut off is the writer's to say.
+
+        Args:
+            activation_id: The activation the restart cut off.
+
+        Returns:
+            The claimed record's attempt, or ``None`` where no message may be sent.
+
+        Raises:
+            ValueError: Before any I/O, if ``activation_id`` is not a non-blank
+                ``str``.
+            TelegramIntakeRecordError: If the record cannot be written, or the id
+                factory kept minting an attempt already held.
+        """
+        ...
+
+    async def finish(self, attempt: str, outcome: TelegramOutcome) -> None:
+        """Write a claimed call's outcome, once (§13:2).
+
+        ``outcome`` is what the Bot API client returned for the call: done where it
+        carries no failure, unknown where its failure is
+        :attr:`~ai_assistant.core.types.TelegramFailure.UNKNOWN`, and not done
+        otherwise. Where the call is a poll that came back done and carried an
+        offset, Telegram has forgotten every update below it: the record no longer
+        owes that confirmation, and drops those updates and the finished fixed
+        replies to them (the class docstring's "What it keeps").
+
+        Args:
+            attempt: The attempt the call was claimed under.
+            outcome: The outcome the client returned for it.
+
+        Raises:
+            ValueError: Before any I/O, if ``attempt`` is not a non-blank ``str`` or
+                ``outcome`` is not a ``TelegramOutcome``.
+            TelegramIntakeRecordError: If the record holds no call under
+                ``attempt``, the call is already finished, or the record cannot be
+                written. Nothing is written.
+        """
+        ...
+
+    async def call(self, attempt: str) -> TelegramCallRecord | None:
+        """Return the call record claimed under ``attempt``, or ``None``.
+
+        ``None`` where the record holds no call under it: never claimed, or dropped
+        once finished (the class docstring's "What it keeps").
+
+        Raises:
+            ValueError: Before any I/O, if ``attempt`` is not a non-blank ``str``.
+            TelegramIntakeRecordError: If the record cannot be read, or the stored
+                row is corrupt.
+        """
+        ...
+
+    # --- the user's data rights (ADR-0004 §6) ---------------------------------------
+
+    async def export(self) -> TelegramIntakeExport:
+        """Return everything the record holds (ADR-0004 §6).
+
+        The offset owed, every update held in update id ascending, and every call
+        record held in claim order, finished or not.
+
+        Raises:
+            TelegramIntakeRecordError: If the record cannot be read, or a stored row
+                is corrupt.
+        """
+        ...
+
+    async def clear(self) -> int:
+        """Erase everything the record holds, returning how many records went.
+
+        Every update held and every call record count, claims with no outcome among
+        them; the offset owed goes too and counts as none. Afterwards the record is
+        as new.
+
+        Raises:
+            TelegramIntakeRecordError: If the record cannot be written.
         """
         ...

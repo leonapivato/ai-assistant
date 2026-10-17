@@ -25,11 +25,13 @@ about which package opens the socket and ``models/`` is still the package that
 does.
 
 Since ADR-0289 it also holds the **story store** (:class:`SqliteStoryStore`), whose
-contract is likewise its own Protocol and which reads no other store (§1).
+contract is likewise its own Protocol and which reads no other store (§1), and since
+ADR-0323 the **Telegram line's intake record** (:class:`SqliteTelegramIntakeRecord`),
+the line's bookkeeping and its own call records (§5:8, §13:2), on the same terms.
 
 Implements: ``MemoryStore``, ``MemoryPolicy``, ``MemoryWriter``,
 ``ConversationStore``, ``NotificationStore``,
-``NotificationPolicy`` and ``StoryStore``.
+``NotificationPolicy``, ``StoryStore`` and ``TelegramIntakeRecord``.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from ai_assistant.memory.policy import DefaultMemoryPolicy
 from ai_assistant.memory.sqlite_store import SqliteMemoryStore
 from ai_assistant.memory.store import InMemoryMemoryStore
 from ai_assistant.memory.story_store import SqliteStoryStore
+from ai_assistant.memory.telegram_intake import SqliteTelegramIntakeRecord
 
 __all__ = [
     "DefaultMemoryPolicy",
@@ -54,4 +57,5 @@ __all__ = [
     "SqliteNotificationOutbox",
     "SqliteNotificationStore",
     "SqliteStoryStore",
+    "SqliteTelegramIntakeRecord",
 ]

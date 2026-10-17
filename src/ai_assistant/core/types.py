@@ -18621,3 +18621,199 @@ class TelegramPollOutcome(TelegramOutcome):
             msg = "a poll's updates are in strictly ascending update_id"
             raise ValueError(msg)
         return self
+
+
+# --- The Telegram line's intake record (ADR-0323 §5:6, §5:8 to §5:10, §13:2, §15) --
+#
+# The shapes :class:`~ai_assistant.core.protocols.TelegramIntakeRecord` exchanges: what
+# it holds of one update the reader dealt with, and the record of one call the line
+# makes other than an activation's message. The record holds no message text (§5:8), so
+# neither shape has a field that could carry any.
+
+
+class TelegramIntakeKind(StrEnum):
+    """How the reader dealt with one update the intake record holds (ADR-0323 §5:8).
+
+    Closed: a member is added by the change that needs it and never renamed.
+    """
+
+    TAKEN_IN = "taken_in"
+    """A text message or a forward, taken in by an activation when it was admitted."""
+
+    ANSWERED = "answered"
+    """A non-text message, answered with the fixed line (§5:3)."""
+
+
+class TelegramIntake(BaseModel):
+    """What the intake record holds of one update (ADR-0323 §5:8).
+
+    Its update id, how it was dealt with, and — for one taken in — by which
+    activation. No text, no sender and no time: the record is bookkeeping, and what
+    the update said is the episode's (§2:6).
+
+    Attributes:
+        update_id: Telegram's id for the update.
+        kind: Whether it was taken in or answered.
+        activation_id: The activation that took it in, present exactly where it was
+            taken in.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    update_id: int = Field(strict=True, ge=0, lt=_TELEGRAM_ID_CEILING)
+    kind: TelegramIntakeKind
+    activation_id: Identifier | None = None
+
+    @model_validator(mode="after")
+    def _an_activation_is_exactly_a_taken_ins(self) -> Self:
+        """Refuse an update taken in by no activation, and an answer naming one.
+
+        Raises:
+            ValueError: If :attr:`activation_id` is absent on an update taken in or
+                present on one answered.
+        """
+        if (self.kind is TelegramIntakeKind.TAKEN_IN) != (self.activation_id is not None):
+            msg = "activation_id is present exactly where the update was taken in"
+            raise ValueError(msg)
+        return self
+
+
+class TelegramCallKind(StrEnum):
+    """Which of the line's own calls a record is the claim of (ADR-0323 §13:2).
+
+    Every call the line makes other than an activation's message, whose claim is its
+    effect record instead (§11:3, ADR-0306 §5:4). Closed: a member is added by the
+    change that needs it and never renamed.
+    """
+
+    POLL = "poll"
+    """A ``getUpdates``, carrying the offset the record handed it (§5:6, §11:10)."""
+
+    TYPING = "typing"
+    """One renewal of the typing indicator while an activation runs (§6:7)."""
+
+    FIXED_REPLY = "fixed_reply"
+    """The fixed line answering one non-text message (§5:3)."""
+
+    INTERRUPTED = "interrupted"
+    """The fixed message sent after a restart cut off an activation (§6:10)."""
+
+
+class TelegramCallOutcome(StrEnum):
+    """What one of the line's own calls came to, in §13:2's three words.
+
+    Read off the :class:`TelegramFailure` the call finished with: none is done,
+    :attr:`TelegramFailure.UNKNOWN` is unknown, and every other failure is not done.
+    """
+
+    DONE = "done"
+    NOT_DONE = "not_done"
+    UNKNOWN = "unknown"
+
+
+class TelegramCallRecord(BaseModel):
+    """The durable record one of the line's own calls was claimed under (§13:2).
+
+    **Claimed before the call is sent, and finished with its outcome**: a record
+    with no outcome is a claim whose call may or may not have reached Telegram, as
+    after a crash, and it is never resolved by guessing. Each kind carries the one
+    subject its call is about and no other.
+
+    Attributes:
+        attempt: The record's id, minted by the record when it was claimed: the
+            ``attempt`` the call names to the Bot API client.
+        kind: Which call it is.
+        offset: The offset a poll was handed to send, ``None`` where it confirmed
+            nothing. Only a poll carries one.
+        update_id: The non-text message a fixed reply answers; only a fixed reply
+            carries one.
+        activation_id: The activation a typing indicator is shown for, or whose cut
+            short a restart's fixed message reports; only those two carry one.
+        finished: Whether the call's outcome has been written.
+        failure: Why a finished call was not done, or ``None`` where it was done or
+            is not finished.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    attempt: Identifier
+    kind: TelegramCallKind
+    offset: int | None = Field(default=None, strict=True, ge=0, lt=_TELEGRAM_ID_CEILING)
+    update_id: int | None = Field(default=None, strict=True, ge=0, lt=_TELEGRAM_ID_CEILING)
+    activation_id: Identifier | None = None
+    finished: bool = Field(default=False, strict=True)
+    failure: TelegramFailure | None = None
+
+    @property
+    def outcome(self) -> TelegramCallOutcome | None:
+        """The call's outcome in §13:2's words, or ``None`` while it has none.
+
+        Returns:
+            Done, not done or unknown for a finished call; ``None`` otherwise.
+        """
+        if not self.finished:
+            return None
+        if self.failure is None:
+            return TelegramCallOutcome.DONE
+        if self.failure is TelegramFailure.UNKNOWN:
+            return TelegramCallOutcome.UNKNOWN
+        return TelegramCallOutcome.NOT_DONE
+
+    @model_validator(mode="after")
+    def _each_kind_carries_its_own_subject(self) -> Self:
+        """Refuse a subject the kind does not carry, and a failure on an open claim.
+
+        Raises:
+            ValueError: If an offset rides on anything but a poll, an update id is
+                absent from a fixed reply or present on another kind, an activation
+                is absent from a typing indicator or a restart's message or present
+                on another kind, or a failure is set on a call not finished.
+        """
+        if self.offset is not None and self.kind is not TelegramCallKind.POLL:
+            msg = "only a poll carries an offset"
+            raise ValueError(msg)
+        if (self.kind is TelegramCallKind.FIXED_REPLY) != (self.update_id is not None):
+            msg = "update_id is present exactly on a fixed reply"
+            raise ValueError(msg)
+        carries_activation = self.kind in {TelegramCallKind.TYPING, TelegramCallKind.INTERRUPTED}
+        if carries_activation != (self.activation_id is not None):
+            msg = "activation_id is present exactly on a typing indicator or a restart's message"
+            raise ValueError(msg)
+        if self.failure is not None and not self.finished:
+            msg = "a failure is written only with the outcome of a finished call"
+            raise ValueError(msg)
+        return self
+
+
+class TelegramPollClaim(BaseModel):
+    """A poll's claim: the record's attempt, and the offset the poll is to send (§5:6).
+
+    The offset is the intake record's, not the reader's: the poll sends exactly this
+    one, so what it confirms to Telegram is only what the record holds as dealt with
+    (§11:11, §12).
+
+    Attributes:
+        attempt: The claimed record's id, which the poll names to the Bot API client.
+        offset: The offset to send, or ``None`` where nothing is owed confirmation.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    attempt: Identifier
+    offset: int | None = Field(default=None, strict=True, ge=0, lt=_TELEGRAM_ID_CEILING)
+
+
+class TelegramIntakeExport(BaseModel):
+    """Everything the intake record holds, for ADR-0004 §6's export.
+
+    Attributes:
+        offset: The confirmation owed: the offset the next poll sends, or ``None``.
+        intake: Every update the record holds, update id ascending.
+        calls: Every call record it holds, in the order they were claimed.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    offset: int | None = Field(default=None, strict=True, ge=0, lt=_TELEGRAM_ID_CEILING)
+    intake: tuple[TelegramIntake, ...] = ()
+    calls: tuple[TelegramCallRecord, ...] = ()
