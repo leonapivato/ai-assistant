@@ -41,6 +41,10 @@ from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import AuditError, OversizedValueError
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    Approval,
+    ApprovalEnd,
+    ApprovalGiven,
+    ApprovalGiver,
     BoundAccount,
     CostBasis,
     DataTier,
@@ -54,11 +58,13 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    QuestionPart,
     Reversibility,
     RiskLevel,
     SpanCoverage,
     ToolCost,
     ToolDefinition,
+    YesToQuestion,
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.testing import FakeAssistantEngine, with_phase_declaration
@@ -213,6 +219,9 @@ def _decision(  # noqa: PLR0913 — a record's fields, each of which some case v
     resolves: str | None = None,
     authorised_by: str | None = None,
     authorised_subject: str | None = None,
+    approval: Approval | None = None,
+    approved_part: QuestionPart | None = None,
+    effect: str | None = None,
 ) -> PermissionDecision:
     """One recorded ruling, built field by field.
 
@@ -245,6 +254,9 @@ def _decision(  # noqa: PLR0913 — a record's fields, each of which some case v
         decided_at=at if at is not None else _AT,
         egress_binding=binding,
         resolves=resolves,
+        approval=approval,
+        approved_part=approved_part,
+        effect=effect,
     )
 
 
@@ -887,8 +899,7 @@ def test_an_unresolved_confirm_is_rendered_as_neither_allowed_nor_denied(
     awaiting anything either.
     """
     rendered = _listing(output, monkeypatch, _decision("d-ask", outcome=PermissionOutcome.CONFIRM))
-    assert "asked" in rendered
-    assert "a question put to you" in rendered
+    assert "needed your yes" in rendered
     assert "allowed" not in rendered
     assert "refused" not in rendered
     assert re.search(r"\bexpired\b", rendered) is None
@@ -911,7 +922,186 @@ def test_a_resolving_decision_names_the_question_it_answers(
         _decision("d-ask", outcome=PermissionOutcome.CONFIRM),
     )
     assert "Answers the question: d-ask" in rendered
-    assert "asked" in rendered
+    assert "needed your yes" in rendered
+
+
+# --- ADR-0321: a confirm says only what the row records, and a yes is named (#3073) --
+
+#: When the user's yes was given: a fixed instant, so a case pins its rendering.
+_YES_AT = datetime(2026, 3, 1, 8, 59, 30, tzinfo=UTC)
+
+
+def _approval(*parts: int) -> Approval:
+    """The approval a yes to round ``r-ask``'s question made, covering ``parts``.
+
+    Every slot is ADR-0321 §4:6's, built as code assembles it: the user through the
+    hub chat, a yes to the question activation ``a-ask``'s round ``r-ask`` wrote,
+    given in the yes's own activation ``a-yes``, and ending when used.
+    """
+    return Approval(
+        who=ApprovalGiver.USER_THROUGH_HUB_CHAT,
+        how=YesToQuestion(activation_id="a-ask", round="r-ask"),
+        covers=tuple(QuestionPart(round="r-ask", part=part) for part in parts),
+        given=ApprovalGiven(activation_id="a-yes", at=_YES_AT),
+        ends=ApprovalEnd.WHEN_USED,
+    )
+
+
+def _route_a_pair() -> tuple[PermissionDecision, PermissionDecision]:
+    """Route (a)'s two rows: the fresh confirm and the allow resolving it (§4:7, §4:8).
+
+    Both name the approval, as §4:8 requires of every decision about a call that runs
+    under one; the allow names its effect record too (§4:10).
+    """
+    approval = _approval(1, 2)
+    part = QuestionPart(round="r-ask", part=1)
+    fresh = _decision(
+        "d-fresh",
+        outcome=PermissionOutcome.CONFIRM,
+        reason="needs the user's confirmation",
+        approval=approval,
+        approved_part=part,
+    )
+    allow = _decision(
+        "d-allow",
+        reason="the user approved the confirmation",
+        resolves="d-fresh",
+        authorised_by="d-fresh",
+        approval=approval,
+        approved_part=part,
+        effect="e-1",
+    )
+    return allow, fresh
+
+
+#: The approval's lines as the user reads them, the §4:8 example's facts in full.
+_APPROVAL_LINES: Final = (
+    "Your yes: given 2026-03-01 08:59:30.000000 UTC by you, through the hub chat, "
+    "in activation a-yes (a yes to a question)",
+    "to the question in the message of round r-ask, asked in activation a-ask; this call is part 1",
+    "It covers part(s) 1, 2 of that question, and it ends when used: each part covers "
+    "its call once",
+)
+
+
+def test_a_confirm_claims_no_question_the_row_does_not_record(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3073's first defect: a confirm no round asked about was rendered as asked.
+
+    A call no round's message names is dropped (ADR-0321 §2:2), and the row of a
+    dropped confirm is the row of an asked one: the round records what it asked, not
+    the decision. So the line is the one true of both, and the old claim is gone.
+    """
+    rendered = _listing(output, monkeypatch, _decision("d-ask", outcome=PermissionOutcome.CONFIRM))
+    assert (
+        "needed your yes (a question to you only where a message in your conversations "
+        "asked about this call, and this row does not record whether one did) "
+        "2026-03-01 09:00:00.000000 UTC d-ask"
+    ) in rendered
+    assert "a question put to you" not in rendered
+    assert "Your yes:" not in rendered
+    assert (
+        "A ruling that needed your yes and the answer to it are two rows. An answer can "
+        "fall outside this page, so a ruling with nothing answering it here is a fact "
+        "about the page and not about the ruling."
+    ) in rendered
+
+
+def test_route_a_s_fresh_confirm_is_not_rendered_as_a_question_and_names_the_yes(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3073: route (a)'s confirm, ruled fresh in the yes's activation (ADR-0321 §4:7).
+
+    It was never put to the user; the question was the earlier message, and the row
+    names it through the approval (§4:8). Its headline says it was ruled after the
+    yes, and the approval's lines follow.
+    """
+    _, fresh = _route_a_pair()
+    rendered = _listing(output, monkeypatch, fresh)
+    assert (
+        "needed your yes (ruled again after your yes, which this row names below) "
+        "2026-03-01 09:00:00.000000 UTC d-fresh"
+    ) in rendered
+    assert "a question put to you" not in rendered
+    assert "a question to you only where" not in rendered
+    for line in _APPROVAL_LINES:
+        assert line in rendered
+    assert "Authorised by:" not in rendered
+
+
+def test_an_allow_under_a_yes_names_the_yes_and_not_a_decision_you_took(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3073's second defect: the allow under an approval did not show it (§4:8).
+
+    The row resolves the system's own fresh confirm, which the page used to call "a
+    decision you took". It now names the user's yes in §4:8's terms — who gave it,
+    how, when, and which question and part it answered — and labels what it
+    resolves as a ruling rather than as the question the user answered.
+    """
+    allow, fresh = _route_a_pair()
+    rendered = _listing(output, monkeypatch, allow, fresh)
+    assert (
+        "Resolves the ruling: d-fresh (ruled again after your yes; the question your "
+        "yes answered is named below)"
+    ) in rendered
+    assert "Answers the question:" not in rendered
+    for line in _APPROVAL_LINES:
+        assert rendered.count(line) == 2
+    assert _basis_line(output) == (
+        "Authorised by: your yes, named above, to part 1 of that question (it resolved "
+        "this call's ruling recorded as d-fresh)"
+    )
+    assert "a decision you took" not in rendered
+
+
+def test_an_allow_the_policy_granted_under_a_yes_still_names_the_yes(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0321 §4:16: where the policy allows and the stand-in needed you.
+
+    The policy's allow is the deciding decision and carries no ``authorised_by``, so
+    ADR-0193 §11's third state holds of the ruling; the approval still lifted what
+    needed you, and the row names it (§4:8) rather than reading as resting on nothing
+    of yours.
+    """
+    rendered = _listing(
+        output,
+        monkeypatch,
+        _decision(
+            "d-allow",
+            approval=_approval(1, 2),
+            approved_part=QuestionPart(round="r-ask", part=1),
+            effect="e-1",
+        ),
+    )
+    for line in _APPROVAL_LINES:
+        assert line in rendered
+    assert _basis_line(output) == (
+        "Authorised by: the policy's own rules, resting on no decision of yours; what "
+        "else needed you rests on your yes, named above"
+    )
+
+
+def test_a_resolving_allow_with_no_approval_renders_as_it_did(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row written before ADR-0321 names no approval, and keeps its wording.
+
+    Its confirm was answered by the user directly, so "a decision you took" is still
+    the row's truth; only a row naming a yes is rendered as the yes.
+    """
+    rendered = _listing(
+        output,
+        monkeypatch,
+        _decision("d-answer", resolves="d-ask", authorised_by="d-ask"),
+    )
+    assert "Answers the question: d-ask" in rendered
+    assert "Your yes:" not in rendered
+    assert _basis_line(output) == (
+        "Authorised by: a decision you took about this call, recorded as d-ask"
+    )
 
 
 # --- §8: one test per bar ----------------------------------------------------
@@ -1400,7 +1590,7 @@ def test_a_refusal_and_a_question_say_nothing_about_what_authorised_them(
     assert "Authorised by:" not in rendered
     assert _basis_lines(output) == []
     assert "refused" in rendered
-    assert "asked" in rendered
+    assert "needed your yes" in rendered
 
 
 def test_the_three_states_are_distinct_and_none_is_rendered_as_another(

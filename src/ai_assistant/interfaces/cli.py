@@ -255,6 +255,8 @@ from ai_assistant.core.types import (
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEnding,
     ActivationStop,
+    ApprovalEnd,
+    ApprovalGiver,
     Belief,
     BeliefBand,
     ChannelIdentity,
@@ -333,6 +335,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import AssistantEngine
     from ai_assistant.core.types import (
+        Approval,
         BeliefSummary,
         CanonicalDestination,
         ChatChange,
@@ -347,6 +350,7 @@ if TYPE_CHECKING:
         GrantableSource,
         HeldNotification,
         NotificationCandidate,
+        QuestionPart,
         StoryHeader,
         StoryOutcome,
         ToolCost,
@@ -7969,8 +7973,8 @@ def _origin_line(*, planned_with_external_content: bool) -> str:
 # origin state (ADR-0184 §2), and a bar on presenting a ruling as an event.
 
 
-def _decision_headline(outcome: PermissionOutcome) -> str:
-    """What the ruling said, in one word (ADR-0186 §7, §8).
+def _decision_headline(outcome: PermissionOutcome, *, names_a_yes: bool) -> str:
+    """What the ruling said, in one word and what the row lets it claim (ADR-0186 §7, §8).
 
     **Past tense, and about the ruling rather than about the call.** §8's third
     clause bars presenting a decision as a transmission — the trail "bounds
@@ -7979,13 +7983,31 @@ def _decision_headline(outcome: PermissionOutcome) -> str:
     beside an ``ALLOW`` is the specific regression this wording exists against, and
     it is the one a status column reaches for first.
 
-    **A ``CONFIRM`` is a question that was asked, and is never resolved by this
-    line** (§7's fifth clause). Whether it was answered is a *different row*, which
-    may lie outside a bounded page, so nothing here renders one as denied, as
-    allowed, as expired or as awaiting anything.
+    **A ``CONFIRM`` says the call needed your yes, and claims a question only as far
+    as the row can** (#3073). Since ADR-0321 a question is a message a planning round
+    writes (§2), and a ``CONFIRM`` is the ruling that sends a call back to planning as
+    needing you. Two kinds of ``CONFIRM`` were never put to you as a question: a call
+    no round's message asked about, which is dropped (§2:2), and route (a)'s confirm,
+    ruled fresh in your yes's own activation and resolved there (§4:7). The first is
+    not told apart from an asked one on the row — the round records what it asked
+    (§2:8), and this surface is handed decisions alone — so the line says what is
+    true of both, and says that the row does not record which. The second names the
+    approval it was ruled under (§4:8), so ``names_a_yes`` lets the line say so. This
+    is what ADR-0321 §7:4's "becomes true" asks of the label: ADR-0186 §7's
+    rendering of a ``CONFIRM`` as a question was written when the ruling *was* the
+    question, and the row now says no more than that the call needed you.
+
+    **It is never resolved by this line** (ADR-0186 §7's fifth clause). Whether it
+    was answered is a *different row*, which may lie outside a bounded page, so
+    nothing here renders one as denied, as allowed, as expired or as awaiting
+    anything — the past tense is that bar, read on the new wording.
 
     Total over the enum through :func:`~typing.assert_never`, so a fourth outcome
     would fail the type check rather than render as an empty headline.
+
+    Args:
+        outcome: What the policy ruled.
+        names_a_yes: Whether the row names the approval a yes made (ADR-0321 §4:8).
     """
     match outcome:
         case PermissionOutcome.ALLOW:
@@ -7993,8 +8015,81 @@ def _decision_headline(outcome: PermissionOutcome) -> str:
         case PermissionOutcome.DENY:
             return "[red]refused[/]"
         case PermissionOutcome.CONFIRM:
-            return "[yellow]asked[/] [dim](a question put to you)[/]"
+            if names_a_yes:
+                return (
+                    "[yellow]needed your yes[/] [dim](ruled again after your yes, "
+                    "which this row names below)[/]"
+                )
+            return (
+                "[yellow]needed your yes[/] [dim](a question to you only where a message "
+                "in your conversations asked about this call, and this row does not "
+                "record whether one did)[/]"
+            )
     assert_never(outcome)
+
+
+def _approval_giver(giver: ApprovalGiver) -> str:
+    """Who gave an approval, as §4:6's *who* reads (ADR-0321 §4:6, §4:8).
+
+    Total over the closed enum through :func:`~typing.assert_never`: a later kind of
+    approval adds a member (§4:6), and this fails the type check rather than render
+    a member it has no words for.
+    """
+    match giver:
+        case ApprovalGiver.USER_THROUGH_HUB_CHAT:
+            return "by you, through the hub chat"
+    assert_never(giver)
+
+
+def _approval_end(end: ApprovalEnd) -> str:
+    """When an approval stops covering anything, as §4:6's *ends* reads (ADR-0321 §4:6).
+
+    Total over the closed enum, for :func:`_approval_giver`'s reason.
+    """
+    match end:
+        case ApprovalEnd.WHEN_USED:
+            return "it ends when used: each part covers its call once"
+    assert_never(end)
+
+
+def _render_approval(approval: Approval, part: QuestionPart) -> None:
+    """The approval a row names, in ADR-0321 §4:8's own terms (#3073).
+
+    §4:8: "Every decision about a call that runs under an approval names the
+    approval, as 'allowed by your yes at 2:15 to the question in that message,
+    part 1' does". The record carries all five of §4:6's slots and the part this call
+    is; this renders each of them — **who** gave it, **how** (a yes to a question,
+    named by the round whose message asked it and the activation that asked),
+    **given** (when, and in which activation), the part this call is, what it
+    **covers**, and when it **ends** — so the trail is the user's way to read their
+    own yes back, as the export already is.
+
+    **It says what the row records and nothing more.** Like every line on this
+    surface it claims no execution (ADR-0186 §8's third clause) and no liveness
+    (§8's first): that the approval was spent, or still covers anything, is the
+    effect records' fact and not this row's. The round and activation ids are
+    rendered because a round names its message (ADR-0307 §3:1) and no other name
+    for it reaches this surface; nothing here resolves one.
+
+    Every value is neutralised for this terminal (ADR-0186 §7's last clause).
+
+    Args:
+        approval: The approval the row names.
+        part: The part of the approval's question this call is (``approved_part``).
+    """
+    given = approval.given
+    how = approval.how
+    covers = ", ".join(str(one.part) for one in approval.covers)
+    _print(
+        f"  [bold]Your yes:[/] given {_decided_at(given.at)} "
+        f"{_approval_giver(approval.who)}, in activation {_safe(given.activation_id)} "
+        f"[dim](a yes to a question)[/]"
+    )
+    _print(
+        f"    to the question in the message of round {_safe(how.round)}, asked in "
+        f"activation {_safe(how.activation_id)}; this call is part {part.part}"
+    )
+    _print(f"    It covers part(s) {covers} of that question, and {_approval_end(approval.ends)}")
 
 
 def _recorded_origin_line(
@@ -8291,7 +8386,13 @@ def _authorisation_line(decision: PermissionDecision) -> str:
         every surface.
     """
     authorised_by = decision.ruling.authorised_by
+    approval = decision.approval
     if authorised_by is None:
+        if approval is not None:
+            return (
+                "[bold]Authorised by:[/] the policy's own rules, resting on no decision of "
+                "yours; what else needed you rests on your yes, named above"
+            )
         return "[bold]Authorised by:[/] the policy's own rules, resting on no decision of yours"
     if decision.resolves is None:
         if _rests_on_the_configuration(decision):
@@ -8305,6 +8406,12 @@ def _authorisation_line(decision: PermissionDecision) -> str:
             f"recorded as {_safe(authorised_by)} [dim](what the row names, and no more)[/]"
         )
     if authorised_by == decision.resolves:
+        if approval is not None and decision.approved_part is not None:
+            return (
+                f"[bold]Authorised by:[/] your yes, named above, to part "
+                f"{decision.approved_part.part} of that question [dim](it resolved this "
+                f"call's ruling recorded as {_safe(authorised_by)})[/]"
+            )
         return (
             "[bold]Authorised by:[/] a decision you took about this call, "
             f"recorded as {_safe(authorised_by)}"
@@ -8351,6 +8458,14 @@ def _render_decision(decision: PermissionDecision) -> None:
     account and no origin is rendered, and none is denied: ``None`` means the
     request was not an egress call (ADR-0150 §1) and continues to mean exactly that.
 
+    **A row naming an approval renders it whole** (ADR-0321 §4:8, #3073) — who gave
+    the yes, how, when, the part this call is, what the approval covers and when it
+    ends — through :func:`_render_approval`, after the resolution and before the
+    authorisation that points at it. Such a row is an ``ALLOW`` under a yes or route
+    (a)'s fresh ``CONFIRM`` (§4:7), and on the second the resolving row's
+    ``resolves`` names a ruling, not the question you answered, so it is labelled a
+    ruling there.
+
     **An ``ALLOW`` also says what authorised it, in three states** (ADR-0193 §11) —
     :func:`_authorisation_line`, appended after §7's own fields and displacing none
     of them. The line is rendered for an ``ALLOW`` and for no other outcome, which
@@ -8362,8 +8477,9 @@ def _render_decision(decision: PermissionDecision) -> None:
     ``reason`` is policy-authored text, a ``supplied`` destination form is a string
     a model produced, and ``argument`` is a caller-influenced key (ADR-0150 §13).
     """
+    approval = decision.approval
     _print(
-        f"  {_decision_headline(decision.ruling.outcome)} "
+        f"  {_decision_headline(decision.ruling.outcome, names_a_yes=approval is not None)} "
         f"[dim]{_decided_at(decision.decided_at)}[/] [dim]{_safe(decision.id)}[/]"
     )
     _print(
@@ -8376,7 +8492,15 @@ def _render_decision(decision: PermissionDecision) -> None:
         "[dim](a digest, never the arguments)[/]"
     )
     if decision.resolves is not None:
-        _print(f"  [bold]Answers the question:[/] {_safe(decision.resolves)}")
+        if approval is None:
+            _print(f"  [bold]Answers the question:[/] {_safe(decision.resolves)}")
+        else:
+            _print(
+                f"  [bold]Resolves the ruling:[/] {_safe(decision.resolves)} [dim](ruled "
+                "again after your yes; the question your yes answered is named below)[/]"
+            )
+    if approval is not None and decision.approved_part is not None:
+        _render_approval(approval, decision.approved_part)
     if decision.ruling.outcome is PermissionOutcome.ALLOW:
         _print(f"  {_authorisation_line(decision)}")
     if decision.egress_binding is not None:
@@ -8427,9 +8551,9 @@ def _render_decisions(recorded: tuple[PermissionDecision, ...], *, limit: int) -
         "out.[/]"
     )
     _print(
-        "[dim]A question and the answer to it are two rows. An answer can fall outside "
-        "this page, so a question with nothing answering it here is a fact about the "
-        "page and not about the question.[/]"
+        "[dim]A ruling that needed your yes and the answer to it are two rows. An answer "
+        "can fall outside this page, so a ruling with nothing answering it here is a fact "
+        "about the page and not about the ruling.[/]"
     )
     _print(
         "[dim]A digest binds the arguments a ruling was taken over. The arguments "
