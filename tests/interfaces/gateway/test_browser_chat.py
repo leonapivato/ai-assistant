@@ -1271,3 +1271,59 @@ async def test_every_device_and_both_acts_in_a_conversations_details_are_reachab
         drive.page.once("dialog", lambda dialog: running.append(loop.create_task(dismiss(dialog))))
         await drive.page.click("#chat-forget")
         assert "Forget this conversation?" in await asked
+
+
+#: The contrast of a focused control's ring against what it sits on, in the browser's
+#: own computed colours: WCAG's 3:1 for a non-text indicator.
+_RING_CONTRAST: Final = """(button) => {
+  const channel = (value) => {
+    const c = value / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  const luminance = (css) => {
+    const [r, g, b] = css.match(/[\\d.]+/g).slice(0, 3).map(Number);
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+  };
+  const ring = getComputedStyle(button);
+  const ground = getComputedStyle(button.closest("li")).backgroundColor;
+  const [high, low] = [luminance(ring.outlineColor), luminance(ground)].sort((a, b) => b - a);
+  return {
+    visible: button.matches(":focus-visible") && ring.outlineStyle !== "none",
+    contrast: (high + 0.05) / (low + 0.05),
+  };
+}"""
+
+
+@pytest.mark.parametrize("scheme", ["dark", "light"])
+async def test_a_focused_control_on_the_owners_own_message_is_seen(
+    gateway_browser: Browser, tmp_path: Path, scheme: str
+) -> None:
+    """The keyboard's place is visible inside the gold, in both schemes (#3113).
+
+    The page's focus ring is the gold, and the owner's messages are *filled* with it —
+    so a ring left at the page's colour would be gold on gold on exactly the controls a
+    keyboard reaches first going back from the message box: the last message's Reply and
+    Delete. Reached by the keyboard rather than focused by a script, because the ring is
+    drawn for `:focus-visible`, which is the browser's own judgement of how focus came.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.page.emulate_media(color_scheme=scheme)  # type: ignore[arg-type]
+        await _open(drive)
+        await drive.page.fill("#chat-text", "Seen from the keyboard.")
+        await drive.page.press("#chat-text", "Control+Enter")
+        await expect(
+            drive.page.locator("#chat-transcript li.from-user:not(.pending)")
+        ).to_have_count(1, timeout=_FOLLOWED)
+
+        await drive.page.focus("#chat-text")
+        for _ in range(8):
+            await drive.page.keyboard.press("Shift+Tab")
+            if await drive.page.evaluate(
+                "() => document.activeElement.closest('li.from-user') !== null"
+            ):
+                break
+        focused = drive.page.locator("li.from-user button:focus")
+        await expect(focused).to_have_count(1)
+        ring = await focused.evaluate(_RING_CONTRAST)
+        assert ring["visible"], ring
+        assert ring["contrast"] >= 3, ring
