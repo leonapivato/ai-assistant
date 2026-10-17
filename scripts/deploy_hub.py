@@ -34,9 +34,13 @@ them, and the smoke passed anyway.
 
 "Nothing can show it" is a list, not a judgement: no marker on the box (a first
 deploy, into a venv with nothing in it), a marker naming a commit this clone does
-not hold, a venv that has no ``ai_assistant`` installed whatever the marker says,
-and a lockfile modified in the working tree the wheel is built from. Each is
-*unknown*, not *clean*, and unknown takes the locked path. Which makes telling an
+not hold, a marker recording a *dirty* deploy (whose lockfile no commit holds), a
+venv that has no ``ai_assistant`` installed whatever the marker says, and a
+lockfile modified in the working tree the wheel is built from. Each is *unknown*,
+not *clean*, and unknown takes the locked path. And because the locked install
+changes the venv before the wheel lands, it first withdraws the marker: a run
+that dies in between leaves *unknown* on the box, never the old commit vouching
+for a set the venv no longer holds. Which makes telling an
 absent marker from a present one the whole job: the marker is read in a login
 shell that prints its own banner, so the read brackets what it produced, and only
 what lies between the brackets is a marker. An absent one is then absent, rather
@@ -464,17 +468,44 @@ def marker_commit(marker_text: str) -> str | None:
 
     Returns:
         The recorded commit, or ``None`` when neither form is present. A
-        ``-dirty`` suffix is stripped, because the dependency question is about
-        the committed lockfile and a dirty deploy still answers it.
+        ``-dirty`` suffix is stripped; :func:`marker_is_dirty` says whether there
+        was one, because a dirty deploy is not evidence about the committed
+        lockfile (:func:`_rule_on_dependencies`).
+    """
+    recorded = _recorded_commit(marker_text)
+    return None if recorded is None else recorded.removesuffix("-dirty") or None
+
+
+def marker_is_dirty(marker_text: str) -> bool:
+    """Report whether the marker records a deploy of an uncommitted tree.
+
+    Args:
+        marker_text: The marker's own text, as :func:`marker_commit` takes it.
+
+    Returns:
+        True when the recorded commit carries a ``-dirty`` suffix.
+    """
+    recorded = _recorded_commit(marker_text)
+    return recorded is not None and recorded.endswith("-dirty")
+
+
+def _recorded_commit(marker_text: str) -> str | None:
+    """Return the commit a marker records, suffix and all.
+
+    Args:
+        marker_text: The marker's own text.
+
+    Returns:
+        The ``commit=`` field's value, the whole of a bare-sha marker, or
+        ``None`` when neither form is present.
     """
     for line in marker_text.splitlines():
         stripped = line.strip()
         if stripped.startswith(_MARKER_COMMIT_PREFIX):
-            value = stripped.removeprefix(_MARKER_COMMIT_PREFIX).strip()
-            return value.removesuffix("-dirty") or None
+            return stripped.removeprefix(_MARKER_COMMIT_PREFIX).strip()
     lines = [line.strip() for line in marker_text.splitlines() if line.strip()]
     if len(lines) == 1 and _BARE_COMMIT.fullmatch(lines[0].removesuffix("-dirty")):
-        return lines[0].removesuffix("-dirty")
+        return lines[0]
     return None
 
 
@@ -847,6 +878,42 @@ class Plan:
             f"{_MARKER_COMMIT_PREFIX}{commit}\nwheel_sha256={digest}\n"
             f"deps={deps}\ndeployed_at={stamp}\n"
         )
+        return self._replace_marker(body)
+
+    def unmark(self, commit: str) -> str:
+        """Return the command that withdraws the marker before the venv changes.
+
+        Run on the locked path only, immediately before the install. From the
+        first package the locked set replaces, the venv no longer holds the set
+        the marker's commit describes — so a run that fails between there and
+        :meth:`write_marker` would otherwise leave a marker certifying the OLD
+        lockfile over a venv carrying part or all of the new one, and the next
+        deploy of the old commit would keep that venv as clean. What replaces it
+        names the commit that was being installed but carries no ``commit=``
+        line, so :func:`marker_commit` reads it as *unknown*, and unknown takes
+        the locked path. The routine path needs none of this: its install
+        touches the wheel alone, and the dependency set it leaves is the one
+        the marker already describes.
+
+        Args:
+            commit: The commit this deploy is installing.
+
+        Returns:
+            The remote command line.
+        """
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        body = f"deps=unknown\ninstalling={commit}\nstarted_at={stamp}\n"
+        return self._replace_marker(body)
+
+    def _replace_marker(self, body: str) -> str:
+        """Return the command that puts ``body`` in place as the marker.
+
+        Args:
+            body: The marker's new contents.
+
+        Returns:
+            The remote command line.
+        """
         marker = remote_path(self.args.marker)
         scratch = remote_path(f"{self.args.marker}.{self.token}.tmp")
         write = f"printf %s {shlex.quote(body)} > {scratch} && mv -f {scratch} {marker}"
@@ -1006,6 +1073,7 @@ def _mode_lines(plan: Plan, commit: str) -> list[str]:
             [
                 ("perms   ", plan.make_readable()),
                 ("verify  ", plan.verify_staged()),
+                *([("unmark  ", plan.unmark(commit))] if plan.locked else []),
                 ("install ", plan.install()),
                 ("unstage ", plan.unstage()),
                 ("marker! ", plan.write_marker(commit, "<sha256 of the built wheel>")),
@@ -1123,6 +1191,10 @@ def _rule_on_dependencies(
     deployed = marker_commit(marker)
     if deployed is None:
         return "no deployed-commit marker on the box, so dependency drift is UNKNOWN"
+    # A dirty deploy may have installed a lockfile no commit holds — the tree's
+    # own, modified — so its commit says nothing about what the venv carries.
+    if marker_is_dirty(marker):
+        return f"the deployed commit {deployed[:12]} was dirty, so its dependency set is UNKNOWN"
     return _drift_reason(repo, deployed, commit.removesuffix("-dirty"))
 
 
@@ -1490,6 +1562,8 @@ def _install_and_verify(plan: Plan, commit: str, before_marker: str, before_vers
             _run_local(plan.stage_requirements())
         _run_local(ssh(plan.make_readable()))
         _assert_staged(plan, digest, requirements_digest)
+        if plan.locked:
+            _run_local(ssh(plan.unmark(commit)))
         _run_local(ssh(plan.install()))
     finally:
         _discard_stage(plan)
