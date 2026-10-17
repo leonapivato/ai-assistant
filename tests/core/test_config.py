@@ -732,6 +732,9 @@ _INTEGER_FIELDS: Final = tuple(
 #: rather than the per-field guard it means to. A case exercising one of the four
 #: overrides the companion and leaves the other three set, which is exactly the shape
 #: the calendar trio already has.
+#: ``telegram_poll_bound`` joins them for ADR-0323 §11:10's refusal: the bound must
+#: exceed ``telegram_poll_wait``, and the hour these cases set the wait to is above
+#: the bound's default.
 _COMPANIONS: Final[dict[str, Any]] = {
     "calendar_reader_path": Path("/srv/calendars/personal.ics"),
     "calendar_upcoming_lead": timedelta(hours=2),
@@ -739,6 +742,7 @@ _COMPANIONS: Final[dict[str, Any]] = {
     "forecast_origin": "https://forecast.example.invalid",
     "forecast_latitude": 41.1579,
     "forecast_longitude": -8.6291,
+    "telegram_poll_bound": timedelta(hours=3),
 }
 
 
@@ -892,6 +896,11 @@ def test_every_integer_setting_is_discovered() -> None:
         "forecast_max_days",
         "forecast_max_day_chars",
         "forecast_max_response_bytes",
+        # ADR-0323 §11:13's read bound for the Telegram line, acknowledged with the
+        # `bool` argument the forecast's carries: `telegram_max_response_bytes=True`
+        # is a one-byte bound that abandons every answer Telegram gives, so every
+        # send would be unknown and every poll would take nothing in.
+        "telegram_max_response_bytes",
         # ADR-0159 §3's spend bound, acknowledged here with the same `bool`
         # argument the caps above carry: `reconciler_max_conflicts=True` is a
         # bound of one, which asks the model about the best-ranked conflict alone
@@ -1253,6 +1262,13 @@ def test_every_duration_setting_is_discovered() -> None:
         # is the spin the figure was chosen to avoid: "long enough that a poll cycle
         # costs one frame pair rather than being a spin".
         "gateway_notification_budget",
+        # ADR-0323 §11:10 to §11:12's three, none nullable: a line with no poll
+        # wait, no poll bound or no send bound is the unbounded call ADR-0241 §1
+        # leaves no spelling for. The poll bound joins :data:`_COMPANIONS`, because
+        # it must exceed the wait and these cases set the wait to an hour.
+        "telegram_poll_wait",
+        "telegram_poll_bound",
+        "telegram_send_bound",
     }
 
 
