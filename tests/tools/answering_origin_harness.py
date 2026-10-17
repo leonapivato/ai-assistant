@@ -48,36 +48,9 @@ recipient). Shelling out to ``openssl`` would add a binary the test corpus does 
 otherwise need and a subprocess to a case measuring a wall clock; the standard
 library mints no certificate at all.
 
-## Runbook — driving Arm 4 against a scratch hub
-
-The in-process cases in :mod:`test_answering_origin` need none of this. It is for a
-QA agent standing an origin in front of a live hub, so that the two-turn arm can be
-driven in minutes rather than rebuilt from zero (#2206).
-
-1. Start the origin, from the repository root, on a port of your choosing::
-
-       uv run python tests/tools/answering_origin_harness.py --port 8443 --answer 1 --then stall
-
-   It prints the endpoint and the certificate's path and then serves until it is
-   interrupted. ``--answer 1`` is Arm 4's script: turn one's search is answered,
-   turn two's stalls. ``--then close`` hangs up instead of holding, for the
-   neighbouring fault.
-
-2. Point the hub at it, in the hub process's own environment::
-
-       ASSISTANT_WEB_SEARCH_ORIGIN=https://localhost:8443
-       SSL_CERT_FILE=<the path the command above printed>
-       ASSISTANT_SEARCH_CALL_DEADLINE_SECONDS=5
-
-   ``SSL_CERT_FILE`` has to be set **before the hub starts**: it is read when the
-   TLS context is built, and a hub already running has built one.
-
-3. Mint the connection the searcher reads its credential from, against that origin,
-   with ``assistant connect`` — the origin a connected account carries is what the
-   binding names, and it has to be the same string the hub is configured with.
-
-4. Drive two turns. The first search is answered from ``--results``; the second is
-   held open until the deadline expires, which is Arm 4's fault.
+**It is an in-process fixture and nothing else.** The standalone runner and the
+manual runbook that once sat here drove an approval flow the tree no longer has, and
+were retired rather than rewritten (#2225).
 
 **The origin listens on loopback and reaches nothing.** ``localhost`` is the one
 name that resolves to the loopback interface without a resolver leaving the machine,
@@ -89,12 +62,10 @@ exactly the one process that was told about it.
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import os
 import socket
 import ssl
-import sys
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -142,7 +113,7 @@ _REQUEST_LINE_FIELDS: Final = 3
 _REQUEST_WAIT: Final = timedelta(seconds=30)
 
 #: How long the minted certificate is valid either side of now. Short, because it
-#: exists for the life of one test session or one QA run, and a fixture certificate
+#: exists for the life of one test session, and a fixture certificate
 #: with a long life is one that can outlive the directory it was written to.
 _VALIDITY: Final = timedelta(hours=1)
 
@@ -166,8 +137,8 @@ def _mint(directory: Path) -> tuple[Path, Path]:
 
     The certificate is its own issuer, so the file handed to ``SSL_CERT_FILE`` is
     both the leaf the origin presents and the anchor the client verifies it
-    against — one file rather than a chain, which is what makes the runbook's
-    second step a single path.
+    against — one file rather than a chain, so that one path is the whole of the
+    trust a process is told about.
 
     It carries ``DNS:localhost`` as a subject alternative name because that is what
     verification reads: ``_tls_context`` states ``check_hostname = True``, and
@@ -321,7 +292,6 @@ async def answering_origin(
     then: After = "stall",
     results: Sequence[Mapping[str, Any]] = DEFAULT_RESULTS,
     date: str | None = DATE_FIELD,
-    port: int = 0,
 ) -> AsyncIterator[AnsweringOrigin]:
     """Bind a scripted HTTPS origin on the loopback interface for the life of the block.
 
@@ -340,10 +310,6 @@ async def answering_origin(
         results: The result objects every answered request carries.
         date: The ``Date`` field's value on every answered response, or ``None``
             for a response declaring no instant.
-        port: The port to bind. ``0`` — every in-process case — lets the operating
-            system choose, so that concurrent test sessions cannot collide. A
-            standalone run names one, because a hub is configured with the origin
-            string before the origin exists.
 
     Yields:
         The origin, already listening and already trusted by this process. Every
@@ -401,7 +367,7 @@ async def answering_origin(
 
     with TemporaryDirectory(prefix="answering-origin-") as directory:
         certificate, key = _mint(Path(directory))
-        server, bound = await _listen(serve, certificate=certificate, key=key, port=port)
+        server, bound = await _listen(serve, certificate=certificate, key=key)
         origin = AnsweringOrigin(
             endpoint=TransportEndpoint(host=HOST, port=bound, implicit_tls=True),
             origin=f"https://{HOST}:{bound}",
@@ -424,7 +390,6 @@ async def _listen(
     *,
     certificate: Path,
     key: Path,
-    port: int,
 ) -> tuple[asyncio.Server, int]:
     """Bind one TLS listener on the loopback interface and start serving it.
 
@@ -440,14 +405,13 @@ async def _listen(
         handler: What each accepted connection is handed to.
         certificate: The certificate to present.
         key: Its private key.
-        port: The port to bind, or ``0`` to let the operating system choose.
 
     Returns:
         The server and the port it actually bound.
     """
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certificate, key)
-    family, kind, proto, _, address = socket.getaddrinfo(HOST, port, type=socket.SOCK_STREAM)[0]
+    family, kind, proto, _, address = socket.getaddrinfo(HOST, 0, type=socket.SOCK_STREAM)[0]
     listening = socket.socket(family, kind, proto)
     listening.setblocking(False)
     listening.bind(address)
@@ -487,89 +451,3 @@ def _trusted(certificate: Path) -> Iterator[None]:
             del os.environ[_TRUST_VARIABLE]
         else:
             os.environ[_TRUST_VARIABLE] = previous
-
-
-def _parser() -> argparse.ArgumentParser:
-    """The standalone runner's arguments.
-
-    Returns:
-        The parser, for :func:`main` and for a case that reads its defaults.
-    """
-    parser = argparse.ArgumentParser(
-        prog="answering_origin_harness",
-        description=(
-            "A loopback HTTPS origin that answers a scripted number of web-search "
-            "requests and then stalls, for driving ADR-0241 §12 Arm 4 against a hub."
-        ),
-    )
-    parser.add_argument("--port", type=int, default=8443, help="the port to listen on")
-    parser.add_argument(
-        "--answer",
-        type=int,
-        default=1,
-        help="how many requests are answered before the script ends",
-    )
-    parser.add_argument(
-        "--then",
-        choices=("stall", "close"),
-        default="stall",
-        help="what a request past the script gets",
-    )
-    parser.add_argument(
-        "--results",
-        type=int,
-        default=len(DEFAULT_RESULTS),
-        help="how many result objects each answered response carries",
-    )
-    return parser
-
-
-async def _serve_forever(arguments: argparse.Namespace) -> None:
-    """Run one scripted origin on the named port until it is interrupted.
-
-    Args:
-        arguments: What :func:`_parser` parsed.
-    """
-    served = [
-        result(
-            title=f"Result {index + 1}",
-            url=f"https://example.invalid/{index + 1}",
-            description="A result this origin was told to serve.",
-        )
-        for index in range(arguments.results)
-    ]
-    async with answering_origin(
-        answer=arguments.answer, then=arguments.then, results=served, port=arguments.port
-    ) as origin:
-        # A QA run reads these three lines and configures the hub from them, so they
-        # are flushed rather than left in a buffer this process never returns from:
-        # the wait below is endless, and an operator watching a pipe would otherwise
-        # see nothing at all.
-        for line in (
-            f"ASSISTANT_WEB_SEARCH_ORIGIN={origin.origin}",
-            f"{_TRUST_VARIABLE}={origin.certificate}",
-            f"script: answer {arguments.answer} request(s), then {arguments.then}",
-        ):
-            print(line, flush=True)
-        # **The certificate lives only as long as this process.** It is written to a
-        # temporary directory this block deletes on the way out, so the hub has to be
-        # started after these lines are printed and stopped before this is.
-        await asyncio.Event().wait()
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run the origin standalone, for a QA run in front of a live hub.
-
-    Args:
-        argv: The command line, or ``None`` for ``sys.argv``.
-
-    Returns:
-        The exit status.
-    """
-    with suppress(KeyboardInterrupt):
-        asyncio.run(_serve_forever(_parser().parse_args(argv)))
-    return 0
-
-
-if __name__ == "__main__":  # pragma: no cover — the standalone runbook entry point
-    sys.exit(main())
