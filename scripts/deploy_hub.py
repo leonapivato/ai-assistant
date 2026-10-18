@@ -915,7 +915,7 @@ class Plan:
             f" elif [ ! -f {passphrase} ]; then echo not-a-file;"
             f" elif [ ! -r {passphrase} ]; then echo unreadable;"
             f" elif [ ! -s {passphrase} ]; then echo empty; else echo present; fi)",
-            f"echo BACKUP_PASSPHRASE_MODE=$(stat -c %a {passphrase} 2>/dev/null)",
+            f"echo BACKUP_PASSPHRASE_MODE=$(stat -L -c %a {passphrase} 2>/dev/null)",
             f"echo BACKUP_PASSPHRASE_PATH=$(realpath -e {passphrase} 2>/dev/null)",
             f"echo BACKUP_DIR_PATH=$(realpath -m {remote_path(self.args.backup_dir)})",
             f"echo HUB_STATE=$({state} || true)",
