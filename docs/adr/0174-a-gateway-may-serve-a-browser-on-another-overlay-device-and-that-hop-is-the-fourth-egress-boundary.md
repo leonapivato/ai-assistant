@@ -1,6 +1,6 @@
 # 174. A gateway may serve a browser on another overlay device, and that hop is the fourth egress boundary
 
-- Status: Partially superseded by ADR-0202 (§7's plain-HTTP clause with the transport-layer security arrangement §11 deferred alongside it, §8's empty default for the remote host-name list as it reaches a configured remote browser listener, and §6's delegation to §8 of when that list is refused, as it reaches certificate coverage) and ADR-0296 (§4:4's bars on keying a rule on the list beyond admission, on recording or revoking anything and on a browser identity crossing the wire, and §3:3's no-other-record clause, each only as it reaches the hub's registration of a listed machine)
+- Status: Partially superseded by ADR-0202 (§7's plain-HTTP clause with the transport-layer security arrangement §11 deferred alongside it, §8's empty default for the remote host-name list as it reaches a configured remote browser listener, and §6's delegation to §8 of when that list is refused, as it reaches certificate coverage) and ADR-0296 (§4:4's bars on keying a rule on the list beyond admission, on recording or revoking anything and on a browser identity crossing the wire, and §3:3's no-other-record clause, each only as it reaches the hub's registration of a listed machine) and ADR-0327 (§1:1's enumeration, which gains the hosted browser transport, and §2:3's binding of only the loopback listener, as it reaches a gateway with a hosted listener on)
 - Date: 2026-08-21
 - Note: 2026-08-23 — **the revisit §9 said this was not has landed, and it chose
   process-bound.** §9 ruled "this is not ADR-0168 §5's revisit… Milestone 16 is,
@@ -164,6 +164,18 @@
   take effect on ratification of ADR-0296. This reciprocal header record accompanies the
   numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
   below are preserved.
+- Partially superseded: 2026-10-18 by ADR-0327 — two scopes. §1:1's enumeration gains
+  a fifth boundary, the gateway's **hosted browser transport**, between a gateway's
+  hosted listener and its hosted owner's browser, carried by the sign-in edge and a
+  tunnel; the four boundaries it named are unchanged. §2:3's rule that a gateway with
+  no remote-browser-listener configuration binds *only* the loopback listener, as it
+  reaches a gateway with a hosted listener on, which binds both (ADR-0327 §3, §5).
+  ADR-0327 §4 names that the fifth boundary does not have §2:1's end-to-end property
+  and supersedes nothing of §2; §2:6's prohibition on a tunnel in front of the
+  loopback listener stands. Every other clause stands. This replacement takes effect
+  on ratification of ADR-0327. This reciprocal header record accompanies the numbered
+  draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below
+  are preserved.
 
 ## Context
 

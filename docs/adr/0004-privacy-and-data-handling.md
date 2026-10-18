@@ -1,6 +1,6 @@
 # 4. Privacy and data handling
 
-- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete), ADR-0155 (§2's residency clause), ADR-0172 (§3's keyring clause, §6's Tier 0 purge clause and §7's gating clause, each only as it reaches a web-session credential), ADR-0202 (§3's keyring clause and §7's gating clause, each only as it reaches the remote browser listener's TLS key material) and ADR-0268 (§6's view and export limbs, each only as they reach one datum: the goal authorization store's per-goal closure record — a goal identifier, a goal version and whether that store's write fence stands — which is reached by no export and no viewing surface and carries no content of the user's. §6's deletion limb binds entire and the record is erased with the store's rows; §6's retention limb is reached by those rows before it is reached by the record; no other store and no other datum takes this scope) and ADR-0314 (§6's view and export limbs, each only as they reach the diagnostic record, which no surface shows and no export carries, and which the owner reads and copies as files on the server)
+- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete), ADR-0155 (§2's residency clause), ADR-0172 (§3's keyring clause, §6's Tier 0 purge clause and §7's gating clause, each only as it reaches a web-session credential), ADR-0202 (§3's keyring clause and §7's gating clause, each only as it reaches the remote browser listener's TLS key material) and ADR-0268 (§6's view and export limbs, each only as they reach one datum: the goal authorization store's per-goal closure record — a goal identifier, a goal version and whether that store's write fence stands — which is reached by no export and no viewing surface and carries no content of the user's. §6's deletion limb binds entire and the record is erased with the store's rows; §6's retention limb is reached by those rows before it is reached by the record; no other store and no other datum takes this scope) and ADR-0314 (§6's view and export limbs, each only as they reach the diagnostic record, which no surface shows and no export carries, and which the owner reads and copies as files on the server) and ADR-0327 (§7's gating clause, only as it reaches a gateway's verification of the sign-in edge's assertion on a hosted listener)
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
@@ -433,6 +433,17 @@
   is **not precedent** for in-place decision changes, which ADR-0070 §1 now
   governs. Retrofitting it would itself violate append-only (ADR-0070
   Consequences; issue #71). Appended note, not a status change.
+- Partially superseded: 2026-10-18 by ADR-0327 — one scope. §7's gating clause, only
+  as it reaches a gateway's verification of the sign-in edge's signed assertion on a
+  hosted listener's admission path, which `permissions/` cannot gate because it sits
+  behind the hub connection that admission decides. Three replacements stand in its
+  place (ADR-0327 §9): the assertion is read for admission alone, on one path; its
+  custody is the box's loopback and the gateway's process memory for one check; and
+  every mint and refusal is recorded. The assertion stays Tier 0 under §1, and §3 and
+  §6 are not superseded, because this system stores no assertion anywhere. Every other
+  access stays under §7. This replacement takes effect on ratification of ADR-0327.
+  This reciprocal header record accompanies the numbered draft under ADR-0070 and
+  ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
