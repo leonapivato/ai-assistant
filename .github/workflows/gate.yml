@@ -7,7 +7,8 @@ name: gate
 # Since ADR-0310 it runs as parallel jobs: the four static steps in one job, the
 # test step split across several, and one job named `gate` that passes only when
 # every other job passed. `gate` is the check branch protection requires
-# (ADR-0167 §1:1); no other job carries that name.
+# (ADR-0167 §1:1); no other job carries that name. Since ADR-0326 §7 one more job
+# runs beside them, `upgrade`, and `gate` requires it like the others.
 
 on:
   # The default pull_request set, named so that nothing is added by accident.
@@ -180,6 +181,42 @@ jobs:
           overwrite: true
           retention-days: 3
 
+  # ADR-0326 §7's upgrade check: the build at the base writes a data directory
+  # through every store a person's hub keeps, and the build at the head opens it
+  # and reads every record back (`scripts/upgrade_check.py`). It is required by
+  # being one of `gate`'s parts, so no branch-protection setting names it.
+  #
+  # The head is this run's checkout: on a pull request the merge commit, which is
+  # the head's content once the branch is up to date with its base, as branch
+  # protection requires before a merge. The base is the commit the pull request
+  # merges onto (§2:4), or on a push to `main` the commit `main` held before it.
+  # The script checks the base out into a worktree with its own locked
+  # environment, so the base's code writes and the head's reads. Only that one
+  # commit is fetched; a worktree of it needs no history.
+  upgrade:
+    runs-on: ubuntu-latest
+    env:
+      BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install the pinned Python
+        run: uv python install
+
+      - name: Sync the locked environment
+        run: uv sync --locked
+
+      - name: Fetch the base
+        run: git fetch --no-tags --depth=1 origin "$BASE"
+
+      - name: The head opens what the base wrote
+        run: uv run python scripts/upgrade_check.py run --base "$BASE"
+
   # The required check (ADR-0167 §1:1), and the only job named `gate`
   # (ADR-0310 §5). It needs every other job of this workflow and runs whatever
   # their outcome, because GitHub counts a *skipped* required check as passing:
@@ -187,7 +224,7 @@ jobs:
   # would read it as green. It passes only when each part concluded `success`, so
   # a part that failed, was cancelled or was skipped fails it.
   gate:
-    needs: [static, tests]
+    needs: [static, tests, upgrade]
     if: always()
     runs-on: ubuntu-latest
     steps:

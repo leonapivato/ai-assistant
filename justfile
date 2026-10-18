@@ -605,6 +605,18 @@ drill:
 review-sweep *args:
     uv run python scripts/review_sweep.py "$@"
 
+# CI's `upgrade` job, locally (ADR-0326 §7): the build at the base (`--base REV`,
+# default `origin/main`) writes a data directory through every store, in a
+# temporary worktree with its own environment, and this tree's build opens it and
+# reads every record back. `ASSISTANT_*` is cleared for both builds, so a shell
+# pointed at a live hub steers neither. `--keep DIR` leaves the base's directory
+# and snapshot in DIR to look at.
+#
+# Last line, because `just --list` shows only that one: what this recipe proves.
+# Does this tree open what the base wrote? (ADR-0326 §7)
+upgrade-check *args:
+    uv run python scripts/upgrade_check.py run "$@"
+
 
 # The hub redeploy, with the two details that cost two failed attempts on
 # 2026-08-22 encoded rather than remembered (issue #1389): the service venv is
