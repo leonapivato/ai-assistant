@@ -1,6 +1,6 @@
 # 5. Memory model: typed memory, provenance, and update proposals
 
-- Status: Partially superseded by ADR-0075 (the proposal → policy write path, for the deterministic capture of an episode recording a turn)
+- Status: Partially superseded by ADR-0075 (the proposal → policy write path, for the deterministic capture of an episode recording a turn) and ADR-0328 (§1's union of four kinds, as to the semantic, preference and procedural kinds; §2's `Provenance` on every record and its profile and model as a query over `source` and `confidence`, as they apply to a memory; and §3's store-temporarily outcome)
 - Date: 2026-07-16
 - Note (2026-07-28): **§3's write path, and its Consequences clause "Every write
   goes through a reviewable proposal → policy path", no longer reach deterministic
@@ -12,6 +12,7 @@
   this note**, so this Status line never names an ADR that does not exist — the
   hazard ADR-0070 §1 guards against — and if that change does not land, neither
   does this. Appended note per ADR-0070 §1; no text below it is rewritten.
+- Partially superseded: 2026-10-18 by ADR-0328 — §1's union of four kinds, as to the semantic, preference and procedural kinds; §2's `Provenance` on every record and its profile and model as a query over `source` and `confidence`, as they apply to a memory; and §3's store-temporarily outcome: the store holds an episode and one memory kind, a memory carries supports instead of `Provenance`, and nothing is stored tentatively (ADR-0328 §2, §3, §10); the episode keeps its envelope, and §3's propose/dispose path stands. This replacement takes effect on ratification of ADR-0328. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
