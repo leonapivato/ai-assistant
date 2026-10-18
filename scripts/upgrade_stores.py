@@ -732,6 +732,9 @@ async def _read_conversations(directory: Path) -> Records:
                 await store.untaken_messages(conversation.id)
             )
         records["my_devices"] = to_json(await store.my_devices())
+        # A conversation stamped deleted is absent from the export and held until its
+        # grace runs out; that it is still held is what this reads.
+        records["stamped"] = to_json(await store.stamped_conversation_ids())
         return records
     finally:
         store.close()
