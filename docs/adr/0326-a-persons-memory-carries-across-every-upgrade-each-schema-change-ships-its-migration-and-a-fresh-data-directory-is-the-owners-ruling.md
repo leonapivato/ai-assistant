@@ -86,11 +86,14 @@ built, and `scripts/deploy_hub.py` records it in a marker on the box. Neither a 
 can see that marker, and two deploys may be one commit apart or a hundred. A rule written
 against "the deployed commit" could not be followed by the change it binds.
 
-What every change can see is the commit of `main` it merges onto. If each schema change
-upgrades from the version on that commit, and CI proves that the head opens a directory the
-base wrote, then by induction every commit of `main` since the cutover opens a directory
-any earlier commit wrote, whichever of them were deployed. That needs one more condition:
-the commit deployed to a person's hub is itself on `main`, so its schema is in the chain.
+What every pull request can see is the commit of `main` it merges onto. If each schema
+change upgrades from the version on that commit, and CI proves that the head opens a
+directory the base wrote, then by induction each merged head since the cutover opens a
+directory any earlier merged head wrote, whichever of them were deployed. Two conditions
+make that hold. The commit deployed to a person's hub is itself a merged head, so its
+schema is in the chain. And it is a pull request's *last* commit: the repository merges by
+*Rebase and merge* (`CONTRIBUTING.md`), so a pull request's earlier commits land on `main`
+too, and nothing checks an upgrade from the schema one of them writes.
 
 ### The case the owner knows is coming
 
@@ -129,13 +132,14 @@ change opens what its base wrote, and only the owner rules a fresh directory.
 > reads again on a later start, with its SQLite sidecars. The instance lock, the sockets
 > and the diagnostic record (§8) are not stores.
 
-> **Normative.** A **schema change** is a change to `main` that changes the shape of what
-> a store writes, or how it reads a file the code before the change wrote: its tables,
-> columns, indexes or label, the shape of a value it serialises (a `core` model it stores
-> among them), or the members of a closed enumeration a stored value names.
+> **Normative.** A **schema change** is a pull request to `main` that changes the shape of
+> what a store writes, or how it reads a file the code at the previous release wrote: its
+> tables, columns, indexes or label, the shape of a value it serialises (a `core` model it
+> stores among them), or the members of a closed enumeration a stored value names.
 
-> **Normative.** A **release** is a commit on `main`. For a given change, the **previous
-> release** is the commit of `main` the change merges onto.
+> **Normative.** A **release** is the last commit of a pull request merged to `main`. The
+> earlier commits of the same pull request are not releases. For a given pull request, the
+> **previous release** is the commit of `main` it merges onto.
 
 > **Normative.** The **version a schema change replaces** is the schema the store's code
 > writes at the previous release.
@@ -147,8 +151,7 @@ change opens what its base wrote, and only the owner rules a fresh directory.
 > **Normative.** A cutover restarts the hub on the same `Settings.data_dir` it served
 > before the install, holding every file the earlier build left there.
 
-> **Normative.** A deploy to a person's hub installs a commit on `main`, built from a
-> clean tree.
+> **Normative.** A deploy to a person's hub installs a release, built from a clean tree.
 
 > **Normative.** Moving a person's hub to another machine carries its data directory by
 > restoring a backup of it there (ADR-0123 §7). The restored directory is the carried
@@ -164,11 +167,11 @@ change opens what its base wrote, and only the owner rules a fresh directory.
 
 ### 4. Every schema change ships its upgrade
 
-> **Normative.** Every schema change to a store ships, in the same change, an in-place
-> upgrade of a file at the version it replaces.
+> **Normative.** Every schema change to a store ships, in the same pull request, an
+> in-place upgrade of a file at the version it replaces.
 
-> **Normative.** Every schema change to a store ships, in the same change, a test that
-> opens a file the store's code at the previous release wrote, upgrades it, and reads
+> **Normative.** Every schema change to a store ships, in the same pull request, a test
+> that opens a file the store's code at the previous release wrote, upgrades it, and reads
 > back every record it holds. That file is written by that code, not assembled by hand,
 > and is kept in the tree beside the test.
 
@@ -206,13 +209,13 @@ backfill in `service/enrolment.py` does, or gains a label in its first schema ch
 > deploy, and never one written at or after it.
 
 > **Normative.** ADR-0049 §1's refusal of a database whose `schema_version` is newer than
-> the code understands binds every store: no build opens a file that a later build wrote
-> or upgraded.
+> the code understands binds every store: no build opens a file whose label is newer than
+> the one its own code writes.
 
 > **Normative.** A deploy that must be undone either installs a later build that opens
 > the directory, or restores the backup §6 took into a new path (ADR-0123 §7:2) and
 > serves the earlier build from it. An earlier build is never started on a directory a
-> later build has served.
+> later build has served, unless no schema change lies between the two releases.
 
 The plan store's refusal of a version below 12 and the audit trail's of one below 6 stand
 under §5:1, as refusals of files from before ADR-0309 §6:1's deploy. Each store's next
@@ -220,9 +223,9 @@ schema change upgrades from the version it writes now.
 
 ### 6. A deploy backs the directory up before it installs
 
-> **Normative.** A deploy to a person's hub stops the hub, backs up its data directory
-> with ADR-0123's tool, and installs only once that backup is written and verified
-> (ADR-0123 §9:1).
+> **Normative.** A deploy to a person's hub that has served a data directory stops the
+> hub, backs up that directory with ADR-0123's tool, and installs only once that backup is
+> written and verified (ADR-0123 §9:1).
 
 > **Normative.** A backup that fails, or that is reported written but unverified, stops
 > the deploy before the install, and the hub is restarted on its earlier build.
@@ -242,7 +245,7 @@ schema change upgrades from the version it writes now.
 > **Normative.** The upgrade check fails where any store refuses that directory, or reads
 > back other than what the base build wrote, carried as the head's upgrades carry it.
 
-> **Normative.** A change that adds a store adds it to the upgrade check.
+> **Normative.** A pull request that adds a store adds it to the upgrade check.
 
 ### 8. The diagnostic record
 
@@ -300,6 +303,6 @@ stand.
   pointer to this rule from `CONTRIBUTING.md`, where a lane changing a store would look, is
   a later change.
 - **Revisit** if the hub gains numbered releases, which would let "release" mean something
-  narrower than every commit of `main`, or if the cost of carrying upgrades outweighs what
+  narrower than every merged pull request, or if the cost of carrying upgrades outweighs what
   a reset would cost the people whose hubs these are. Either is a new ADR, not an edit of
   this one.
