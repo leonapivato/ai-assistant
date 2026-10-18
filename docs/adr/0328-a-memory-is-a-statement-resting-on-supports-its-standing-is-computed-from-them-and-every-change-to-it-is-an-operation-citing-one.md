@@ -1,6 +1,6 @@
 # 328. A memory is a statement resting on supports: its standing is computed from them, and every change to it is an operation citing one
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-18
 - Scope: what the memory store holds beside episodes. The memory record, its supports, its operations, its track record and its open questions; the values computed from it; how today's writers write it until the observer's decision is built; and the mechanical upgrade of every record stored before it. Batch [#3148](https://github.com/leonapivato/ai-assistant/issues/3148), lane L-α, for milestone #3 ([#2528](https://github.com/leonapivato/ai-assistant/issues/2528)).
 - Dependency: ADR-0045, ADR-0217, ADR-0219, ADR-0286, ADR-0306, ADR-0308, ADR-0321 and ADR-0326, as their status lines leave them.
