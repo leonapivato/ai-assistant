@@ -2749,15 +2749,18 @@ class Settings(BaseSettings):
     def _each_claim_the_edge_must_carry_is_written(
         cls, value: str | None, info: ValidationInfo
     ) -> str | None:
-        """Refuse a blank claim, and a subject that is a contact detail (ADR-0327 §6).
+        """Refuse a blank claim (ADR-0327 §6:6 to §6:8).
 
-        Each is compared literally against what an assertion carries (§6:6 to §6:8), so
-        a blank one could never be equalled by a claim the edge signs. The subject is
-        held to §6:9 as far as the text decides it: an address with an ``@`` in it is
-        the one contact detail an operator is likely to paste where the edge's opaque
-        account id belongs, and a door keyed on an email is keyed on something its
-        owner can change. The values are not echoed: the subject identifies a
-        person's account, and §7:8 keeps it out of every record.
+        Each is compared literally against what an assertion carries, so a blank one
+        could never be equalled by a claim the edge signs.
+
+        **Nothing else about the subject is refused here**, and the reason is where a
+        refusal is written. A field's refusal is reported with the value it refused
+        (``load_settings`` renders the whole ``ValidationError``), so any refusal of a
+        non-blank subject would print the account id it was given — which §7:8 keeps
+        out of every record — to the gateway's start diagnostic. §6:9's "not an email
+        address or any other contact detail" is the setup's to hold: the subject is
+        copied from the edge's own account record (§13:1).
 
         Args:
             value: The configured value, or ``None`` when the listener is off.
@@ -2767,7 +2770,7 @@ class Settings(BaseSettings):
             The value, stripped of surrounding space, or ``None``.
 
         Raises:
-            ValueError: If the value is blank, or the subject carries an ``@``.
+            ValueError: If the value is blank.
         """
         if value is None:
             return None
@@ -2776,13 +2779,6 @@ class Settings(BaseSettings):
             msg = (
                 f"{info.field_name} is blank, so no assertion the edge signs could carry "
                 f"it (ADR-0327 §6); write the value the edge puts in its assertions"
-            )
-            raise ValueError(msg)
-        if info.field_name == "gateway_edge_subject" and "@" in text:
-            msg = (
-                "gateway_edge_subject looks like an email address. It is the edge's "
-                "opaque, stable id for the hosted owner's account, not a contact detail "
-                "(ADR-0327 §6:9); copy the account id the edge shows for that person"
             )
             raise ValueError(msg)
         return text
