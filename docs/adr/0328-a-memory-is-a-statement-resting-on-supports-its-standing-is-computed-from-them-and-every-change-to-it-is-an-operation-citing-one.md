@@ -1,13 +1,13 @@
 # 328. A memory is a statement resting on supports: its standing is computed from them, and every change to it is an operation citing one
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-10-18
 - Scope: what the memory store holds beside episodes. The memory record, its supports, its operations, its track record and its open questions; the values computed from it; how today's writers write it until the observer's decision is built; and the mechanical upgrade of every record stored before it. Batch [#3148](https://github.com/leonapivato/ai-assistant/issues/3148), lane L-α, for milestone #3 ([#2528](https://github.com/leonapivato/ai-assistant/issues/2528)).
 - Dependency: ADR-0045, ADR-0217, ADR-0219, ADR-0286, ADR-0306, ADR-0308, ADR-0321 and ADR-0326, as their status lines leave them.
 - Authorization: the owner ruled this design in the learning walk of 2026-10-17 and 2026-10-18 and approved it on 2026-10-18. This decision writes those rulings down and settles only what they leave open, each such point named where it is settled. The dispatcher assigned 0328. The owner reads it before it is ratified (§1:1).
 - **Contract-surface decision.** It changes `core/types.py` (a memory kind and the types it carries, `MemoryKind`, `RecalledItem`'s admissible kinds, and the inspection projections) and `core/protocols.py` (`MemoryStore`'s reads, `MemoryWriter`, `MemoryPolicy`'s reading of a proposal, and the removal of `FeedbackProcessor`). It is a breaking change under golden rule 5. The episode record gains no field (§2).
 - **Supersedes**, each in what remains in force (§18): ADR-0009 and ADR-0122.
-- **Partially supersedes**, in the clauses §18's second table names: ADR-0072, ADR-0073, ADR-0077, ADR-0086, ADR-0092, ADR-0103, ADR-0106, ADR-0107, ADR-0109, ADR-0159, ADR-0189 and ADR-0321.
+- **Partially supersedes**, in the clauses §18's second table names: ADR-0005, ADR-0072, ADR-0073, ADR-0077, ADR-0086, ADR-0092, ADR-0103, ADR-0106, ADR-0107, ADR-0109, ADR-0159, ADR-0189, ADR-0217 and ADR-0321.
 - **Leaves to the observer's decision**, the second ADR of batch #3148 (§17): who writes memories once the observer exists and when, candidates, the evidence bar, how open questions are raised and reach planning, who records the track record, and the supersessions of ADR-0306 §3:2, ADR-0309 §6:5, ADR-0285 §1:2, ADR-0319 §5 and ADR-0321 §5's yes path.
 
 ## Context
@@ -152,8 +152,8 @@ confirmation now means.
 > to a stored episode.
 
 > **Normative.** The semantic, preference and procedural kinds retire from the store. What
-> `PreferenceMemory.strength` and `context` and `ProceduralMemory.steps` carried is said in a
-> memory's wording.
+> `PreferenceMemory.strength` and `context` and `ProceduralMemory.steps` carried is said in
+> the wording of a memory written from now on; §16 says what the upgrade does with them.
 
 > **Normative.** A record minted as one activation's supply — `SearchOutcome.records`,
 > `ForecastOutcome.records`, `FetchOutcome.record`, the records `SourceReading.proposals`
@@ -223,7 +223,7 @@ A support is one piece of evidence about the memory, kept on the memory.
 | when | When the part happened, on this system's clock, from the episode's record |
 | about when | Optionally, the time the part refers to |
 | source details | For a source, which source and when it said so: an `Attestation` |
-| added at, added by | When this support was added, and by which writer (§5:8) |
+| added at, added by | When this support was added, and by which writer (§5:9) |
 
 The parts a support may point at:
 
@@ -310,16 +310,21 @@ The origin each part takes, the standing it ranks at, and whether it is outside 
 | --- | --- | --- |
 | create | The memory's first support | Starts the memory, `current`. May name the memories it replaces |
 | add support | The support added | Adds one support |
-| end | The support showing it no longer holds | Closes validity (§5:9) and sets `ended`: it was true, and is no longer. May name a successor |
+| end | The support showing it no longer holds | Closes validity (§5:10) and sets `ended`: it was true, and is no longer. May name a successor |
 | mark wrong | The support showing it was never true | Closes validity at the operation's instant and sets `wrong`, kept for audit. May name a successor |
 | replace | The support showing the claim was too broad | Names the narrower memory that replaces it, closes validity at the operation's instant and sets `ended` |
 | stop counting | The support that explains another away | Names that other support, which stays on the memory and stops counting |
 | raise question | A support the question rests on | Adds an open question (§9) |
 | resolve question | The support that resolved it | Records the resolution of a named open question |
 
-> **Normative.** A memory changes only by the operations the table names. Each is recorded
-> in the memory's log with its kind, the support that caused it, a note in words, the
-> instant it was written and the writer that wrote it.
+> **Normative.** A memory's supports, status, validity and open questions change only by the
+> operations the table names, and its wording by none (§3:2). Each operation is recorded in
+> the memory's log with its kind, the support that caused it, a note in words, the instant
+> it was written and the writer that wrote it.
+
+> **Normative.** A memory's placement changes by ADR-0217's routes, its topics by
+> ADR-0213's, and its track record by §8, as they stand. None of those writes is an
+> operation, and none changes its wording, supports, status, validity or open questions.
 
 > **Normative.** The support an operation cites is one the memory carries once the
 > operation is applied. An operation may add the support it cites in the same write.
@@ -339,9 +344,10 @@ The origin each part takes, the standing it ranks at, and whether it is outside 
 > mark wrong makes a `current` or an `ended` memory `wrong`. Nothing makes a memory
 > `current` again: something true again is a new memory.
 
-> **Normative.** A support stopped from counting stays on the memory, is excluded from every
-> value §7 computes except rests on outside content, and is never stopped twice. Stopping is
-> not undone.
+> **Normative.** A support stopped from counting stays on the memory and is never stopped
+> twice, and stopping is not undone. It is excluded from the standing (§6), the evidence
+> summary, as of, reading certainty and whether the memory is unbacked; it is included in
+> learned, rests on outside content and whether the memory is legacy (§7).
 
 > **Normative.** A writer is named from a closed set, added to and never renamed:
 > `remember` (§13) and `migration` (§16). The observer's decision adds its own.
@@ -382,8 +388,9 @@ The origin each part takes, the standing it ranks at, and whether it is outside 
 
 > **Normative.** A lower standing never silently overrides a higher one. A writer refuses an
 > end, a mark wrong or a replace whose cited support's origin ranks below the memory's
-> standing, and writes nothing. Where such a change is wanted, the open question it needs is
-> raised on the memory (§9).
+> standing, and a stop counting whose cited support's origin ranks below the origin of the
+> support it stops, and writes nothing. Where such a change is wanted, the open question it
+> needs is raised on the memory (§9).
 
 ### 7. Values computed from a memory
 
@@ -566,7 +573,9 @@ The origin each part takes, the standing it ranks at, and whether it is outside 
 | A belief | A memory |
 
 > **Normative.** A ratified clause still in force that says one of the table's terms of a
-> memory reads it as the table says, and is not superseded by that reading.
+> memory reads it as the table says where that reading leaves what the clause decided
+> unchanged, and is not superseded by that reading. Where it does not, the clause is
+> superseded and §18 names it.
 
 > **Normative.** Where such a clause names a retired field, member or producer (§10, §14) as
 > one of several things it governs, that limb binds nothing and the rest binds as written.
@@ -667,7 +676,7 @@ The origin each part takes, the standing it ranks at, and whether it is outside 
 | --- | --- |
 | An episode | Unchanged |
 | A semantic, preference or procedural record | A memory at the same id |
-| Its `content` | The wording |
+| Its `content`, with a preference's `context` and a procedural record's steps | The wording (§16:3) |
 | Its `validity`, `placement`, `expires_at`, `about_person`, `topics` | The same values |
 | The whole record, as stored | One legacy support, carrying it |
 | Its `last_updated` | The create's instant |
@@ -678,8 +687,14 @@ The origin each part takes, the standing it ranks at, and whether it is outside 
 > §4:3, §4:4).
 
 > **Normative.** Each semantic, preference or procedural record becomes a memory at the same
-> id whose wording is its `content`, carrying its `validity`, `placement`, `expires_at`,
-> `about_person` and `topics` unchanged.
+> id, carrying its `validity`, `placement`, `expires_at`, `about_person` and `topics`
+> unchanged.
+
+> **Normative.** The memory's wording is the record's `content`, followed, for a preference
+> record carrying a `context`, by ` (context: ` + its context + `)`, and, for a procedural
+> record carrying steps, by ` Steps: ` + its steps in order, each preceded by its number,
+> a full stop and a space, joined by `; `. A preference's `strength` is a number, which no
+> memory's wording carries (§10), and is kept on the legacy support alone.
 
 > **Normative.** The memory carries one legacy support pointing at the record's own id,
 > carrying the record whole as it was stored. Its origin is `legacy_outside` where
@@ -738,6 +753,7 @@ Superseded in part; every clause the middle column does not name stands:
 
 | Earlier decision | What retires | Why |
 | --- | --- | --- |
+| ADR-0005 | §1's union of four kinds, as to the semantic, preference and procedural kinds; §2's `Provenance` on every record and its profile and model as a query over `source` and `confidence`, as they apply to a memory; §3's store-temporarily outcome | Two kinds, a memory carrying supports instead of `Provenance`, and nothing stored tentatively (§2, §3, §10). The episode keeps its envelope, and §3's propose/dispose path stands |
 | ADR-0072 | §1's definition of the profile and the inferred model by `MemorySource` and confidence; §2's ruling that the three bands partition `MemorySource`, as it applies to a memory; §3 whole; §6's rule that a belief is rendered carrying its confidence | Bands are groups of standings (§6), and a memory carries no confidence (§10). §4's keyed-on-the-record rule, §5's relevance-only retrieval, §7 and §9 stand |
 | ADR-0073 | §4's per-belief list — its band, its confidence, its kind among four and its band-dependent answer to why it is held — except that list's floor that a citation is never rendered as evidence it cannot show; and §7's `Belief` carrying exactly §4's fields | §15 states what a projection carries. The floor stands, as §15:7 keeps it |
 | ADR-0077 | §6's presented confidence: the number falling with lost support, every surface stating the adjusted one, and a belief held at its effective floor | No confidence (§10). §6's lazy resolution, tombstone and held state stand (§15:7) |
@@ -749,6 +765,7 @@ Superseded in part; every clause the middle column does not name stands:
 | ADR-0109 | §1:1, §2:1, §4:1–§4:4, §5:1–§5:3, §6:1–§6:3, §8:1–§8:3, §9:1, §9:2 and §10:1–§10:4, each as it applies to a memory | As of is computed from supports (§7). §1:2, §2:2, §3:1, §3:2 and §7:1 stand, read on as of |
 | ADR-0159 | §4:1's arm (c), in its `STORE_TEMPORARY` below `min_confidence` | Nothing is stored tentatively (§10); arm (c) is `ACCEPT` |
 | ADR-0189 | §2:1, §2:5 and §2:6, as they reach the projection of a memory | §15 states what the projection carries. §1 stands: a projection carries the band it calls the standing, and §6's standing beside it (§15) |
+| ADR-0217 | §7:1–§7:8: the owner's write-time `guarded` flag on `FeedbackEvent`, its route and its honouring by the `FeedbackProcessor` | Both retire (§14). §7:9–§7:18's `guard` and `unguard` after the fact stand, outside §5's operations (§5:2) |
 | ADR-0321 | §5:3 | A confirmed memory carries a confirmation support and stands at "you confirmed this wording" (§13). §5:3's "how much weight a confirmed memory carries is the learning milestone's" is this decision |
 
 Read through §12 and not superseded:
@@ -760,7 +777,7 @@ Read through §12 and not superseded:
 | ADR-0306 §5:16, ADR-0308 §3:3 | Nothing: a memory's source is outside where it rests on outside content |
 | ADR-0100, ADR-0213 | Nothing: `about_person` and `topics` stay, with no producer (§3:6); their producer limbs bind nothing (§12:2) |
 | ADR-0300 §9:3, ADR-0285 §5:3 | Nothing: the schedule and the route stay (§14) |
-| ADR-0045, ADR-0074 §6, ADR-0217, ADR-0219, ADR-0072 §5 | Nothing: validity, the listing's default, placement, the revision and relevance-only search are kept as they stand |
+| ADR-0045, ADR-0074 §6, ADR-0217 (but §7:1–§7:8), ADR-0219, ADR-0072 §5 | Nothing: validity, the listing's default, placement, the revision and relevance-only search are kept as they stand |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
 > dated header note of each ADR this section's first two tables name, atomically with this
