@@ -1,6 +1,6 @@
 # 327. A hosted browser reaches its gateway through the sign-in edge, which signs every request it forwards, and that hop is the fifth egress boundary
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-18
 - Scope: a gateway serving the owner of a hub hosted on a box the operator runs, reached over HTTPS the box terminates itself, through our own sign-in service. Tracker: [#3138](https://github.com/leonapivato/ai-assistant/issues/3138), acceptance [#3133](https://github.com/leonapivato/ai-assistant/issues/3133), implementation [#3139](https://github.com/leonapivato/ai-assistant/issues/3139), containers [#3142](https://github.com/leonapivato/ai-assistant/issues/3142).
 - Dependency: ADR-0004, ADR-0168, ADR-0172, ADR-0174, ADR-0177, ADR-0182, ADR-0296 and ADR-0298, as their status lines leave them.
