@@ -79,7 +79,21 @@ flowchart LR
   hub listener is untouched, because the hub binds no remote listener at all.
 - **One hostname per person, one Access application each.** Every application's policy
   allows exactly one email address: that person's. The invite is adding the address;
-  removing it ends their access. The operator is in no family member's policy.
+  removing it ends their access.
+- **Sign-in is Google, with an emailed code as the backup** (owner, 2026-10-17). Someone
+  signed into Google on their phone signs in with one tap. Someone without Google gets a
+  one-time code by email. Either way, the account's own security is what protects the
+  door.
+- **A sign-in lasts a week** (owner, 2026-10-17). That is the Access application's
+  session length, set in Cloudflare. With Google, signing in again is one tap. A lost
+  phone stays signed in for at most a week, or until the operator removes the address.
+- **The operator is in no family member's policy.** Opening Mom's page would let the
+  operator approve or forget as her, an act carrying her authority, which #3131 never
+  lets the operator perform. The diagnostics on the box are the operator's view.
+- **The operator's own hub has a door too** (owner, 2026-10-17). It is one more
+  hostname, whose policy allows only the operator. As user zero, the operator signs in
+  the way family do, and meets the door's problems before they do. The operator's CLI
+  and devices keep the tailnet as now.
 - **Cloudflare decrypts the traffic in transit.** It terminates TLS, so it sees each
   page and each response in the clear. That is the named cost of buying the door. It
   fits the pilot's terms: plain storage, an operator who reads diagnostics, and the
@@ -106,6 +120,11 @@ pattern of ADR-0174 §4:1:
    The gateway checks this itself, on every request. It does not take `cloudflared`'s
    word, because any local process can reach a loopback port and set a header. Nobody
    can forge Cloudflare's signature.
+
+   **The token is a bearer credential.** Whoever holds it can mint sessions until it
+   expires, so it is Tier 0 like the session halves and the bootstrap value
+   (ADR-0168 §6:7). It is never written to a store, a file, a log record, an audit
+   record or an error.
 2. **It carries a live web session** (ADR-0168 §6), both halves.
 
 The token takes the bootstrap value's place. **On the hosted listener, a request with a
@@ -115,8 +134,18 @@ alone. The loopback listener keeps the bootstrap value exactly as now.
 Sessions stay as ADR-0168 §4 rules them: process memory, the same lifetimes, gone when
 the gateway restarts. Behind the token that stops mattering to the person. When a
 session ends, the page asks again, the gateway mints a new one from the token, and
-nobody types anything. A person signs in when their Access session runs out (with
-Google or an emailed code), not when the gateway restarts.
+nobody types anything. A person signs in when their Access session runs out, not when
+the gateway restarts.
+
+That keeps ADR-0172's exemption whole. Its conditions (ADR-0172 §6:1) are ADR-0168 §4's
+storage clauses and §6's admission records, and this proposal touches neither of them.
+
+**One clause of §4 does change.** ADR-0168 §4:6 refuses a mint beyond
+`gateway_max_sessions` "rather than evicting an existing session". Behind the token,
+every new tab and every restart mints a session. A person with a few devices would hit
+the cap and be locked out of their own page. On the hosted listener, every session
+belongs to the one owner, so a mint at the cap evicts that owner's oldest session
+instead. That supersedes §4:6 for the hosted listener alone.
 
 ### One browser device per hosted owner
 
@@ -140,6 +169,15 @@ time someone opens a new browser.
 - **Anything the hub's remote listener would carry.** A hosted gateway reaches its hub
   over the local socket alone.
 
+### Telegram and the web stay separate
+
+The web page shows the hub's own conversations. It does not show the Telegram chat,
+because ADR-0323 §2 rules that "The line shares no transcript with the hub chat". The
+assistant's memory connects the two: what someone tells it on Telegram shows up in
+what it believes on the web. The owner kept that as ratified for the pilot
+(2026-10-17). The note to family explains it in a sentence. Revisit if family find it
+confusing.
+
 ## Options considered
 
 - **Our own sign-in service now.** It builds more of the launch. Passkeys from an auth
@@ -160,8 +198,6 @@ time someone opens a new browser.
   can fetch them, a call that carries no user data, or they can be configured and
   refreshed by the operator. Either way, a gateway that cannot verify refuses rather
   than admits.
-- **How long an Access session lasts** before a person signs in again. That is set in
-  Cloudflare, per application: a week is easy on family, a day is tighter.
 - **Streams through the edge.** The delivery and change streams already send
   keep-alives (`interfaces/gateway/streams.py`, `KEEP_ALIVE_HEADER`). Their cadence has
   to stay under Cloudflare's idle timeout for a proxied response. The implementation
