@@ -2259,3 +2259,28 @@ def test_the_real_backup_command_reports_what_the_tool_said(
     else:
         with pytest.raises(_MODULE.DeployError):
             _MODULE._check_backup(plan, _target(plan), probed)
+
+
+@_NEEDS_SHELL
+def test_a_symlinked_passphrase_file_is_judged_by_what_it_names(tmp_path: Path) -> None:
+    # The link's own mode is 777; the file's is what guards the passphrase, and
+    # where the link points is what the containment test must see.
+    home, env, data = _home(tmp_path, unit="inactive")
+    plan = _plan(_repo(tmp_path))
+    kept = tmp_path / "keys" / "pass"
+    kept.parent.mkdir()
+    (home / ".assistant-backup-pass").replace(kept)
+    (home / ".assistant-backup-pass").symlink_to(kept)
+
+    out = _sh(plan.probe_backup(), env)[1]
+    assert "BACKUP_PASSPHRASE_MODE=600" in out
+    assert f"BACKUP_PASSPHRASE_PATH={kept}" in out
+
+    inside = data / "pass"
+    kept.replace(inside)
+    (home / ".assistant-backup-pass").unlink()
+    (home / ".assistant-backup-pass").symlink_to(inside)
+    (home / "venv" / "bin" / "ai-assistant-backup").write_text("#!/bin/sh\n")
+    (home / "venv" / "bin" / "ai-assistant-backup").chmod(0o755)
+    with pytest.raises(_MODULE.DeployError, match="is not outside"):
+        _MODULE.backup_target(plan, _sh(plan.probe_backup(), env))
