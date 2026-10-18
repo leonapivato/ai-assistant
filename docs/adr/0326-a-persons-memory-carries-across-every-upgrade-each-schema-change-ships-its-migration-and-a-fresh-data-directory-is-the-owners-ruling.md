@@ -1,6 +1,6 @@
 # 326. A person's memory carries across every upgrade: each schema change ships its migration, and a fresh data directory is the owner's ruling
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-18
 - Scope: every store a person's hub keeps under `Settings.data_dir`, every change to `main` that changes one, and every deploy to a person's hub. Tracker: [#3134](https://github.com/leonapivato/ai-assistant/issues/3134), acceptance [#3133](https://github.com/leonapivato/ai-assistant/issues/3133).
 - Dependency: ADR-0049, ADR-0123, ADR-0309 and ADR-0314, as their status lines leave them.
