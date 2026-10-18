@@ -1,6 +1,6 @@
 # 321. Authority at the deploy is your yes to a question that showed the call
 
-- Status: Partially superseded by ADR-0322 (§3:1's one pointer: one per question; §3:2, in the addition alone: questions are marked and labelled; §3:6, per question; §9's `ProposedActivationUnderstanding` and `ActivationUnderstanding` rows: the pointer becomes a sequence) and ADR-0323 (§3:3's second sentence, §4:4's *in one of your conversations* and §4:6's *through the hub chat*, each restated without naming a channel)
+- Status: Partially superseded by ADR-0322 (§3:1's one pointer: one per question; §3:2, in the addition alone: questions are marked and labelled; §3:6, per question; §9's `ProposedActivationUnderstanding` and `ActivationUnderstanding` rows: the pointer becomes a sequence) and ADR-0323 (§3:3's second sentence, §4:4's *in one of your conversations* and §4:6's *through the hub chat*, each restated without naming a channel) and ADR-0328 (§5:3)
 - Date: 2026-10-15
 - Scope: the authority milestone, M44 ([milestone #11](https://github.com/leonapivato/ai-assistant/milestone/11)), acceptance [#3058](https://github.com/leonapivato/ai-assistant/issues/3058), batch [#3059](https://github.com/leonapivato/ai-assistant/issues/3059): how the assistant asks about a call that needs you, how your answer becomes permission, and how the call is then checked and run. It is the smallest version the deploy waits for (ADR-0309 §6).
 - Dependency: the phases as ADR-0306 to ADR-0309 and ADR-0312 to ADR-0320 decide them, all Accepted and built on `main` at `2ff6298c`.
@@ -35,6 +35,7 @@
   four slots and every other clause stand. This replacement takes effect on ratification of
   ADR-0323. This reciprocal header record accompanies the numbered draft under ADR-0070 and
   ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-18 by ADR-0328 — §5:3: a confirmed memory carries a confirmation support and stands at "you confirmed this wording" (ADR-0328 §13). This replacement takes effect on ratification of ADR-0328. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

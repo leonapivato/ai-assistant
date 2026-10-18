@@ -1,6 +1,6 @@
 # 9. Learning: feedback capture that proposes memory updates
 
-- Status: Partially superseded by ADR-0122 (§1's first bullet, in its one clause requiring the caller to carry the target kind — `memory_kind` becomes optional and an absent value is resolved before the processor is called; that bullet's reason, its second bullet and §§2–6 stand)
+- Status: Superseded by ADR-0328; partially superseded before it by ADR-0122 (§1's first bullet, in its one clause requiring the caller to carry the target kind — `memory_kind` becomes optional and an absent value is resolved before the processor is called; that bullet's reason, its second bullet and §§2–6 stand)
 - Date: 2026-07-17
 - **Partially superseded: 2026-08-09 by
   [ADR-0122](0122-a-corrections-record-type-is-resolved-from-its-target.md), in the
@@ -20,6 +20,7 @@
   unchanged, and §6's `PROCEDURAL`/`EPISODIC` deferral bounds what the resolution
   may select. ADR-0122 §3 is the operative text; this note records the supersession
   and does not restate its terms.
+- Superseded: 2026-10-18 by ADR-0328 — `FeedbackEvent`, `FeedbackProcessor` and the first deterministic processor retire (ADR-0328 §14); every clause still in force governed them. This replacement takes effect on ratification of ADR-0328. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

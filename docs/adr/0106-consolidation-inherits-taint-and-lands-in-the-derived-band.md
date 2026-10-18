@@ -1,6 +1,6 @@
 # 106. Consolidation inherits taint, lands in the derived band, and is the seam that makes externality recoverable
 
-- Status: Partially superseded by ADR-0319 (§6:9 and §10:9–§10:11)
+- Status: Partially superseded by ADR-0319 (§6:9 and §10:9–§10:11) and ADR-0328 (§1:1, §2:1, §2:2, §3:1, §4:1, §4:2 and §7:1, each as it applies to a memory; §5:1, §6:8, §9:1, §9:2 and §10:5–§10:8; §10:1 and §10:4 as they apply to a memory)
 - Date: 2026-08-05
 - **Note (2026-08-23): §12's third deferral is answered by ADR-0181, and no clause
   of this ADR changes.** That bullet — "Whether a tainted belief may parameterise an
@@ -182,6 +182,7 @@
   #301. **ADR-0070 §1's no-rewrite rule now protects this text**, so any later
   correction to any of it is an appended dated note.
 - Partially superseded: 2026-10-14 by ADR-0319 — §6:9 and §10:9–§10:11. They governed the deferred-question queue in `memory/deferral_store.py` and the answer path. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-18 by ADR-0328 — §1:1, §2:1, §2:2, §3:1, §4:1, §4:2 and §7:1, each as it applies to a memory; §5:1, §6:8, §9:1, §9:2 and §10:5–§10:8; §10:1 and §10:4 as they apply to a memory: outside origins on supports replace the marker on a memory, and consolidation retires (ADR-0328 §4, §7, §14); §1:2 and §6:1–§6:7 stand, read through ADR-0328 §12. This replacement takes effect on ratification of ADR-0328. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -1,8 +1,9 @@
 # 189. A projection carries the origin of what it shows, and the named source is one configured source rather than a reader
 
-- Status: Partially superseded by ADR-0319 (§2:2–§2:4, §3:1–§3:2, §4:4–§4:6, §9:5, §9:7 and §9:9)
+- Status: Partially superseded by ADR-0319 (§2:2–§2:4, §3:1–§3:2, §4:4–§4:6, §9:5, §9:7 and §9:9) and ADR-0328 (§2:1, §2:5 and §2:6, as they reach the projection of a memory)
 - Date: 2026-08-24
 - Partially superseded: 2026-10-14 by ADR-0319 — §2:2–§2:4, §3:1–§3:2, §4:4–§4:6, §9:5, §9:7 and §9:9. They governed the `Question`, `Retirement` and `Warrant` projections and their renderers. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-18 by ADR-0328 — §2:1, §2:5 and §2:6, as they reach the projection of a memory: ADR-0328 §15 states what a projection of a memory carries; §1 stands. This replacement takes effect on ratification of ADR-0328. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
