@@ -271,21 +271,21 @@
   and the ratified body below are preserved.
 - Partially superseded: 2026-10-18 by ADR-0327 — eight clauses, one listener. ADR-0327
   adds a **hosted listener**, which the sign-in edge reaches from the box's own
-  loopback alone, behind a tunnel. On that listener only: §2:1's loopback-only bind
-  admits a private-use address for a gateway in a network namespace of its own whose
-  port is published to the host's loopback alone; §2:2's one-device clause gives way
-  to the fifth egress boundary; §3:1's second pre-session exception is the exchange of
-  a signed assertion rather than the bootstrap exchange, and both exceptions are
-  served only on a valid assertion; §4:1's sole admitter becomes two facts, the
-  assertion and a live session; §4:6's refusal at the ceiling becomes eviction of the
-  oldest session minted through that listener; §5:3's only mint is that exchange;
-  §6:9's list of conditions a recorded refusal is decided on gains the assertion's,
-  with no new fact a record may carry; and §7:1's `Host` check compares against the
-  configured public name (ADR-0327 §§5, 7, 8). The loopback listener, §4's storage
-  clauses and every other clause stand. This replacement takes effect on ratification
-  of ADR-0327. This reciprocal header record accompanies the numbered draft under
-  ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
-  preserved.
+  loopback alone, behind HTTPS the box terminates. On that listener only: §2:1's
+  loopback-only bind admits a private-use address for a gateway in a network namespace
+  of its own whose port is published to the host's loopback alone; §2:2's one-device
+  clause gives way to the fifth egress boundary; §3:1's second pre-session exception
+  is the exchange of a signed assertion rather than the bootstrap exchange, and both
+  exceptions are served only on a valid assertion; §4:1's sole admitter becomes two
+  facts, the assertion and a live session; §4:6's refusal at the ceiling becomes
+  eviction of the oldest session minted through that listener; §5:3's only mint is
+  that exchange; §6:9's list of conditions a recorded refusal is decided on gains the
+  assertion's, with no new fact a record may carry; and §7:1's `Host` check compares
+  against the configured public name (ADR-0327 §§5, 7, 8). The loopback listener, §4's
+  storage clauses and every other clause stand. This replacement takes effect on
+  ratification of ADR-0327. This reciprocal header record accompanies the numbered
+  draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below
+  are preserved.
 
 ## Context
 
