@@ -4,7 +4,7 @@
 - Date: 2026-10-18
 - Scope: a gateway serving the owner of a hub hosted on a box the operator runs, reached over HTTPS the box terminates itself, through our own sign-in service. Tracker: [#3138](https://github.com/leonapivato/ai-assistant/issues/3138), acceptance [#3133](https://github.com/leonapivato/ai-assistant/issues/3133), implementation [#3139](https://github.com/leonapivato/ai-assistant/issues/3139), containers [#3142](https://github.com/leonapivato/ai-assistant/issues/3142).
 - Dependency: ADR-0004, ADR-0168, ADR-0172, ADR-0174, ADR-0177, ADR-0182, ADR-0296 and ADR-0298, as their status lines leave them.
-- Authorization: the owner accepted the web-door proposal ([#3132](https://github.com/leonapivato/ai-assistant/pull/3132)) with three changes in the ruling of 2026-10-18 on #879 ([the ruling](https://github.com/leonapivato/ai-assistant/issues/879#issuecomment-6252766646)): the token's issuer is our own sign-in service; the privacy property of the browser boundary that this one gives up is named; and the page's bootstrap form becomes an automatic exchange. A second ruling the same day ([on #3138](https://github.com/leonapivato/ai-assistant/issues/3138#issuecomment-6254607509)) put no third party's network in the path: the door is our own HTTPS, terminated on the box, with one port open for it. So §4 states the property as kept, and names exactly where it differs. The dispatcher assigned 0327 for Hosted setup B1. This decision is that proposal, converted and revised by the second ruling.
+- Authorization: the owner accepted the web-door proposal ([#3132](https://github.com/leonapivato/ai-assistant/pull/3132)) with three changes in the ruling of 2026-10-18 on #879 ([the ruling](https://github.com/leonapivato/ai-assistant/issues/879#issuecomment-6252766646)): the token's issuer is our own sign-in service; the privacy property the boundary then gave up, behind a third party's tunnel, is named; and the page's bootstrap form becomes an automatic exchange. A second ruling the same day ([on #3138](https://github.com/leonapivato/ai-assistant/issues/3138#issuecomment-6254607509)) put no third party's network in the path: the door is our own HTTPS, terminated on the box, with one port open for it. So §4 states the property as kept, and names exactly where it differs. The dispatcher assigned 0327 for Hosted setup B1. This decision is that proposal, converted and revised by the second ruling.
 - **Not a contract-surface decision.** It changes no `core/protocols.py` or `core/types.py` surface and no wire member. It adds `Settings` fields (§5, §6), a listener and its admission rule, and supersedes clauses of six ADRs in part (§15).
 
 ## Context
@@ -142,7 +142,8 @@ We will give a gateway a third browser listener, the **hosted listener**. The si
 reaches it from the box's own loopback. It admits a request on two facts: the edge's signed
 assertion that this hub's owner is signed in, and a live web session. It mints that session from
 the assertion with nothing typed. All of the owner's browsers are one browser device. The hop is
-the fifth egress boundary, and it gives up end-to-end encryption, which we name.
+the fifth egress boundary. It keeps end-to-end encryption between the browser's device and the
+box, which alone terminates TLS, and §4 names where that differs from the fourth boundary's.
 
 ### 1. Status and delivery
 
