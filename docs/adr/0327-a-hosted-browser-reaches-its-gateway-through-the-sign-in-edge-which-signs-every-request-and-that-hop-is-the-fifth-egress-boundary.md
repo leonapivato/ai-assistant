@@ -361,9 +361,18 @@ request is the edge's to add later without any change here.
 > hold: it carries a valid assertion, and it carries a live web session under ADR-0168 §4 and
 > §6. Neither fact admits a request on its own.
 
-> **Normative.** A request refused on the hosted listener is refused with a refusal carrying no
-> assistant content, no fact about the hub's state, no fact about whether the hub is reachable,
-> and nothing about which check failed, exactly as ADR-0168 §3:2 requires.
+> **Normative.** A request refused on the hosted listener on its assertion (§6), its `Host`
+> (§7:2) or its `Origin` (§7:3) is refused with one refusal, the same whichever of those checks
+> it failed. It carries no assistant content, no fact about the hub's state, no fact about
+> whether the hub is reachable, nothing about whether a session exists, and nothing about which
+> of those checks failed.
+
+> **Normative.** A request that passes those checks and is refused on its session is refused
+> exactly as ADR-0168 §3:2 and §6:4 rule, and this decision supersedes neither: a request with
+> no live session is refused as an absent session, and one whose header half verifies against a
+> live session while its cookie half does not, or that carries more than one cookie of the
+> gateway's own name, is refused with ADR-0168 §6:4's distinct fault. Neither is §7:6's refusal,
+> so the page tells the three apart (§11:2, §11:5, §11:6).
 
 > **Normative.** The gateway records a refusal on any of §6's conditions as an admission
 > decision, under ADR-0168 §6's record clause, beside the conditions of ADR-0168 §3 to §7 it
@@ -503,6 +512,11 @@ name "the web" rather than a machine. That is acceptable for the pilot.
 > **Normative.** On the hosted listener a refusal that ADR-0168 §6:4 reports as its own fault is
 > shown as that fault, and the page makes no exchange for it.
 
+> **Normative.** On the hosted listener a refusal of §7:6 is shown as the door refusing the
+> request, with the statement that signing in again happens at the sign-in page, and the page
+> makes no exchange for it. An exchange is checked first by the same checks (§7:1), so the next
+> attempt is the owner's to make.
+
 > **Normative.** The hosted page states, without requiring an interaction to reveal it, that it
 > stays signed in for as long as the person's sign-in lasts, and that signing in again happens
 > at the sign-in page.
@@ -606,7 +620,9 @@ or the page it serves:**
   request of its own motion, only as it reaches §11's exchange. The rest of §7:5 binds (§11).
 - **ADR-0296 §1:1**, a browser device admitted by its overlay identity. **§1:3**, registration
   by listing a machine. **§1:7**, a device is the machine. **§5:4**, admission by the overlay
-  identity or loopback (§10, §7).
+  identity or loopback (§10, §7). ADR-0298 records §1:3 as the owner's ruling. The owner's
+  acceptance of one browser device per hosted owner, in the review of the proposal this decision
+  converts, is the authority for superseding it here, and only here.
 - **ADR-0298 §2:9**'s list of the ids a peer writing a message names, which gains the hosted
   browser device's configured name (§10).
 
@@ -622,7 +638,7 @@ or the page it serves:**
 - **ADR-0172.** Its class stays closed at three (§9:3), its exemptions keep their condition for
   the session halves (§9:9), and the assertion's exemption is this decision's own, argued here,
   as ADR-0172 §3:8 requires of a further Tier 0 access `permissions/` cannot gate.
-- **ADR-0182 §1:10** binds the hosted listener whole (§8:4, §7:4, §7:9). **§5:5** binds unchanged
+- **ADR-0182 §1:10** binds the hosted listener whole (§8:4, §7:4, §7:10). **§5:5** binds unchanged
   (§12:4).
 - **ADR-0168 §6:13**'s rule that a mint record is not rate-bounded binds the hosted listener. Only
   a request the edge signed for the owner can drive a mint, and §11:2–§11:3 bound how often the
