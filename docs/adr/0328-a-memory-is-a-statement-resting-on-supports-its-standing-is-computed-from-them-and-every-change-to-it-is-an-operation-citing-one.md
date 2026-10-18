@@ -274,8 +274,10 @@ The origin each part takes, the standing it ranks at, and whether it is outside 
 
 > **Normative.** A confirmation support is `for` a memory whose wording agrees, under
 > ADR-0121 §1's predicate, with the statement the approved part showed, and only there does
-> it back the memory as worded. It is `against` a memory the part showed that statement
-> replacing (ADR-0321 §5:5). It is added to no other memory.
+> it back the memory as worded. It is `against` a memory that the ingest adding it retires
+> (§11:7), and which memories that ingest may retire stays the write path's law: an
+> assertion only where the question showed it replaced (ADR-0078 §5, ADR-0321 §5:5), and
+> the rest as ADR-0079 §3 and ADR-0171 §2 decide. It is added to no other memory.
 
 > **Normative.** A support other than a legacy one points at an episode the store holds when
 > the support is added. A support that does not is refused, and nothing is written.
