@@ -92,17 +92,16 @@ becomes binding only when an ADR ratifies the slice that implements it.
    right for that world; "not buildable today" is a scoping answer, not a design
    objection. The counterweight is honesty about evidence — say when a
    discussion has outrun its data rather than deciding on it anyway.
-6. **The dedicated box is an operating act, not a milestone** (#879). The hub
-   will eventually run on an always-on machine of its own. A **VPS is ruled
-   out**: a host that roots the store is the maximal ADR-0017 §1 decision, and
-   it sits against the trust thesis rather than merely costing something. No
-   track hard-depends on the box — the remote path is testable as two processes
-   on one machine, so the box buys duty cycle (always-on accumulation, overnight
-   proactivity), not capability. The migration is a data-directory copy under
-   ADR-0083's layout, and it has one hard constraint: **it must not land
-   mid-#829-window**, because the consolidation arming is a one-shot natural
-   experiment a migration inside the window would confound. #879 tracks it until
-   the hub runs supervised on that machine with the store carried over.
+6. **A hub runs on a box the owner operates** (#879). A rented box is the
+   standing arrangement, for the owner's own hub and for other people's: each
+   person has a hub of their own, hosted on a box the owner operates, on the
+   terms #879 sets. A box at home stays possible later. #879 holds the ruling and
+   its reading of ADR-0155 §1:1 for a hosted hub; a clause that reading does not
+   answer is raised there rather than built against. Moving a hub between boxes
+   is a data-directory copy under ADR-0083's layout, and it has one hard
+   constraint: **it must not land mid-#829-window**, because the consolidation
+   arming is a one-shot natural experiment a migration inside the window would
+   confound.
 7. **Ambient capture walks into a ratified pair, and pays for it first.** The
    historical voice discussion is on #1318; any new ambient-capture scope must
    be selected explicitly in a native GitHub milestone. The design is not what is
