@@ -368,9 +368,13 @@ def _provenance(moment: Moment, source: MemorySource = MemorySource.OBSERVED) ->
     )
 
 
+#: The channel the activation episode was on, so its channel number is read back.
+_CHANNEL: Final = ChannelIdentity(channel_type="conversation", instance_id="upgrade-chat")
+
+
 def _activation_episode(moment: Moment) -> EpisodicMemory:
     """An ended activation's episode, with its processing record (ADR-0275)."""
-    channel = ChannelIdentity(channel_type="conversation", instance_id="upgrade-chat")
+    channel = _CHANNEL
     ended = moment.ago(minutes=20)
     return EpisodicMemory(
         id="mem-episode-activation",
@@ -437,12 +441,13 @@ async def _write_memory(directory: Path, moment: Moment) -> None:
 
 
 async def _read_memory(directory: Path) -> Records:
-    """Every record, the walk's resumption, and whether each record's vector finds it.
+    """Every record, the walk's resumption, and the nearest record to each one's content.
 
     The records alone would miss an upgrade that kept every row and lost the vector
-    index ``search`` reads, so each record is searched for by its own content: the
-    hashing embedder maps that text onto the record's own vector, so a record whose
-    vector survived finds itself.
+    index ``search`` reads, or attached its vectors to the wrong rows. So each record is
+    searched for by its own content, and the nearest hit is read back: the hashing
+    embedder maps that text onto the record's own vector, so where the vectors are
+    whole and in place, every record is its own nearest.
     """
     traces = _traces(directory)
     store = _memory(directory, traces)
@@ -451,10 +456,11 @@ async def _read_memory(directory: Path) -> Records:
         records = _keyed("record", exported, _field("id"))
         rest = await store.walk_records(_WALK, limit=_PAGE)
         records["walk"] = [record.id for record in rest.records]
+        records["channel"] = to_json(await store.channel_episode_ids(_CHANNEL, limit=_PAGE))
         for record in exported:
             if record.content:
-                found = await store.search(record.content, limit=len(exported))
-                records[f"found/{record.id}"] = record.id in {hit.id for hit in found.records}
+                found = await store.search(record.content, limit=1)
+                records[f"nearest/{record.id}"] = [hit.id for hit in found.records]
         return records
     finally:
         store.close()
@@ -735,6 +741,10 @@ async def _read_conversations(directory: Path) -> Records:
         # A conversation stamped deleted is absent from the export and held until its
         # grace runs out; that it is still held is what this reads.
         records["stamped"] = to_json(await store.stamped_conversation_ids())
+        records["changes"] = to_json(await store.changes(after=0, limit=_PAGE))
+        records["changes/phone"] = to_json(
+            await store.device_changes("phone", after=0, limit=_PAGE)
+        )
         return records
     finally:
         store.close()
@@ -1091,6 +1101,7 @@ async def _read_devices(directory: Path) -> Records:
         records.update(_keyed("enrolment", enrolments, _field("enrolment_id")))
         records.update(_keyed("device", devices, _field("device_id")))
         records.update(_keyed("registration", registrations, _field("registration_id")))
+        records["verifiers"] = to_json(store.live_verifiers())
         return records
     finally:
         store.close()
