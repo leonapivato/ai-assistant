@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -220,8 +221,7 @@ def test_no_box_specific_value_is_hardcoded(tmp_path: Path) -> None:
         "/opt/bin/uv pip install",
         "/var/lib/DEPLOYED",
         "custom-9.9.whl",
-        ". /etc/hub/env",
-        "/opt/env/bin/ai-assistant-backup /srv/backups/pre-deploy-",
+        "' /etc/hub/env /opt/env/bin/ai-assistant-backup /srv/backups/pre-deploy-",
         "--passphrase-file /etc/hub/backup-pass",
     ):
         assert expected in plan, expected
@@ -1134,28 +1134,29 @@ def _assert_every_install_is_no_deps(text: str) -> None:
 _DATA_DIR = "/home/assistant/data-m44"
 
 
-def _healthy_probe(**overrides: str) -> str:
+def _healthy_probe(**overrides: object) -> str:
     """The backup preflight's answers from a box that can take the backup.
 
     Args:
-        **overrides: Labels to answer differently, by name without the ``=``.
+        **overrides: Report fields to answer differently; ``HUB_STATE`` is the
+            unit's state, on its own line.
 
     Returns:
-        The labelled lines, as the probe prints them.
+        The probe's output, as :meth:`Plan.probe_backup` prints it.
     """
-    answers = {
-        "BACKUP_ENV": "present",
-        "BACKUP_DATA_DIR": _DATA_DIR,
-        "BACKUP_TOOL": "present",
-        "BACKUP_PASSPHRASE": "present",
-        "BACKUP_PASSPHRASE_MODE": "600",
-        "BACKUP_PASSPHRASE_PATH": "/home/assistant/.assistant-backup-pass",
-        "BACKUP_DIR_PATH": "/home/assistant/backups",
-        "HUB_STATE": "active",
-        "HUB_LOCK": "held",
+    hub = overrides.pop("HUB_STATE", "active")
+    report: dict[str, object] = {
+        "env": "present",
+        "data_dir": _DATA_DIR,
+        "tool": True,
+        "passphrase": "present",
+        "passphrase_mode": 0o600,
+        "passphrase_path": "/home/assistant/.assistant-backup-pass",
+        "backup_dir": "/home/assistant/backups",
+        "lock": "held",
         **overrides,
     }
-    return "".join(f"{label}={value}\n" for label, value in answers.items())
+    return f"BACKUP_PROBE={json.dumps(report)}\nHUB_STATE={hub}\n"
 
 
 class _FakeBox:
@@ -1208,7 +1209,7 @@ class _FakeBox:
     def probe(self, argv: list[str]) -> tuple[int, str, str]:
         self.issued.append(" ".join(argv))
         text = self.issued[-1]
-        if "BACKUP_ENV=" in text:
+        if "BACKUP_PROBE=" in text:
             return 0, f"Welcome\n{self.backup_probe}", ""
         if "BACKUP_BEGIN_" in text:
             token = self.plan.token
@@ -1696,8 +1697,8 @@ def test_the_backup_is_the_earlier_builds_tool_reading_a_passphrase_file(tmp_pat
         "the venv's own tool, before the install replaces it"
     )
     assert "--passphrase-file ~/.assistant-backup-pass </dev/null 2>&1" in plan
-    # The hub's environment, so the tool copies the directory the hub serves.
-    assert "set -a && . ~/hub.env && set +a && echo BACKUP_BEGIN_" in plan
+    # Through the env-file loader, so the tool copies the directory the hub serves.
+    assert "' ~/hub.env ~/venv/bin/ai-assistant-backup ~/backups/pre-deploy-" in plan
     # Never a passphrase this script mints, shows or reads.
     assert "generate-passphrase" not in plan
     assert "cat ~/.assistant-backup-pass" not in plan
@@ -1706,13 +1707,12 @@ def test_the_backup_is_the_earlier_builds_tool_reading_a_passphrase_file(tmp_pat
 def test_the_backup_names_no_store_and_no_exclusion(tmp_path: Path) -> None:
     # ADR-0326 §6:4: the exclusions are exactly the tool's own. The script passes
     # the tool a destination and a passphrase file, and nothing else.
-    plan = _dry_run(_repo(tmp_path))
-    backup = next(line for line in plan.splitlines() if "ai-assistant-backup ~/" in line)
-    words = shlex.split(shlex.split(backup.strip())[-1])
+    words = shlex.split(_inner(_plan(_repo(tmp_path)).back_up()))
     tool = words.index("~/venv/bin/ai-assistant-backup")
 
     assert words[tool + 2 : tool + 4] == ["--passphrase-file", "~/.assistant-backup-pass"]
     assert words[tool + 4] == "</dev/null"
+    assert words[words.index("-c") + 1] == _MODULE._RUN_BACKUP
     for word in ("--exclude", "trace", "diagnostics", ".db"):
         assert not any(word in w for w in words), word
 
@@ -1756,7 +1756,7 @@ def test_each_run_writes_a_new_artifact_under_the_backup_dir(
 
 # --- The preflight: refused while the hub still serves ---------------------- #
 
-_NO_PASSPHRASE_FILE = dict.fromkeys(["BACKUP_PASSPHRASE"], "absent")
+_NO_PASSPHRASE_FILE = dict.fromkeys(["passphrase"], "absent")
 
 
 def test_a_healthy_box_names_the_directory_and_the_artifact(tmp_path: Path) -> None:
@@ -1772,24 +1772,28 @@ def test_a_healthy_box_names_the_directory_and_the_artifact(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"BACKUP_ENV": "absent"}, "environment file ~/hub.env is not there"),
-        ({"BACKUP_DATA_DIR": ""}, "could not name its data directory"),
-        ({"BACKUP_TOOL": "absent"}, "has no ai-assistant-backup"),
-        ({"BACKUP_PASSPHRASE": "absent"}, "passphrase file ~/.assistant-backup-pass is absent"),
-        ({"BACKUP_PASSPHRASE": "empty"}, "is empty on the box"),
-        ({"BACKUP_PASSPHRASE": "unreadable"}, "is unreadable on the box"),
-        ({"BACKUP_PASSPHRASE_MODE": "644"}, "has mode 644"),
-        ({"BACKUP_PASSPHRASE_MODE": "640"}, "has mode 640"),
-        ({"BACKUP_PASSPHRASE_MODE": ""}, "has mode unknown"),
-        ({"BACKUP_PASSPHRASE_PATH": f"{_DATA_DIR}/pass"}, "is not outside"),
-        ({"BACKUP_DIR_PATH": f"{_DATA_DIR}/backups"}, "is not\noutside the data directory"),
-        ({"BACKUP_DIR_PATH": _DATA_DIR}, "is not\noutside the data directory"),
-        ({"HUB_LOCK": "free"}, "the instance lock of /home/assistant/data-m44 is free"),
-        ({"HUB_LOCK": "absent"}, "does not name the directory the hub"),
+        ({"env": "absent"}, "environment file ~/hub.env is absent"),
+        ({"env": "unreadable"}, "environment file ~/hub.env is unreadable"),
+        ({"env": "unsupported", "env_line": 7}, "line 7 of the hub's environment file"),
+        ({"data_dir": None, "settings_error": "ValidationError data_dir"}, "ValidationError"),
+        ({"tool": False}, "has no ai-assistant-backup"),
+        ({"passphrase": "absent"}, "passphrase file ~/.assistant-backup-pass is absent"),
+        ({"passphrase": "empty"}, "is empty on the box"),
+        ({"passphrase": "unreadable"}, "is unreadable on the box"),
+        ({"passphrase": "not-a-file"}, "is not-a-file on the box"),
+        ({"passphrase_mode": 0o644}, "has mode 644"),
+        ({"passphrase_mode": 0o620}, "has mode 620"),
+        ({"passphrase_mode": None}, "has mode unknown"),
+        ({"passphrase_path": f"{_DATA_DIR}/pass"}, "is not outside"),
+        ({"backup_dir": f"{_DATA_DIR}/backups"}, "is not\noutside the data directory"),
+        ({"backup_dir": _DATA_DIR}, "is not\noutside the data directory"),
+        ({"lock": "free"}, "the instance lock of /home/assistant/data-m44 is free"),
+        ({"lock": "absent"}, "does not name the directory the hub"),
+        ({"lock": "unopenable PermissionError"}, "is unopenable PermissionError"),
     ],
 )
 def test_a_box_that_cannot_take_the_backup_is_refused_before_anything_stops(
-    tmp_path: Path, overrides: dict[str, str], message: str
+    tmp_path: Path, overrides: dict[str, object], message: str
 ) -> None:
     plan = _plan(_repo(tmp_path))
 
@@ -1809,39 +1813,42 @@ def test_an_absent_passphrase_file_names_the_operators_step(tmp_path: Path) -> N
     assert "OFF the box" in str(refused.value)
 
 
-def test_a_directory_beside_the_data_dirs_name_is_not_inside_it(tmp_path: Path) -> None:
-    # A prefix of the string is not containment: data-m44-backups is outside.
+@pytest.mark.parametrize("suffix", ["-backups", " archive", "  archive/pass"])
+def test_a_path_beside_the_data_dirs_name_is_not_inside_it(tmp_path: Path, suffix: str) -> None:
+    # A prefix of the string is not containment, and spaces survive the trip.
     plan = _plan(_repo(tmp_path))
 
-    target = _MODULE.backup_target(
-        plan, (0, _healthy_probe(BACKUP_DIR_PATH=f"{_DATA_DIR}-backups"), "")
-    )
+    target = _MODULE.backup_target(plan, (0, _healthy_probe(backup_dir=f"{_DATA_DIR}{suffix}"), ""))
 
     assert target.data_dir == _DATA_DIR
 
 
-def test_an_unanswered_preflight_is_not_reported_as_a_box_fact(tmp_path: Path) -> None:
+def test_a_data_dir_with_runs_of_spaces_still_contains_its_own_files(tmp_path: Path) -> None:
+    plan = _plan(_repo(tmp_path))
+    spaced = "/home/assistant/data  archive"
+
+    with pytest.raises(_MODULE.DeployError, match="is not outside"):
+        _MODULE.backup_target(
+            plan,
+            (0, _healthy_probe(data_dir=spaced, passphrase_path=f"{spaced}/pass"), ""),
+        )
+
+
+@pytest.mark.parametrize("out", ["", "Welcome\n", "BACKUP_PROBE=not json\n", "BACKUP_PROBE=[1]\n"])
+def test_an_unanswered_preflight_is_not_reported_as_a_box_fact(tmp_path: Path, out: str) -> None:
     with pytest.raises(_MODULE.DeployError, match="could not ask the box about the backup"):
-        _MODULE.backup_target(_plan(_repo(tmp_path)), (255, "", "ssh: connect: refused"))
+        _MODULE.backup_target(_plan(_repo(tmp_path)), (255, out, "ssh: connect: refused"))
 
 
-@pytest.mark.parametrize(
-    ("overrides", "warning"),
-    [
-        ({"HUB_STATE": "inactive", "HUB_LOCK": "free"}, "the unit is inactive"),
-        ({"HUB_LOCK": "unknown"}, "flock is not on the box"),
-    ],
-)
-def test_a_hub_that_cannot_be_asked_is_backed_up_as_named_and_said_so(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    overrides: dict[str, str],
-    warning: str,
+def test_a_stopped_hub_is_backed_up_as_named_and_said_so(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    target = _MODULE.backup_target(_plan(_repo(tmp_path)), (0, _healthy_probe(**overrides), ""))
+    probe = _healthy_probe(HUB_STATE="inactive", lock="free")
+
+    target = _MODULE.backup_target(_plan(_repo(tmp_path)), (0, probe, ""))
 
     assert target.data_dir == _DATA_DIR
-    assert warning in capsys.readouterr().err
+    assert "the unit is inactive" in capsys.readouterr().err
 
 
 def test_a_first_deploy_takes_no_backup(tmp_path: Path) -> None:
@@ -1859,6 +1866,65 @@ def test_an_empty_venv_under_a_marker_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(_MODULE.DeployError, match="holds no build, but the marker shows"):
         _MODULE._rule_on_backup(plan, "commit=abc1234\n", "(not installed)\n", lambda r: [r])
+
+
+# --- How the box reads the hub's environment file -------------------------- #
+
+
+def _loader() -> Any:
+    """The env-file loader the box runs, executed here as the box would."""
+    namespace: dict[str, Any] = {}
+    exec(_MODULE._ENV_LOADER, namespace)  # noqa: S102  # the script's own constant
+    return namespace
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("ASSISTANT_DATA_DIR=/home/assistant/data-m44\n", "/home/assistant/data-m44"),
+        ("  ASSISTANT_DATA_DIR=/srv/x  \n", "/srv/x"),
+        ("ASSISTANT_DATA_DIR='/srv/hub data'\n", "/srv/hub data"),
+        ('ASSISTANT_DATA_DIR="/srv/hub data"\n', "/srv/hub data"),
+        # Single quotes are literal to systemd and to a shell alike.
+        ("ASSISTANT_DATA_DIR='/srv/$HOME'\n", "/srv/$HOME"),
+        ("ASSISTANT_DATA_DIR=\n", ""),
+        ("# a comment\n; another\n\nASSISTANT_DATA_DIR=/srv/y\r\n", "/srv/y"),
+        ("ASSISTANT_WEB_SEARCH_ORIGIN=https://api.example\nASSISTANT_DATA_DIR=/a\n", "/a"),
+    ],
+)
+def test_the_loader_reads_what_systemd_and_a_shell_read_alike(
+    tmp_path: Path, text: str, expected: str
+) -> None:
+    env = tmp_path / "hub.env"
+    env.write_text(text)
+
+    assert _loader()["load_env"](str(env))["ASSISTANT_DATA_DIR"] == expected
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # Whitespace, `$`, backslashes and backticks are where systemd and a
+        # shell part ways; each is refused rather than read one way or the other.
+        "ASSISTANT_DATA_DIR=/srv/hub data",
+        "ASSISTANT_DATA_DIR=/srv/$USER",
+        'ASSISTANT_DATA_DIR="/srv/${USER}"',
+        'ASSISTANT_DATA_DIR="/srv/a\\b"',
+        "ASSISTANT_DATA_DIR=/srv/`id`",
+        "export ASSISTANT_DATA_DIR=/srv/x",
+        "ASSISTANT_DATA_DIR='/srv/x",
+        "ASSISTANT_DATA_DIR=/srv/x # note",
+    ],
+)
+def test_the_loader_refuses_by_line_number_never_by_content(tmp_path: Path, line: str) -> None:
+    env = tmp_path / "hub.env"
+    env.write_text(f"ASSISTANT_KEY=sk-secret\n{line}\n")
+    loader = _loader()
+
+    with pytest.raises(loader["Unsupported"]) as refused:
+        loader["load_env"](str(env))
+
+    assert refused.value.args == (2,)
 
 
 # --- The tool's report ------------------------------------------------------ #
@@ -1960,7 +2026,7 @@ def test_a_routine_deploy_stops_backs_up_then_installs(
 
     stop = _index(box, "systemctl --user stop")
     backup = _index(box, "BACKUP_BEGIN_")
-    assert _index(box, "BACKUP_ENV=") < _index(box, "uv build") < stop < backup
+    assert _index(box, "BACKUP_PROBE=") < _index(box, "uv build") < stop < backup
     assert backup < _index(box, "pip install") < _index(box, "commit=")
     # The artifact is reported, and nothing deletes it.
     out = capsys.readouterr().out
@@ -2106,17 +2172,18 @@ def test_a_first_deploy_neither_stops_nor_backs_up(
 ) -> None:
     box = _deploy_against(_repo(tmp_path), monkeypatch, marker="", version="(not installed)")
 
-    for step in ("BACKUP_ENV=", "systemctl --user stop", "BACKUP_BEGIN_"):
+    for step in ("BACKUP_PROBE=", "systemctl --user stop", "BACKUP_BEGIN_"):
         assert not any(step in c for c in box.issued), step
     assert "backup: none — a first deploy" in capsys.readouterr().out
 
 
 # --- The remote commands, through a real shell ------------------------------ #
 #
-# The two commands above are shell text, and a fake box only answers what they
-# say. These run their inner commands under `sh` (dash, where it is installed),
-# with HOME pointing at a scratch home that holds a fake venv, a fake systemctl,
-# and a real lock file a real flock can contend for.
+# The two commands above are shell and Python text, and a fake box only answers
+# what they say. These run their inner commands under `sh` (dash, where it is
+# installed), with HOME pointing at a scratch home whose venv's python is this
+# interpreter — so the probe's `load_settings()` is the package's own — and with
+# a fake systemctl and a real lock file a real flock can contend for.
 
 
 def _inner(command: str) -> str:
@@ -2127,29 +2194,30 @@ def _inner(command: str) -> str:
 
 
 def _home(tmp_path: Path, *, unit: str = "active") -> tuple[Path, dict[str, str], Path]:
-    """A service user's home with a fake venv, hub.env and passphrase file.
+    """A service user's home with a venv, hub.env, a lock and a passphrase file.
 
     Returns:
         The home, the environment to run in, and the data directory.
     """
     home = tmp_path / "home"
-    data = home / "data-m44"
+    data = home / "data  m44"
     bin_dir = home / "venv" / "bin"
     shims = tmp_path / "shims"
     for directory in (data, bin_dir, shims):
         directory.mkdir(parents=True)
-    # The earlier build's settings: it reads ASSISTANT_DATA_DIR, so the answer
-    # proves hub.env was sourced and exported.
     python = bin_dir / "python"
-    python.write_text('#!/bin/sh\nprintf "%s\\n" "$ASSISTANT_DATA_DIR"\n')
+    python.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
     (shims / "systemctl").write_text(f"#!/bin/sh\necho {unit}\n[ {unit} = active ]\n")
     for script in (python, shims / "systemctl"):
         script.chmod(0o755)
-    (home / "hub.env").write_text(f"ASSISTANT_DATA_DIR={data}\n")
+    (home / "hub.env").write_text(f"# the hub\nASSISTANT_DATA_DIR='{data}'\n")
     passphrase = home / ".assistant-backup-pass"
     passphrase.write_text("correct horse battery staple\n")
     passphrase.chmod(0o600)
     (data / "hub.lock").write_text("4242\n")
+    tool = bin_dir / "ai-assistant-backup"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
     env = {"HOME": str(home), "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}"}
     return home, env, data
 
@@ -2162,24 +2230,26 @@ def _sh(command: str, env: dict[str, str]) -> tuple[int, str, str]:
         capture_output=True,
         text=True,
         env=env,
+        cwd=env["HOME"],
         check=False,
     )
     return completed.returncode, completed.stdout, completed.stderr
 
 
-_NEEDS_SHELL = pytest.mark.skipif(
-    not all(shutil.which(tool) for tool in ("sh", "flock", "realpath", "stat")),
-    reason="needs a POSIX sh with flock, realpath and stat",
-)
+def _report(probed: tuple[int, str, str]) -> dict[str, Any]:
+    report: dict[str, Any] | None = _MODULE._probe_report(probed[1])
+    assert report is not None, probed
+    return report
+
+
+_NEEDS_SHELL = pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
 
 
 @_NEEDS_SHELL
 def test_the_real_probe_names_the_served_directory_while_the_hub_holds_it(
     tmp_path: Path,
 ) -> None:
-    home, env, data = _home(tmp_path)
-    (home / "venv" / "bin" / "ai-assistant-backup").write_text("#!/bin/sh\n")
-    (home / "venv" / "bin" / "ai-assistant-backup").chmod(0o755)
+    _home_dir, env, data = _home(tmp_path)
     plan = _plan(_repo(tmp_path))
 
     with (data / "hub.lock").open("rb") as held:
@@ -2187,9 +2257,10 @@ def test_the_real_probe_names_the_served_directory_while_the_hub_holds_it(
         target = _MODULE.backup_target(plan, _sh(plan.probe_backup(), env))
     probed = _sh(plan.probe_backup(), env)
 
-    assert target.data_dir == str(data)
+    # The package's own settings, under the loaded file: two spaces and all.
+    assert target.data_dir == str(data.resolve())
     # And the same directory, once nothing holds its lock, is not the hub's.
-    assert "HUB_LOCK=free" in probed[1]
+    assert _report(probed)["lock"] == "free"
     with pytest.raises(_MODULE.DeployError, match="is free"):
         _MODULE.backup_target(plan, probed)
 
@@ -2201,17 +2272,56 @@ def test_the_real_probe_sees_an_absent_or_exposed_passphrase_file(tmp_path: Path
     passphrase = home / ".assistant-backup-pass"
 
     passphrase.chmod(0o644)
-    assert "BACKUP_PASSPHRASE_MODE=644" in _sh(plan.probe_backup(), env)[1]
+    assert _report(_sh(plan.probe_backup(), env))["passphrase_mode"] == 0o644
     passphrase.unlink()
-    out = _sh(plan.probe_backup(), env)[1]
+    (home / "venv" / "bin" / "ai-assistant-backup").unlink()
+    probed = _sh(plan.probe_backup(), env)
 
-    assert "BACKUP_PASSPHRASE=absent" in out
-    assert "BACKUP_TOOL=absent" in out
-    assert "HUB_STATE=inactive" in out
-    # The probe never prints a passphrase: it examines the file, never reads it.
+    assert _report(probed)["passphrase"] == "absent"  # noqa: S105  # a state, not a secret
+    assert _report(probed)["tool"] is False
+    assert "HUB_STATE=inactive" in probed[1]
+    # The probe examines the file and never reads it.
     passphrase.write_text("correct horse battery staple\n")
     passphrase.chmod(0o600)
     assert "correct horse" not in "".join(_sh(plan.probe_backup(), env)[1:])
+
+
+@_NEEDS_SHELL
+def test_the_real_probe_refuses_an_env_file_systemd_would_read_otherwise(
+    tmp_path: Path,
+) -> None:
+    home, env, _data = _home(tmp_path)
+    (home / "hub.env").write_text("ASSISTANT_KEY=sk-secret\nASSISTANT_DATA_DIR=/srv/$USER\n")
+    plan = _plan(_repo(tmp_path))
+
+    probed = _sh(plan.probe_backup(), env)
+
+    with pytest.raises(_MODULE.DeployError, match="line 2 of the hub's environment file"):
+        _MODULE.backup_target(plan, probed)
+    assert "sk-secret" not in "".join(probed[1:])
+
+
+@_NEEDS_SHELL
+def test_a_symlinked_passphrase_file_is_judged_by_what_it_names(tmp_path: Path) -> None:
+    # The link's own mode is 777; the file's is what guards the passphrase, and
+    # where the link points is what the containment test must see.
+    home, env, data = _home(tmp_path, unit="inactive")
+    plan = _plan(_repo(tmp_path))
+    kept = tmp_path / "keys" / "pass"
+    kept.parent.mkdir()
+    (home / ".assistant-backup-pass").replace(kept)
+    (home / ".assistant-backup-pass").symlink_to(kept)
+
+    report = _report(_sh(plan.probe_backup(), env))
+    assert report["passphrase_mode"] == 0o600
+    assert report["passphrase_path"] == str(kept.resolve())
+
+    inside = data / "pass"
+    kept.replace(inside)
+    (home / ".assistant-backup-pass").unlink()
+    (home / ".assistant-backup-pass").symlink_to(inside)
+    with pytest.raises(_MODULE.DeployError, match="is not outside"):
+        _MODULE.backup_target(plan, _sh(plan.probe_backup(), env))
 
 
 @_NEEDS_SHELL
@@ -2220,9 +2330,9 @@ def test_the_real_probe_sees_an_absent_or_exposed_passphrase_file(tmp_path: Path
     [
         (f'echo "wrote $1"; echo "{_MODULE._BACKUP_VERIFIED}"', True),
         (f'echo "wrote $1"; echo "warning: {_MODULE._BACKUP_UNVERIFIED}: none" >&2', False),
+        ('echo "the backup was refused: a sidecar" >&2; exit 78', False),
         # Says verified, and left nothing behind: not a backup either.
         (f'rm -f "$1"; echo "{_MODULE._BACKUP_VERIFIED}"', False),
-        ('echo "the backup was refused: a sidecar" >&2; exit 78', False),
     ],
 )
 def test_the_real_backup_command_reports_what_the_tool_said(
@@ -2231,8 +2341,8 @@ def test_the_real_backup_command_reports_what_the_tool_said(
     home, env, data = _home(tmp_path)
     seen = tmp_path / "seen"
     tool = home / "venv" / "bin" / "ai-assistant-backup"
-    # Records its argv, its data directory and whether stdin is /dev/null, then
-    # writes a non-empty artifact (or not) and says what the real tool says.
+    # Records its argv, its data directory and what reached its stdin, then
+    # writes a non-empty artifact and says what the real tool says.
     tool.write_text(
         "#!/bin/sh\n"
         f'printf "%s\\n" "$@" "$ASSISTANT_DATA_DIR" > "{seen}"\n'
@@ -2262,25 +2372,20 @@ def test_the_real_backup_command_reports_what_the_tool_said(
 
 
 @_NEEDS_SHELL
-def test_a_symlinked_passphrase_file_is_judged_by_what_it_names(tmp_path: Path) -> None:
-    # The link's own mode is 777; the file's is what guards the passphrase, and
-    # where the link points is what the containment test must see.
-    home, env, data = _home(tmp_path, unit="inactive")
+def test_the_real_backup_refuses_an_env_file_it_cannot_read_alike(tmp_path: Path) -> None:
+    home, env, _data = _home(tmp_path)
+    (home / "hub.env").write_text("ASSISTANT_DATA_DIR=/srv/a b\n")
     plan = _plan(_repo(tmp_path))
-    kept = tmp_path / "keys" / "pass"
-    kept.parent.mkdir()
-    (home / ".assistant-backup-pass").replace(kept)
-    (home / ".assistant-backup-pass").symlink_to(kept)
 
-    out = _sh(plan.probe_backup(), env)[1]
-    assert "BACKUP_PASSPHRASE_MODE=600" in out
-    assert f"BACKUP_PASSPHRASE_PATH={kept}" in out
+    probed = _sh(plan.back_up(), env)
 
-    inside = data / "pass"
-    kept.replace(inside)
-    (home / ".assistant-backup-pass").unlink()
-    (home / ".assistant-backup-pass").symlink_to(inside)
-    (home / "venv" / "bin" / "ai-assistant-backup").write_text("#!/bin/sh\n")
-    (home / "venv" / "bin" / "ai-assistant-backup").chmod(0o755)
-    with pytest.raises(_MODULE.DeployError, match="is not outside"):
-        _MODULE.backup_target(plan, _sh(plan.probe_backup(), env))
+    with pytest.raises(_MODULE.DeployError, match=r"failed \(exit 1\)"):
+        _MODULE._check_backup(plan, _target(plan), probed)
+    assert "cannot read: 1" in probed[1]
+
+
+@pytest.mark.parametrize("name", ["_ENV_LOADER", "_PROBE", "_RUN_BACKUP"])
+def test_the_box_side_python_carries_no_single_quote(name: str) -> None:
+    # Each crosses two shells inside single quotes; a quote in it would print in
+    # the dry run as the '"'"' escaping nobody can check by eye.
+    assert "'" not in getattr(_MODULE, name)
