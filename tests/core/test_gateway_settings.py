@@ -81,6 +81,22 @@ _REMOTE_TLS_FIELDS = (
     "gateway_remote_tls_key",
 )
 
+#: ADR-0327's fields: the hosted listener's switch, port, door name and device (§5,
+#: §7:2, §10), and the edge's keys, claims and assertion lifetime (§6). Held apart
+#: for ADR-0174 §8's reason: §5:8 spends no new budget — the figures ADR-0174 §8:1
+#: names are totals across every listener, the hosted one included.
+_HOSTED_FIELDS = (
+    "gateway_hosted_address",
+    "gateway_hosted_port",
+    "gateway_hosted_host_name",
+    "gateway_hosted_device",
+    "gateway_edge_public_keys",
+    "gateway_edge_issuer",
+    "gateway_edge_audience",
+    "gateway_edge_subject",
+    "gateway_edge_assertion_max_age",
+)
+
 
 def test_the_figures_are_all_present_with_their_adrs_defaults() -> None:
     """§8's table, transcribed. A default that drifts is two gateways disagreeing."""
@@ -106,12 +122,17 @@ def test_the_figures_are_exactly_the_ones_an_adr_names() -> None:
 
     Ten figures from ADR-0168 §8, none from ADR-0172 ("adds no eleventh"), the
     eleventh from ADR-0175 §8, the twelfth from ADR-0182 §3, ADR-0174 §8's three
-    non-figures and ADR-0202 §8's two. Discovering an eighteenth here is cheaper
-    than in review.
+    non-figures and ADR-0202 §8's two, and ADR-0327's nine. Discovering a twenty-
+    seventh here is cheaper than in review.
     """
     named = {name for name in Settings.model_fields if name.startswith("gateway_")}
 
-    assert named == set(_GATEWAY_FIELDS) | set(_REMOTE_BROWSER_FIELDS) | set(_REMOTE_TLS_FIELDS)
+    assert named == (
+        set(_GATEWAY_FIELDS)
+        | set(_REMOTE_BROWSER_FIELDS)
+        | set(_REMOTE_TLS_FIELDS)
+        | set(_HOSTED_FIELDS)
+    )
 
 
 def test_the_notification_budget_is_far_below_the_hubs_own_ceiling() -> None:
@@ -610,3 +631,284 @@ def test_a_tls_path_carrying_a_nul_is_refused_at_load(field: str) -> None:
                 other: _KEY,
             }
         )
+
+
+# --- ADR-0327: the hosted listener and the edge in front of it ---------------------
+
+#: A public key in the form ``gateway_edge_public_keys`` takes: the raw 32 bytes in
+#: unpadded base64url (RFC 8037's ``x``). Any 32 bytes are a valid value at load; the
+#: gateway loads the key at start.
+_EDGE_KEY = "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+
+#: Every field the hosted listener needs to be on, with values ``Settings`` admits.
+_HOSTED_ON: dict[str, object] = {
+    "gateway_hosted_address": "127.0.0.1",
+    "gateway_hosted_host_name": "door.example.com",
+    "gateway_hosted_device": "web-owner",
+    "gateway_edge_public_keys": (_EDGE_KEY,),
+    "gateway_edge_issuer": "https://signin.example.com",
+    "gateway_edge_audience": "hub-owner",
+    "gateway_edge_subject": "acct_7f3a9c",
+}
+
+#: The five §6:12 names beside the key set, which are set exactly when the switch is.
+_HOSTED_COMPANIONS = (
+    "gateway_hosted_host_name",
+    "gateway_hosted_device",
+    "gateway_edge_issuer",
+    "gateway_edge_audience",
+    "gateway_edge_subject",
+)
+
+
+def _hosted(**overrides: object) -> Settings:
+    """Settings with the hosted listener on, and any field replaced."""
+    values = {**_HOSTED_ON, **overrides}
+    return Settings(**values)  # type: ignore[arg-type] # a mapping of the model's own fields
+
+
+def test_the_hosted_listener_is_off_unless_it_is_configured_on() -> None:
+    """ADR-0327 §5:1: "off unless it is configured on, by ``gateway_hosted_address``.
+    Unset, which is the default, means off"."""
+    settings = Settings()
+
+    assert settings.gateway_hosted_address is None
+    assert settings.gateway_hosted_port == 8423
+    assert settings.gateway_edge_public_keys == ()
+    assert settings.gateway_edge_assertion_max_age == timedelta(seconds=60)
+    for name in _HOSTED_COMPANIONS:
+        assert getattr(settings, name) is None, name
+
+
+def test_a_hosted_listener_configured_whole_loads() -> None:
+    """Every §6:12 field set, and the address the box's own loopback."""
+    settings = _hosted()
+
+    assert settings.gateway_hosted_address == "127.0.0.1"
+    assert settings.gateway_edge_public_keys == (_EDGE_KEY,)
+
+
+@pytest.mark.parametrize("value", ["127.0.0.1", "127.0.0.9", "::1"])
+def test_a_loopback_address_is_admitted_for_the_hosted_listener(value: str) -> None:
+    """§5:3: "a literal loopback address"."""
+    assert _hosted(gateway_hosted_address=value).gateway_hosted_address == value
+
+
+@pytest.mark.parametrize("value", ["10.0.0.5", "172.17.0.2", "192.168.1.20", "fd00::5"])
+def test_a_private_use_address_is_admitted_for_the_hosted_listener(value: str) -> None:
+    """§5:3: "or a literal private-use address (IPv4 RFC 1918, IPv6 unique-local)" —
+    the container case, whose port the setup publishes to the host's loopback alone
+    (§5:4)."""
+    assert _hosted(gateway_hosted_address=value).gateway_hosted_address == value
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("0.0.0.0", "wildcard"),  # noqa: S104 — the refusal under test
+        ("::", "wildcard"),
+        ("224.0.0.1", "multicast"),
+        ("169.254.0.7", "link-local"),
+        ("fe80::1", "link-local"),
+        ("100.64.0.9", "shared space"),
+        ("100.127.255.1", "shared space"),
+        ("8.8.8.8", "neither a loopback nor a private-use"),
+        ("2001:4860:4860::8888", "neither a loopback nor a private-use"),
+        # Reserved blocks `ipaddress` calls private and §5:3 does not name.
+        ("192.0.2.1", "neither a loopback nor a private-use"),
+        ("198.18.0.1", "neither a loopback nor a private-use"),
+        ("::ffff:10.0.0.1", "neither a loopback nor a private-use"),
+        ("fd00::5%eth0", "zone index"),
+        ("door.example.com", "not an IP address"),
+        ("localhost", "not an IP address"),
+    ],
+)
+def test_an_address_adr_0327_forbids_the_hosted_listener_is_refused_at_load(
+    value: str, reason: str
+) -> None:
+    """§5:3: "A wildcard, a multicast address, a link-local address, an address in the
+    shared space ``100.64.0.0/10`` that overlays use, and any globally reachable
+    address are refused." A name is refused rather than resolved."""
+    with pytest.raises(ValidationError, match=reason):
+        _hosted(gateway_hosted_address=value)
+
+
+def test_the_hosted_port_may_not_be_the_loopback_listeners() -> None:
+    """§5:5: "refused at settings load when the hosted listener is on and the port
+    equals ``gateway_port``"."""
+    with pytest.raises(ValidationError, match="equals gateway_port"):
+        _hosted(gateway_port=9000, gateway_hosted_port=9000)
+
+
+def test_the_hosted_port_is_a_neutral_fact_while_the_listener_is_off() -> None:
+    """Neither the port nor the lifetime is among §6:13's stranded settings."""
+    settings = Settings(
+        gateway_port=9000,
+        gateway_hosted_port=9000,
+        gateway_edge_assertion_max_age=timedelta(seconds=30),
+    )
+
+    assert settings.gateway_hosted_port == 9000
+
+
+@pytest.mark.parametrize("value", [0, 1023, 65536])
+def test_the_hosted_port_is_a_valid_non_privileged_port(value: int) -> None:
+    """§5:5: "a valid non-privileged TCP port"."""
+    with pytest.raises(ValidationError):
+        Settings(gateway_hosted_port=value)
+
+
+@pytest.mark.parametrize("name", _HOSTED_COMPANIONS)
+def test_a_hosted_listener_missing_a_companion_is_refused(name: str) -> None:
+    """§6:12: refused "while any of" the five "is unset"."""
+    with pytest.raises(ValidationError, match=name):
+        _hosted(**{name: None})
+
+
+def test_a_hosted_listener_with_no_edge_key_is_refused() -> None:
+    """§6:12: "or while ``gateway_edge_public_keys`` is empty"."""
+    with pytest.raises(ValidationError, match="gateway_edge_public_keys"):
+        _hosted(gateway_edge_public_keys=())
+
+
+@pytest.mark.parametrize("name", [*_HOSTED_COMPANIONS, "gateway_edge_public_keys"])
+def test_an_edge_setting_written_about_a_listener_that_is_off_is_refused(name: str) -> None:
+    """§6:13: "A configuration with the hosted listener off is refused at settings load
+    while any of those five is set, or while ``gateway_edge_public_keys`` is
+    non-empty" — none is ignored silently."""
+    with pytest.raises(ValidationError, match=name):
+        Settings(**{name: _HOSTED_ON[name]})  # type: ignore[arg-type] # the point of the case
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Door.Example.com",
+        "door.example.com:443",
+        "https://door.example.com",
+        "door.example.com/",
+        "door.example.com.",
+        "door",
+        "-door.example.com",
+        "203.0.113.4",
+        "",
+    ],
+)
+def test_a_door_name_no_browser_would_send_is_refused(value: str) -> None:
+    """§7:2 compares the `Host` literally and §7:3 builds the `Origin` from the name,
+    so the name is a lower-case DNS name with no scheme, port or path."""
+    with pytest.raises(ValidationError, match="gateway_hosted_host_name"):
+        _hosted(gateway_hosted_host_name=value)
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("", "blank"),
+        ("   ", "blank"),
+        ("hub", "hub's own machine"),
+        ('web"owner', "quote, a backslash or a control"),
+        ("web\\owner", "quote, a backslash or a control"),
+        ("web\nowner", "quote, a backslash or a control"),
+        ("\ud800", "UTF-8"),
+    ],
+)
+def test_a_hosted_device_the_hub_could_not_accept_is_refused(value: str, reason: str) -> None:
+    """§10:3: held to ADR-0298 §1:3's invariant, split as ADR-0174 §8:7 splits the
+    check, and "never ``hub``". The byte bound is the gateway's, at start."""
+    with pytest.raises(ValidationError, match=reason):
+        _hosted(gateway_hosted_device=value)
+
+
+def test_the_hosted_device_may_not_be_a_listed_remote_device() -> None:
+    """§10:4: the name is "held by no other device the hub knows" — one that the
+    remote listener also names is one this configuration already knows of."""
+    with pytest.raises(ValidationError, match="gateway_remote_browser_devices"):
+        _hosted(
+            gateway_remote_address="100.64.0.9",
+            gateway_remote_browser_devices=("web-owner",),
+            gateway_remote_tls_certificate="/etc/assistant/cert.pem",
+            gateway_remote_tls_key="/etc/assistant/key.pem",
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not base64!",
+        "AAAA",
+        "A" * 44,
+        _EDGE_KEY + "=",
+        "-----BEGIN PUBLIC KEY-----",
+    ],
+)
+def test_an_edge_key_that_is_not_one_ed25519_public_key_is_refused(value: str) -> None:
+    """§6:4: "a set of Ed25519 public keys" — each the raw 32 bytes, unpadded base64url."""
+    with pytest.raises(ValidationError, match="gateway_edge_public_keys"):
+        _hosted(gateway_edge_public_keys=(value,))
+
+
+def test_the_edge_keys_parse_as_comma_separated_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rotation adds a key beside the old one (§6:5), so the set is a list."""
+    second = "A" * 43
+    for name, value in _HOSTED_ON.items():
+        if name != "gateway_edge_public_keys":
+            monkeypatch.setenv(f"ASSISTANT_{name.upper()}", str(value))
+    monkeypatch.setenv("ASSISTANT_GATEWAY_EDGE_PUBLIC_KEYS", f"{_EDGE_KEY}, {second}")
+
+    assert Settings().gateway_edge_public_keys == (_EDGE_KEY, second)
+
+
+@pytest.mark.parametrize("name", ["gateway_edge_issuer", "gateway_edge_audience"])
+@pytest.mark.parametrize("value", ["", "  "])
+def test_a_blank_claim_is_refused(name: str, value: str) -> None:
+    """§6:6, §6:7: compared literally, so a blank one could never be equalled."""
+    with pytest.raises(ValidationError, match=name):
+        _hosted(**{name: value})
+
+
+def test_a_subject_that_is_an_email_address_is_refused() -> None:
+    """§6:9: "the edge's opaque, stable identifier for the hosted owner's account, not
+    an email address or any other contact detail"."""
+    with pytest.raises(ValidationError, match="email") as refused:
+        _hosted(gateway_edge_subject="person@example.com")
+    # §7:8 keeps the subject out of every record, so the refusal does not echo it.
+    assert "person@example.com" not in str(refused.value).split("input_value")[0]
+
+
+@pytest.mark.parametrize(
+    "value", [timedelta(0), timedelta(seconds=-1), timedelta(minutes=5, microseconds=1)]
+)
+def test_the_assertion_lifetime_is_positive_and_at_most_five_minutes(value: timedelta) -> None:
+    """§6:11: "refused at settings load unless it is strictly positive and no greater
+    than five minutes"."""
+    with pytest.raises(ValidationError):
+        Settings(gateway_edge_assertion_max_age=value)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (timedelta(minutes=5), timedelta(minutes=5)),
+        (60, timedelta(minutes=1)),
+        ("PT1M", timedelta(minutes=1)),
+        ("00:01:00", timedelta(minutes=1)),
+    ],
+)
+def test_the_assertion_lifetime_takes_every_form_a_duration_takes(
+    value: object, expected: timedelta
+) -> None:
+    """The forms ``test_config.py`` pins for every duration at an hour, at a minute —
+    the hour is above this field's ceiling (§6:11)."""
+    settings = Settings(gateway_edge_assertion_max_age=value)  # type: ignore[arg-type] # the point of the case
+
+    assert settings.gateway_edge_assertion_max_age == expected
+
+
+def test_the_assertion_lifetime_parses_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator's spelling, ISO-8601."""
+    monkeypatch.setenv("ASSISTANT_GATEWAY_EDGE_ASSERTION_MAX_AGE", "PT2M")
+
+    assert Settings().gateway_edge_assertion_max_age == timedelta(minutes=2)
