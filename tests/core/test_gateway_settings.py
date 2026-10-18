@@ -34,7 +34,8 @@ from datetime import timedelta
 import pytest
 from pydantic import ValidationError
 
-from ai_assistant.core.config import Settings
+from ai_assistant.core.config import Settings, load_settings
+from ai_assistant.core.errors import ConfigurationError
 
 _GATEWAY_FIELDS = (
     "gateway_port",
@@ -867,13 +868,29 @@ def test_a_blank_claim_is_refused(name: str, value: str) -> None:
         _hosted(**{name: value})
 
 
-def test_a_subject_that_is_an_email_address_is_refused() -> None:
-    """§6:9: "the edge's opaque, stable identifier for the hosted owner's account, not
-    an email address or any other contact detail"."""
-    with pytest.raises(ValidationError, match="email") as refused:
-        _hosted(gateway_edge_subject="person@example.com")
-    # §7:8 keeps the subject out of every record, so the refusal does not echo it.
-    assert "person@example.com" not in str(refused.value).split("input_value")[0]
+def test_a_non_blank_subject_is_never_refused_so_never_echoed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§7:8 keeps the subject out of every record, and a field's refusal is rendered
+    with the value it refused — so the only refusal of the subject is a blank one, and
+    no configuration error ever carries an account id (adversarial review, round 1).
+
+    Read through ``load_settings``, whose rendering of the whole ``ValidationError`` is
+    what the gateway prints at start, and asserted over all of it.
+    """
+    for name, value in _HOSTED_ON.items():
+        if name not in {"gateway_edge_subject", "gateway_edge_public_keys"}:
+            monkeypatch.setenv(f"ASSISTANT_{name.upper()}", str(value))
+    monkeypatch.setenv("ASSISTANT_GATEWAY_EDGE_SUBJECT", "acct_7f3a9c")
+    # The key set left empty: the configuration is refused, and the refusal is about
+    # the keys rather than about the subject beside them.
+    with pytest.raises(ConfigurationError) as refused:
+        load_settings()
+
+    assert "gateway_edge_public_keys" in str(refused.value)
+    assert "acct_7f3a9c" not in str(refused.value)
+    monkeypatch.setenv("ASSISTANT_GATEWAY_EDGE_PUBLIC_KEYS", _EDGE_KEY)
+    assert load_settings().gateway_edge_subject == "acct_7f3a9c"
 
 
 @pytest.mark.parametrize(

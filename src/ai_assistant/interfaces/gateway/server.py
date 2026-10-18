@@ -213,7 +213,12 @@ from ai_assistant.interfaces.devices import this_device
 from ai_assistant.interfaces.gateway import streams
 from ai_assistant.interfaces.gateway.change_stream import paced
 from ai_assistant.interfaces.gateway.delivery import DeliveryFanOut, DeliveryStream, write_stream
-from ai_assistant.interfaces.gateway.edge import ASSERTION_HEADER, check_assertion, edge_terms
+from ai_assistant.interfaces.gateway.edge import (
+    ASSERTION_HEADER,
+    AssertionFault,
+    check_assertion,
+    edge_terms,
+)
 from ai_assistant.interfaces.gateway.http import (
     NO_STORE,
     NO_STORE_NO_TRANSFORM,
@@ -2341,9 +2346,48 @@ class Gateway:
             )
         except MalformedRequestError:
             return _fault(400, "Bad Request", "malformed-request")
-        return await self._respond(request, connection)
+        if not connection.hosted:
+            return await self._respond(request, connection)
+        # ADR-0327 §9:2: "The gateway holds an assertion only while it checks the
+        # request that carried it." The check is made here, and the request this frame
+        # goes on holding — through the engine call and through a stream that may last
+        # hours — is one the assertion has been taken out of. Rebinding the name is
+        # what lets the original go: nothing else refers to it.
+        request, verdict = self._take_the_assertion(request)
+        return await self._respond(request, connection, verdict=verdict)
 
-    async def _respond(self, request: Request, connection: _Connection) -> Response | _Streamed:
+    def _take_the_assertion(self, request: Request) -> tuple[Request, AssertionFault | None]:
+        """Check a hosted request's assertion, and hand back the request without it.
+
+        The whole of the assertion's custody in this process (ADR-0327 §9:2, §9:7): it
+        is read out of the request, checked (§6), and dropped with this frame. What
+        survives is the verdict, a fixed value, and a request carrying every header
+        but this one — so no frame that awaits anything afterwards, the engine call
+        and a stream's body among them, holds a reference to it.
+
+        Args:
+            request: The request as read.
+
+        Returns:
+            The request without its ``Edge-Assertion`` header, and ``None`` where the
+            assertion was accepted or the fault it failed on.
+        """
+        terms = self._edge
+        verdict = (
+            AssertionFault.ABSENT
+            if terms is None
+            else check_assertion(request.header(ASSERTION_HEADER), terms=terms, now=self._now())
+        )
+        kept = tuple((name, value) for name, value in request.headers if name != ASSERTION_HEADER)
+        return replace(request, headers=kept), verdict
+
+    async def _respond(
+        self,
+        request: Request,
+        connection: _Connection,
+        *,
+        verdict: AssertionFault | None = AssertionFault.ABSENT,
+    ) -> Response | _Streamed:
         """Decide one request (ADR-0168 §3, §7, §1's biconditional; ADR-0174 §4).
 
         The order is §7's: "Both checks run before the session is read, and a
@@ -2373,13 +2417,20 @@ class Gateway:
         the checks above pass". A request failing the assertion, its `Host` or its
         `Origin` is recorded on the check it failed (§7:7) and answered with one
         refusal whichever it was (§7:6), so nothing a peer without the edge's key
-        sends can learn which of the three it got wrong, or anything past them.
+        sends can learn which of the three it got wrong, or anything past them. The
+        assertion itself was checked one frame up, by :meth:`_take_the_assertion`, and
+        arrives here as ``verdict`` alone — whose default is a refusal, so a hosted
+        request that reached here without the check is refused rather than admitted
+        (§6:14). It is read on the hosted listener and on no other.
         """
         request_class = self._classify(request, hosted=connection.hosted)
-        if connection.hosted:
-            refused = self._check_the_edge(request, request_class, connection)
-            if refused is not None:
-                return refused
+        if connection.hosted and verdict is not None:
+            return self._refuse(
+                request_class,
+                RefusalCondition(verdict.value),
+                connection,
+                answered_as=RefusalCondition.DOOR_REFUSED,
+            )
         condition = self._check_door(request, connection)
         if condition is not None:
             answered = RefusalCondition.DOOR_REFUSED if connection.hosted else None
@@ -2394,43 +2445,6 @@ class Gateway:
             exchange = self._edge_exchange if connection.hosted else self._exchange
             return exchange(request, connection)
         return await self._session_bound(request, connection, request_class)
-
-    def _check_the_edge(
-        self, request: Request, request_class: RequestClass, connection: _Connection
-    ) -> Response | None:
-        """ADR-0327 §6's check on one hosted request, refused as §7:6 rules if it fails.
-
-        The value is read out of the request here and handed to the check, and is
-        held nowhere else (§9:2): no record, no log line and no response carries it,
-        and nothing of it passes the admission. A request it admits writes no record
-        either (§9:8) — "the exemption's third replacement reaches an admission and
-        not a use".
-
-        Args:
-            request: The request as parsed.
-            request_class: Which of ADR-0168 §6's four kinds it is, for the record.
-            connection: The connection it arrived on.
-
-        Returns:
-            The refusal, or ``None`` where the assertion is accepted.
-        """
-        terms = self._edge
-        if terms is None:  # pragma: no cover — a hosted listener binds only with terms
-            return self._refuse(
-                request_class,
-                RefusalCondition.ASSERTION_ABSENT,
-                connection,
-                answered_as=RefusalCondition.DOOR_REFUSED,
-            )
-        fault = check_assertion(request.header(ASSERTION_HEADER), terms=terms, now=self._now())
-        if fault is None:
-            return None
-        return self._refuse(
-            request_class,
-            RefusalCondition(fault.value),
-            connection,
-            answered_as=RefusalCondition.DOOR_REFUSED,
-        )
 
     def _classify(self, request: Request, *, hosted: bool = False) -> RequestClass:
         """Which of ADR-0168 §6's four kinds this request is, decided from it alone.

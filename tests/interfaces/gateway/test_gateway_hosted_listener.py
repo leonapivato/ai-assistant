@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import json
 import socket
 from dataclasses import dataclass, field
@@ -35,6 +36,8 @@ from ai_assistant.core.config import Settings
 from ai_assistant.core.device_context import current_acting_for
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import DEFAULT_PAGE_SIZE
+from ai_assistant.interfaces.gateway.edge import ASSERTION_HEADER
+from ai_assistant.interfaces.gateway.http import Request
 from ai_assistant.interfaces.gateway.server import Gateway
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
@@ -807,3 +810,72 @@ async def test_an_assertion_that_verified_writes_no_record(hosted: Hosted) -> No
         hosted.gateway.close()
 
     assert records == []
+
+
+class _Holding(_Recording):
+    """An engine whose listing waits until a case lets it go."""
+
+    def __init__(self) -> None:
+        """Start with the listing held."""
+        super().__init__()
+        self.release = asyncio.Event()
+        self.occupied = asyncio.Event()
+
+    async def recent_conversations(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[ConversationSummary, ...]:
+        """Hold the request inside the engine until released."""
+        self.occupied.set()
+        await self.release.wait()
+        return await super().recent_conversations(limit=limit, offset=offset)
+
+
+def _suspended_locals() -> list[object]:
+    """Every local of every gateway coroutine frame suspended in this loop.
+
+    Down each await chain, keeping the frames of the gateway's own code: the case's own
+    client holds the token it sent, which is the browser's side of the hop and not the
+    gateway's custody.
+    """
+    found: list[object] = []
+    for task in asyncio.all_tasks():
+        awaited: object = task.get_coro()
+        while awaited is not None:
+            frame = getattr(awaited, "cr_frame", None)
+            if frame is None:
+                break
+            if "ai_assistant/interfaces/gateway/" in frame.f_code.co_filename.replace("\\", "/"):
+                found.extend(frame.f_locals.values())
+            awaited = getattr(awaited, "cr_await", None)
+    return found
+
+
+async def test_the_assertion_is_held_only_while_it_is_checked() -> None:
+    """§9:2: "The gateway holds an assertion only while it checks the request that
+    carried it." With an admitted request suspended inside the engine — the longest
+    an ordinary request lives — no frame holds the assertion, and no request the
+    process still holds carries it (adversarial review, round 1)."""
+    async with _hosted() as one:
+        engine = _Holding()
+        one.gateway._engine = engine
+        session = await one.exchange()
+        token = one.assertion()
+
+        listing = asyncio.ensure_future(one.listing(session, assertion=token))
+        await engine.occupied.wait()
+        try:
+            held = _suspended_locals()
+            live_requests = [obj for obj in gc.get_objects() if isinstance(obj, Request)]
+        finally:
+            engine.release.set()
+        answer = await listing
+
+        assert answer.status == 200, answer.body
+        assert held, "the suspended request's frames were found"
+        for local in held:
+            assert not (isinstance(local, str) and token in local), local
+            if isinstance(local, Request):
+                assert local.header(ASSERTION_HEADER) is None
+        assert live_requests
+        for request in live_requests:
+            assert request.header(ASSERTION_HEADER) is None
