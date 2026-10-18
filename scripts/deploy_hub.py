@@ -98,9 +98,12 @@ the passphrase file, the environment and where the artifact will go.
 * **Which directory.** The one the hub serves: the earlier build's own
   ``load_settings()``, run under the environment file the unit loads
   (``--env-file``, ``~/hub.env`` by default; pass ``/dev/null`` for a unit that
-  loads none). While the hub is running, that directory's instance lock must be
-  held, or the environment named is not the hub's and the deploy refuses: a
-  backup of some other directory would verify perfectly and protect nothing.
+  loads none). That file is read, not sourced, and only in the subset on which a
+  shell and systemd's ``EnvironmentFile=`` agree (:data:`_ENV_LOADER`); any other
+  line is refused by its number. While the hub is running, that directory's
+  instance lock must be held, or the environment named is not the hub's and the
+  deploy refuses: a backup of some other directory would verify perfectly and
+  protect nothing.
 * **What it holds.** Exactly what the tool copies. The exclusions are the tool's
   own (ADR-0123 §3, ADR-0314 §7:5); this script adds none and removes none, and
   never names a store.
@@ -136,6 +139,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import json
 import re
 import secrets
 import shlex
@@ -213,6 +217,123 @@ _BACKUP_UNVERIFIED = "the artifact is written but unverified"
 #: does and for the same reason: the login shell's banner is not the tool's word.
 _BACKUP_BEGIN = "BACKUP_BEGIN_"
 _BACKUP_END = "BACKUP_END_"
+#: How the box loads the hub's environment file, as Python the earlier build's
+#: interpreter runs. Not ``. file`` in a shell: a systemd ``EnvironmentFile=`` is
+#: not shell, and the two disagree on whitespace, ``$`` and backslashes, so a
+#: sourced file can name another directory than the one the unit serves. This
+#: reads only the subset on which they provably agree — comments, blank lines,
+#: and ``KEY=value`` whose value is bare (no whitespace, quote, ``$``, backslash
+#: or backtick), single-quoted, or double-quoted with none of ``$ \\ `` ` ``
+#: inside — and refuses any other line by its number, never by its content,
+#: because the file holds the hub's keys. It and the two scripts built on it
+#: carry no single quote (``\x27`` stands in), so the dry run prints them plain.
+_ENV_LOADER = r'''
+import os, re, sys
+class Unsupported(Exception):
+    pass
+_LINE = re.compile(
+    r"""\s*([A-Za-z_][A-Za-z0-9_]*)="""
+    r"""(?:([^\s\x27"\\$`]*)|\x27([^\x27]*)\x27|"([^"\\$`]*)")\s*"""
+)
+def load_env(path):
+    loaded = {}
+    with open(path, encoding="utf-8") as handle:
+        for number, line in enumerate(handle, 1):
+            stripped = line.strip()
+            if not stripped or stripped[0] in "#;":
+                continue
+            match = _LINE.fullmatch(line.rstrip("\n"))
+            if match is None:
+                raise Unsupported(number)
+            key, *values = match.groups()
+            loaded[key] = next(value for value in values if value is not None)
+    return loaded
+'''
+#: The backup preflight, run by the earlier build's interpreter with the hub's
+#: environment loaded: its own settings name the data directory, ``fcntl`` asks
+#: whether a live process holds that directory's lock (a shared, non-blocking
+#: try never waits and never takes the lock from a holder), and the passphrase
+#: file is examined and never opened. One JSON line carries every answer, so no
+#: path is re-split by a shell on its way back.
+_PROBE = (
+    _ENV_LOADER
+    + r"""
+import fcntl, json, stat
+env_file, tool, passphrase, backup_dir, lock_name = sys.argv[1:6]
+report = {"env": "absent"}
+if os.access(env_file, os.R_OK):
+    try:
+        os.environ.update(load_env(env_file))
+        report["env"] = "present"
+    except Unsupported as exc:
+        report["env"] = "unsupported"
+        report["env_line"] = exc.args[0]
+    except (OSError, ValueError) as exc:
+        report["env"] = "unreadable"
+        report["env_error"] = type(exc).__name__
+if report["env"] == "present":
+    try:
+        from ai_assistant.core.config import load_settings
+        report["data_dir"] = str(load_settings().data_dir)
+    except Exception as exc:
+        errors = getattr(exc, "errors", None)
+        where = [".".join(map(str, e.get("loc", ()))) for e in errors()] if errors else []
+        report["settings_error"] = " ".join([type(exc).__name__, *where])
+report["tool"] = os.access(tool, os.X_OK)
+try:
+    info = os.stat(passphrase)
+except FileNotFoundError:
+    report["passphrase"] = "absent"
+except OSError:
+    report["passphrase"] = "unreadable"
+else:
+    report["passphrase_mode"] = stat.S_IMODE(info.st_mode)
+    if not stat.S_ISREG(info.st_mode):
+        report["passphrase"] = "not-a-file"
+    elif not os.access(passphrase, os.R_OK):
+        report["passphrase"] = "unreadable"
+    elif info.st_size == 0:
+        report["passphrase"] = "empty"
+    else:
+        report["passphrase"] = "present"
+report["passphrase_path"] = os.path.realpath(passphrase)
+report["backup_dir"] = os.path.realpath(backup_dir)
+report["lock"] = "absent"
+if "data_dir" in report:
+    try:
+        fd = os.open(os.path.join(report["data_dir"], lock_name), os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        report["lock"] = "unopenable " + type(exc).__name__
+    else:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            report["lock"] = "held"
+        else:
+            report["lock"] = "free"
+        finally:
+            os.close(fd)
+print("BACKUP_PROBE=" + json.dumps(report))
+"""
+)
+#: The backup itself: the same loader, then the earlier build's tool exec'd in
+#: its place with the hub's environment, so the tool's settings — its data
+#: directory and the exclusions it computes from them — are the hub's.
+_RUN_BACKUP = (
+    _ENV_LOADER
+    + r"""
+env_file, tool = sys.argv[1:3]
+try:
+    os.environ.update(load_env(env_file))
+except Unsupported as exc:
+    sys.exit(f"the environment file of the hub has a line this deploy cannot read: {exc.args[0]}")
+except (OSError, ValueError) as exc:
+    sys.exit(f"the environment file of the hub could not be read: {type(exc).__name__}")
+os.execv(tool, [tool, *sys.argv[3:]])
+"""
+)
 
 
 class DeployError(Exception):
@@ -877,56 +998,33 @@ class Plan:
         """
         return remote_path(f"{self.args.venv.rstrip('/')}/bin/{name}")
 
-    def _source_env(self) -> str:
-        """Return the shell text that loads the hub's environment, exported.
-
-        Returns:
-            ``set -a``, the file sourced, ``set +a``, chained so a file that
-            cannot be read stops whatever follows it.
-        """
-        return f"set -a && . {remote_path(self.args.env_file)} && set +a"
-
     def probe_backup(self) -> str:
         """Return the command that asks the box everything the backup depends on.
 
         Run before anything is stopped, so a deploy that cannot back up is refused
-        while the hub is still serving. The data directory is the **earlier
-        build's** answer under the hub's environment, because that build is the
-        one that has been writing it; the passphrase file is examined and never
-        read. Every answer is on a labelled line, after the login banner.
+        while the hub is still serving. The answers come from the **earlier
+        build's** interpreter (:data:`_PROBE`), because that build is the one that
+        has been writing the directory; the unit's state comes after, on a
+        labelled line of its own.
 
         Returns:
             The remote command line.
         """
-        env = remote_path(self.args.env_file)
-        passphrase = remote_path(self.args.backup_passphrase_file)
-        expr = "from ai_assistant.core.config import load_settings; print(load_settings().data_dir)"
-        resolve = f"d=$({self._venv_bin('python')} -c {shlex.quote(expr)})"
-        lock = f'"$d"/{_LOCK_FILENAME}'
+        probe = " ".join(
+            [
+                self._venv_bin("python"),
+                "-c",
+                shlex.quote(_PROBE),
+                remote_path(self.args.env_file),
+                self._venv_bin("ai-assistant-backup"),
+                remote_path(self.args.backup_passphrase_file),
+                remote_path(self.args.backup_dir),
+                _LOCK_FILENAME,
+            ]
+        )
         state = with_user_bus(f"systemctl --user is-active {shlex.quote(self.args.unit)}")
-        checks = [
-            "d=",
-            f"if [ -r {env} ]; then echo BACKUP_ENV=present; {self._source_env()} && {resolve};"
-            " else echo BACKUP_ENV=absent; fi",
-            'echo BACKUP_DATA_DIR="$d"',
-            f"echo BACKUP_TOOL=$(test -x {self._venv_bin('ai-assistant-backup')}"
-            " && echo present || echo absent)",
-            f"echo BACKUP_PASSPHRASE=$(if [ ! -e {passphrase} ]; then echo absent;"
-            f" elif [ ! -f {passphrase} ]; then echo not-a-file;"
-            f" elif [ ! -r {passphrase} ]; then echo unreadable;"
-            f" elif [ ! -s {passphrase} ]; then echo empty; else echo present; fi)",
-            f"echo BACKUP_PASSPHRASE_MODE=$(stat -L -c %a {passphrase} 2>/dev/null)",
-            f"echo BACKUP_PASSPHRASE_PATH=$(realpath -e {passphrase} 2>/dev/null)",
-            f"echo BACKUP_DIR_PATH=$(realpath -m {remote_path(self.args.backup_dir)})",
-            f"echo HUB_STATE=$({state} || true)",
-            # Held means a live process has this directory locked, and while the
-            # unit is active that process is the hub. A shared, non-blocking try
-            # never waits and never takes the lock from a holder.
-            f'echo HUB_LOCK=$(if [ -z "$d" ] || [ ! -e {lock} ]; then echo absent;'
-            " elif ! command -v flock >/dev/null; then echo unknown;"
-            f" elif flock -s -n {lock} true; then echo free; else echo held; fi)",
-        ]
-        return as_service_user("; ".join(checks), self.args.user)
+        inner = f"{probe}; printf 'HUB_STATE=%s\\n' \"$({state} || true)\""
+        return as_service_user(inner, self.args.user)
 
     def stop(self) -> str:
         """Return the command that stops the hub for its backup.
@@ -958,13 +1056,24 @@ class Plan:
         """
         begin, end = f"{_BACKUP_BEGIN}{self.token}", f"{_BACKUP_END}{self.token}"
         artifact = remote_path(self.backup_artifact)
-        tool = self._venv_bin("ai-assistant-backup")
-        passphrase = remote_path(self.args.backup_passphrase_file)
-        run_tool = f"{tool} {artifact} --passphrase-file {passphrase} </dev/null 2>&1"
+        run_tool = " ".join(
+            [
+                self._venv_bin("python"),
+                "-c",
+                shlex.quote(_RUN_BACKUP),
+                remote_path(self.args.env_file),
+                self._venv_bin("ai-assistant-backup"),
+                artifact,
+                "--passphrase-file",
+                remote_path(self.args.backup_passphrase_file),
+                "</dev/null 2>&1",
+            ]
+        )
+        present = f"$(test -s {artifact} && echo present || echo absent)"
         inner = (
-            f"mkdir -p -m 0700 {remote_path(self.args.backup_dir)} && {self._source_env()} && "
+            f"mkdir -p -m 0700 {remote_path(self.args.backup_dir)} && "
             f"echo {begin} && {{ {run_tool}; status=$?; echo; echo {end}=$status; "
-            f"echo BACKUP_ARTIFACT=$(test -s {artifact} && echo present || echo absent); }}"
+            f"printf 'BACKUP_ARTIFACT=%s\\n' \"{present}\"; }}"
         )
         return as_service_user(inner, self.args.user)
 
@@ -1705,70 +1814,99 @@ def backup_target(plan: Plan, probed: tuple[int, str, str]) -> BackupTarget:
     """
     status, out, error = probed
     args = plan.args
-    env = _labelled(out, "BACKUP_ENV=")
-    if env is None:
+    report = _probe_report(out)
+    if report is None:
         raise DeployError(
             f"could not ask the box about the backup (exit {status}):\n"
             f"{error.strip() or out.strip() or '(no output)'}\n{_UNTOUCHED}"
         )
+    env = report.get("env")
+    if env == "unsupported":
+        raise DeployError(
+            f"line {report.get('env_line')} of the hub's environment file {args.env_file} is not\n"
+            "one this deploy reads the way systemd does: KEY=value with a bare value (no\n"
+            "whitespace, quote, $, backslash or backtick), 'single-quoted', or \"double-\n"
+            f'quoted" with no $, backslash or backtick inside. Rewrite it so.\n{_UNTOUCHED}'
+        )
     if env != "present":
         raise DeployError(
-            f"the hub's environment file {args.env_file} is not there for the service user\n"
-            "to read, so the data directory the hub serves cannot be named. Pass\n"
-            "--env-file with the file the unit's EnvironmentFile= loads, or /dev/null\n"
-            f"if it loads none.\n{_UNTOUCHED}"
+            f"the hub's environment file {args.env_file} is {env} for the service user,\n"
+            "so the data directory the hub serves cannot be named. Pass --env-file with\n"
+            "the file the unit's EnvironmentFile= loads, or /dev/null if it loads none.\n"
+            f"{_UNTOUCHED}"
         )
-    data_dir = _labelled(out, "BACKUP_DATA_DIR=")
-    if not data_dir:
+    data_dir = report.get("data_dir")
+    if not isinstance(data_dir, str) or not data_dir:
         raise DeployError(
             f"the earlier build in {args.venv} could not name its data directory under\n"
-            f"{args.env_file}:\n{error.strip() or '(no output)'}\n{_UNTOUCHED}"
+            f"{args.env_file}: {report.get('settings_error') or error.strip() or '(no answer)'}\n"
+            f"{_UNTOUCHED}"
         )
-    if _labelled(out, "BACKUP_TOOL=") != "present":
+    if report.get("tool") is not True:
         raise DeployError(
             f"the earlier build in {args.venv} has no ai-assistant-backup, so nothing can\n"
             f"back up its data directory before the install.\n{_UNTOUCHED}"
         )
-    _rule_on_passphrase_file(plan, out, data_dir)
-    backup_dir = _labelled(out, "BACKUP_DIR_PATH=") or ""
-    if not backup_dir or _within(backup_dir, data_dir):
+    _rule_on_passphrase_file(plan, report, data_dir)
+    backup_dir = report.get("backup_dir")
+    if not isinstance(backup_dir, str) or _within(backup_dir, data_dir):
         raise DeployError(
             f"the backup directory {args.backup_dir} ({backup_dir or 'unresolved'}) is not\n"
             f"outside the data directory {data_dir}; a backup kept where it is taken\n"
             f"is lost with it (ADR-0123 §11). Pass --backup-dir elsewhere.\n{_UNTOUCHED}"
         )
-    _rule_on_the_served_directory(plan, out, data_dir)
+    _rule_on_the_served_directory(plan, report, _labelled(out, "HUB_STATE="), data_dir)
     return BackupTarget(data_dir=data_dir, artifact=plan.backup_artifact)
 
 
-def _rule_on_passphrase_file(plan: Plan, out: str, data_dir: str) -> None:
+def _probe_report(out: str) -> dict[str, object] | None:
+    """Decode the probe's one JSON line, after the login banner.
+
+    Args:
+        out: The probe's standard output.
+
+    Returns:
+        The report, or ``None`` when the probe printed none that decodes.
+    """
+    line = _labelled(out, "BACKUP_PROBE=")
+    if line is None:
+        return None
+    try:
+        report = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return report if isinstance(report, dict) else None
+
+
+def _rule_on_passphrase_file(plan: Plan, report: dict[str, object], data_dir: str) -> None:
     """Refuse a passphrase file the backup could not use, or should not.
 
     Args:
         plan: The plan.
-        out: The probe's standard output.
+        report: The probe's report.
         data_dir: The data directory being backed up.
 
     Raises:
-        DeployError: If the file is absent, unusable, readable by anyone but its
-            owner, or inside the data directory.
+        DeployError: If the file is absent, unusable, readable or writable by
+            anyone but its owner, or inside the data directory.
     """
     path = plan.args.backup_passphrase_file
-    state = _labelled(out, "BACKUP_PASSPHRASE=")
+    state = report.get("passphrase")
     if state != "present":
         raise DeployError(
             f"the backup passphrase file {path} is {state or 'unexamined'} on the box, so\n"
             f"the deploy cannot take the backup it owes before installing.\n{_UNTOUCHED}\n\n"
             f"{_OPERATOR_SETUP}"
         )
-    mode = _labelled(out, "BACKUP_PASSPHRASE_MODE=") or ""
-    if not re.fullmatch(r"[0-7]{3,4}", mode) or int(mode, 8) & 0o077:
+    mode = report.get("passphrase_mode")
+    if not isinstance(mode, int) or mode & 0o077:
+        shown = f"{mode:o}" if isinstance(mode, int) else "unknown"
         raise DeployError(
-            f"the backup passphrase file {path} has mode {mode or 'unknown'}; it must be\n"
-            f"readable by the service user alone (chmod 600 {path}).\n{_UNTOUCHED}"
+            f"the backup passphrase file {path} has mode {shown}; it must be readable by\n"
+            f"the service user alone (chmod 600 {path}).\n{_UNTOUCHED}"
         )
-    resolved = _labelled(out, "BACKUP_PASSPHRASE_PATH=") or ""
-    if not resolved or _within(resolved, data_dir):
+    resolved = report.get("passphrase_path")
+    if not isinstance(resolved, str) or _within(resolved, data_dir):
         raise DeployError(
             f"the backup passphrase file {path} ({resolved or 'unresolved'}) is not outside\n"
             f"the data directory {data_dir}: a key kept in what it encrypts is no key, and\n"
@@ -1777,25 +1915,27 @@ def _rule_on_passphrase_file(plan: Plan, out: str, data_dir: str) -> None:
         )
 
 
-def _rule_on_the_served_directory(plan: Plan, out: str, data_dir: str) -> None:
+def _rule_on_the_served_directory(
+    plan: Plan, report: dict[str, object], hub: str | None, data_dir: str
+) -> None:
     """Refuse a directory the running hub is not holding.
 
     A backup of the wrong directory would verify perfectly and protect nothing,
     which is the failure a mismatched ``--env-file`` produces. While the unit is
-    active its process holds the instance lock of the directory it serves, so a
-    lock that is free, or absent, there says the environment named is not the
-    hub's. A stopped hub cannot be asked, and is backed up as named.
+    active its process holds the instance lock of the directory it serves, so
+    any answer but *held* there says the environment named is not the hub's —
+    or that the check could not run, which is refused the same way. A stopped
+    hub cannot be asked, and is backed up as named.
 
     Args:
         plan: The plan.
-        out: The probe's standard output.
+        report: The probe's report.
+        hub: The unit's state, as the probe read it.
         data_dir: The data directory the environment names.
 
     Raises:
         DeployError: If the hub is running and that directory's lock is not held.
     """
-    hub = _labelled(out, "HUB_STATE=")
-    lock = _labelled(out, "HUB_LOCK=")
     if hub != "active":
         print(
             f"backup: the unit is {hub or 'in no state'}, so nothing confirms {data_dir}\n"
@@ -1803,13 +1943,7 @@ def _rule_on_the_served_directory(plan: Plan, out: str, data_dir: str) -> None:
             file=sys.stderr,
         )
         return
-    if lock == "unknown":
-        print(
-            "backup: flock is not on the box, so the running hub's lock cannot be checked;\n"
-            f"        backing up {data_dir}, the directory its environment names",
-            file=sys.stderr,
-        )
-        return
+    lock = report.get("lock")
     if lock != "held":
         raise DeployError(
             f"the hub is running, but the instance lock of {data_dir} is {lock or 'unread'}:\n"
