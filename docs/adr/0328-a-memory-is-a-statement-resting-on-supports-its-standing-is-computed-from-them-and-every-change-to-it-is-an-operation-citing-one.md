@@ -195,7 +195,7 @@ confirmation now means.
 > therefore never reworded, and a merge adds supports, never text.
 
 > **Normative.** A memory carries at least one support, and its operations log begins with
-> exactly one create.
+> exactly one create, which cites a `for` support that backs the memory as worded.
 
 > **Normative.** A memory's status is `current`, `ended` or `wrong`, and it changes only by
 > an operation (§5). A memory whose status is not `current` has a set validity end.
@@ -233,7 +233,7 @@ The parts a support may point at:
 | A round's message | The episode and the planning round that wrote the message |
 | An evidence item | The episode, the digest's position and the item's position in it |
 | A confirmation | The episode of the yes, and the question part it approved (the asking activation, its round, the part) |
-| The activation | The episode alone; only the remember capability points here (§13) |
+| A remember call | The episode and the id of the effect record the call is claimed under (ADR-0306 §5:3); only the remember capability points here (§13) |
 | A legacy record | The id of a record stored before this decision (§16) |
 
 The origin each part takes, the standing it ranks at, and whether it is outside content:
@@ -246,8 +246,8 @@ The origin each part takes, the standing it ranks at, and whether it is outside 
 | An evidence item | `evidence` | from a source | yes |
 | A round's message, the activation not having read outside content | `assistant_message` | from a source | no |
 | A round's message, the activation having read outside content | `assistant_message_over_outside` | from a source | yes |
-| The activation, not having read outside content | `remembered` | inference | no |
-| The activation, having read outside content | `remembered_over_outside` | inference | yes |
+| A remember call, its activation not having read outside content | `remembered` | inference | no |
+| A remember call, its activation having read outside content | `remembered_over_outside` | inference | yes |
 | A legacy record that did not rest on recorded external content | `legacy` | inference | no |
 | A legacy record that did | `legacy_outside` | inference | yes |
 
@@ -269,9 +269,13 @@ The origin each part takes, the standing it ranks at, and whether it is outside 
 > decides otherwise.
 
 > **Normative.** A confirmation support is added only where the records show the user's yes
-> approved the question part it names — an approval covering that part, given in that
-> episode (ADR-0321 §4:6) — and the memory's wording equals, character for character, the
-> statement that part showed.
+> approved the question part it names: an approval covering that part, given in that
+> episode (ADR-0321 §4:6).
+
+> **Normative.** A confirmation support is `for` a memory whose wording agrees, under
+> ADR-0121 §1's predicate, with the statement the approved part showed, and only there does
+> it back the memory as worded. It is `against` a memory the part showed that statement
+> replacing (ADR-0321 §5:5). It is added to no other memory.
 
 > **Normative.** A support other than a legacy one points at an episode the store holds when
 > the support is added. A support that does not is refused, and nothing is written.
@@ -291,7 +295,7 @@ The origin each part takes, the standing it ranks at, and whether it is outside 
 
 > **Normative.** A support's `when` is read from the episode's record: a recorded message's
 > `sent_at` where the support names one, and the episode's `occurred_at` otherwise for the
-> input and the activation; the round's `recorded_at`; the digest's `recorded_at`; and the
+> input and for a remember call; the round's `recorded_at`; the digest's `recorded_at`; and the
 > approval's `given.at` for a confirmation. §16 sets a legacy support's.
 
 > **Normative.** Source details are carried only by an `outside_input`, `evidence` or
@@ -521,7 +525,8 @@ The origin each part takes, the standing it ranks at, and whether it is outside 
 > does today, and ends each memory the ruling retires with an end citing the new memory's
 > first support, added to the retired memory as an `against` support. Each retired memory
 > names the new one as its successor, and the new one names them as the memories it
-> replaces. An end that §6:5 refuses refuses the whole ingest, with nothing written.
+> replaces. An end that §6:5 refuses, or a retired memory that already carries the part
+> that support points at, refuses the whole ingest, with nothing written.
 
 > **Normative.** On a `REJECT` or an `ASK_USER`, `ingest` writes nothing.
 
@@ -575,7 +580,7 @@ The origin each part takes, the standing it ranks at, and whether it is outside 
 > replies, its *needs you* — and writes the memory record as this section says.
 
 > **Normative.** A remember call proposes one memory: its wording is the statement, its one
-> support points at the activation with the origin `remembered`, or
+> support points at the remember call with the origin `remembered`, or
 > `remembered_over_outside` where `rests_on_outside_content` is true, `for`, backing it as
 > worded, not judged, its `when` the episode's `occurred_at`, added by `remember`; and its
 > create cites that support, by `remember`. Its placement is set by rule as today
