@@ -1,6 +1,6 @@
 # 107. The elision reaches the inspection surface: both DTOs carry it, and ADR-0086 §10 deferred the form
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0328 (§2–§7, as they apply to a memory's projection)
 - Date: 2026-08-05
 - **Note (2026-08-05): ratified.** `Proposed` → `Accepted`, in the separate lane
   #633 requires — and which the bullet at §8 item 7 predicts by name — after
@@ -179,6 +179,7 @@
   (the bounded release and the fork it filed), ADR-0089 (marking), ADR-0070 and
   ADR-0082 (amendment, supersession, and where a record goes), ADR-0103 (the
   quantity this deliberately does not pre-empt; #744).
+- Partially superseded: 2026-10-18 by ADR-0328 — §2–§7, as they apply to a memory's projection: a memory carries no elision (ADR-0328 §10, §15). This replacement takes effect on ratification of ADR-0328. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

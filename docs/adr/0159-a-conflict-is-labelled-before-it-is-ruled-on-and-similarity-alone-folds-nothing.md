@@ -1,6 +1,6 @@
 # 159. A conflict is labelled before it is ruled on, and similarity alone folds nothing
 
-- Status: Partially superseded by ADR-0161 (of §4, §4(a) whole — its target class, its target selection and the reach of its `CONTRADICTS` purity condition — and the paragraph excluding `EXTERNAL` from both target classes, each only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`; of §6, the members its degraded floor may name as a target, for every non-asserted proposal) and ADR-0171 (§3's default value for `reconciler_max_conflicts`; §5's second clause, in the respect that the `MemoryWriter` retirement obligation it narrows is narrowed a second time) and ADR-0214 (§4's fourth normative clause, the unconditional precedence of the prior-assertion deferral, only as it reaches a non-asserted proposal every asserted member of whose conflict set agrees with it)
+- Status: Partially superseded by ADR-0161 (of §4, §4(a) whole — its target class, its target selection and the reach of its `CONTRADICTS` purity condition — and the paragraph excluding `EXTERNAL` from both target classes, each only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`; of §6, the members its degraded floor may name as a target, for every non-asserted proposal) and ADR-0171 (§3's default value for `reconciler_max_conflicts`; §5's second clause, in the respect that the `MemoryWriter` retirement obligation it narrows is narrowed a second time) and ADR-0214 (§4's fourth normative clause, the unconditional precedence of the prior-assertion deferral, only as it reaches a non-asserted proposal every asserted member of whose conflict set agrees with it) and ADR-0328 (§4:1's arm (c), in its `STORE_TEMPORARY` below `min_confidence`)
 - Date: 2026-08-16
 - Partially superseded: 2026-08-29 by ADR-0214 — **§4's fourth normative clause,
   the unconditional precedence of the prior-assertion deferral, only as it reaches
@@ -178,6 +178,7 @@
   reading its own §4 does not support is corrected rather than grandfathered. Appended
   dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
   other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
+- Partially superseded: 2026-10-18 by ADR-0328 — §4:1's arm (c), in its `STORE_TEMPORARY` below `min_confidence`: nothing is stored tentatively, so arm (c) is `ACCEPT` (ADR-0328 §10). This replacement takes effect on ratification of ADR-0328. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

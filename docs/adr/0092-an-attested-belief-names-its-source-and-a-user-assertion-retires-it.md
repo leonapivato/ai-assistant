@@ -1,6 +1,6 @@
 # 92. An attested belief names its source and its report time; a user assertion retires it
 
-- Status: Partially superseded by ADR-0230 (§3's local-substitute clause, in one scope stated about the **producer** and not about the file it reads: a source this system interrogates **directly**, whose answer is produced at the instant of the read rather than replayed from an answer another source gave earlier — for such a source the read instant *is* the source's report time rather than a substitute for one; §3's mtime prohibition, its `reported_by` account, its ruling that a `reported_at` earlier than `last_updated` is normal and its ruling that one in our future is not refused all stand, and §§1, 2, 4–10 are untouched)
+- Status: Partially superseded by ADR-0230 (§3's local-substitute clause, in one scope stated about the **producer** and not about the file it reads: a source this system interrogates **directly**, whose answer is produced at the instant of the read rather than replayed from an answer another source gave earlier — for such a source the read instant *is* the source's report time rather than a substitute for one; §3's mtime prohibition, its `reported_by` account, its ruling that a `reported_at` earlier than `last_updated` is normal and its ruling that one in our future is not refused all stand, and §§1, 2, 4–10 are untouched) and ADR-0328 (§1, as it applies to a memory)
 - Date: 2026-08-02
 - Amended: 2026-08-09 by ADR-0121 — **§5's reinforce-safe class becomes
   `{OBSERVED, INFERRED, USER_ASSERTED}`; the *meaning* §5 gave the class is what
@@ -105,6 +105,7 @@
 - **Follow-up to** ADR-0073 §4 and ADR-0045 §7, which teed this up between them:
   one named what an attested belief must be able to say, the other made saying it
   safe and left the adoption open.
+- Partially superseded: 2026-10-18 by ADR-0328 — §1, as it applies to a memory: an attestation is a source support's details (ADR-0328 §4); §3 governs those details. This replacement takes effect on ratification of ADR-0328. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

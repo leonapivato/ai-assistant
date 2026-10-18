@@ -1,6 +1,6 @@
 # 103. Confidence is two quantities — the evidence for a belief, and whether it still holds
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0328 (§2:1, §3:1, §3:2, §4:1, §6:1, §6:2, §9:1 and §9:4, each as it applies to a memory)
 - Date: 2026-08-05
 - **Note (2026-08-05): ratified.** `Proposed` → `Accepted`, in the separate lane
   #633 requires, after **both** required reviews came back green on the content
@@ -160,6 +160,7 @@
   under ADR-0070 §4 and ADR-0082 §2 the record is the dated note above and nothing
   else. Should ADR-0109 be ratified with a different resolution, the note that
   records that lands the same way.
+- Partially superseded: 2026-10-18 by ADR-0328 — §2:1, §3:1, §3:2, §4:1, §6:1, §6:2, §9:1 and §9:4, each as it applies to a memory: a memory's evidence strength and currency are computed from its supports (ADR-0328 §7). This replacement takes effect on ratification of ADR-0328. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

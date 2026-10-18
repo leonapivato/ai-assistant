@@ -1,6 +1,6 @@
 # 86. A belief's evidence is bounded, the elision is on the record, and the batch read lands
 
-- Status: Partially superseded by ADR-0091 (§4's clause that two renderings of an elision and a tombstone must both exist) and ADR-0320 (§1's paragraph that the evidence bound does not reach `Goal`, with its two bullets)
+- Status: Partially superseded by ADR-0091 (§4's clause that two renderings of an elision and a tombstone must both exist) and ADR-0320 (§1's paragraph that the evidence bound does not reach `Goal`, with its two bullets) and ADR-0328 (§1–§4, as they apply to a memory)
 - Date: 2026-07-31
 - Note (2026-08-05): **§10's second deferral is taken, and nothing this ADR
   decided changes.** §10 records under "What this ADR does not decide" that
@@ -143,6 +143,7 @@
 
   Refs #586, #606, ADR-0091 §1–§5.
 - Partially superseded: 2026-10-14 by ADR-0320 — §1's paragraph that the evidence bound does not reach `Goal`, with its two bullets. They governed `Goal.provenance` on `PlanStore.save_goal`'s path; the bound on `MemoryRecord` stands. Every other clause stands. What they governed was removed by the residue lanes, which merge ahead of ADR-0320 (ADR-0320 §1:2). This replacement takes effect on ratification of ADR-0320. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-18 by ADR-0328 — §1–§4, as they apply to a memory: every support a memory carries is kept, with no bound (ADR-0328 §4). This replacement takes effect on ratification of ADR-0328. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

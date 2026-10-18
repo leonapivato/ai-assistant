@@ -1,6 +1,6 @@
 # 77. The observer proposes beliefs from episodes, through the gate, on a named route
 
-- Status: Partially superseded by ADR-0084 (§10 item 7's placement of the façade's observation result outside contract surface, and the header's restatement of that premise) and ADR-0156 (§3's sentence enumerating what the observation prompt's payload carries) and ADR-0162 (§2's warrant bar, as it reaches an episode recording what the user said to the assistant; and the proposal bound's value of 5 together with the sentence grounding it) and ADR-0163 (§3's payload-enumerating sentence again, in the scope of an episode's principal-participant marker) and ADR-0212 (§8's selection sentence and its durable-cursor sentence) and ADR-0218 (§8's third reason, the consent argument for an explicit trigger) and ADR-0283 (§1's batch read through `ConversationStore.turns`; §8's index-entry premise) and ADR-0285 (§1, §2, §3 and §8 entire; and every clause of §4, §5, §9, §10 and §11 whose subject is the observer, its batch, prompt, route, outcome, trigger or contract surface)
+- Status: Partially superseded by ADR-0084 (§10 item 7's placement of the façade's observation result outside contract surface, and the header's restatement of that premise) and ADR-0156 (§3's sentence enumerating what the observation prompt's payload carries) and ADR-0162 (§2's warrant bar, as it reaches an episode recording what the user said to the assistant; and the proposal bound's value of 5 together with the sentence grounding it) and ADR-0163 (§3's payload-enumerating sentence again, in the scope of an episode's principal-participant marker) and ADR-0212 (§8's selection sentence and its durable-cursor sentence) and ADR-0218 (§8's third reason, the consent argument for an explicit trigger) and ADR-0283 (§1's batch read through `ConversationStore.turns`; §8's index-entry premise) and ADR-0285 (§1, §2, §3 and §8 entire; and every clause of §4, §5, §9, §10 and §11 whose subject is the observer, its batch, prompt, route, outcome, trigger or contract surface) and ADR-0328 (§6's presented confidence)
 - Date: 2026-07-28
 - Partially superseded: 2026-07-31 by ADR-0084 — **§10 item 7's claim that the
   façade's observation result is an `orchestration` type and not contract surface
@@ -610,6 +610,7 @@
   §5). These replacements take effect on ratification of ADR-0285. This reciprocal
   header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-18 by ADR-0328 — §6's presented confidence: a memory carries no confidence (ADR-0328 §10); §6's lazy resolution, tombstone and held state stand (ADR-0328 §15:7). This replacement takes effect on ratification of ADR-0328. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

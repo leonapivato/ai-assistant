@@ -1,6 +1,6 @@
 # 109. Currency's confirming instant is stored on `Provenance`, and the fold selects it at fold time
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0328 (§1:1, §2:1, §4:1–§4:4, §5:1–§5:3, §6:1–§6:3, §8:1–§8:3, §9:1, §9:2 and §10:1–§10:4, each as it applies to a memory)
 - Date: 2026-08-06
 - **Note (2026-08-06): ratified.** `Proposed` → `Accepted`, after **both**
   required reviews came back green on the content this ADR merged with:
@@ -71,6 +71,7 @@
   ADR-0028 §8 (the fold is `memory`'s), ADR-0045 §3 (transaction time),
   ADR-0089 (marking), ADR-0070 and ADR-0082 (amendment and where a record goes);
   #744, #741, #742, #646, #729.
+- Partially superseded: 2026-10-18 by ADR-0328 — §1:1, §2:1, §4:1–§4:4, §5:1–§5:3, §6:1–§6:3, §8:1–§8:3, §9:1, §9:2 and §10:1–§10:4, each as it applies to a memory: a memory's as-of is computed from its supports (ADR-0328 §7); §1:2, §2:2, §3:1, §3:2 and §7:1 stand, read on as-of. This replacement takes effect on ratification of ADR-0328. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
