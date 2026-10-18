@@ -145,6 +145,25 @@ def test_a_record_read_back_otherwise_fails_the_check(
     ]
 
 
+def test_a_memory_store_that_loses_its_vectors_fails_the_check(
+    written: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Every row kept and the vector index lost: ``search`` finds nothing, and the check says so."""
+    import sqlite_vec  # noqa: PLC0415  # only this case edits the index
+
+    directory, snapshot = _copy(written, tmp_path)
+    conn = sqlite3.connect(directory / "memory.db")
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    with conn:
+        conn.execute("DELETE FROM vec_records")
+    conn.close()
+    problems = read(directory, snapshot)
+    assert problems
+    assert all(p.startswith("memory found/") for p in problems), problems
+    assert all(p.endswith("the base read true, the head reads false") for p in problems)
+
+
 def test_a_record_the_head_loses_fails_the_check(
     written: tuple[Path, Path], tmp_path: Path
 ) -> None:
@@ -338,6 +357,46 @@ def test_the_writer_refuses_a_directory_that_holds_anything(tmp_path: Path) -> N
     (tmp_path / "data" / "memory.db").touch()
     with pytest.raises(upgrade_check.CheckError, match="not empty"):
         write(tmp_path / "data", tmp_path / "snapshot.json")
+
+
+def test_a_relative_keep_names_one_place_for_both_builds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The writer runs from the base's worktree, the reader from here: one absolute path."""
+    monkeypatch.chdir(tmp_path)
+    data, snapshot = upgrade_check._kept(Path("saved"), tmp_path / "scratch")
+    assert data == tmp_path / "saved" / "data"
+    assert snapshot == tmp_path / "saved" / "base-snapshot.json"
+    assert data.parent.is_dir()
+
+
+def _tree(root: Path, pin: bytes) -> Path:
+    """A tree with the two pin modules and one vendored file."""
+    for module in upgrade_check._PINS:
+        (root / module).parent.mkdir(parents=True, exist_ok=True)
+        (root / module).write_bytes(pin)
+    (root / upgrade_check._VENDOR / "model").mkdir(parents=True)
+    (root / upgrade_check._VENDOR / "model" / "weights").write_bytes(b"weights")
+    return root
+
+
+def test_the_base_gets_this_trees_models_only_where_both_pin_the_same(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model re-pinned here would fail the base's verification, so it is not seeded."""
+    monkeypatch.setattr(upgrade_check, "_ROOT", _tree(tmp_path / "head", b"pins v2"))
+    differing = tmp_path / "differing"
+    for module in upgrade_check._PINS:
+        (differing / module).parent.mkdir(parents=True, exist_ok=True)
+        (differing / module).write_bytes(b"pins v1")
+    assert upgrade_check._seed_vendor(differing) is False
+    assert not (differing / upgrade_check._VENDOR).exists()
+    alike = tmp_path / "alike"
+    for module in upgrade_check._PINS:
+        (alike / module).parent.mkdir(parents=True, exist_ok=True)
+        (alike / module).write_bytes(b"pins v2")
+    assert upgrade_check._seed_vendor(alike) is True
+    assert (alike / upgrade_check._VENDOR / "model" / "weights").read_bytes() == b"weights"
 
 
 def test_the_modules_say_what_they_are_for() -> None:
