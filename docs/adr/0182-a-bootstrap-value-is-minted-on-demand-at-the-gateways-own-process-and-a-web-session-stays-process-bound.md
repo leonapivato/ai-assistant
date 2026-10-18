@@ -1,6 +1,6 @@
 # 182. A bootstrap value is minted on demand at the gateway's own process, and a web session stays process-bound
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0327 (§4:1 and §4:2's refusal at the ceiling with nothing evicted, as they reach an exchange on a hosted listener, and §6:3, §6:4 and §7:5's first sentence, each only as it reaches the page a hosted listener serves)
 - Date: 2026-08-23
 
 - **This is `track:web-client` milestone 16's sessions decision** (#1230, #1429).
@@ -32,6 +32,17 @@
   exemptions keep the condition ADR-0172 §2's replacement (d) makes of that bound.
   "Persistence" is satisfied by survival across a reload, which already holds, plus
   re-entry that costs a keystroke rather than a restart.
+- Partially superseded: 2026-10-18 by ADR-0327 — two scopes, one listener. §4:1 and
+  §4:2's refusal at `gateway_max_sessions` with nothing evicted, as they reach the
+  exchange on a hosted listener, where a mint at the ceiling ends the oldest session
+  minted through that listener and is refused only where none was (ADR-0327 §8). And
+  §6:3's three stated conditions, §6:4's bootstrap entry shown as re-entry, and §7:5's
+  first sentence, that the page re-issues no other request of its own motion, each
+  only as it reaches the page a hosted listener serves, which mints its session by an
+  automatic exchange (ADR-0327 §11). §1:10 binds that listener whole, and every other
+  clause stands. This replacement takes effect on ratification of ADR-0327. This
+  reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
+  prior supersessions and the ratified body below are preserved.
 
 ## Context
 
