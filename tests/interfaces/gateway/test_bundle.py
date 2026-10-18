@@ -174,6 +174,7 @@ def test_the_bundle_is_read_out_of_the_installed_package() -> None:
         "/",
         "/app.css",
         "/app.js",
+        "/door.js",
         *(f"/fonts/{face}.woff2" for face in _FACES),
     }
     assert all(body for body, _ in bundle.values())
@@ -185,12 +186,39 @@ def test_the_bundle_is_read_out_of_the_installed_package() -> None:
         assert body[:4] == b"wOF2", face
 
 
+@pytest.mark.integration
+def test_the_hosted_bundle_differs_from_the_others_in_one_file() -> None:
+    """ADR-0327 §11: the hosted listener serves this repository's page (§3:1, §4:7),
+    and the one thing it serves differently is the file that says which door it is.
+
+    So the page learns it is behind the sign-in door without asking the gateway anything
+    before a session exists, which §7:4 would refuse — and both files ship in the
+    distribution, so nothing is generated or transformed at serve time.
+    """
+    local = packaged_bundle()
+    hosted = packaged_bundle(hosted=True)
+
+    assert set(hosted) == set(local)
+    differing = {path for path in local if local[path] != hosted[path]}
+    assert differing == {"/door.js"}
+    assert b'dataset.door = "local"' in local["/door.js"][0]
+    assert b'dataset.door = "hosted"' in hosted["/door.js"][0]
+    assert hosted["/door.js"][1] == local["/door.js"][1]
+
+
 def test_the_bundle_lives_inside_the_package_that_ships_it() -> None:
     """Which is what puts it in the wheel: the build target packages
     ``src/ai_assistant``, so a file under it ships and a file beside it does not."""
     assert _ASSETS.parent.name == "gateway"
     assert (_ROOT / "server.py").exists()
-    assert {path.name for path in _ASSETS.iterdir()} == {"index.html", "app.css", "app.js", "fonts"}
+    assert {path.name for path in _ASSETS.iterdir()} == {
+        "index.html",
+        "app.css",
+        "app.js",
+        "door.js",
+        "door-hosted.js",
+        "fonts",
+    }
     # The faces, and each family's licence with them: the SIL Open Font License lets a
     # face be redistributed only with its copyright notice and the licence, so the
     # distribution that carries the one carries the other.
@@ -242,7 +270,7 @@ def test_the_pages_name_is_written_once() -> None:
         assert source.count(name) == (1 if asset == "index.html" else 0), asset
 
 
-@pytest.mark.parametrize("name", ["index.html", "app.css", "app.js"])
+@pytest.mark.parametrize("name", ["index.html", "app.css", "app.js", "door.js", "door-hosted.js"])
 def test_no_asset_reaches_off_the_gateways_own_origin(name: str) -> None:
     """§10: "loads no asset, font, style, script or datum from any origin but the
     gateway's own"."""
@@ -536,10 +564,28 @@ def test_every_refusal_a_browser_can_provoke_is_a_condition_the_page_reads() -> 
         RefusalCondition.HOST_NOT_BOUND.value,
         RefusalCondition.ORIGIN_NOT_OWN.value,
     }
+    # ADR-0327 §7:7's seven are recorded and never answered: a browser on the hosted
+    # listener is told `door-refused` whichever check failed (§7:6), and that one is
+    # reachable — an assertion can lapse under a page that is already loaded.
+    recorded_and_never_answered = {
+        RefusalCondition.ASSERTION_ABSENT.value,
+        RefusalCondition.ASSERTION_MALFORMED.value,
+        RefusalCondition.ASSERTION_SIGNATURE.value,
+        RefusalCondition.ASSERTION_ISSUER.value,
+        RefusalCondition.ASSERTION_AUDIENCE.value,
+        RefusalCondition.ASSERTION_SUBJECT.value,
+        RefusalCondition.ASSERTION_TIMES.value,
+    }
 
-    reachable = {one.value for one in RefusalCondition} - decided_before_the_page_exists
+    reachable = (
+        {one.value for one in RefusalCondition}
+        - decided_before_the_page_exists
+        - recorded_and_never_answered
+    )
     assert reachable <= named, sorted(reachable - named)
     assert not decided_before_the_page_exists & named
+    assert not recorded_and_never_answered & named
+    assert RefusalCondition.DOOR_REFUSED.value in named
     # The remedy is the setting's name, and §4's own clause is why the last sentence is
     # safe to say: the exchange is refused "without the value being read, compared or
     # consumed", so nothing was spent and nothing needs re-minting.
@@ -563,7 +609,7 @@ def test_the_page_states_the_three_conditions_of_the_session_it_runs_under() -> 
     bootstrap panel is on screen exactly when there is none.
     """
     document = _asset("index.html")
-    opened = document.index('<div class="session-conditions">')
+    opened = document.index('<div class="session-conditions" id="session-terms">')
     # Collapsed, because the sentences are wrapped to the file's column width and a
     # check reading them line by line would pin where the wrapping happens to fall.
     conditions = " ".join(document[opened : document.index("</div>", opened)].split())
@@ -591,12 +637,17 @@ def test_the_page_states_the_three_conditions_of_the_session_it_runs_under() -> 
     # rather than inside one, which is what makes the second half decidable here: the
     # last section tag before them is a close.
     assert "session-conditions" not in _code("app.js")
+    # The one script that reaches it is the hosted page's, which hides it in favour of
+    # ADR-0327 §11:7's statement — on the door whose page §15 supersedes ADR-0182 §6:3
+    # for, and on no other (``test_the_hosted_page_states_how_long_it_stays_signed_in``).
+    reaching = [line for line in _code("app.js").splitlines() if '"session-terms"' in line]
+    assert reaching == ['  el("session-terms").hidden = true;']
     stylesheet = _style("app.css")
     assert stylesheet.count("display: none") == 1
     assert _rule(stylesheet, "[hidden]").strip() == "display: none !important;"
     assert "hidden" not in document[opened : document.index(">", opened)]
     markup = _markup("index.html")
-    sentences = markup.index('<div class="session-conditions">')
+    sentences = markup.index('<div class="session-conditions" id="session-terms">')
     assert markup.rindex("</section>", 0, sentences) > markup.rindex("<section", 0, sentences)
 
 
@@ -959,7 +1010,7 @@ def test_a_fault_is_written_beside_the_act_that_raised_it() -> None:
 #: opens, and the console, the conversations listing and the notification panel are the
 #: three surfaces a session-less page stops *being* rather than stops showing.
 _NAMED_BY_SHOW_BOOTSTRAP: Final = frozenset(
-    {"bootstrap", "console", "conversations", "notifications"}
+    {"bootstrap", "hosted", "console", "conversations", "notifications"}
 )
 
 #: The panels outside the hide sweep on purpose, recorded here so that the census below
@@ -998,9 +1049,12 @@ def test_every_panel_a_session_less_page_may_not_show_is_in_the_hide_sweep() -> 
     assert sections - _NAMED_BY_SHOW_BOOTSTRAP - _OUTSIDE_THE_HIDE_SWEEP == swept
     assert swept <= sections
     assert "CONTROL_PANELS.forEach((panel) => show(panel, false));" in sweeping
-    for panel in _NAMED_BY_SHOW_BOOTSTRAP - {"bootstrap"}:
+    for panel in _NAMED_BY_SHOW_BOOTSTRAP - {"bootstrap", "hosted"}:
         assert f'show("{panel}", false);' in sweeping
-    assert 'show("bootstrap", true);' in sweeping
+    # Which of the two it opens is the door's (ADR-0327 §11:1): the bootstrap entry on
+    # every door but the hosted one, and the hosted panel there.
+    assert 'show("bootstrap", !HOSTED);' in sweeping
+    assert 'show("hosted", HOSTED);' in sweeping
 
 
 #: The acts that report what became of *themselves* after their session has ended, and
@@ -1991,9 +2045,12 @@ def test_a_session_that_ended_ends_the_delivery_stream_and_not_only_its_line() -
     # session is gone.
     assert lost.index("releaseStream();") < lost.index("stopWatching();")
     assert lost.index("releaseStream();") < lost.index("showBootstrap(")
+    # The conditions that mean the session is gone, and on the hosted door the one that
+    # means nothing more is admitted through it (ADR-0327 §11:6).
+    assert 'const barred = HOSTED && body.fault === "door-refused";' in lost
     assert (
-        'if (body.fault === "no-live-session" || body.fault === "cookie-half-mismatch") {' in lost
-    )
+        'if (barred || body.fault === "no-live-session" || body.fault === "cookie-half-mismatch") {'
+    ) in lost
     # And it ends a stream and opens none, which is the clause §7 turns on: a release
     # that re-established one would be the page taking motion §7 gives to two events.
     for opening in ("watchDeliveries", "fetch(", "setTimeout", "rearm("):
@@ -2394,6 +2451,8 @@ def test_the_page_reads_a_conversation_before_it_forgets_one() -> None:
 #: guard is asserted there rather than at the call.
 _FETCH_SITES: Final = {
     "startSession": "startSession",
+    # ADR-0327 §8's exchange, the hosted page's stand-in for the bootstrap exchange.
+    "exchangeSession": "exchangeSession",
     "readDeliveries": "readDeliveries",
     # The change stream (ADR-0298 §7), its own `fetch` for `readDeliveries`' reason: a
     # stream is read value by value, which `relay` does not do.
@@ -2448,6 +2507,9 @@ _FAULT_PANELS: Final = frozenset(
         "connections",
         "connection-log",
         "chat",
+        # ADR-0327 §11: the hosted exchange's own `fetch`, whose rejection is the
+        # gateway not answering, said beside the panel that is up while it is out.
+        "hosted",
     }
 )
 
@@ -3909,3 +3971,54 @@ def test_the_page_offers_none_of_the_panels_adr_0309_retires() -> None:
         "connections-button",
         "connection-log-button",
     ]
+
+
+def test_the_hosted_panel_offers_nothing_to_type() -> None:
+    """ADR-0327 §11:1: "On the hosted listener the page shows no bootstrap entry. It
+    mints its session by §8's exchange, with nothing typed." The hosted panel carries a
+    line and one control, and the exchange sends no body (§8:1)."""
+    document = _markup("index.html")
+    opened = document.index('<section id="hosted" class="panel" hidden>')
+    panel = document[opened : document.index("</section>", opened)]
+    exchange = _functions(_code("app.js"))["exchangeSession"]
+
+    assert "<input" not in panel
+    assert "<form" not in panel
+    assert '<button type="button" id="hosted-again" hidden>Try again</button>' in panel
+    assert 'await fetch(EDGE_EXCHANGE_PATH, { method: "POST" });' in exchange
+    assert "body:" not in exchange
+
+
+def test_the_door_is_read_before_the_page_runs() -> None:
+    """ADR-0327 §11: the page knows which door served it before it decides anything —
+    `/door.js` is a parser-blocking script in the head, so it has run before `app.js`,
+    which is the last thing in the body, reads it."""
+    document = _markup("index.html")
+    head = document[: document.index("</head>")]
+
+    assert '<script src="/door.js"></script>' in head
+    assert 'const HOSTED = document.documentElement.dataset.door === "hosted";' in _code("app.js")
+
+
+def test_a_failed_exchange_is_followed_by_none_the_owner_did_not_ask_for() -> None:
+    """ADR-0327 §11:3: no further exchange "until the owner acts, a reload included".
+    Every failure sets the flag, nothing in the page clears it, and the owner's act is a
+    reload — so no refusal, however it arrives, becomes a retry loop."""
+    script = _code("app.js")
+    functions = _functions(script)
+
+    assert "if (exchanging || exchangeFailed) {" in functions["exchangeSession"]
+    # Its declaration is the one place it is ever false.
+    assert script.count("exchangeFailed = false") == 1
+    assert script.count("let exchangeFailed = false;") == 1
+    assert 'el("hosted-again").addEventListener("click", () => window.location.reload());' in script
+
+
+def test_a_session_replaced_through_the_door_re_issues_nothing() -> None:
+    """ADR-0327 §11:4: "The page re-issues no request a refusal interrupted." The console
+    a resumed exchange brings back opens no stream of its own motion."""
+    console = _functions(_code("app.js"))["showConsole"]
+    resumed = console[console.index("if (resumed === true) {") :]
+
+    assert resumed.index("return;") < resumed.index("watchDeliveries();")
+    assert resumed.index("return;") < resumed.index("openChat();")

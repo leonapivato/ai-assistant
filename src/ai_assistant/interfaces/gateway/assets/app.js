@@ -58,6 +58,22 @@
 
 const STORAGE_KEY = "assistant.session.header-half";
 
+// **Which door served this page** (ADR-0327 §11), read off the document element, where
+// `/door.js` wrote it before this file ran. The hosted listener — the one behind the
+// sign-in edge — serves a `door.js` that says "hosted", and every other listener serves
+// one that does not; that file is the whole of the difference between the two bundles.
+//
+// On the hosted door the page shows no bootstrap entry and mints its session by the
+// exchange, with nothing typed (§11:1). Everything the gateway admits it decides for
+// itself, so a page that read this wrong would show the wrong panel and be refused —
+// it could never be admitted on the strength of it.
+const HOSTED = document.documentElement.dataset.door === "hosted";
+
+// The exchange that takes the bootstrap value's place on the hosted listener (§8): a
+// `POST` carrying nothing. The edge adds its assertion on the box; this page never sees
+// one (§9:2).
+const EDGE_EXCHANGE_PATH = "/session/edge";
+
 // The response header a delivery stream states its own keep-alive cadence in, as a
 // decimal count of microseconds (#1442, ADR-0175 §4, §8).
 //
@@ -521,6 +537,13 @@ const FAULTS = {
   "cookie-half-mismatch": "The two halves of this browser's session no longer match.",
   "session-ceiling": "The gateway is holding as many sessions as it admits.",
   "bootstrap-exchange-failed": "That did not start a session.",
+  // ADR-0327 §7:6 and §11:6: the hosted listener's one refusal for its assertion, its
+  // `Host` and its `Origin`, which carries nothing about which of them failed — so the
+  // sentence says what the person can do, which is the same whichever it was. It is
+  // never shown on another door, which never answers with it.
+  "door-refused":
+    "The sign-in door refused this request, so nothing was asked. If your sign-in has " +
+    "ended, sign in again at the sign-in page.",
   // ADR-0174 §4, and the one refusal on this page whose remedy no status code hints at
   // (#1438). The assets are served to **any** device of the overlay — §4 keeps them
   // above the device check deliberately, because "an overlay member obtains nothing
@@ -681,11 +704,20 @@ const DELIVERY_STREAM_MISFRAMED =
 // This is the sentence for the surprise rather than a restatement of the mechanism:
 // nothing is wrong with the browser, nothing is recoverable, and the way back is a
 // fresh bootstrap value.
-const GATEWAY_GONE =
-  "The gateway did not answer, so it may have stopped. " +
-  "Every session ends with the gateway: a session is held in that process's memory " +
-  "and written down nowhere, so a gateway that starts again has no memory of this one. " +
-  "Start the gateway, then start a session with the value it prints.";
+//
+// **Through the sign-in door the way back is not the owner's to take at the gateway**
+// (ADR-0327 §11): the box is the operator's, and a session there is started by the
+// exchange, with nothing typed. So the same surprise is said with the hosted remedy —
+// try again, and this page starts a new session through the sign-in it already has.
+const GATEWAY_GONE = HOSTED
+  ? "The gateway did not answer, so it may have stopped. " +
+    "Every session ends with the gateway: a session is held in that process's memory " +
+    "and written down nowhere, so a gateway that starts again has no memory of this one. " +
+    "Try again in a moment, and this page starts a new session through your sign-in."
+  : "The gateway did not answer, so it may have stopped. " +
+    "Every session ends with the gateway: a session is held in that process's memory " +
+    "and written down nowhere, so a gateway that starts again has no memory of this one. " +
+    "Start the gateway, then start a session with the value it prints.";
 
 // Why a delivery stream can end in `no-live-session` when nothing was refused and the
 // owner did nothing — the one condition on this page that nobody guesses right.
@@ -850,6 +882,95 @@ async function startSession(event) {
   showConsole();
 }
 
+// --- the exchange, through the sign-in door (ADR-0327 §8, §11) -------------------
+//
+// **The page exchanges by itself, on two events only** (§11:2): when it loads holding no
+// header half, and when the gateway refuses the half it holds as no live session. Each
+// makes at most one exchange, and an exchange already in flight is the one for every
+// event that arrives while it is — so a listing and a stream refused together start one
+// session, not two.
+//
+// **After a failed exchange the page makes no further one until the owner acts**
+// (§11:3). `exchangeFailed` is set by every failure and cleared by nothing in this file:
+// the act is the owner's "Try again", which reloads the page, and a reload is the act
+// §11:3 names. So no refusal, however it arrives, becomes a retry loop.
+//
+// **Three outcomes, each in its own words.** A session — and the page carries on. The
+// door refusing (§7:6), which says the sign-in page is where signing in again happens
+// (§11:6). Any other failure, which says only that it failed (§8:2) — and the gateway
+// not answering at all, which is `GATEWAY_GONE` in the hosted panel's fault slot.
+let exchanging = false;
+let exchangeFailed = false;
+
+// What the hosted panel says while the exchange is out, and after a session that ended
+// was replaced. Neither is a fault: a session ending on its own bounds is how sessions
+// end, and the page has already done the one thing there is to do about it.
+const SIGNING_IN = "Starting a session through your sign-in.";
+const RESUMED =
+  "That session ended, so this browser started a new one through your sign-in. " +
+  "Nothing you asked was sent again: ask again, and watch again, when you want to.";
+
+// §11:3's other half: what the owner is told after a failure, beside the act that is
+// theirs to take.
+const TRY_AGAIN = "Nothing more is tried until you try again.";
+
+function exchangeRefused(said) {
+  exchangeFailed = true;
+  showBootstrap(`${said} ${TRY_AGAIN}`);
+  el("hosted-again").hidden = false;
+}
+
+async function exchangeSession(resumed) {
+  if (exchanging || exchangeFailed) {
+    return;
+  }
+  exchanging = true;
+  el("hosted-again").hidden = true;
+  showBootstrap(SIGNING_IN);
+  let response;
+  let body;
+  try {
+    // No body and no header of this page's own (§8:1): the browser sends the `Origin`
+    // and the edge attaches its assertion, and those are the whole of the exchange.
+    response = await fetch(EDGE_EXCHANGE_PATH, { method: "POST" });
+    body = await readBody(response);
+  } catch (_) {
+    exchanging = false;
+    exchangeFailed = true;
+    showBootstrap(TRY_AGAIN);
+    el("hosted-again").hidden = false;
+    fault(GATEWAY_GONE, "hosted");
+    return;
+  }
+  exchanging = false;
+  if (!response.ok || typeof body.header_half !== "string") {
+    exchangeRefused(describe(body, response.status));
+    return;
+  }
+  if (!rememberHeaderHalf(body.header_half)) {
+    exchangeRefused("This browser will not store the session, so it cannot hold one.");
+    return;
+  }
+  showConsole(resumed);
+}
+
+// What the hosted page does with a refusal that ended, or barred, the session it holds
+// (§11:2, §11:5, §11:6). Its own function so `sessionLost` keeps the loopback page's
+// re-entry exactly as ADR-0182 §6 rules it (§11:8).
+function hostedSessionLost(body, said) {
+  if (body.fault === "no-live-session") {
+    // §11:2's second event: one exchange, and the request that was refused is not sent
+    // again (§11:4) — `showConsole` is told it is resuming and re-issues nothing.
+    void exchangeSession(true);
+    return;
+  }
+  // The mismatch (§11:5) and the door's refusal (§11:6) are each shown as themselves,
+  // and neither makes an exchange: the next attempt is the owner's to make.
+  exchangeFailed = true;
+  showBootstrap(`${said || describe(body, 0)} ${TRY_AGAIN}`);
+  el("hosted-again").hidden = false;
+}
+
 // One request the gateway admits, with both halves of the session presented as
 // ADR-0168 §6 requires: the header this page sets, and the cookie the browser
 // attaches on its own.
@@ -884,7 +1005,12 @@ const RE_ENTRY =
   "bootstrap value to carry on.";
 
 function sessionLost(body, said) {
-  if (body.fault === "no-live-session" || body.fault === "cookie-half-mismatch") {
+  // **The door's refusal ends this page's use of its session as well** (ADR-0327
+  // §11:6): nothing more is admitted through a door that refuses, and the half is let
+  // go so that trying again starts the one exchange a load holding no session makes —
+  // rather than presenting a half the person's ended sign-in can no longer carry.
+  const barred = HOSTED && body.fault === "door-refused";
+  if (barred || body.fault === "no-live-session" || body.fault === "cookie-half-mismatch") {
     forgetHeaderHalf();
     // **The stream goes with the session, and it goes first** (#1542). `stopWatching`
     // below changes what the page says and what the owner can press; this ends the
@@ -900,6 +1026,10 @@ function sessionLost(body, said) {
     // on `visibilitychange` and `online` and on nothing else.
     releaseStream();
     stopWatching();
+    if (HOSTED) {
+      hostedSessionLost(body, said);
+      return true;
+    }
     showBootstrap(said ? `${RE_ENTRY} ${said}` : RE_ENTRY);
     return true;
   }
@@ -5822,12 +5952,17 @@ function fromMenu(panelId, act) {
 // header half by calling this with nothing, so a sentence cleared by the next click
 // would be an explanation the owner had one click to read. It is cleared where it stops
 // being true: when a session starts.
+//
+// **On the hosted door it shows the hosted panel instead**, which carries no bootstrap
+// entry (ADR-0327 §11:1): the same sweep, so a session-less page shows nothing of the
+// owner's through either door, and `because` is what that panel says.
 function showBootstrap(because) {
   clearFaults();
   if (because !== undefined) {
-    el("reentry").textContent = because;
+    el(HOSTED ? "hosted-state" : "reentry").textContent = because;
   }
-  show("bootstrap", true);
+  show("bootstrap", !HOSTED);
+  show("hosted", HOSTED);
   show("console", false);
   show("conversations", false);
   show("notifications", false);
@@ -5835,12 +5970,19 @@ function showBootstrap(because) {
   closeChat();
 }
 
-function showConsole() {
+//
+// `resumed` is the hosted page's exchange after a session ended under it (ADR-0327
+// §11:2): the console comes back, and **nothing the ended session was doing is
+// re-issued** (§11:4, ADR-0182 §7:5) — not the delivery stream and not the chat's
+// following, each of which is one press away and said so.
+function showConsole(resumed) {
   clearFaults();
   // The re-entry sentence stops being true the moment a session exists, and this is the
   // one place that is so.
   el("reentry").textContent = "";
+  el("hosted-state").textContent = "";
   show("bootstrap", false);
+  show("hosted", false);
   show("console", true);
   // The notification panel is shown before anything has arrived, because what it
   // mostly says is whether this browser is watching at all — and a panel that
@@ -5848,6 +5990,10 @@ function showConsole() {
   // notifications" from "not connected", which is ADR-0083's ruling 4 failure at the
   // one place ADR-0175 §4 spends a keep-alive to prevent it.
   show("notifications", true);
+  if (resumed === true) {
+    deliveryState(RESUMED);
+    return;
+  }
   // The control surface's own entry points are in the console's menu; each panel
   // appears when it has been read, so a panel on screen is always a panel showing an
   // answer rather than an empty promise.
@@ -5865,6 +6011,9 @@ function showConsole() {
 el("page-name").textContent = document.title;
 
 el("bootstrap-form").addEventListener("submit", startSession);
+// The owner's act after a failed exchange (ADR-0327 §11:3): a reload, which starts the
+// page over — and with it the one exchange a load holding no session makes.
+el("hosted-again").addEventListener("click", () => window.location.reload());
 // Wrapped rather than passed, because the listener's argument is a `MouseEvent` and
 // `watchDeliveries` reads its first argument as the sentence to announce.
 el("watch-button").addEventListener("click", () => watchDeliveries());
@@ -5950,8 +6099,17 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("online", () => rearm(NETWORK_BACK));
 
 stopWatching();
-if (headerHalf() === null) {
-  showBootstrap();
-} else {
+if (HOSTED) {
+  // ADR-0327 §11:7 in place of ADR-0182 §6:3's three conditions, which are this page's
+  // on every other door: a session here is the gateway's and lasts as ADR-0168 §4 rules,
+  // but the person never meets its end — they meet their sign-in's.
+  el("session-terms").hidden = true;
+  el("hosted-terms").hidden = false;
+}
+if (headerHalf() !== null) {
   showConsole();
+} else if (HOSTED) {
+  void exchangeSession(false);
+} else {
+  showBootstrap();
 }

@@ -108,6 +108,11 @@ class _Session:
     device's Tier 0 secret at rest"; ADR-0168 §4 takes that verbatim for the
     gateway, and ADR-0172 §1 confirms a verifier is not itself in the credential
     class.
+
+    **Which listener minted it is one more bounded fact about the row** (ADR-0327
+    §15, on ADR-0094 §9): a session minted through the hosted listener admits there
+    and nowhere else, and is the only kind a hosted exchange may end at the ceiling
+    (§8:6).
     """
 
     cookie_verifier: bytes
@@ -115,6 +120,7 @@ class _Session:
     expires_at: datetime
     last_used_at: datetime
     timer: Cancellable | None = None
+    hosted: bool = False
 
 
 def verifier(value: str) -> bytes:
@@ -227,6 +233,49 @@ class SessionTable:
         """
         if len(self._sessions) >= self._max_sessions:
             return None
+        return self._minted(hosted=False)
+
+    def mint_hosted(self) -> tuple[SessionValues, bool] | None:
+        """Mint one session through the hosted listener, ending its oldest at the ceiling.
+
+        > An exchange on the hosted listener that would take the live session count
+        > past ``gateway_max_sessions`` ends the oldest live session minted through the
+        > hosted listener, then mints. Where no live session was minted through it, the
+        > exchange is refused as ADR-0182 §4:2 rules. No session minted through another
+        > listener is ever ended by it. (ADR-0327 §8:6)
+
+        **Why ADR-0131 §2's reason for refusing does not reach here**: the lever it
+        names is "any local caller", and a hosted exchange is driven only by a
+        request the edge signed for this hub's owner (§6), so the one caller who can
+        pull it is the owner, on their own sessions. Behind an automatic exchange,
+        refusing would lock them out of their own page after a few browsers.
+
+        **Oldest is oldest minted**, which is the table's insertion order. The ending
+        is the same ending either bound gives a session — removed, its timer
+        cancelled, and its handle announced so its streams end with it (ADR-0175 §7).
+
+        Returns:
+            The two values to disclose and whether a session was ended to make room,
+            or ``None`` where the ceiling is reached and no hosted session is live.
+        """
+        ended = False
+        if len(self._sessions) >= self._max_sessions:
+            oldest = next((key for key, one in self._sessions.items() if one.hosted), None)
+            if oldest is None:
+                return None
+            self._end(oldest)
+            ended = True
+        return self._minted(hosted=True), ended
+
+    def _minted(self, *, hosted: bool) -> SessionValues:
+        """Mint one session into the table, with nothing about the ceiling decided here.
+
+        Args:
+            hosted: Whether the hosted listener minted it.
+
+        Returns:
+            The two values to disclose.
+        """
         values = SessionValues(cookie_half=self._mint_value(), header_half=self._mint_value())
         moment = self._now()
         key = SessionHandle(secrets.token_hex(8))
@@ -235,12 +284,15 @@ class SessionTable:
             header_verifier=verifier(values.header_half),
             expires_at=_saturating(moment, self._ttl),
             last_used_at=moment,
+            hosted=hosted,
         )
         self._sessions[key] = session
         self._rearm(key, session)
         return values
 
-    def admit(self, *, header_half: str | None, cookie_halves: tuple[str, ...]) -> Admission:
+    def admit(
+        self, *, header_half: str | None, cookie_halves: tuple[str, ...], hosted: bool = False
+    ) -> Admission:
         """Decide one request's two values (ADR-0168 §6).
 
         The header half is what a session is *found* by, and the cookie half is
@@ -253,11 +305,16 @@ class SessionTable:
             header_half: The value the front end sent as a header, or ``None``.
             cookie_halves: Every cookie presented under the gateway's own name —
                 all of them, since more than one is itself the refusal.
+            hosted: Whether the request arrived on the hosted listener. A session is
+                found only among those minted through the listener it arrives on,
+                hosted or not (ADR-0327 §10:2): a hosted session's browser is the
+                hosted browser device, and on another listener it would act as a
+                device it is not.
 
         Returns:
             What the table made of them.
         """
-        found = None if header_half is None else self._find(header_half)
+        found = None if header_half is None else self._find(header_half, hosted=hosted)
         if found is None:
             return Admission.NO_LIVE_SESSION
         key, session = found
@@ -327,9 +384,18 @@ class SessionTable:
         if self._on_ended is not None:
             self._on_ended(key)
 
-    def _find(self, header_half: str) -> tuple[SessionHandle, _Session] | None:
-        """The live session whose header verifier matches, with its key."""
+    def _find(
+        self, header_half: str, *, hosted: bool | None = None
+    ) -> tuple[SessionHandle, _Session] | None:
+        """The live session whose header verifier matches, with its key.
+
+        Args:
+            header_half: The value presented.
+            hosted: Which listener's sessions to look among, or ``None`` for all.
+        """
         for key, session in self._sessions.items():
+            if hosted is not None and session.hosted is not hosted:
+                continue
             if self._matches(session, header_half):
                 return key, session
         return None

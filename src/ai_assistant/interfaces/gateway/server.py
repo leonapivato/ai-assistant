@@ -105,6 +105,19 @@ clause of ADR-0177 §3, which ADR-0202 §9 leaves where it found it and §10 rec
 no supersession against. So the refusal stands as written, and lifting it is
 ADR-0177's own decision to reopen rather than a consequence of this one.
 
+**A third listener serves the hosted owner through the sign-in edge, and it too is off
+unless it is configured on** (ADR-0327). The edge — our own sign-in service, a program
+outside this repository — holds a person's sign-in on the box behind the door's HTTPS,
+and forwards each of their requests to this listener over the box's loopback with an
+assertion it signs. That hop is the fifth egress boundary (§3:1). The listener binds
+where only the box reaches it (§5), speaks plain HTTP to the edge (§5:6), and admits a
+request on two facts: the edge's assertion, which :mod:`.edge` checks against keys
+configured at setup and nothing fetched, and a live web session (§7:5). Its session is
+minted by an exchange of the assertion with nothing typed (§8), it serves no bootstrap
+exchange, and every browser it admits is the one hosted browser device the operator
+named (§10). Its refusals on the assertion, the `Host` and the `Origin` are one refusal
+(§7:6); its session refusals are ADR-0168's, unchanged.
+
 **And a gateway that reaches its *hub* over ADR-0124's remote listener** serves
 none of the five to any browser on either listener, because ADR-0151 §13's own
 question — the credential's hop from an enrolled device to the hub — is untouched
@@ -200,7 +213,10 @@ from ai_assistant.interfaces.devices import this_device
 from ai_assistant.interfaces.gateway import streams
 from ai_assistant.interfaces.gateway.change_stream import paced
 from ai_assistant.interfaces.gateway.delivery import DeliveryFanOut, DeliveryStream, write_stream
+from ai_assistant.interfaces.gateway.edge import ASSERTION_HEADER, check_assertion, edge_terms
 from ai_assistant.interfaces.gateway.http import (
+    NO_STORE,
+    NO_STORE_NO_TRANSFORM,
     IncompleteRequestError,
     MalformedRequestError,
     Request,
@@ -229,6 +245,7 @@ from ai_assistant.interfaces.gateway.sessions import (
     mint_value,
 )
 from ai_assistant.interfaces.gateway.tls import remote_tls
+from ai_assistant.wire.envelope import checked_acting_for
 from ai_assistant.wire.errors import OverlayIdentityUnavailableError, TransportError
 from ai_assistant.wire.overlay import (
     CLIENT_AGENT_SOCKET,
@@ -244,6 +261,7 @@ if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
     from ai_assistant.core.types import (
         ChatChange,
     )
+    from ai_assistant.interfaces.gateway.edge import EdgeTerms
     from ai_assistant.interfaces.gateway.tls import RemoteTls
     from ai_assistant.wire.overlay import OverlayAgent
 
@@ -270,6 +288,12 @@ _LOOPBACK: Final = "127.0.0.1"
 _LOOPBACK_SCHEME: Final = "http"
 _REMOTE_SCHEME: Final = "https"
 
+#: The scheme of the hosted listener's **origin**, which is not the scheme it speaks.
+#: The listener speaks plain HTTP to the edge, on the box (ADR-0327 §5:6); the page's
+#: origin is the door's, which the box serves over HTTPS on port 443 (§4:1, §4:6), so
+#: the `Origin` §7:3 admits is ``https://`` followed by ``gateway_hosted_host_name``.
+_HOSTED_SCHEME: Final = "https"
+
 
 #: The paths the browser-facing surface uses. ADR-0168 §12 leaves the surface to
 #: this lane — "the request shapes, the paths, the document, and whether a push
@@ -288,6 +312,14 @@ _REMOTE_SCHEME: Final = "https"
 #: appearing in a URL, and a surface with no URL arguments at all cannot acquire one
 #: by accident.
 _SESSION_PATH: Final = "/session"
+
+#: The exchange that takes the bootstrap value's place on the hosted listener
+#: (ADR-0327 §8): a ``POST`` with no body, admitted on the edge's assertion alone. A
+#: path of its own rather than :data:`_SESSION_PATH` with a second meaning, so "the
+#: hosted listener serves no bootstrap exchange" (§8:3) is a fact about routing: no
+#: request on that listener reaches the code that reads a bootstrap value, and no
+#: request on another listener reaches this one.
+_EDGE_EXCHANGE_PATH: Final = "/session/edge"
 
 #: ADR-0175 §4's delivery stream. ``GET`` because it carries no argument: the poll
 #: is the gateway's own and takes none from a browser.
@@ -488,6 +520,13 @@ _STREAMED_SHAPES: Final = frozenset({("GET", _DELIVERIES_PATH), ("POST", _CHAT_F
 _COOKIE_NAME: Final = "assistant_session"
 _SESSION_HEADER: Final = "x-assistant-session"
 
+#: The cookie half's name on the hosted listener (ADR-0327 §8:5): ``__Host-`` before
+#: the same name, which a browser accepts only beside ``Secure``, ``Path=/`` and no
+#: ``Domain`` — so a cookie of that name on the door's origin cannot have been set by
+#: any other host, and every attribute §6:2 of ADR-0168 requires is held to it by the
+#: browser as well as written by the gateway.
+_HOSTED_COOKIE_NAME: Final = f"__Host-{_COOKIE_NAME}"
+
 #: The policy every response carries (ADR-0168 §6): scripts, styles, fonts,
 #: images, media and connections from the gateway's own origin alone, and no
 #: inline script. `default-src 'none'` is what makes the enumeration exhaustive
@@ -523,6 +562,20 @@ _REFUSAL_STATUS: Final[Mapping[RefusalCondition, tuple[int, str]]] = {
     # A `401` would invite a browser to present something, and there is nothing it
     # could present that would change the answer.
     RefusalCondition.DEVICE_NOT_LISTED: (403, "Forbidden"),
+    # ADR-0327 §7:6: one refusal for the hosted listener's assertion, `Host` and
+    # `Origin` alike. `403` rather than `401`, so it never reads as the absent session
+    # §7:7 keeps distinct, and the page tells them apart by the `fault` member (§11).
+    RefusalCondition.DOOR_REFUSED: (403, "Forbidden"),
+    # Recorded and never written back: each is answered as `DOOR_REFUSED`. In the
+    # table for the reason `SESSION_CEILING` is — a condition missing from it would be
+    # a `KeyError` in the one place a gateway must not raise.
+    RefusalCondition.ASSERTION_ABSENT: (403, "Forbidden"),
+    RefusalCondition.ASSERTION_MALFORMED: (403, "Forbidden"),
+    RefusalCondition.ASSERTION_SIGNATURE: (403, "Forbidden"),
+    RefusalCondition.ASSERTION_ISSUER: (403, "Forbidden"),
+    RefusalCondition.ASSERTION_AUDIENCE: (403, "Forbidden"),
+    RefusalCondition.ASSERTION_SUBJECT: (403, "Forbidden"),
+    RefusalCondition.ASSERTION_TIMES: (403, "Forbidden"),
 }
 
 #: How many parts a peer address must have before its host and port can be read.
@@ -543,6 +596,7 @@ _BUNDLE: Final[Mapping[str, tuple[str, str]]] = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/door.js": ("door.js", "text/javascript; charset=utf-8"),
     **{
         f"/fonts/{face}.woff2": (f"fonts/{face}.woff2", "font/woff2")
         for face in (
@@ -555,6 +609,15 @@ _BUNDLE: Final[Mapping[str, tuple[str, str]]] = {
         )
     },
 }
+
+
+#: The served path whose file differs on the hosted listener, and the file it serves
+#: there (ADR-0327 §11). One path, one file, both shipped in the distribution: the
+#: hosted bundle is the same bundle with this one substitution, so the page that
+#: listener serves is this repository's page (§3:1, §4:7) and learns which door it
+#: came through without asking the gateway anything before a session exists (§7:4).
+_DOOR_PATH: Final = "/door.js"
+_HOSTED_DOOR: Final = "door-hosted.js"
 
 
 def _authority(host: str, port: int) -> str:
@@ -596,26 +659,29 @@ def _hold_what_the_peer_sent_for_tls(writer: asyncio.StreamWriter) -> None:
         transport.pause_reading()
 
 
-def _cookie(half: str, *, remote: bool) -> str:
-    """The `Set-Cookie` value for one minted session (ADR-0168 §6, ADR-0202 §7).
+def _cookie(half: str, *, remote: bool, hosted: bool = False) -> str:
+    """The `Set-Cookie` value for one minted session (ADR-0168 §6, ADR-0202 §7, ADR-0327 §8:5).
 
     One function rather than an interpolation at the call site, so the attribute set
-    is one thing to read against the two ADRs that decide it — and so a second mint
-    path could never grow a different set.
+    is one thing to read against the ADRs that decide it — and so a second mint path
+    could never grow a different set.
 
     Args:
         half: The cookie half the session table minted.
-        remote: Whether the exchange arrived on the remote browser listener, which is
-            the only thing that decides `Secure`.
+        remote: Whether the exchange arrived on the remote browser listener.
+        hosted: Whether it arrived on the hosted listener. With ``remote``, the only
+            things that decide `Secure` and the name.
 
     Returns:
-        The header value, with every attribute ADR-0168 §6 requires and, on the
-        remote listener alone, the one ADR-0202 §7 adds.
+        The header value, with every attribute ADR-0168 §6 requires; `Secure` on the
+        remote listener (ADR-0202 §7) and on the hosted one, which also takes the
+        ``__Host-`` name (ADR-0327 §8:5).
     """
     attributes = "HttpOnly; SameSite=Strict; Path=/"
-    if remote:
+    if remote or hosted:
         attributes = f"{attributes}; Secure"
-    return f"{_COOKIE_NAME}={half}; {attributes}"
+    name = _HOSTED_COOKIE_NAME if hosted else _COOKIE_NAME
+    return f"{name}={half}; {attributes}"
 
 
 def _refuse_an_address_this_machine_does_not_hold(address: str) -> None:
@@ -671,6 +737,76 @@ def _refuse_an_address_this_machine_does_not_hold(address: str) -> None:
         raise ConfigurationError(msg) from exc
 
 
+def _refuse_a_hosted_address_this_machine_does_not_hold(address: str) -> None:
+    """Refuse a hosted address no interface of this machine holds (ADR-0327 §5:4).
+
+    The kernel is asked by a bind on an ephemeral port, for the reason
+    :func:`_refuse_an_address_this_machine_does_not_hold` gives: the real bind turns
+    ``EADDRNOTAVAIL`` into an ``OSError`` with no errno. A loopback address is always
+    held; a private-use one is held inside the container whose own address it is,
+    and a gateway configured with another machine's or container's address is a
+    setup fault worth a sentence.
+
+    Args:
+        address: The address the hosted listener is about to bind.
+
+    Raises:
+        ConfigurationError: If the address is not one this machine holds.
+        OSError: If the probe fails for any other reason.
+    """
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as probe:
+            probe.bind((address, 0))
+    except OSError as exc:
+        if exc.errno != errno.EADDRNOTAVAIL:
+            raise
+        msg = (
+            f"the hosted listener is configured to bind {address}, which is not an "
+            f"address of this machine ({exc}). ADR-0327 §5:4 configures a private-use "
+            f"address only for a gateway in a network namespace of its own, where that "
+            f"address is its own; set ASSISTANT_GATEWAY_HOSTED_ADDRESS to 127.0.0.1 on "
+            f"a gateway that shares the box's network"
+        )
+        raise ConfigurationError(msg) from exc
+
+
+def _check_the_hosted_listener_can_serve(settings: Settings) -> EdgeTerms | None:
+    """Refuse a hosted listener that could never relay a request (ADR-0327 §10:3).
+
+    ``Settings`` refused what it could decide without importing a subsystem; the
+    hosted device is held here to the whole of ADR-0298 §1:3 by the very check the
+    wire client runs on every ``acting_for`` it writes, byte bound included. A name
+    failing it would be refused before any frame was written, so every request the
+    hosted owner made would fail with nothing at setup saying why.
+
+    Args:
+        settings: The loaded configuration.
+
+    Returns:
+        The terms the edge's assertions are held to, or ``None`` where the hosted
+        listener is off.
+
+    Raises:
+        ConfigurationError: If the device cannot be named on the wire, or a key
+            cannot be loaded.
+    """
+    terms = edge_terms(settings)
+    device = settings.gateway_hosted_device
+    if terms is None or device is None:
+        return None
+    try:
+        checked_acting_for(device)
+    except ValueError as exc:
+        msg = (
+            f"gateway_hosted_device cannot be named on the wire ({exc}), so the hub "
+            f"could never be told which device the hosted owner's browsers are "
+            f"(ADR-0327 §10:2, ADR-0298 §1:3); choose a shorter plain name"
+        )
+        raise ConfigurationError(msg) from exc
+    return terms
+
+
 def _check_the_remote_listener_can_serve(settings: Settings, *, agent: OverlayAgent | None) -> None:
     """Refuse a remote browser listener that could never admit anything (ADR-0174 §8).
 
@@ -718,20 +854,27 @@ def _check_the_remote_listener_can_serve(settings: Settings, *, agent: OverlayAg
             raise ConfigurationError(msg)
 
 
-def packaged_bundle() -> Mapping[str, tuple[bytes, str]]:
+def packaged_bundle(*, hosted: bool = False) -> Mapping[str, tuple[bytes, str]]:
     """Read the front end out of the installed distribution (ADR-0168 §10).
 
     Read once, at start, rather than per request: the bundle ships with the
     package and cannot change under a running process, and a gateway that read a
     file per request would have a filesystem in its request path for no gain.
 
+    Args:
+        hosted: Whether this is the bundle the hosted listener serves, which differs
+            in :data:`_DOOR_PATH` alone (ADR-0327 §11).
+
     Returns:
         Each served path's bytes and media type.
     """
     root = resources.files(__package__) / "assets"
+    files = {**_BUNDLE}
+    if hosted:
+        files[_DOOR_PATH] = (_HOSTED_DOOR, _BUNDLE[_DOOR_PATH][1])
     return {
         path: (root.joinpath(*name.split("/")).read_bytes(), media_type)
-        for path, (name, media_type) in _BUNDLE.items()
+        for path, (name, media_type) in files.items()
     }
 
 
@@ -758,14 +901,18 @@ class _Connection:
             exactly.
         device: The overlay identity ADR-0174 §3 obtained for it, attested by the
             gateway's own agent and taken from nothing the peer asserts. ``None`` on
-            a loopback connection, which has no such fact — and a remote connection
-            never reaches a request with it still ``None``, because §3 refuses and
-            closes one whose identity could not be obtained.
+            a loopback or hosted connection, which has no such fact — and a remote
+            connection never reaches a request with it still ``None``, because §3
+            refuses and closes one whose identity could not be obtained.
+        hosted: Whether it arrived on the hosted listener (ADR-0327), which selects
+            that ADR's admission on two facts — the edge's assertion and a live
+            session. Never ``True`` beside ``remote``.
     """
 
     admitted: bool = False
     remote: bool = False
     device: str | None = None
+    hosted: bool = False
 
 
 @dataclass(frozen=True)
@@ -1098,7 +1245,7 @@ class _Streamed:
 class Gateway:
     """Serves one device's browsers, and reaches the hub as any spoke does."""
 
-    def __init__(  # noqa: PLR0913 — one keyword per injected seam: config, hub, clock, timer, bundle, agent, entropy
+    def __init__(  # noqa: PLR0913 — one keyword per injected seam: config, hub, clock, timer, bundles, agent, entropy
         self,
         *,
         settings: Settings,
@@ -1108,6 +1255,7 @@ class Gateway:
         bundle: Mapping[str, tuple[bytes, str]],
         agent: OverlayAgent | None = None,
         mint_value: Callable[[], str] = mint_value,
+        hosted_bundle: Mapping[str, tuple[bytes, str]] | None = None,
     ) -> None:
         """Build a gateway that has minted nothing and bound nothing.
 
@@ -1148,6 +1296,9 @@ class Gateway:
                 and a test supplies a fake.
             mint_value: The entropy source for the bootstrap value and both
                 session halves.
+            hosted_bundle: The front end the hosted listener serves, or ``None`` to
+                serve ``bundle`` there too. :func:`packaged_bundle` builds the real
+                one, which differs in one file (ADR-0327 §11).
 
         Raises:
             ConfigurationError: If the remote browser listener is configured on with
@@ -1157,15 +1308,22 @@ class Gateway:
                 at start. Each is a stay-down deployment fault (ADR-0083 §5): a
                 gateway that bound the door anyway would refuse every connection on
                 it, refuse the owner's own named device at every exchange with
-                nothing saying why, or serve a certificate no browser accepts.
+                nothing saying why, or serve a certificate no browser accepts. Also
+                if the hosted listener's device cannot be named on the wire or an
+                edge key cannot be loaded (ADR-0327 §6:4, §10:3).
         """
         _check_the_remote_listener_can_serve(settings, agent=agent)
+        #: What the edge's assertions are held to (ADR-0327 §6), read once and never
+        #: re-read: "No request on any listener may add to, remove from or replace
+        #: the set" (§6:5). ``None`` exactly where the hosted listener is off.
+        self._edge: EdgeTerms | None = _check_the_hosted_listener_can_serve(settings)
         tls = remote_tls(settings, now=now)
         self._settings = settings
         self._engine = engine
         self._now = now
         self._defer = defer
         self._bundle = bundle
+        self._hosted_bundle = bundle if hosted_bundle is None else hosted_bundle
         self._mint_value = mint_value
         self._sessions = SessionTable(
             max_sessions=settings.gateway_max_sessions,
@@ -1235,6 +1393,12 @@ class Gateway:
             _authority(name, settings.gateway_port)
             for name in (self._remote_address, *settings.gateway_remote_host_names)
             if name is not None
+        )
+        #: What a `Host` may name on the hosted listener (ADR-0327 §7:2): the door's
+        #: own hostname and nothing else, compared literally and never resolved. Empty
+        #: where the listener is off, so nothing is admitted by it.
+        self._hosted_authorities = frozenset(
+            name for name in (settings.gateway_hosted_host_name,) if name is not None
         )
         #: The shapes answered whole, by path. A table rather than a chain of
         #: comparisons, so ADR-0177 §1's enumeration is one thing to read against the
@@ -1326,6 +1490,21 @@ class Gateway:
         """
         remote = sorted(self._remote_authorities)
         return (self._origin, *(f"{_REMOTE_SCHEME}://{one}" for one in remote))
+
+    @property
+    def hosted_origin(self) -> str | None:
+        """The door's origin, which the hosted listener admits, or ``None`` where it is off.
+
+        **Not one of :attr:`origins`**, because those are where a bootstrap value is
+        spent and every disclosure lists them beside one: "The hosted listener serves
+        no bootstrap exchange" (ADR-0327 §8:3), so naming its origin beside a value
+        would hand the owner a door the value does not open.
+
+        Returns:
+            ``https://`` followed by ``gateway_hosted_host_name`` (§7:3), or ``None``.
+        """
+        name = self._settings.gateway_hosted_host_name
+        return None if self._edge is None or name is None else f"{_HOSTED_SCHEME}://{name}"
 
     def mint_bootstrap(
         self, disclose: Callable[[Disclosure], None], *, act: MintAct | None
@@ -1577,6 +1756,74 @@ class Gateway:
         )
         return server
 
+    async def start_hosted(self) -> asyncio.Server | None:
+        """Bind the hosted listener, if the operator configured one (ADR-0327 §5).
+
+        > The hosted listener is **off unless it is configured on**, by
+        > ``gateway_hosted_address``. (§5:1)
+
+        **Where it binds is decided before this, and what reaches it after.**
+        ``Settings`` admits only a literal loopback or private-use address (§5:3), and
+        this asks the kernel that the address is this machine's own. A loopback
+        address is reached from the box alone; a private-use one is configured only
+        inside a network namespace of its own whose hosted port is published to the
+        host's loopback and to nothing else (§5:4), which the setup holds (#3142).
+        The gateway cannot see that publication and does not claim to.
+
+        **Plain HTTP, and no certificate** (§5:6): TLS is the door's, terminated on
+        the box in front of the edge (§4:1). No request reaches this listener
+        except one the edge forwarded, and the gateway checks every one (§7:1).
+
+        **The device it names is not this machine's own**, which is checked here
+        because only here is this machine's device known (:meth:`start`): a hosted
+        owner's browsers acting as the gateway's own device would take its roles,
+        which §10:2 forbids.
+
+        **The keep-alive it relies on** (§5:9). Both streams write at least once per
+        ``gateway_notification_budget``, twenty seconds by default (ADR-0175 §4,
+        ADR-0298 §7), and the hosted listener adds no cadence of its own; this
+        assumes every hop between the gateway and the browser, the edge among them,
+        holds an idle stream for at least sixty seconds, three cadences at the
+        default.
+
+        Returns:
+            The bound server, or ``None`` where the listener is off.
+
+        Raises:
+            ConfigurationError: If the address is not one this machine holds, or the
+                hosted device is this machine's own.
+            OSError: If the bind fails for any other reason, left raw for the reason
+                :meth:`start_remote` leaves it.
+        """
+        address = self._settings.gateway_hosted_address
+        device = self._settings.gateway_hosted_device
+        if address is None or self._edge is None:
+            return None
+        if self._own_device is not None and device == self._own_device:
+            msg = (
+                "gateway_hosted_device names this gateway's own machine, so the hosted "
+                "owner's browsers would act with its roles (ADR-0327 §10:2, ADR-0298 "
+                "§8:1); give them a name of their own"
+            )
+            raise ConfigurationError(msg)
+        _refuse_a_hosted_address_this_machine_does_not_hold(address)
+        server = await asyncio.start_server(
+            partial(self._handle, remote=False, hosted=True),
+            host=address,
+            port=self._settings.gateway_hosted_port,
+        )
+        # Tier 2 facts about the listener and nothing of the edge's terms: no key, no
+        # issuer or audience, and never the subject, which §7:8 keeps out of every
+        # record. ``origin`` rather than a key with ``auth`` in it, for the reason
+        # :meth:`start_remote` gives about ``core.logging``'s mask.
+        _log.info(
+            "gateway.hosted_listening",
+            origin=self.hosted_origin,
+            bound=_authority(address, self._settings.gateway_hosted_port),
+            edge_verifiers=len(self._edge.keys),
+        )
+        return server
+
     async def _confirm_the_address_is_on_the_overlay(self, address: str) -> None:
         """Check 2: the overlay places a node at the address (ADR-0174 §2).
 
@@ -1630,6 +1877,12 @@ class Gateway:
             remote = await self.start_remote()
             if remote is not None:
                 bound.append(await stack.enter_async_context(remote))
+            # The hosted listener is bound beside both and torn down with them, under
+            # the same reasoning: a gateway asked to serve the door and unable to is
+            # not left serving the other listeners as though it were (ADR-0327 §5:7).
+            hosted = await self.start_hosted()
+            if hosted is not None:
+                bound.append(await stack.enter_async_context(hosted))
             await asyncio.gather(*(one.serve_forever() for one in bound))
 
     def close(self) -> None:
@@ -1692,7 +1945,12 @@ class Gateway:
         self._hub_in_flight -= 1
 
     async def _handle(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, *, remote: bool
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        *,
+        remote: bool,
+        hosted: bool = False,
     ) -> None:
         """Serve one connection under ADR-0168 §8's two ceilings and one deadline.
 
@@ -1708,8 +1966,11 @@ class Gateway:
             reader: The connection's reader.
             writer: The connection's writer.
             remote: Whether this is the remote browser listener's door.
+            hosted: Whether this is the hosted listener's (ADR-0327). It has no
+                identity step and no handshake: the peer is the edge, on the box, and
+                every request is admitted on the edge's assertion (§7:1).
         """
-        connection = _Connection(remote=remote)
+        connection = _Connection(remote=remote, hosted=hosted)
         if remote:
             # Before the first `await` on this connection, and see `_handshake` for
             # why that is the whole of the requirement: the peer's first bytes are
@@ -1932,6 +2193,9 @@ class Gateway:
         reading and §7 ratified it.
         """
         timeout = self._settings.gateway_read_timeout.total_seconds()
+        # ADR-0327 §4:9: every response on the hosted listener asks the edge and the
+        # browser to neither store nor transform it. Decided by the listener, once.
+        cache = NO_STORE_NO_TRANSFORM if connection.hosted else NO_STORE
         while True:
             answer = await self._next(reader, connection, timeout)
             if answer is None:
@@ -1944,11 +2208,15 @@ class Gateway:
             closing = answer.head.close if isinstance(answer, _Streamed) else answer.close
             closing = closing or not connection.admitted
             if isinstance(answer, _Streamed):
-                if not await self._write_stream(reader, writer, answer, closing=closing):
+                if not await self._write_stream(
+                    reader, writer, answer, closing=closing, cache=cache
+                ):
                     return
             else:
                 try:
-                    writer.write(render(replace(answer, close=closing), policy=_POLICY))
+                    writer.write(
+                        render(replace(answer, close=closing), policy=_POLICY, cache=cache)
+                    )
                     await writer.drain()
                 except ConnectionError, OSError:
                     # The same ordinary end, on the writing half. `_write_stream`
@@ -1967,6 +2235,7 @@ class Gateway:
         answer: _Streamed,
         *,
         closing: bool,
+        cache: str = NO_STORE,
     ) -> bool:
         """Write one streamed response whole (ADR-0175 §1).
 
@@ -1982,6 +2251,7 @@ class Gateway:
             writer: The connection's writer.
             answer: What to stream.
             closing: Whether the connection is closed once this completes.
+            cache: The head's ``Cache-Control`` (ADR-0327 §4:9).
 
         **The stream is registered before the first awaited write, and that ordering
         is the whole of ADR-0175 §7's reachability.** Nothing between
@@ -2007,6 +2277,7 @@ class Gateway:
             writer: The connection's writer.
             answer: What to stream.
             closing: Whether the connection is closed once this completes.
+            cache: The head's ``Cache-Control`` (ADR-0327 §4:9).
 
         Returns:
             Whether the connection survived. ``False`` where the peer went away,
@@ -2020,7 +2291,9 @@ class Gateway:
         )
         self._register(answer.handle, held)
         try:
-            writer.write(render_stream_head(replace(answer.head, close=closing), policy=_POLICY))
+            writer.write(
+                render_stream_head(replace(answer.head, close=closing), policy=_POLICY, cache=cache)
+            )
             await writer.drain()
             if answer.ends_when_the_peer_leaves:
                 if not await _while_the_peer_stays(answer.body(writer), reader):
@@ -2093,21 +2366,73 @@ class Gateway:
 
         The check is ahead of the session read for §3's reason one level in: an
         unlisted device is refused without the gateway consulting a session at all.
+
+        **On the hosted listener the edge's assertion comes first** (ADR-0327 §7:1),
+        "before ADR-0168 §7's ``Host`` and ``Origin`` checks and before any session is
+        read" — the assets and the exchange included, since §7:4 serves them "once
+        the checks above pass". A request failing the assertion, its `Host` or its
+        `Origin` is recorded on the check it failed (§7:7) and answered with one
+        refusal whichever it was (§7:6), so nothing a peer without the edge's key
+        sends can learn which of the three it got wrong, or anything past them.
         """
-        request_class = self._classify(request)
+        request_class = self._classify(request, hosted=connection.hosted)
+        if connection.hosted:
+            refused = self._check_the_edge(request, request_class, connection)
+            if refused is not None:
+                return refused
         condition = self._check_door(request, connection)
         if condition is not None:
-            return self._refuse(request_class, condition, connection)
+            answered = RefusalCondition.DOOR_REFUSED if connection.hosted else None
+            return self._refuse(request_class, condition, connection, answered_as=answered)
         if request_class is RequestClass.ASSET:
-            body, media_type = self._bundle[request.path]
+            bundle = self._hosted_bundle if connection.hosted else self._bundle
+            body, media_type = bundle[request.path]
             return Response(200, "OK", body=body, content_type=media_type, close=False)
         if connection.remote and connection.device not in self._listed_devices:
             return self._refuse(request_class, RefusalCondition.DEVICE_NOT_LISTED, connection)
         if request_class is RequestClass.BOOTSTRAP:
-            return self._exchange(request, connection)
+            exchange = self._edge_exchange if connection.hosted else self._exchange
+            return exchange(request, connection)
         return await self._session_bound(request, connection, request_class)
 
-    def _classify(self, request: Request) -> RequestClass:
+    def _check_the_edge(
+        self, request: Request, request_class: RequestClass, connection: _Connection
+    ) -> Response | None:
+        """ADR-0327 §6's check on one hosted request, refused as §7:6 rules if it fails.
+
+        The value is read out of the request here and handed to the check, and is
+        held nowhere else (§9:2): no record, no log line and no response carries it,
+        and nothing of it passes the admission. A request it admits writes no record
+        either (§9:8) — "the exemption's third replacement reaches an admission and
+        not a use".
+
+        Args:
+            request: The request as parsed.
+            request_class: Which of ADR-0168 §6's four kinds it is, for the record.
+            connection: The connection it arrived on.
+
+        Returns:
+            The refusal, or ``None`` where the assertion is accepted.
+        """
+        terms = self._edge
+        if terms is None:  # pragma: no cover — a hosted listener binds only with terms
+            return self._refuse(
+                request_class,
+                RefusalCondition.ASSERTION_ABSENT,
+                connection,
+                answered_as=RefusalCondition.DOOR_REFUSED,
+            )
+        fault = check_assertion(request.header(ASSERTION_HEADER), terms=terms, now=self._now())
+        if fault is None:
+            return None
+        return self._refuse(
+            request_class,
+            RefusalCondition(fault.value),
+            connection,
+            answered_as=RefusalCondition.DOOR_REFUSED,
+        )
+
+    def _classify(self, request: Request, *, hosted: bool = False) -> RequestClass:
         """Which of ADR-0168 §6's four kinds this request is, decided from it alone.
 
         **Still four, and ADR-0175 adds no fifth** (§12): "A streamed turn and a
@@ -2119,7 +2444,11 @@ class Gateway:
         """
         if request.method == "GET" and request.path in self._bundle:
             return RequestClass.ASSET
-        if request.method == "POST" and request.path == _SESSION_PATH:
+        # The exchange is in the bootstrap exchange's class (ADR-0327 §7:10), and each
+        # listener has exactly one: the hosted listener serves no bootstrap exchange
+        # (§8:3), and no other listener serves the edge's.
+        exchange = _EDGE_EXCHANGE_PATH if hosted else _SESSION_PATH
+        if request.method == "POST" and request.path == exchange:
             return RequestClass.BOOTSTRAP
         if (request.method, request.path) in _ASSISTANT_PATHS:
             return RequestClass.ASSISTANT
@@ -2161,6 +2490,11 @@ class Gateway:
         the remote listener is `https://` and one on the loopback listener is
         `http://`, each decided by the socket that accepted the connection.
 
+        **On the hosted listener the set is one name, and the scheme is the door's**
+        (ADR-0327 §7:2, §7:3): the `Host` must be ``gateway_hosted_host_name`` and an
+        `Origin` must be ``https://`` followed by it, because the page's origin is the
+        door's HTTPS one while this listener speaks plain HTTP to the edge.
+
         Args:
             request: The request as parsed.
             connection: The connection it arrived on, which decides which set of
@@ -2169,8 +2503,12 @@ class Gateway:
         Returns:
             The condition it fails, or ``None`` where it passes both.
         """
-        admitted = self._remote_authorities if connection.remote else frozenset({self._authority})
-        scheme = _REMOTE_SCHEME if connection.remote else _LOOPBACK_SCHEME
+        if connection.hosted:
+            admitted, scheme = self._hosted_authorities, _HOSTED_SCHEME
+        elif connection.remote:
+            admitted, scheme = self._remote_authorities, _REMOTE_SCHEME
+        else:
+            admitted, scheme = frozenset({self._authority}), _LOOPBACK_SCHEME
         host = request.header("host")
         if host is None or host not in admitted:
             return RefusalCondition.HOST_NOT_BOUND
@@ -2256,13 +2594,72 @@ class Gateway:
             close=True,
         )
 
+    def _edge_exchange(self, request: Request, connection: _Connection) -> Response:
+        """The exchange that mints a session on the hosted listener (ADR-0327 §8).
+
+        > On the hosted listener a session is minted by the **exchange**: a ``POST``
+        > to the exchange path carrying a valid assertion, an ``Origin`` that §7
+        > admits, and nothing else. A request to it with a body, or with no
+        > ``Origin``, is refused. (§8:1)
+
+        **The assertion and a present `Origin` were checked before this was reached**
+        (:meth:`_respond`), so what is left is that the `Origin` is present at all —
+        §7:3 refuses a wrong one and lets an absent one by, and an exchange is the one
+        request §8:1 requires carry it — and that nothing else came with it. The body
+        is refused unread: there is nothing in this exchange a browser could say.
+
+        **A failed exchange discloses only that it failed** (§8:2), with ADR-0168
+        §5:3's single answer, and the ceiling is recorded as itself and answered as
+        that failure (ADR-0182 §4:2). The ceiling is reached only where no session
+        minted here is live to end (§8:6): :meth:`.SessionTable.mint_hosted` ends this
+        listener's oldest otherwise, and the record says so (§8:7).
+
+        Args:
+            request: The exchange as parsed.
+            connection: The connection it arrived on.
+
+        Returns:
+            The two session values, or the refusal.
+        """
+        if request.header("origin") is None or request.body:
+            return self._refuse(
+                RequestClass.BOOTSTRAP, RefusalCondition.BOOTSTRAP_EXCHANGE_FAILED, connection
+            )
+        minted = self._sessions.mint_hosted()
+        if minted is None:
+            return self._refuse(
+                RequestClass.BOOTSTRAP,
+                RefusalCondition.SESSION_CEILING,
+                connection,
+                answered_as=RefusalCondition.BOOTSTRAP_EXCHANGE_FAILED,
+            )
+        values, ended_oldest = minted
+        self._records.session_minted(ended_oldest=ended_oldest)
+        return Response(
+            200,
+            "OK",
+            body=_json({"header_half": values.header_half}),
+            content_type="application/json",
+            set_cookie=_cookie(values.cookie_half, remote=False, hosted=True),
+            close=True,
+        )
+
     async def _session_bound(
         self, request: Request, connection: _Connection, request_class: RequestClass
     ) -> Response | _Streamed:
-        """Everything ADR-0168 §3 serves only to an admitted browser."""
+        """Everything ADR-0168 §3 serves only to an admitted browser.
+
+        On the hosted listener this is the second of ADR-0327 §7:5's two facts — the
+        assertion was the first — and its refusals are ADR-0168 §3:2's and §6:4's
+        unchanged (§7:7), read off the ``__Host-`` cookie that listener sets (§8:5)
+        and found only among the sessions it minted.
+        """
         header_half = request.header(_SESSION_HEADER)
+        cookie = _HOSTED_COOKIE_NAME if connection.hosted else _COOKIE_NAME
         outcome = self._sessions.admit(
-            header_half=header_half, cookie_halves=request.cookies(_COOKIE_NAME)
+            header_half=header_half,
+            cookie_halves=request.cookies(cookie),
+            hosted=connection.hosted,
         )
         if outcome is Admission.NO_LIVE_SESSION:
             return self._refuse(request_class, RefusalCondition.NO_LIVE_SESSION, connection)
@@ -2368,12 +2765,18 @@ class Gateway:
           nothing either, for the same clause: a browser reaching this gateway over
           the overlay from the machine it runs on is still that machine.
 
+        * **On the hosted listener**, the hosted browser device, on every request
+          (ADR-0327 §10:2): "It relays no request from the hosted listener without
+          it, so no such request acts with the gateway's own device's roles."
+
         Args:
             connection: The connection the request arrived on.
 
         Returns:
             The name, or ``None`` where the call is the connecting device's own.
         """
+        if connection.hosted:
+            return self._settings.gateway_hosted_device
         if not connection.remote:
             return None
         device = self._browser_device(connection)
@@ -2415,12 +2818,18 @@ class Gateway:
         refused as its own condition (:meth:`_write_message`) instead of being
         recorded under an id the hub would not know the machine by.
 
+        * **On the hosted listener**, the hosted browser device the operator named in
+          ``gateway_hosted_device`` (ADR-0327 §10:1): every browser through the door
+          is that one device, and none of them a machine.
+
         Args:
             connection: The connection the request arrived on.
 
         Returns:
             The device's id, or ``None`` where the gateway cannot name it.
         """
+        if connection.hosted:
+            return self._settings.gateway_hosted_device
         if connection.remote:
             return connection.device
         return self._own_device
@@ -2479,6 +2888,23 @@ class Gateway:
                     "This gateway reaches its hub over the remote listener, and the "
                     "connection surface is carried only on the hub's own machine "
                     "(ADR-0151 §13). Run a gateway there to connect an account."
+                ),
+                close=False,
+            )
+        if connection.hosted and path in _CREDENTIAL_PATHS:
+            # ADR-0327 §12:1, decided from the listener as ADR-0177 §3:4 and §3:5 rule.
+            # The reason is not the remote listener's: the hosted page is HTTPS, and a
+            # credential typed there would leave the person's device for the box and
+            # pass the edge in the clear on it (§12's note).
+            return _fault(
+                403,
+                "Forbidden",
+                "credential-entry-loopback-only",
+                detail=(
+                    "Entering a credential is available on a loopback origin only. "
+                    "Through the sign-in door a secret typed here would cross the box "
+                    "in the clear on its way to the hub. Disconnecting and reading the "
+                    "connections are available here."
                 ),
                 close=False,
             )
@@ -4988,6 +5414,7 @@ async def run_gateway(
         defer=default_defer(),
         bundle=packaged_bundle(),
         agent=_agent_for(settings),
+        hosted_bundle=packaged_bundle(hosted=True),
     )
     act = _install_the_mint_act(gateway=gateway, disclose=disclose, report=report)
     try:
