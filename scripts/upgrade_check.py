@@ -447,11 +447,34 @@ def _git(*args: str) -> str:
     return completed.stdout.strip()
 
 
-def _seed_vendor(base: Path) -> None:
-    """Give the base worktree this tree's vendored models, linked where the disk allows."""
+#: The modules that pin the vendored models (``hatch_build.py``). Where the base's
+#: are this tree's byte for byte, this tree's models are the base's too.
+_PINS: Final = (
+    Path("src/ai_assistant/models/embedding_artifact.py"),
+    Path("src/ai_assistant/models/speech_artifact.py"),
+)
+
+
+def _seed_vendor(base: Path) -> bool:
+    """Give the base worktree this tree's vendored models, where the two pin the same.
+
+    The base's build verifies whatever it finds against its own pins and refuses a
+    mismatch rather than fetching over it, so models this tree re-pinned are left out
+    and the base fetches its own.
+
+    Args:
+        base: The base's worktree.
+
+    Returns:
+        Whether the models were seeded.
+    """
     source = _ROOT / _VENDOR
-    if not source.is_dir():
-        return
+    pinned_alike = all(
+        (base / pin).is_file() and (base / pin).read_bytes() == (_ROOT / pin).read_bytes()
+        for pin in _PINS
+    )
+    if not source.is_dir() or not pinned_alike:
+        return False
 
     def link(src: str, dst: str) -> None:
         try:
@@ -460,6 +483,25 @@ def _seed_vendor(base: Path) -> None:
             shutil.copy2(src, dst)
 
     shutil.copytree(source, base / _VENDOR, copy_function=link, dirs_exist_ok=True)
+    return True
+
+
+def _kept(keep: Path | None, scratch: Path) -> tuple[Path, Path]:
+    """Where the base's directory and snapshot go: absolute, as both builds must agree.
+
+    The writer runs from the base's worktree and the reader from the caller's
+    directory, so a relative path would name two places.
+
+    Args:
+        keep: The caller's ``--keep``, or ``None``.
+        scratch: The run's temporary directory, used where ``keep`` is ``None``.
+
+    Returns:
+        The data directory and the snapshot file, both absolute.
+    """
+    root = (keep or scratch).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "data", root / "base-snapshot.json"
 
 
 def run(base_rev: str, keep: Path | None) -> int:
@@ -485,10 +527,7 @@ def run(base_rev: str, keep: Path | None) -> int:
     head = _git("rev-parse", "HEAD")
     scratch = Path(tempfile.mkdtemp(prefix="upgrade-check-"))
     base = scratch / "base"
-    if keep is not None:
-        keep.mkdir(parents=True, exist_ok=True)
-    data = (keep or scratch) / "data"
-    snapshot = (keep or scratch) / "base-snapshot.json"
+    data, snapshot = _kept(keep, scratch)
     try:
         _git("worktree", "add", "--detach", str(base), sha)
         own = base / "scripts" / "upgrade_check.py"
@@ -500,7 +539,8 @@ def run(base_rev: str, keep: Path | None) -> int:
                 "under the base's code (bootstrapping)",
                 flush=True,
             )
-        _seed_vendor(base)
+        if not _seed_vendor(base):
+            print("upgrade check: the base pins other models; its build fetches them", flush=True)
         if _call([uv, "sync", "--locked", "--quiet"], cwd=base) != 0:
             msg = f"could not give the base {sha[:12]} its locked environment"
             raise CheckError(msg)

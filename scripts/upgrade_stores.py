@@ -437,12 +437,24 @@ async def _write_memory(directory: Path, moment: Moment) -> None:
 
 
 async def _read_memory(directory: Path) -> Records:
+    """Every record, the walk's resumption, and whether each record's vector finds it.
+
+    The records alone would miss an upgrade that kept every row and lost the vector
+    index ``search`` reads, so each record is searched for by its own content: the
+    hashing embedder maps that text onto the record's own vector, so a record whose
+    vector survived finds itself.
+    """
     traces = _traces(directory)
     store = _memory(directory, traces)
     try:
-        records = _keyed("record", await store.export(), _field("id"))
+        exported = await store.export()
+        records = _keyed("record", exported, _field("id"))
         rest = await store.walk_records(_WALK, limit=_PAGE)
         records["walk"] = [record.id for record in rest.records]
+        for record in exported:
+            if record.content:
+                found = await store.search(record.content, limit=len(exported))
+                records[f"found/{record.id}"] = record.id in {hit.id for hit in found.records}
         return records
     finally:
         store.close()
