@@ -198,7 +198,8 @@ flowchart LR
     transport and its credential. Keeping it that way is the ADR's main design goal and
     its main test.
 
-  Proposed: the pilot starts on **one bot per person**, which works today with no code.
+  Ruled (owner, 2026-10-17): the pilot starts on **one bot per person**, which works
+  today with no code.
   The operator creates each bot in BotFather and connects it at that person's hub. The
   shared bot follows once its ADR and router land. A person then switches by opening a
   chat with the new bot: their hub keeps the transcript, and the old Telegram chat
