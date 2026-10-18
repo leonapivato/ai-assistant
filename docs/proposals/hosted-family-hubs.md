@@ -14,12 +14,13 @@ web page. That is the door, and it gets its own proposal.
 - **The pilot needs it.** The first users are close family. A hub on their own machine
   means about thirteen commands and two open terminals by the 2026-10-17 survey's count,
   plus an always-on machine. [#3112](https://github.com/leonapivato/ai-assistant/issues/3112)
-  records the install guide's known errors on top of that.
-  None of them will do that. The owner wants to host their hubs instead.
+  records the install guide's known errors on top of that. None of them will do that.
+  The owner wants to host their hubs instead.
 - **A hosted hub can already be reached.** Milestone 12's Telegram line (ADR-0323) has
   the hub call out to Telegram by long polling. It needs no public address and no
-  listener anyone else can reach. A hosted family member can talk to their assistant
-  through their own bot the day their hub starts, with no web door at all.
+  listener anyone else can reach. Once its hub starts, a hosted family member can talk
+  to their assistant on Telegram with no web door at all. The line as built takes one
+  bot per hub; a bot the family shares is a change of its own (see **The box**).
 - **The incumbents host.** Muse and Dots each give a user a cloud computer. A pilot that
   asks family to run a server tests the wrong thing.
 
@@ -91,7 +92,11 @@ is the decision, and stating it in the open is the point.
 
 The stance becomes: a hub may run on a rented box when its owner chooses that, either
 as their own operator or with an operator they trust. That covers the owner's own hub
-(the 2026-08-21 exception stops being an exception) and the family's. The trust thesis
+(the 2026-08-21 exception stops being an exception) and the family's. The owner's own
+hub moves to the US box with `data-m44` copied over, as a plain data-directory copy at
+the same version. #879 then closes as not planned when the ADR merges: the rented box is
+the standing arrangement, and a box at home stays possible later (owner, 2026-10-17).
+The trust thesis
 moves from "nobody else's machine" to "a machine run by someone you chose, on terms you
 were told". That matches the owner's view that what withholding protects against is
 other people, not providers.
@@ -100,28 +105,40 @@ other people, not providers.
 
 Ruled by the owner on 2026-10-17:
 
-- **Storage is plain; trust is by relationship.** The operator can technically read any
-  hosted store. The operator commits not to look, except when the owner asks for help
-  with something that needs it. No encryption at rest is added. Backups are encrypted
-  already: `ai-assistant-backup` (ADR-0123) encrypts the whole data directory to a
-  passphrase, which the operator holds for each hosted hub.
-- **Resets happen with notice.** A cutover may start a hosted hub on a fresh data
-  directory, as the practice is today. The owner is told beforehand through their line.
-  The previous directory is kept for a while, then removed (how long is open, below).
-  Each reset restarts that person's learning loop, which is the pilot's cost for keeping
-  cutovers cheap. Revisit before any launch.
+- **Storage is plain; trust is by relationship; and the operator looks.** The operator
+  can read any hosted store, and does. Each hosted hub keeps the diagnostic record on,
+  and the operator reads it to see what the assistant did and to improve it. The note
+  says so in those words. The owner chose to be honest about that rather than promise
+  not to look: debugging the pilot needs it, and a promise broken in the first week is
+  worse than none. The cost is candour. Someone who knows the operator can read their
+  assistant may tell it less, and the pilot then measures a more guarded user model.
+  No encryption at rest is added. Backups are encrypted already: `ai-assistant-backup`
+  (ADR-0123) encrypts the whole data directory to a passphrase, which the operator holds
+  for each hosted hub. The diagnostic record stays out of backups (ADR-0314 §7:5).
+- **Resets happen with notice, whenever the operator cuts over.** A cutover may start a
+  hosted hub on a fresh data directory, as the practice is today. Family hubs follow the
+  operator's cutovers, with no separate schedule. The owner expects large cutovers to
+  come less often now that M44 is live. The six fresh directories between 09-28 and
+  10-16 are the pace to compare against. The owner is told beforehand through their
+  line. The previous directory is kept for a while, then removed (how long is open,
+  below). Each reset restarts that person's learning loop, which is the pilot's cost for
+  keeping cutovers cheap. If resets turn out frequent, the fallback is to pin family
+  hubs to a release, so that a reset reaches them less often than it reaches the
+  operator's own hub. Revisit before any launch.
 - **Model spend has no cap; the operator is alerted.** Each hosted hub has its own
   provider key in its own workspace. That shows spend per person and puts the alert in
   the provider's console, with nothing to build.
 - **Size and place.** Up to five hosted hubs plus the operator's own, on one box in a US
   region. The family is in the US. About 450 MB of memory per idle hub (measured on the
-  live hub, 2026-10-17) puts that at about 8 GB.
+  live hub, 2026-10-17) puts that at about 8 GB. One box is a single point of failure
+  for every hub on it, which the pilot accepts. Backups are copied off the box to the
+  operator's own machine.
 - **Leaving.** On the owner's request, the operator stops the hub, hands over a backup
   with its passphrase if the owner wants one, and deletes the data directory and every
   backup of it.
 - **Telling them.** Before a hosted hub starts, the owner gets a one-page note in plain
-  words: who can see their data, what Telegram and the model provider keep, that resets
-  happen, and how to leave.
+  words: that the operator can see their data and reads what the assistant did, what
+  Telegram and the model provider keep, that resets happen, and how to leave.
 
 ### The box
 
@@ -138,7 +155,8 @@ flowchart LR
             H0 --- D0[("data directory")]
         end
     end
-    H1 -- "long poll, calls out" --> TG["Telegram: the owner's own bot"]
+    H1 -- "long poll, calls out" --> RT["Telegram router, on the box"]
+    RT -- "one bot, routed by sender id" --> TG["Telegram: the family's shared bot"]
     H1 -- "calls out" --> MP["Model provider: this hub's own key"]
     OP["Operator"] -- "ssh, root" --> BOX
     PC["Operator's devices"] -- "tailnet, ADR-0124" --> H0
@@ -153,24 +171,70 @@ flowchart LR
   on no overlay, and ADR-0124 §2 has nothing to reach. Its owner reaches it through
   lines that call out, Telegram first, and later through the door. The operator's own
   hub keeps its tailnet listener for the operator's devices, unchanged.
+- **One shared bot behind a router, with per-person bots first.** The owner wants a
+  single bot the whole family talks to (2026-10-17). Telegram lets only one client
+  long-poll a bot, so hubs can't share a bot directly. A small router on the box would:
+  - hold the bot's one token and poll Telegram;
+  - serve each hub the three Bot API methods its client uses (`getUpdates`,
+    `sendMessage`, `sendChatAction`), over only the updates whose sender matches that
+    hub's `telegram_user_id`;
+  - keep a durable queue per hub, so that a hub that is down loses nothing.
+
+  Three things make it more than a relay:
+  - **Authentication moves.** ADR-0323 §4:3 establishes the user "by Telegram's own
+    authentication of its users: the reader compares the sender id Telegram reports
+    against the setting". Behind a router, the sender id is the router's report. So the
+    channel between a hub and the router needs its own mutual authentication, per hub,
+    and the ADR has to argue why the router's report still establishes the user.
+    Otherwise the line's input is only claimed. A claimed input carries no authority,
+    so there would be no yes over Telegram.
+  - **One token sees every message.** The router holds the only token and sees every
+    family member's messages in the clear. Under plain storage that adds no new reader,
+    because the operator can already read everything. But it is one process whose
+    compromise exposes everyone's line, and the note says so.
+  - **What survives.** Suppose the router serves the Bot API faithfully, with its own
+    update ids and offsets for each hub. Then milestone 12's reader (T3) and intake
+    record (T2) need not change. Only the client (T1) does: its fixed origin, its
+    transport and its credential. Keeping it that way is the ADR's main design goal and
+    its main test.
+
+  Proposed: the pilot starts on **one bot per person**, which works today with no code.
+  The operator creates each bot in BotFather and connects it at that person's hub. The
+  shared bot follows once its ADR and router land. A person then switches by opening a
+  chat with the new bot: their hub keeps the transcript, and the old Telegram chat
+  stays behind. A shared bot is also the launch's shape. No one can make a bot for
+  every stranger, and linking a Telegram account to a person's hub is the same job the
+  launch's account system will do.
 - **Deploys go through `scripts/deploy_hub.py` once per hub.** It already takes the
   ssh user, unit, venv, uv binary and marker as arguments. Whether it needs anything
   more for several hubs on one box is for the implementation lane to find out.
 
 ### Acts at the hub, for a hosted owner
 
-A hosted owner has no shell. So for them, the operator performs the acts the corpus
-places at the hub: connecting the owner's bot and setting `telegram_user_id`
-(ADR-0323 §3), enrolling, assigning roles and listing devices, and connecting any
-account. The rule proposed: **the operator performs an owner's at-the-hub act only at
-that owner's request, the act is recorded as it is today, and it counts as the
-owner's.** For the Telegram line, the owner creates their own bot with the operator
-beside them, and the operator enters its token at the hub.
+A hosted owner has no shell, so the operator performs, for them, the **setup acts**
+the corpus places at the hub:
+- connecting the hub's Telegram line and setting `telegram_user_id` (ADR-0323 §3);
+- enrolling devices;
+- assigning roles;
+- listing the owner's devices.
+
+The rule proposed: **the operator performs a setup act only at that owner's request,
+and the act is recorded as it is today.**
+
+**An act that carries the owner's authority is never the operator's to perform.** That
+covers an approval, a grant, and anything else the owner's yes decides (ADR-0321). It
+comes from the owner, through their own line. Otherwise the operator's yes would stand
+in for the owner's, which is the one thing a hosted hub must not blur. Connecting an
+account that takes a credential (ADR-0151) is out of the pilot.
 
 ## Options considered
 
 - **Each person runs their own hub (today).** It needs no ruling, and nobody in the
   pilot would do it.
+- **One Telegram bot per person, for good.** Nothing to build, and ADR-0323 stands as
+  written, with the operator creating each bot. The cost is that each person messages a
+  differently named bot. The owner wants the shared bot (2026-10-17), because the
+  launch needs one. Per-person bots are the pilot's first step, not its end state.
 - **One multi-user hub.** Rejected. A hub has one owner all the way down: one data
   directory (ADR-0083), one user model, one yes. Making a hub multi-tenant would
   rewrite all of that for a worse isolation story than separate processes.
@@ -192,12 +256,21 @@ beside them, and the operator enters its token at the hub.
   with a gateway listener that checks Access's signed token. It would supersede
   ADR-0168 §2's proxy clause and extend ADR-0174. The domain is an operating detail of
   that proposal.
-- **The dedicated box (#879).** Whether the "dedicated always-on machine" direction
-  survives once a rented box is a standing choice, or #879 closes as not planned.
-- **Moving the operator's own hub.** Whether it moves from the Hetzner box in Nuremberg
-  to the US box, by copying `data-m44` or by starting fresh.
+- **The shared bot's router**, as its own ADR. It would:
+  - amend ADR-0323 §4:3, which establishes the user by Telegram's own authentication
+    with nothing in between, against a router that reports the sender;
+  - amend ADR-0323 §11:5's one origin "fixed in code", and the `TelegramBotClient`
+    contract's matching sentence ("One request, to the one origin
+    `https://api.telegram.org`, fixed in code"), which makes it a Protocol change under
+    golden rule 5;
+  - say where the router sits, and how a hub reaches it and authenticates it, per hub,
+    under the seam's transport rules;
+  - say how ADR-0323 §12's connect act reads when the bot is shared.
+
+  It sequences after the line's live acceptance (#3118), so that the direct line is
+  proven before a router sits in front of it.
 - **How long a reset keeps the previous directory**, before it is removed.
-- **The exact ADR text for "the operator acts for the owner"**, and which existing
-  clauses it touches by name (ADR-0124 §6, ADR-0151 §13, ADR-0323 §12).
+- **The exact ADR text for the operator's setup acts**, and which existing clauses it
+  touches by name (ADR-0124 §6, ADR-0323 §3 and §12).
 - **Launch terms.** Encryption, migrations, containers, accounts and payments. These
   pilot terms decide none of them.
