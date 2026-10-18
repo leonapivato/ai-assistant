@@ -2,9 +2,9 @@
 
 - Status: Proposed
 - Date: 2026-10-18
-- Scope: a gateway serving the owner of a hub hosted on a box the operator runs, reached through our own sign-in service and Cloudflare Tunnel. Tracker: [#3138](https://github.com/leonapivato/ai-assistant/issues/3138), acceptance [#3133](https://github.com/leonapivato/ai-assistant/issues/3133), implementation [#3139](https://github.com/leonapivato/ai-assistant/issues/3139), containers [#3142](https://github.com/leonapivato/ai-assistant/issues/3142).
+- Scope: a gateway serving the owner of a hub hosted on a box the operator runs, reached over HTTPS the box terminates itself, through our own sign-in service. Tracker: [#3138](https://github.com/leonapivato/ai-assistant/issues/3138), acceptance [#3133](https://github.com/leonapivato/ai-assistant/issues/3133), implementation [#3139](https://github.com/leonapivato/ai-assistant/issues/3139), containers [#3142](https://github.com/leonapivato/ai-assistant/issues/3142).
 - Dependency: ADR-0004, ADR-0168, ADR-0172, ADR-0174, ADR-0177, ADR-0182, ADR-0296 and ADR-0298, as their status lines leave them.
-- Authorization: the owner accepted the web-door proposal ([#3132](https://github.com/leonapivato/ai-assistant/pull/3132)) with three changes in the ruling of 2026-10-18 on #879 ([the ruling](https://github.com/leonapivato/ai-assistant/issues/879#issuecomment-6252766646)): the token's issuer is our own sign-in service, not Cloudflare Access; the property this boundary gives up is named; and the page's bootstrap form becomes an automatic exchange. The dispatcher assigned 0327 for Hosted setup B1. This decision is that proposal, converted.
+- Authorization: the owner accepted the web-door proposal ([#3132](https://github.com/leonapivato/ai-assistant/pull/3132)) with three changes in the ruling of 2026-10-18 on #879 ([the ruling](https://github.com/leonapivato/ai-assistant/issues/879#issuecomment-6252766646)): the token's issuer is our own sign-in service; the privacy property of the browser boundary that this one gives up is named; and the page's bootstrap form becomes an automatic exchange. A second ruling the same day ([on #3138](https://github.com/leonapivato/ai-assistant/issues/3138#issuecomment-6254607509)) put no third party's network in the path: the door is our own HTTPS, terminated on the box, with one port open for it. So §4 states the property as kept, and names exactly where it differs. The dispatcher assigned 0327 for Hosted setup B1. This decision is that proposal, converted and revised by the second ruling.
 - **Not a contract-surface decision.** It changes no `core/protocols.py` or `core/types.py` surface and no wire member. It adds `Settings` fields (§5, §6), a listener and its admission rule, and supersedes clauses of six ADRs in part (§15).
 
 ## Context
@@ -38,21 +38,21 @@ their hub.
 
 ### The path a request takes
 
-The owner's ruling puts two pieces in front of the gateway, both on the box. **Cloudflare
-Tunnel** is the transport: `cloudflared` on the box dials out to Cloudflare, Cloudflare
-forwards each request for the public hostname down that connection, and the box opens no port.
-**The sign-in edge** is our own sign-in service, a separate program kept in a private
-repository. It holds the person's sign-in for a week, with Google or an emailed code through a
-vendor. It routes each signed-in account to that person's gateway, and on every request it
-forwards it attaches a short-lived assertion it signs. The gateway verifies the assertion with
-the edge's public key, configured at setup.
+The owner's rulings put two things in front of the gateway, both on the box. **The door** is
+our own HTTPS: the box terminates TLS for the door's public hostname, it opens one port to the
+internet for the door, and its firewall closes every other. The hostname's DNS is held at any
+registrar. **The sign-in edge**, behind the door, is our own sign-in service, a separate program
+kept in a private repository. It holds the person's sign-in for a week, with Google or an
+emailed code through a vendor. It routes each signed-in account to that person's gateway, and
+on every request it forwards it attaches a short-lived assertion it signs. The gateway verifies the assertion with
+the edge's public key, configured at setup. What terminates TLS in front of the edge, and how
+it obtains its certificate, are the edge's business.
 
 ```mermaid
 flowchart LR
-    B["The person's browser<br/>(phone or laptop)"] -- "HTTPS; Cloudflare terminates TLS" --> CF["Cloudflare"]
-    CF -- "the tunnel the box dialled" --> CD["cloudflared"]
+    B["The person's browser<br/>(phone or laptop)"] -- "HTTPS to the door's one port;<br/>the box terminates TLS" --> E
     subgraph BOX["The operator's box"]
-        CD -- "loopback" --> E["The sign-in edge<br/>holds the week's sign-in"]
+        E["The sign-in edge<br/>holds the week's sign-in"]
         E -- "the box's loopback,<br/>with the edge's signed assertion" --> G["This person's gateway<br/>hosted listener"]
         G -- "local socket, ADR-0084 §1" --> H["This person's hub"]
     end
@@ -67,18 +67,20 @@ and none can forge the edge's signature without the edge's private key.
 
 - **ADR-0174 §1:1** enumerates where user data may leave a device: `models/`, the `tools/`
   seam, the hub's remote transport, and the gateway's remote browser transport over the
-  owner's overlay. "Every other egress is a bug." A page served to a browser through the edge
-  and Cloudflare is none of the four.
+  owner's overlay. "Every other egress is a bug." A page served across the public network to a
+  browser, through the edge, is none of the four.
 - **ADR-0168 §2:2** and **ADR-0174 §2:6.** Reaching a gateway's listener from another device
   "by an operator-configured proxy, a port forward, a tunnel, or any other means" is
   authorised by no clause, and a tunnel in front of the loopback listener is not the fourth
-  boundary. Cloudflare Tunnel is exactly such a tunnel. It needs a boundary of its own, in
-  front of a listener of its own.
+  boundary. The edge, forwarding from the public network, is exactly such a proxy. It needs a
+  boundary of its own, in front of a listener of its own.
 - **ADR-0124 §2:1**, which ADR-0174 §2:1 adopts whole for the fourth boundary: the payload is
   "encrypted end to end between the two participating devices, such that no third party —
   including the overlay's operator and any relay it routes through — holds a key that
-  decrypts it". Cloudflare terminates TLS for the public hostname, so it holds such a key for
-  everything that crosses this hop. That is the property this boundary gives up (§4).
+  decrypts it". Only the box terminates the door's TLS, so no third party holds such a key.
+  But the two ends are the browser's device and the box, with the edge and the gateway both on
+  the box, and the box's key is vouched for by the public certificate system rather than by an
+  overlay the owner administers. §4 states the property in that form.
 - **ADR-0168 §5:3** and **ADR-0182 §1.** A session is minted only by exchanging a bootstrap
   value, minted at the gateway's machine. On the hosted listener the assertion takes the
   value's place.
@@ -108,6 +110,12 @@ reach the listener rather than as an address family. How the container is built 
 
 ### Options considered
 
+- **Cloudflare Tunnel as the transport.** The converted draft's. The box would open no port,
+  and Cloudflare's network would absorb floods and hide the box's address. But Cloudflare
+  terminates TLS for the hostname, so it would hold a key that decrypts every page, every
+  message and both halves of every web session crossing the door, and could act as a person for
+  as long as a sign-in lasts. The draft named that cost. Rejected by the owner's ruling of
+  2026-10-18 on #3138, for that cost.
 - **Cloudflare Access as the issuer.** The proposal's design, ruled for the pilot on
   2026-10-17 and replaced on 2026-10-18. It bought the sign-in rather than building it, and
   it put the gateway on Cloudflare's rotating, published keys. Our own edge keeps the gateway's
@@ -150,13 +158,14 @@ the fifth egress boundary, and it gives up end-to-end encryption, which we name.
 
 > **Normative.** The **edge** is the sign-in service that holds a person's sign-in, routes each
 > signed-in account to that person's gateway, and signs the assertion §6 rules. It is a program
-> outside this repository, and this decision binds what a gateway accepts from it, never how it
-> is built.
+> outside this repository. This decision binds what a gateway accepts from it, and what the
+> boundary requires of the traffic it carries (§4:1, §4:5, §4:7, §4:8), never how it is built.
 
-> **Normative.** The **tunnel** is the outbound connection by which a third party's network
-> forwards requests for a public hostname to the box, so that the box opens no port.
-> Cloudflare Tunnel is the first, and nothing in this decision is conditioned on it: moving to
-> another tunnel reopens no clause, provided §4's statements stay true of it.
+> **Normative.** The **door** is the edge's public HTTPS endpoint: the hostname a hosted
+> owner's browser opens, the one port the box exposes to the public network for it, and the TLS
+> the box terminates there. Nothing in this decision is conditioned on the program that
+> terminates TLS, on the certificate authority or on the registrar: changing any of them
+> reopens no clause, provided §4's statements stay true of the door.
 
 > **Normative.** A **hosted listener** is the gateway listener §5 binds, which the edge alone
 > forwards requests to. A **hosted owner** is the owner of a hub whose gateway runs one.
@@ -174,8 +183,8 @@ ADR-0174 §1:1's enumeration gains one member. Its text, with the addition, read
 > transport** between a gateway and a browser on another device of the owner's overlay — its
 > two halves being the gateway's remote browser listener and the front-end bundle this
 > repository serves to that browser — or across the gateway's **hosted browser transport**
-> between a gateway's hosted listener and its hosted owner's browser, carried by the edge and
-> the tunnel — its two halves being the hosted listener and the front-end bundle this
+> between a gateway's hosted listener and its hosted owner's browser, carried through the door
+> by the edge — its two halves being the hosted listener and the front-end bundle this
 > repository serves to that browser; every other egress is a bug.
 
 > **Normative.** The four boundaries ADR-0174 §1:1 named are unchanged by this decision, and
@@ -184,7 +193,8 @@ ADR-0174 §1:1's enumeration gains one member. Its text, with the addition, read
 
 > **Normative.** ADR-0174 §2:6 stands and is reinforced: a proxy, port forward, tunnel or
 > "serve" feature in front of the **loopback** listener, or in front of the remote browser
-> listener, is not this boundary. The tunnel and the edge reach the hosted listener alone.
+> listener, is not this boundary. The edge alone reaches the hosted listener, and nothing the
+> door exposes reaches any other listener of this system.
 
 > **Normative.** The gateway opens no connection for the hosted browser transport. It fetches
 > no key, no configuration and no asset, and the edge's keys reach it only as configuration
@@ -195,43 +205,63 @@ ADR-0174 §1:1's enumeration gains one member. Its text, with the addition, read
 > **Normative.** The gateway never dials a browser or the edge on this boundary. ADR-0174 §10:1
 > binds the hosted listener as it binds the remote one.
 
-### 4. What this boundary gives up, and what it keeps
+### 4. The door keeps the property, between the browser's device and the box
 
-> **Normative.** The hosted browser transport does **not** have ADR-0124 §2:1's second
-> property, which ADR-0174 §2:1 adopts for the fourth boundary: the tunnel's operator terminates
-> TLS for the public hostname and holds a key that decrypts every request and response crossing
-> it. No lane, document or surface may describe the hosted transport as encrypted end to end,
-> or cite it toward a claim that no third party can read what a hosted owner sees and types.
+> **Normative.** The hosted browser transport has ADR-0124 §2:1's second property, which
+> ADR-0174 §2:1 adopts for the fourth boundary, in this form: what crosses the public network is
+> encrypted under TLS between the hosted owner's browser and the box, and only the box
+> terminates it. The door's TLS private key is held on the box alone. No registrar, certificate
+> authority, network or relay between the browser and the box holds a key that decrypts it.
 
-> **Normative.** The hosted browser transport does not have ADR-0124 §2:1's third property
-> either: the edge's accounts are administered by the operator, at the person's request
-> (#879's terms), and not by the hosted owner.
+> **Normative.** The property differs from ADR-0124 §2:1's in two respects, and no lane may cite
+> this boundary for more than the clause above states. Its ends are the browser's device and the
+> box, not the browser and the gateway: TLS ends at the edge, and a request crosses the box in
+> the clear to the hosted listener, where whoever holds the box can read it, as they can read the
+> hub's store. And the box's key is vouched for to the browser by the public certificate system,
+> not by an overlay the owner administers: whoever can have a publicly trusted certificate issued
+> for the door's hostname, by controlling its DNS or through an authority that misissues one,
+> can stand between the browser and the box.
+
+> **Normative.** The hosted browser transport does not have ADR-0124 §2:1's third property: the
+> edge's accounts are administered by the operator, at the person's request (#879's terms), and
+> not by the hosted owner.
 
 > **Normative.** The gateway checks each request's assertion itself before serving anything
 > (§7), so that ADR-0124 §2:1's first property is kept in the gateway's own form: no request is
 > served that the edge has not authenticated.
 
-> **Normative.** Neither the edge nor the tunnel may alter a response body the gateway serves.
-> The operator switches off every feature of the tunnel's network that rewrites a page or
-> injects into one, Cloudflare's script loading, email obfuscation and injected analytics among
-> them, so that ADR-0174 §1:1's "the front-end bundle this repository serves" stays true at the
-> browser.
+> **Normative.** Nothing of a hosted hub crosses the public network on this boundary except
+> inside the door's TLS: no page, no request, no response and no value of ADR-0172 §1:1's class.
 
-> **Normative.** The tunnel's network caches no response the gateway serves on the hosted
-> listener. The operator configures the hostname to cache nothing.
+> **Normative.** For the door, the box exposes one port to the public network, the HTTPS port
+> 443, and the box's firewall closes every other port to the public network. No gateway's or
+> hub's listener is reachable from it. How the edge obtains its certificate is the edge's
+> business, within that posture.
+
+> **Normative.** The edge alters no response body the gateway serves, the front-end bundle
+> included, so that ADR-0174 §1:1's "the front-end bundle this repository serves" stays true at
+> the browser.
+
+> **Normative.** The edge caches no response the gateway serves on the hosted listener, so that
+> every request reaches the gateway and is admitted there (§7).
 
 > **Normative.** The gateway serves every response on the hosted listener with
 > `Cache-Control: no-store, no-transform`, as the standard's own request against caching and
-> transformation. This is a request to every hop, not the guarantee; the two operating clauses
-> above are the guarantee.
+> transformation. This is a request to the edge and to the browser, not the guarantee; §4:7 and
+> §4:8 are the guarantee.
 
-The cost of the property given up is concrete. Cloudflare can read every page, every message
-and correction a hosted owner types, everything the assistant answers, both halves of every web
-session, and the edge's sign-in cookie. Holding that cookie, it could act as the person until the
-sign-in ends. A court order to Cloudflare reaches all of it, and an outage at Cloudflare takes the
-door down. It fits the pilot's terms: storage on the box is plain, the operator reads diagnostics,
-and trust is by relationship (#879). A later decision that wants end-to-end encryption for the web
-door supersedes §4 with one of its own. No lane narrows the cost by describing it differently.
+The door's costs are the box's exposure, and they are concrete. The box takes connections from
+the internet directly, so the edge, and whatever terminates TLS in front of it, can be reached by
+anyone, and a flaw in either is a flaw at every hosted door. An edge taken over signs assertions
+for every hub (§6). Hardening it is the edge's, outside this repository (§14:3). The gateway's own
+check refuses everything the edge did not sign (§6, §7). Nothing shields the door from a flood: one
+aimed at it can take every hosted door down, and with them the box's other work. The gateway's
+own figures bound what reaches a gateway (§5:8), and no clause here bounds the edge. And the box's
+address is public, named by the door's DNS record, so whatever the box exposes is found. That is
+why the box's posture is a clause (§4:6), and the other two costs are stated here and not ruled.
+They fit the pilot's terms: storage on the box is plain, the operator reads diagnostics, and trust
+is by relationship (#879). Against them, no third party's network holds a key to what a hosted
+owner sees and types.
 
 ### 5. The hosted listener binds where only the box reaches it
 
@@ -272,8 +302,8 @@ door supersedes §4 with one of its own. No lane narrows the cost by describing 
 > a request on the hosted listener as they bind one on the loopback listener.
 
 > **Normative.** A stream on the hosted listener carries a keep-alive more often than the idle
-> timeout of every hop between the gateway and the browser. The implementing lane measures the
-> tunnel's timeout and states the cadence it relies on.
+> timeout of every hop between the gateway and the browser, the edge's among them. The
+> implementing lane states the cadence it relies on and the edge's timeout it assumes.
 
 ### 6. What the gateway accepts as the edge's assertion
 
@@ -538,8 +568,8 @@ name "the web" rather than a machine. That is acceptable for the pilot.
 > **Normative.** This decision authorises no browser capability on the hosted page that the
 > page does not use on the loopback listener. A lane that wants a secure-context capability
 > there, microphone capture among them, stops and owes a ratified decision, as ADR-0174 §7:2
-> has a lane do for the remote listener. Whatever such a capability carries would cross the
-> tunnel's operator in the clear (§4).
+> has a lane do for the remote listener. Whatever such a capability carries is user data of a
+> kind this boundary has not been weighed for.
 
 > **Normative.** This decision authorises no durable session and no durable credential of this
 > system's. ADR-0182 §5:5 binds the hosted listener unchanged. The week-long sign-in is the
@@ -547,8 +577,10 @@ name "the web" rather than a machine. That is acceptable for the pilot.
 
 ADR-0177's refusal rested on the remote listener's page not being a potentially trustworthy
 origin. The hosted page is HTTPS and is one. The refusal stays for a different reason: a
-credential typed there would cross Cloudflare in the clear. Lifting it on the hosted listener is
-a decision of its own, for when a hosted person connects an account that takes a credential.
+credential typed there would leave the person's own device for the box and pass the edge in the
+clear on the box, and ADR-0177 rules a credential's entry from a loopback origin only. Lifting it
+on the hosted listener is a decision of its own, for when a hosted person connects an account that
+takes a credential.
 
 ### 13. Who the door admits
 
@@ -582,9 +614,9 @@ believes on the web. The note to each person explains that in a sentence.
 > (ADR-0124 §9).
 
 > **Normative.** It decides nothing about the edge's internals: its sign-in vendor, how it
-> holds a sign-in, how it routes, whether each person has a hostname of their own, or how it
-> keeps its private key. A lane that finds a clause here needs one of those to be a particular
-> way stops and raises it on #3138.
+> holds a sign-in, how it routes, whether each person has a hostname of their own, how it
+> obtains its certificate, or how it keeps the private key it signs assertions with. A lane that
+> finds a clause here needs one of those to be a particular way stops and raises it on #3138.
 
 > **Normative.** It decides nothing about how #3142's container is built beyond §5's rule on
 > what may reach the hosted listener.
@@ -629,12 +661,13 @@ or the page it serves:**
 **Engaged, examined, and not superseded:**
 
 - **ADR-0124 §2:1** and **ADR-0174 §2:1** govern the hub's remote listener and the remote
-  browser listener, and both stay true of them. §4 names that the fifth boundary does not have
-  their second and third properties, and supersedes neither.
+  browser listener, and both stay true of them. §4 states the form in which the fifth boundary
+  has their second property and that it does not have their third, and supersedes neither.
 - **ADR-0174 §2:6** and **ADR-0168 §2:2**'s prohibition on a tunnel in front of the loopback
   listener stand (§3:3).
 - **ADR-0174 §5:2** reaches the fourth boundary only. On the fifth, the session halves cross the
-  tunnel's operator in the clear, and §4 names that as part of the cost.
+  public network only inside the door's TLS (§4:5), and are in the clear only on the box, between
+  the edge and the gateway (§4:2).
 - **ADR-0172.** Its class stays closed at three (§9:3), its exemptions keep their condition for
   the session halves (§9:9), and the assertion's exemption is this decision's own, argued here,
   as ADR-0172 §3:8 requires of a further Tier 0 access `permissions/` cannot gate.
@@ -658,20 +691,25 @@ or the page it serves:**
   when the edge's week runs out.
 - **The part the gateway builds is the part the launch keeps.** At launch the edge changes;
   the gateway's check (§6) does not.
-- **A third party can read the web door.** Cloudflare sees everything that crosses it, and could
-  act as a person for as long as a sign-in lasts (§4). The note to each person says so. Moving to
-  end-to-end encryption is a later decision that supersedes §4.
-- **The edge's private key is now the door to every hosted hub.** One key signs for all of them,
+- **No third party reads the web door.** Only the box terminates its TLS (§4:1). What the
+  property is not is stated as well (§4:2): its ends are the browser's device and the box, and
+  the box can read what crosses it, as it can read the store. The note to each person says so.
+- **The box is exposed.** It takes connections from the internet on the door's one port, has
+  no shield against a flood, and its address is public (§4). The box's posture is a clause
+  (§4:6); the edge's hardening is the edge's.
+- **The edge's signing key is now the door to every hosted hub.** One key signs for all of them,
   and the audience separates them. A leaked key admits to any hub until the operator rotates it
-  at each gateway (§6:5). Its custody is the edge's, outside this decision.
+  at each gateway (§6:5). Its custody is the edge's, outside this decision, and the edge now
+  faces the internet directly (§4).
 - **The operator's reach is unchanged, and the door adds none.** The operator holds the box, so
   #879's terms, and not a mechanism, keep the operator from acting as a person there (§13).
 - **The hub cannot tell a person's browsers apart** (§10). A conversation's devices name the web.
 - **An open stream outlives a sign-out** until it ends: the assertion is checked when the request
   arrives. Every later request is refused once the edge stops signing.
 - **Follow-on work.** #3139 builds §§5–12 in `interfaces/gateway/` and `core/config.py`. #3142
-  holds §5:4 for the container. The operator's setup holds §4:4–§4:5, §10:4 and §13:1. A wiki
+  holds §5:4 for the container. The edge holds §4:1's key custody, §4:5 and §4:7–§4:8. The
+  operator's setup holds §4:6, §10:4 and §13:1. A wiki
   section on how a browser is admitted to a gateway is a later edit.
 - **Revisit** if a hosted person connects an account that takes a credential (§12), if the pilot
-  shows one device per person costs too much (§10), or if end-to-end encryption for the web door
-  becomes worth its cost (§4). Each is a new ADR, not an edit of this one.
+  shows one device per person costs too much (§10), or if the box's exposure costs more than the
+  pilot can carry (§4). Each is a new ADR, not an edit of this one.

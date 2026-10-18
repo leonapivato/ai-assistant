@@ -166,14 +166,15 @@
   below are preserved.
 - Partially superseded: 2026-10-18 by ADR-0327 — two scopes. §1:1's enumeration gains
   a fifth boundary, the gateway's **hosted browser transport**, between a gateway's
-  hosted listener and its hosted owner's browser, carried by the sign-in edge and a
-  tunnel; the four boundaries it named are unchanged. §2:3's rule that a gateway with
-  no remote-browser-listener configuration binds *only* the loopback listener, as it
-  reaches a gateway with a hosted listener on, which binds both (ADR-0327 §3, §5).
-  ADR-0327 §4 names that the fifth boundary does not have §2:1's end-to-end property
-  and supersedes nothing of §2; §2:6's prohibition on a tunnel in front of the
-  loopback listener stands. Every other clause stands. This replacement takes effect
-  on ratification of ADR-0327. This reciprocal header record accompanies the numbered
+  hosted listener and its hosted owner's browser, carried by the sign-in edge through
+  HTTPS the box terminates; the four boundaries it named are unchanged. §2:3's rule
+  that a gateway with no remote-browser-listener configuration binds *only* the
+  loopback listener, as it reaches a gateway with a hosted listener on, which binds
+  both (ADR-0327 §3, §5). ADR-0327 §4 states the form in which the fifth boundary has
+  §2:1's end-to-end property, between the browser's device and the box, and
+  supersedes nothing of §2; §2:6's prohibition on a tunnel in front of the loopback
+  listener stands. Every other clause stands. This replacement takes effect on
+  ratification of ADR-0327. This reciprocal header record accompanies the numbered
   draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below
   are preserved.
 
