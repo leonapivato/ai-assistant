@@ -14,11 +14,13 @@ empty.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -202,6 +204,12 @@ def test_no_box_specific_value_is_hardcoded(tmp_path: Path) -> None:
         "HEAD",
         "--stage-dir",
         "/srv/stage",
+        "--env-file",
+        "/etc/hub/env",
+        "--backup-dir",
+        "/srv/backups",
+        "--backup-passphrase-file",
+        "/etc/hub/backup-pass",
     )
 
     for expected in (
@@ -212,6 +220,9 @@ def test_no_box_specific_value_is_hardcoded(tmp_path: Path) -> None:
         "/opt/bin/uv pip install",
         "/var/lib/DEPLOYED",
         "custom-9.9.whl",
+        ". /etc/hub/env",
+        "/opt/env/bin/ai-assistant-backup /srv/backups/pre-deploy-",
+        "--passphrase-file /etc/hub/backup-pass",
     ):
         assert expected in plan, expected
     assert _staged(plan).startswith("/srv/stage/deploy-hub-")
@@ -564,7 +575,7 @@ def test_a_failed_deploy_still_removes_its_staging_directory(
     issued = _remote_recorder(monkeypatch, plan, fail_at=step)
 
     with pytest.raises(_MODULE.DeployError, match=step.split(maxsplit=1)[0]):
-        _MODULE._install_and_verify(plan, "abc1234", "", "0.0.1")
+        _MODULE._install_and_verify(plan, "abc1234", "", "0.0.1", backup=None)
 
     assert any("rmdir" in command for command in issued), issued
     # And nothing is recorded for a deploy that did not happen.
@@ -578,7 +589,7 @@ def test_a_failed_digest_check_removes_the_staging_directory_and_installs_nothin
     issued = _remote_recorder(monkeypatch, plan, fail_at="sha256sum")
 
     with pytest.raises(_MODULE.DeployError, match="could not digest the staged wheel"):
-        _MODULE._install_and_verify(plan, "abc1234", "", "0.0.1")
+        _MODULE._install_and_verify(plan, "abc1234", "", "0.0.1", backup=None)
 
     assert any("rmdir" in command for command in issued), issued
     assert not any("uv pip install" in command for command in issued), issued
@@ -590,7 +601,7 @@ def test_a_successful_deploy_still_unstages_exactly_once(
     plan = _staged_plan(_repo(tmp_path))
     issued = _remote_recorder(monkeypatch, plan, fail_at="nothing fails")
 
-    _MODULE._install_and_verify(plan, "abc1234", "", "0.0.1")
+    _MODULE._install_and_verify(plan, "abc1234", "", "0.0.1", backup=None)
 
     assert sum("rmdir" in command for command in issued) == 1, issued
     # The install happened, and the marker followed it rather than the cleanup.
@@ -832,7 +843,7 @@ def test_hub_ready_in_this_invocations_journal_passes(
     _MODULE._wait_for_ready(_plan(_repo(tmp_path), "--ready-timeout", "0"), "abc123")
 
 
-def _plan(repo: Path, *args: str) -> object:
+def _plan(repo: Path, *args: str) -> Any:
     """A plan built from parsed arguments, for the checks that run before any ssh."""
     parsed = _MODULE._parser().parse_args(["hub.example", "--repo", str(repo), *args])
     return _MODULE.Plan(parsed, "w.whl")
@@ -1054,9 +1065,9 @@ def test_the_drift_check_reads_the_marker_through_the_brackets(tmp_path: Path) -
     repo = _repo(tmp_path)
     real = git(repo, "rev-parse", "--short", "HEAD")
     plan = _plan(repo)
-    banner = f"Last login from {real}\nMARKER_BEGIN_{plan.token}\n\nMARKER_END_{plan.token}\n"  # type: ignore[attr-defined]
+    banner = f"Last login from {real}\nMARKER_BEGIN_{plan.token}\n\nMARKER_END_{plan.token}\n"
 
-    marker = _MODULE.marker_body(banner, plan.token)  # type: ignore[attr-defined]
+    marker = _MODULE.marker_body(banner, plan.token)
 
     assert marker == ""
     reason = _MODULE._rule_on_dependencies(plan, repo, "HEAD", marker, "0.1.0\n")
@@ -1120,6 +1131,33 @@ def _assert_every_install_is_no_deps(text: str) -> None:
             assert "--no-deps" in segment, segment
 
 
+_DATA_DIR = "/home/assistant/data-m44"
+
+
+def _healthy_probe(**overrides: str) -> str:
+    """The backup preflight's answers from a box that can take the backup.
+
+    Args:
+        **overrides: Labels to answer differently, by name without the ``=``.
+
+    Returns:
+        The labelled lines, as the probe prints them.
+    """
+    answers = {
+        "BACKUP_ENV": "present",
+        "BACKUP_DATA_DIR": _DATA_DIR,
+        "BACKUP_TOOL": "present",
+        "BACKUP_PASSPHRASE": "present",
+        "BACKUP_PASSPHRASE_MODE": "600",
+        "BACKUP_PASSPHRASE_PATH": "/home/assistant/.assistant-backup-pass",
+        "BACKUP_DIR_PATH": "/home/assistant/backups",
+        "HUB_STATE": "active",
+        "HUB_LOCK": "held",
+        **overrides,
+    }
+    return "".join(f"{label}={value}\n" for label, value in answers.items())
+
+
 class _FakeBox:
     """Answers every local and remote command one deploy issues, and records them."""
 
@@ -1131,6 +1169,11 @@ class _FakeBox:
         self.plan = plan
         self.marker = marker
         self.version = version
+        #: What the backup preflight answers: a healthy box by default.
+        self.backup_probe = _healthy_probe()
+        #: What the backup tool prints and the status it exits with.
+        self.backup_said = f"wrote the artifact\n{_MODULE._BACKUP_VERIFIED}"
+        self.backup_status = 0
         self.issued: list[str] = []
         #: The cwd each `uv export` ran in.
         self.exports: list[Path | None] = []
@@ -1165,6 +1208,15 @@ class _FakeBox:
     def probe(self, argv: list[str]) -> tuple[int, str, str]:
         self.issued.append(" ".join(argv))
         text = self.issued[-1]
+        if "BACKUP_ENV=" in text:
+            return 0, f"Welcome\n{self.backup_probe}", ""
+        if "BACKUP_BEGIN_" in text:
+            token = self.plan.token
+            out = (
+                f"Welcome\nBACKUP_BEGIN_{token}\n{self.backup_said}\n\n"
+                f"BACKUP_END_{token}={self.backup_status}\nBACKUP_ARTIFACT=present\n"
+            )
+            return 0, out, ""
         if "sha256sum" in text:
             answers = []
             for label, path in (
@@ -1283,13 +1335,21 @@ def test_an_empty_venv_takes_the_locked_path_whatever_the_marker_says(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A venv recreated under a marker that survived it: the marker shows uv.lock
-    # unchanged, and the venv holds nothing that the marker describes.
+    # unchanged, and the venv holds nothing that the marker describes. Ruled on
+    # its own, because the deploy as a whole now refuses this box before it
+    # exports anything: a hub has served there, and no earlier build is left to
+    # back its directory up with (ADR-0326 §6:1).
     repo = _repo(tmp_path)
     head = git(repo, "rev-parse", "HEAD")
+    marker = f"commit={head}\n"
 
-    box = _deploy_against(repo, monkeypatch, marker=f"commit={head}\n", version="(not installed)")
+    reason = _MODULE._rule_on_dependencies(_plan(repo), repo, head, marker, "(not installed)\n")
 
-    assert len(box.exports) == 1
+    assert reason is not None
+    assert "no ai_assistant installed" in reason
+    with pytest.raises(_MODULE.DeployError, match="holds no build, but the marker shows"):
+        _deploy_against(repo, monkeypatch, marker=marker, version="(not installed)")
+    assert _FakeBox.last.exports == []
 
 
 def test_a_deployed_commit_this_clone_lacks_takes_the_locked_path(
@@ -1429,7 +1489,7 @@ def test_the_dry_run_shows_both_installs_without_with_deps(tmp_path: Path) -> No
     routine, _, locked = plan.partition("# otherwise")
 
     assert "uv export" not in routine
-    assert "-r " not in routine
+    assert "--no-deps -r " not in routine
     assert "uv export --locked --offline --no-dev --no-emit-project" in locked
     assert f"/{LOCKED} && " in locked
     _assert_every_install_is_no_deps(plan)
@@ -1590,3 +1650,612 @@ def test_a_dirty_deployed_marker_is_not_proof_of_the_committed_set(tmp_path: Pat
 )
 def test_a_dirty_marker_is_recognised_in_both_formats(text: str, dirty: bool) -> None:
     assert _MODULE.marker_is_dirty(text) is dirty
+
+
+# --------------------------------------------------------------------------- #
+# The backup before the install (ADR-0326 §6)                                  #
+# --------------------------------------------------------------------------- #
+#
+# A deploy to a box whose venv holds an earlier build stops the hub, runs that
+# build's `ai-assistant-backup` over the directory the hub serves, and installs
+# only once the tool says the artifact is written and verified. What can be
+# refused is refused before the hub is stopped.
+
+_SOURCE = Path(__file__).parents[2] / "src" / "ai_assistant" / "service"
+
+
+def _steps(mode: str) -> list[str]:
+    """The step labels of one rendered install mode, in order."""
+    return [line.split(":", 1)[0].strip() for line in mode.splitlines() if ": " in line[:10]]
+
+
+@pytest.mark.parametrize("args", [(), ("--with-deps",)])
+def test_the_backup_comes_before_any_install_on_every_path(
+    tmp_path: Path, args: tuple[str, ...]
+) -> None:
+    # The routine install, the locked one, and --with-deps alike: the hub is
+    # stopped and backed up after the wheel is staged and before the venv or
+    # the marker changes.
+    plan = _dry_run(_repo(tmp_path), *args)
+    modes = plan.split("# otherwise")
+    assert len(modes) == (1 if args else 2)
+
+    for mode in modes:
+        steps = _steps(mode)
+        assert steps.index("backup?") < steps.index("stagedir")
+        assert steps.index("verify") < steps.index("stop") < steps.index("backup")
+        assert steps.index("backup") < steps.index("install")
+        if "unmark" in steps:
+            assert steps.index("backup") < steps.index("unmark")
+
+
+def test_the_backup_is_the_earlier_builds_tool_reading_a_passphrase_file(tmp_path: Path) -> None:
+    plan = _dry_run(_repo(tmp_path))
+
+    assert "~/venv/bin/ai-assistant-backup ~/backups/pre-deploy-" in plan, (
+        "the venv's own tool, before the install replaces it"
+    )
+    assert "--passphrase-file ~/.assistant-backup-pass </dev/null 2>&1" in plan
+    # The hub's environment, so the tool copies the directory the hub serves.
+    assert "set -a && . ~/hub.env && set +a && echo BACKUP_BEGIN_" in plan
+    # Never a passphrase this script mints, shows or reads.
+    assert "generate-passphrase" not in plan
+    assert "cat ~/.assistant-backup-pass" not in plan
+
+
+def test_the_backup_names_no_store_and_no_exclusion(tmp_path: Path) -> None:
+    # ADR-0326 §6:4: the exclusions are exactly the tool's own. The script passes
+    # the tool a destination and a passphrase file, and nothing else.
+    plan = _dry_run(_repo(tmp_path))
+    backup = next(line for line in plan.splitlines() if "ai-assistant-backup ~/" in line)
+    words = shlex.split(shlex.split(backup.strip())[-1])
+    tool = words.index("~/venv/bin/ai-assistant-backup")
+
+    assert words[tool + 2 : tool + 4] == ["--passphrase-file", "~/.assistant-backup-pass"]
+    assert words[tool + 4] == "</dev/null"
+    for word in ("--exclude", "trace", "diagnostics", ".db"):
+        assert not any(word in w for w in words), word
+
+
+def test_the_help_carries_the_operators_one_time_passphrase_step() -> None:
+    result = run("deploy_hub", ["--help"])
+
+    assert result.returncode == 0
+    for expected in ("stty -echo", "~/.assistant-backup-pass", "umask 077", "OFF the box"):
+        assert expected in result.stdout, expected
+
+
+def test_the_tools_words_and_lock_name_are_the_ones_the_script_reads() -> None:
+    # Exit 0 covers a verified artifact and an unverified one, so the script
+    # tells them apart by the tool's own sentence. If that sentence changes,
+    # every deploy refuses; this test says why before a deploy does.
+    source = (_SOURCE / "backup.py").read_text(encoding="utf-8")
+
+    assert f'"{_MODULE._BACKUP_VERIFIED}"' in source
+    assert _MODULE._BACKUP_UNVERIFIED in source
+    assert f'LOCK_FILENAME: Final = "{_MODULE._LOCK_FILENAME}"' in (_SOURCE / "lock.py").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_each_run_writes_a_new_artifact_under_the_backup_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The tool refuses a destination that exists, and the deploy deletes none.
+    repo = _repo(tmp_path)
+    first = re.findall(
+        r"~/backups/pre-deploy-\w+-1111aaaa\.age", _rendered(repo, monkeypatch, "1111aaaa")
+    )
+    second = re.findall(
+        r"~/backups/pre-deploy-\w+-2222bbbb\.age", _rendered(repo, monkeypatch, "2222bbbb")
+    )
+
+    assert first
+    assert second
+
+
+# --- The preflight: refused while the hub still serves ---------------------- #
+
+_NO_PASSPHRASE_FILE = dict.fromkeys(["BACKUP_PASSPHRASE"], "absent")
+
+
+def test_a_healthy_box_names_the_directory_and_the_artifact(tmp_path: Path) -> None:
+    plan = _plan(_repo(tmp_path))
+
+    target = _MODULE.backup_target(plan, (0, f"Welcome\n{_healthy_probe()}", ""))
+
+    assert target.data_dir == _DATA_DIR
+    assert target.artifact == plan.backup_artifact
+    assert target.artifact.startswith("~/backups/pre-deploy-")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"BACKUP_ENV": "absent"}, "environment file ~/hub.env is not there"),
+        ({"BACKUP_DATA_DIR": ""}, "could not name its data directory"),
+        ({"BACKUP_TOOL": "absent"}, "has no ai-assistant-backup"),
+        ({"BACKUP_PASSPHRASE": "absent"}, "passphrase file ~/.assistant-backup-pass is absent"),
+        ({"BACKUP_PASSPHRASE": "empty"}, "is empty on the box"),
+        ({"BACKUP_PASSPHRASE": "unreadable"}, "is unreadable on the box"),
+        ({"BACKUP_PASSPHRASE_MODE": "644"}, "has mode 644"),
+        ({"BACKUP_PASSPHRASE_MODE": "640"}, "has mode 640"),
+        ({"BACKUP_PASSPHRASE_MODE": ""}, "has mode unknown"),
+        ({"BACKUP_PASSPHRASE_PATH": f"{_DATA_DIR}/pass"}, "is not outside"),
+        ({"BACKUP_DIR_PATH": f"{_DATA_DIR}/backups"}, "is not\noutside the data directory"),
+        ({"BACKUP_DIR_PATH": _DATA_DIR}, "is not\noutside the data directory"),
+        ({"HUB_LOCK": "free"}, "the instance lock of /home/assistant/data-m44 is free"),
+        ({"HUB_LOCK": "absent"}, "does not name the directory the hub"),
+    ],
+)
+def test_a_box_that_cannot_take_the_backup_is_refused_before_anything_stops(
+    tmp_path: Path, overrides: dict[str, str], message: str
+) -> None:
+    plan = _plan(_repo(tmp_path))
+
+    with pytest.raises(_MODULE.DeployError, match=re.escape(message)) as refused:
+        _MODULE.backup_target(plan, (0, _healthy_probe(**overrides), ""))
+
+    assert "Nothing has been stopped or installed." in str(refused.value)
+
+
+def test_an_absent_passphrase_file_names_the_operators_step(tmp_path: Path) -> None:
+    plan = _plan(_repo(tmp_path))
+
+    with pytest.raises(_MODULE.DeployError) as refused:
+        _MODULE.backup_target(plan, (0, _healthy_probe(**_NO_PASSPHRASE_FILE), ""))
+
+    assert "stty -echo" in str(refused.value)
+    assert "OFF the box" in str(refused.value)
+
+
+def test_a_directory_beside_the_data_dirs_name_is_not_inside_it(tmp_path: Path) -> None:
+    # A prefix of the string is not containment: data-m44-backups is outside.
+    plan = _plan(_repo(tmp_path))
+
+    target = _MODULE.backup_target(
+        plan, (0, _healthy_probe(BACKUP_DIR_PATH=f"{_DATA_DIR}-backups"), "")
+    )
+
+    assert target.data_dir == _DATA_DIR
+
+
+def test_an_unanswered_preflight_is_not_reported_as_a_box_fact(tmp_path: Path) -> None:
+    with pytest.raises(_MODULE.DeployError, match="could not ask the box about the backup"):
+        _MODULE.backup_target(_plan(_repo(tmp_path)), (255, "", "ssh: connect: refused"))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "warning"),
+    [
+        ({"HUB_STATE": "inactive", "HUB_LOCK": "free"}, "the unit is inactive"),
+        ({"HUB_LOCK": "unknown"}, "flock is not on the box"),
+    ],
+)
+def test_a_hub_that_cannot_be_asked_is_backed_up_as_named_and_said_so(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    overrides: dict[str, str],
+    warning: str,
+) -> None:
+    target = _MODULE.backup_target(_plan(_repo(tmp_path)), (0, _healthy_probe(**overrides), ""))
+
+    assert target.data_dir == _DATA_DIR
+    assert warning in capsys.readouterr().err
+
+
+def test_a_first_deploy_takes_no_backup(tmp_path: Path) -> None:
+    plan = _plan(_repo(tmp_path))
+
+    def _no_ssh(_remote: str) -> list[str]:
+        raise AssertionError("a first deploy asks the box nothing about a backup")
+
+    assert _MODULE._rule_on_backup(plan, "", "Welcome\n(not installed)\n", _no_ssh) is None
+
+
+def test_an_empty_venv_under_a_marker_is_refused(tmp_path: Path) -> None:
+    # A hub has served here, and nothing is left that could back it up.
+    plan = _plan(_repo(tmp_path))
+
+    with pytest.raises(_MODULE.DeployError, match="holds no build, but the marker shows"):
+        _MODULE._rule_on_backup(plan, "commit=abc1234\n", "(not installed)\n", lambda r: [r])
+
+
+# --- The tool's report ------------------------------------------------------ #
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("Welcome\nBACKUP_BEGIN_tok\nwrote x\n\nBACKUP_END_tok=0\n", (0, "wrote x")),
+        ("BACKUP_BEGIN_tok\nrefused\nBACKUP_END_tok=78\nBACKUP_ARTIFACT=absent\n", (78, "refused")),
+        # Cut off: the tool's words so far, and no status.
+        ("BACKUP_BEGIN_tok\ncopying 9 file(s)\n", (None, "copying 9 file(s)")),
+        ("ssh: connect: refused\n", (None, "")),
+        # Another run's brackets are not this run's answer.
+        ("BACKUP_BEGIN_other\nok\nBACKUP_END_other=0\n", (None, "")),
+    ],
+)
+def test_only_the_bracketed_output_is_the_tools_report(
+    output: str, expected: tuple[int | None, str]
+) -> None:
+    assert _MODULE.backup_report(output, "tok") == expected
+
+
+def _backup_out(plan: Any, said: str, status: int = 0, artifact: str = "present") -> str:
+    """The backup command's output from a box, as :meth:`Plan.back_up` prints it."""
+    token = plan.token
+    return (
+        f"Welcome\nBACKUP_BEGIN_{token}\n{said}\n\nBACKUP_END_{token}={status}\n"
+        f"BACKUP_ARTIFACT={artifact}\n"
+    )
+
+
+def _target(plan: Any) -> Any:
+    return _MODULE.BackupTarget(data_dir=_DATA_DIR, artifact=plan.backup_artifact)
+
+
+def test_a_verified_backup_admits_the_install(tmp_path: Path) -> None:
+    plan = _plan(_repo(tmp_path))
+    said = f"wrote {plan.backup_artifact} (9 bytes)\n{_MODULE._BACKUP_VERIFIED}"
+
+    _MODULE._check_backup(plan, _target(plan), (0, _backup_out(plan, said), ""))
+
+
+@pytest.mark.parametrize(
+    ("said", "status", "artifact", "message"),
+    [
+        (
+            "wrote x (9 bytes)\nwarning: the artifact is written but unverified: no scratch",
+            0,
+            "present",
+            "is not verified",
+        ),
+        ("wrote x (9 bytes)", 0, "present", "is not verified"),
+        ("the backup was refused: a sidecar", 78, "absent", "failed (exit 78)"),
+        ("x is held by another instance", 1, "absent", "failed (exit 1)"),
+        (f"wrote x\n{_MODULE._BACKUP_VERIFIED}", 0, "absent", "is absent or empty"),
+    ],
+)
+def test_a_backup_not_written_and_verified_admits_no_install(
+    tmp_path: Path, said: str, status: int, artifact: str, message: str
+) -> None:
+    plan = _plan(_repo(tmp_path))
+
+    with pytest.raises(_MODULE.DeployError, match=re.escape(message)):
+        _MODULE._check_backup(
+            plan, _target(plan), (0, _backup_out(plan, said, status, artifact), "")
+        )
+
+
+def test_a_backup_that_never_reported_is_not_a_backup(tmp_path: Path) -> None:
+    plan = _plan(_repo(tmp_path))
+
+    with pytest.raises(_MODULE.DeployError, match="did not run to its end"):
+        _MODULE._check_backup(plan, _target(plan), (255, "", "ssh: connect: refused"))
+
+
+# --- The whole deploy, against a fake box ----------------------------------- #
+
+
+def _code_only(repo: Path) -> str:
+    """Commit a change that moves code and not uv.lock; return the deployed commit."""
+    deployed = git(repo, "rev-parse", "HEAD")
+    (repo / "f.txt").write_text("code only\n")
+    git(repo, "commit", "-qam", "code only")
+    return deployed
+
+
+def _index(box: _FakeBox, needle: str) -> int:
+    return next(i for i, command in enumerate(box.issued) if needle in command)
+
+
+def test_a_routine_deploy_stops_backs_up_then_installs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _repo(tmp_path)
+    deployed = _code_only(repo)
+
+    box = _deploy_against(repo, monkeypatch, marker=f"commit={deployed}\n")
+
+    stop = _index(box, "systemctl --user stop")
+    backup = _index(box, "BACKUP_BEGIN_")
+    assert _index(box, "BACKUP_ENV=") < _index(box, "uv build") < stop < backup
+    assert backup < _index(box, "pip install") < _index(box, "commit=")
+    # The artifact is reported, and nothing deletes it.
+    out = capsys.readouterr().out
+    assert f"backup: {box.plan.backup_artifact} (of {_DATA_DIR}; verified, and kept)" in out
+    assert not any(box.plan.backup_artifact in c and "rm " in c for c in box.issued)
+
+
+def test_a_locked_deploy_backs_up_before_the_marker_is_withdrawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path)
+    deployed = _bump_lockfile(repo)
+
+    box = _deploy_against(repo, monkeypatch, marker=f"commit={deployed}\n")
+
+    assert _index(box, "BACKUP_BEGIN_") < _index(box, "deps=unknown") < _index(box, "pip install")
+
+
+@pytest.mark.parametrize(
+    ("said", "status"),
+    [
+        ("the backup was refused: hub.db-wal is a SQLite sidecar", 78),
+        (f"wrote x\nwarning: {_MODULE._BACKUP_UNVERIFIED}: no owner-only scratch directory", 0),
+    ],
+)
+def test_a_failed_or_unverified_backup_installs_nothing_and_restarts_the_hub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, said: str, status: int
+) -> None:
+    repo = _repo(tmp_path)
+    deployed = _code_only(repo)
+    box_init = _FakeBox.__init__
+
+    def _init(self: _FakeBox, *args: Any, **kwargs: Any) -> None:
+        box_init(self, *args, **kwargs)
+        self.backup_said, self.backup_status = said, status
+
+    monkeypatch.setattr(_FakeBox, "__init__", _init)
+
+    with pytest.raises(_MODULE.DeployError) as failed:
+        _deploy_against(repo, monkeypatch, marker=f"commit={deployed}\n")
+    box = _FakeBox.last
+
+    assert "Nothing was installed." in str(failed.value)
+    assert "started again on its earlier build, and logged hub_ready" in str(failed.value)
+    assert box.installs() == []
+    assert not any("commit=" in c or "deps=unknown" in c for c in box.issued)
+    # Started again after the backup, and the staged wheel still cleaned up.
+    assert _index(box, "BACKUP_BEGIN_") < _index(box, "systemctl --user restart")
+    assert any("rmdir" in c for c in box.issued)
+
+
+def test_a_hub_that_will_not_come_back_is_reported_beside_the_failed_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _plan(_repo(tmp_path))
+    out = _backup_out(plan, "the backup was refused: a sidecar", 78, "absent")
+    monkeypatch.setattr(_MODULE, "_run_local", lambda _argv, **_k: "")
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (0, out, ""))
+
+    with pytest.raises(_MODULE.DeployError) as failed:
+        _MODULE._take_backup(plan, _target(plan), lambda remote: [remote])
+
+    message = str(failed.value)
+    assert "failed (exit 78)" in message
+    assert "could NOT be started again" in message
+    assert "printed no unit InvocationID" in message
+
+
+def test_a_hub_that_will_not_stop_is_a_failed_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _plan(_repo(tmp_path))
+    issued: list[str] = []
+
+    def _run_local(argv: list[str], **_kwargs: object) -> str:
+        issued.append(argv[0])
+        if "systemctl --user stop" in argv[0]:
+            raise _MODULE.DeployError("ssh failed: Job for ai-assistant-hub.service canceled")
+        return "INVOCATION_ID=inv\n"
+
+    monkeypatch.setattr(_MODULE, "_run_local", _run_local)
+    monkeypatch.setattr(
+        _MODULE, "_probe", lambda argv: (0, "UNIT_STATE=active\nhub_ready jobs=[]\n", "")
+    )
+
+    with pytest.raises(_MODULE.DeployError, match="canceled\nNothing was installed"):
+        _MODULE._take_backup(plan, _target(plan), lambda remote: [remote])
+
+    assert not any("BACKUP_BEGIN_" in command for command in issued)
+
+
+def test_a_refused_preflight_touches_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path)
+    deployed = _code_only(repo)
+    box_init = _FakeBox.__init__
+
+    def _init(self: _FakeBox, *args: Any, **kwargs: Any) -> None:
+        box_init(self, *args, **kwargs)
+        self.backup_probe = _healthy_probe(**_NO_PASSPHRASE_FILE)
+
+    monkeypatch.setattr(_FakeBox, "__init__", _init)
+
+    with pytest.raises(_MODULE.DeployError, match="passphrase file"):
+        _deploy_against(repo, monkeypatch, marker=f"commit={deployed}\n")
+    box = _FakeBox.last
+
+    for step in ("uv build", "mkdir", "scp ", "systemctl --user stop", "BACKUP_BEGIN_"):
+        assert not any(step in c for c in box.issued), step
+
+
+def test_a_failed_install_after_the_backup_leaves_the_hub_stopped_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The venv may hold part of the new build; starting it could upgrade the
+    # directory with nothing verified, so it is left for the operator.
+    repo = _repo(tmp_path)
+    deployed = _code_only(repo)
+    box_run = _FakeBox.run_local
+
+    def _run_local(self: _FakeBox, argv: list[str], **kwargs: Any) -> str:
+        if "pip install" in " ".join(argv):
+            self.issued.append(" ".join(argv))
+            raise _MODULE.DeployError("ssh failed: No space left on device")
+        return box_run(self, argv, **kwargs)
+
+    monkeypatch.setattr(_FakeBox, "run_local", _run_local)
+
+    with pytest.raises(_MODULE.DeployError) as failed:
+        _deploy_against(repo, monkeypatch, marker=f"commit={deployed}\n")
+    box = _FakeBox.last
+
+    message = str(failed.value)
+    assert "No space left on device" in message
+    assert "is still stopped" in message
+    assert box.plan.backup_artifact in message
+    assert not any("systemctl --user restart" in c for c in box.issued)
+
+
+def test_a_first_deploy_neither_stops_nor_backs_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    box = _deploy_against(_repo(tmp_path), monkeypatch, marker="", version="(not installed)")
+
+    for step in ("BACKUP_ENV=", "systemctl --user stop", "BACKUP_BEGIN_"):
+        assert not any(step in c for c in box.issued), step
+    assert "backup: none — a first deploy" in capsys.readouterr().out
+
+
+# --- The remote commands, through a real shell ------------------------------ #
+#
+# The two commands above are shell text, and a fake box only answers what they
+# say. These run their inner commands under `sh` (dash, where it is installed),
+# with HOME pointing at a scratch home that holds a fake venv, a fake systemctl,
+# and a real lock file a real flock can contend for.
+
+
+def _inner(command: str) -> str:
+    """The command line `su - <user> -c` would hand the service user's shell."""
+    words = shlex.split(command)
+    assert words[:2] == ["su", "-"], words
+    return words[-1]
+
+
+def _home(tmp_path: Path, *, unit: str = "active") -> tuple[Path, dict[str, str], Path]:
+    """A service user's home with a fake venv, hub.env and passphrase file.
+
+    Returns:
+        The home, the environment to run in, and the data directory.
+    """
+    home = tmp_path / "home"
+    data = home / "data-m44"
+    bin_dir = home / "venv" / "bin"
+    shims = tmp_path / "shims"
+    for directory in (data, bin_dir, shims):
+        directory.mkdir(parents=True)
+    # The earlier build's settings: it reads ASSISTANT_DATA_DIR, so the answer
+    # proves hub.env was sourced and exported.
+    python = bin_dir / "python"
+    python.write_text('#!/bin/sh\nprintf "%s\\n" "$ASSISTANT_DATA_DIR"\n')
+    (shims / "systemctl").write_text(f"#!/bin/sh\necho {unit}\n[ {unit} = active ]\n")
+    for script in (python, shims / "systemctl"):
+        script.chmod(0o755)
+    (home / "hub.env").write_text(f"ASSISTANT_DATA_DIR={data}\n")
+    passphrase = home / ".assistant-backup-pass"
+    passphrase.write_text("correct horse battery staple\n")
+    passphrase.chmod(0o600)
+    (data / "hub.lock").write_text("4242\n")
+    env = {"HOME": str(home), "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}"}
+    return home, env, data
+
+
+def _sh(command: str, env: dict[str, str]) -> tuple[int, str, str]:
+    shell = shutil.which("sh") or "/bin/sh"
+    completed = subprocess.run(  # noqa: S603  # fixed shell, test-built command
+        [shell, "-c", _inner(command)],
+        input="typed at the terminal\n",
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    return completed.returncode, completed.stdout, completed.stderr
+
+
+_NEEDS_SHELL = pytest.mark.skipif(
+    not all(shutil.which(tool) for tool in ("sh", "flock", "realpath", "stat")),
+    reason="needs a POSIX sh with flock, realpath and stat",
+)
+
+
+@_NEEDS_SHELL
+def test_the_real_probe_names_the_served_directory_while_the_hub_holds_it(
+    tmp_path: Path,
+) -> None:
+    home, env, data = _home(tmp_path)
+    (home / "venv" / "bin" / "ai-assistant-backup").write_text("#!/bin/sh\n")
+    (home / "venv" / "bin" / "ai-assistant-backup").chmod(0o755)
+    plan = _plan(_repo(tmp_path))
+
+    with (data / "hub.lock").open("rb") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        target = _MODULE.backup_target(plan, _sh(plan.probe_backup(), env))
+    probed = _sh(plan.probe_backup(), env)
+
+    assert target.data_dir == str(data)
+    # And the same directory, once nothing holds its lock, is not the hub's.
+    assert "HUB_LOCK=free" in probed[1]
+    with pytest.raises(_MODULE.DeployError, match="is free"):
+        _MODULE.backup_target(plan, probed)
+
+
+@_NEEDS_SHELL
+def test_the_real_probe_sees_an_absent_or_exposed_passphrase_file(tmp_path: Path) -> None:
+    home, env, _data = _home(tmp_path, unit="inactive")
+    plan = _plan(_repo(tmp_path))
+    passphrase = home / ".assistant-backup-pass"
+
+    passphrase.chmod(0o644)
+    assert "BACKUP_PASSPHRASE_MODE=644" in _sh(plan.probe_backup(), env)[1]
+    passphrase.unlink()
+    out = _sh(plan.probe_backup(), env)[1]
+
+    assert "BACKUP_PASSPHRASE=absent" in out
+    assert "BACKUP_TOOL=absent" in out
+    assert "HUB_STATE=inactive" in out
+    # The probe never prints a passphrase: it examines the file, never reads it.
+    passphrase.write_text("correct horse battery staple\n")
+    passphrase.chmod(0o600)
+    assert "correct horse" not in "".join(_sh(plan.probe_backup(), env)[1:])
+
+
+@_NEEDS_SHELL
+@pytest.mark.parametrize(
+    ("script", "verified"),
+    [
+        (f'echo "wrote $1"; echo "{_MODULE._BACKUP_VERIFIED}"', True),
+        (f'echo "wrote $1"; echo "warning: {_MODULE._BACKUP_UNVERIFIED}: none" >&2', False),
+        # Says verified, and left nothing behind: not a backup either.
+        (f'rm -f "$1"; echo "{_MODULE._BACKUP_VERIFIED}"', False),
+        ('echo "the backup was refused: a sidecar" >&2; exit 78', False),
+    ],
+)
+def test_the_real_backup_command_reports_what_the_tool_said(
+    tmp_path: Path, script: str, verified: bool
+) -> None:
+    home, env, data = _home(tmp_path)
+    seen = tmp_path / "seen"
+    tool = home / "venv" / "bin" / "ai-assistant-backup"
+    # Records its argv, its data directory and whether stdin is /dev/null, then
+    # writes a non-empty artifact (or not) and says what the real tool says.
+    tool.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$@" "$ASSISTANT_DATA_DIR" > "{seen}"\n'
+        f'if read -r line; then echo "stdin: $line"; else echo "stdin: none"; fi >> "{seen}"\n'
+        f'echo data > "$1"\n{script}\n'
+    )
+    tool.chmod(0o755)
+    plan = _plan(_repo(tmp_path))
+
+    probed = _sh(plan.back_up(), env)
+
+    artifact = home / "backups" / Path(plan.backup_artifact).name
+    assert seen.read_text().splitlines()[:4] == [
+        str(artifact),
+        "--passphrase-file",
+        str(home / ".assistant-backup-pass"),
+        str(data),
+    ]
+    # What an operator might have typed never reaches the tool: stdin is /dev/null.
+    assert seen.read_text().splitlines()[-1] == "stdin: none"
+    assert (home / "backups").stat().st_mode & 0o777 == 0o700
+    if verified:
+        _MODULE._check_backup(plan, _target(plan), probed)
+    else:
+        with pytest.raises(_MODULE.DeployError):
+            _MODULE._check_backup(plan, _target(plan), probed)

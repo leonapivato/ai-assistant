@@ -83,6 +83,49 @@ the service user, which proves readability and integrity in one step — and
 refuses unless it matches the digest of the local file, which is the same digest
 the marker records.
 
+**The data directory is backed up before anything installs** (ADR-0326 §6). A
+person's memory carries across every upgrade, and an upgrade cannot be undone by
+starting the earlier build on a directory the later one has served (ADR-0326
+§5:4). So a deploy to a box whose venv holds an earlier build stops the hub, runs
+*that build's* ``ai-assistant-backup`` over the hub's own data directory, and
+installs only once the tool reports the artifact written **and verified**
+(ADR-0123 §9). A backup that fails, or that is written but unverified, stops the
+deploy before the install, and the hub is started again on the build it was
+running. Everything that can be refused is refused *before* the hub is stopped:
+the wheel is built, staged and digested first, and a preflight on the box checks
+the passphrase file, the environment and where the artifact will go.
+
+* **Which directory.** The one the hub serves: the earlier build's own
+  ``load_settings()``, run under the environment file the unit loads
+  (``--env-file``, ``~/hub.env`` by default; pass ``/dev/null`` for a unit that
+  loads none). While the hub is running, that directory's instance lock must be
+  held, or the environment named is not the hub's and the deploy refuses: a
+  backup of some other directory would verify perfectly and protect nothing.
+* **What it holds.** Exactly what the tool copies. The exclusions are the tool's
+  own (ADR-0123 §3, ADR-0314 §7:5); this script adds none and removes none, and
+  never names a store.
+* **Where it goes.** ``--backup-dir`` (``~/backups``), one new file per deploy,
+  named for the time and the run, and reported on every outcome. It must lie
+  outside the data directory (ADR-0123 §11). The deploy **never deletes** an
+  artifact, which keeps each at least until a later deploy's backup is verified
+  (ADR-0326 §6:3); pruning old ones is the operator's act.
+* **The passphrase.** Read by the tool, on the box, from
+  ``--backup-passphrase-file`` (``~/.assistant-backup-pass``). This script never
+  generates, reads, prints, logs or sends one: it checks only that the file is
+  there, is the service user's to read, is readable by nobody else and is outside
+  the data directory, and refuses before stopping anything when it is not. The
+  file is created once per box by the operator (the help's epilog has the step),
+  and a copy kept off the box is the only key to an artifact once the box is gone
+  (ADR-0123 §5).
+* **A first deploy** (no build in the venv and no marker) has served no data
+  directory and takes no backup. An empty venv under a marker is refused: a hub
+  has served there, and there is no earlier build to back it up with.
+
+Once the hub has been stopped for the backup, a failure in the install or
+before the restart leaves it **stopped**, and says so: the venv may hold part of
+the new build, and starting that on a person's directory could upgrade it with
+no deploy having verified anything.
+
 ``--dry-run`` prints the exact commands the run would issue and contacts nothing.
 It is what the tests drive, because the remote half cannot be exercised from a
 gate that has no box to talk to.
@@ -102,11 +145,12 @@ import sys
 import tempfile
 import time
 import tomllib
-from pathlib import Path
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 #: Default service user on the box, and the login user ssh authenticates as.
 DEFAULT_SERVICE_USER = "assistant"
@@ -148,10 +192,45 @@ LOCKED_REQUIREMENTS = "locked-requirements.txt"
 _EXPORT = ("uv", "export", "--locked", "--offline", "--no-dev", "--no-emit-project")
 #: What the version read prints when the venv has no ``ai_assistant`` in it.
 _NOT_INSTALLED = "(not installed)"
+#: The hub's environment file, the backup's destination directory, and the file
+#: the backup tool reads its passphrase from — all on the box, relative to the
+#: service user's home. The passphrase path is the tool's own example
+#: (``ai-assistant-backup --help``).
+DEFAULT_ENV_FILE = "~/hub.env"
+DEFAULT_BACKUP_DIR = "~/backups"
+DEFAULT_BACKUP_PASSPHRASE_FILE = "~/.assistant-backup-pass"  # noqa: S105  # a path, never a passphrase
+#: The instance lock's name inside the data directory. Spelled out rather than
+#: imported, so this script stays stdlib: it is ``service/lock.py``'s
+#: ``LOCK_FILENAME``, and a test holds the two equal.
+_LOCK_FILENAME = "hub.lock"
+#: What ``ai-assistant-backup`` prints when it published an artifact it verified,
+#: and the start of what it prints when it published one it could not verify
+#: (``service/backup.py``, ``_run_locked``). Exit 0 covers both, so the line is
+#: what tells them apart; a test holds both to the tool's source.
+_BACKUP_VERIFIED = "verified by restoring it into a scratch directory and checking every file."
+_BACKUP_UNVERIFIED = "the artifact is written but unverified"
+#: What the backup command prints around the tool's own output, as the marker read
+#: does and for the same reason: the login shell's banner is not the tool's word.
+_BACKUP_BEGIN = "BACKUP_BEGIN_"
+_BACKUP_END = "BACKUP_END_"
 
 
 class DeployError(Exception):
     """A deploy could not proceed, or could not be verified."""
+
+
+@dataclass(frozen=True, slots=True)
+class BackupTarget:
+    """What this deploy backs up before it installs, and where the artifact goes.
+
+    Attributes:
+        data_dir: The data directory the hub serves, as the earlier build's own
+            settings resolve it on the box.
+        artifact: The path the artifact is written to, outside that directory.
+    """
+
+    data_dir: str
+    artifact: str
 
 
 # --------------------------------------------------------------------------- #
@@ -648,6 +727,10 @@ class Plan:
         self.locked: bool = bool(args.with_deps)
         #: The exported locked set on THIS machine, once a locked run has one.
         self._requirements: Path | None = None
+        #: When this run began, in the artifact's name beside the token: the time
+        #: is what an operator looks for, and the token keeps two runs in one
+        #: second apart, since the tool refuses a destination that exists.
+        self.stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
 
     @property
     def local(self) -> Path:
@@ -772,6 +855,117 @@ class Plan:
         python = remote_path(f"{self.args.venv.rstrip('/')}/bin/python")
         expr = "import ai_assistant; print(ai_assistant.__version__)"
         inner = f"{python} -c {shlex.quote(expr)} 2>/dev/null || echo {shlex.quote(_NOT_INSTALLED)}"
+        return as_service_user(inner, self.args.user)
+
+    @property
+    def backup_artifact(self) -> str:
+        """Where this deploy's backup is written on the box.
+
+        Returns:
+            A new file under ``--backup-dir``, named for this run.
+        """
+        return f"{self.args.backup_dir.rstrip('/')}/pre-deploy-{self.stamp}-{self.token}.age"
+
+    def _venv_bin(self, name: str) -> str:
+        """Return one of the venv's executables, quoted for the remote shell.
+
+        Args:
+            name: The executable's name.
+
+        Returns:
+            The path as one shell word.
+        """
+        return remote_path(f"{self.args.venv.rstrip('/')}/bin/{name}")
+
+    def _source_env(self) -> str:
+        """Return the shell text that loads the hub's environment, exported.
+
+        Returns:
+            ``set -a``, the file sourced, ``set +a``, chained so a file that
+            cannot be read stops whatever follows it.
+        """
+        return f"set -a && . {remote_path(self.args.env_file)} && set +a"
+
+    def probe_backup(self) -> str:
+        """Return the command that asks the box everything the backup depends on.
+
+        Run before anything is stopped, so a deploy that cannot back up is refused
+        while the hub is still serving. The data directory is the **earlier
+        build's** answer under the hub's environment, because that build is the
+        one that has been writing it; the passphrase file is examined and never
+        read. Every answer is on a labelled line, after the login banner.
+
+        Returns:
+            The remote command line.
+        """
+        env = remote_path(self.args.env_file)
+        passphrase = remote_path(self.args.backup_passphrase_file)
+        expr = "from ai_assistant.core.config import load_settings; print(load_settings().data_dir)"
+        resolve = f"d=$({self._venv_bin('python')} -c {shlex.quote(expr)})"
+        lock = f'"$d"/{_LOCK_FILENAME}'
+        state = with_user_bus(f"systemctl --user is-active {shlex.quote(self.args.unit)}")
+        checks = [
+            "d=",
+            f"if [ -r {env} ]; then echo BACKUP_ENV=present; {self._source_env()} && {resolve};"
+            " else echo BACKUP_ENV=absent; fi",
+            'echo BACKUP_DATA_DIR="$d"',
+            f"echo BACKUP_TOOL=$(test -x {self._venv_bin('ai-assistant-backup')}"
+            " && echo present || echo absent)",
+            f"echo BACKUP_PASSPHRASE=$(if [ ! -e {passphrase} ]; then echo absent;"
+            f" elif [ ! -f {passphrase} ]; then echo not-a-file;"
+            f" elif [ ! -r {passphrase} ]; then echo unreadable;"
+            f" elif [ ! -s {passphrase} ]; then echo empty; else echo present; fi)",
+            f"echo BACKUP_PASSPHRASE_MODE=$(stat -c %a {passphrase} 2>/dev/null)",
+            f"echo BACKUP_PASSPHRASE_PATH=$(realpath -e {passphrase} 2>/dev/null)",
+            f"echo BACKUP_DIR_PATH=$(realpath -m {remote_path(self.args.backup_dir)})",
+            f"echo HUB_STATE=$({state} || true)",
+            # Held means a live process has this directory locked, and while the
+            # unit is active that process is the hub. A shared, non-blocking try
+            # never waits and never takes the lock from a holder.
+            f'echo HUB_LOCK=$(if [ -z "$d" ] || [ ! -e {lock} ]; then echo absent;'
+            " elif ! command -v flock >/dev/null; then echo unknown;"
+            f" elif flock -s -n {lock} true; then echo free; else echo held; fi)",
+        ]
+        return as_service_user("; ".join(checks), self.args.user)
+
+    def stop(self) -> str:
+        """Return the command that stops the hub for its backup.
+
+        ``systemctl stop`` returns once the unit has stopped, so the instance lock
+        is free by the time the backup asks for it — and if it is not, the tool
+        says the lock is held, which is a failed backup like any other.
+
+        Returns:
+            The remote command line.
+        """
+        stop = with_user_bus(f"systemctl --user stop {shlex.quote(self.args.unit)}")
+        return as_service_user(stop, self.args.user)
+
+    def back_up(self) -> str:
+        """Return the command that runs the earlier build's backup tool.
+
+        The tool runs under the hub's own environment, so it copies the
+        directory the hub served and computes its exclusions from the same
+        settings the hub does; nothing here names a store or an exclusion. Its
+        output, both streams, is bracketed with this run's token, with its exit
+        status on the closing line, because exit 0 covers a verified artifact
+        *and* an unverified one and only the tool's own words tell them apart.
+        Standard input is ``/dev/null``: an unattended tool that found a reason to
+        prompt must fail, not wait.
+
+        Returns:
+            The remote command line.
+        """
+        begin, end = f"{_BACKUP_BEGIN}{self.token}", f"{_BACKUP_END}{self.token}"
+        artifact = remote_path(self.backup_artifact)
+        tool = self._venv_bin("ai-assistant-backup")
+        passphrase = remote_path(self.args.backup_passphrase_file)
+        run_tool = f"{tool} {artifact} --passphrase-file {passphrase} </dev/null 2>&1"
+        inner = (
+            f"mkdir -p -m 0700 {remote_path(self.args.backup_dir)} && {self._source_env()} && "
+            f"echo {begin} && {{ {run_tool}; status=$?; echo; echo {end}=$status; "
+            f"echo BACKUP_ARTIFACT=$(test -s {artifact} && echo present || echo absent); }}"
+        )
         return as_service_user(inner, self.args.user)
 
     def stage(self) -> list[str]:
@@ -1059,8 +1253,10 @@ def _mode_lines(plan: Plan, commit: str) -> list[str]:
     steps: list[tuple[str, str]] = [
         ("marker  ", plan.read_marker()),
         ("version ", plan.read_version()),
+        ("backup? ", plan.probe_backup()),
     ]
     lines.extend(_step_lines(ssh_prefix, steps))
+    lines.append("          (skipped, with no backup, on a first deploy: no build and no marker)")
     lines.extend(_step_lines(ssh_prefix, [("stagedir", plan.make_stage_dir())]))
     staged = f"{args.ssh_user}@{args.host}:{plan.staged}"
     lines.append(f"stage   : scp <the wheel above> {staged}")
@@ -1073,6 +1269,17 @@ def _mode_lines(plan: Plan, commit: str) -> list[str]:
             [
                 ("perms   ", plan.make_readable()),
                 ("verify  ", plan.verify_staged()),
+                ("stop    ", plan.stop()),
+                ("backup  ", plan.back_up()),
+            ],
+        )
+    )
+    lines.append(f"          (the artifact: {plan.backup_artifact}, kept; a failed or")
+    lines.append("          unverified backup installs nothing and starts the unit again)")
+    lines.extend(
+        _step_lines(
+            ssh_prefix,
+            [
                 *([("unmark  ", plan.unmark(commit))] if plan.locked else []),
                 ("install ", plan.install()),
                 ("unstage ", plan.unstage()),
@@ -1451,6 +1658,319 @@ def invocation_id(output: str) -> str:
     )
 
 
+# --------------------------------------------------------------------------- #
+# The backup before the install (ADR-0326 §6)                                  #
+# --------------------------------------------------------------------------- #
+
+
+#: The one-time step the operator takes on a box before its first backing-up
+#: deploy, printed by ``--help`` and by every refusal about the passphrase file.
+#: The passphrase is typed with echo off and goes straight into a file only the
+#: service user can read: it is never on a command line, in a history, or in any
+#: output this script sees.
+_OPERATOR_SETUP = """\
+once per box, before the first deploy that backs up (ADR-0326 §6), as the operator:
+
+  ssh -t root@<host>
+  su - <service user>
+  umask 077; stty -echo; printf 'backup passphrase: '; IFS= read -r p; stty echo; echo
+  printf '%s\\n' "$p" > ~/.assistant-backup-pass; unset p; exit
+
+Keep a copy of that passphrase OFF the box: it is the only key to every backup
+the deploy takes, and the file on the box goes when the box does (ADR-0123 §5).
+Use --backup-passphrase-file for another path; it must be outside the data
+directory, and readable by the service user alone."""
+
+
+#: How every refusal before the stop ends, so an operator knows the box is as it was.
+_UNTOUCHED = "Nothing has been stopped or installed."
+
+
+def backup_target(plan: Plan, probed: tuple[int, str, str]) -> BackupTarget:
+    """Rule on the box's answers to :meth:`Plan.probe_backup`.
+
+    Everything here is decided while the hub is still serving, so a refusal
+    costs nothing but the deploy.
+
+    Args:
+        plan: The plan.
+        probed: The probe's exit status, standard output and standard error.
+
+    Returns:
+        The directory to back up and the artifact to write.
+
+    Raises:
+        DeployError: If any answer means the backup cannot be taken, or cannot
+            be shown to be a backup of the directory the hub serves.
+    """
+    status, out, error = probed
+    args = plan.args
+    env = _labelled(out, "BACKUP_ENV=")
+    if env is None:
+        raise DeployError(
+            f"could not ask the box about the backup (exit {status}):\n"
+            f"{error.strip() or out.strip() or '(no output)'}\n{_UNTOUCHED}"
+        )
+    if env != "present":
+        raise DeployError(
+            f"the hub's environment file {args.env_file} is not there for the service user\n"
+            "to read, so the data directory the hub serves cannot be named. Pass\n"
+            "--env-file with the file the unit's EnvironmentFile= loads, or /dev/null\n"
+            f"if it loads none.\n{_UNTOUCHED}"
+        )
+    data_dir = _labelled(out, "BACKUP_DATA_DIR=")
+    if not data_dir:
+        raise DeployError(
+            f"the earlier build in {args.venv} could not name its data directory under\n"
+            f"{args.env_file}:\n{error.strip() or '(no output)'}\n{_UNTOUCHED}"
+        )
+    if _labelled(out, "BACKUP_TOOL=") != "present":
+        raise DeployError(
+            f"the earlier build in {args.venv} has no ai-assistant-backup, so nothing can\n"
+            f"back up its data directory before the install.\n{_UNTOUCHED}"
+        )
+    _rule_on_passphrase_file(plan, out, data_dir)
+    backup_dir = _labelled(out, "BACKUP_DIR_PATH=") or ""
+    if not backup_dir or _within(backup_dir, data_dir):
+        raise DeployError(
+            f"the backup directory {args.backup_dir} ({backup_dir or 'unresolved'}) is not\n"
+            f"outside the data directory {data_dir}; a backup kept where it is taken\n"
+            f"is lost with it (ADR-0123 §11). Pass --backup-dir elsewhere.\n{_UNTOUCHED}"
+        )
+    _rule_on_the_served_directory(plan, out, data_dir)
+    return BackupTarget(data_dir=data_dir, artifact=plan.backup_artifact)
+
+
+def _rule_on_passphrase_file(plan: Plan, out: str, data_dir: str) -> None:
+    """Refuse a passphrase file the backup could not use, or should not.
+
+    Args:
+        plan: The plan.
+        out: The probe's standard output.
+        data_dir: The data directory being backed up.
+
+    Raises:
+        DeployError: If the file is absent, unusable, readable by anyone but its
+            owner, or inside the data directory.
+    """
+    path = plan.args.backup_passphrase_file
+    state = _labelled(out, "BACKUP_PASSPHRASE=")
+    if state != "present":
+        raise DeployError(
+            f"the backup passphrase file {path} is {state or 'unexamined'} on the box, so\n"
+            f"the deploy cannot take the backup it owes before installing.\n{_UNTOUCHED}\n\n"
+            f"{_OPERATOR_SETUP}"
+        )
+    mode = _labelled(out, "BACKUP_PASSPHRASE_MODE=") or ""
+    if not re.fullmatch(r"[0-7]{3,4}", mode) or int(mode, 8) & 0o077:
+        raise DeployError(
+            f"the backup passphrase file {path} has mode {mode or 'unknown'}; it must be\n"
+            f"readable by the service user alone (chmod 600 {path}).\n{_UNTOUCHED}"
+        )
+    resolved = _labelled(out, "BACKUP_PASSPHRASE_PATH=") or ""
+    if not resolved or _within(resolved, data_dir):
+        raise DeployError(
+            f"the backup passphrase file {path} ({resolved or 'unresolved'}) is not outside\n"
+            f"the data directory {data_dir}: a key kept in what it encrypts is no key, and\n"
+            "the backup would carry it (ADR-0123 §5). Move it, and pass\n"
+            f"--backup-passphrase-file.\n{_UNTOUCHED}"
+        )
+
+
+def _rule_on_the_served_directory(plan: Plan, out: str, data_dir: str) -> None:
+    """Refuse a directory the running hub is not holding.
+
+    A backup of the wrong directory would verify perfectly and protect nothing,
+    which is the failure a mismatched ``--env-file`` produces. While the unit is
+    active its process holds the instance lock of the directory it serves, so a
+    lock that is free, or absent, there says the environment named is not the
+    hub's. A stopped hub cannot be asked, and is backed up as named.
+
+    Args:
+        plan: The plan.
+        out: The probe's standard output.
+        data_dir: The data directory the environment names.
+
+    Raises:
+        DeployError: If the hub is running and that directory's lock is not held.
+    """
+    hub = _labelled(out, "HUB_STATE=")
+    lock = _labelled(out, "HUB_LOCK=")
+    if hub != "active":
+        print(
+            f"backup: the unit is {hub or 'in no state'}, so nothing confirms {data_dir}\n"
+            "        is the directory it serves; backing up the one its environment names",
+            file=sys.stderr,
+        )
+        return
+    if lock == "unknown":
+        print(
+            "backup: flock is not on the box, so the running hub's lock cannot be checked;\n"
+            f"        backing up {data_dir}, the directory its environment names",
+            file=sys.stderr,
+        )
+        return
+    if lock != "held":
+        raise DeployError(
+            f"the hub is running, but the instance lock of {data_dir} is {lock or 'unread'}:\n"
+            f"the environment in {plan.args.env_file} does not name the directory the hub\n"
+            f"serves. Pass --env-file with the file the unit loads.\n{_UNTOUCHED}"
+        )
+
+
+def _within(path: str, directory: str) -> bool:
+    """Report whether one resolved box path is at or beneath another.
+
+    Args:
+        path: A resolved absolute path on the box.
+        directory: A resolved absolute directory on the box.
+
+    Returns:
+        True when ``path`` is ``directory`` or lies inside it.
+    """
+    return PurePosixPath(path).is_relative_to(PurePosixPath(directory))
+
+
+def _rule_on_backup(
+    plan: Plan, marker: str, version_output: str, ssh: Callable[[str], list[str]]
+) -> BackupTarget | None:
+    """Decide what this deploy backs up before it installs, or that nothing can be.
+
+    Args:
+        plan: The plan.
+        marker: The box's marker, as :func:`marker_body` cut it out of the read.
+        version_output: The version read's standard output, banner and all.
+        ssh: Wraps a remote command line as the local argv that runs it.
+
+    Returns:
+        The backup to take, or ``None`` on a first deploy — no build in the venv
+        and no marker — which has served no data directory.
+
+    Raises:
+        DeployError: If a backup is owed and cannot be taken.
+    """
+    if venv_is_empty(version_output):
+        if marker:
+            raise DeployError(
+                f"the venv {plan.args.venv} holds no build, but the marker shows this box has\n"
+                "been deployed to, so a hub has served a data directory here and there is no\n"
+                "earlier build to back it up with before installing (ADR-0326 §6). Back the\n"
+                "directory up by hand, or reinstall the earlier build, and deploy again; if\n"
+                f"no hub has ever served a directory here, remove the marker.\n{_UNTOUCHED}"
+            )
+        print(
+            "backup: none — a first deploy, with no earlier build to have served", file=sys.stderr
+        )
+        return None
+    target = backup_target(plan, _probe(ssh(plan.probe_backup())))
+    print(
+        f"backup: the hub will be stopped and {target.data_dir} backed up to\n"
+        f"        {target.artifact} before anything installs",
+        file=sys.stderr,
+    )
+    return target
+
+
+def backup_report(output: str, token: str) -> tuple[int | None, str]:
+    """Cut the backup tool's own output and exit status out of the remote run.
+
+    Args:
+        output: The backup command's standard output, banner and all.
+        token: The per-run token the brackets carry, from :attr:`Plan.token`.
+
+    Returns:
+        The tool's exit status, or ``None`` when the closing bracket never came
+        (the command did not run to its end), and what the tool printed.
+    """
+    lines = output.splitlines()
+    try:
+        start = lines.index(f"{_BACKUP_BEGIN}{token}")
+    except ValueError:
+        return None, ""
+    closing = f"{_BACKUP_END}{token}="
+    for index in range(start + 1, len(lines)):
+        if lines[index].startswith(closing):
+            body = "\n".join(lines[start + 1 : index]).strip()
+            code = lines[index].removeprefix(closing).strip()
+            return (int(code) if code.isdigit() else None), body
+    return None, "\n".join(lines[start + 1 :]).strip()
+
+
+def _check_backup(plan: Plan, target: BackupTarget, probed: tuple[int, str, str]) -> None:
+    """Hold the backup to ADR-0326 §6:1: written, and verified.
+
+    Args:
+        plan: The plan.
+        target: The backup that was taken.
+        probed: The backup command's exit status, standard output and standard error.
+
+    Raises:
+        DeployError: If the tool did not report, failed, reported the artifact
+            written but unverified, or left no artifact where it said it wrote one.
+    """
+    status, out, error = probed
+    code, said = backup_report(out, plan.token)
+    shown = said or error.strip() or out.strip() or "(no output)"
+    if code is None:
+        raise DeployError(f"the backup did not run to its end (exit {status}):\n{shown}")
+    if code != 0:
+        raise DeployError(f"ai-assistant-backup failed (exit {code}):\n{shown}")
+    if _BACKUP_UNVERIFIED in said or _BACKUP_VERIFIED not in said:
+        raise DeployError(
+            f"the backup was written to {target.artifact} but is not verified, and an\n"
+            f"unverified backup does not admit an install (ADR-0326 §6:2):\n{shown}"
+        )
+    if _labelled(out, "BACKUP_ARTIFACT=") != "present":
+        raise DeployError(
+            f"the backup reported success, but {target.artifact} is absent or empty:\n{shown}"
+        )
+
+
+def _take_backup(plan: Plan, target: BackupTarget, ssh: Callable[[str], list[str]]) -> None:
+    """Stop the hub, back its directory up, and start it again if that failed.
+
+    Args:
+        plan: The plan.
+        target: The backup to take.
+        ssh: Wraps a remote command line as the local argv that runs it.
+
+    Raises:
+        DeployError: If the hub could not be stopped or the backup is not written
+            and verified. Nothing has been installed by then, and the hub has been
+            started again on its earlier build, which the message reports.
+    """
+    try:
+        _run_local(ssh(plan.stop()))
+        _check_backup(plan, target, _probe(ssh(plan.back_up())))
+    except DeployError as exc:
+        raise DeployError(
+            f"{exc}\nNothing was installed. {_restart_earlier_build(plan, ssh)}"
+        ) from exc
+    print(f"backup: {target.artifact} written and verified", file=sys.stderr)
+
+
+def _restart_earlier_build(plan: Plan, ssh: Callable[[str], list[str]]) -> str:
+    """Start the hub again on the build it was running, and say how that went.
+
+    Never raises: it runs on the way out of a failure, and the failure is the
+    thing the operator must see.
+
+    Args:
+        plan: The plan.
+        ssh: Wraps a remote command line as the local argv that runs it.
+
+    Returns:
+        A sentence for the operator.
+    """
+    try:
+        invocation = invocation_id(_run_local(ssh(plan.restart())))
+        _assert_active(plan)
+        _wait_for_ready(plan, invocation)
+    except DeployError as exc:
+        return f"The hub could NOT be started again on its earlier build:\n{exc}"
+    return "The hub was started again on its earlier build, and logged hub_ready."
+
+
 def _deploy(plan: Plan, repo: Path, commit: str) -> None:
     """Run the deploy and verify it.
 
@@ -1476,6 +1996,9 @@ def _deploy(plan: Plan, repo: Path, commit: str) -> None:
         print("dependencies: uv.lock unchanged since the deployed commit; kept", file=sys.stderr)
     else:
         print(f"dependencies: installing the locked set from uv.lock — {reason}", file=sys.stderr)
+    # Ruled before anything is built, staged or stopped: a box that cannot take
+    # the backup refuses the deploy while the hub is still serving.
+    backup = _rule_on_backup(plan, before_marker, version_output, ssh)
 
     with tempfile.TemporaryDirectory(prefix="deploy-hub-") as scratch:
         if plan.locked:
@@ -1501,7 +2024,7 @@ def _deploy(plan: Plan, repo: Path, commit: str) -> None:
             built = Path(scratch) / "wheel"
             built.mkdir()
             plan.use(build_wheel(repo, built))
-        _install_and_verify(plan, commit, before_marker, before_version)
+        _install_and_verify(plan, commit, before_marker, before_version, backup=backup)
 
 
 def build_wheel(repo: Path, out: Path) -> Path:
@@ -1525,17 +2048,32 @@ def build_wheel(repo: Path, out: Path) -> Path:
     return wheels[0]
 
 
-def _install_and_verify(plan: Plan, commit: str, before_marker: str, before_version: str) -> None:
-    """Stage, install, restart and verify, then print before and after.
+def _install_and_verify(
+    plan: Plan,
+    commit: str,
+    before_marker: str,
+    before_version: str,
+    *,
+    backup: BackupTarget | None,
+) -> None:
+    """Stage, back up, install, restart and verify, then print before and after.
+
+    The wheel is staged and digested while the hub still serves, so the window in
+    which it is stopped holds only the backup, the install and the restart.
 
     Args:
         plan: The plan, carrying the wheel to deploy.
         commit: The commit being deployed.
         before_marker: The marker as it stood before this deploy.
         before_version: The installed version before this deploy.
+        backup: The backup to take before the install, or ``None`` on a first
+            deploy (:func:`_rule_on_backup`). Required rather than defaulted, so
+            no caller skips it by leaving it out.
 
     Raises:
-        DeployError: If any step fails, or verification does not pass.
+        DeployError: If any step fails, or verification does not pass. Once the
+            hub has been stopped for the backup, a failure before the restart
+            leaves it stopped, and the message says so.
     """
     args = plan.args
 
@@ -1556,18 +2094,34 @@ def _install_and_verify(plan: Plan, commit: str, before_marker: str, before_vers
     # happy path means the failures — the runs that get retried — are exactly the
     # ones that accumulate. `finally` rather than a second call in an `except`,
     # so the error the operator needs to see is still the one that propagates.
+    stopped = False
     try:
-        _run_local(plan.stage())
-        if plan.locked:
-            _run_local(plan.stage_requirements())
-        _run_local(ssh(plan.make_readable()))
-        _assert_staged(plan, digest, requirements_digest)
-        if plan.locked:
-            _run_local(ssh(plan.unmark(commit)))
-        _run_local(ssh(plan.install()))
-    finally:
-        _discard_stage(plan)
-    _run_local(ssh(plan.write_marker(commit, digest)))
+        try:
+            _run_local(plan.stage())
+            if plan.locked:
+                _run_local(plan.stage_requirements())
+            _run_local(ssh(plan.make_readable()))
+            _assert_staged(plan, digest, requirements_digest)
+            if backup is not None:
+                # ADR-0326 §6:1. On a failure this has already started the hub
+                # again, and nothing below it has run.
+                _take_backup(plan, backup, ssh)
+                stopped = True
+            if plan.locked:
+                _run_local(ssh(plan.unmark(commit)))
+            _run_local(ssh(plan.install()))
+        finally:
+            _discard_stage(plan)
+        _run_local(ssh(plan.write_marker(commit, digest)))
+    except DeployError as exc:
+        if not stopped or backup is None:
+            raise
+        raise DeployError(
+            f"{exc}\nThe hub was stopped for the backup and is still stopped: the venv may\n"
+            f"hold part of this install, and starting that could upgrade the data\n"
+            f"directory with nothing verified. The backup is {backup.artifact}.\n"
+            "Fix the cause and deploy again."
+        ) from exc
 
     invocation = invocation_id(_run_local(ssh(plan.restart())))
     _assert_active(plan)
@@ -1583,6 +2137,10 @@ def _install_and_verify(plan: Plan, commit: str, before_marker: str, before_vers
     print((after_marker or "(no marker)\n").rstrip("\n"))
     deps = "the locked set from uv.lock" if plan.locked else "kept, uv.lock unchanged"
     print(f"dependencies: {deps}")
+    if backup is None:
+        print("backup: none — a first deploy, with no earlier build to have served")
+    else:
+        print(f"backup: {backup.artifact} (of {backup.data_dir}; verified, and kept)")
     print(f"unit {args.unit} is active and logged hub_ready; wheel sha256 {digest[:12]}")
 
 
@@ -1624,7 +2182,12 @@ def _parser() -> argparse.ArgumentParser:
         The parser.
     """
     parser = argparse.ArgumentParser(
-        description="Build, install, restart and verify the hub on a remote box (issue #1389)."
+        description=(
+            "Build, back up, install, restart and verify the hub on a remote box"
+            " (issue #1389, ADR-0326 §6)."
+        ),
+        epilog=_OPERATOR_SETUP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("host", help="the box's hostname or address")
     parser.add_argument(
@@ -1642,6 +2205,27 @@ def _parser() -> argparse.ArgumentParser:
         "--stage-dir",
         default=DEFAULT_STAGE_DIR,
         help="where this deploy's staging directory is created",
+    )
+    parser.add_argument(
+        "--env-file",
+        default=DEFAULT_ENV_FILE,
+        help=(
+            "the environment file the unit loads, sourced so the backup copies the"
+            " directory the hub serves (default: ~/hub.env; /dev/null for none)"
+        ),
+    )
+    parser.add_argument(
+        "--backup-dir",
+        default=DEFAULT_BACKUP_DIR,
+        help="where the pre-install backup is written, outside the data directory",
+    )
+    parser.add_argument(
+        "--backup-passphrase-file",
+        default=DEFAULT_BACKUP_PASSPHRASE_FILE,
+        help=(
+            "the file on the box ai-assistant-backup reads its passphrase from; the"
+            " operator creates it once (see below), and this script never reads it"
+        ),
     )
     parser.add_argument(
         "--wheel", help="deploy this already-built wheel instead of running uv build"
