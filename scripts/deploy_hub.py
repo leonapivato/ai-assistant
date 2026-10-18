@@ -213,6 +213,10 @@ _LOCK_FILENAME = "hub.lock"
 #: what tells them apart; a test holds both to the tool's source.
 _BACKUP_VERIFIED = "verified by restoring it into a scratch directory and checking every file."
 _BACKUP_UNVERIFIED = "the artifact is written but unverified"
+#: What the tool says, before it writes anything, about the directory it copies
+#: (ADR-0123 §11). Held to the directory the preflight named, so a backup can
+#: only admit the install for the directory the deploy checked.
+_BACKUP_DISCLOSES = "about to write a complete encrypted copy of "
 #: What the backup command prints around the tool's own output, as the marker read
 #: does and for the same reason: the login shell's banner is not the tool's word.
 _BACKUP_BEGIN = "BACKUP_BEGIN_"
@@ -1793,6 +1797,11 @@ directory, and readable by the service user alone."""
 
 #: How every refusal before the stop ends, so an operator knows the box is as it was.
 _UNTOUCHED = "Nothing has been stopped or installed."
+#: The ``systemctl is-active`` answers that mean a process is serving, and those
+#: that mean none is. Every other answer is a state in transition or a query that
+#: failed, and the preflight refuses it.
+_UNIT_RUNNING = frozenset({"active", "reloading", "refreshing"})
+_UNIT_STOPPED = frozenset({"inactive", "failed"})
 
 
 def backup_target(plan: Plan, probed: tuple[int, str, str]) -> BackupTarget:
@@ -1924,8 +1933,10 @@ def _rule_on_the_served_directory(
     which is the failure a mismatched ``--env-file`` produces. While the unit is
     active its process holds the instance lock of the directory it serves, so
     any answer but *held* there says the environment named is not the hub's —
-    or that the check could not run, which is refused the same way. A stopped
-    hub cannot be asked, and is backed up as named.
+    or that the check could not run, which is refused the same way. A hub
+    confirmed stopped cannot be asked, and is backed up as named. Any other
+    state — none at all, because the query failed, or one in transition — is
+    neither, and is refused: it would otherwise skip the check.
 
     Args:
         plan: The plan.
@@ -1934,15 +1945,22 @@ def _rule_on_the_served_directory(
         data_dir: The data directory the environment names.
 
     Raises:
-        DeployError: If the hub is running and that directory's lock is not held.
+        DeployError: If the hub is running and that directory's lock is not
+            held, or the unit's state is neither running nor stopped.
     """
-    if hub != "active":
+    if hub in _UNIT_STOPPED:
         print(
-            f"backup: the unit is {hub or 'in no state'}, so nothing confirms {data_dir}\n"
+            f"backup: the unit is {hub}, so nothing confirms {data_dir}\n"
             "        is the directory it serves; backing up the one its environment names",
             file=sys.stderr,
         )
         return
+    if hub not in _UNIT_RUNNING:
+        raise DeployError(
+            f"the unit {plan.args.unit} is {hub or 'in no state the box reported'}, neither\n"
+            "running nor stopped, so nothing can show which directory it serves.\n"
+            f"Deploy again once it has settled.\n{_UNTOUCHED}"
+        )
     lock = report.get("lock")
     if lock != "held":
         raise DeployError(
@@ -2054,6 +2072,11 @@ def _check_backup(plan: Plan, target: BackupTarget, probed: tuple[int, str, str]
             f"the backup was written to {target.artifact} but is not verified, and an\n"
             f"unverified backup does not admit an install (ADR-0326 §6:2):\n{shown}"
         )
+    if f"{_BACKUP_DISCLOSES}{target.data_dir}" not in said.splitlines():
+        raise DeployError(
+            f"the backup did not copy {target.data_dir}, the directory the preflight\n"
+            f"checked, so it does not admit an install:\n{shown}"
+        )
     if _labelled(out, "BACKUP_ARTIFACT=") != "present":
         raise DeployError(
             f"the backup reported success, but {target.artifact} is absent or empty:\n{shown}"
@@ -2079,6 +2102,16 @@ def _take_backup(plan: Plan, target: BackupTarget, ssh: Callable[[str], list[str
     except DeployError as exc:
         raise DeployError(
             f"{exc}\nNothing was installed. {_restart_earlier_build(plan, ssh)}"
+        ) from exc
+    except KeyboardInterrupt as exc:
+        # Nothing has been installed, so the earlier build is started again here
+        # as on any other failure. A backup the interrupt left running on the box
+        # still holds the instance lock, and the hub cannot take the directory
+        # until it lets go: the lock, not this script, keeps the two apart.
+        raise DeployError(
+            f"interrupted while the hub was stopped for its backup. Nothing was\n"
+            f"installed, and this deploy verified no artifact at {target.artifact}.\n"
+            f"{_restart_earlier_build(plan, ssh)}"
         ) from exc
     print(f"backup: {target.artifact} written and verified", file=sys.stderr)
 
@@ -2247,11 +2280,12 @@ def _install_and_verify(
         finally:
             _discard_stage(plan)
         _run_local(ssh(plan.write_marker(commit, digest)))
-    except DeployError as exc:
+    except (DeployError, KeyboardInterrupt) as exc:
         if not stopped or backup is None:
             raise
+        reason = "interrupted" if isinstance(exc, KeyboardInterrupt) else str(exc)
         raise DeployError(
-            f"{exc}\nThe hub was stopped for the backup and is still stopped: the venv may\n"
+            f"{reason}\nThe hub was stopped for the backup and is still stopped: the venv may\n"
             f"hold part of this install, and starting that could upgrade the data\n"
             f"directory with nothing verified. The backup is {backup.artifact}.\n"
             "Fix the cause and deploy again."
