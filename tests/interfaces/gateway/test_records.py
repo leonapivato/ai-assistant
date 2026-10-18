@@ -243,6 +243,13 @@ def test_the_four_request_classes_and_seven_conditions_are_the_whole_enumeration
     refusal on any other ground, §8's size bound included"; so is ADR-0174 §3's
     unobtainable identity, which "reaches no clause of ADR-0168 §3, §4, §5 or §6 at
     all" and so has no condition to be recorded under.
+
+    ADR-0327 §7:7 adds seven, one per check its §6 makes of the edge's assertion — "no
+    assertion, a malformed one, its signature, its issuer, its audience, its subject,
+    or its times" — and §7:6 one more that is answered and never recorded, the single
+    refusal a browser on the hosted listener is told of all three of its door's
+    checks. Still four classes: the edge's exchange is "in the bootstrap exchange's
+    class. They gain no fifth" (§7:10).
     """
     assert {member.value for member in RequestClass} == {
         "asset",
@@ -258,7 +265,36 @@ def test_the_four_request_classes_and_seven_conditions_are_the_whole_enumeration
         "session-ceiling",
         "bootstrap-exchange-failed",
         "device-not-listed",
+        "assertion-absent",
+        "assertion-malformed",
+        "assertion-signature",
+        "assertion-issuer",
+        "assertion-audience",
+        "assertion-subject",
+        "assertion-times",
+        "door-refused",
     }
+
+
+def test_a_mint_that_ended_the_oldest_session_says_so_in_its_outcome(
+    clock: Clock, timers: Timers
+) -> None:
+    """ADR-0327 §8:7: "The mint record of an exchange that ended a session says so in
+    its outcome. That outcome is a value of the outcome fact ADR-0168 §6:11 already
+    enumerates, and no new kind of fact is added."
+    """
+    recorder = _recorder(clock, timers)
+
+    with structlog.testing.capture_logs() as records:
+        recorder.session_minted(ended_oldest=True)
+        recorder.session_minted()
+
+    assert [record["outcome"] for record in records] == [
+        "session-minted-ending-oldest",
+        "session-minted",
+    ]
+    for record in records:
+        assert set(record) <= _PERMITTED, record
 
 
 def test_a_record_names_a_class_and_an_outcome_always(clock: Clock, timers: Timers) -> None:

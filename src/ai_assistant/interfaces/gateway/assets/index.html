@@ -10,6 +10,12 @@
     -->
     <title>Aether</title>
     <link rel="stylesheet" href="/app.css" />
+    <!--
+      Which door served this page (ADR-0327 §11), written onto this element before the
+      body exists. The hosted listener serves a different file at this path, and that
+      one file is the whole difference between what the doors serve.
+    -->
+    <script src="/door.js"></script>
   </head>
   <body>
     <!--
@@ -117,6 +123,19 @@
           />
           <button type="submit">Start</button>
         </form>
+      </section>
+
+      <!--
+        The hosted page's stand-in for the panel above (ADR-0327 §11): through the
+        sign-in door there is no bootstrap entry, and the page mints its session by an
+        exchange with nothing typed (§11:1). This says what that exchange is doing, or
+        why it stopped, and offers the one act that is the owner's after a failure —
+        trying again, which reloads the page (§11:3). Shown on the hosted door alone.
+      -->
+      <section id="hosted" class="panel" hidden>
+        <h2>Your session</h2>
+        <p class="hint" id="hosted-state"></p>
+        <button type="button" id="hosted-again" hidden>Try again</button>
       </section>
 
       <!--
@@ -471,7 +490,7 @@
         the browser. So the page says a value is minted at the machine the gateway
         runs on and stops there; the first-run guide states the act itself (§10).
       -->
-      <div class="session-conditions">
+      <div class="session-conditions" id="session-terms">
         <p class="hint">
           Every session ends when the gateway process does. A session is held in that
           process's memory and written down nowhere, so a gateway that starts again
@@ -487,6 +506,22 @@
           Closing the browser may end it and may not — that depends on a setting of
           your browser's that the gateway cannot see. Either way the way back is a
           fresh bootstrap value, minted at the machine the gateway runs on.
+        </p>
+      </div>
+
+      <!--
+        The hosted page's one condition in place of the three above (ADR-0327 §11:7):
+        "The hosted page states, without requiring an interaction to reveal it, that it
+        stays signed in for as long as the person's sign-in lasts, and that signing in
+        again happens at the sign-in page." Shown on the hosted door, at load, by the
+        script that reads which door this is, and the three above hidden there: their
+        remedy is a bootstrap value, which that door does not take.
+      -->
+      <div class="session-conditions" id="hosted-terms" hidden>
+        <p class="hint">
+          This page stays signed in for as long as your sign-in lasts. When your sign-in
+          ends, you sign in again at the sign-in page, and nothing else here asks you
+          for anything.
         </p>
       </div>
     </main>

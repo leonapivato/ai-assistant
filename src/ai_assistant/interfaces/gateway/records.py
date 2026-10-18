@@ -81,7 +81,8 @@ class RequestClass(StrEnum):
     """The front end's own static assets (ADR-0168 §10)."""
 
     BOOTSTRAP = "bootstrap-exchange"
-    """The single bootstrap exchange of ADR-0168 §5."""
+    """The single bootstrap exchange of ADR-0168 §5 — and on the hosted listener the
+    exchange that takes its place, in this class and not a fifth (ADR-0327 §7:10)."""
 
     ASSISTANT = "assistant-request"
     """A request that asks the assistant for something."""
@@ -134,6 +135,41 @@ class RefusalCondition(StrEnum):
     a session exists), and it is told only to a device the gateway's own agent has
     already attested. Unreachable on the loopback listener."""
 
+    # --- ADR-0327 §7:7: a refusal on any of §6's conditions, on the hosted listener ---
+    # Recorded and never answered: §7:6 refuses a request failing the assertion, its
+    # `Host` or its `Origin` "with one refusal, the same whichever of those checks it
+    # failed", which is :attr:`DOOR_REFUSED`. "The condition names which check failed:
+    # no assertion, a malformed one, its signature, its issuer, its audience, its
+    # subject, or its times." The values are :class:`.edge.AssertionFault`'s.
+
+    ASSERTION_ABSENT = "assertion-absent"
+    """ADR-0327 §6:1 — no ``Edge-Assertion`` header, or more than one."""
+
+    ASSERTION_MALFORMED = "assertion-malformed"
+    """ADR-0327 §6:1 — not a compact JWS whose two halves are JSON objects."""
+
+    ASSERTION_SIGNATURE = "assertion-signature"
+    """ADR-0327 §6:2, §6:3 — no configured key verifies it as Ed25519."""
+
+    ASSERTION_ISSUER = "assertion-issuer"
+    """ADR-0327 §6:6 — its ``iss`` is not ``gateway_edge_issuer``."""
+
+    ASSERTION_AUDIENCE = "assertion-audience"
+    """ADR-0327 §6:7 — its ``aud`` is not the one string ``gateway_edge_audience``."""
+
+    ASSERTION_SUBJECT = "assertion-subject"
+    """ADR-0327 §6:8 — its ``sub`` is not ``gateway_edge_subject``."""
+
+    ASSERTION_TIMES = "assertion-times"
+    """ADR-0327 §6:10 — its ``iat``, ``exp`` or ``nbf`` puts it outside its life."""
+
+    DOOR_REFUSED = "door-refused"
+    """ADR-0327 §7:6 — what a browser is **told** of a refusal on the hosted
+    listener's assertion, `Host` or `Origin`: one refusal for all three, carrying
+    nothing about which check failed. Answered and never recorded; the record names
+    the check (§7:7), as ADR-0182 §4's ceiling is recorded as itself and answered as
+    a failed exchange."""
+
 
 class AdmissionRecorder:
     """Emits the two admission decisions, and retains only the interval's counters."""
@@ -161,22 +197,29 @@ class AdmissionRecorder:
         self._opened_at: datetime | None = None
         self._timer: Cancellable | None = None
 
-    def session_minted(self, *, device: str | None = None) -> None:
-        """Record that a session was minted (ADR-0168 §6, ADR-0174 §3).
+    def session_minted(self, *, device: str | None = None, ended_oldest: bool = False) -> None:
+        """Record that a session was minted (ADR-0168 §6, ADR-0174 §3, ADR-0327 §8:7).
 
         Not rate-bounded, and §6 says why it needs no bound: "§5 permits one mint
-        per process life".
+        per process life". On the hosted listener ADR-0327 §15 keeps that clause on
+        its own ground: only a request the edge signed for the owner can drive a
+        mint, and the page bounds how often it makes one (§11:2, §11:3).
 
         Args:
             device: The attested overlay identity of the device the exchange arrived
-                from, on the remote browser listener; ``None`` on the loopback one,
-                where there is no such fact and the record carries no such field.
+                from, on the remote browser listener; ``None`` on the loopback and
+                hosted ones, where there is no such fact and the record carries no
+                such field.
+            ended_oldest: Whether a hosted exchange ended its listener's oldest
+                session to make room (ADR-0327 §8:6). "The mint record of an exchange
+                that ended a session says so in its outcome", as a value of the
+                outcome fact ADR-0168 §6:11 already enumerates (§8:7).
         """
         _log.info(
             _EVENT,
             instant=self._now().isoformat(),
             request_class=RequestClass.BOOTSTRAP.value,
-            outcome="session-minted",
+            outcome="session-minted-ending-oldest" if ended_oldest else "session-minted",
             **_device(device),
         )
 

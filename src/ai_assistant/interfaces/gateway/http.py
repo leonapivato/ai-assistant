@@ -68,6 +68,17 @@ _TOKEN = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567
 _DIGITS = frozenset("0123456789")
 
 
+#: The ``Cache-Control`` every response carries on the loopback and remote browser
+#: listeners.
+NO_STORE: Final = "no-store"
+
+#: The ``Cache-Control`` every response carries on the hosted listener: "the
+#: standard's own request against caching and transformation", made to the edge and
+#: to the browser (ADR-0327 §4:9). A request and not the guarantee — the edge caching
+#: nothing and altering no body is (§4:7, §4:8).
+NO_STORE_NO_TRANSFORM: Final = "no-store, no-transform"
+
+
 class RequestError(Exception):
     """A browser request this door will not interpret.
 
@@ -462,7 +473,7 @@ def _content_length(headers: tuple[tuple[str, str], ...]) -> int:
         raise MalformedRequestError from exc
 
 
-def render(response: Response, *, policy: str) -> bytes:
+def render(response: Response, *, policy: str, cache: str = NO_STORE) -> bytes:
     """Serialise a response, with the content security policy ADR-0168 §6 requires.
 
     "The gateway serves every response with a content security policy that permits
@@ -473,12 +484,14 @@ def render(response: Response, *, policy: str) -> bytes:
     Args:
         response: What to send.
         policy: The content security policy value.
+        cache: The ``Cache-Control`` value — :data:`NO_STORE` on every listener but
+            the hosted one, which serves :data:`NO_STORE_NO_TRANSFORM` (ADR-0327 §4:9).
 
     Returns:
         The bytes to write.
     """
     lines = [
-        *_status_and_common(response.status, response.reason, response.content_type, policy),
+        *_status_and_common(response.status, response.reason, response.content_type, policy, cache),
         f"Content-Length: {len(response.body)}",
         f"Connection: {'close' if response.close else 'keep-alive'}",
     ]
@@ -487,7 +500,7 @@ def render(response: Response, *, policy: str) -> bytes:
     return _head(lines) + response.body
 
 
-def render_stream_head(head: StreamHead, *, policy: str) -> bytes:
+def render_stream_head(head: StreamHead, *, policy: str, cache: str = NO_STORE) -> bytes:
     """Serialise the head of a streamed response (ADR-0175 §1).
 
     The same policy and the same sniffing and caching headers every other response
@@ -504,13 +517,14 @@ def render_stream_head(head: StreamHead, *, policy: str) -> bytes:
         head: What is being streamed, its own headers, and whether the connection
             survives it.
         policy: The content security policy value.
+        cache: The ``Cache-Control`` value, as :func:`render` takes it.
 
     Returns:
         The bytes to write before the first chunk.
     """
     return _head(
         [
-            *_status_and_common(head.status, head.reason, head.content_type, policy),
+            *_status_and_common(head.status, head.reason, head.content_type, policy, cache),
             *(f"{name}: {value}" for name, value in head.headers),
             "Transfer-Encoding: chunked",
             f"Connection: {'close' if head.close else 'keep-alive'}",
@@ -547,14 +561,16 @@ def render_stream_end() -> bytes:
     return b"0\r\n\r\n"
 
 
-def _status_and_common(status: int, reason: str, content_type: str, policy: str) -> list[str]:
+def _status_and_common(
+    status: int, reason: str, content_type: str, policy: str, cache: str
+) -> list[str]:
     """The status line and the headers every response carries, streamed or not."""
     return [
         f"{_HTTP_VERSION} {status} {reason}",
         f"Content-Type: {content_type}",
         f"Content-Security-Policy: {policy}",
         "X-Content-Type-Options: nosniff",
-        "Cache-Control: no-store",
+        f"Cache-Control: {cache}",
     ]
 
 
