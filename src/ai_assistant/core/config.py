@@ -7,6 +7,7 @@ configuration knob is discoverable, typed, and validated in one place.
 
 from __future__ import annotations
 
+import base64
 import ipaddress
 import logging
 import os
@@ -32,7 +33,7 @@ from pydantic import (
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from ai_assistant.core.errors import ConfigurationError
-from ai_assistant.core.types import Reversibility, RiskLevel, describe_untrusted
+from ai_assistant.core.types import HUB_DEVICE_ID, Reversibility, RiskLevel, describe_untrusted
 
 #: The string an operator sets a setting to in the environment to select its
 #: ``None`` value — "disable this entirely". Environment variables arrive as
@@ -841,6 +842,235 @@ def _refuse_a_non_overlay_address(
             )
             raise ValueError(msg)
     return text
+
+
+#: The private-use ranges ADR-0327 §5:3 admits for a hosted address besides loopback:
+#: IPv4's three RFC 1918 blocks and IPv6's unique-local block (RFC 4193). Written out
+#: rather than read off ``ipaddress``'s ``is_private``, which answers yes for a dozen
+#: further reserved blocks — documentation ranges, benchmarking, ``0.0.0.0/8`` — none
+#: of which §5:3 names.
+_PRIVATE_USE_NETWORKS: Final = tuple(
+    ipaddress.ip_network(block)
+    for block in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+)
+
+#: The shared address space overlays use (RFC 6598), which §5:3 refuses by name: an
+#: overlay member could reach a listener bound there.
+_SHARED_ADDRESS_SPACE: Final = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _refuse_a_hosted_address_beyond_the_box(value: str | None) -> str | None:
+    """Refuse at load what ADR-0327 §5:3 forbids the hosted listener to bind.
+
+    > ``gateway_hosted_address`` is refused at settings load unless it is a literal
+    > loopback address or a literal private-use address (IPv4 RFC 1918, IPv6
+    > unique-local). A wildcard, a multicast address, a link-local address, an
+    > address in the shared space ``100.64.0.0/10`` that overlays use, and any
+    > globally reachable address are refused.
+
+    **The rule is about what may reach the listener, and the string decides only its
+    first half** (§5:2, §5:4). A loopback address is reached from the box alone. A
+    private-use address is admitted for a gateway in a network namespace of its own —
+    a container whose hosted port is published to the host's loopback and to nothing
+    else — and making that publication true is the setup's, which #3142 holds. So
+    this refuses every address no setup could make box-only, and the listener binds
+    what is left.
+
+    **A zone index is refused**, because §5:3 admits a literal address and an
+    address carrying ``%eth0`` names an interface as well; only a link-local address
+    needs one, and those are refused anyway.
+
+    Args:
+        value: The configured address, or ``None`` when the listener is off.
+
+    Returns:
+        The address, stripped of surrounding space, or ``None``.
+
+    Raises:
+        ValueError: If the value is not a literal IP address, or is one §5:3 refuses.
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError as exc:
+        msg = (
+            f"gateway_hosted_address={value!r} is not an IP address. The hosted listener "
+            f"binds a literal loopback or private-use address (ADR-0327 §5:3), never a "
+            f"name; use 127.0.0.1 on a gateway that shares the box's network, or the "
+            f"container's own private address where its port is published to the "
+            f"host's loopback alone"
+        )
+        raise ValueError(msg) from exc
+    if isinstance(address, ipaddress.IPv6Address) and address.scope_id is not None:
+        msg = (
+            f"gateway_hosted_address={value!r} carries a zone index, which names an "
+            f"interface as well as an address (ADR-0327 §5:3). Write the address alone"
+        )
+        raise ValueError(msg)
+    forbidden = (
+        (address.is_unspecified, "a wildcard address, which would bind every interface"),
+        (address.is_multicast, "a multicast address, which no listener may hold"),
+        (address.is_link_local, "a link-local address, which the local network reaches"),
+        (
+            address in _SHARED_ADDRESS_SPACE,
+            "in the shared space 100.64.0.0/10 that overlays use, which an overlay reaches",
+        ),
+    )
+    for holds, reason in forbidden:
+        if holds:
+            msg = (
+                f"gateway_hosted_address={value!r} is {reason} (ADR-0327 §5:3). The "
+                f"hosted listener is reached from the box's own loopback and from "
+                f"nothing else"
+            )
+            raise ValueError(msg)
+    if address.is_loopback or any(address in block for block in _PRIVATE_USE_NETWORKS):
+        return text
+    msg = (
+        f"gateway_hosted_address={value!r} is neither a loopback nor a private-use address "
+        f"(ADR-0327 §5:3), so something beyond the box could reach it. Use 127.0.0.1, or "
+        f"a container's own RFC 1918 or unique-local address"
+    )
+    raise ValueError(msg)
+
+
+#: One label of a DNS name as a browser writes it in a `Host`: lower case, letters,
+#: digits and inner hyphens, at most 63 characters (RFC 1035 §2.3.1, RFC 1123 §2.1).
+_HOST_LABEL: Final = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
+#: The longest DNS name, in characters, written without its trailing dot.
+_HOST_NAME_MAX: Final = 253
+
+
+def _refuse_a_door_name_no_browser_sends(value: str | None) -> str | None:
+    """Refuse a ``gateway_hosted_host_name`` no `Host` header could ever equal.
+
+    ADR-0327 §7:2 compares the `Host` against this name literally and §7:3 builds the
+    admitted `Origin` as ``https://`` followed by it, and §4:6 puts the door on port
+    443, which a browser leaves out of both. So the name is the door's public
+    hostname exactly as a browser writes it: a DNS name, in lower case, with no
+    scheme, no port, no path and no trailing dot. Anything else is a configuration
+    under which every request is refused, and an operator learns that here rather
+    than from a page that never loads.
+
+    An IP literal is refused as well: the door is a hostname whose DNS the operator
+    holds (ADR-0327 §2:2), and nothing here resolves it.
+
+    Args:
+        value: The configured name, or ``None`` when the listener is off.
+
+    Returns:
+        The name, stripped of surrounding space, or ``None``.
+
+    Raises:
+        ValueError: If the value is not such a name.
+    """
+    if value is None:
+        return None
+    name = value.strip()
+    labels = name.split(".")
+    shaped = (
+        0 < len(name) <= _HOST_NAME_MAX
+        and len(labels) > 1
+        and all(_HOST_LABEL.fullmatch(label) for label in labels)
+        and not labels[-1].isdigit()
+    )
+    if not shaped:
+        msg = (
+            f"gateway_hosted_host_name={value!r} is not the door's public hostname as a "
+            f"browser writes it (ADR-0327 §7:2, §7:3): a DNS name in lower case, with no "
+            f"scheme, no port, no path and no trailing dot, such as door.example.com"
+        )
+        raise ValueError(msg)
+    return name
+
+
+#: The characters ADR-0298 §1:3 bars from ``acting_for``: the two the codec escapes
+#: and the C0 controls.
+_ACTING_FOR_ESCAPED: Final = re.compile(r'["\\\x00-\x1f]')
+
+
+def _refuse_a_hosted_device_the_hub_could_not_accept(value: str | None) -> str | None:
+    """Refuse at load what ADR-0327 §10:3 lets ``Settings`` decide about the device.
+
+    > ``gateway_hosted_device`` is held to ADR-0298 §1:3's invariant, checked as
+    > ADR-0174 §8:7 splits the check for an overlay identity. It is never ``hub`` and
+    > never the hub's own overlay identity.
+
+    **The split is golden rule 2's, as it is for ``gateway_remote_browser_devices``.**
+    What needs no import is refused here: a blank value, one with no UTF-8 form, one
+    carrying a character the codec escapes, and ``hub``. The byte bound is the wire
+    seam's constant, so the gateway refuses an over-long name at start, reading it
+    there. The hub's own overlay identity is a fact of the hub's, which refuses it
+    as a naming (ADR-0298 §3:3, §6:2); the setup lists the hub's devices before it
+    chooses the name (§10:4).
+
+    Args:
+        value: The configured device id, or ``None`` when the listener is off.
+
+    Returns:
+        The id, stripped of surrounding space, or ``None``.
+
+    Raises:
+        ValueError: If the id is one the hub could never accept as a naming.
+    """
+    if value is None:
+        return None
+    name = value.strip()
+    if not name:
+        msg = (
+            "gateway_hosted_device is blank, so the hosted owner's browsers would have no "
+            "device to act as (ADR-0327 §10:3, ADR-0298 §1:3); name one no other device "
+            "of the hub holds"
+        )
+        raise ValueError(msg)
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        msg = "gateway_hosted_device has no UTF-8 form, so no frame could name it (ADR-0298 §1:3)"
+        raise ValueError(msg) from exc
+    if _ACTING_FOR_ESCAPED.search(name):
+        msg = (
+            "gateway_hosted_device carries a quote, a backslash or a control character, "
+            "which ADR-0298 §1:3 bars from a device a gateway names"
+        )
+        raise ValueError(msg)
+    if name == HUB_DEVICE_ID:
+        msg = (
+            f"gateway_hosted_device is {HUB_DEVICE_ID!r}, the hub's own machine, which no "
+            f"gateway may name (ADR-0327 §10:3, ADR-0298 §3:3); name the hosted owner's "
+            f"browsers something no other device of the hub holds"
+        )
+        raise ValueError(msg)
+    return name
+
+
+#: How many bytes an Ed25519 public key is (RFC 8032 §5.1.5).
+_ED25519_PUBLIC_KEY_BYTES: Final = 32
+
+#: One unpadded base64url value, the form RFC 8037 §2 gives an OKP key's ``x``.
+_BASE64URL: Final = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _decoded_edge_key(text: str) -> bytes | None:
+    """The 32 bytes one configured edge key encodes, or ``None`` where it encodes none.
+
+    Args:
+        text: One element of ``gateway_edge_public_keys``.
+
+    Returns:
+        The raw public key, or ``None`` if the text is not unpadded base64url of
+        exactly 32 bytes.
+    """
+    if not _BASE64URL.fullmatch(text):
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    except ValueError:
+        return None
+    return raw if len(raw) == _ED25519_PUBLIC_KEY_BYTES else None
 
 
 class EmbedderKind(StrEnum):
@@ -2343,6 +2573,297 @@ class Settings(BaseSettings):
                 raise ValueError(msg) from exc
             listed.append(identity)
         return tuple(listed)
+
+    # --- The gateway's hosted listener and the edge in front of it (ADR-0327) ----
+    # **The address is the switch**, nullable for the reason ADR-0174 §8:12 gives of
+    # ``gateway_remote_address`` (§5:1): a boundary that is off unless configured on
+    # needs a value meaning off. **No new budget**: §5:8 makes every figure ADR-0174
+    # §8:1 names a total across all the gateway's listeners, the hosted one included.
+    #
+    # **The edge's settings name the edge**, the sign-in service in front of the door
+    # (§2:1), and each is something the operator writes at setup: its public keys
+    # (§6:4), what its assertions say they are from and for (§6:6 to §6:8), and the one
+    # account this hub's door admits (§13:1). A public key is Tier 2 configuration and
+    # the edge's private key never reaches a gateway (§6:4). The gateway fetches none
+    # of it (§3:4).
+    gateway_hosted_address: str | None = Field(
+        default=None,
+        description=(
+            "The address the gateway's hosted listener binds, which the sign-in edge "
+            "forwards to, or unset for no hosted listener (ADR-0327 §5). A literal "
+            "loopback address — 127.0.0.1 on a gateway that shares the box's network — "
+            "or, for a gateway in a container whose hosted port is published to the "
+            "host's loopback alone, the container's own private-use address."
+        ),
+    )
+    gateway_hosted_port: _IntegerSetting = Field(
+        default=8423,
+        ge=_LOWEST_UNPRIVILEGED_PORT,
+        le=_HIGHEST_PORT,
+        description=(
+            "The TCP port the hosted listener binds (ADR-0327 §5:5). A valid "
+            "non-privileged port other than gateway_port while the listener is on."
+        ),
+    )
+    gateway_hosted_host_name: str | None = Field(
+        default=None,
+        description=(
+            "The door's public hostname, as a browser writes it in a Host header: a "
+            "lower-case DNS name with no scheme, port or path (ADR-0327 §7:2, §7:3). "
+            "The hosted listener admits that Host and the https:// origin of that name "
+            "alone. Set exactly when gateway_hosted_address is."
+        ),
+    )
+    gateway_hosted_device: str | None = Field(
+        default=None,
+        description=(
+            "The device id the hosted owner's browsers act as at the hub, named in "
+            "acting_for on every request the hosted listener relays (ADR-0327 §10). "
+            "Held by no other device the hub knows, and never 'hub'. Set exactly when "
+            "gateway_hosted_address is."
+        ),
+    )
+    gateway_edge_public_keys: _ConfiguredList = Field(
+        default=(),
+        description=(
+            "The sign-in edge's Ed25519 public keys, comma-separated, each the raw "
+            "32-byte key in unpadded base64url (RFC 8037's x) (ADR-0327 §6:3, §6:4). "
+            "An assertion verifies when one of them verifies it. Rotation is adding the "
+            "new key, restarting, and removing the old one later (§6:5). Non-empty "
+            "exactly when gateway_hosted_address is set."
+        ),
+    )
+    gateway_edge_issuer: str | None = Field(
+        default=None,
+        description=(
+            "The iss an edge assertion must carry, compared literally (ADR-0327 §6:6). "
+            "Set exactly when gateway_hosted_address is."
+        ),
+    )
+    gateway_edge_audience: str | None = Field(
+        default=None,
+        description=(
+            "The aud an edge assertion must carry, as one string compared literally, "
+            "naming this hub (ADR-0327 §6:7). Set exactly when gateway_hosted_address is."
+        ),
+    )
+    gateway_edge_subject: str | None = Field(
+        default=None,
+        description=(
+            "The edge's opaque, stable id for the hosted owner's account, which an "
+            "assertion's sub must equal literally (ADR-0327 §6:8, §6:9, §13:1). One "
+            "account, never a list, and never an email address. Set exactly when "
+            "gateway_hosted_address is."
+        ),
+    )
+    gateway_edge_assertion_max_age: _DurationSetting = Field(
+        default=timedelta(seconds=60),
+        gt=timedelta(0),
+        le=timedelta(minutes=5),
+        description=(
+            "The longest an edge assertion may live from iat to exp (ADR-0327 §6:10, "
+            "§6:11). Strictly positive and at most five minutes."
+        ),
+    )
+
+    @field_validator("gateway_hosted_address")
+    @classmethod
+    def _the_hosted_listener_binds_where_only_the_box_reaches_it(
+        cls, value: str | None
+    ) -> str | None:
+        """ADR-0327 §5:3, decided from the string alone.
+
+        :func:`_refuse_a_hosted_address_beyond_the_box` holds the conditions.
+
+        Args:
+            value: The configured address, or ``None`` when the listener is off.
+
+        Returns:
+            The address, stripped of surrounding space, or ``None``.
+        """
+        return _refuse_a_hosted_address_beyond_the_box(value)
+
+    @field_validator("gateway_hosted_host_name")
+    @classmethod
+    def _the_door_name_is_one_a_browser_sends(cls, value: str | None) -> str | None:
+        """ADR-0327 §7:2: :func:`_refuse_a_door_name_no_browser_sends`.
+
+        Args:
+            value: The configured name, or ``None`` when the listener is off.
+
+        Returns:
+            The name, stripped of surrounding space, or ``None``.
+        """
+        return _refuse_a_door_name_no_browser_sends(value)
+
+    @field_validator("gateway_hosted_device")
+    @classmethod
+    def _the_hosted_device_is_one_the_hub_could_accept(cls, value: str | None) -> str | None:
+        """ADR-0327 §10:3: :func:`_refuse_a_hosted_device_the_hub_could_not_accept`.
+
+        Args:
+            value: The configured device id, or ``None`` when the listener is off.
+
+        Returns:
+            The id, stripped of surrounding space, or ``None``.
+        """
+        return _refuse_a_hosted_device_the_hub_could_not_accept(value)
+
+    @field_validator("gateway_edge_public_keys")
+    @classmethod
+    def _every_edge_key_is_an_ed25519_public_key(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Refuse an element that is not one Ed25519 public key (ADR-0327 §6:2, §6:4).
+
+        The form is RFC 8037's for an OKP key's ``x``: the raw 32 bytes, unpadded
+        base64url — one line, so the set is written as one comma-separated variable.
+        The gateway decodes each into a key at start; what is decidable from the text
+        alone is refused here. A key that is the wrong length could never verify an
+        Ed25519 signature, so the door it configures would refuse every request with
+        nothing saying why.
+
+        Args:
+            value: The configured keys.
+
+        Returns:
+            The keys, each stripped of surrounding space.
+
+        Raises:
+            ValueError: If an element does not encode exactly one 32-byte key.
+        """
+        keys: list[str] = []
+        for position, element in enumerate(value):
+            text = element.strip()
+            if _decoded_edge_key(text) is None:
+                msg = (
+                    f"gateway_edge_public_keys[{position}] is not an Ed25519 public key in "
+                    f"the form this setting takes — the raw 32 bytes in unpadded "
+                    f"base64url, RFC 8037's x (ADR-0327 §6:2, §6:4). Copy the edge's "
+                    f"public key in that form"
+                )
+                raise ValueError(msg)
+            keys.append(text)
+        return tuple(keys)
+
+    @field_validator("gateway_edge_issuer", "gateway_edge_audience", "gateway_edge_subject")
+    @classmethod
+    def _each_claim_the_edge_must_carry_is_written(
+        cls, value: str | None, info: ValidationInfo
+    ) -> str | None:
+        """Refuse a blank claim, and a subject that is a contact detail (ADR-0327 §6).
+
+        Each is compared literally against what an assertion carries (§6:6 to §6:8), so
+        a blank one could never be equalled by a claim the edge signs. The subject is
+        held to §6:9 as far as the text decides it: an address with an ``@`` in it is
+        the one contact detail an operator is likely to paste where the edge's opaque
+        account id belongs, and a door keyed on an email is keyed on something its
+        owner can change. The values are not echoed: the subject identifies a
+        person's account, and §7:8 keeps it out of every record.
+
+        Args:
+            value: The configured value, or ``None`` when the listener is off.
+            info: The field being validated, for the name in the refusal.
+
+        Returns:
+            The value, stripped of surrounding space, or ``None``.
+
+        Raises:
+            ValueError: If the value is blank, or the subject carries an ``@``.
+        """
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            msg = (
+                f"{info.field_name} is blank, so no assertion the edge signs could carry "
+                f"it (ADR-0327 §6); write the value the edge puts in its assertions"
+            )
+            raise ValueError(msg)
+        if info.field_name == "gateway_edge_subject" and "@" in text:
+            msg = (
+                "gateway_edge_subject looks like an email address. It is the edge's "
+                "opaque, stable id for the hosted owner's account, not a contact detail "
+                "(ADR-0327 §6:9); copy the account id the edge shows for that person"
+            )
+            raise ValueError(msg)
+        return text
+
+    @model_validator(mode="after")
+    def _the_hosted_listener_is_configured_whole_or_not_at_all(self) -> Settings:
+        """Refuse a hosted listener configured in part (ADR-0327 §5:5, §6:12, §6:13).
+
+        > A configuration with the hosted listener on is refused at settings load
+        > while any of ``gateway_edge_issuer``, ``gateway_edge_audience``,
+        > ``gateway_edge_subject``, ``gateway_hosted_host_name`` and
+        > ``gateway_hosted_device`` is unset, or while ``gateway_edge_public_keys`` is
+        > empty.
+
+        > A configuration with the hosted listener off is refused at settings load
+        > while any of those five is set, or while ``gateway_edge_public_keys`` is
+        > non-empty.
+
+        **The port and the age are neutral facts**, so neither is named in either
+        list and neither is refused while the listener is off: a port number going
+        unread costs nobody anything (ADR-0174 §8:6's distinction). The port is
+        refused only where it would collide (§5:5): the loopback listener and a
+        loopback hosted listener share an address.
+
+        **One check beyond §6's**, from §10:4's own reason: the hosted device's name
+        may not also be listed in ``gateway_remote_browser_devices``, because one name
+        is one device at the hub, and the hosted owner's browsers would take on that
+        device's roles. Decidable here, so it is refused here rather than left to the
+        setup's care alone.
+
+        Returns:
+            ``self``, once the listener is configured whole or not at all.
+
+        Raises:
+            ValueError: On any of those configurations.
+        """
+        written = {
+            "gateway_edge_issuer": self.gateway_edge_issuer,
+            "gateway_edge_audience": self.gateway_edge_audience,
+            "gateway_edge_subject": self.gateway_edge_subject,
+            "gateway_hosted_host_name": self.gateway_hosted_host_name,
+            "gateway_hosted_device": self.gateway_hosted_device,
+        }
+        if self.gateway_hosted_address is None:
+            stranded = [name for name, one in written.items() if one is not None]
+            if self.gateway_edge_public_keys:
+                stranded.append("gateway_edge_public_keys")
+            if stranded:
+                msg = (
+                    f"{', '.join(stranded)} set while gateway_hosted_address is unset, so "
+                    f"the hosted listener they configure is off and nothing would read "
+                    f"them (ADR-0327 §6:13). Set gateway_hosted_address, or unset them"
+                )
+                raise ValueError(msg)
+            return self
+        missing = [name for name, one in written.items() if one is None]
+        if not self.gateway_edge_public_keys:
+            missing.append("gateway_edge_public_keys")
+        if missing:
+            msg = (
+                f"gateway_hosted_address is set, so the hosted listener is on, and "
+                f"{', '.join(missing)} unset: the gateway could verify no assertion the "
+                f"edge signs or admit no request through the door (ADR-0327 §6:12). Set "
+                f"them, or unset gateway_hosted_address"
+            )
+            raise ValueError(msg)
+        if self.gateway_hosted_port == self.gateway_port:
+            msg = (
+                f"gateway_hosted_port={self.gateway_hosted_port} equals gateway_port, and "
+                f"the loopback listener and a loopback hosted listener share an address, "
+                f"so one figure cannot serve both (ADR-0327 §5:5); choose another port"
+            )
+            raise ValueError(msg)
+        if self.gateway_hosted_device in self.gateway_remote_browser_devices:
+            msg = (
+                "gateway_hosted_device is also listed in gateway_remote_browser_devices. "
+                "One name is one device at the hub, so the hosted owner's browsers would "
+                "take on that device's roles (ADR-0327 §10:4); give them a name of their own"
+            )
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _the_gateway_bounds_can_bind(self) -> Settings:

@@ -822,6 +822,9 @@ def test_every_integer_setting_is_discovered() -> None:
         "gateway_max_request_bytes",
         "gateway_max_browser_connections",
         "gateway_max_pending_connections",
+        # ADR-0327 §5:5's hosted port, acknowledged for ``gateway_port``'s reason one
+        # listener over: ``gateway_hosted_port=True`` would bind port 1.
+        "gateway_hosted_port",
         # ADR-0093 §7a's four counting caps. Acknowledged here for the reason the
         # transport figures are: each is refused at load outside its range, and
         # joining this tuple is what subjects it to the guards below. The ``bool``
@@ -1099,6 +1102,17 @@ _DURATION_FIELDS: Final = tuple(
     if _admitted_types(field.annotation) == frozenset({timedelta})
 )
 
+#: The durations an ADR caps below the hour the form cases below are written at.
+#: ADR-0327 §6:11 refuses an assertion lifetime above five minutes, so an hour is a
+#: refusal of the ceiling rather than a test of the form; that field's forms are
+#: pinned at a minute beside its other cases, in ``test_gateway_settings.py``.
+_CAPPED_BELOW_AN_HOUR: Final = frozenset({"gateway_edge_assertion_max_age"})
+
+#: Every duration the hour-scale form cases can be written against.
+_HOUR_SCALE_DURATIONS: Final = tuple(
+    name for name in _DURATION_FIELDS if name not in _CAPPED_BELOW_AN_HOUR
+)
+
 #: Values that are neither a real number nor a duration but that pydantic's lax
 #: mode coerces into a plausible one anyway. ``numpy.bool_`` is the case the
 #: allowlist exists for: a flag that is not a ``bool`` subclass — so a denylist
@@ -1269,6 +1283,10 @@ def test_every_duration_setting_is_discovered() -> None:
         "telegram_poll_wait",
         "telegram_poll_bound",
         "telegram_send_bound",
+        # ADR-0327 §6:11's assertion lifetime: strictly positive and at most five
+        # minutes, so it is in :data:`_HOUR_SCALE_DURATIONS`' exceptions and its forms
+        # are pinned at a minute in ``tests/core/test_gateway_settings.py``.
+        "gateway_edge_assertion_max_age",
     }
 
 
@@ -1353,7 +1371,7 @@ def test_every_real_setting_still_accepts_the_forms_it_is_written_in(
     assert getattr(_settings_with(name, value), name) == expected
 
 
-@pytest.mark.parametrize("name", _DURATION_FIELDS)
+@pytest.mark.parametrize("name", _HOUR_SCALE_DURATIONS)
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -1416,7 +1434,7 @@ def test_every_optional_real_setting_still_parses_from_the_environment(
     assert getattr(load_settings(), name) == 2.5
 
 
-@pytest.mark.parametrize("name", _DURATION_FIELDS)
+@pytest.mark.parametrize("name", _HOUR_SCALE_DURATIONS)
 def test_every_duration_setting_still_parses_from_the_environment(
     monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
