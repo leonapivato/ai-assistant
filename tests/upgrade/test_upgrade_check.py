@@ -145,23 +145,53 @@ def test_a_record_read_back_otherwise_fails_the_check(
     ]
 
 
+def _vectors(directory: Path) -> sqlite3.Connection:
+    """A connection to the memory store's file that can read and write its vectors."""
+    import sqlite_vec  # noqa: PLC0415  # only the cases that edit the index need it
+
+    conn = sqlite3.connect(directory / "memory.db")
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    return conn
+
+
 def test_a_memory_store_that_loses_its_vectors_fails_the_check(
     written: tuple[Path, Path], tmp_path: Path
 ) -> None:
     """Every row kept and the vector index lost: ``search`` finds nothing, and the check says so."""
-    import sqlite_vec  # noqa: PLC0415  # only this case edits the index
-
     directory, snapshot = _copy(written, tmp_path)
-    conn = sqlite3.connect(directory / "memory.db")
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
+    conn = _vectors(directory)
     with conn:
         conn.execute("DELETE FROM vec_records")
     conn.close()
     problems = read(directory, snapshot)
-    assert problems
-    assert all(p.startswith("memory found/") for p in problems), problems
-    assert all(p.endswith("the base read true, the head reads false") for p in problems)
+    assert len(problems) == 4, problems
+    assert all(p.startswith("memory nearest/") for p in problems), problems
+    assert all(p.endswith(", the head reads []") for p in problems), problems
+
+
+def test_a_memory_store_whose_vectors_moved_fails_the_check(
+    written: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Two records' vectors exchanged: each is still found, and neither is its own nearest."""
+    directory, snapshot = _copy(written, tmp_path)
+    conn = _vectors(directory)
+    rows = dict(conn.execute("SELECT id, rowid FROM records").fetchall())
+    one, other = rows["mem-semantic"], rows["mem-preference"]
+    vectors = dict(conn.execute("SELECT rowid, embedding FROM vec_records").fetchall())
+    with conn:
+        conn.execute("DELETE FROM vec_records WHERE rowid IN (?, ?)", (one, other))
+        conn.execute(
+            "INSERT INTO vec_records(rowid, embedding) VALUES (?, ?), (?, ?)",
+            (one, vectors[other], other, vectors[one]),
+        )
+    conn.close()
+    assert sorted(read(directory, snapshot)) == [
+        'memory nearest/mem-preference: [0]: the base read "mem-preference", '
+        'the head reads "mem-semantic"',
+        'memory nearest/mem-semantic: [0]: the base read "mem-semantic", '
+        'the head reads "mem-preference"',
+    ]
 
 
 def test_a_record_the_head_loses_fails_the_check(
