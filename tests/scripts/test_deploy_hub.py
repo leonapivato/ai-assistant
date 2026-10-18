@@ -1132,6 +1132,8 @@ def _assert_every_install_is_no_deps(text: str) -> None:
 
 
 _DATA_DIR = "/home/assistant/data-m44"
+#: What the tool says first about the directory it copies.
+_DISCLOSED = f"{_MODULE._BACKUP_DISCLOSES}{_DATA_DIR}"
 
 
 def _healthy_probe(**overrides: object) -> str:
@@ -1173,7 +1175,7 @@ class _FakeBox:
         #: What the backup preflight answers: a healthy box by default.
         self.backup_probe = _healthy_probe()
         #: What the backup tool prints and the status it exits with.
-        self.backup_said = f"wrote the artifact\n{_MODULE._BACKUP_VERIFIED}"
+        self.backup_said = f"{_DISCLOSED}\nwrote the artifact\n{_MODULE._BACKUP_VERIFIED}"
         self.backup_status = 0
         self.issued: list[str] = []
         #: The cwd each `uv export` ran in.
@@ -1732,6 +1734,7 @@ def test_the_tools_words_and_lock_name_are_the_ones_the_script_reads() -> None:
     source = (_SOURCE / "backup.py").read_text(encoding="utf-8")
 
     assert f'"{_MODULE._BACKUP_VERIFIED}"' in source
+    assert f'print(f"{_MODULE._BACKUP_DISCLOSES}{{data_dir}}")' in source
     assert _MODULE._BACKUP_UNVERIFIED in source
     assert f'LOCK_FILENAME: Final = "{_MODULE._LOCK_FILENAME}"' in (_SOURCE / "lock.py").read_text(
         encoding="utf-8"
@@ -1840,15 +1843,35 @@ def test_an_unanswered_preflight_is_not_reported_as_a_box_fact(tmp_path: Path, o
         _MODULE.backup_target(_plan(_repo(tmp_path)), (255, out, "ssh: connect: refused"))
 
 
+@pytest.mark.parametrize("state", ["inactive", "failed"])
 def test_a_stopped_hub_is_backed_up_as_named_and_said_so(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], state: str
 ) -> None:
-    probe = _healthy_probe(HUB_STATE="inactive", lock="free")
+    probe = _healthy_probe(HUB_STATE=state, lock="free")
 
     target = _MODULE.backup_target(_plan(_repo(tmp_path)), (0, probe, ""))
 
     assert target.data_dir == _DATA_DIR
-    assert "the unit is inactive" in capsys.readouterr().err
+    assert f"the unit is {state}" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("state", ["", "activating", "deactivating", "maintenance", "unknown"])
+def test_a_unit_neither_running_nor_stopped_is_refused(tmp_path: Path, state: str) -> None:
+    # A failed query prints no state at all, and a unit in transition may be
+    # serving another directory; either would otherwise skip the lock check
+    # and back up a directory named by the wrong environment.
+    probe = _healthy_probe(HUB_STATE=state, lock="free")
+
+    with pytest.raises(_MODULE.DeployError, match="neither\nrunning nor stopped"):
+        _MODULE.backup_target(_plan(_repo(tmp_path)), (0, probe, ""))
+
+
+def test_a_reloading_hub_is_running_and_must_hold_the_lock(tmp_path: Path) -> None:
+    plan = _plan(_repo(tmp_path))
+
+    assert _MODULE.backup_target(plan, (0, _healthy_probe(HUB_STATE="reloading"), ""))
+    with pytest.raises(_MODULE.DeployError, match="is free"):
+        _MODULE.backup_target(plan, (0, _healthy_probe(HUB_STATE="reloading", lock="free"), ""))
 
 
 def test_a_first_deploy_takes_no_backup(tmp_path: Path) -> None:
@@ -1963,7 +1986,7 @@ def _target(plan: Any) -> Any:
 
 def test_a_verified_backup_admits_the_install(tmp_path: Path) -> None:
     plan = _plan(_repo(tmp_path))
-    said = f"wrote {plan.backup_artifact} (9 bytes)\n{_MODULE._BACKUP_VERIFIED}"
+    said = f"{_DISCLOSED}\nwrote {plan.backup_artifact} (9 bytes)\n{_MODULE._BACKUP_VERIFIED}"
 
     _MODULE._check_backup(plan, _target(plan), (0, _backup_out(plan, said), ""))
 
@@ -1980,7 +2003,14 @@ def test_a_verified_backup_admits_the_install(tmp_path: Path) -> None:
         ("wrote x (9 bytes)", 0, "present", "is not verified"),
         ("the backup was refused: a sidecar", 78, "absent", "failed (exit 78)"),
         ("x is held by another instance", 1, "absent", "failed (exit 1)"),
-        (f"wrote x\n{_MODULE._BACKUP_VERIFIED}", 0, "absent", "is absent or empty"),
+        (f"{_DISCLOSED}\nwrote x\n{_MODULE._BACKUP_VERIFIED}", 0, "absent", "is absent or empty"),
+        # Verified, and of some other directory than the one the preflight checked.
+        (
+            f"{_MODULE._BACKUP_DISCLOSES}/home/assistant/.ai-assistant\n{_MODULE._BACKUP_VERIFIED}",
+            0,
+            "present",
+            "did not copy /home/assistant/data-m44",
+        ),
     ],
 )
 def test_a_backup_not_written_and_verified_admits_no_install(
@@ -2116,6 +2146,51 @@ def test_a_hub_that_will_not_stop_is_a_failed_backup(
         _MODULE._take_backup(plan, _target(plan), lambda remote: [remote])
 
     assert not any("BACKUP_BEGIN_" in command for command in issued)
+
+
+def test_an_interrupted_backup_starts_the_hub_again_and_installs_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path)
+    deployed = _code_only(repo)
+    box_probe = _FakeBox.probe
+
+    def _probe(self: _FakeBox, argv: list[str]) -> tuple[int, str, str]:
+        if "BACKUP_BEGIN_" in " ".join(argv):
+            self.issued.append(" ".join(argv))
+            raise KeyboardInterrupt
+        return box_probe(self, argv)
+
+    monkeypatch.setattr(_FakeBox, "probe", _probe)
+
+    with pytest.raises(_MODULE.DeployError) as failed:
+        _deploy_against(repo, monkeypatch, marker=f"commit={deployed}\n")
+    box = _FakeBox.last
+
+    message = str(failed.value)
+    assert "interrupted while the hub was stopped for its backup" in message
+    assert "started again on its earlier build, and logged hub_ready" in message
+    assert box.installs() == []
+    assert _index(box, "BACKUP_BEGIN_") < _index(box, "systemctl --user restart")
+    assert any("rmdir" in c for c in box.issued)
+
+
+def test_an_interrupted_install_after_the_backup_says_the_hub_is_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path)
+    deployed = _code_only(repo)
+    box_run = _FakeBox.run_local
+
+    def _run_local(self: _FakeBox, argv: list[str], **kwargs: Any) -> str:
+        if "pip install" in " ".join(argv):
+            raise KeyboardInterrupt
+        return box_run(self, argv, **kwargs)
+
+    monkeypatch.setattr(_FakeBox, "run_local", _run_local)
+
+    with pytest.raises(_MODULE.DeployError, match="interrupted\nThe hub was stopped"):
+        _deploy_against(repo, monkeypatch, marker=f"commit={deployed}\n")
 
 
 def test_a_refused_preflight_touches_nothing(
@@ -2347,7 +2422,7 @@ def test_the_real_backup_command_reports_what_the_tool_said(
         "#!/bin/sh\n"
         f'printf "%s\\n" "$@" "$ASSISTANT_DATA_DIR" > "{seen}"\n'
         f'if read -r line; then echo "stdin: $line"; else echo "stdin: none"; fi >> "{seen}"\n'
-        f'echo data > "$1"\n{script}\n'
+        f'echo "{_MODULE._BACKUP_DISCLOSES}$ASSISTANT_DATA_DIR"; echo data > "$1"\n{script}\n'
     )
     tool.chmod(0o755)
     plan = _plan(_repo(tmp_path))
@@ -2364,11 +2439,12 @@ def test_the_real_backup_command_reports_what_the_tool_said(
     # What an operator might have typed never reaches the tool: stdin is /dev/null.
     assert seen.read_text().splitlines()[-1] == "stdin: none"
     assert (home / "backups").stat().st_mode & 0o777 == 0o700
+    target = _MODULE.BackupTarget(data_dir=str(data), artifact=plan.backup_artifact)
     if verified:
-        _MODULE._check_backup(plan, _target(plan), probed)
+        _MODULE._check_backup(plan, target, probed)
     else:
         with pytest.raises(_MODULE.DeployError):
-            _MODULE._check_backup(plan, _target(plan), probed)
+            _MODULE._check_backup(plan, target, probed)
 
 
 @_NEEDS_SHELL
