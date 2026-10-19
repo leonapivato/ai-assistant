@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from memory_writer_contract import MemoryWriterContract, StubReconciler, WriterFactory
 
-from ai_assistant.core.errors import MemoryStoreError
+from ai_assistant.core.errors import MemoryStoreError, MemoryStoreStaleError
 from ai_assistant.core.types import (
     Attestation,
     BeliefBand,
@@ -126,6 +126,29 @@ async def test_every_proposal_is_recorded_as_handed_over() -> None:
     # A snapshot, not the caller's object: mutating the proposal afterwards
     # cannot reach what was recorded.
     assert writer.calls[0] is not proposal
+
+
+async def test_a_stale_retry_records_the_one_call_once() -> None:
+    """One public ``ingest`` is one entry, though its first write went stale and it retried."""
+    store = await _store()
+    writer = FakeMemoryWriter(store=store, policy=FakeMemoryPolicy(), now=_fixed_now)
+    attempts: list[int] = []
+    real_write = store.write_atomic
+
+    async def stale_once(writes: Any) -> Any:
+        attempts.append(1)
+        if len(attempts) == 1:
+            msg = "another writer moved it"
+            raise MemoryStoreStaleError(msg)
+        return await real_write(writes)
+
+    store.write_atomic = stale_once  # type: ignore[method-assign]
+
+    result = await writer.ingest(_proposal(_inferred("pref-1")))
+
+    assert len(attempts) == 2
+    assert result.record_id == "pref-1"
+    assert [call.proposed.id for call in writer.calls] == ["pref-1"]
 
 
 async def test_a_non_utc_clock_is_converted_not_merely_accepted() -> None:

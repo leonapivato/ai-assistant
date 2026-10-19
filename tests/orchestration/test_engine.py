@@ -52,6 +52,7 @@ from ai_assistant.core.types import (
     PlanningRound,
     Provenance,
     ProvisioningState,
+    ReportedExtent,
     Reversibility,
     RiskLevel,
     ToolCost,
@@ -1006,9 +1007,23 @@ def test_a_user_s_own_word_never_rests_on_outside_content_whatever_else_it_rests
 
 
 def test_a_source_support_carries_its_source_details_whole() -> None:
-    """ADR-0328 §15:2, ADR-0189 §2: the attestation as stored, on the support it is."""
-    belief = belief_view(_in_band("rec-1", BeliefBand.ATTESTED), now=AT, contents={})
-    assert belief.supports[0].source_details == _CALENDAR
+    """ADR-0328 §15:2, ADR-0189 §2: the attestation as stored, on the support it is.
+
+    Whole means its extent too, which nothing renders (ADR-0189 §2) but no projection
+    drops: a populated one survives, and is the same object the record holds.
+    """
+    extended = _CALENDAR.model_copy(
+        update={
+            "extent": ReportedExtent(
+                extends_from=AT - timedelta(days=7), extends_until=AT + timedelta(days=7)
+            )
+        }
+    )
+    record = _memory("rec-1", sourced_support(extended, episode="ep-1", when=AT, added_at=AT))
+    belief = belief_view(record, now=AT, contents={})
+    assert belief.supports[0].source_details == extended
+    assert belief.supports[0].source_details is record.supports[0].source_details
+    assert belief.attestation == extended
     said = belief_view(_in_band("rec-2", BeliefBand.ASSERTED), now=AT, contents={})
     assert said.supports[0].source_details is None
 
@@ -1575,6 +1590,29 @@ async def test_two_supports_in_one_episode_ask_for_it_once_and_each_shows_its_pa
         None,
     ]
     assert belief.supports_gone is False, "the episode resolves; one part of it is missing"
+
+
+async def test_a_held_episode_missing_the_only_part_is_not_all_gone_on_either_view() -> None:
+    """§15:7 keys the all-gone mark on the episode: the listing and the view agree.
+
+    The memory's one support names a round its held episode never recorded, so the part
+    is shown as gone while the episode resolves; neither view marks the memory as having
+    lost everything it rested on.
+    """
+    harness = Harness()
+    held = story_episode("a", text="they asked for metric units")
+    await harness.memory.add(held)
+    await harness.memory.add(
+        _memory("rec-1", message_support(held.id, round_id="r-never", when=AT, added_at=AT))
+    )
+
+    belief = await harness.engine.belief("rec-1")
+    (listed,) = [one for one in await harness.engine.beliefs() if one.id == "rec-1"]
+
+    assert belief is not None
+    assert belief.supports[0].content is None
+    assert belief.supports_gone is False
+    assert listed.supports_gone is False
 
 
 async def test_every_support_of_a_memory_is_judged_at_one_instant() -> None:

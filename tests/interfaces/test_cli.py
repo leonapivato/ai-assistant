@@ -1109,6 +1109,32 @@ def test_each_sources_report_time_is_shown_as_its_own_clock(output: StringIO) ->
     ) in rendered
 
 
+def test_a_sourced_memory_on_the_listing_names_its_source_and_its_clock(
+    output: StringIO,
+) -> None:
+    """ADR-0189 §1, §4 on the listing: which source its standing rests on, and when."""
+    cli._render_belief_summary(_summary(BeliefBand.ATTESTED, attestation=ATTESTED_BY))
+    rendered = _flat(output.getvalue())
+    assert (
+        f"Reported by: work-calendar, as of {cli._when(REPORTED_AT)} on its own clock" in rendered
+    )
+
+
+def test_an_inference_says_when_its_latest_piece_is_from(output: StringIO) -> None:
+    """§7:2's latest `when` is said, so a newer piece against it is not lost (§15:4)."""
+    later = LEARNED + timedelta(days=30)
+    held = memory(
+        "rec-1",
+        "the user runs on Tuesdays",
+        remembered_support(when=LEARNED, added_at=LEARNED),
+        said_support("activation:no", direction=SupportDirection.AGAINST, when=later),
+    )
+    cli._render_belief(_view(held))
+    rendered = _flat(output.getvalue())
+    assert f"The latest piece is from {cli._when(later)}." in rendered
+    assert f"As of: {cli._when(LEARNED)}" in rendered
+
+
 def test_an_attested_episode_names_its_source_and_its_clock(output: StringIO) -> None:
     """ADR-0189 §4 on an episode's projection: what reported it, and when, on its clock."""
     episode = EpisodicMemory(

@@ -5010,8 +5010,9 @@ def _belief_fields(belief: Belief | BeliefSummary) -> dict[str, Any]:
         "unbacked": belief.unbacked,
         "rests_on_outside_content": belief.rests_on_outside_content,
         "supports_gone": belief.supports_gone,
-        # An episode's provenance attestation (ADR-0189 §2:1); a memory's is null, its
-        # source details being on its supports (ADR-0328 §15:2).
+        # What reported it and when, on that source's clock (ADR-0189 §1): an episode's
+        # provenance attestation, or the source details a memory's standing rests on
+        # (ADR-0328 §2:6); null otherwise.
         "attestation": _attestation_view(belief.attestation),
     }
 

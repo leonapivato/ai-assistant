@@ -15,6 +15,7 @@ import asyncio
 import json
 import sqlite3
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -277,6 +278,42 @@ def test_a_base_shape_the_head_does_not_know_fails_the_check() -> None:
     ]
 
 
+def test_the_memory_carry_reads_a_users_assertion_as_its_upgrade_does() -> None:
+    """A user's assertion marked ``derived_from_external`` migrates as ``legacy`` (§16:4).
+
+    The core predicate's band guard (ADR-0106 §2) says a user's own assertion never
+    rests on external content, so the head's upgrade gives it the origin ``legacy``,
+    and the carry must say the same rather than reading the flag on its own.
+    """
+    from ai_assistant.memory._legacy import memory_from_legacy  # noqa: PLC0415
+
+    at = "2026-10-01T12:00:00Z"
+    record: dict[str, upgrade_stores.Json] = {
+        "id": "asserted-flagged",
+        "kind": "semantic",
+        "content": "The user's sister is called Ada.",
+        "provenance": {
+            "source": "user_asserted",
+            "confidence": 1.0,
+            "last_updated": at,
+            "derived_from_external": True,
+        },
+    }
+    (memory,) = [one for one in STORES if one.name == "memory"]
+
+    carried = memory.carries[1]({"record/asserted-flagged": record})["record/asserted-flagged"]
+    upgraded = memory_from_legacy(
+        record, occurred_at=lambda _: None, now=datetime(2026, 10, 2, tzinfo=UTC)
+    )
+
+    assert isinstance(carried, dict)
+    supports = carried["supports"]
+    assert isinstance(supports, list)
+    assert isinstance(supports[0], dict)
+    assert supports[0]["origin"] == "legacy"
+    assert upgraded.supports[0].origin.value == "legacy"
+
+
 def test_the_memory_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> None:
     """ADR-0328 §16:9: the carry from shape 1 says what the head's upgrade writes.
 
@@ -300,8 +337,13 @@ def test_the_memory_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> Non
             f"record/{record_id}": json.loads(data) | {"revision": revision}
             for record_id, data, revision in conn.execute("SELECT id, data, revision FROM records")
         }
+    # The day after the previous release wrote the file, before any retention deadline
+    # it holds passes: the carry keeps every row, so the store must read them all back.
     store = SqliteMemoryStore(
-        traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=8)
+        traces_sink=FakeTraceSink(),
+        path=path,
+        embedder=HashingEmbedder(dimensions=8),
+        now=lambda: datetime(2026, 10, 2, 12, tzinfo=UTC),
     )
     try:
         head: Records = {

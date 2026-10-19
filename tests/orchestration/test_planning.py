@@ -59,6 +59,7 @@ from ai_assistant.core.types import (
     StageOutcome,
     StoryMember,
     StoryMemberKind,
+    SupportDirection,
     ToolCost,
     ToolDefinition,
     TrackRecordEntry,
@@ -1369,7 +1370,12 @@ async def test_a_found_memory_record_is_shown_only_where_its_source_is_not_outsi
             "as_of": _AT.isoformat(),
             "learned": _AT.isoformat(),
             "fact": "Appointments are on Fridays.",
-            "evidence": {"supporting": 1, "against": 0, "episodes": 1},
+            "evidence": {
+                "supporting": 1,
+                "against": 0,
+                "episodes": 1,
+                "latest": _AT.isoformat(),
+            },
             "reading_certainty": "not judged",
         },
     ]
@@ -1405,6 +1411,27 @@ async def test_a_memory_label_carries_what_adr_0328_15_5_names() -> None:
     assert "track_record" not in shown_confirmed
     assert (shown_undated["as_of"], shown_undated["learned"]) == ("unknown", "unknown")
     assert shown_undated["track_record"] == {"relied_on": 1, "held_up": 0, "let_down": 1}
+
+
+async def test_an_inferences_label_carries_its_evidences_latest_date() -> None:
+    """§7:2's latest `when`, a newer piece against it included, beside as of (§15:5)."""
+    july = _AT - timedelta(days=60)
+    held = memory(
+        "m-runs",
+        "The user runs on Tuesdays.",
+        remembered_support(when=july, added_at=_AT),
+        said_support("activation:no", direction=SupportDirection.AGAINST, when=_AT),
+    )
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(recalled=(held,)))
+    (shown,) = _sent(completer)["recalled"]
+    assert shown["as_of"] == july.isoformat()
+    assert shown["evidence"] == {
+        "supporting": 1,
+        "against": 1,
+        "episodes": 2,
+        "latest": _AT.isoformat(),
+    }
 
 
 async def test_a_memory_resting_on_the_assistants_message_is_not_a_connected_sources() -> None:

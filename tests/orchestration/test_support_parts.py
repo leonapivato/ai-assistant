@@ -45,7 +45,7 @@ from ai_assistant.orchestration.support_parts import (
 from ai_assistant.testing.memories import confirmed_support, memory, remembered_support
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping
+    from collections.abc import Mapping
 
     from ai_assistant.core.types import SupportPart
 
@@ -90,11 +90,8 @@ def _content(
     *,
     effects: Mapping[str, ActivationEffect] | None = None,
     carried: Mapping[str, object] | None = None,
-    wordings: Collection[str] = (),
 ) -> str | None:
-    return part_content(
-        part, episodes=episodes, effects=effects or {}, carried=carried, wordings=wordings
-    )
+    return part_content(part, episodes=episodes, effects=effects or {}, carried=carried)
 
 
 def test_each_part_of_one_episode_reads_as_itself() -> None:
@@ -213,23 +210,41 @@ def test_a_remember_call_reads_as_the_statement_of_the_call_its_effect_claims() 
     assert _content(part, episodes, effects=elsewhere) is None
 
 
-def test_two_remember_calls_in_one_round_are_told_apart_by_the_wording() -> None:
-    """§13:2: the memory is worded as its call's statement, so the wording picks the call."""
+def test_two_remember_calls_one_effect_cannot_tell_apart_are_not_resolved() -> None:
+    """The effect record names the round, not the call: two statements leave it unresolved.
+
+    Never resolved by a memory's wording, which a reinforcement keeps as the target's
+    (§11:6): "prefers tea" reinforcing "likes tea" would otherwise show the other call.
+    """
     record = _held(
         episode("a"),
         rounds=(
             _round(
                 "r-1",
-                calls=(_remember_call("c-1", "likes tea"), _remember_call("c-2", "hates coffee")),
+                calls=(_remember_call("c-1", "prefers tea"), _remember_call("c-2", "likes tea")),
             ),
         ),
     )
-    episodes = {record.id: record}
     part = RememberCallPart(episode=record.id, effect="effect-1")
     effects = {"effect-1": _effect("effect-1", "a", "r-1")}
 
-    assert _content(part, episodes, effects=effects, wordings={"hates coffee"}) == "hates coffee"
-    assert _content(part, episodes, effects=effects, wordings={"something else"}) is None
+    assert _content(part, {record.id: record}, effects=effects) is None
+
+
+def test_two_remember_calls_saying_the_same_statement_resolve_to_it() -> None:
+    record = _held(
+        episode("a"),
+        rounds=(
+            _round(
+                "r-1",
+                calls=(_remember_call("c-1", "likes tea"), _remember_call("c-2", "likes tea")),
+            ),
+        ),
+    )
+    part = RememberCallPart(episode=record.id, effect="effect-1")
+    effects = {"effect-1": _effect("effect-1", "a", "r-1")}
+
+    assert _content(part, {record.id: record}, effects=effects) == "likes tea"
 
 
 def test_a_legacy_part_reads_as_the_record_it_carries() -> None:

@@ -6484,7 +6484,12 @@ class Engine:
         if not isinstance(record, Memory):
             return episode_view(record)
         reading = await self._support_contents((record,))
-        return belief_view(record, now=self._clock(), contents=reading.contents)
+        return belief_view(
+            record,
+            now=self._clock(),
+            contents=reading.contents,
+            supports_gone=reading.all_gone(record),
+        )
 
     async def _support_contents(self, memories: Sequence[Memory]) -> _SupportReading:
         """Resolve each support's part to readable content at presentation (ADR-0328 §15:2).
@@ -6519,10 +6524,6 @@ class Engine:
             if activations
             else {}
         )
-        wordings: dict[SupportPart, set[str]] = {}
-        for memory in memories:
-            for support in memory.supports:
-                wordings.setdefault(support.points_at, set()).add(memory.content)
         contents: dict[SupportPart, str | None] = {}
         for memory in memories:
             for support in memory.supports:
@@ -6531,7 +6532,6 @@ class Engine:
                     episodes=episodes,
                     effects=effects,
                     carried=support.carries,
-                    wordings=wordings[support.points_at],
                 )
         return _SupportReading(contents=contents, held=frozenset(episodes))
 

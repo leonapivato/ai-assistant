@@ -4351,8 +4351,14 @@ function whyHeld(belief) {
   // A legacy support points at no exchange (ADR-0328 §16:4), so a count of none is left
   // unsaid rather than rendered as "across 0 exchange(s)", as the CLI does.
   const across = evidence.episodes > 0 ? ` across ${evidence.episodes} exchange(s)` : "";
+  // §7:2's latest `when`, which can be a newer piece against it than As of shows.
+  const latest =
+    evidence.latest === null
+      ? " None of it is dated."
+      : ` The latest piece is from ${evidence.latest}.`;
   return (
     `I worked it out from ${evidence.supporting} piece(s) of support${across}${against}.` +
+    latest +
     outsideWarrant(belief)
   );
 }
@@ -4367,6 +4373,14 @@ function beliefLines(belief) {
     `Learned: ${belief.learned === null ? "unknown" : belief.learned}`,
     `As of: ${belief.as_of === null ? "unknown" : belief.as_of}`,
   ];
+  if (belief.attestation !== null) {
+    // ADR-0189 §1, §4: which source its standing rests on, and when that source said so
+    // on its own clock (ADR-0328 §2:6), as the CLI says it.
+    lines.push(
+      `Reported by: ${belief.attestation.reported_by}, as of ` +
+        `${belief.attestation.reported_at} on its own clock`,
+    );
+  }
   if (belief.reading_certainty !== "sure") {
     const reading = belief.reading_certainty === null ? "not judged" : belief.reading_certainty;
     lines.push(`How sure the reading was: ${reading}`);

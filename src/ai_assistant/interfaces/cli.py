@@ -6565,7 +6565,15 @@ def _evidence_words(belief: Belief | BeliefSummary) -> str:
     # A legacy support points at no exchange (ADR-0328 §16:4), so a count of none is
     # left unsaid rather than rendered as "across 0 exchange(s)".
     across = f" across {evidence.episodes} exchange(s)" if evidence.episodes else ""
-    return f"I worked it out from {evidence.supporting} piece(s) of support{across}{against}."
+    # §7:2's latest `when`, which can be a newer piece against it than As of shows.
+    latest = (
+        " None of it is dated."
+        if evidence.latest is None
+        else f" The latest piece is from {_when(evidence.latest)}."
+    )
+    return (
+        f"I worked it out from {evidence.supporting} piece(s) of support{across}{against}.{latest}"
+    )
 
 
 def _outside_warrant(belief: Belief | BeliefSummary) -> str:
@@ -6746,6 +6754,20 @@ def _render_belief(belief: Belief) -> None:
     _render_supports(belief)
 
 
+def _render_reported_by(belief: Belief | BeliefSummary) -> None:
+    """What reported it and when that source said so, on its own clock (ADR-0189 §1, §4).
+
+    An episode's provenance attestation, or the source details a memory's standing rests
+    on (ADR-0328 §2:6's latest backing source support); nothing where there are none.
+    """
+    if belief.attestation is None:
+        return
+    _print(
+        f"  [dim]Reported by:[/] {_safe(belief.attestation.reported_by)}, as of "
+        f"{_when(belief.attestation.reported_at)} on its own clock"
+    )
+
+
 def _render_belief_fields(belief: Belief | BeliefSummary) -> None:
     """Render what ADR-0328 §15:4 requires a surface showing a memory to show.
 
@@ -6769,18 +6791,14 @@ def _render_belief_fields(belief: Belief | BeliefSummary) -> None:
         # An episode has no standing, supports or reading (ADR-0074 §6): when it
         # happened, its window and its id are what it carries.
         _print(f"  [dim]Happened:[/] {_when_or_unknown(belief.learned)}")
-        if belief.attestation is not None:
-            # ADR-0189 §4: what reported it, and when that source said so, on its clock.
-            _print(
-                f"  [dim]Reported by:[/] {_safe(belief.attestation.reported_by)}, as of "
-                f"{_when(belief.attestation.reported_at)} on its own clock"
-            )
+        _render_reported_by(belief)
         if belief.valid_until is not None:
             _print(f"  [dim]Kept until:[/] {_when(belief.valid_until)}")
         _print(f"  [dim]id:[/] {_safe(belief.id)}")
         return
     _print(f"  [dim]Learned:[/] {_when_or_unknown(belief.learned)}")
     _print(f"  [dim]As of:[/] {_when_or_unknown(belief.as_of)}")
+    _render_reported_by(belief)
     certainty = belief.reading_certainty
     if certainty is not ReadingCertainty.SURE:
         reading = "not judged" if certainty is None else certainty.value

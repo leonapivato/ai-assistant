@@ -3154,8 +3154,17 @@ class MemoryWriterContract:
             "another-question-same-conflicts",
         ],
     )
+    @pytest.mark.parametrize(
+        "proposed",
+        [_preference, _confirmed_memory],
+        ids=["inference", "confirmed-wording"],
+    )
     async def test_a_supersede_onto_an_assertion_raises_unless_a_confirmation_covers_it(
-        self, make_writer: WriterFactory, mangle: _Mangle, label: str
+        self,
+        make_writer: WriterFactory,
+        mangle: _Mangle,
+        label: str,
+        proposed: Callable[[str], Memory],
     ) -> None:
         """ADR-0028 §8's second clause, in six parts (ADR-0078 §5b).
 
@@ -3179,6 +3188,11 @@ class MemoryWriterContract:
 
         A suite asserting only the refusal certifies the gate as shut; one omitting
         either mismatch shape certifies a bearer token rather than a bound authority.
+
+        **Run on a proposal standing at "you confirmed this wording" too** (ADR-0328
+        §13:3), the shape a confirmed remember proposes: a confirmation *support* is no
+        authority to retire anything, so only the authority conditions above decide,
+        and a writer treating the confirmed standing itself as authorisation fails here.
         """
         store = FakeMemoryStore(now=_long_ago)
         await _cite(store)
@@ -3186,7 +3200,7 @@ class MemoryWriterContract:
         writer = make_writer(store, _SupersedeNamingPolicy("asserted"))
 
         with pytest.raises(MemoryStoreError, match="refusing to fold onto"):
-            await writer.ingest(mangle(_preference("new")))
+            await writer.ingest(mangle(proposed("new")))
 
         assert label
         retained = await _memories(store)

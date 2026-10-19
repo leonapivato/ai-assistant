@@ -15168,8 +15168,13 @@ class BeliefSummary(BaseModel):
     happened. Its band and its outside-content mark are its provenance's (§12), and so
     is ``attestation``: ADR-0189 §2:1 binds an episode's projection still (ADR-0328 §18
     supersedes it for a memory's alone), so an attested episode carries what reported
-    it and when. A memory's source details are on its supports (§15:2), and its
-    ``attestation`` here is always ``None``.
+    it and when.
+
+    On a memory, ``attestation`` is §2:6's value: the source details of its latest
+    counted source support backing it as worded, where its standing is from a source,
+    and ``None`` otherwise (:attr:`Memory.standing_attestation`), so a listing can say
+    which source reported it and when on that source's clock (ADR-0189 §1, §4). Every
+    support's details are on the single view (§15:2).
 
     Attributes:
         id: The record's id, opaque, and what ``forget`` names.
@@ -15190,7 +15195,7 @@ class BeliefSummary(BaseModel):
         rests_on_outside_content: Whether it rests on outside content (§7:6).
         supports_gone: Whether no support's episode resolves (§15:7).
         attestation: For an episode, its provenance's ``Attestation`` as stored
-            (ADR-0189 §2:1); ``None`` on a memory.
+            (ADR-0189 §2:1); for a memory, §2:6's source details its standing rests on.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -15222,8 +15227,12 @@ class BeliefSummary(BaseModel):
                 "carries neither (ADR-0328 §15:1, ADR-0074 §6)"
             )
             raise ValueError(msg)
-        if self.attestation is not None and not episodic:
-            msg = "a memory's source details are on its supports (ADR-0328 §15:2)"
+        if (
+            not episodic
+            and self.attestation is not None
+            and self.standing is not MemoryStanding.SOURCE
+        ):
+            msg = "a memory carries source details only where its standing is from a source"
             raise ValueError(msg)
         return self
 
@@ -15273,6 +15282,7 @@ def _summary_fields(memory: Memory, *, now: datetime, supports_gone: bool) -> di
         "unbacked": memory.is_unbacked,
         "rests_on_outside_content": memory.rests_on_outside_content,
         "supports_gone": supports_gone,
+        "attestation": memory.standing_attestation,
     }
 
 
@@ -15298,7 +15308,11 @@ def belief_summary(memory: Memory, *, now: datetime, supports_gone: bool) -> Bel
 
 
 def belief_view(
-    memory: Memory, *, now: datetime, contents: Mapping[SupportPart, str | None]
+    memory: Memory,
+    *,
+    now: datetime,
+    contents: Mapping[SupportPart, str | None],
+    supports_gone: bool | None = None,
 ) -> Belief:
     """Project ``memory`` onto the single-memory view (ADR-0328 §15:2).
 
@@ -15307,6 +15321,10 @@ def belief_view(
         now: The reader's instant, against which as of is judged (§7:3).
         contents: Each support's part resolved to readable content, or ``None`` where
             it is gone; a part absent from the mapping is shown as gone.
+        supports_gone: Whether no support's episode resolves (§15:7), as the caller
+            resolved it for the listing too, so the two views agree: a part missing
+            from an episode the store holds is gone, but its episode resolves. Where
+            ``None``, every support's part being gone stands in for it.
 
     Returns:
         The single-memory view, its supports in the order the memory carries them.
@@ -15327,7 +15345,7 @@ def belief_view(
         )
         for support in memory.supports
     )
-    gone = all(view.gone for view in supports)
+    gone = all(view.gone for view in supports) if supports_gone is None else supports_gone
     return Belief.model_validate(
         _summary_fields(memory, now=now, supports_gone=gone) | {"supports": supports}
     )

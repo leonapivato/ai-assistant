@@ -41,7 +41,7 @@ from ai_assistant.orchestration.remembering import STATEMENT_ARGUMENT
 from ai_assistant.orchestration.stories import episode_address
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterable, Mapping
+    from collections.abc import Iterable, Mapping
 
     from ai_assistant.core.types import ActivationEffect, EpisodeProcessingRecord
 
@@ -109,7 +109,6 @@ def part_content(  # noqa: PLR0911 — one arm per part §4's part table names
     episodes: Mapping[str, EpisodicMemory],
     effects: Mapping[str, ActivationEffect],
     carried: Mapping[str, object] | None,
-    wordings: Collection[str],
 ) -> str | None:
     """The readable content ``part`` points at, or ``None`` where it does not resolve.
 
@@ -118,8 +117,6 @@ def part_content(  # noqa: PLR0911 — one arm per part §4's part table names
         episodes: The episodes read for the page, by id.
         effects: The effect records read for the page's remember calls, by id.
         carried: A legacy support's carried record, as stored (§16:4).
-        wordings: The wordings of the memories carrying this part, which tell apart two
-            remember calls one round made under the capability one effect record names.
 
     Returns:
         The part's content, or ``None`` for gone.
@@ -147,7 +144,7 @@ def part_content(  # noqa: PLR0911 — one arm per part §4's part table names
                 return None
             if effect.activation_id != processing.activation_id or effect.round is None:
                 return None
-            return _remembered(_round(processing, effect.round), effect.capability, wordings)
+            return _remembered(_round(processing, effect.round), effect.capability)
         case _:  # pragma: no cover - exhaustive over the discriminated union
             assert_never(part)
 
@@ -209,16 +206,15 @@ def _approved(processing: EpisodeProcessingRecord | None, round_id: str, part: i
     return round_.text or None
 
 
-def _remembered(
-    round_: PlanningRound | None, capability: str | None, wordings: Collection[str]
-) -> str | None:
-    """The statement of the remember call one effect record claims, where one is told apart.
+def _remembered(round_: PlanningRound | None, capability: str | None) -> str | None:
+    """The statement of the remember call one effect record claims, where it is told apart.
 
     The effect record names its round and its capability, not the call (ADR-0306 §6), so
-    the round's calls to that capability are the candidates. One distinct statement among
-    them is the call's; among several, the one a memory carrying the part is worded as
-    (§13:2 makes the wording the statement). Where neither tells them apart, the part is
-    not resolved rather than resolved to another call's statement.
+    the round's calls to that capability are the candidates, and one distinct statement
+    among them is the call's. Where the round made two with different statements the
+    record does not say which it claims, and the part is left unresolved rather than
+    resolved to another call's statement: a memory's wording cannot tell them apart,
+    since a reinforcement keeps the target's wording (§11:6).
     """
     if round_ is None or capability is None:
         return None
@@ -229,7 +225,4 @@ def _remembered(
         and isinstance(statement := call.arguments.get(STATEMENT_ARGUMENT), str)
         and statement
     }
-    if len(statements) == 1:
-        return next(iter(statements))
-    matching = statements.intersection(wordings)
-    return next(iter(matching)) if len(matching) == 1 else None
+    return next(iter(statements)) if len(statements) == 1 else None
