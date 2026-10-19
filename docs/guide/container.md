@@ -307,8 +307,8 @@ this order:
 Once the new image has run, the deploy never starts the earlier one on that data, because
 an earlier build cannot open a directory a later one upgraded (§5:4). A new image that
 does not become healthy is left to its unit only where the reachability checks pass;
-otherwise, and whenever the door or those checks fail, the deploy stops it, and says so
-plainly if it cannot. Undoing the deploy is a later image, or the backup restored into a
+otherwise, and whenever the door or those checks fail, the deploy stops and disables it,
+so a boot does not start it either, and says so plainly if it cannot. Undoing the deploy is a later image, or the backup restored into a
 new volume. The
 artifact is kept; the deploy deletes none, and pruning old ones is the operator's act.
 

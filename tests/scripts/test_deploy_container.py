@@ -85,6 +85,10 @@ class FakeBox:
     unit_installed_meanwhile: bytes | None = None
     #: The link drops just after unit.env's rename lands.
     interrupt_after_rename: bool = False
+    #: Whether the unit starts at boot.
+    enabled: bool = False
+    #: The next write of unit.env fails, once.
+    fail_unit_env_write: bool = False
 
     def run(self, argv: Sequence[str], *, stdin: IO[bytes] | None = None) -> Any:
         argv = list(argv)
@@ -131,7 +135,9 @@ class FakeBox:
             else:
                 self.active, self.container_image = "active", env.image
             return 0, "", ""
-        return 0, "", ""  # daemon-reload, enable, reset-failed
+        if verb in {"enable", "disable"}:
+            self.enabled = verb == "enable"
+        return 0, "", ""  # daemon-reload, reset-failed
 
     def cmd_curl(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
         return (0, "curl 8\n", "") if argv[1] == "--version" else (0, self.door, "")
@@ -179,6 +185,9 @@ class FakeBox:
         if argv[1] == "-d":
             self.files[argv[-1]] = File(int(argv[3]), int(argv[-3], 8), directory=True)
         else:
+            if self.fail_unit_env_write and argv[-1].startswith(str(PERSON.unit_env)):
+                self.fail_unit_env_write = False
+                return 1, "", "install: cannot create regular file: No space left on device"
             self.files[argv[-1]] = File(0, int(argv[2], 8), data)
         return 0, "", ""
 
@@ -215,6 +224,9 @@ class FakeBox:
         name = argv[-1]
         if argv[2] == "create":
             self.volumes.add(name)
+            return 0, f"{name}\n", ""
+        if argv[2] == "rm":
+            self.volumes.discard(name)
             return 0, f"{name}\n", ""
         return (0, f"{name}\n", "") if name in self.volumes else (1, "", "no such volume")
 
@@ -542,9 +554,31 @@ def test_deploy_says_when_an_uncontained_container_cannot_be_stopped() -> None:
         deployment(box).run()
 
     message = str(caught.value)
-    assert "could NOT be shown stopped (stop exit 255, state active" in message
+    assert "could NOT be shown stopped and disabled (disable exit 0,\nstop exit 255" in message
     assert "Stop it by hand: systemctl stop hub@alice.service" in message
     assert "is stopped: it does not serve" not in message
+
+
+def test_deploy_contained_container_does_not_start_at_boot() -> None:
+    box = served_box(raw_rules="-P PREROUTING ACCEPT\n", enabled=True)
+
+    with pytest.raises(dc.DeployError, match="is stopped and disabled"):
+        deployment(box).run()
+
+    assert not box.enabled
+
+
+def test_deploy_first_install_that_fails_can_be_retried() -> None:
+    box = FakeBox(files=person_files(served=False), fail_unit_env_write=True)
+
+    with pytest.raises(dc.DeployError, match="No space left"):
+        deployment(box, port=8501).run()
+    assert box.volumes == set(), "volumes made for a start that never came are removed"
+
+    deployment(box, port=8501).run()
+
+    assert box.volumes == {PERSON.data_volume, PERSON.keyring_volume}
+    assert box.active == "active"
 
 
 def test_deploy_unreachability_not_established_stops_the_new_container() -> None:
@@ -604,7 +638,10 @@ def test_deploy_refuses_a_missing_backup_passphrase() -> None:
     _refused_untouched(box, "backup passphrase file .* is missing")
 
 
-@pytest.mark.parametrize(("uid", "mode"), [(0, 0o400), (10001, 0o440), (10001, 0o604)])
+@pytest.mark.parametrize(
+    ("uid", "mode"),
+    [(0, 0o400), (10001, 0o440), (10001, 0o604), (10001, 0o000), (10001, 0o200)],
+)
 def test_deploy_refuses_a_passphrase_anyone_else_can_read(uid: int, mode: int) -> None:
     box = served_box()
     box.files[str(PERSON.keyring_passphrase)] = File(uid, mode, b"k\n")
@@ -846,6 +883,8 @@ def test_container_problems(change: dict[str, object], said: str) -> None:
         ["alice", "--", "-box"],
         ["alice", "box", "--port", "80"],
         ["alice", "box", "--hubs-dir", "srv"],
+        ["alice", "box", "--hubs-dir", "/srv/hub data"],
+        ["alice", "box", "--hubs-dir", "/srv/100%"],
     ],
 )
 def test_main_refuses_bad_arguments_before_contacting_anything(

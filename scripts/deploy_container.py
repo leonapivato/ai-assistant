@@ -62,8 +62,8 @@ deploys an image already on the box, which must carry ``build.sh``'s commit labe
 4. The new container is verified: healthy, running the new image, the door answering
    ``403`` on the published loopback port, and the reachability check below. One that
    never becomes healthy is left to its unit only where that check passes; otherwise,
-   and whenever the door or the check fails, it is stopped, and a stop that cannot be
-   confirmed is said to be one.
+   and whenever the door or the check fails, it is stopped and disabled, so a boot does
+   not start it either, and a stop that cannot be confirmed is said to be one.
 
 **What the backup copies** is the hub's own directory by construction: the data volume
 mounted at ``/data``, the directory the image pins, and ``supervise.py`` refuses an
@@ -158,6 +158,7 @@ _POLL_SECONDS = 2.0
 _PERSON = re.compile(r"[a-z][a-z0-9-]{0,30}[a-z0-9]|[a-z]")
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
+_PLAIN_PATH = re.compile(r"/[A-Za-z0-9._/-]*")
 _REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]*")
 #: Interfaces Docker makes for its bridges, whose ``route_localnet`` is Docker's own.
 _DOCKER_INTERFACE = re.compile(r"docker0|br-[0-9a-f]+|veth[0-9a-f]+")
@@ -928,11 +929,12 @@ class Deployment:
                 "then type the passphrase, Enter and Ctrl-D, and keep a copy off the box\n"
                 f"(ADR-0123 §5).\n{_UNTOUCHED}"
             )
-        if state.uid != CONTAINER_UID or state.mode & 0o077:
+        if state.uid != CONTAINER_UID or state.mode & 0o077 or not state.mode & 0o400:
             raise DeployError(
                 f"the {which} passphrase file {path} is owned by uid {state.uid} with mode\n"
                 f"{state.mode:o}; the container's user, uid {CONTAINER_UID}, must own it and\n"
-                f"nobody else read it (chown {CONTAINER_UID}:{CONTAINER_UID}, chmod 400).\n"
+                f"read it, and nobody else read it (chown {CONTAINER_UID}:{CONTAINER_UID},\n"
+                "chmod 400).\n"
                 f"{_UNTOUCHED}"
             )
 
@@ -1210,10 +1212,12 @@ class Deployment:
         except DeployError as exc:
             named = f"unreadable ({exc})"
         if named != earlier.image:
+            self.box.run(["systemctl", "disable", self.person.unit])
             return (
                 f"{self.person.unit_env} no longer names the earlier image {earlier.image}\n"
                 f"(it names {named}), so nothing was started, and {self.person.unit} is\n"
-                "stopped. Write the earlier image back into it, or deploy again."
+                "stopped and disabled. Write the earlier image back into it and enable it,\n"
+                "or deploy again."
             )
         try:
             self._start()
@@ -1239,14 +1243,23 @@ class Deployment:
             DeployError: If the volumes, the unit or ``unit.env`` cannot be set up.
         """
         person = self.person
-        if first:
-            for volume in (person.data_volume, person.keyring_volume):
-                if not self._volume_exists(volume):
-                    self._ok([DOCKER, "volume", "create", volume], f"creating {volume}")
         self._ok(["systemctl", "enable", person.unit], f"enabling {person.unit}")
-        assert self.port is not None  # noqa: S101  # set by the preflight
-        # Replaced whole, so until this lands the unit's next start is the earlier image.
-        self._write(person.unit_env, render_unit_env(image, self.port, self.stamp))
+        created: list[str] = []
+        try:
+            if first:
+                for volume in (person.data_volume, person.keyring_volume):
+                    if not self._volume_exists(volume):
+                        self._ok([DOCKER, "volume", "create", volume], f"creating {volume}")
+                        created.append(volume)
+            assert self.port is not None  # noqa: S101  # set by the preflight
+            # Replaced whole, so until this lands the unit's next start is the earlier image.
+            self._write(person.unit_env, render_unit_env(image, self.port, self.stamp))
+        except BaseException:
+            # Nothing has run on a volume made here, and one left behind with no
+            # unit.env would read, to the next deploy, as data no record explains.
+            for volume in created:
+                self.box.run([DOCKER, "volume", "rm", volume])
+            raise
 
     def await_ready(self, image_id: str) -> None:
         """Wait for the unit's container to be healthy on ``image_id``.
@@ -1324,6 +1337,9 @@ class Deployment:
             A sentence for the operator.
         """
         unit = self.person.unit
+        # Disabled as well as stopped: a boot would otherwise start what this deploy could
+        # not show unreachable, with nothing checking it.
+        disabled = self.box.run(["systemctl", "disable", unit])
         stopped = self.box.run(["systemctl", "stop", unit])
         try:
             state = self._unit_state().get("ActiveState")
@@ -1333,13 +1349,15 @@ class Deployment:
             ).split()
         except DeployError as exc:
             state, running = f"unknown ({exc})", ["?"]
-        if stopped.ok and state in {"inactive", "failed"} and not running:
+        if disabled.ok and stopped.ok and state in {"inactive", "failed"} and not running:
             return (
-                f"{unit} is stopped: it does not serve while this is so, and the earlier\n"
-                "image is not started on its data (ADR-0326 §5:4)."
+                f"{unit} is stopped and disabled: it does not serve, at boot or before, until\n"
+                "a deploy verifies it, and the earlier image is not started on its data\n"
+                "(ADR-0326 §5:4)."
             )
         return (
-            f"{unit} could NOT be shown stopped (stop exit {stopped.code}, state {state},\n"
+            f"{unit} could NOT be shown stopped and disabled (disable exit {disabled.code},\n"
+            f"stop exit {stopped.code}, state {state},\n"
             f"container {'running' if running else 'gone'}): it may still serve where this\n"
             f"deploy could not establish who reaches it. Stop it by hand: systemctl stop {unit}"
         )
@@ -1579,8 +1597,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.port is not None and not 1024 <= args.port <= 65535:  # noqa: PLR2004
             raise DeployError(f"--port {args.port} is not an unprivileged TCP port")
         hubs = PurePosixPath(args.hubs_dir)
-        if not hubs.is_absolute():
-            raise DeployError(f"--hubs-dir {args.hubs_dir} is not an absolute path")
+        # The root goes into the unit's command lines, where systemd splits on spaces
+        # and expands `%`, so it is held to characters both read literally.
+        if not hubs.is_absolute() or _PLAIN_PATH.fullmatch(args.hubs_dir) is None:
+            raise DeployError(
+                f"--hubs-dir {args.hubs_dir!r} is not an absolute path of letters, digits, '.',"
+                " '_', '-' and '/'"
+            )
         box: Box = LocalBox() if args.local else SshBox(args.host, args.ssh_user)
         deployment = Deployment(
             box=box,
