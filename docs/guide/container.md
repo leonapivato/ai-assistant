@@ -252,7 +252,7 @@ Every refusal ends with `(exit 78)` on a `hub-container:` line, or with the hub'
 | `the container holds 2 besides loopback` (or any count but 1) | Run it on a bridge network, not `--network host`. |
 | `ASSISTANT_GATEWAY_HOSTED_ADDRESS=127.0.0.1 is a loopback address`, or `… is set but blank` | Remove it from the env file. |
 | `the passphrase at … does not unlock the login keyring` | Mount the passphrase this keyring volume was created with. |
-| `the gateway exited 1 before its hosted listener accepted` (exit 1, so it is started again) | Read the gateway's own message just above it. Where it names a setting, fix it: the container keeps restarting until you do (#3167). |
+| `the gateway refused to start before its hosted listener accepted` (exit 78), or `the gateway exited 1 before its hosted listener accepted` (exit 1, so it is started again) | Read the gateway's own message above it. A `78` names what to change, and the container stays down until you change it; a `1` is a fault that may clear, so the container is started again. |
 | `hub: cannot start: … holds no credential` | Put the model key in the env file. |
 
 ## What this page is not

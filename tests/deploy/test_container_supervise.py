@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from ai_assistant.core.config import Settings
+from ai_assistant.interfaces.gateway import exits as gateway_exits
 from ai_assistant.service import exits
 from ai_assistant.wire.address import socket_path
 
@@ -80,6 +81,14 @@ def test_the_exit_codes_are_the_hubs() -> None:
     assert supervise.EXIT_OK == exits.EXIT_OK
     assert supervise.EXIT_RESTART == exits.EXIT_RESTART
     assert supervise.EXIT_DEPLOYMENT == exits.EXIT_DEPLOYMENT
+
+
+def test_the_gateways_exit_codes_are_the_hubs() -> None:
+    # #3167: the gateway restates ADR-0083 §5's codes rather than importing them, and
+    # the supervisor passes its `78` through, so all three must agree.
+    assert gateway_exits.EXIT_OK == exits.EXIT_OK
+    assert gateway_exits.EXIT_RESTART == exits.EXIT_RESTART
+    assert gateway_exits.EXIT_DEPLOYMENT == exits.EXIT_DEPLOYMENT
 
 
 def test_readiness_waits_on_the_socket_the_hub_binds(layout: Any) -> None:
@@ -405,13 +414,40 @@ def test_the_hub_exiting_on_its_own_is_the_containers_exit(
     assert run.all_ended()
 
 
-def test_a_gateway_that_exits_before_it_listens_is_a_restart(layout: Any) -> None:
-    # Its `1` is the same for a setting it refused and for a fault that clears, and
-    # ADR-0083 §5 makes the case that does not answer the question a restart.
+def test_a_gateway_that_exits_1_before_it_listens_is_a_restart(layout: Any) -> None:
+    # The gateway's `1` is a fault that may clear (#3167), so the container comes back.
     run = _Run(layout, FAKE_GATEWAY_REFUSES="1")
     assert run.result() == supervise.EXIT_RESTART
     assert run.saw("hub.signal") == "SIGTERM"
     assert run.all_ended()
+
+
+def test_a_gateway_that_refuses_with_78_before_it_listens_is_the_containers_78(
+    layout: Any, capfd: pytest.CaptureFixture[str]
+) -> None:
+    # #3167: the gateway exits `78` only where restarting unchanged never succeeds,
+    # so restarting the container would meet the same refusal; it stays down.
+    run = _Run(layout, FAKE_GATEWAY_REFUSES="78")
+    assert run.result() == supervise.EXIT_DEPLOYMENT
+    assert run.saw("hub.signal") == "SIGTERM"
+    assert run.all_ended()
+    # ADR-0083 §5: the cause and the action are the last thing said, after every
+    # child's own last line, and the line carries the code a reader greps for.
+    said = capfd.readouterr().err.strip().splitlines()
+    assert "hub: stopped on SIGTERM" in said
+    last = said[-1]
+    assert last.startswith("hub-container: the gateway refused to start")
+    assert "names what to change" in last
+    assert last.endswith("(exit 78)")
+
+
+@pytest.mark.parametrize("status", ["2", "77", "79"])
+def test_a_gateway_exiting_with_a_code_it_does_not_use_is_a_restart(
+    layout: Any, status: str
+) -> None:
+    # Only the gateway's `78` is a verdict; any other status gets §5's tie-break.
+    run = _Run(layout, FAKE_GATEWAY_REFUSES=status)
+    assert run.result() == supervise.EXIT_RESTART
 
 
 def test_a_gateway_a_signal_ends_before_it_listens_is_a_restart(layout: Any) -> None:

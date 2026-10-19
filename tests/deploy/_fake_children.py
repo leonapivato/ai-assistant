@@ -29,6 +29,9 @@ def _park(stop_signal: signal.Signals, *, role: str, code: int) -> None:
 
     def stop(signum: int, _frame: object) -> None:
         _record(f"{role}.signal", signal.Signals(signum).name)
+        # A line on the way out, as a real child's drain writes one, so a test can
+        # tell what the supervisor said before the children stopped from after.
+        print(f"{role}: stopped on {signal.Signals(signum).name}", file=sys.stderr, flush=True)
         sys.exit(code)
 
     signal.signal(stop_signal, stop)
@@ -58,8 +61,10 @@ def main(role: str) -> None:
         listener.listen()
         _park(signal.SIGTERM, role=role, code=int(os.environ.get("FAKE_HUB_STOP_CODE", "0")))
     elif role == "gateway":
-        if os.environ.get("FAKE_GATEWAY_REFUSES"):
-            sys.exit(1)
+        refuses = os.environ.get("FAKE_GATEWAY_REFUSES")
+        if refuses:
+            print(f"Error: the gateway refused, exit {refuses}", flush=True)
+            sys.exit(int(refuses))
         if os.environ.get("FAKE_GATEWAY_KILLED"):
             os.kill(os.getpid(), signal.SIGKILL)
         listener = socket.create_server(
