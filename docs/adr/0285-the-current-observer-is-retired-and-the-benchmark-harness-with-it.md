@@ -1,6 +1,6 @@
 # 285. The current observer is retired, and the benchmark harness with it
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0329 (§1:2)
 - Date: 2026-10-03
 - Scope: [M36](https://github.com/leonapivato/ai-assistant/milestone/2), reopened 2026-09-30 for [#2613](https://github.com/leonapivato/ai-assistant/issues/2613); the first item of the plan recorded there on 2026-10-03, ahead of step 3a and step 3b, behind their shared cutover.
 - Dependency: ADR-0284, implemented at `ee659a12`.
@@ -25,6 +25,7 @@
 - **Partially supersedes** [ADR-0239](0239-the-observation-pass-labels-the-episodes-it-read-and-a-label-lands-as-a-conditional-write-at-the-episodes-own-id.md) — **the labelling pass.** §1, §2, §3, §5, §8 and §9 entire, and §4:5–§4:7. §4:1–§4:4, §6, §7 and §13 stand for the labels an episode carries.
 - **Partially supersedes** [ADR-0283](0283-a-channels-history-is-its-episodes-and-the-turn-index-is-retired.md) — **three scopes.** §6:1's and §6:8's `record_observed` member, §6:6 entire, and §11:1–§11:3 entire. Every other clause stands.
 - **Partially supersedes** [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md) — **one scope.** The observer's member of §6:2, §8:3 and §8:7. Every other member and clause stands.
+- Partially superseded: 2026-10-18 by ADR-0329 — §1:2: the observer is the producer of memories from episodes that §1:2 waited for (ADR-0329 §2). Under §1:3 it adopts none of the clauses this ADR superseded. Every other clause stands. This replacement takes effect on ratification of ADR-0329. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

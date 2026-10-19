@@ -1,6 +1,6 @@
 # 319. The decisions the cutover left standing over deleted code retire, the stamp drops recall's limit, and an unasked memory question is logged
 
-- Status: Partially superseded by ADR-0321 (§6:1 whole; §6:2's structural-test limb; §8's ADR-0193 and ADR-0235 rows' *the authority milestone redoes the act*)
+- Status: Partially superseded by ADR-0321 (§6:1 whole; §6:2's structural-test limb; §8's ADR-0193 and ADR-0235 rows' *the authority milestone redoes the act*) and ADR-0329 (§5:1–§5:3)
 - Date: 2026-10-14
 - Scope: the phases after understanding, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): the records [#2836](https://github.com/leonapivato/ai-assistant/issues/2836) asks for, for the ratified decisions whose code the cutover's deletion lanes removed or are removing, and four decisions those deletions leave to be recorded.
 - Dependency: [ADR-0309](0309-the-phases-are-built-beside-the-old-path-and-one-cutover-switches-the-controller-over-deletes-the-old-path-and-goes-live-in-one-deploy.md), ADR-0313 and ADR-0318, all Accepted.
@@ -9,6 +9,7 @@
 - **Supersedes**, each whole (§8): ADR-0022, ADR-0033, ADR-0034, ADR-0047, ADR-0051, ADR-0053, ADR-0055, ADR-0057, ADR-0058, ADR-0071, ADR-0158, ADR-0160, ADR-0170, ADR-0176, ADR-0201, ADR-0211 and ADR-0244.
 - **Partially supersedes**, in the clauses §8's second table names: ADR-0008, ADR-0014, ADR-0028, ADR-0029, ADR-0037, ADR-0039, ADR-0042, ADR-0049, ADR-0052, ADR-0059, ADR-0060, ADR-0074, ADR-0083, ADR-0084, ADR-0085, ADR-0093, ADR-0096, ADR-0097, ADR-0106, ADR-0115, ADR-0119, ADR-0122, ADR-0144, ADR-0148, ADR-0150, ADR-0162, ADR-0173, ADR-0175, ADR-0177, ADR-0178, ADR-0181, ADR-0184, ADR-0185, ADR-0187, ADR-0189, ADR-0192, ADR-0193, ADR-0199, ADR-0203, ADR-0204, ADR-0208, ADR-0210, ADR-0221, ADR-0222, ADR-0223, ADR-0226, ADR-0227, ADR-0228, ADR-0230, ADR-0231, ADR-0232, ADR-0233, ADR-0235, ADR-0236, ADR-0238, ADR-0240, ADR-0241, ADR-0242, ADR-0245, ADR-0246, ADR-0247, ADR-0260, ADR-0274, ADR-0286, ADR-0293, ADR-0295, ADR-0297 and ADR-0300.
 - Partially superseded: 2026-10-15 by ADR-0321 — §6:1 whole, and §6:2's structural-test limb: the yes path is `UserConfirmation`'s one production producer (ADR-0321 §5:2). §8's ADR-0193 and ADR-0235 rows' *the authority milestone redoes the act*: the act is replaced by scoped delegations and not redone (ADR-0321 §7:1). §6:2's honouring and every other clause stand. This replacement takes effect on ratification of ADR-0321. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-18 by ADR-0329 — §5:1–§5:3: an `ASK_USER` ruling on the observer's write raises an open question on each stored memory it names, and is never logged and dropped (ADR-0329 §13). Every other clause stands. This replacement takes effect on ratification of ADR-0329. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
