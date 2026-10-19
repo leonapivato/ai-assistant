@@ -126,9 +126,12 @@ keeping, never a memory and never a support.
 
 > **Normative.** A candidate is the `remember` call as its round records it
 > (`PlanningRound.calls`), read with the episode's labels (ADR-0307 §5:7) and joined to
-> its effect record (ADR-0306 §5:3). It is a candidate exactly where that effect record
-> shows it done. No episode field, record or store is added for candidates, and
-> `EpisodeProcessingRecord` keeps its schema.
+> its effect record (ADR-0306 §5:3). A `remember` that runs under an approval is proposed
+> by its approved-action label (ADR-0321 §4:2), so its candidate is the asked call the
+> effect record's question part names, as the asking round records it (ADR-0321 §2:8),
+> read with the asking episode's labels. Either way it is a candidate of the episode whose
+> effect record shows it done, and exactly where it does. No episode field, record or
+> store is added for candidates, and `EpisodeProcessingRecord` keeps its schema.
 
 > **Normative.** The hub fills `remember`'s episode and its rests-on-outside-content as
 > today (`system_supplied`, ADR-0254 §3), and a call naming a label planning was not shown
@@ -240,9 +243,11 @@ the ask comes from planning, through the same question and approval.
 > **Normative.** Planning's instruction says: note reliance for a memory that shaped a
 > suggestion, an answer or an action, and not for one mentioned in passing.
 
-> **Normative.** Where an episode that is not processed is shown in the episode window, its
-> candidates are shown with it, each by its fact and marked pending. No other rendering
-> shows a candidate.
+> **Normative.** Where an episode that is not processed is shown in the episode window, the
+> candidates its own rounds record as `remember` calls are shown with it, each by its fact
+> and marked pending. A candidate recorded under an approval is shown in the question that
+> asked it, whose exact line carries its fact (ADR-0321 §2:5). No other rendering shows a
+> candidate.
 
 ### 7. The trigger
 
@@ -266,8 +271,8 @@ the ask comes from planning, through the same question and approval.
 > composition-root constant holds that instant.
 
 > **Normative.** A run starts when an activation's episode is frozen (ADR-0286), without
-> the activation waiting on it, and on a scheduler row at a composition-root interval, so
-> that a retry is not held for the next activation.
+> the activation waiting on it, and on a scheduler row whose interval a setting holds
+> (ADR-0083 §7), armed by default, so that a retry is not held for the next activation.
 
 ### 8. What the observer reads
 
@@ -294,8 +299,9 @@ the ask comes from planning, through the same question and approval.
 
 > **Normative.** The observer's two steps render an episode's parts as this section and §9
 > name, outside input and digested evidence included, each marked outside where it is. They
-> render no episode's `content` and no other field (ADR-0284 §8:3 and §8:5, as §20
-> supersedes them for the observer).
+> render an episode's `content` only as ADR-0284 §8:2 renders it for an episode without a
+> processing record, and no other field (ADR-0284 §8:3 and §8:5, as §20 supersedes them for
+> the observer).
 
 ### 9. Scout and commit
 
@@ -324,9 +330,17 @@ the ask comes from planning, through the same question and approval.
 > says so.
 
 > **Normative.** A support the observer adds points at the input or one of its messages, a
-> round's message, an evidence item or a confirmation (ADR-0328 §4's part table). A
-> finding resting on a result points at the evidence items of the digests of that result;
-> a result no digest recorded supports nothing.
+> round's message, an evidence item or a confirmation (ADR-0328 §4's part table), or is an
+> observer's inference (§9:7). A finding resting on a result points at the evidence items
+> of the digests of that result; a result no digest recorded supports nothing.
+
+> **Normative.** ADR-0328 §4's part table gains one part, **an observer's inference**,
+> addressed by the episode whose processing drew it, and its origin table one origin,
+> `observer_inference`, which ranks at inference and is not outside. The observer adds
+> such a support, `for` and backing the claim as worded, only where the claim is its own
+> reading of the other supports it adds with it, which are `for` and do not back the claim
+> as worded, as a preference drawn from several choices is. Its how sure is the commit
+> step's, its `when` is that episode's `occurred_at`, and it carries no source details.
 
 > **Normative.** A memory from a source is worded as what its source said — which source,
 > and as of when — and never as the fact itself.
@@ -355,21 +369,22 @@ the ask comes from planning, through the same question and approval.
 
 > **Normative.** An explicit request to remember, or a correction, in the user's own words
 > is always kept: where no stored memory states it, the observer creates one, and where
-> one does, it adds the user's message as a support. Only a refusal of the write path
-> (§12) stops it, and that refusal raises an open question (§13).
+> one does, it adds the user's message as a support. Only the write path's refusal (§12)
+> stops it, and §13 says where that refusal raises an open question.
 
 > **Normative.** A fact the user said in passing is kept where it is worth keeping by
 > §6:2's test.
 
 > **Normative.** A report — what a source said — is kept where it is worth knowing later
-> and not cheap to read again from its source, worded as §9:7 says.
+> and not cheap to read again from its source, worded as §9:8 says.
 
 > **Normative.** A single observation is evidence only. It is not kept as a memory by
 > itself; it waits as a candidate on its episode, where a later run's search finds it.
 
 > **Normative.** The observer creates a memory whose standing would be inference only where
-> its counted `for` supports point at at least three distinct episodes, and it carries
-> fewer counted `against` supports than `for` ones. Code checks both before the write.
+> its counted `for` supports other than an observer's inference point at at least three
+> distinct episodes, and it carries fewer counted `against` supports than `for` ones. Code
+> checks both before the write.
 
 > **Normative.** Beside that floor, the commit step judges that the supports bear the
 > claim as independent occasions — several exchanges of one sitting count once — that no
@@ -402,8 +417,10 @@ the ask comes from planning, through the same question and approval.
 > support of the new memory added to the retired one as `against`. `MemoryPolicy` rules on
 > the new memory over every conflict but the memory it retires. On an `ACCEPT` the ingest
 > installs the new memory and applies the operation in one atomic write, each naming the
-> other (ADR-0328 §5:6); on a `REINFORCE` it adds the supports to the target and applies
-> the operation naming no successor; on any other ruling it writes nothing.
+> other (ADR-0328 §5:6). On a `REINFORCE` of an end or a mark wrong, it adds the supports
+> to the target and applies the operation naming no successor, in one atomic write. On a
+> `REINFORCE` of a replace, which must name its replacement, and on any other ruling, it
+> writes nothing, and the finding's outcome says so.
 
 > **Normative.** ADR-0328 §6:5 refuses a retiring operation whose cited support ranks below
 > the memory's standing, and the whole proposal with it.
@@ -453,10 +470,11 @@ the ask comes from planning, through the same question and approval.
 > a call of §6:7 in the leaving episode named, when that episode is due, and only where
 > that reliance shaped something the user acted on (ADR-0328 §8:2).
 
-> **Normative.** It records held up where the episodes after it that it read show the
-> suggestion accepted, the action run or the answer used, with nothing contradicting the
-> memory; and let down where they show the user correcting what the memory said. Where
-> they show neither, it records nothing.
+> **Normative.** The commit step decides it, given the reliance call, the memory and the
+> parts of the later episodes the finding rests on. It records held up where those parts
+> show the suggestion accepted, the action run or the answer used, with nothing
+> contradicting the memory; and let down where they show the user correcting what the
+> memory said. Where they show neither, it records nothing.
 
 > **Normative.** A correction the user makes is also a finding under §11:1. Acceptance that
 > bears on the memory's claim may be added as a support where §10 admits it, and the entry
@@ -519,9 +537,13 @@ the ask comes from planning, through the same question and approval.
 > **Normative.** The hub runs at most one observer run at a time. ADR-0219 §2's conditional
 > write is the backstop.
 
-> **Normative.** An episode whose input carries no message of the user, whose rounds record
-> no candidate, and whose digests hold no evidence item is skipped by rule, with no model
-> call, and marked skipped.
+> **Normative.** An episode whose input carries no message, the user's or from outside,
+> whose rounds record no candidate, and whose digests hold no evidence item is skipped by
+> rule, with no model call, and marked skipped.
+
+> **Normative.** A run processes at most a composition-root number of episodes, so a
+> scheduled run stays bounded on the scheduler's serial loop (ADR-0083 §7). What is left
+> waits for the next run.
 
 > **Normative.** A setting bounds the observer's model calls in any 24 hours, with an
 > initial value of 300. A run that would exceed it stops, and the episodes left wait; none
@@ -566,7 +588,7 @@ the ask comes from planning, through the same question and approval.
 | Lane | What it lands | Where |
 | --- | --- | --- |
 | 1 | The observation record: its types, `PlanStore`'s members, the conformance suite, the canonical fake, the SQLite plan store and its upgrade (§16) | `core`, `planning`, `testing` |
-| 2 | `MemoryWriter`'s track-record member and the proposal that may retire (§12:4, §14:4), with the writer `observer`, the suite, the fake and `MemoryIngestor` | `core`, `memory`, `testing` |
+| 2 | `MemoryWriter`'s track-record member and the proposal that may retire (§12:4, §14:4), with the writer `observer`, the origin `observer_inference` (§9:7), the suite, the fake, `MemoryIngestor` and the memory store's carry for the new members | `core`, `memory`, `testing` |
 | 3 | Planning's side: `remember` repurposed, the lookup, *confirm*, the reliance capability, the instruction, the labels and the projection's candidates (§§3–6), behind a composition switch that is off | `orchestration`, `core` |
 | 4 | The observer stage, its settings, its composition and scheduler row, and the switch turned on (§§7–17) | `orchestration`, `app`, `service`, `core` |
 | 5 | The pending candidates' read, the wire and the panel (§18) | `orchestration`, `wire`, `interfaces` |
@@ -603,7 +625,7 @@ Superseded in part; every clause the middle column does not name stands:
 | ADR-0309 | §6:5 | §2 |
 | ADR-0319 | §5:1–§5:3 | §13 |
 | ADR-0321 | §4:4's and §4:17's `MemoryPolicy` limbs, replaced by *confirm* as a source of *needs you*; §5:1, §5:2, §5:5, §5:6 and §5:7 | §5, §12, §13 |
-| ADR-0328 | §11:3, in the addition alone: the track-record member; §11:4, in the addition alone: a proposal that may retire; §15:5, in the addition alone: open questions in planning's label | §14:4, §12:4, §6:6 |
+| ADR-0328 | §4:2's origin table and §4:12, in the additions alone: the observer's inference, its part, origin and `when`; §11:3, in the addition alone: the track-record member; §11:4, in the addition alone: a proposal that may retire; §15:5, in the addition alone: open questions in planning's label | §9:7, §14:4, §12:4, §6:6 |
 
 Read through and not superseded:
 
