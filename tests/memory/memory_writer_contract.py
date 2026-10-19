@@ -1362,6 +1362,40 @@ class MemoryWriterContract:
         assert stored.supports == target.supports
         assert stored.operations == target.operations
 
+    async def test_reinforce_adds_every_new_support_past_one_the_target_carries(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§11:6, §4:8: each support added, one add support each, a carried one skipped.
+
+        The proposal's first support is one the target already carries and its next two
+        are new: the carried one changes nothing, and both new ones land, in order, each
+        with its own ``add_support`` citing it. A writer stopping at the first support,
+        or at the first already-carried one, fails here.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        await _cite(store)
+        await store.add(_episodic(_OTHER_CITED, "a second exchange"))
+        await store.add(_episodic("third-episode", "a third exchange"))
+        target = _preference("existing")
+        await store.add(target)
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
+        fresh = _preference("new", evidence=(_OTHER_CITED, "third-episode")).supports
+        incoming = memory("new", _CONTENT, target.supports[0], *fresh)
+
+        result = await writer.ingest(_proposal(incoming))
+
+        assert result.record_id == "existing"
+        stored = await store.get("existing")
+        assert isinstance(stored, Memory)
+        assert [one.points_at for one in stored.supports] == [
+            target.supports[0].points_at,
+            *(one.points_at for one in fresh),
+        ]
+        added = stored.operations[len(target.operations) :]
+        assert [(one.kind, one.cites) for one in added] == [
+            (MemoryOperationKind.ADD_SUPPORT, one.points_at) for one in fresh
+        ]
+
     async def test_supersede_ends_the_target_and_installs_the_correction_at_a_new_id(
         self, make_writer: WriterFactory
     ) -> None:
