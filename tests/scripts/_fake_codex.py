@@ -28,6 +28,17 @@ every case:
   can assert on what the reviewer was told.
 - ``FAKE_CODEX_PRE_CMD``    — a shell snippet ``eval``'d before output is
   written, to reproduce a race (a commit or a base move mid-review).
+- ``FAKE_CODEX_STATE_DIR``  — a directory where every invocation is numbered
+  (``count``) and leaves its argv (``args-<n>``) and its prompt
+  (``prompt-<n>.md``), and where ``review-<n>.md``, when present, is the message
+  invocation *n* writes in place of ``FAKE_CODEX_REVIEW``. A parted round
+  (ADR-0331) is several invocations, so this is how a test steers each turn and
+  reads each turn's prompt back.
+- ``FAKE_CODEX_ONLY_AT``    — an invocation number. When set, the failure and
+  race knobs above (``FORCE_SANDBOX``, ``RESUME_FAIL``, ``START_FAIL``,
+  ``TURN_FAILED``, ``PRE_CMD``) apply to that invocation alone, so a test can
+  fail one turn of a parted round. Counted in ``FAKE_CODEX_STATE_DIR``, which it
+  requires.
 """
 
 from __future__ import annotations
@@ -76,25 +87,46 @@ if [[ -n "${FAKE_CODEX_ARGS_FILE:-}" ]]; then
     printf '%s\n' "$@" >"${FAKE_CODEX_ARGS_FILE}"
 fi
 
+# Number this invocation, and keep its argv and prompt, when asked.
+n=0
+state="${FAKE_CODEX_STATE_DIR:-}"
+if [[ -n "$state" ]]; then
+    mkdir -p "$state"
+    n=$(($(cat "${state}/count" 2>/dev/null || echo 0) + 1))
+    printf '%s\n' "$n" >"${state}/count"
+    printf '%s\n' "$@" >"${state}/args-${n}"
+    cat >"${state}/prompt-${n}.md"
+fi
+
+# Whether the failure and race knobs apply to this invocation.
+active=1
+if [[ -n "${FAKE_CODEX_ONLY_AT:-}" && "$n" != "${FAKE_CODEX_ONLY_AT}" ]]; then
+    active=0
+fi
+
 # Capture the prompt (fed on stdin) before anything else, when asked.
 if [[ -n "${FAKE_CODEX_PROMPT_COPY:-}" ]]; then
-    cat >"${FAKE_CODEX_PROMPT_COPY}"
+    if [[ -n "$state" ]]; then
+        cp "${state}/prompt-${n}.md" "${FAKE_CODEX_PROMPT_COPY}"
+    else
+        cat >"${FAKE_CODEX_PROMPT_COPY}"
+    fi
 fi
 
 # A pruned/unavailable session: resume exits non-zero, the driver degrades.
-if [[ "$mode" == "resume" && "${FAKE_CODEX_RESUME_FAIL:-}" == "1" ]]; then
+if [[ "$active" -eq 1 && "$mode" == "resume" && "${FAKE_CODEX_RESUME_FAIL:-}" == "1" ]]; then
     echo "fake codex: session ${tid} not found" >&2
     exit 1
 fi
 
 # Reproduce a mid-review race (a commit landing, the base moving) when asked.
-if [[ -n "${FAKE_CODEX_PRE_CMD:-}" ]]; then
+if [[ "$active" -eq 1 && -n "${FAKE_CODEX_PRE_CMD:-}" ]]; then
     eval "${FAKE_CODEX_PRE_CMD}"
 fi
 
 eff="${sb:-read-only}"
 [[ "$bypass" -eq 1 ]] && eff="danger-full-access"
-[[ -n "${FAKE_CODEX_FORCE_SANDBOX:-}" ]] && eff="${FAKE_CODEX_FORCE_SANDBOX}"
+[[ "$active" -eq 1 && -n "${FAKE_CODEX_FORCE_SANDBOX:-}" ]] && eff="${FAKE_CODEX_FORCE_SANDBOX}"
 
 if [[ "$mode" == "start" ]]; then
     tid="${FAKE_CODEX_THREAD_ID:-$(cat /proc/sys/kernel/random/uuid 2>/dev/null ||
@@ -105,7 +137,7 @@ fi
 # events and stderr stays EMPTY — measured behaviour of codex-cli 0.146.0, and the
 # shape that made issues #1674 and #1675 unreadable: the driver routes that stdout
 # into a temp file it then deletes.
-if [[ "$mode" == "start" && "${FAKE_CODEX_START_FAIL:-}" == "1" ]]; then
+if [[ "$active" -eq 1 && "$mode" == "start" && "${FAKE_CODEX_START_FAIL:-}" == "1" ]]; then
     if [[ "$want_json" -eq 1 ]]; then
         printf '{"type":"thread.started","thread_id":"%s"}\n' "$tid"
         printf '{"type":"error","message":"fake codex: the service refused this request"}\n'
@@ -114,9 +146,12 @@ if [[ "$mode" == "start" && "${FAKE_CODEX_START_FAIL:-}" == "1" ]]; then
     exit 1
 fi
 
+turn_failed=0
+[[ "$active" -eq 1 && "${FAKE_CODEX_TURN_FAILED:-}" == "1" ]] && turn_failed=1
+
 if [[ "$want_json" -eq 1 ]]; then
     printf '{"type":"thread.started","thread_id":"%s"}\n' "$tid"
-    if [[ "${FAKE_CODEX_TURN_FAILED:-}" == "1" ]]; then
+    if [[ "$turn_failed" -eq 1 ]]; then
         printf '{"type":"turn.failed","error":{"message":"%s"}}\n' \
             "fake codex: the turn failed mid-stream"
     else
@@ -128,8 +163,10 @@ fi
 # left untouched and the driver's empty-review guard is what catches it. The
 # rollout is still written, because the read-only proof runs first and would
 # otherwise be the refusal a test attributed to the wrong thing.
-if [[ -n "$ofile" && "${FAKE_CODEX_TURN_FAILED:-}" != "1" ]]; then
-    if [[ -n "${FAKE_CODEX_REVIEW+set}" ]]; then
+if [[ -n "$ofile" && "$turn_failed" -ne 1 ]]; then
+    if [[ -n "$state" && -f "${state}/review-${n}.md" ]]; then
+        cat "${state}/review-${n}.md" >"$ofile"
+    elif [[ -n "${FAKE_CODEX_REVIEW+set}" ]]; then
         printf '%s' "${FAKE_CODEX_REVIEW}" >"$ofile"
     else
         printf 'a finding\nVerdict: APPROVE\n' >"$ofile"

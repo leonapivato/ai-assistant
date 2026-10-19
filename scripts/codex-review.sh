@@ -25,6 +25,11 @@
 #   HEAD's tree and then reports the artifact and its verdict. Neither changes
 #   what a round is or what it records: the foreground form is the round, and
 #   these two are how it is started and observed.
+#
+#        scripts/codex-review.sh --plan  <persona> [base-ref]
+#   How the round WOULD read the diff, and nothing more: a single turn, or the
+#   parts of a parted round with each part turn prompt's size (ADR-0331). It
+#   calls no Codex, takes no lock and writes nothing under `.review/`.
 set -euo pipefail
 
 # --- Modes (issue #1594) -----------------------------------------------------
@@ -40,9 +45,9 @@ timeout_arg=""
 positional=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-    --start | --wait)
+    --start | --wait | --plan)
         if [[ "$mode" != "run" ]]; then
-            echo "scripts/codex-review.sh: --start and --wait are alternatives;" \
+            echo "scripts/codex-review.sh: --start, --wait and --plan are alternatives;" \
                 "pass at most one" >&2
             exit 2
         fi
@@ -83,6 +88,7 @@ _usage() {
     echo "usage: scripts/codex-review.sh <architecture|adversarial> [base-ref]" >&2
     echo "       scripts/codex-review.sh --start <persona> [base-ref]" >&2
     echo "       scripts/codex-review.sh --wait <persona> [base-ref] [--timeout N]" >&2
+    echo "       scripts/codex-review.sh --plan <persona> [base-ref]" >&2
 }
 
 persona="${positional[0]:-}"
@@ -123,8 +129,9 @@ fi
 # `--wait` reads `.review/` and a lock file and calls nothing; requiring the CLI
 # it never invokes would make the one mode whose job is to REPORT on a round fail
 # on a host that cannot start one — including the case where the round it is
-# reporting on was started elsewhere.
-if [[ "$mode" != "wait" ]] && ! command -v codex >/dev/null 2>&1; then
+# reporting on was started elsewhere. `--plan` invokes nothing either: its
+# whole point is to answer before anything is spent.
+if [[ "$mode" != "wait" && "$mode" != "plan" ]] && ! command -v codex >/dev/null 2>&1; then
     echo "codex CLI not found on PATH; install it to run reviews" >&2
     exit 127
 fi
@@ -156,6 +163,14 @@ if [[ "$mode" == "wait" ]]; then
         echo "warning: the working tree is dirty (tracked or untracked), so HEAD's" >&2
         echo "  tree is not what is on disk, and a round in flight will refuse to" >&2
         echo "  record itself when it finishes. Reporting on HEAD's tree anyway." >&2
+    fi
+elif [[ "$mode" == "plan" ]]; then
+    # `--plan` reads the committed range and nothing on disk, so a dirty tree
+    # changes none of its answer; a round started from this tree would still
+    # refuse, which is worth saying.
+    if [[ -n "$_dirty" ]]; then
+        echo "warning: the working tree is dirty (tracked or untracked); a round" >&2
+        echo "  would refuse to start here. Planning HEAD's committed range anyway." >&2
     fi
 elif [[ -n "$_dirty" ]]; then
     echo "working tree is dirty (tracked or untracked); commit or stash first" >&2
@@ -308,7 +323,7 @@ fi
 serialized=1
 if ! command -v flock >/dev/null 2>&1; then
     serialized=0
-    if [[ "$bypass" -eq 0 && "$mode" != "wait" ]]; then
+    if [[ "$bypass" -eq 0 && "$mode" != "wait" && "$mode" != "plan" ]]; then
         echo "warning: flock not found; the review loop's init/update cannot be" >&2
         echo "  serialized. Run one codex-review at a time (issue #142)." >&2
     fi
@@ -1494,7 +1509,12 @@ inject_tmp="$(mktemp -t "codex-inject-${persona}.XXXXXX.md")"
 # review content in /tmp and in .review/ — the latter invisible to the dirty-tree
 # check, since .review/ is ignored. ${var:+...} expands to nothing while
 # artifact_tmp is still unset, which it is for most of this script.
-trap 'rm -f "$prompt" "$out" "$stream" "$inject_tmp" ${artifact_tmp:+"$artifact_tmp"}' EXIT
+# `$parts_work` is a parted round's working directory (ADR-0331): its parts, its
+# turn prompts and its captured part messages, the last of which are copied into
+# `.review/` only once the round records. Empty, and so removing nothing, on a
+# single-turn round; `rm -rf` with no operand succeeds.
+parts_work=""
+trap 'rm -f "$prompt" "$out" "$stream" "$inject_tmp" ${artifact_tmp:+"$artifact_tmp"}; rm -rf ${parts_work:+"$parts_work"}' EXIT
 
 # --- Persistent session identity and read-only proof (ADR-0025 §1) -----------
 #
@@ -1679,7 +1699,10 @@ _write_meta() {
 # gates that), so an adopted loop's first recorded round is a cold one.
 loop_id=""
 recorded_thread=""
-if [[ "$bypass" -eq 0 ]]; then
+# `--plan` claims nothing and reserves nothing: it reports how a round would read
+# the diff, and a plan that took the persona lock or minted a loop identity would
+# be a round's side effects without a round.
+if [[ "$bypass" -eq 0 && "$mode" == "run" ]]; then
     _claim_persona
     _lock_session
     recorded_last_sha=""
@@ -1744,7 +1767,7 @@ _write_round_marker() {
         "${CODEX_REVIEW_START_TOKEN:-}" >>"$tmp"
     mv "$tmp" "$round_file"
 }
-if [[ "$bypass" -eq 0 ]]; then
+if [[ "$bypass" -eq 0 && "$mode" == "run" ]]; then
     _write_round_marker
 fi
 
@@ -1835,51 +1858,68 @@ mapfile -d '' -t changed_paths < <(
 # can already put arbitrary text in front of it; the path is not a privileged
 # channel and treating it as one would be theatre.
 _render_path() {
+    # $2, when given, is the path's part mark in a parted round (ADR-0331 §5),
+    # set off by one space. A single-turn round passes none, so its list items
+    # are exactly what they were before parted rounds existed (§4).
+    local mark="${2:+ ${2}}"
     case "$1" in
-    *[$'\n\t\r']*) printf -- '- `%s` (control characters escaped)\n' "$(printf '%q' "$1")" ;;
-    *) printf -- '- `%s`\n' "$1" ;;
+    *[$'\n\t\r']*) printf -- '- `%s` (control characters escaped)%s\n' "$(printf '%q' "$1")" "$mark" ;;
+    *) printf -- '- `%s`%s\n' "$1" "$mark" ;;
     esac
+}
+
+# Which side of the split above a path falls on: one spelling for the split
+# itself and for the preamble that lists it.
+_is_prose() {
+    case "$1" in
+    *.md | *.rst) return 0 ;;
+    esac
+    return 1
 }
 
 prose_paths=()
 other_paths=()
 for changed_path in "${changed_paths[@]}"; do
-    case "$changed_path" in
-    *.md | *.rst) prose_paths+=("$changed_path") ;;
-    *) other_paths+=("$changed_path") ;;
-    esac
+    if _is_prose "$changed_path"; then
+        prose_paths+=("$changed_path")
+    else
+        other_paths+=("$changed_path")
+    fi
 done
 
-# Writes the round's prompt to `$prompt`. With a non-empty, non-blank injection
-# file as $1, the recorded prior-round dispositions are prepended (mechanism b,
-# ADR-0025 §1) so a cold round that lost the warm session still sees what was
-# already raised and answered. Round 1 and every resumed round pass nothing.
-_write_prompt() {
-{
-    if [[ -n "${1:-}" && -s "${1:-}" ]]; then
-        cat "$1"
-        echo
-    fi
-    cat "$rubric"
-    echo
-    echo "## Change under review"
-    echo
-    echo "Review ONLY the committed diff below (${content_sha} vs ${base}). You may read full"
-    echo "files in the repo for context, but do not modify anything. Output exactly the"
-    echo "ranked findings and verdict from docs/review/guide.md."
-    echo
+# Each changed path's part mark, by its index in `changed_paths`, in a parted
+# round; empty in a single-turn round, so `_write_preamble` marks nothing there.
+# Indexed rather than keyed by path, because a path is arbitrary bytes and an
+# associative subscript is not a safe place for those.
+path_marks=()
+
+# The ADR-0020 §1 preamble: what each changed path is, and the prose
+# qualification. Shared by a single-turn round's prompt and every part turn of a
+# parted round (ADR-0331 §5), so the two cannot drift. Each list keeps
+# `changed_paths` order, which is the order `prose_paths` and `other_paths` were
+# filled in.
+_write_preamble() {
+    local i
     echo "### What these paths are"
     echo
     if [[ ${#prose_paths[@]} -gt 0 ]]; then
         echo "**Prose** — documentation read by a human operator, not executed or tested:"
         echo
-        for p in "${prose_paths[@]}"; do _render_path "$p"; done
+        for i in "${!changed_paths[@]}"; do
+            if _is_prose "${changed_paths[$i]}"; then
+                _render_path "${changed_paths[$i]}" "${path_marks[$i]:-}"
+            fi
+        done
         echo
     fi
     if [[ ${#other_paths[@]} -gt 0 ]]; then
         echo "**Code, scripts, config, and tests** — machine-consumed, and judged as such:"
         echo
-        for p in "${other_paths[@]}"; do _render_path "$p"; done
+        for i in "${!changed_paths[@]}"; do
+            if ! _is_prose "${changed_paths[$i]}"; then
+                _render_path "${changed_paths[$i]}" "${path_marks[$i]:-}"
+            fi
+        done
         echo
     fi
     if [[ ${#prose_paths[@]} -gt 0 ]]; then
@@ -1908,6 +1948,31 @@ that you did.
 PROSE
         echo
     fi
+}
+
+# Writes the round's prompt to `$prompt`. With a non-empty, non-blank injection
+# file as $1, the recorded prior-round dispositions are prepended (mechanism b,
+# ADR-0025 §1) so a cold round that lost the warm session still sees what was
+# already raised and answered. Round 1 and every resumed round pass nothing.
+#
+# This is a single-turn round's prompt, and ADR-0331 §4 holds it byte for byte to
+# what it was before parted rounds: `tests/scripts/test_codex_review_parted.py`
+# rebuilds it independently and compares.
+_write_prompt() {
+{
+    if [[ -n "${1:-}" && -s "${1:-}" ]]; then
+        cat "$1"
+        echo
+    fi
+    cat "$rubric"
+    echo
+    echo "## Change under review"
+    echo
+    echo "Review ONLY the committed diff below (${content_sha} vs ${base}). You may read full"
+    echo "files in the repo for context, but do not modify anything. Output exactly the"
+    echo "ranked findings and verdict from docs/review/guide.md."
+    echo
+    _write_preamble
     echo '```diff'
     printf '%s\n' "$diff"
     echo '```'
@@ -2157,7 +2222,577 @@ _report_codex_failure() {
     fi
 }
 
-if [[ "$bypass" -eq 1 ]]; then
+# --- A diff too large for one turn is read in parts (ADR-0331) ---------------
+#
+# One round, one conversation, one terminal verdict and one artifact per persona
+# per tree, exactly as before. What changes is how the diff reaches the reviewer
+# when the round's prompt would not fit one turn: the rendered diff above is cut
+# into PARTS, each read verbatim in a turn of its own within the same round, and
+# a closing VERDICT TURN is handed every part turn's final message and writes the
+# round's review. Under the budget nothing here runs, and the round below is the
+# single-turn round it always was (§4).
+#
+# Why a budget well below Codex's hard input limit (1,048,576 characters): a turn
+# whose context fills is COMPACTED, and a compaction keeps the turn's prompt
+# whole only up to about 254,000 characters, cutting the middle out of anything
+# longer without recording that it did (ADR-0331, Context). So a part that is
+# meant to stay in front of the reviewer for its whole turn has to stay under
+# that line, prompt and all.
+
+# ADR-0331 §3:1. Deliberately not an environment knob: §3 fixes the figure as a
+# measurement of one Codex version and model, and moving it is a new ADR, not a
+# setting. Measured in BYTES (§3:2): a count never lower than the length in
+# characters, so a prompt measured to fit does fit.
+turn_budget=240000
+
+_bytes() {
+    wc -c <"$1" | tr -d '[:space:]'
+}
+
+parted=0
+part_count=0
+single_prompt_bytes=0
+diff_file_bytes=0
+fixed_bytes=0
+fixed_rubric=""
+part_room=0
+part_prompt_bytes=()
+part_diff_bytes=()
+# The conversation a parted round runs in, off the bypass path, and whether its
+# first turn resumed the loop's recorded thread (which decides whether mechanism
+# (b) rides in the verdict turn, exactly as it decides a single-turn round's).
+parted_thread=""
+parted_resumed=0
+parted_tried_resume=0
+
+_part_diff_path() { printf '%s/part-%04d.diff' "$parts_work" "$1"; }
+_part_prompt_path() { printf '%s/prompt-%04d.md' "$parts_work" "$1"; }
+_part_message_path() {
+    printf '%s/messages/part-%04d-of-%04d.md' "$parts_work" "$1" "$part_count"
+}
+
+# A part turn's prompt (§5:6): the persona rubric, the instructions §5:8 lists,
+# the ADR-0020 §1 preamble for the WHOLE change with every path marked by the
+# part that carries it (`path_marks`), and the part itself, verbatim.
+#   $1 output file   $2 part number   $3 part count   $4 the part   $5 rubric
+# The two SHAs are written out in full, so the instructions are the same length
+# for every persona and every part, which the packing bound below relies on.
+_write_part_prompt() {
+    {
+        cat "$5"
+        echo
+        echo "## Change under review — part ${2} of ${3}"
+        echo
+        echo "This change is too large for one review turn, so this round reads its committed"
+        echo "diff (${content_sha} vs ${base_sha}) in ${3} parts, one turn each, and then"
+        echo "closes with one verdict turn. You are reviewing part ${2} of ${3}: the hunks in the"
+        echo "diff at the end of this message. Each path listed under \"What these paths are\""
+        echo "is marked with the part or parts that carry its hunks."
+        echo
+        echo "You may read anything in the repository for context, but do not modify anything."
+        echo "That includes another part's hunks, which you can read with:"
+        echo
+        echo "    git diff ${base_sha} ${content_sha} -- <path>"
+        echo
+        echo "Report your findings for this part as the ranked findings docs/review/guide.md"
+        echo "specifies, or say explicitly that this part has none and what you checked. Write"
+        echo "NO verdict line: the verdict turn that closes this round writes its only verdict."
+        echo
+        _write_preamble
+        echo '```diff'
+        cat "$4"
+        echo '```'
+    } >"$1"
+}
+
+# The verdict turn's prompt (§6:1): any re-injected dispositions (§6:3), the
+# persona rubric, its instructions, and every part turn's captured message from
+# this attempt, verbatim and in part order. Nothing is truncated or dropped from
+# the messages (§6:2); whether the whole fits is the caller's check.
+#   $1 output file   $2 injection file, or ""   $3 "frame" to omit the messages
+_write_verdict_prompt() {
+    local i msg
+    {
+        if [[ -n "${2:-}" && -s "${2:-}" ]]; then
+            cat "$2"
+            echo
+        fi
+        cat "$rubric"
+        echo
+        echo "## Verdict turn — closing this round"
+        echo
+        echo "You have read this change's committed diff (${content_sha} vs ${base_sha})"
+        echo "in ${part_count} parts, one turn each. Below, verbatim and in part order, is the final"
+        echo "message of every part turn of this round. This turn closes the round: its output"
+        echo "is the round's review, and nothing else from the round is."
+        echo
+        echo "Assess the part findings together. Which of them you still hold, and at what"
+        echo "rank, is your own judgement, and so is anything you now see that spans parts."
+        echo "You may read anything in the repository, including any part's hunks with"
+        echo "\`git diff ${base_sha} ${content_sha} -- <path>\`, but do not modify anything."
+        echo
+        echo "Output exactly the ranked findings and verdict from docs/review/guide.md. Before"
+        echo "the ranked findings, under the heading \"Part findings no longer held\", name every"
+        echo "part finding you do not carry into them, each as a bullet (never a numbered item)"
+        echo "with your reason, or write \"None.\" under it."
+        echo
+        if [[ "${3:-}" != "frame" ]]; then
+            for ((i = 1; i <= part_count; i++)); do
+                msg="$(_part_message_path "$i")"
+                echo "===== part ${i} of ${part_count}: its final message, verbatim ====="
+                cat "$msg"
+                if [[ -n "$(tail -c 1 "$msg")" ]]; then
+                    echo
+                fi
+                echo "===== end of part ${i} of ${part_count} ====="
+                echo
+            done
+        fi
+        echo "Now write this round's review as instructed above: the \"Part findings no longer"
+        echo "held\" list, then the ranked findings, then the one-line verdict."
+    } >"$1"
+}
+
+# The partition (§5:2–§5:4), over the rendered diff and nothing the persona
+# chooses. It reads the diff a line at a time and buffers one file entry —
+# `diff --git` through the line before the next one — measuring its header lines
+# (everything before its first `@@ `) and each hunk. A hunk's body lines all
+# carry a one-byte prefix, so neither header can appear inside one.
+#
+#   * An entry that fits a part is packed whole, after the previous entry if the
+#     current part still has room, else at the start of a new part.
+#   * An entry that does not fit a part by itself starts a new part and is split
+#     between its hunks, each piece opening with the entry's header lines. No
+#     hunk is ever split; a piece holds as many whole hunks as fit.
+#   * A hunk that does not fit even beside its header lines, or an entry with no
+#     hunk that does not fit at all, is REFUSED (§5:7), and the whole partition
+#     is still read so every refusal can be named.
+#
+# Consecutive entries with the same `diff --git` line are one changed path,
+# which is what a type change renders as (a deletion and a creation under one
+# header), so the path marks are written per run of those: one `first last` line
+# per changed path, in the order `--name-only` lists them.
+#
+# `LC_ALL=C` makes `length` count bytes, which is §3:2's measure.
+_PARTITION_AWK='
+function fresh_part() {
+    if (part > 0) close(pf)
+    part++
+    pf = sprintf("%s/part-%04d.diff", dir, part)
+    printf "" > pf
+    used = 0
+}
+function emit(a, b,   j) {
+    for (j = a; j <= b; j++) print L[j] > pf
+}
+function refuse(size, what) {
+    nbad++
+    if (nbad <= 5) print size "\t" what > (dir "/refused")
+}
+function flush_entry(   j, esize, first) {
+    if (!have) return
+    have = 0
+    if (nh > 0) HE[nh] = nl
+    esize = hsize
+    for (j = 1; j <= nh; j++) esize += HZ[j]
+    if (nh == 0 && hsize > room) refuse(hsize, "the file entry " L[1] " (it has no hunk)")
+    for (j = 1; j <= nh; j++)
+        if (hsize + HZ[j] > room)
+            refuse(hsize + HZ[j], "the hunk " L[HS[j]] " of " L[1] " (with its header lines)")
+    if (nbad > 0) return
+    if (esize <= room) {
+        if (part == 0 || used + esize > room) fresh_part()
+        first = part
+        emit(1, nl)
+        used += esize
+    } else {
+        if (part == 0 || used > 0) fresh_part()
+        first = part
+        emit(1, hend)
+        used += hsize
+        for (j = 1; j <= nh; j++) {
+            if (used + HZ[j] > room) {
+                fresh_part()
+                emit(1, hend)
+                used += hsize
+                repeated += hsize
+            }
+            emit(HS[j], HE[j])
+            used += HZ[j]
+        }
+    }
+    if (ngroups == 0 || L[1] != gline) {
+        if (ngroups > 0) print gfirst " " glast > (dir "/marks")
+        ngroups++
+        gline = L[1]
+        gfirst = first
+    }
+    glast = part
+}
+/^diff --git / {
+    flush_entry()
+    have = 1
+    nl = 0
+    nh = 0
+    hsize = 0
+    hend = 0
+    split("", L)
+}
+{
+    if (!have) {
+        stray++
+        next
+    }
+    L[++nl] = $0
+    b = length($0) + 1
+    total += b
+    if (substr($0, 1, 3) == "@@ ") {
+        if (nh > 0) HE[nh] = nl - 1
+        nh++
+        HS[nh] = nl
+        HZ[nh] = 0
+    }
+    if (nh == 0) {
+        hsize += b
+        hend = nl
+    } else {
+        HZ[nh] += b
+    }
+}
+END {
+    flush_entry()
+    if (part > 0) close(pf)
+    if (ngroups > 0 && nbad == 0) print gfirst " " glast > (dir "/marks")
+    printf "parts=%d\ngroups=%d\nrepeated=%d\ntotal=%d\nstray=%d\nrefused=%d\n", \
+        part, ngroups, repeated + 0, total + 0, stray + 0, nbad + 0 > (dir "/summary")
+}
+'
+
+# One `key=value` of the partition's summary.
+_partition_field() {
+    sed -n "s/^${1}=//p" "${parts_work}/summary"
+}
+
+# Fails the round, before any turn, for a reason that is the driver's own fault
+# rather than the change's: what it read does not add up to the rendered diff,
+# so whatever it would hand the reviewer could not be shown to cover the diff.
+_partition_broken() {
+    echo "refusing to start a parted round: $1 (ADR-0331 §5)." >&2
+    echo "  Nothing has been sent and nothing will be recorded. This is a defect in" >&2
+    echo "  scripts/codex-review.sh's partition, not in the change under review." >&2
+    exit 1
+}
+
+# Cuts the rendered diff into parts, checks the whole partition (§5:7) and builds
+# every part turn's prompt, all before any turn is invoked.
+_partition_diff() {
+    local diff_file="${parts_work}/diff" units nines candidate size best=-1 i line
+    mkdir -p "${parts_work}/messages"
+    printf '%s\n' "$diff" >"$diff_file"
+    diff_file_bytes="$(_bytes "$diff_file")"
+
+    # The parts must be the same for every persona reviewing this tree (§5:5),
+    # so they are packed under ONE bound on the fixed content, and the persona's
+    # rubric is the only input to it that differs between personas. The bound
+    # uses the largest file a persona could name under docs/review/, which makes
+    # it the same whichever persona is running.
+    shopt -s nullglob
+    for candidate in "${repo_root}"/docs/review/*.md; do
+        size="$(_bytes "$candidate")"
+        if [[ "$size" -gt "$best" ]]; then
+            best="$size"
+            fixed_rubric="$candidate"
+        fi
+    done
+    shopt -u nullglob
+
+    # The two other inputs that vary are the part numbers and each path's mark,
+    # and neither is known until the partition is. Both are bounded by the widest
+    # number any part could carry: every part holds at least one hunk or one
+    # entry, so the count of those bounds the count of parts.
+    units="$(grep -c -e '^@@ ' -e '^diff --git ' "$diff_file" || true)"
+    nines="$(printf '%*s' "${#units}" '' | tr ' ' '9')"
+    path_marks=()
+    for i in "${!changed_paths[@]}"; do
+        path_marks[i]="(parts ${nines}-${nines})"
+    done
+    _write_part_prompt "${parts_work}/fixed" "$nines" "$nines" /dev/null "$fixed_rubric"
+    fixed_bytes="$(_bytes "${parts_work}/fixed")"
+    part_room=$((turn_budget - fixed_bytes))
+
+    LC_ALL=C awk -v room="$part_room" -v dir="$parts_work" "$_PARTITION_AWK" "$diff_file"
+
+    if [[ "$(_partition_field stray)" != "0" ]]; then
+        _partition_broken "the rendered diff has lines before its first file entry"
+    fi
+
+    if [[ "$(_partition_field refused)" != "0" ]]; then
+        echo "refusing to start a parted round (ADR-0331 §5): the turn budget cannot hold" >&2
+        echo "  a part turn's fixed content together with what follows. Nothing has been" >&2
+        echo "  sent to Codex and nothing will be recorded." >&2
+        while IFS=$'\t' read -r size line; do
+            echo "  does not fit: ${line:0:200} — ${size} bytes" >&2
+        done <"${parts_work}/refused"
+        if [[ "$(_partition_field refused)" -gt 5 ]]; then
+            echo "  …and $(($(_partition_field refused) - 5)) more of the same." >&2
+        fi
+        echo "  fixed content: ${fixed_bytes} bytes (the largest rubric," \
+            "${fixed_rubric#"${repo_root}/"}, the marked preamble for" \
+            "${#changed_paths[@]} path(s), and the part instructions)" >&2
+        echo "  turn budget:   ${turn_budget} bytes, leaving ${part_room} for a part's diff" >&2
+        echo "  Cut the change, or what did not fit." >&2
+        exit 1
+    fi
+
+    part_count="$(_partition_field parts)"
+    if [[ "$(_partition_field groups)" != "${#changed_paths[@]}" ]]; then
+        _partition_broken "it read $(_partition_field groups) changed path(s) where git lists ${#changed_paths[@]}"
+    fi
+
+    # §5:4, checked rather than trusted: with the repeated header lines taken out,
+    # the parts hold exactly the rendered diff's bytes.
+    local held=0
+    for ((i = 1; i <= part_count; i++)); do
+        part_diff_bytes[i]="$(_bytes "$(_part_diff_path "$i")")"
+        held=$((held + part_diff_bytes[i]))
+    done
+    if [[ $((held - $(_partition_field repeated))) -ne "$diff_file_bytes" ||
+        "$(_partition_field total)" -ne "$diff_file_bytes" ]]; then
+        _partition_broken "its parts hold ${held} bytes less $(_partition_field repeated) repeated, where the rendered diff is ${diff_file_bytes}"
+    fi
+
+    # The real marks, then the real prompts, each checked against the budget —
+    # by construction they fit, and a prompt that did not would be one this
+    # round must never send (§3:1).
+    i=0
+    while read -r first last; do
+        if [[ "$first" == "$last" ]]; then
+            path_marks[i]="(part ${first})"
+        else
+            path_marks[i]="(parts ${first}-${last})"
+        fi
+        i=$((i + 1))
+    done <"${parts_work}/marks"
+    for ((i = 1; i <= part_count; i++)); do
+        _write_part_prompt "$(_part_prompt_path "$i")" "$i" "$part_count" \
+            "$(_part_diff_path "$i")" "$rubric"
+        part_prompt_bytes[i]="$(_bytes "$(_part_prompt_path "$i")")"
+        if [[ "${part_prompt_bytes[i]}" -gt "$turn_budget" ]]; then
+            _partition_broken "part ${i}'s turn prompt is ${part_prompt_bytes[i]} bytes"
+        fi
+    done
+}
+
+# HEAD and the working tree, re-checked after every turn (§6:7) for the reason
+# the check at the end of every round gives: the reviewer reads files as it goes.
+_require_settled() {
+    if [[ "$(git rev-parse HEAD)" != "$sha" || -n "$(git status --porcelain)" ]]; then
+        echo "the checkout changed during ${1} of this parted round; not recording it" >&2
+        echo "HEAD was ${sha}, now $(git rev-parse HEAD); re-run on a settled tree" \
+            "(ADR-0331 §6)" >&2
+        exit 1
+    fi
+}
+
+# One turn of a parted round, into $3, from the prompt in $2. Any failure fails
+# the attempt (§6:8): the script exits, and nothing has been recorded yet.
+#
+# Off the bypass path every turn runs in the persona's one conversation (§5:9):
+# the first resumes the loop's recorded thread, or starts one, and every later
+# turn resumes that. A recorded thread that cannot be resumed degrades exactly as
+# a single-turn round's does — a fresh read-only session, with the prior
+# dispositions re-injected (in the verdict turn, §6:3) — but only for the first
+# turn: once this round's own conversation exists, losing it is a failed turn.
+# Every turn is proven read-only from Codex's own record (§5:10).
+#
+# On the bypass path every turn is a cold invocation made exactly as that path
+# makes its one (§8:2): no session, no sandbox, no proof.
+_run_turn() {
+    local label="$1" turn_prompt="$2" turn_out="$3" status=0 ran=0 eff
+    local -a ro_config=(-c sandbox_mode="read-only")
+    : >"$turn_out"
+    echo "  ${label}: a $(_bytes "$turn_prompt")-byte turn prompt…" >&2
+    if [[ "$bypass" -eq 1 ]]; then
+        codex exec --dangerously-bypass-approvals-and-sandbox "${model_args[@]}" \
+            -o "$turn_out" - <"$turn_prompt" >&2 || status=$?
+        if [[ "$status" -ne 0 ]]; then
+            echo "codex exec (bypass, cold, ${label}) exited ${status}; its output is above." >&2
+            echo "  The parted round fails and records nothing (ADR-0331 §6)." >&2
+            exit 1
+        fi
+        _require_settled "$label"
+        return 0
+    fi
+    if [[ -z "$parted_thread" && -n "$recorded_thread" && "$parted_tried_resume" -eq 0 ]]; then
+        parted_tried_resume=1
+        codex exec resume "$recorded_thread" --json "${ro_config[@]}" "${model_args[@]}" \
+            -o "$turn_out" - <"$turn_prompt" >"$stream" || status=$?
+        if [[ "$status" -eq 0 ]]; then
+            parted_thread="$recorded_thread"
+            parted_resumed=1
+            ran=1
+        else
+            echo "resume unavailable; starting a fresh read-only session with prior" \
+                "findings re-injected in the verdict turn" >&2
+            _report_codex_failure "resume ${recorded_thread:0:12}, ${label}" "$status"
+            status=0
+            : >"$turn_out"
+        fi
+    fi
+    if [[ "$ran" -eq 0 && -z "$parted_thread" ]]; then
+        codex exec --json -s read-only "${ro_config[@]}" "${model_args[@]}" \
+            -o "$turn_out" - <"$turn_prompt" >"$stream" || status=$?
+        if [[ "$status" -ne 0 ]]; then
+            _report_codex_failure "the fresh read-only session, ${label}" "$status"
+            echo "  The parted round fails and records nothing (ADR-0331 §6)." >&2
+            exit 1
+        fi
+        parted_thread="$(grep -o '"thread_id":"[^"]*"' "$stream" | head -1 |
+            sed 's/.*:"//; s/"$//' || true)"
+    elif [[ "$ran" -eq 0 ]]; then
+        codex exec resume "$parted_thread" --json "${ro_config[@]}" "${model_args[@]}" \
+            -o "$turn_out" - <"$turn_prompt" >"$stream" || status=$?
+        if [[ "$status" -ne 0 ]]; then
+            _report_codex_failure "resume ${parted_thread:0:12}, ${label}" "$status"
+            echo "  The parted round fails and records nothing (ADR-0331 §6)." >&2
+            exit 1
+        fi
+    fi
+    eff="$(_effective_sandbox "$parted_thread" || true)"
+    if [[ "$eff" != "read-only" ]]; then
+        echo "refusing to record: could not prove ${label} of this parted round ran" \
+            "read-only (ADR-0331 §5)" >&2
+        echo "effective sandbox for thread ${parted_thread:-<unknown>} was" \
+            "'${eff:-unreadable}' (a widening \$CODEX_HOME/config.toml, a" \
+            "bypass flag, or a missing session rollout can cause this)" >&2
+        exit 1
+    fi
+    _require_settled "$label"
+}
+
+# The whole parted round: every part turn in order, then the verdict turn, whose
+# final message lands in `$out` — the same file a single-turn round's review
+# does, so every check and record below applies to it unchanged (§6:4).
+_run_parted_round() {
+    local i label message verdict_prompt="${parts_work}/verdict-prompt.md" size inject_size
+    echo "Running Codex '${persona}' review of HEAD vs '${base}' as a parted round:" \
+        "${part_count} part turns, then one verdict turn (ADR-0331)…" >&2
+    for ((i = 1; i <= part_count; i++)); do
+        label="part ${i} of ${part_count}"
+        message="$(_part_message_path "$i")"
+        _run_turn "$label" "$(_part_prompt_path "$i")" "$message"
+        # A turn that wrote nothing is a failed turn — a dropped connection, or a
+        # `turn.failed` that still exited 0 — and its part would otherwise reach
+        # the verdict turn as nothing at all.
+        if [[ ! -s "$message" ]] || ! grep -q '[^[:space:]]' "$message"; then
+            echo "codex returned an empty message for ${label}; the parted round fails" \
+                "and records nothing (ADR-0331 §6)" >&2
+            if [[ "$bypass" -eq 0 && -s "$stream" ]]; then
+                echo "its --json event stream ends (stdout, where codex puts failures):" >&2
+                tail -n 5 "$stream" | cut -c 1-400 | sed 's/^/  | /' >&2
+            fi
+            exit 1
+        fi
+    done
+
+    _write_verdict_prompt "$verdict_prompt" ""
+    size="$(_bytes "$verdict_prompt")"
+    if [[ "$size" -gt "$turn_budget" ]]; then
+        echo "refusing to run the verdict turn: the ${part_count} part messages, with the" >&2
+        echo "  rubric and the verdict instructions, come to ${size} bytes, over the turn" >&2
+        echo "  budget of ${turn_budget}. No part message is ever cut or dropped, so the" >&2
+        echo "  round fails and records nothing (ADR-0331 §6)." >&2
+        exit 1
+    fi
+    # Mechanism (b) rides in the verdict turn, on the condition it rides in a
+    # single-turn round on: the conversation was started fresh rather than
+    # resumed. Dropped whole when it does not fit, which is ADR-0025 §1's floor.
+    if [[ "$bypass" -eq 0 && "$parted_resumed" -eq 0 && -n "$prior_snapshot" &&
+        -s "$prior_snapshot" ]]; then
+        _render_dispositions "$inject_tmp"
+        _write_verdict_prompt "${verdict_prompt}.injected" "$inject_tmp"
+        inject_size="$(_bytes "${verdict_prompt}.injected")"
+        if [[ "$inject_size" -le "$turn_budget" ]]; then
+            mv "${verdict_prompt}.injected" "$verdict_prompt"
+        else
+            rm -f "${verdict_prompt}.injected"
+            echo "prior findings would bring the verdict turn to ${inject_size} bytes, over" \
+                "the turn budget (${turn_budget}); dropping them whole (the degradation" \
+                "floor). They remain recorded in ${prior_snapshot}." >&2
+        fi
+    fi
+    _run_turn "the verdict turn" "$verdict_prompt" "$out"
+    round_thread="$parted_thread"
+}
+
+# Each part turn's captured message, kept in `.review/` beside the artifact the
+# round records (§5:11), under the artifact's own name. Written before the
+# artifact, so an interruption leaves at worst an inert directory no artifact
+# names, never an artifact whose parts are missing. A re-review of identical
+# content reuses the artifact's name (ADR-0027 §6), so it replaces that name's
+# parts as it replaces the artifact.
+_keep_part_messages() {
+    local dest="${review_dir}/parts/${artifact##*/}"
+    dest="${dest%.md}"
+    local staged="${dest}.partial.$$"
+    mkdir -p "${review_dir}/parts"
+    rm -rf "$staged"
+    cp -R "${parts_work}/messages" "$staged"
+    rm -rf "$dest"
+    mv "$staged" "$dest"
+}
+
+# `--plan`'s report, on stdout.
+_print_plan() {
+    local i largest=0 largest_part=0
+    echo "persona        ${persona}"
+    echo "range          ${base_sha}...${content_sha}"
+    echo "turn budget    ${turn_budget} bytes (ADR-0331 §3)"
+    if [[ "$parted" -eq 0 ]]; then
+        echo "round          single-turn: its prompt is ${single_prompt_bytes} bytes, within" \
+            "the budget, so it runs exactly as it always has (ADR-0331 §4)"
+        return 0
+    fi
+    echo "rendered diff  ${diff_file_bytes} bytes across ${#changed_paths[@]} changed path(s)"
+    echo "round          parted: as one turn its prompt would be ${single_prompt_bytes} bytes," \
+        "so it reads the diff in ${part_count} part turn(s), then one verdict turn" \
+        "(ADR-0331 §5)"
+    echo "fixed content  ${fixed_bytes} bytes, the bound every part is packed under: the" \
+        "largest rubric (${fixed_rubric#"${repo_root}/"}), the marked preamble with every" \
+        "mark at its widest, and the part instructions"
+    echo "room per part  ${part_room} bytes of diff"
+    for ((i = 1; i <= part_count; i++)); do
+        printf 'part %4d/%-4d %7d-byte turn prompt, %7d bytes of diff\n' \
+            "$i" "$part_count" "${part_prompt_bytes[i]}" "${part_diff_bytes[i]}"
+        if [[ "${part_prompt_bytes[i]}" -gt "$largest" ]]; then
+            largest="${part_prompt_bytes[i]}"
+            largest_part="$i"
+        fi
+    done
+    echo "largest        part ${largest_part}, a ${largest}-byte turn prompt"
+    _write_verdict_prompt "${parts_work}/verdict-frame.md" "" frame
+    echo "verdict turn   $(_bytes "${parts_work}/verdict-frame.md") bytes of rubric and" \
+        "instructions, before the ${part_count} part message(s) it must also carry"
+}
+
+# §4's test, on exactly the prompt a single-turn round would send without
+# re-injected dispositions. At or under the budget, the round below is today's
+# round byte for byte; only over it does anything above run.
+_write_prompt ""
+single_prompt_bytes="$(_bytes "$prompt")"
+if [[ "$single_prompt_bytes" -gt "$turn_budget" ]]; then
+    parted=1
+    parts_work="$(mktemp -d -t "codex-parts-${persona}.XXXXXX")"
+    _partition_diff
+fi
+if [[ "$mode" == "plan" ]]; then
+    _print_plan
+    exit 0
+fi
+
+if [[ "$parted" -eq 1 ]]; then
+    _run_parted_round
+elif [[ "$bypass" -eq 1 ]]; then
     _write_prompt ""
     echo "Running Codex '${persona}' review of HEAD vs '${base}' (bypass, cold)…" >&2
     # -o captures just the final review; progress streams to stderr.
@@ -2465,6 +3100,9 @@ rm -f "$description_tmp"
 # The aggregate (§2) is recorded on the same line so `just ship` can render it
 # into the PR comment: the human at merge then sees the same round count and
 # churn ratio the author saw, which is the whole point of printing it.
+if [[ "$parted" -eq 1 ]]; then
+    _keep_part_messages
+fi
 artifact_tmp="${artifact}.partial.$$"
 {
     # Both binary counts are recorded, not just the one in the final diff. §2's
@@ -2566,4 +3204,8 @@ fi
 echo >&2
 echo "===== ${persona} review (HEAD vs ${base}) =====" >&2
 echo "(recorded at ${artifact#"${repo_root}/"}, tree ${tree:0:12}, round ${round})" >&2
+if [[ "$parted" -eq 1 ]]; then
+    echo "(a parted round: ${part_count} part turns and one verdict turn; the part" \
+        "messages are kept in ${review_dir#"${repo_root}/"}/parts/$(basename "$artifact" .md)/)" >&2
+fi
 cat "$out"
