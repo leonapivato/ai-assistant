@@ -97,6 +97,7 @@ from ai_assistant.core.errors import TransportError
 from ai_assistant.core.types import (
     BeliefBand,
     Memory,
+    MemorySource,
     ProvisioningState,
     SecretName,
     SecretScope,
@@ -475,8 +476,20 @@ class PriorIngestion:
         reading = await self.reader.read()
         for item, proposal in enumerate(reading.proposals):
             minted = proposal.proposed
+            # The replay stands for what the reader's own provenance would have made,
+            # so it reads that provenance rather than assuming it: a reader that
+            # promoted outside content to the user's word, or dropped its source's
+            # attribution, fails here instead of being laundered into a source's report
+            # (ADR-0098 §4).
+            provenance = minted.provenance
+            if provenance.source is not MemorySource.EXTERNAL or provenance.attestation is None:
+                msg = (
+                    f"the reader minted {minted.id!r} as {provenance.source}, attested by "
+                    f"{provenance.attestation!r}: a source's report is EXTERNAL and attested"
+                )
+                raise AssertionError(msg)
             support = sourced_support(
-                minted.provenance.attestation,
+                provenance.attestation,
                 episode=PRIOR_INGESTION_EPISODE,
                 item=item,
                 when=NOW,

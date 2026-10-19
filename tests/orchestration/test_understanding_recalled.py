@@ -220,7 +220,7 @@ async def test_an_attested_fact_is_attributed_to_its_source() -> None:
     model = FakeModelProvider.scripted(_proposal())
     await _understand(await _stage(model), _found(reported))
     assert _sent(model)["recalled"][0]["item"] == (
-        "a remembered fact: something a connected source reported, never something the user said"
+        "a remembered fact: something from a source, never something the user said"
     )
 
 

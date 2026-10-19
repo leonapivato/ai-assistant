@@ -6522,7 +6522,7 @@ _ORIGIN_WORDS: Final[dict[SupportOrigin, str]] = {
     SupportOrigin.USER_MESSAGE: "your message",
     SupportOrigin.OUTSIDE_INPUT: "a report from outside",
     SupportOrigin.CONFIRMATION: "your yes to my question",
-    SupportOrigin.EVIDENCE: "a connected source",
+    SupportOrigin.EVIDENCE: "outside content I read",
     SupportOrigin.ASSISTANT_MESSAGE: "my own message",
     SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE: "my own message, over outside content",
     SupportOrigin.REMEMBERED: "something I chose to remember",
@@ -6601,7 +6601,13 @@ def _why(belief: Belief | BeliefSummary) -> str:
         case MemoryStanding.SAID:
             return "you told me, and your own word is the whole of it."
         case MemoryStanding.SOURCE:
-            return "a source you connected reported it — neither your word nor my inference."
+            # Every origin ranked at source (ADR-0328 §4): an outside report, an
+            # evidence item read from outside content, or a message of my own. What it
+            # rests on says which; nothing here claims an integration reported it.
+            return (
+                "it came from a source rather than from you — neither your word nor my "
+                "inference. What it rests on says which source."
+            )
         case MemoryStanding.INFERENCE:
             return _evidence_words(belief) + _outside_warrant(belief)
         case _:  # pragma: no cover - exhaustive
@@ -6646,8 +6652,8 @@ def _forget_warning(band: BeliefBand) -> str:
             )
         case BeliefBand.ATTESTED:
             return (
-                "A connected source reported this. Forgetting it destroys my copy but "
-                "not the source, so a later sync may bring it back."
+                "This came from a source, not from you. Forgetting it destroys my copy but "
+                "not the source, so I may come across it again."
             )
         case _:  # pragma: no cover - exhaustive
             assert_never(band)
@@ -6763,6 +6769,12 @@ def _render_belief_fields(belief: Belief | BeliefSummary) -> None:
         # An episode has no standing, supports or reading (ADR-0074 §6): when it
         # happened, its window and its id are what it carries.
         _print(f"  [dim]Happened:[/] {_when_or_unknown(belief.learned)}")
+        if belief.attestation is not None:
+            # ADR-0189 §4: what reported it, and when that source said so, on its clock.
+            _print(
+                f"  [dim]Reported by:[/] {_safe(belief.attestation.reported_by)}, as of "
+                f"{_when(belief.attestation.reported_at)} on its own clock"
+            )
         if belief.valid_until is not None:
             _print(f"  [dim]Kept until:[/] {_when(belief.valid_until)}")
         _print(f"  [dim]id:[/] {_safe(belief.id)}")
@@ -6819,7 +6831,14 @@ def _render_supports(belief: Belief) -> None:
         stopped = " · [dim]no longer counted[/]" if not support.counts else ""
         when = "" if support.when is None else f" · {_when(support.when)}"
         source = support.source_details
-        named = "" if source is None else f" · {_safe(source.reported_by)}"
+        # ADR-0189 §4: the source's own reporting instant, said as its clock, beside the
+        # `when` this system read the part at.
+        named = (
+            ""
+            if source is None
+            else f" · {_safe(source.reported_by)}, which said so as of "
+            f"{_when(source.reported_at)} on its own clock"
+        )
         _print(f"    - {_ORIGIN_WORDS[support.origin]}{named}{when}{against}{stopped}")
         if support.content is None:
             _print("      [yellow]—[/] [dim]what it pointed at is gone.[/]")

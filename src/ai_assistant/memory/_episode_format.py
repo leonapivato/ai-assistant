@@ -121,7 +121,9 @@ def check_memory_format(conn: sqlite3.Connection, *, allow_empty: bool = False) 
     return found is not None
 
 
-def inspect_existing(path: str) -> None:
+def inspect_existing(
+    path: str, *, accepted: frozenset[int] = frozenset({EPISODE_RECORD_FORMAT})
+) -> None:
     """Check existing files without allowing SQLite recovery to modify them.
 
     A read-only connection suffices for a clean rollback-mode database. Pending
@@ -133,6 +135,15 @@ def inspect_existing(path: str) -> None:
     The marker is the whole test, for the conversation store as for the memory
     store: the conversation store's turn table and its column check are retired
     (ADR-0283 §6, §12), so there is no second shape to probe.
+
+    ``accepted`` is the opener's own set of markers, so a file the opener would then
+    refuse is refused here, before a writable open could recover its journal: the
+    conversation store opens 12 alone, the memory store 12 and 13 (ADR-0328 §16:8,
+    ADR-0326 §5).
+
+    Args:
+        path: The store's file, or ``":memory:"``.
+        accepted: The markers the calling opener opens.
     """
     if path == ":memory:":
         return
@@ -143,14 +154,14 @@ def inspect_existing(path: str) -> None:
         source = source.resolve()
         sidecars = tuple(Path(f"{source}{suffix}") for suffix in ("-journal", "-wal", "-shm"))
         if _wal_header(source) or any(file.exists() or file.is_symlink() for file in sidecars):
-            _inspect_copy(source, sidecars)
+            _inspect_copy(source, sidecars, accepted)
         else:
             with contextlib.closing(
                 sqlite3.connect(
                     f"{source.resolve().as_uri()}?mode=ro", uri=True, isolation_level=None
                 )
             ) as conn:
-                _inspect_connection(conn)
+                _inspect_connection(conn, accepted)
     except (OSError, sqlite3.Error, ValueError) as exc:
         raise MemoryStoreError("cannot inspect existing episode record format") from exc
 
@@ -163,10 +174,10 @@ def _wal_header(path: Path) -> bool:
     return header.startswith(b"SQLite format 3\0") and b"\x02" in header[18:20]
 
 
-def _inspect_connection(conn: sqlite3.Connection) -> None:
-    # Any marker some store of this build opens is admitted here, and the opener
-    # rechecks its own inside its initialization transaction.
-    stored_format(conn, allow_empty=True, accepted=MEMORY_RECORD_FORMATS)
+def _inspect_connection(conn: sqlite3.Connection, accepted: frozenset[int]) -> None:
+    # The calling opener's own markers, which it rechecks inside its initialization
+    # transaction.
+    stored_format(conn, allow_empty=True, accepted=accepted)
 
 
 def _file_state(path: Path) -> tuple[int, int, int, int, int] | None:
@@ -177,7 +188,7 @@ def _file_state(path: Path) -> tuple[int, int, int, int, int] | None:
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
-def _inspect_copy(source: Path, sidecars: tuple[Path, ...]) -> None:
+def _inspect_copy(source: Path, sidecars: tuple[Path, ...], accepted: frozenset[int]) -> None:
     files = (source, *sidecars)
     before = tuple(_file_state(file) for file in files)
     with tempfile.TemporaryDirectory(prefix="assistant-format-") as directory:
@@ -195,7 +206,7 @@ def _inspect_copy(source: Path, sidecars: tuple[Path, ...]) -> None:
         if journal.exists():
             _refuse_super_journal(journal)
         with contextlib.closing(sqlite3.connect(copied, isolation_level=None)) as conn:
-            _inspect_connection(conn)
+            _inspect_connection(conn, accepted)
 
 
 def _refuse_super_journal(journal: Path) -> None:

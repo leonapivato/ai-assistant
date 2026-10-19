@@ -67,6 +67,7 @@ from ai_assistant.core.types import (
     TrackRecordSummary,
     Validity,
     belief_view,
+    episode_view,
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.orchestration import (
@@ -95,6 +96,7 @@ from ai_assistant.testing.memories import (
     legacy_support,
     memory,
     memory_in_band,
+    message_support,
     remembered_support,
     said_support,
     sourced_support,
@@ -1072,14 +1074,71 @@ def test_a_confirmed_memory_says_the_user_confirmed_the_wording(output: StringIO
 def test_a_sourced_memory_names_the_source_on_its_support(output: StringIO) -> None:
     """ADR-0189 §4 on a memory: the source is named where its source details are (§15:2).
 
-    At source granularity and no finer, and apposed to "a connected source" so it cannot
+    At source granularity and no finer, and apposed to the origin's words so it cannot
     be read as a person (ADR-0098 §8, ADR-0093 §7).
     """
     cli._render_belief(_belief(BeliefBand.ATTESTED, attestation=ATTESTED_BY))
     rendered = _flat(output.getvalue())
     assert "from a source" in rendered
     assert "neither your word nor my inference" in rendered
-    assert "a connected source · work-calendar" in rendered
+    assert "outside content I read · work-calendar" in rendered
+
+
+def test_each_sources_report_time_is_shown_as_its_own_clock(output: StringIO) -> None:
+    """ADR-0189 §4 on every support: the source's reporting instant, said as its clock.
+
+    Two sources reporting at instants distinct from when each part was read: both report
+    times are shown, each beside its source, and neither is the encounter time.
+    """
+    early = Attestation(reported_by="work-calendar", reported_at=REPORTED_AT)
+    late = Attestation(reported_by="home-calendar", reported_at=REPORTED_AT + timedelta(days=2))
+    held = memory(
+        "rec-1",
+        "the office is in Boston",
+        sourced_support(early, episode="activation:a", when=LEARNED),
+        sourced_support(late, episode="activation:b", when=LEARNED + timedelta(days=5)),
+    )
+    cli._render_belief(_view(held))
+    rendered = _flat(output.getvalue())
+    assert f"work-calendar, which said so as of {cli._when(REPORTED_AT)} on its own clock" in (
+        rendered
+    )
+    assert (
+        f"home-calendar, which said so as of {cli._when(REPORTED_AT + timedelta(days=2))} "
+        "on its own clock"
+    ) in rendered
+
+
+def test_an_attested_episode_names_its_source_and_its_clock(output: StringIO) -> None:
+    """ADR-0189 §4 on an episode's projection: what reported it, and when, on its clock."""
+    episode = EpisodicMemory(
+        id="activation:a",
+        content="a source's report",
+        occurred_at=LEARNED,
+        provenance=Provenance(
+            source=MemorySource.EXTERNAL,
+            confidence=0.9,
+            last_updated=LEARNED,
+            attestation=ATTESTED_BY,
+        ),
+    )
+    cli._render_belief(episode_view(episode))
+    rendered = _flat(output.getvalue())
+    assert (
+        f"Reported by: work-calendar, as of {cli._when(REPORTED_AT)} on its own clock" in rendered
+    )
+
+
+def test_a_memory_resting_on_my_own_message_is_not_attributed_to_a_connected_source(
+    output: StringIO,
+) -> None:
+    """ADR-0328 §4: an assistant message ranks at source, and no integration reported it."""
+    held = memory("rec-1", "the office is in Boston", message_support())
+    cli._render_belief(_view(held))
+    rendered = _flat(output.getvalue())
+    assert "from a source" in rendered
+    assert "connected source" not in rendered
+    assert "my own message" in rendered
 
 
 def test_an_inference_resting_on_outside_content_says_so_without_reattributing_the_words(
@@ -1222,7 +1281,7 @@ def test_render_beliefs_does_not_offer_a_next_page_for_a_short_one(output: Strin
     [
         (BeliefBand.ASSERTED, "permanent"),
         (BeliefBand.DERIVED, "may reach it again"),
-        (BeliefBand.ATTESTED, "may bring it back"),
+        (BeliefBand.ATTESTED, "may come across it again"),
     ],
 )
 def test_forget_prompt_warns_by_band_because_the_consequence_differs(

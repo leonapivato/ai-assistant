@@ -427,6 +427,22 @@ def test_the_standing_attestation_is_the_latest_backing_sources() -> None:
     assert memory("m", "c", said_support()).standing_attestation is None
 
 
+def test_a_latest_source_support_stating_no_details_answers_none() -> None:
+    """§2:6: the latest backing source support's details, ``None`` included.
+
+    An older support's attribution never stands in for a newer one that states none.
+    """
+    older = Attestation(reported_by="old-calendar", reported_at=AT)
+    held = memory(
+        "m",
+        "c",
+        sourced_support(older, episode="activation:a", when=AT),
+        message_support("activation:b", when=_LATER),
+    )
+    assert held.standing is MemoryStanding.SOURCE
+    assert held.standing_attestation is None
+
+
 def test_the_track_summary_counts_its_entries() -> None:
     """§15:1's track-record counts and last use."""
 
@@ -591,6 +607,27 @@ def test_a_question_is_raised_and_resolved_by_operations() -> None:
         )
 
 
+def test_a_raise_question_cites_a_support_the_question_rests_on() -> None:
+    """§5's table: a raise question cites a support the question rests on."""
+    first = remembered_support("activation:first")
+    second = remembered_support("activation:second")
+    held = memory("m", "c", first, second)
+    question = OpenQuestion(
+        id="q-1",
+        kind=OpenQuestionKind.RECHECK,
+        asks="is this still so?",
+        rests_on=(second.points_at,),
+        raised_at=_LATER,
+        raised_by=MemoryWriterName.REMEMBER,
+    )
+    with pytest.raises(ValueError, match="rests on"):
+        applied_operation(
+            held,
+            _operation(MemoryOperationKind.RAISE_QUESTION, first, question="q-1"),
+            question=question,
+        )
+
+
 # --- the stored-record union and its helpers (§2, §12) ----------------------------
 
 
@@ -717,6 +754,35 @@ def test_an_episode_a_caller_asked_for_is_projected_without_a_standing() -> None
     assert summary.learned == AT
     assert view.supports == ()
     assert view.model_dump(exclude={"supports"}) == summary.model_dump()
+
+
+def test_an_attested_episodes_projection_carries_its_attestation() -> None:
+    """ADR-0189 §2:1 still binds an episode's projection (ADR-0328 §18 scopes it off a memory).
+
+    An ``EXTERNAL`` episode projects as ``ATTESTED`` with what reported it and when, on
+    the listing and on the single view; a memory's projection carries none.
+    """
+    episode = EpisodicMemory(
+        id="e",
+        content="a source's report",
+        occurred_at=AT,
+        provenance=Provenance(
+            source=MemorySource.EXTERNAL,
+            confidence=0.9,
+            last_updated=_LATER,
+            attestation=_SOURCE,
+        ),
+    )
+    assert episode_summary(episode).band is BeliefBand.ATTESTED
+    assert episode_summary(episode).attestation == _SOURCE
+    assert episode_view(episode).attestation == _SOURCE
+    assert episode_summary(_episode()).attestation is None
+    held = belief_view(memory("m", "c", sourced_support(_SOURCE)), now=_LATER, contents={})
+    assert held.attestation is None
+    with pytest.raises(ValidationError, match="supports"):
+        BeliefSummary.model_validate(
+            held.model_dump(exclude={"supports"}) | {"attestation": _SOURCE}
+        )
 
 
 def test_a_projection_says_which_kind_it_is_and_carries_its_shape() -> None:

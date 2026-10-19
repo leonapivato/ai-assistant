@@ -288,6 +288,37 @@ async def test_the_upgraded_store_reads_as_it_did(legacy: Path) -> None:
         store.close()
 
 
+async def test_the_upgrade_persists_each_memorys_band_for_band_scoped_reads(
+    legacy: Path,
+) -> None:
+    """§7:11's persisted band is written for every upgraded memory, as §6 computes it.
+
+    Every legacy memory stands at inference (§16:10), so the formerly asserted and
+    attested records become ``DERIVED`` in the column band-scoped reads filter on, and
+    a ``DERIVED`` search and listing find them while an ``ASSERTED`` or ``ATTESTED`` one
+    finds none.
+    """
+    store = _open(legacy)
+    try:
+        listed = {record.id for record in await store.list_beliefs(bands=[BeliefBand.DERIVED])}
+        assert listed == set(_WORDINGS) - {"semantic-retired"}
+        for band in (BeliefBand.ASSERTED, BeliefBand.ATTESTED):
+            assert await store.list_beliefs(bands=[band]) == []
+        found = await store.search(
+            "The user's sister is called Ada.", limit=1, bands=[BeliefBand.DERIVED]
+        )
+        assert [record.id for record in found.records] == ["semantic-asserted"]
+        found = await store.search(
+            "Dentist appointment on Thursday at 9.", limit=1, bands=[BeliefBand.DERIVED]
+        )
+        assert [record.id for record in found.records] == ["semantic-external"]
+    finally:
+        store.close()
+    with sqlite3.connect(legacy) as conn:
+        bands = dict(conn.execute("SELECT id, band FROM records WHERE kind = 'memory'"))
+    assert bands == dict.fromkeys(_WORDINGS, BeliefBand.DERIVED.value)
+
+
 async def test_a_second_open_changes_nothing(legacy: Path) -> None:
     """The upgrade runs once: a file already at the new label is not upgraded again."""
     await _upgraded(legacy)

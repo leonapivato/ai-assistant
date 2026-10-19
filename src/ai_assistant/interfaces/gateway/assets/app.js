@@ -4275,7 +4275,7 @@ function bandWords(band) {
     return "I worked it out";
   }
   if (band === "attested") {
-    return "A connected source reported it";
+    return "From a source";
   }
   return band;
 }
@@ -4304,7 +4304,7 @@ const ORIGIN_WORDS = {
   user_message: "your message",
   outside_input: "a report from outside",
   confirmation: "your yes to my question",
-  evidence: "a connected source",
+  evidence: "outside content I read",
   assistant_message: "my own message",
   assistant_message_over_outside: "my own message, over outside content",
   remembered: "something I chose to remember",
@@ -4339,7 +4339,12 @@ function whyHeld(belief) {
     return "You told me, and your own word is the whole of it.";
   }
   if (belief.standing === "source") {
-    return "A source you connected reported it — neither your word nor my inference.";
+    // Every origin ranked at source (ADR-0328 §4): an outside report, an evidence item
+    // read from outside content, or a message of my own. What it rests on says which.
+    return (
+      "It came from a source rather than from you — neither your word nor my inference. " +
+      "What it rests on says which source."
+    );
   }
   const evidence = belief.evidence;
   const against = evidence.against > 0 ? `, ${evidence.against} against it` : "";
@@ -4393,15 +4398,25 @@ function beliefLines(belief) {
 }
 
 // A memory's heading: its band's words and its standing (ADR-0073 §4, ADR-0328 §15:4).
+// The attested band holds the one standing "from a source" (§6:4), so where the two
+// say the same words they are said once.
 function beliefHeading(belief) {
-  return `${bandWords(belief.band)} · ${standingWords(belief.standing)}`;
+  const band = bandWords(belief.band);
+  const standing = standingWords(belief.standing);
+  return band.toLowerCase() === standing.toLowerCase() ? band : `${band} · ${standing}`;
 }
 
 // One support of the single view, its part resolved or shown as gone (ADR-0328 §15:2,
 // §15:7): never a bare id, never shown as evidence once it is gone.
 function supportLine(support) {
   const origin = ORIGIN_WORDS[support.origin] || support.origin;
-  const named = support.source_details === null ? "" : ` · ${support.source_details.reported_by}`;
+  // ADR-0189 §4: the source's own reporting instant, said as its clock, beside the
+  // `when` this system read the part at.
+  const source = support.source_details;
+  const named =
+    source === null
+      ? ""
+      : ` · ${source.reported_by}, which said so as of ${source.reported_at} on its own clock`;
   const when = support.when === null ? "" : ` · ${support.when}`;
   const against = support.direction === "against" ? " · against it" : "";
   const stopped = support.counts ? "" : " · no longer counted";
@@ -4437,8 +4452,8 @@ function forgetWarning(band) {
   }
   if (band === "attested") {
     return (
-      "A connected source reported this. Forgetting it destroys my copy but not the " +
-      "source, so a later sync may bring it back."
+      "This came from a source, not from you. Forgetting it destroys my copy but not the " +
+      "source, so I may come across it again."
     );
   }
   return (

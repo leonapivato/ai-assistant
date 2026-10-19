@@ -364,7 +364,14 @@ class MemoryPolicyContract:
             support_with_origin(marked),
             remembered_support(effect="effect-2", outside=True),
         )
-        without_marker = _record("marked", plain)
+        # The same parts and the same count, only the outside origins differ: a policy
+        # may weigh corroboration, and this asks about the marker alone.
+        without_marker = memory(
+            "marked",
+            "marked",
+            support_with_origin(plain),
+            remembered_support(effect="effect-2", outside=False),
+        )
 
         ruled_with = await policy.decide(_proposal(with_marker), conflicts=[])
         ruled_without = await policy.decide(_proposal(without_marker), conflicts=[])

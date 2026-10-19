@@ -2929,6 +2929,21 @@ def test_a_gone_support_is_shown_as_gone_and_never_by_an_id() -> None:
     assert "id" not in re.findall(r"support\.(\w+)", support)
 
 
+def test_a_supports_source_is_shown_with_its_own_report_time() -> None:
+    """ADR-0189 §4 on each support: the source's reporting instant, said as its clock.
+
+    Read off ``source_details.reported_at`` beside the source's name, never substituted
+    by the support's ``when`` (when this system read the part), and in the terminal's
+    words.
+    """
+    support = _functions(_code("app.js"))["supportLine"]
+
+    assert "source.reported_by" in support
+    assert "source.reported_at" in support
+    assert "on its own clock" in support
+    assert "support.when" in support  # the encounter time stays, apart from the report
+
+
 def test_the_browser_says_a_warrant_from_outside_in_the_terminals_sentence() -> None:
     """ADR-0189 §4's clause, read through ADR-0328 §12, the same on both surfaces.
 

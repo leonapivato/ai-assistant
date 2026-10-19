@@ -454,7 +454,7 @@ class SqliteMemoryStore:
         self._conn = self._setup()
 
     def _setup(self) -> sqlite3.Connection:
-        inspect_existing(self._path)
+        inspect_existing(self._path, accepted=MEMORY_RECORD_FORMATS)
         try:
             # `isolation_level=None` puts the driver in autocommit mode, so every
             # transaction below is an explicit `BEGIN ... COMMIT` this module

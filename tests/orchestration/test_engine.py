@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import pytest
 from pydantic import SecretStr
+from story_support import episode as story_episode
 
 from ai_assistant.core.errors import (
     MemoryStoreError,
@@ -48,6 +49,7 @@ from ai_assistant.core.types import (
     MemoryStanding,
     MemoryStatus,
     MemorySupport,
+    PlanningRound,
     Provenance,
     ProvisioningState,
     Reversibility,
@@ -952,9 +954,11 @@ def test_a_projection_carries_exactly_what_adr_0328_15_1_names() -> None:
     assert summary.as_of == AT
     assert (summary.evidence.supporting, summary.evidence.episodes) == (2, 2)
     assert summary.kind == "memory"
-    for absent in ("confidence", "evidence_elided", "attestation"):
+    for absent in ("confidence", "evidence_elided"):
         assert absent not in BeliefSummary.model_fields
         assert absent not in Belief.model_fields
+    # A memory's source details are on its supports (§15:2); the field is an episode's.
+    assert summary.attestation is None
 
 
 def test_the_single_view_resolves_each_support_and_never_carries_an_id() -> None:
@@ -1318,14 +1322,18 @@ async def test_engine_start_consumes_the_stamped_enumeration(
 
 
 async def _derived_with_two_episodes(harness: Harness) -> None:
-    """Store a derived memory resting on two episodes that both resolve."""
+    """Store a memory resting on the inputs of two episodes that both resolve.
+
+    Each support points at its episode's input, which an episode recorded with no
+    processing record holds as its content (ADR-0328 §15:2).
+    """
     await harness.memory.add(_episode_record("ep-1", "they asked for metric units"))
     await harness.memory.add(_episode_record("ep-2", "they asked again in metric"))
     await harness.memory.add(
         _memory(
             "rec-1",
-            remembered_support("ep-1", when=AT, added_at=AT),
-            remembered_support("ep-2", effect="effect-2", when=AT, added_at=AT),
+            said_support("ep-1", when=AT, added_at=AT),
+            said_support("ep-2", when=AT, added_at=AT),
             content="the user prefers metric units",
         )
     )
@@ -1394,8 +1402,8 @@ async def test_an_expired_episode_renders_exactly_as_a_deleted_one() -> None:
     await harness.memory.add(
         _memory(
             "rec-1",
-            remembered_support("ep-1", when=AT, added_at=AT),
-            remembered_support("ep-2", effect="effect-2", when=AT, added_at=AT),
+            said_support("ep-1", when=AT, added_at=AT),
+            said_support("ep-2", when=AT, added_at=AT),
         )
     )
 
@@ -1529,16 +1537,30 @@ async def test_a_listing_page_resolves_every_support_in_one_batch() -> None:
     assert store.singles == []
 
 
-async def test_two_supports_in_one_episode_ask_for_it_once_and_both_show_it() -> None:
-    """Each support keeps a position of its own; the episode is read once."""
+async def test_two_supports_in_one_episode_ask_for_it_once_and_each_shows_its_part() -> None:
+    """Each support reads as its own part of the one episode, which is read once (§15:2).
+
+    The input and a round's message are two texts, never the episode's search text
+    twice; a round the episode never recorded is gone though the episode resolves.
+    """
     harness_store = CountingStore(now=lambda: AT)
     harness = Harness(memory=harness_store)
-    await harness.memory.add(_episode_record("ep-1", "they asked for metric units"))
+    held = story_episode("a", text="they asked for metric units")
+    assert held.processing_record is not None
+    held = held.model_copy(
+        update={
+            "processing_record": held.processing_record.model_copy(
+                update={"rounds": (PlanningRound(id="r-1", recorded_at=AT, text="Metric it is."),)}
+            )
+        }
+    )
+    await harness.memory.add(held)
     await harness.memory.add(
         _memory(
             "rec-1",
-            said_support("ep-1", when=AT, added_at=AT),
-            message_support("ep-1", when=AT, added_at=AT),
+            said_support(held.id, when=AT, added_at=AT),
+            message_support(held.id, round_id="r-1", when=AT, added_at=AT),
+            message_support(held.id, round_id="r-never", when=AT, added_at=AT),
         )
     )
     harness_store.batches.clear()
@@ -1546,11 +1568,13 @@ async def test_two_supports_in_one_episode_ask_for_it_once_and_both_show_it() ->
     belief = await harness.engine.belief("rec-1")
 
     assert belief is not None
-    assert harness_store.batches == [("ep-1",)]
+    assert harness_store.batches == [(held.id,)]
     assert [support.content for support in belief.supports] == [
         "they asked for metric units",
-        "they asked for metric units",
+        "Metric it is.",
+        None,
     ]
+    assert belief.supports_gone is False, "the episode resolves; one part of it is missing"
 
 
 async def test_every_support_of_a_memory_is_judged_at_one_instant() -> None:
@@ -1570,8 +1594,8 @@ async def test_every_support_of_a_memory_is_judged_at_one_instant() -> None:
     await store.add(
         _memory(
             "rec-1",
-            remembered_support("ep-1", when=AT, added_at=AT),
-            remembered_support("ep-2", effect="effect-2", when=AT, added_at=AT),
+            said_support("ep-1", when=AT, added_at=AT),
+            said_support("ep-2", when=AT, added_at=AT),
         )
     )
     clock.arm()
@@ -1608,8 +1632,8 @@ async def test_the_batch_shows_gone_where_the_singles_would() -> None:
         _memory(
             "rec-1",
             *(
-                remembered_support(episode, effect=f"effect-{n}", when=AT, added_at=AT)
-                for n, episode in enumerate(("ep-live", "ep-expired", "ep-absent", "ep-future"))
+                said_support(episode, when=AT, added_at=AT)
+                for episode in ("ep-live", "ep-expired", "ep-absent", "ep-future")
             ),
         )
     )
