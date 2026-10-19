@@ -33,7 +33,7 @@ On sequencing: planning's side and the observer ship together.
 
 ### What is there today
 
-Surveyed at `4f2d8151`.
+Surveyed at `cbb0f160`.
 
 - **`remember`** (`orchestration/remembering.py`, `REMEMBER`) is planning's one route to
   memory (ADR-0306 §3:2, ADR-0309 §6:5). Authorizing hands its proposal to
@@ -60,8 +60,8 @@ Surveyed at `4f2d8151`.
 - **Writing a memory is an inside action** that planning chooses and authorizing checks
   (ADR-0292 §12:1–§12:2). ADR-0300 carved the hub's own story bookkeeping out of that
   rule; nothing carves out a background memory writer.
-- **`learning/`** holds `RuleBasedFeedbackProcessor` alone, which ADR-0328 §14:1
-  retires.
+- **`learning/`** holds no module since `RuleBasedFeedbackProcessor` retired under
+  ADR-0328 §14:1, and keeps its import-linter contracts.
 
 ### Words
 
