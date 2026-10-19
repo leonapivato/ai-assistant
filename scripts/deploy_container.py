@@ -1201,6 +1201,20 @@ class Deployment:
         Returns:
             A sentence for the operator.
         """
+        # unit.env is read again rather than trusted: a replacement interrupted after
+        # its rename has already named the new image, and starting the unit then would
+        # run that image with nothing checking who reaches it.
+        try:
+            text = self._read(self.person.unit_env)
+            named = None if text is None else parse_unit_env(text).image
+        except DeployError as exc:
+            named = f"unreadable ({exc})"
+        if named != earlier.image:
+            return (
+                f"{self.person.unit_env} no longer names the earlier image {earlier.image}\n"
+                f"(it names {named}), so nothing was started, and {self.person.unit} is\n"
+                "stopped. Write the earlier image back into it, or deploy again."
+            )
         try:
             self._start()
             self.await_ready(earlier.image)
