@@ -1752,6 +1752,32 @@ def test_an_installed_commit_this_clone_cannot_name_is_unknown_not_earlier(
     assert "is not one this clone holds" in refusal
 
 
+def test_a_hex_named_branch_does_not_stand_in_for_an_abbreviated_commit(
+    tmp_path: Path,
+) -> None:
+    # rev-parse prefers a ref to an object prefix: a branch named like the marker's
+    # short sha, pointing at an earlier commit, must not make that commit "installed".
+    repo, commits = _history(tmp_path)
+    short = commits["third"][:8]
+    git(repo, "branch", short, commits["first"])
+
+    refusal = _MODULE.history_refusal(repo, short, commits["first"])
+
+    assert refusal is not None
+    assert "is an earlier build than" in refusal
+    assert commits["third"][:12] in refusal
+
+
+def test_a_recorded_object_that_is_not_a_commit_is_unknown(tmp_path: Path) -> None:
+    repo, commits = _history(tmp_path)
+    blob = git(repo, "rev-parse", "HEAD:f.txt")
+
+    refusal = _MODULE.history_refusal(repo, blob, commits["third"])
+
+    assert refusal is not None
+    assert "is not one this clone holds" in refusal
+
+
 def test_a_dirty_install_of_the_same_commit_is_unknown(tmp_path: Path) -> None:
     # A dirty deploy installed a tree no commit holds, so even its own commit is
     # not shown to be at least as late as it.
