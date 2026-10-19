@@ -23,13 +23,16 @@ before either listener is bound. The only thing between it and the bind is that
 mint, which §8 orders after it, so the pair is still read exactly once and still
 read for the bind alone.
 
-**Every refusal here but one is a stay-down deployment fault** (ADR-0083 §5), and
-every one reaches the owner as ADR-0168 §5's shape — "does not start, and reports
-why". §2 admits no softer outcome: "It does not bind the loopback listener alone and
-continue, and it does not bind the remote listener without TLS." The one is a
-certificate not yet in force, which a restart unchanged gets past once the clock
-reaches it — "if yes — even eventually — it is ``1``" — so it is raised as
-:class:`~.exits.ClearableRefusalError` and the gateway exits ``1`` on it (#3167).
+**Every refusal here is a stay-down deployment fault** (ADR-0083 §5) **but two
+kinds**, and every one reaches the owner as ADR-0168 §5's shape — "does not start,
+and reports why". §2 admits no softer outcome: "It does not bind the loopback
+listener alone and continue, and it does not bind the remote listener without TLS."
+The two are a certificate not yet in force, which a restart unchanged gets past once
+the clock reaches it — "if yes — even eventually — it is ``1``" — and so is raised as
+:class:`~.exits.ClearableRefusalError`; and a read the operating system refused for
+a reason that clears, such as descriptors exhausted, which
+:func:`~.exits.exit_code` reads off the ``OSError`` each refusal retypes. On both
+the gateway exits ``1`` (#3167).
 
 **What is deliberately not checked, because §1 says so in terms.** No clause of
 ADR-0202 "requires the gateway to determine a certificate's issuer, its provenance,
@@ -181,8 +184,9 @@ def remote_tls(settings: Settings, *, now: Callable[[], datetime]) -> RemoteTls 
         ConfigurationError: On every condition §§2, 3 and 6 refuse at start. Each is
             a stay-down fault: restarting unchanged never succeeds, and what has to
             change is the configuration, the files' permissions, or the certificate
-            the owner installed. The exception is §8's near bound, a certificate not
-            yet in force, raised as :class:`~.exits.ClearableRefusalError`.
+            the owner installed. The exceptions are §8's near bound, a certificate
+            not yet in force, raised as :class:`~.exits.ClearableRefusalError`, and a
+            read refused for a reason that clears (:func:`~.exits.exit_code`).
     """
     if settings.gateway_remote_address is None:
         return None

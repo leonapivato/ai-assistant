@@ -19,7 +19,9 @@ reads it back, which is what the marker names.
 from __future__ import annotations
 
 import datetime
+import errno
 import os
+import pathlib
 import re
 from typing import TYPE_CHECKING, Any, Final
 
@@ -153,8 +155,11 @@ def test_a_key_that_does_not_belong_to_the_certificate_is_refused(tmp_path: Path
     other.mkdir()
     _, stranger = issue_pair(other, names=(_NAME,), issued_at=_NOW)
 
-    with pytest.raises(ConfigurationError, match="not a usable pair"):
+    with pytest.raises(ConfigurationError, match="not a usable pair") as refused:
         _read(certificate, stranger)
+    # `ssl.SSLError` is an `OSError` whose errno is the TLS library's, so the refusal's
+    # own verdict stands: no restart makes the key match (#3167).
+    assert exits.exit_code(refused.value) == exits.EXIT_DEPLOYMENT
 
 
 # --- ADR-0202 §3: ownership and mode, the key stricter than the certificate ---
@@ -294,6 +299,37 @@ def test_a_certificate_not_yet_in_force_is_refused_and_says_which_bound(
     # ADR-0083 §5's "even eventually" — and the gateway comes back rather than staying
     # down (#3167).
     assert exits.exit_code(refused.value) == exits.EXIT_RESTART
+
+
+def test_a_read_the_operating_system_refuses_for_a_moment_is_not_a_78(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3167: a refusal retyping an ``OSError`` takes that errno's verdict.
+
+    Descriptors exhausted while the certificate is read clear without anyone acting,
+    so a supervisor must restart the gateway rather than leave a correctly configured
+    one down; a certificate that is not there is the configuration's to fix.
+    """
+    certificate, key = issue_pair(
+        tmp_path,
+        names=(_NAME,),
+        issued_at=_NOW,
+        not_before=_NOW - datetime.timedelta(days=1),
+        not_after=_NOW + datetime.timedelta(days=90),
+    )
+
+    def exhausted(_path: Path) -> bytes:
+        raise OSError(errno.ENFILE, "too many open files in system")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(pathlib.Path, "read_bytes", exhausted)
+        with pytest.raises(ConfigurationError, match="cannot be read") as refused:
+            _read(certificate, key)
+    assert exits.exit_code(refused.value) == exits.EXIT_RESTART
+
+    with pytest.raises(ConfigurationError, match="cannot be read") as absent:
+        _read(tmp_path / "not-there.pem", key)
+    assert exits.exit_code(absent.value) == exits.EXIT_DEPLOYMENT
 
 
 def test_a_certificate_inside_both_bounds_is_admitted(tmp_path: Path) -> None:

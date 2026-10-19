@@ -219,6 +219,7 @@ from ai_assistant.interfaces.gateway.edge import (
     check_assertion,
     edge_terms,
 )
+from ai_assistant.interfaces.gateway.exits import ClearableRefusalError
 from ai_assistant.interfaces.gateway.http import (
     NO_STORE,
     NO_STORE_NO_TRANSFORM,
@@ -1717,8 +1718,9 @@ class Gateway:
                 moment since it was read. Each is a stay-down deployment fault
                 (ADR-0083 §5): restarting unchanged never succeeds, and what has to
                 change is the configuration, the overlay, or the certificate — except
-                a certificate a clock that moved back has put before its validity,
-                which is :class:`~.exits.ClearableRefusalError`.
+                an agent that would not answer, and a certificate a clock that moved
+                back has put before its validity, which are
+                :class:`~.exits.ClearableRefusalError` (#3167).
             OSError: If the bind fails for any other reason. Left to propagate for
                 the reason :mod:`ai_assistant.service.remote` leaves it — "the raw
                 errno distinguishes a stay-down fault from a transient one" — and an
@@ -1845,7 +1847,12 @@ class Gateway:
             address: The address about to be bound.
 
         Raises:
-            ConfigurationError: If the agent places no node there, or will not say.
+            ClearableRefusalError: If the agent places no node there, or will not
+                say. A ``1`` rather than a ``78`` (#3167): the one error carries both
+                "this address is not on the overlay" and "the agent timed out" or "is
+                not running yet", and the second clears without anyone acting, so
+                ADR-0083 §5's tie-break decides — "a spurious restart is recoverable
+                and a spurious ``78`` is an outage".
         """
         agent = self._agent
         if agent is None:  # pragma: no cover — the constructor refuses this pairing
@@ -1863,7 +1870,7 @@ class Gateway:
                 f"it reports for this machine, or unset ASSISTANT_GATEWAY_REMOTE_ADDRESS "
                 f"to serve browsers over the loopback listener alone"
             )
-            raise ConfigurationError(msg) from exc
+            raise ClearableRefusalError(msg) from exc
 
     async def serve(self) -> None:
         """Bind every configured listener and serve until cancelled.
