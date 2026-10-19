@@ -197,7 +197,6 @@ from ai_assistant.core.types import (
     SupportDirection,
     UserConfirmation,
     Validity,
-    applied_operation,
     band_of,
 )
 from ai_assistant.memory._reconciler import ReconcilerOutcome
@@ -3461,9 +3460,10 @@ class MemoryWriterContract:
 
     # --- the operation member: apply (ADR-0328 §11:3, §5) --------------------
     # Every case reads the memory back from the store first: a change is applied to
-    # the memory the caller read, revision and all (§5:4), and the record the writer
-    # writes is the one core's ``applied_operation`` computes from it, so the
-    # canonical fake and the production writer write the same record.
+    # the memory the caller read, revision and all (§5:4). Each writer computes the
+    # record with its own transition (§11:3); these cases state that record and every
+    # refusal outright, so the two writers are held to one answer here, not to a
+    # function either shares.
 
     async def _stored(self, store: MemoryStore, record: Memory) -> Memory:
         """Store ``record`` and return it as the store hands it back, revision and all."""
@@ -3472,7 +3472,7 @@ class MemoryWriterContract:
         assert isinstance(read, Memory)
         return read
 
-    async def test_apply_writes_the_record_core_computes_for_an_add_support(
+    async def test_apply_of_an_add_support_writes_exactly_that_support_and_its_operation(
         self, make_writer: WriterFactory
     ) -> None:
         """An add support adds its support and its operation, and nothing else (§5:3)."""
@@ -3493,7 +3493,10 @@ class MemoryWriterContract:
 
         written = await store.get("existing")
         assert isinstance(written, Memory)
-        expected = applied_operation(read, operation, support=support)
+        expected = Memory.model_validate(
+            read.model_dump()
+            | {"supports": (*read.supports, support), "operations": (*read.operations, operation)}
+        )
         assert _unstamped(written) == _unstamped(expected)
         assert written.content == read.content  # no write changes the wording (§3:2)
         assert written.revision > read.revision
@@ -3704,6 +3707,176 @@ class MemoryWriterContract:
             )
 
         assert await store.get("existing") == read
+
+    async def test_apply_refuses_a_support_that_is_not_the_one_its_operation_cites(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§5:3: the support an operation adds is the one it cites; another is refused."""
+        store = FakeMemoryStore(now=_long_ago)
+        await _cite(store)
+        await store.add(_episodic(_OTHER_CITED, "a second exchange"))
+        read = await self._stored(store, _preference("existing"))
+        cited, other = _preference("other", evidence=(_OTHER_CITED, _CITED)).supports
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.ADD_SUPPORT,
+            cites=cited.points_at,
+            at=_WHEN,
+            by=MemoryWriterName.REMEMBER,
+        )
+        before = await _snapshot(store)
+
+        with pytest.raises(MemoryStoreError):
+            await make_writer(store, FakeMemoryPolicy()).apply(
+                MemoryChange(memory=read, operation=operation, support=other)
+            )
+
+        assert await _snapshot(store) == before
+
+    async def test_apply_of_an_end_closes_at_its_supports_about_when(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§5:10: an end closes validity at the about-when of the support it cites."""
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await store.add(_episodic(_OTHER_CITED, "a second exchange"))
+        read = await self._stored(store, _preference("existing"))
+        ending = (
+            _preference("other", evidence=(_OTHER_CITED,))
+            .supports[0]
+            .model_copy(
+                update={
+                    "direction": SupportDirection.AGAINST,
+                    "backs_as_worded": False,
+                    "about_when": _WHEN - timedelta(days=3),
+                }
+            )
+        )
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.END,
+            cites=ending.points_at,
+            at=_WHEN,
+            by=MemoryWriterName.REMEMBER,
+        )
+
+        await make_writer(store, FakeMemoryPolicy()).apply(
+            MemoryChange(memory=read, operation=operation, support=ending)
+        )
+
+        (kept,) = await _memories(store)
+        assert isinstance(kept, Memory)
+        assert kept.status is MemoryStatus.ENDED
+        assert kept.validity.valid_until == _WHEN - timedelta(days=3)
+
+    async def test_apply_refuses_an_end_whose_about_when_lies_after_its_instant(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§5:10: a claim holding until a later time is worded so, never ended early."""
+        store = FakeMemoryStore(now=_long_ago)
+        await _cite(store)
+        await store.add(_episodic(_OTHER_CITED, "a second exchange"))
+        read = await self._stored(store, _preference("existing"))
+        ending = (
+            _preference("other", evidence=(_OTHER_CITED,))
+            .supports[0]
+            .model_copy(
+                update={
+                    "direction": SupportDirection.AGAINST,
+                    "backs_as_worded": False,
+                    "about_when": _WHEN + timedelta(days=3),
+                }
+            )
+        )
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.END,
+            cites=ending.points_at,
+            at=_WHEN,
+            by=MemoryWriterName.REMEMBER,
+        )
+        before = await _snapshot(store)
+
+        with pytest.raises(MemoryStoreError):
+            await make_writer(store, FakeMemoryPolicy()).apply(
+                MemoryChange(memory=read, operation=operation, support=ending)
+            )
+
+        assert await _snapshot(store) == before
+
+    async def test_apply_of_a_close_clamps_and_never_extends_the_window(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§5:11, ADR-0080 §1: a window already ending earlier keeps its earlier end."""
+        store = FakeMemoryStore(now=_long_ago)
+        await _cite(store)
+        bounded = _preference("existing").model_copy(
+            update={"validity": Validity(valid_until=_WHEN)}
+        )
+        read = await self._stored(store, bounded)
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.MARK_WRONG,
+            cites=read.supports[0].points_at,
+            at=_WHEN + timedelta(days=30),
+            by=MemoryWriterName.REMEMBER,
+        )
+
+        await make_writer(store, FakeMemoryPolicy()).apply(
+            MemoryChange(memory=read, operation=operation)
+        )
+
+        (kept,) = await _memories(store)
+        assert isinstance(kept, Memory)
+        assert kept.status is MemoryStatus.WRONG
+        assert kept.validity.valid_until == _WHEN
+
+    async def test_apply_refuses_a_close_with_no_representable_end(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§5:11, ADR-0080 §3: a close at or before the window's start is refused whole."""
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        later = _preference("existing").model_copy(
+            update={"validity": Validity(valid_from=_WHEN + timedelta(days=1))}
+        )
+        read = await self._stored(store, later)
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.MARK_WRONG,
+            cites=read.supports[0].points_at,
+            at=_WHEN,
+            by=MemoryWriterName.REMEMBER,
+        )
+        before = await _snapshot(store)
+
+        with pytest.raises(MemoryStoreError):
+            await make_writer(store, FakeMemoryPolicy()).apply(
+                MemoryChange(memory=read, operation=operation)
+            )
+
+        assert await _snapshot(store) == before
+
+    async def test_apply_refuses_a_lower_standing_stopping_a_higher_support(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§6:5: a stop counting citing a support ranking below the one it stops."""
+        store = FakeMemoryStore(now=_long_ago)
+        await _cite(store)
+        await store.add(_episodic(_OTHER_CITED, "a second exchange"))
+        said = _preference("s", source=MemorySource.USER_ASSERTED).supports[0]
+        inferred = _preference("i", evidence=(_OTHER_CITED,)).supports[0]
+        read = await self._stored(store, memory("existing", _CONTENT, said, inferred))
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.STOP_COUNTING,
+            cites=inferred.points_at,
+            stops=said.points_at,
+            at=_WHEN,
+            by=MemoryWriterName.REMEMBER,
+        )
+        before = await _snapshot(store)
+
+        with pytest.raises(MemoryStoreError):
+            await make_writer(store, FakeMemoryPolicy()).apply(
+                MemoryChange(memory=read, operation=operation)
+            )
+
+        assert await _snapshot(store) == before
 
     async def test_apply_refuses_a_lower_standing_overriding_a_higher_one(
         self, make_writer: WriterFactory
@@ -3977,14 +4150,19 @@ class MemoryWriterContract:
         await store.add(_preference("existing", source=MemorySource.INFERRED))
         before = await _snapshot(store)
         correction = _correcting("new")
-        ended = applied_operation(
-            correction,
-            MemoryOperation(
-                kind=MemoryOperationKind.END,
-                cites=correction.supports[0].points_at,
-                at=_WHEN,
-                by=MemoryWriterName.REMEMBER,
-            ),
+        end = MemoryOperation(
+            kind=MemoryOperationKind.END,
+            cites=correction.supports[0].points_at,
+            at=_WHEN,
+            by=MemoryWriterName.REMEMBER,
+        )
+        ended = Memory.model_validate(
+            correction.model_dump()
+            | {
+                "operations": (*correction.operations, end),
+                "status": MemoryStatus.ENDED,
+                "validity": Validity(valid_until=_WHEN),
+            }
         )
         writer = make_writer(
             store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=_scripted("c")

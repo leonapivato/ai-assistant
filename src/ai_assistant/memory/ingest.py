@@ -13,9 +13,10 @@ producer built, it:
    a ``SUPERSEDE`` installs it at a fresh id and ends what it retires (§11:5-§11:8).
 
 It also applies one operation to one stored memory (:meth:`MemoryIngestor.apply`,
-§11:3), computing the record the operation yields through ``core``'s
-:func:`~ai_assistant.core.types.applied_operation`, which the canonical fake computes
-through too.
+§11:3), computing the record the operation yields
+(:func:`~ai_assistant.memory._operations.applied_operation`): the transition is this
+subsystem's (ADR-0016 §2, ADR-0014), and the canonical fake carries its own, held to
+the same records by the shared writer suite.
 
 It depends only on the store and policy contracts, so it is agnostic to which concrete
 store or policy is wired in. Every rule of the ratified write path over a field
@@ -63,12 +64,12 @@ from ai_assistant.core.types import (
     TraceKind,
     TraceRecordSet,
     Validity,
-    applied_operation,
     part_episode,
     record_band,
 )
 from ai_assistant.memory import traces
 from ai_assistant.memory._agreement import agrees
+from ai_assistant.memory._operations import applied_operation
 from ai_assistant.memory._reconciler import ReconcilerOutcome
 
 # `memory`'s own policy module, for its floor predicate alone (ADR-0159 §2, §10). The
@@ -1193,7 +1194,7 @@ class MemoryIngestor:
         """Apply one operation to one stored memory (ADR-0328 §11:3).
 
         The record the operation yields is computed by
-        :func:`~ai_assistant.core.types.applied_operation` from the memory the caller
+        :func:`~ai_assistant.memory._operations.applied_operation` from the memory the caller
         read, and written ``IF_UNCHANGED`` at that memory's revision (§5:4), with the
         successor an end, a mark wrong or a replace names written ``INSERT_IF_ABSENT`` in
         the same atomic batch (§5:6). An add support whose part the memory already

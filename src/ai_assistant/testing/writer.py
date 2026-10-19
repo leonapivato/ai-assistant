@@ -10,9 +10,10 @@ a proposal whose supports point at an episode the store does not hold, resolves
 conflicts, asks the policy to rule, and applies the ruling as ADR-0328 §11 says — an
 ``ACCEPT`` installs the memory, a ``REINFORCE`` adds its supports to the target, a
 ``SUPERSEDE`` installs it at a fresh id and ends what it retires. It applies one
-operation to one stored memory through ``core``'s
-:func:`~ai_assistant.core.types.applied_operation`, which ``MemoryIngestor`` computes
-through too, so the two writers yield the same record and refuse the same writes. Only
+operation to one stored memory through its own transition
+(:func:`~ai_assistant.testing._operations.applied_operation`), since no testing module
+imports ``memory``; the shared conformance suite holds it and ``MemoryIngestor``'s to
+the same record and the same refusals. Only
 the behaviour pinned by the shared conformance suite is contract; its conflict
 heuristic, the *value* of its ceiling and its clock are deliberately not.
 
@@ -57,10 +58,10 @@ from ai_assistant.core.types import (
     SupportDirection,
     SupportOrigin,
     Validity,
-    applied_operation,
     part_episode,
     record_band,
 )
+from ai_assistant.testing._operations import applied_operation
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence

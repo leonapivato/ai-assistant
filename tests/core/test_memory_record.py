@@ -44,8 +44,6 @@ from ai_assistant.core.types import (
     SupportDirection,
     SupportOrigin,
     TrackRecordEntry,
-    Validity,
-    applied_operation,
     belief_summary,
     belief_view,
     episode_summary,
@@ -85,6 +83,19 @@ def _operation(
 ) -> MemoryOperation:
     return MemoryOperation.model_validate(
         {"kind": kind, "cites": cites.points_at, "at": at, "by": MemoryWriterName.REMEMBER} | fields
+    )
+
+
+def _logged(held: Memory, operation: MemoryOperation, *added: MemorySupport) -> Memory:
+    """``held`` with ``operation`` logged and ``added`` carried, validated as a record.
+
+    Built from the record's own shape, so these cases test what ``core`` computes from a
+    record (§6, §7) and not how a writer applies an operation, which is ``memory``'s
+    (§11:3; ``tests/memory/test_operations.py``).
+    """
+    return Memory.model_validate(
+        held.model_dump()
+        | {"supports": (*held.supports, *added), "operations": (*held.operations, operation)}
     )
 
 
@@ -303,9 +314,8 @@ def test_the_highest_backing_support_decides_and_a_stopped_one_counts_for_nothin
     held = memory("m", "c", inferred, said)
     assert held.standing is MemoryStanding.SAID
 
-    stopped = applied_operation(
-        held,
-        _operation(MemoryOperationKind.STOP_COUNTING, said, stops=inferred.points_at),
+    stopped = _logged(
+        held, _operation(MemoryOperationKind.STOP_COUNTING, said, stops=inferred.points_at)
     )
     assert stopped.standing is MemoryStanding.SAID
     assert inferred not in stopped.counted_supports
@@ -341,9 +351,8 @@ def test_stopping_the_highest_backing_support_lowers_the_standing_and_its_band()
     held = memory("m", "c", said, inferred, explaining)
     assert (held.standing, held.band) == (MemoryStanding.SAID, BeliefBand.ASSERTED)
 
-    stopped = applied_operation(
-        held,
-        _operation(MemoryOperationKind.STOP_COUNTING, explaining, stops=said.points_at),
+    stopped = _logged(
+        held, _operation(MemoryOperationKind.STOP_COUNTING, explaining, stops=said.points_at)
     )
 
     assert (stopped.standing, stopped.band) == (MemoryStanding.INFERENCE, BeliefBand.DERIVED)
@@ -424,9 +433,8 @@ def test_rests_on_outside_content_holds_outside_the_asserted_band_only() -> None
 
     inferred = remembered_support()
     held = memory("m", "c", inferred, outside)
-    stopped = applied_operation(
-        held,
-        _operation(MemoryOperationKind.STOP_COUNTING, inferred, stops=outside.points_at),
+    stopped = _logged(
+        held, _operation(MemoryOperationKind.STOP_COUNTING, inferred, stops=outside.points_at)
     )
     assert stopped.rests_on_outside_content
 
@@ -435,10 +443,10 @@ def test_transaction_time_is_the_latest_operation() -> None:
     """§7:8."""
     held = memory("m", "c", said_support(added_at=AT))
     assert held.transaction_time == AT
-    grown = applied_operation(
+    grown = _logged(
         held,
         _operation(MemoryOperationKind.ADD_SUPPORT, said_support("activation:x")),
-        support=said_support("activation:x"),
+        said_support("activation:x"),
     )
     assert grown.transaction_time == _LATER
 
@@ -504,166 +512,6 @@ def test_the_track_summary_counts_its_entries() -> None:
     summary = held.track_summary
     assert (summary.relied_on, summary.held_up, summary.let_down) == (2, 1, 1)
     assert summary.last_used == _LATER
-
-
-# --- applied_operation (§5) -------------------------------------------------------
-
-
-def test_add_support_adds_once_and_an_add_of_a_carried_part_changes_nothing() -> None:
-    """§4:8, §5:3."""
-    held = memory("m", "c", remembered_support())
-    added = said_support("activation:x")
-    grown = applied_operation(
-        held, _operation(MemoryOperationKind.ADD_SUPPORT, added), support=added
-    )
-    assert grown.supports == (*held.supports, added)
-    assert grown.standing is MemoryStanding.SAID
-    assert (
-        applied_operation(grown, _operation(MemoryOperationKind.ADD_SUPPORT, added), support=added)
-        is grown
-    )
-
-
-def test_an_operations_support_must_be_the_one_it_cites() -> None:
-    held = memory("m", "c")
-    with pytest.raises(ValueError, match="the one it cites"):
-        applied_operation(
-            held,
-            _operation(MemoryOperationKind.ADD_SUPPORT, said_support("activation:x")),
-            support=said_support("activation:y"),
-        )
-
-
-def test_a_create_is_never_applied() -> None:
-    held = memory("m", "c")
-    with pytest.raises(ValueError, match="create"):
-        applied_operation(held, held.operations[0])
-
-
-def test_an_end_closes_the_window_at_its_about_when_and_ends_the_memory() -> None:
-    """§5:10, §5:7."""
-    held = memory("m", "c", remembered_support())
-    ending = MemorySupport.model_validate(
-        said_support("activation:end").model_dump() | {"about_when": AT + timedelta(hours=1)}
-    )
-    ended = applied_operation(held, _operation(MemoryOperationKind.END, ending), support=ending)
-    assert ended.status is MemoryStatus.ENDED
-    assert ended.validity.valid_until == AT + timedelta(hours=1)
-    # Nothing is removed (§5:5).
-    assert set(held.supports) <= set(ended.supports)
-    assert ended.operations[: len(held.operations)] == held.operations
-
-
-def test_an_end_whose_about_when_is_after_its_instant_is_refused() -> None:
-    held = memory("m", "c", remembered_support())
-    later = MemorySupport.model_validate(
-        said_support("activation:end").model_dump() | {"about_when": _LATER + timedelta(days=1)}
-    )
-    with pytest.raises(ValueError, match="about-when"):
-        applied_operation(held, _operation(MemoryOperationKind.END, later), support=later)
-
-
-def test_a_close_clamps_and_never_extends_the_window() -> None:
-    """ADR-0080 §1 kept by §5:11."""
-    held = memory("m", "c", remembered_support(), validity=Validity(valid_until=AT))
-    ended = applied_operation(
-        held,
-        _operation(MemoryOperationKind.MARK_WRONG, said_support("activation:no")),
-        support=said_support("activation:no"),
-    )
-    assert ended.validity.valid_until == AT
-    assert ended.status is MemoryStatus.WRONG
-
-
-def test_a_replace_names_its_successor_and_ends_the_memory() -> None:
-    held = memory("m", "c", remembered_support())
-    narrower = said_support("activation:narrower")
-    replaced = applied_operation(
-        held,
-        _operation(MemoryOperationKind.REPLACE, narrower, successor="m-2"),
-        support=narrower,
-    )
-    assert replaced.status is MemoryStatus.ENDED
-    assert replaced.operations[-1].successor == "m-2"
-
-
-def test_a_lower_standing_never_retires_a_higher_one() -> None:
-    """§6:5: the open question it needs is raised instead."""
-    held = memory("m", "c", said_support())
-    inferred = remembered_support("activation:guess")
-    with pytest.raises(ValueError, match="ranks below"):
-        applied_operation(held, _operation(MemoryOperationKind.END, inferred), support=inferred)
-
-
-def test_a_lower_standing_never_stops_a_higher_support() -> None:
-    said = said_support()
-    inferred = remembered_support("activation:guess")
-    held = memory("m", "c", said, inferred)
-    with pytest.raises(ValueError, match="ranks below"):
-        applied_operation(
-            held,
-            _operation(MemoryOperationKind.STOP_COUNTING, inferred, stops=said.points_at),
-        )
-
-
-def test_a_question_is_raised_and_resolved_by_operations() -> None:
-    """§9:2."""
-    held = memory("m", "c", remembered_support())
-    cites = held.supports[0]
-    question = OpenQuestion(
-        id="q-1",
-        kind=OpenQuestionKind.RECHECK,
-        asks="is this still so?",
-        rests_on=(cites.points_at,),
-        raised_at=_LATER,
-        raised_by=MemoryWriterName.REMEMBER,
-    )
-    raised = applied_operation(
-        held,
-        _operation(MemoryOperationKind.RAISE_QUESTION, cites, question="q-1"),
-        question=question,
-    )
-    assert raised.open_questions == (question,)
-    answer = said_support("activation:answer")
-    resolved = applied_operation(
-        raised,
-        _operation(
-            MemoryOperationKind.RESOLVE_QUESTION,
-            answer,
-            question="q-1",
-            note="the user said so",
-        ),
-        support=answer,
-    )
-    (closed,) = resolved.open_questions
-    assert closed.resolved
-    assert closed.resolved_by == answer.points_at
-    with pytest.raises(ValueError, match="carries open"):
-        applied_operation(
-            resolved,
-            _operation(MemoryOperationKind.RESOLVE_QUESTION, answer, question="q-1", note="x"),
-        )
-
-
-def test_a_raise_question_cites_a_support_the_question_rests_on() -> None:
-    """§5's table: a raise question cites a support the question rests on."""
-    first = remembered_support("activation:first")
-    second = remembered_support("activation:second")
-    held = memory("m", "c", first, second)
-    question = OpenQuestion(
-        id="q-1",
-        kind=OpenQuestionKind.RECHECK,
-        asks="is this still so?",
-        rests_on=(second.points_at,),
-        raised_at=_LATER,
-        raised_by=MemoryWriterName.REMEMBER,
-    )
-    with pytest.raises(ValueError, match="rests on"):
-        applied_operation(
-            held,
-            _operation(MemoryOperationKind.RAISE_QUESTION, first, question="q-1"),
-            question=question,
-        )
 
 
 # --- the stored-record union and its helpers (§2, §12) ----------------------------
