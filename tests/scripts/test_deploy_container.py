@@ -83,6 +83,8 @@ class FakeBox:
     stop_fails_once_started: bool = False
     #: A unit another deploy installs while this one builds.
     unit_installed_meanwhile: bytes | None = None
+    #: The link drops just after unit.env's rename lands.
+    interrupt_after_rename: bool = False
 
     def run(self, argv: Sequence[str], *, stdin: IO[bytes] | None = None) -> Any:
         argv = list(argv)
@@ -182,6 +184,8 @@ class FakeBox:
 
     def cmd_mv(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
         self.files[argv[-1]] = self.files.pop(argv[-2])
+        if self.interrupt_after_rename and argv[-1] == str(PERSON.unit_env):
+            raise KeyboardInterrupt
         return 0, "", ""
 
     def cmd_grep(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
@@ -514,6 +518,20 @@ def test_deploy_interrupted_while_starting_is_contained() -> None:
     assert "hub@alice.service is stopped" in message
     assert box.active == "inactive"
     assert str(PERSON.lock) not in box.files
+
+
+def test_deploy_interrupted_after_naming_the_new_image_starts_nothing() -> None:
+    box = served_box(interrupt_after_rename=True)
+
+    with pytest.raises(dc.DeployError) as caught:
+        deployment(box).run()
+
+    message = str(caught.value)
+    assert "no longer names the earlier image" in message
+    assert "nothing was started" in message
+    assert box.active == "inactive"
+    assert box.container_image is None
+    assert ["systemctl", "start", PERSON.unit] not in box.ran
 
 
 def test_deploy_says_when_an_uncontained_container_cannot_be_stopped() -> None:
