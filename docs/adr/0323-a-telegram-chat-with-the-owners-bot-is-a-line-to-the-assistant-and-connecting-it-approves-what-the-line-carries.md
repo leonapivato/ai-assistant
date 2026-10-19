@@ -1,6 +1,6 @@
 # 323. A Telegram chat with the owner's bot is a line to the assistant, and connecting it approves what the line carries
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0330 (§2:1; §2:7, §5:5, §5:6, §5:7, §11:10 and §13:1 in their naming of Telegram as what the line's calls reach; §3:1; §4:3; §11:4, §11:8 and §11:9 in the addition; §11:5; §12:1; §12:3 in the addition; §13's table, rows 3, 4, 5, 7, 8, 10 and 12; §14:1; §14:2 in the addition; each for a line in relayed mode alone)
 - Date: 2026-10-17
 - Scope: [#2819](https://github.com/leonapivato/ai-assistant/issues/2819), the messaging line, Telegram first; batch [#3113](https://github.com/leonapivato/ai-assistant/issues/3113), lane L1. It decides the Telegram kind on ADR-0292's model, how its calls leave the hub, and what they may carry.
 - Dependency: the phases, the authority milestone (ADR-0321, ADR-0322) and the conversation channel (ADR-0293), all Accepted and built on `main` at `e3beb99d`.
@@ -12,6 +12,22 @@
   [ADR-0154](0154-the-tools-egress-seam-is-designated-and-the-fourteen-conditions-are-attested-in-code.md) (§2:2's single-route limb, §2:4's standing-authorisation limb and §4:3),
   [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md) (§10:1, in the addition alone) and
   [ADR-0321](0321-authority-at-the-deploy-is-your-yes-to-a-question-that-showed-the-call.md) (§3:3's second sentence, §4:4's *in one of your conversations* and §4:6's *through the hub chat*, each restated without naming a channel).
+- Partially superseded: 2026-10-18 by ADR-0330 — for a line in relayed mode alone, which reaches a relay
+  on the box holding one shared bot instead of the hub's own bot at `https://api.telegram.org`.
+  §2:1: the bot is the shared one the person linked their account to. §2:7, §5:5, §5:6, §5:7,
+  §11:10 and §13:1, in their naming of Telegram as what the line's calls reach: the relay stands
+  in its place (ADR-0330 §4:15). §3:1: the credential is the hub's relay credential (ADR-0330
+  §6:4). §4:3: the user is established by Telegram's authentication as the relay hands on
+  Telegram's report, and the reader still compares the sender with the setting (ADR-0330 §5:1).
+  §11:4, §11:8 and §11:9, in the addition: they bind the relay credential (ADR-0330 §6:5–§6:6).
+  §11:5: the one origin is the configured relay origin, verified against the configured
+  certificates (ADR-0330 §3:4, §7). §12:1: the approval rests on the person's link act, carried
+  out by setup at their request (ADR-0330 §11:1); §12:3, in the addition: unlinking ends it
+  (ADR-0330 §11:3). §13's table, rows 3, 4, 5, 7, 8, 10 and 12: restated for the relayed route
+  (ADR-0330 §9:2). §14:1 and §14:2: the relay's costs, and what it holds (ADR-0330 §10:3–§10:4).
+  A line in direct mode, and every other clause, stand. This replacement takes effect on
+  ratification of ADR-0330. This reciprocal header record accompanies the numbered draft under
+  ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
