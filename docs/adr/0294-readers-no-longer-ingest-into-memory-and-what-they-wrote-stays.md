@@ -1,6 +1,6 @@
 # 294. Readers no longer ingest into memory, and what they wrote stays
 
-- Status: Partially superseded by ADR-0318 (§2:2's request-path facets; §4:3's and §4:6's `FACET`) and ADR-0320 (§2:3 and §3:2) and ADR-0324 (§4:3's and §4:6's subsets, in the addition alone)
+- Status: Partially superseded by ADR-0318 (§2:2's request-path facets; §4:3's and §4:6's `FACET`) and ADR-0320 (§2:3 and §3:2) and ADR-0324 (§4:3's and §4:6's subsets, in the addition alone) and ADR-0329 (§1:2's second sentence)
 - Date: 2026-10-04
 - Scope: [#2578](https://github.com/leonapivato/ai-assistant/issues/2578), the channel redesign: the retirement of readers' scheduled ingestion into memory that ADR-0292 §13 names, taken ahead of the readers' channels.
 - Authorization: the owner ruled on 2026-10-04, in the review ADR-0292 records, that readers' scheduled ingestion into memory retires (ADR-0292 §13's table), and directed that it go now rather than wait for the readers' channel design. The dispatcher assigned 0294.
@@ -29,6 +29,7 @@
   takes effect on ratification of ADR-0324. This reciprocal header record accompanies the
   numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
   below are preserved.
+- Partially superseded: 2026-10-18 by ADR-0329 — §1:2's second sentence: a source's content reaches memory only through an episode, as the observer commits it from what the episode recorded, never from a source read (ADR-0329 §§8–9). Every other clause stands. This replacement takes effect on ratification of ADR-0329. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

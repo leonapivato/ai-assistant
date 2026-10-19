@@ -1,6 +1,6 @@
 # 50. Contradiction resolution retires the full conflict set, and defers assertion-vs-assertion
 
-- Status: Partially superseded by ADR-0079 (§1's over-limit surplus clause), ADR-0092 (§1's `EXTERNAL` hold-out from the retirement widening), ADR-0121 (§2's scope over a conflict set whose asserted members all *agree* with the proposal), ADR-0159 (§1's extensional definition of the retirement set, as it reaches a conflict labelled a restatement or an addition) and ADR-0171 (that same definition, as it reaches a conflict the writer holds no relation for on a crossing carrying a labelled contradiction)
+- Status: Partially superseded by ADR-0079 (§1's over-limit surplus clause), ADR-0092 (§1's `EXTERNAL` hold-out from the retirement widening), ADR-0121 (§2's scope over a conflict set whose asserted members all *agree* with the proposal), ADR-0159 (§1's extensional definition of the retirement set, as it reaches a conflict labelled a restatement or an addition) and ADR-0171 (that same definition, as it reaches a conflict the writer holds no relation for on a crossing carrying a labelled contradiction) and ADR-0329 (its deferral of assertion against assertion, as it reaches the memory a proposal's retiring operation names)
 - Date: 2026-07-23
 - Partially superseded: 2026-08-21 by ADR-0171 — **§1's extensional definition of the
   retirement set no longer reaches a conflict the writer holds *no* relation for,
@@ -247,6 +247,7 @@
   ADR-0038 §3's mixed-conflict handling (§2 below). It does **not** touch ADR-0045's
   writer floor: `_refuse_unsafe_fold` clause 1 (nothing may fold onto a
   `USER_ASSERTED` target, both rulings) stands verbatim.
+- Partially superseded: 2026-10-18 by ADR-0329 — its deferral of assertion against assertion, as it reaches the memory a proposal's retiring operation names: the observer's proposal that ends, marks wrong or replaces a stored memory is ruled on over every conflict but that memory, and ADR-0328 §6:5's rank rule guards the retirement (ADR-0329 §12:4–§12:5). Every other part stands. This replacement takes effect on ratification of ADR-0329. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
