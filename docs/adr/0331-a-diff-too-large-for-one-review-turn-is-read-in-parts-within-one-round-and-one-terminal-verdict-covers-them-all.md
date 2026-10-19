@@ -143,7 +143,7 @@ the round's artifact. `scripts/ship.sh` reads that artifact unchanged.
 ### 3. The turn budget
 
 > **Normative.** The turn budget is 240,000 characters. No turn prompt in a parted round exceeds
-> it, counting the rubric, the preamble, the manifest, the part or the collected findings, the
+> it, counting the rubric, the preamble, the part or the collected findings, the
 > instructions and any re-injected dispositions.
 
 > **Normative.** The driver measures a prompt against the turn budget by a count that is never
@@ -185,28 +185,32 @@ the hard limit. It is left alone so that "under the budget, nothing changes" hol
 > **Normative.** A parted round's parts are a function of the rendered diff and the turn budget
 > alone, so every persona reviewing one tree reads the same parts.
 
-> **Normative.** When one hunk cannot fit a part turn by itself, the round fails before its first
-> turn starts and records nothing. The driver prints the hunk's path, its size and the turn budget.
-
-That change, or that hunk, has to be cut. At 240,000 characters the hunk would be several thousand
-lines of one file with no three unchanged lines anywhere in it.
-
 > **Normative.** Each part turn carries the persona rubric, the ADR-0020 §1 preamble for the whole
-> change, a manifest naming every changed path and the part that carries it, and its own part
-> verbatim.
+> change with every listed path marked by the part that carries it, the instructions below, and its
+> own part verbatim. Every changed path is listed once, not twice.
+
+> **Normative.** Before its first turn, the driver checks the whole partition. A parted round
+> fails before any turn starts, and records nothing, when the turn budget cannot hold a part
+> turn's fixed content (the rubric, the marked preamble and the instructions) together with one
+> hunk, or together with one file entry that has no hunk. The driver prints what did not fit, its
+> size, the fixed content's size and the turn budget.
+
+That change, or what did not fit, has to be cut. With a few thousand changed paths, the marked
+preamble alone can approach the budget. At 240,000 characters, a hunk that does not fit would be
+several thousand lines of one file with no three unchanged lines anywhere in it.
 
 > **Normative.** Each part turn tells the reviewer four things: that it is reviewing part *i* of
 > *k*; that it may read anything in the repository, including another part's hunks by `git diff
 > <base_sha> <content_sha> -- <path>` with the pinned SHAs written out; that it reports findings in
 > `docs/review/guide.md`'s format; and that it writes no verdict.
 
-> **Normative.** A parted round's turns run in part order, in the persona's one conversation
-> (ADR-0025 §1). In round 1 the first part turn starts that conversation, and in a later round it
-> resumes it.
+> **Normative.** A parted round's turns run in part order. Off the bypass path, they run in the
+> persona's one conversation (ADR-0025 §1): in round 1 the first part turn starts that
+> conversation, and in a later round it resumes it.
 
-> **Normative.** Every turn of a parted round runs read-only, and the driver proves it for every
-> turn from Codex's own record, as ADR-0025 §4 requires of a round. One unproven turn fails the
-> round, and it records nothing.
+> **Normative.** Off the bypass path, every turn of a parted round runs read-only, and the driver
+> proves it for every turn from Codex's own record, as ADR-0025 §4 requires of a round. One
+> unproven turn fails the round, and it records nothing.
 
 > **Normative.** The driver captures each part turn's final message verbatim, outside the model's
 > context, and keeps it in `.review/` beside the artifact the round records.
@@ -271,8 +275,9 @@ any artifact.
 > **Normative.** This decision applies to every persona. Each persona reads the parts in its own
 > conversation, and a both-lens round stays one round.
 
-> **Normative.** On the bypass path, which keeps no session, each turn of a parted round is a cold
-> invocation. The verdict turn's inputs are exactly those §6 lists.
+> **Normative.** On the bypass path, each turn of a parted round is a cold invocation made exactly
+> as that path makes its one invocation today: no session, no sandbox and no read-only proof. The
+> verdict turn's inputs are still exactly those §6 lists.
 
 Nothing about coverage or the verdict rests on what the conversation remembers. The verdict turn
 receives every part's findings verbatim, so the persistent session's memory helps a parted round
@@ -302,9 +307,9 @@ now act differently?
 - **ADR-0025 §2** is kept. The driver retires nothing, and the verdict turn's choices are the
   reviewer's.
 - **ADR-0025 §4** is kept. The verdict turn is the round's terminal turn, its output is the
-  shippable artifact, and the snapshot comes from it. Read-only is proven for every turn. A part
-  finding the verdict turn drops reaches the merge reviewer (§6). The snapshot stays selected by
-  the full anchor, because there is still one artifact per anchor.
+  shippable artifact, and the snapshot comes from it. Off the bypass path, read-only is proven for
+  every turn. A part finding the verdict turn drops reaches the merge reviewer (§6). The snapshot
+  stays selected by the full anchor, because there is still one artifact per anchor.
 - **ADR-0027 §2 and §6** are kept (§7).
 - **ADR-0020 §1** is kept, because every part turn carries the preamble. **§2** is kept, because a
   parted round is one round. **§3** is kept as ADR-0027 left it. The rejected "diff-size
@@ -329,12 +334,16 @@ now act differently?
 > headers removed, reproduce the rendered diff, and that no part turn prompt exceeds the turn
 > budget.
 
-> **Normative.** The implementation lane's tests show that a single hunk too large for a part turn
-> fails the round before any turn is invoked.
+> **Normative.** The implementation lane's tests show that a parted round fails before any turn is
+> invoked when one hunk does not fit beside a part turn's fixed content, and when the fixed content
+> leaves no room for one file entry that has no hunk.
 
 > **Normative.** The implementation lane's tests show that a parted round records nothing when any
 > turn fails, when any turn's read-only proof fails, or when HEAD or the working tree changes
 > between turns.
+
+> **Normative.** The implementation lane's tests show that a parted round on the bypass path makes
+> every turn as a cold bypass invocation, and records its artifact without a read-only proof.
 
 > **Normative.** The implementation lane's tests show that the verdict turn carries every part
 > message verbatim, and drops re-injected dispositions, never part messages, when the turn budget
@@ -358,7 +367,7 @@ contacts the service.
   verdict turn. Wall time per round grows with it, so `just review-codex-wait` answers "still
   running" more often.
 - **Cross-part reasoning is weaker than having everything in view at once.** A part turn sees the
-  others only through the manifest, its own reads and the conversation's compacted history. The
+  others only through the marked preamble, its own reads and the conversation's compacted history. The
   verdict turn sees every part's findings, but not every part's hunks. This is the main cost in
   review quality, and it is carried deliberately.
 - **The constant is a measurement of one Codex version and one model.** Revisit it, by a new ADR,
