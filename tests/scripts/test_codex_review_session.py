@@ -530,3 +530,65 @@ def test_a_malformed_injection_budget_refuses_with_a_configuration_error(
         result = run_review(repo, tmp_path, check=False, CODEX_REVIEW_INJECT_BUDGET=bad)
         assert result.returncode != 0, f"{bad!r} was accepted"
         assert "CODEX_REVIEW_INJECT_BUDGET must be" in result.stderr
+
+
+# The two round-2 bodies PR #3177 recorded, both plain APPROVE with no ranked
+# list. Each was recorded as an open finding (issue #3179): `blocker` for the
+# first, from "the previous blocker", and `unknown` for the second.
+_CLEAN_ROUND_BODIES = {
+    "adversarial": (
+        "No findings. Checked redelivery and restart semantics, failure classification,"
+        " credential isolation, TLS trust, configuration validation, and"
+        " implementation-test obligations. The revised update-ID rule resolves the"
+        " previous blocker.\n\nAPPROVE\n"
+    ),
+    "architecture": (
+        "No findings. Checked contract-first sequencing, subsystem boundaries, transport"
+        " injection, credential handling, polling semantics, and ADR supersession scope."
+        " Both previous findings are resolved.\n\nAPPROVE\n"
+    ),
+}
+
+
+def _snapshot_for_head(repo: Path) -> str:
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    return next(
+        iter((repo / ".review" / "dispositions").glob(f"*-adversarial-{tree}.md"))
+    ).read_text()
+
+
+@pytest.mark.parametrize("body", list(_CLEAN_ROUND_BODIES.values()), ids=list(_CLEAN_ROUND_BODIES))
+def test_a_clean_approve_records_no_open_finding(tmp_path: Path, body: str) -> None:
+    """A plain APPROVE with an unranked "no findings" body is not a finding (#3179).
+
+    Round 1's real finding is still carried forward as retired, so the ledger
+    keeps the history and loses only the bogus entry.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    run_review(repo, tmp_path, FAKE_CODEX_REVIEW="1. **blocker** the redelivery rule\nBLOCK\n")
+    _commit(repo, "three\n", "round 2")
+
+    run_review(repo, tmp_path, FAKE_CODEX_REVIEW=body)
+
+    snapshot = _snapshot_for_head(repo)
+    assert "status=open" not in snapshot
+    assert snapshot.count("<!-- finding id=") == 1
+    assert "severity=blocker status=retired" in snapshot
+    assert "No findings" not in snapshot
+    assert "verdict=APPROVE -->" in snapshot.splitlines()[0]
+
+
+@pytest.mark.parametrize("verdict", ["BLOCK", "APPROVE WITH NITS", "Verdict: BLOCK"])
+def test_an_unranked_body_under_any_other_verdict_is_still_one_finding(
+    tmp_path: Path, verdict: str
+) -> None:
+    """Outside a plain APPROVE the whole-body fallback stands: no finding is lost."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    run_review(repo, tmp_path, FAKE_CODEX_REVIEW=f"The cache is never invalidated.\n\n{verdict}\n")
+
+    snapshot = _snapshot_for_head(repo)
+    assert snapshot.count("status=open") == 1
+    assert "The cache is never invalidated." in snapshot
