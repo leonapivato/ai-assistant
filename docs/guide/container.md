@@ -296,8 +296,8 @@ this order:
 
 1. **Everything it can refuse, while the hub still serves.** The person's files and their
    modes, the volumes, the image the unit runs now, the port, the box's routing; then the
-   new image is built and the unit installed. A refusal ends with `Nothing has been
-   stopped or changed.`
+   new image is built, its commit is ruled on (below), and the unit installed. A refusal
+   ends with `Nothing has been stopped or changed.`
 2. **The backup, before the new image runs** (§6:1). The unit is stopped, and the image
    that wrote the data runs its own `ai-assistant-backup` over the data volume, in a
    container with no network, to `backups/pre-deploy-<UTC>-<run>.age`. A backup that
@@ -315,6 +315,16 @@ otherwise, and whenever the door or those checks fail, the deploy stops and disa
 so a boot does not start it either, and says so plainly if it cannot. Undoing the deploy is a later image, or the backup restored into a
 new volume. The
 artifact is kept; the deploy deletes none, and pruning old ones is the operator's act.
+
+**An earlier build is refused up front** (§5:4). The new image's commit must be the one
+the unit's image is labelled with, or a later one, by the history of the clone you deploy
+from. An earlier commit is refused, and so is one that has diverged from it, and so is
+any commit when the unit's image names one that clone does not hold: that is unknown, not
+earlier. The refusal names the way back: deploy a later build that opens the data, or
+restore the backup into a new volume and serve the earlier build from that.
+`--allow-earlier` deploys it anyway, and is for a release with no schema change between
+the two, which you must know: nothing checks it for you. `scripts/deploy_hub.py` rules the
+same way against its marker, with the same flag.
 
 The backup copies the data volume as the image pins it, `/data`, with the exclusions the
 tool makes and no others (ADR-0123 §3, ADR-0314 §7:5). It runs with the image's own

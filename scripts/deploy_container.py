@@ -50,7 +50,8 @@ deploys an image already on the box, which must carry ``build.sh``'s commit labe
 
 1. Everything that can be refused is refused while the hub still serves: the files and
    their modes, the volumes, the earlier image, the port, the box's network (below),
-   the new image built and labelled, the unit installed. *Nothing is stopped.*
+   the new image built and labelled, its commit ruled on (below), the unit installed.
+   *Nothing is stopped.*
 2. On a person whose hub has served data, the unit is stopped, and the earlier image's
    own ``ai-assistant-backup`` copies the data volume to the artifact, in a container
    of its own with no network. A backup that fails, or is written but unverified,
@@ -64,6 +65,15 @@ deploys an image already on the box, which must carry ``build.sh``'s commit labe
    never becomes healthy is left to its unit only where that check passes; otherwise,
    and whenever the door or the check fails, it is stopped and disabled, so a boot does
    not start it either, and a stop that cannot be confirmed is said to be one.
+
+**An earlier build is refused before the unit is touched** (ADR-0326 §5:4). Over a
+person whose hub has served, the new image's commit must be the earlier image's revision
+label or a later one, by this clone's history. An earlier commit is refused, and so is
+one that has diverged from it, and so is any commit when the label names none this clone
+holds: that is *unknown*, not *earlier*, and unknown is not clean. The refusal names the
+way back, a later build or the backup restored into a new path and served by the
+earlier build. ``--allow-earlier`` overrides it, and is the operator's word that no
+schema change lies between the two releases; nothing here computes that.
 
 **What the backup copies** is the hub's own directory by construction: the data volume
 mounted at ``/data``, the directory the image pins, and ``supervise.py`` refuses an
@@ -120,9 +130,19 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import IO, TYPE_CHECKING, Protocol
 
-# The backup tool's own words, held to its source by deploy_hub's tests: one source for
-# what "written and verified" looks like, whichever deploy reads it.
-from deploy_hub import _BACKUP_DISCLOSES, _BACKUP_UNVERIFIED, _BACKUP_VERIFIED
+# From deploy_hub, one source for whichever deploy reads it: the backup tool's own words,
+# held to its source by deploy_hub's tests, for what "written and verified" looks like;
+# and ADR-0326 §5:4's ruling on the commit, whose git lookups can raise deploy_hub's own
+# error, which main() reports as this script's.
+from deploy_hub import (
+    _BACKUP_DISCLOSES,
+    _BACKUP_UNVERIFIED,
+    _BACKUP_VERIFIED,
+    ALLOW_EARLIER_HELP,
+    HISTORY_WAY_BACK,
+    history_refusal,
+)
+from deploy_hub import DeployError as HubDeployError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -731,6 +751,8 @@ class Deployment:
     clock: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
     stage_context: Callable[[Path, Path], str] | None = None
+    allow_earlier: bool = False
+    history: Callable[[Path, str, str], str | None] = history_refusal
 
     # -- small helpers --------------------------------------------------------
 
@@ -1126,6 +1148,24 @@ class Deployment:
         if built is None or built.commit != commit:
             raise DeployError(f"{tag} is not on the box labelled {commit} after its build")
         return built
+
+    def rule_on_history(self, installed: str, deploying: str) -> None:
+        """Refuse a commit earlier than the one the unit runs, or not known to be later.
+
+        Args:
+            installed: The revision label of the image the unit runs now.
+            deploying: The new image's.
+
+        Raises:
+            DeployError: If ADR-0326 §5:4 refuses it and ``--allow-earlier`` was not
+                passed.
+        """
+        refusal = self.history(self.repo, installed, deploying)
+        if refusal is None:
+            return
+        if not self.allow_earlier:
+            raise DeployError(f"{refusal}.\n{HISTORY_WAY_BACK}\n{_UNTOUCHED}")
+        say(f"{refusal};\ndeploying it, as --allow-earlier says")
 
     def install_unit(self) -> None:
         """Install the unit as this tree has it, reloading systemd when it changed.
@@ -1569,12 +1609,13 @@ class Deployment:
     def _run(self) -> list[str]:
         installed = self.preflight()
         image = self.prepare_image()
-        self.install_unit()
         before = "none, a first install"
         if installed is not None:
             earlier = self._image(installed.image)
-            commit = earlier.commit if earlier is not None else "unlabelled"
-            before = f"{installed.image} (commit {commit})"
+            commit = earlier.commit if earlier is not None else ""
+            self.rule_on_history(commit, image.commit)
+            before = f"{installed.image} (commit {commit or 'unlabelled'})"
+        self.install_unit()
         artifact = None if installed is None else self.back_up(installed)
         try:
             self.name_new_image(image, first=installed is None)
@@ -1665,6 +1706,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--hubs-dir", default=DEFAULT_HUBS_DIR, help="the person directories")
     parser.add_argument("--port", type=int, help="the person's loopback port; a first install")
     parser.add_argument("--image", help="deploy this image, already on the box, unbuilt")
+    parser.add_argument("--allow-earlier", action="store_true", help=ALLOW_EARLIER_HELP)
     parser.add_argument(
         "--ready-timeout",
         type=float,
@@ -1706,9 +1748,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             port=args.port,
             image_ref=args.image,
             ready_timeout=args.ready_timeout,
+            allow_earlier=args.allow_earlier,
         )
         report = deployment.run()
-    except DeployError as exc:
+    except (DeployError, HubDeployError) as exc:
         print(f"deploy-container: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
