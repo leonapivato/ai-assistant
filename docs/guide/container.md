@@ -155,10 +155,11 @@ anyone else, and keep a copy of each off the box: the backup passphrase is the o
 to the artifacts (ADR-0123 §5). The rest is named from the person: the volumes
 `hub-<person>-data` and `hub-<person>-keyring`, the container `hub-<person>` on a bridge
 network of its own, also `hub-<person>`, and the unit `hub@<person>.service`, which the
-deploy installs from `deploy/container/hub@.service`. That unit is this page's systemd
-unit made real: the flags above, `docker run` in the foreground so its exit is the
-container's, `Restart=on-failure`, `RestartPreventExitStatus=78`, a stop timeout of 120
-seconds over Docker's 90, and a start at boot. A misconfigured gateway exits `78` through
+deploy installs from `deploy/container/hub@.service`. That unit is the supervisor that
+[what the container's exit means](#what-the-containers-exit-means) asks for: the flags
+above, `docker run` in the foreground so its exit is the container's,
+`Restart=on-failure`, `RestartPreventExitStatus=78`, a stop timeout of 120 seconds over
+Docker's 90, and a start at boot. A misconfigured gateway exits `78` through
 the container (#3167), so it too stays down until someone acts. `journalctl --unit
 hub@alice` is the container's log.
 
@@ -266,25 +267,10 @@ together and waits for both; a second stop changes nothing.
 and so do `always` and `unless-stopped`, so a deployment fault becomes a restart
 loop, the failure ADR-0083 §5 exists to prevent. The supervisor outside should
 instead be one that can tell the codes apart. systemd is the reference ADR-0083
-names; a unit of this shape runs one person's container, illustrative only:
-
-```ini
-[Unit]
-Description=Hub container for alice
-After=docker.service
-Requires=docker.service
-
-[Service]
-ExecStartPre=-/usr/bin/docker rm --force hub-alice
-ExecStart=/usr/bin/docker run --rm --name hub-alice ...the flags from step 3, without --detach...
-ExecStop=/usr/bin/docker stop --time 90 hub-alice
-Restart=on-failure
-RestartPreventExitStatus=78
-TimeoutStopSec=120
-
-[Install]
-WantedBy=multi-user.target
-```
+names, and the unit the deploy installs is
+[`deploy/container/hub@.service`](../../deploy/container/hub@.service): one person's
+container per instance, `hub@<person>.service`, with `Restart=on-failure` and
+`RestartPreventExitStatus=78`.
 
 `docker run` without `--detach` exits with the container's code, which is what lets
 `RestartPreventExitStatus=78` read it.
