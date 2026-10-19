@@ -28,8 +28,8 @@ leave a ``78`` down, which is ADR-0083's D1, so the reference is a systemd unit 
    secret store use. A passphrase that leaves the login keyring locked is a ``78``.
 3. The hub, until its socket accepts (ADR-0083 §3 step 6).
 4. The gateway, until its hosted listener accepts. A gateway that stops before it
-   ever accepted is a ``1``: its exit cannot tell a setting it refused from a fault
-   that clears, and ADR-0083 §5 makes that case a restart.
+   ever accepted passes its ``78`` through, since it exits ``78`` only for a refusal
+   no restart changes (#3167); any other stop is a ``1``.
 5. ``/run/assistant/ready``, which the image's health check reads.
 
 **A stop is one signal to each.** ``SIGTERM`` or ``SIGINT`` here sends ``SIGINT`` to
@@ -635,23 +635,31 @@ class Supervisor:
     def serve(self) -> int:
         """Start, watch and stop the children.
 
+        **A fault is said after everything has stopped**, so that it is the last line
+        of the log: once the hub has started, stopping it writes its drain after
+        anything said before it, and ADR-0083 §5 has every ``78`` end on its cause
+        and the operator action.
+
         Returns:
             The container's exit code (ADR-0083 §5).
         """
         self._layout.ready.unlink(missing_ok=True)
+        said: str | None = None
         try:
             code = self._run()
         except _StopRequestedError:
             code = EXIT_OK
         except DeploymentError as fault:
-            say(f"{fault} (exit {EXIT_DEPLOYMENT})")
+            said = f"{fault} (exit {EXIT_DEPLOYMENT})"
             code = EXIT_DEPLOYMENT
         except StartError as fault:
-            say(f"{fault} (exit {EXIT_RESTART})")
+            said = f"{fault} (exit {EXIT_RESTART})"
             code = EXIT_RESTART
         finally:
             self._layout.ready.unlink(missing_ok=True)
             self._stop_everything()
+        if said is not None:
+            say(said)
         hub = next((c.process.returncode for c in self._children if c.name == "hub"), None)
         return code if hub is None else _settle(code, hub)
 
@@ -678,14 +686,17 @@ class Supervisor:
     def _gateway_did_not_start(self, gateway: _Child, address: str, port: int) -> None:
         """Report a gateway that exited before its hosted listener ever accepted.
 
-        **It is a ``1``, whatever its status**, because the status cannot say which
-        kind of fault it was. ``assistant gateway`` exits ``1`` both for a setting it
-        refused and for a fault that clears on its own — descriptors exhausted for a
-        moment, say — and ADR-0083 §5 settles the case where a fault does not answer
-        "would restarting, unchanged, ever succeed?": "the answer is ``1``: a spurious
-        restart is recoverable and a spurious ``78`` is an outage." Most of the
-        gateway's settings are the hub's too, and the hub refuses them first with its
-        own ``78``; a gateway that told the two apart is #3167.
+        **Its ``78`` is the container's ``78``.** ``assistant gateway`` uses ADR-0083
+        §5's codes as the hub does (#3167): it exits ``78`` for a refusal restarting
+        unchanged never gets past — a setting it refused, an edge key that will not
+        load, a hosted address this container does not hold — after printing the
+        cause and what to change, and ``1`` for a fault that may clear. So a ``78``
+        here is a deployment to fix, and restarting the container would only meet the
+        same refusal again.
+
+        **Every other status is a ``1``**: the gateway's own ``1``, a signal, or a
+        code it does not use. §5's tie-break is the reason — "a spurious restart is
+        recoverable and a spurious ``78`` is an outage".
 
         Args:
             gateway: The gateway, which has exited.
@@ -693,11 +704,20 @@ class Supervisor:
             port: The hosted port.
 
         Raises:
-            StartError: Always.
+            DeploymentError: If the gateway exited ``78``.
+            StartError: Otherwise.
         """
+        status = gateway.process.returncode
+        if status == EXIT_DEPLOYMENT:
+            msg = (
+                f"the gateway refused to start before its hosted listener accepted on "
+                f"{address}:{port}. Its own message above names what to change; the "
+                f"container starts once that is changed"
+            )
+            raise DeploymentError(msg)
         msg = (
-            f"the gateway exited {gateway.process.returncode} before its hosted listener "
-            f"accepted on {address}:{port}; its own message above says why"
+            f"the gateway exited {status} before its hosted listener accepted on "
+            f"{address}:{port}; its own message above says why"
         )
         raise StartError(msg)
 
