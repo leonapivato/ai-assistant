@@ -424,7 +424,8 @@ def test_a_request_argument_object_sorts_rather_than_keeping_keyword_order(
 #: :func:`_belief`'s bytes: ADR-0328 §15's field set, every member sorted at every
 #: depth (§2), 824 bytes.
 _BELIEF_BYTES: Final = (
-    b'{"as_of":"2026-08-01T12:00:00Z","band":"asserted","content":"prefers dark mode",'
+    b'{"as_of":"2026-08-01T12:00:00Z","attestation":null,"band":"asserted",'
+    b'"content":"prefers dark mode",'
     b'"evidence":{"against":0,"episodes":2,"latest":"2026-08-01T12:00:00Z","supporting":2},'
     b'"id":"b-1","kind":"memory","learned":"2026-08-01T12:00:00Z","legacy":false,'
     b'"reading_certainty":null,'
@@ -468,7 +469,7 @@ def test_a_belief_shaped_model_takes_its_ratified_bytes() -> None:
     ``null`` field emitted rather than omitted, which is what ADR-0124 §9's second limb
     rests on for version 110.
     """
-    assert len(_BELIEF_BYTES) == 840
+    assert len(_BELIEF_BYTES) == 859
     assert _both(_belief()) == _BELIEF_BYTES
 
 

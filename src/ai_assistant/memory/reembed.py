@@ -61,7 +61,11 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import EpisodicMemory, record_band
 from ai_assistant.memory._channel_reads import channel_of
-from ai_assistant.memory._episode_format import check_memory_format, inspect_existing
+from ai_assistant.memory._episode_format import (
+    MEMORY_RECORD_FORMAT,
+    check_memory_format,
+    inspect_existing,
+)
 from ai_assistant.memory._episode_guard import is_open
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory.sqlite_store import (
@@ -319,7 +323,7 @@ def _connect(path: Path) -> sqlite3.Connection:
         MemoryStoreError: If the database cannot be opened or the extension
             cannot be loaded.
     """
-    inspect_existing(str(path))
+    inspect_existing(str(path), accepted=frozenset({MEMORY_RECORD_FORMAT}))
     try:
         conn = sqlite3.connect(str(path), isolation_level=None)
     except (sqlite3.Error, OSError, ValueError) as exc:

@@ -94,6 +94,7 @@ from ai_assistant.core.types import (
     EpisodeCaptureReport,
     EpisodeChunk,
     EpisodePage,
+    EpisodicMemory,
     InformationalEventResult,
     Memory,
     MemoryKind,
@@ -209,6 +210,11 @@ from ai_assistant.orchestration.stories import (
 from ai_assistant.orchestration.story_links import StoryLinksDecision
 from ai_assistant.orchestration.story_standing import OWNER_READER
 from ai_assistant.orchestration.story_standing import story_standing as standing_of
+from ai_assistant.orchestration.support_parts import (
+    episodes_to_read,
+    part_content,
+    remember_activations,
+)
 from ai_assistant.orchestration.telegram import (
     LINE_GIVER,
     TELEGRAM,
@@ -225,7 +231,7 @@ from ai_assistant.orchestration.understanding import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -391,6 +397,33 @@ class DrainPhase(StrEnum):
     #: Phase A's budget was reached; the remainder was cancelled and then awaited
     #: to completion, unbounded (ADR-0083 §4).
     CANCELLED = "phase_b_cancelled"
+
+
+@dataclass(frozen=True, slots=True)
+class _SupportReading:
+    """One page's supports, resolved (ADR-0328 §15:2, §15:7).
+
+    Attributes:
+        contents: Each part's readable content, or ``None`` where it is gone.
+        held: The episodes the store still holds, of those the page's parts point into.
+    """
+
+    contents: Mapping[SupportPart, str | None]
+    held: frozenset[str]
+
+    def all_gone(self, memory: Memory) -> bool:
+        """Whether none of ``memory``'s supports' episodes resolves (§15:7).
+
+        Keyed on the episode, as §15:7 is: a part missing from an episode the store
+        still holds is shown as gone, but the episode resolves. A legacy support points
+        into no episode, and is gone where the record it carries has no content.
+        """
+        return all(
+            self.contents.get(support.points_at) is None
+            if (episode := part_episode(support.points_at)) is None
+            else episode not in self.held
+            for support in memory.supports
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -6432,18 +6465,12 @@ class Engine:
         records = await self._memory.list_beliefs(
             bands=bands, kinds=kinds, limit=limit, offset=offset
         )
-        contents = await self._support_contents(
+        reading = await self._support_contents(
             [record for record in records if isinstance(record, Memory)]
         )
         now = self._clock()
         return tuple(
-            belief_summary(
-                record,
-                now=now,
-                supports_gone=all(
-                    contents.get(support.points_at) is None for support in record.supports
-                ),
-            )
+            belief_summary(record, now=now, supports_gone=reading.all_gone(record))
             if isinstance(record, Memory)
             else episode_summary(record)
             for record in records
@@ -6456,41 +6483,57 @@ class Engine:
             return None
         if not isinstance(record, Memory):
             return episode_view(record)
-        contents = await self._support_contents((record,))
-        return belief_view(record, now=self._clock(), contents=contents)
+        reading = await self._support_contents((record,))
+        return belief_view(record, now=self._clock(), contents=reading.contents)
 
-    async def _support_contents(self, memories: Sequence[Memory]) -> dict[SupportPart, str | None]:
+    async def _support_contents(self, memories: Sequence[Memory]) -> _SupportReading:
         """Resolve each support's part to readable content at presentation (ADR-0328 §15:2).
 
         **Lazily, here, and without rewriting anything** (ADR-0077 §6, kept by §15:7).
-        A part that points into an episode reads as that episode's content, and as gone
-        (``None``) where the episode no longer resolves: a support the user's forgetting
-        took still counts, and is shown as gone and never as evidence. A legacy part
-        reads as the content of the record it carries (§16:4). Every episode the
-        memories point into is read through **one**
-        :meth:`~ai_assistant.core.protocols.MemoryStore.get_many` (ADR-0086 §6), so
-        every support is judged against one state of the store.
+        Each part reads as the content of that part on its episode's record — the input
+        or one of its messages, a round's message, a digest's evidence item, the
+        statement a confirmed question part showed, a remember call's statement — and
+        as gone (``None``) where the episode no longer resolves or holds no such part
+        (:mod:`~ai_assistant.orchestration.support_parts`). A legacy part reads as the
+        content of the record it carries (§16:4).
+
+        Every episode the memories point into, the asking activations' included, is read
+        through **one** :meth:`~ai_assistant.core.protocols.MemoryStore.get_many`
+        (ADR-0086 §6), and the effect records their remember calls are claimed under
+        through one :meth:`~ai_assistant.core.protocols.PlanStore.activation_effects`,
+        so every support is judged against one state of each store.
 
         Resolution happens at this façade rather than in `interfaces/`, which golden
         rule 3 keeps thin.
         """
-        parts = [support.points_at for memory in memories for support in memory.supports]
-        episodes = tuple(
-            dict.fromkeys(e for part in parts if (e := part_episode(part)) is not None)
+        wanted = episodes_to_read(memories)
+        found = await self._memory.get_many(wanted) if wanted else {}
+        episodes = {
+            record_id: record
+            for record_id, record in found.items()
+            if isinstance(record, EpisodicMemory)
+        }
+        activations = remember_activations(memories, episodes)
+        effects = (
+            {effect.id: effect for effect in await self._plans.activation_effects(activations)}
+            if activations
+            else {}
         )
-        found = await self._memory.get_many(episodes) if episodes else {}
+        wordings: dict[SupportPart, set[str]] = {}
+        for memory in memories:
+            for support in memory.supports:
+                wordings.setdefault(support.points_at, set()).add(memory.content)
         contents: dict[SupportPart, str | None] = {}
         for memory in memories:
             for support in memory.supports:
-                part = support.points_at
-                episode = part_episode(part)
-                if episode is None:
-                    carried = (support.carries or {}).get("content")
-                    contents[part] = carried if isinstance(carried, str) and carried else None
-                else:
-                    record = found.get(episode)
-                    contents[part] = None if record is None else record.content
-        return contents
+                contents[support.points_at] = part_content(
+                    support.points_at,
+                    episodes=episodes,
+                    effects=effects,
+                    carried=support.carries,
+                    wordings=wordings[support.points_at],
+                )
+        return _SupportReading(contents=contents, held=frozenset(episodes))
 
     def _checked(self, result: _T, method: str) -> _T:
         """Refuse a result the contract does not admit, before returning it (§8c).

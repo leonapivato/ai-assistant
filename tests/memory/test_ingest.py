@@ -817,14 +817,14 @@ async def test_superseding_a_target_whose_window_opens_at_the_close_refuses(
                 source=MemorySource.INFERRED,
             )
         )
-        before = await _memories(store)
+        before = await store.export()
 
         with pytest.raises(MemoryStoreError, match="valid_from"):
             await _ingestor(store).ingest(
                 _proposal(_asserted("correction", "user prefers afternoon meetings"))
             )
 
-        assert await _memories(store) == before
+        assert await store.export() == before
     finally:
         if isinstance(store, SqliteMemoryStore):
             store.close()

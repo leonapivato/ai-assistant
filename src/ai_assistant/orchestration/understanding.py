@@ -432,8 +432,10 @@ def _instruction(*, recalled: bool, stories: bool) -> str:
 _BAND_ATTRIBUTION: Final = {
     BeliefBand.ASSERTED: "a remembered fact: something the user said",
     BeliefBand.DERIVED: "a remembered fact: something the assistant worked out",
+    # Not "a connected source": the band also holds a memory resting on the
+    # assistant's own message (ADR-0328 §4, §6), which no integration reported.
     BeliefBand.ATTESTED: (
-        "a remembered fact: something a connected source reported, never something the user said"
+        "a remembered fact: something from a source, never something the user said"
     ),
 }
 

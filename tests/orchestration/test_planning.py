@@ -90,6 +90,7 @@ from ai_assistant.testing import FakeDiagnosticSink, FakeToolCallingCompleter
 from ai_assistant.testing.memories import (
     confirmed_support,
     memory,
+    message_support,
     remembered_support,
     said_support,
     sourced_support,
@@ -1404,6 +1405,20 @@ async def test_a_memory_label_carries_what_adr_0328_15_5_names() -> None:
     assert "track_record" not in shown_confirmed
     assert (shown_undated["as_of"], shown_undated["learned"]) == ("unknown", "unknown")
     assert shown_undated["track_record"] == {"relied_on": 1, "held_up": 0, "let_down": 1}
+
+
+async def test_a_memory_resting_on_the_assistants_message_is_not_a_connected_sources() -> None:
+    """ADR-0328 §4: an assistant message ranks at source, and no integration reported it.
+
+    Planning's label says "from a source" for every origin ranked there, and never that a
+    connected source reported it.
+    """
+    held = memory("m-said-by-me", "The meeting is at noon.", message_support(when=_AT))
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(recalled=(held,)))
+    (shown,) = _sent(completer)["recalled"]
+    assert shown["standing"] == "from a source, not the user's word"
+    assert "connected source" not in shown["item"]
 
 
 async def test_a_found_episode_the_episode_window_shows_is_not_shown_again() -> None:

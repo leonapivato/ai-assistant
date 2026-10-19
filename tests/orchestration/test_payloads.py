@@ -344,7 +344,8 @@ class TestComposites:
         and every instant is ``Z``-suffixed.
         """
         assert _encoded(_belief()) == (
-            '{"as_of":"2026-08-01T12:00:00Z","band":"asserted","content":"prefers dark mode",'
+            '{"as_of":"2026-08-01T12:00:00Z","attestation":null,"band":"asserted",'
+            '"content":"prefers dark mode",'
             '"evidence":{"against":0,"episodes":2,"latest":"2026-08-01T12:00:00Z",'
             '"supporting":2},"id":"b-1","kind":"memory","learned":"2026-08-01T12:00:00Z",'
             '"legacy":false,'

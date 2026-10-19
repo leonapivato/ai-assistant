@@ -24,7 +24,11 @@ from pydantic import ValidationError
 from ai_assistant.core.types import (
     BeliefSummary,
     EvidenceSummary,
+    MemoryOperation,
+    MemoryOperationKind,
+    MemoryWriterName,
     SupportDirection,
+    applied_operation,
     belief_summary,
 )
 from ai_assistant.testing.memories import memory, said_support
@@ -59,6 +63,30 @@ class TestBeliefSummary:
         assert not belief_summary(backed, now=AT, supports_gone=False).unbacked
         assert not belief_summary(against, now=AT, supports_gone=False).unbacked
         assert belief_summary(against, now=AT, supports_gone=False).evidence.against == 1
+
+    def test_a_memory_whose_sole_backing_stops_counting_is_unbacked(self) -> None:
+        """§7:10 firing: the one backing support explained away leaves it unbacked.
+
+        An equal-standing ``against`` support stops the only ``for`` one (§6:5 permits
+        it), so no counted ``for`` support backs the wording, and both the computed
+        value and its projection say so.
+        """
+        backing = said_support()
+        explaining = said_support("activation:other", direction=SupportDirection.AGAINST)
+        held = memory("rec-3", "the office is in Boston", backing, explaining)
+        stopped = applied_operation(
+            held,
+            MemoryOperation(
+                kind=MemoryOperationKind.STOP_COUNTING,
+                cites=explaining.points_at,
+                stops=backing.points_at,
+                at=AT,
+                by=MemoryWriterName.REMEMBER,
+            ),
+        )
+        assert not held.is_unbacked
+        assert stopped.is_unbacked
+        assert belief_summary(stopped, now=AT, supports_gone=False).unbacked
 
     def test_it_has_no_supports_field_at_all(self) -> None:
         """§4a's structural guarantee: the wrong behaviour is unrepresentable.

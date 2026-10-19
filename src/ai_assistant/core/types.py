@@ -5591,14 +5591,16 @@ class Memory(RecordEnvelope):
 
         Those of its latest backing support whose origin ranks at source, where its
         standing is from a source, and ``None`` otherwise. Latest by ``when``, an unknown
-        ``when`` earliest, and by position among equals.
+        ``when`` earliest, and by position among equals. The support is chosen first and
+        its details read after, so a latest support stating none answers ``None`` rather
+        than an older support's details (§2:6 names the latest support's).
         """
         if self.standing is not MemoryStanding.SOURCE:
             return None
         sourced = [
             one
             for one in self.backing_supports
-            if origin_standing(one.origin) is MemoryStanding.SOURCE and one.source_details
+            if origin_standing(one.origin) is MemoryStanding.SOURCE
         ]
         if not sourced:
             return None
@@ -6550,6 +6552,9 @@ def _resolved_questions(
     if operation.kind is MemoryOperationKind.RAISE_QUESTION:
         if question is None or question.id != operation.question or question.resolved:
             msg = "a raise question carries the open question it raises (ADR-0328 §9:2)"
+            raise ValueError(msg)
+        if operation.cites not in question.rests_on:
+            msg = "a raise question cites a support the question rests on (ADR-0328 §5)"
             raise ValueError(msg)
         return (*memory.open_questions, question)
     if operation.kind is not MemoryOperationKind.RESOLVE_QUESTION:
@@ -15160,7 +15165,11 @@ class BeliefSummary(BaseModel):
     which ADR-0328 §18 keeps beside §11:2's default), and is projected onto the same
     type by :func:`episode_summary`: ``kind`` says which it is, and an episode has no
     standing and no status (``None``), rests on no supports, and was learned when it
-    happened. Its band and its outside-content mark are its provenance's (§12).
+    happened. Its band and its outside-content mark are its provenance's (§12), and so
+    is ``attestation``: ADR-0189 §2:1 binds an episode's projection still (ADR-0328 §18
+    supersedes it for a memory's alone), so an attested episode carries what reported
+    it and when. A memory's source details are on its supports (§15:2), and its
+    ``attestation`` here is always ``None``.
 
     Attributes:
         id: The record's id, opaque, and what ``forget`` names.
@@ -15180,6 +15189,8 @@ class BeliefSummary(BaseModel):
         unbacked: Whether no counted ``for`` support backs it as worded (§7:10).
         rests_on_outside_content: Whether it rests on outside content (§7:6).
         supports_gone: Whether no support's episode resolves (§15:7).
+        attestation: For an episode, its provenance's ``Attestation`` as stored
+            (ADR-0189 §2:1); ``None`` on a memory.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -15200,6 +15211,7 @@ class BeliefSummary(BaseModel):
     unbacked: bool = False
     rests_on_outside_content: bool = False
     supports_gone: bool = False
+    attestation: Attestation | None = None
 
     @model_validator(mode="after")
     def _kind_decides_standing(self) -> Self:
@@ -15209,6 +15221,9 @@ class BeliefSummary(BaseModel):
                 "a memory's projection carries its standing and status, and an episode's "
                 "carries neither (ADR-0328 §15:1, ADR-0074 §6)"
             )
+            raise ValueError(msg)
+        if self.attestation is not None and not episodic:
+            msg = "a memory's source details are on its supports (ADR-0328 §15:2)"
             raise ValueError(msg)
         return self
 
@@ -15332,6 +15347,7 @@ def _episode_fields(episode: EpisodicMemory) -> dict[str, object]:
         "evidence": EvidenceSummary(supporting=0, against=0, episodes=0),
         "track_record": TrackRecordSummary(relied_on=0, held_up=0, let_down=0),
         "rests_on_outside_content": record_rests_on_outside_content(episode),
+        "attestation": episode.provenance.attestation,
     }
 
 

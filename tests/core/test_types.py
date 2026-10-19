@@ -937,16 +937,24 @@ def test_a_proposals_supports_are_a_set_to_its_fingerprint() -> None:
     second = said_support("activation:b")
 
     one = MemoryUpdateProposal(proposed=memory("r1", "c", first, second), rationale="r")
-    other = MemoryUpdateProposal(proposed=memory("r1", "c", second, first), rationale="r")
+    # The same memory, operation log and all, its supports held in the other order.
+    reordered = Memory.model_validate(one.proposed.model_dump() | {"supports": (second, first)})
+    other = MemoryUpdateProposal(proposed=reordered, rationale="r")
 
-    assert (
-        one.proposal_fingerprint
-        != MemoryUpdateProposal(
-            proposed=memory("r1", "c", first), rationale="r"
-        ).proposal_fingerprint
-    )
-    # The create cites the first support, so the two logs differ: the log is its order.
-    assert one.proposed.operations != other.proposed.operations
+    assert other.proposed.supports != one.proposed.supports
+    assert other.proposal_fingerprint == one.proposal_fingerprint
+    assert other.question_key == one.question_key
+
+
+def test_a_different_set_of_supports_is_a_different_question() -> None:
+    """The set is in the fingerprint: adding a support changes it (§11:11)."""
+    first = said_support("activation:a")
+    second = said_support("activation:b")
+
+    one = MemoryUpdateProposal(proposed=memory("r1", "c", first, second), rationale="r")
+    fewer = MemoryUpdateProposal(proposed=memory("r1", "c", first), rationale="r")
+
+    assert one.proposal_fingerprint != fewer.proposal_fingerprint
 
 
 # --- ADR-0068: the memory record graph is frozen all the way down -------

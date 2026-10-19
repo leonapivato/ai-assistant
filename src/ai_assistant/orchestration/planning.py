@@ -1209,9 +1209,9 @@ _RELATION_TEXT: Final = {
 #: A found memory record, attributed by its band and never by its text (ADR-0072 §5).
 _BAND_TEXT: Final = {
     BeliefBand.ASSERTED: "a remembered fact: something the user said",
-    BeliefBand.ATTESTED: (
-        "a remembered fact: something a connected source reported, never what the user said"
-    ),
+    # Not "a connected source": the band also holds a memory resting on the
+    # assistant's own message (ADR-0328 §4, §6), which no integration reported.
+    BeliefBand.ATTESTED: "a remembered fact: something from a source, never what the user said",
     BeliefBand.DERIVED: "a remembered fact: something the assistant worked out",
 }
 
@@ -1219,7 +1219,7 @@ _BAND_TEXT: Final = {
 _STANDING_TEXT: Final = {
     MemoryStanding.CONFIRMED: "the user confirmed this wording",
     MemoryStanding.SAID: "the user said it",
-    MemoryStanding.SOURCE: "a connected source reported it",
+    MemoryStanding.SOURCE: "from a source, not the user's word",
     MemoryStanding.INFERENCE: "the assistant inferred it",
 }
 

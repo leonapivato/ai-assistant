@@ -407,6 +407,7 @@ _LISTED: Final = {
     "unbacked",
     "rests_on_outside_content",
     "supports_gone",
+    "attestation",
 }
 
 

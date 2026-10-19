@@ -29,6 +29,8 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, assert_never
 
+from pydantic import ValidationError
+
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     FoldOntoCitedRecordError,
@@ -43,7 +45,6 @@ from ai_assistant.core.types import (
     BeliefBand,
     ConflictRelation,
     DataTier,
-    LegacyPart,
     Memory,
     MemoryDecisionKind,
     MemoryIngestResult,
@@ -54,6 +55,7 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     SupportDirection,
+    SupportOrigin,
     Validity,
     applied_operation,
     part_episode,
@@ -146,10 +148,15 @@ def _asserted(record: MemoryRecord) -> bool:
 
 
 def _cited_ids(memory: Memory) -> frozenset[str]:
-    """The ids ``memory``'s supports point at: their episodes and legacy records."""
+    """The episodes ``memory``'s supports point at: what it cites (ADR-0328 §12).
+
+    A legacy support carries its record whole (§16:4), so installing at that record's
+    id consumes no warrant, and it is no citation here.
+    """
     return frozenset(
-        part.record if isinstance(part, LegacyPart) else part.episode
-        for part in (support.points_at for support in memory.supports)
+        episode
+        for support in memory.supports
+        if (episode := part_episode(support.points_at)) is not None
     )
 
 
@@ -373,10 +380,17 @@ def _supersede(incoming: Memory, new_id: str, retired: Sequence[str]) -> Memory:
     create = first.model_copy(
         update={"replaces": tuple(dict.fromkeys([*first.replaces, *retired]))}
     )
-    return Memory.model_validate(
-        incoming.model_dump()
-        | {"id": new_id, "validity": Validity(), "operations": (create, *rest)}
-    )
+    try:
+        return Memory.model_validate(
+            incoming.model_dump()
+            | {"id": new_id, "validity": Validity(), "operations": (create, *rest)}
+        )
+    except ValidationError as exc:
+        # A proposal that cannot stand live — one already ended or marked wrong keeps
+        # its status, which an open window contradicts (ADR-0328 §3:4) — is refused as
+        # this writer's error, never as a raw validation failure.
+        msg = f"cannot supersede with {incoming.id!r}: it cannot stand live"
+        raise MemoryStoreError(msg) from exc
 
 
 def _ended(target: MemoryRecord, successor: Memory, now: datetime) -> Memory:
@@ -421,6 +435,12 @@ def _reinforced(target: MemoryRecord, incoming: Memory, *, now: datetime) -> Mem
     for support in incoming.supports:
         if folded.support_at(support.points_at) is not None:
             continue
+        if support.origin is SupportOrigin.CONFIRMATION and not _agrees(target, incoming):
+            msg = (
+                f"cannot reinforce {target.id!r}: a confirmation backs only a wording that "
+                f"agrees with the statement the user approved (ADR-0328 §4:6)"
+            )
+            raise MemoryStoreError(msg)
         operation = MemoryOperation(
             kind=MemoryOperationKind.ADD_SUPPORT,
             cites=support.points_at,
@@ -520,7 +540,10 @@ class FakeMemoryWriter:
         observed = change.model_copy(deep=True)
         async with self._lock:
             memory = observed.memory
-            added = () if observed.support is None else (observed.support,)
+            # §4:7 binds a support actually added: one the memory already carries
+            # changes nothing and is no error (§4:8), its episode gone or not.
+            carried = observed.support is not None and memory.support_at(observed.support.points_at)
+            added = () if observed.support is None or carried else (observed.support,)
             successor = () if observed.successor is None else observed.successor.supports
             await self._require_held_episodes(memory.id, (*added, *successor))
             try:

@@ -163,7 +163,6 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
-    FoldOntoCitedRecordError,
     MemoryStoreConflictError,
     MemoryStoreError,
     MemoryStoreStaleError,
@@ -362,12 +361,6 @@ _ROOMY_CEILING = 10
 #: ADR-0079 §1's refusal. Held apart from :data:`_ROOMY_CEILING` rather than raising
 #: it, so every other multi-conflict case keeps the set size it was written for.
 _AUDIT_CEILING = 20
-
-#: An id a proposal's legacy support points at that names **no stored record**: a
-#: legacy part is not resolved (ADR-0328 §4:7), so it is where ADR-0081 §4's re-mint
-#: does real work — an ``INSERT_IF_ABSENT`` at an unoccupied id would otherwise
-#: *succeed*.
-_CITED_FREE = "cited-but-unstored"
 
 
 async def _cite(store: MemoryStore) -> str:
@@ -569,6 +562,16 @@ def _preference(  # noqa: PLR0913 — one keyword per record axis a case may var
 async def _memories(store: MemoryStore) -> list[MemoryRecord]:
     """What ``store`` exports, less its episodes: the memories a writer wrote."""
     return [record for record in await store.export() if isinstance(record, Memory)]
+
+
+async def _snapshot(store: MemoryStore) -> list[MemoryRecord]:
+    """Everything ``store`` exports, episodes included: what a refused write leaves alone.
+
+    A no-write assertion compares this whole, because the episodes a proposal's supports
+    point at are state a writer could damage on a refused path as much as any memory
+    (ADR-0328 §5:11, §11:8).
+    """
+    return list(await store.export())
 
 
 def _proposal(record: Memory) -> MemoryUpdateProposal:
@@ -1296,6 +1299,7 @@ class MemoryWriterContract:
     ) -> None:
         store = FakeMemoryStore(now=_long_ago)
         await _cite(store)
+        before = await _snapshot(store)
 
         result = await make_writer(store, FakeMemoryPolicy(kind)).ingest(
             _proposal(_preference("new"))
@@ -1303,7 +1307,7 @@ class MemoryWriterContract:
 
         assert result.decision.kind is kind
         assert result.record_id is None
-        assert await _memories(store) == []
+        assert await _snapshot(store) == before
 
     async def test_reinforce_adds_the_proposals_supports_to_the_target(
         self, make_writer: WriterFactory
@@ -1620,7 +1624,7 @@ class MemoryWriterContract:
         store = FakeMemoryStore(now=_after_close)
         await _cite(store)
         await store.add(_preference("existing", source=MemorySource.INFERRED, evidence=("t-ev",)))
-        before = await _memories(store)
+        before = await _snapshot(store)
         writer = make_writer(
             store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=factory
         )
@@ -1628,7 +1632,7 @@ class MemoryWriterContract:
         with pytest.raises(MemoryStoreError):
             await writer.ingest(_proposal(_preference("new")))
 
-        assert await _memories(store) == before  # nothing written
+        assert await _snapshot(store) == before  # nothing written
         target = await store.get("existing")
         assert target is not None
         assert target.validity.valid_until is None  # target left live
@@ -1693,7 +1697,7 @@ class MemoryWriterContract:
         await _cite(store)
         await store.add(_preference("existing", source=target))
         writer = make_writer(store, FakeMemoryPolicy(kind))
-        before = await _memories(store)
+        before = await _snapshot(store)
         # `_DISAGREEING` still ranks the target as a conflict (see the constant), so
         # the disagreeing half exercises the predicate rather than an empty set.
         proposal = _proposal(
@@ -1711,7 +1715,7 @@ class MemoryWriterContract:
             # Write nothing: the whole store is unchanged, so a writer that
             # mutated the target and *then* raised is caught, not only one that
             # stored the proposal as new.
-            assert await _memories(store) == before
+            assert await _snapshot(store) == before
             return
 
         result = await writer.ingest(proposal)
@@ -1950,7 +1954,7 @@ class MemoryWriterContract:
         await _cite(store)
         await store.add(_preference("theirs", target_content, source=MemorySource.USER_ASSERTED))
         writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
-        before = await _memories(store)
+        before = await _snapshot(store)
 
         with pytest.raises(MemoryStoreError):
             await writer.ingest(
@@ -1964,7 +1968,7 @@ class MemoryWriterContract:
                 )
             )
 
-        assert await _memories(store) == before
+        assert await _snapshot(store) == before
 
     @pytest.mark.parametrize(
         ("kind", "incoming", "content"),
@@ -2017,7 +2021,7 @@ class MemoryWriterContract:
         await _cite(store)
         await store.add(_preference("theirs", source=MemorySource.USER_ASSERTED))
         writer = make_writer(store, FakeMemoryPolicy(kind))
-        before = await _memories(store)
+        before = await _snapshot(store)
 
         with pytest.raises(MemoryStoreError):
             await writer.ingest(
@@ -2026,7 +2030,7 @@ class MemoryWriterContract:
 
         # Write nothing: a writer that mutated the target and then raised is caught
         # as well as one that stored the proposal as new.
-        assert await _memories(store) == before
+        assert await _snapshot(store) == before
 
     # --- the full-conflict ruling and its ceiling (ADR-0079 §4) -------------
 
@@ -2183,14 +2187,14 @@ class MemoryWriterContract:
         await _cite(store)
         await store.add(_preference("imported", source=MemorySource.EXTERNAL))
         writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
-        before = await _memories(store)
+        before = await _snapshot(store)
 
         with pytest.raises(MemoryStoreError):
             await writer.ingest(_proposal(_preference("new", source=MemorySource.USER_ASSERTED)))
 
         # Fail-closed and whole: the import is byte-identical and nothing landed,
         # so a writer that folded and *then* raised is caught too.
-        assert await _memories(store) == before
+        assert await _snapshot(store) == before
         assert await store.get("new") is None
 
     async def test_an_unmintable_multi_target_supersede_leaves_every_target_live(
@@ -2207,7 +2211,7 @@ class MemoryWriterContract:
         await _cite(store)
         await _plant_conflict_set(store, target_source=MemorySource.INFERRED)
         await store.add(_episodic("wall", "always in the way"))
-        before = await _memories(store)
+        before = await _snapshot(store)
         writer = make_writer(
             store,
             _SupersedeNamingPolicy("target"),
@@ -2218,7 +2222,7 @@ class MemoryWriterContract:
         with pytest.raises(MemoryStoreError):
             await writer.ingest(_proposal(_preference("new", source=MemorySource.USER_ASSERTED)))
 
-        assert await _memories(store) == before
+        assert await _snapshot(store) == before
         for record_id in ("target", *_SWEPT_IN):
             live = await store.get(record_id)
             assert live is not None
@@ -2278,7 +2282,7 @@ class MemoryWriterContract:
         await _cite(store)
         for index in range(3):
             await store.add(_preference(f"existing-{index}", source=MemorySource.INFERRED))
-        before = await _memories(store)
+        before = await _snapshot(store)
         policy = FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE)
         writer = make_writer(store, policy, conflict_limit=2)
 
@@ -2286,7 +2290,7 @@ class MemoryWriterContract:
             await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
 
         assert policy.call_count == 0  # no ruling was sought
-        assert await _memories(store) == before  # nothing written, no window closed
+        assert await _snapshot(store) == before  # nothing written, no window closed
         for index in range(3):
             live = await store.get(f"existing-{index}")
             assert live is not None
@@ -2314,14 +2318,14 @@ class MemoryWriterContract:
         await _cite(store)
         await store.add(_preference("existing", source=MemorySource.INFERRED))
         writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE))
-        before = await _memories(store)
+        before = await _snapshot(store)
 
         with pytest.raises(MemoryStoreError):
             await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
 
         # Nothing written and nothing retired: a writer that closed the window and
         # *then* raised is caught, not only one that stored the correction.
-        assert await _memories(store) == before
+        assert await _snapshot(store) == before
 
     async def test_a_supersede_leaves_an_adds_sibling_live(
         self, make_writer: WriterFactory
@@ -2383,12 +2387,12 @@ class MemoryWriterContract:
             FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE),
             reconciler=_LabellingReconciler({"existing": ConflictRelation.ADDS}),
         )
-        before = await _memories(store)
+        before = await _snapshot(store)
 
         with pytest.raises(MemoryStoreError):
             await writer.ingest(_proposal(_correcting("new", evidence=(_CITED,))))
 
-        assert await _memories(store) == before
+        assert await _snapshot(store) == before
 
     async def test_a_contradicting_conflict_is_retired_exactly_as_before(
         self, make_writer: WriterFactory
@@ -2699,7 +2703,7 @@ class MemoryWriterContract:
             )
         )
         await store.add(_preference("sibling", source=MemorySource.INFERRED))
-        before = await _memories(store)
+        before = await _snapshot(store)
         writer = make_writer(
             store,
             _SupersedeNamingPolicy("sibling"),
@@ -2722,7 +2726,7 @@ class MemoryWriterContract:
             # evidence failure, so it must not arrive as the subclass ADR-0077 §5
             # took for that other question.
             assert not isinstance(refusal, UnresolvedEvidenceError)
-            assert await _memories(store) == before
+            assert await _snapshot(store) == before
             assert await store.get("corrected") is None
             return
 
@@ -2762,7 +2766,7 @@ class MemoryWriterContract:
         store = FakeMemoryStore(now=_long_ago)
         await _cite(store)
         await store.add(_preference("existing", source=MemorySource.INFERRED))
-        before = await _memories(store)
+        before = await _snapshot(store)
         policy = FakeMemoryPolicy(MemoryDecisionKind.ACCEPT)
         writer = make_writer(store, policy)
 
@@ -2775,7 +2779,7 @@ class MemoryWriterContract:
 
         assert tuple(caught.value.unresolved_ids) == ("gone-later", "gone-early")
         assert policy.call_count == 0  # refused before any ruling was sought
-        assert await _memories(store) == before
+        assert await _snapshot(store) == before
 
     async def test_a_support_pointing_at_a_memory_rather_than_an_episode_is_refused(
         self, make_writer: WriterFactory
@@ -2828,9 +2832,10 @@ class MemoryWriterContract:
         assert result.record_id == "new"
 
     # --- no write consumes its own warrant (ADR-0081 §1, read through §12) ----
-    # What a memory cites is the parts its supports point at: its episodes, and a
-    # legacy support's record (ADR-0328 §12). So a proposal installed at an id one of
-    # its supports points at would stand as its own warrant.
+    # What a memory cites is the episodes its supports point at (ADR-0328 §12). So a
+    # proposal installed at an id one of its supports points into would stand as its
+    # own warrant. A legacy support is no citation: it carries the record it points at
+    # whole (§16:4), so an install at that record's id consumes nothing.
 
     @pytest.mark.parametrize("source", list(MemorySource), ids=str)
     async def test_an_accept_at_an_id_its_supports_point_at_is_refused(
@@ -2844,44 +2849,46 @@ class MemoryWriterContract:
         """
         store = FakeMemoryStore(now=_long_ago)
         await _cite(store)
-        before = await _memories(store)
+        before = await _snapshot(store)
         writer = make_writer(store, _RulesExactly(MemoryDecisionKind.ACCEPT))
 
         with pytest.raises(MemoryStoreError) as caught:
             await writer.ingest(_proposal(_preference(_CITED, source=source)))
 
         assert type(caught.value) is SelfConsumingWriteError
-        assert await _memories(store) == before
+        assert await _snapshot(store) == before
 
-    async def test_an_accept_at_a_cited_id_is_refused_even_where_nothing_stands_there(
+    async def test_an_accept_at_its_own_legacy_records_id_installs(
         self, make_writer: WriterFactory
     ) -> None:
-        """Limb 1's empty slot: refused whether or not a record stands at the id.
+        """A legacy support at the proposal's own id is no citation (§12, §16:4).
 
-        Driven by a legacy support pointing at the proposal's own, unstored id — an
-        install that would succeed and leave a memory standing as its only warrant.
+        The legacy support carries its record whole, so installing at that id leaves
+        nothing the memory rests on unreadable: §16:4's upgraded memory is exactly this
+        shape, and no refusal ADR-0081 makes reaches it.
         """
         store = FakeMemoryStore(now=_long_ago)
         await _cite(store)
         writer = make_writer(store, _RulesExactly(MemoryDecisionKind.ACCEPT))
 
-        with pytest.raises(SelfConsumingWriteError):
-            await writer.ingest(_proposal(memory("new", _CONTENT, legacy_support({"id": "new"}))))
+        result = await writer.ingest(
+            _proposal(memory("new", _CONTENT, legacy_support({"id": "new"})))
+        )
 
-        assert await _memories(store) == []
+        assert result.record_id == "new"
+        assert await store.get("new") is not None
 
-    async def test_a_reinforce_onto_a_target_its_supports_point_at_is_refused(
+    async def test_a_reinforce_onto_a_target_a_legacy_support_names_lands(
         self, make_writer: WriterFactory
     ) -> None:
-        """Limb 1, ``REINFORCE``: the policy chose the destination, and it is cited.
+        """A legacy support naming the target is no citation, so the fold lands (§12).
 
-        ``FoldOntoCitedRecordError`` by exact type — the one arm a caller may continue
-        past (ADR-0116 §2) — with nothing written.
+        ``FoldOntoCitedRecordError`` keys on the episodes a proposal's supports point
+        into, and a target memory is never one.
         """
         store = FakeMemoryStore(now=_long_ago)
         await _cite(store)
         await store.add(_preference("existing", source=MemorySource.INFERRED))
-        before = await _memories(store)
         writer = make_writer(store, _RulesExactly(MemoryDecisionKind.REINFORCE))
         proposed = memory(
             "new",
@@ -2890,11 +2897,10 @@ class MemoryWriterContract:
             legacy_support({"id": "existing"}),
         )
 
-        with pytest.raises(MemoryStoreError) as caught:
-            await writer.ingest(_proposal(proposed))
+        result = await writer.ingest(_proposal(proposed))
 
-        assert type(caught.value) is FoldOntoCitedRecordError
-        assert await _memories(store) == before
+        assert result.record_id == "existing"
+        assert {record.id for record in await _memories(store)} == {"existing"}
 
     @pytest.mark.parametrize(
         "kind", [MemoryDecisionKind.REJECT, MemoryDecisionKind.ASK_USER], ids=str
@@ -2965,8 +2971,8 @@ class MemoryWriterContract:
     ) -> None:
         """Limb 2: a minted id the proposal cites is re-minted, not refused (ADR-0081 §4).
 
-        The cited id names nothing, so an insert there would **succeed** and leave the
-        correction standing as its own warrant; the writer mints again instead.
+        The minted id is the episode the correction's own support points into; the
+        writer mints again rather than installing the correction over its warrant.
         """
         store = FakeMemoryStore(now=_after_close)
         await _cite(store)
@@ -2974,17 +2980,13 @@ class MemoryWriterContract:
         writer = make_writer(
             store,
             FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE),
-            id_factory=_scripted(_CITED_FREE, "corrected"),
-        )
-        correction = _correcting("new")
-        proposed = memory(
-            "new", _DISAGREEING, correction.supports[0], legacy_support({"id": _CITED_FREE})
+            id_factory=_scripted(_CITED, "corrected"),
         )
 
-        result = await writer.ingest(_proposal(proposed))
+        result = await writer.ingest(_proposal(_correcting("new")))
 
         assert result.record_id == "corrected"
-        assert await store.get(_CITED_FREE) is None
+        assert isinstance(await store.get(_CITED), EpisodicMemory)
         retained = {record.id for record in await _memories(store)}
         assert retained == {"existing", "corrected"}
 
@@ -2995,21 +2997,17 @@ class MemoryWriterContract:
         store = FakeMemoryStore(now=_after_close)
         await _cite(store)
         await store.add(_preference("existing", source=MemorySource.INFERRED))
-        before = await _memories(store)
+        before = await _snapshot(store)
         writer = make_writer(
             store,
             FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE),
-            id_factory=_always(_CITED_FREE),
-        )
-        correction = _correcting("new")
-        proposed = memory(
-            "new", _DISAGREEING, correction.supports[0], legacy_support({"id": _CITED_FREE})
+            id_factory=_always(_CITED),
         )
 
         with pytest.raises(MemoryStoreError):
-            await writer.ingest(_proposal(proposed))
+            await writer.ingest(_proposal(_correcting("new")))
 
-        assert await _memories(store) == before
+        assert await _snapshot(store) == before
 
     async def test_a_supersede_still_retires_a_cited_record_and_lands(
         self, make_writer: WriterFactory
@@ -3045,7 +3043,7 @@ class MemoryWriterContract:
         store = FakeMemoryStore(now=_after_close)
         await _cite(store)
         await store.add(_preference("existing", source=MemorySource.USER_ASSERTED))
-        before = await _memories(store)
+        before = await _snapshot(store)
         writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE))
         correction = _correcting("new")
         proposed = memory(
@@ -3055,7 +3053,7 @@ class MemoryWriterContract:
         with pytest.raises(MemoryStoreError):
             await writer.ingest(_proposal(proposed))
 
-        assert await _memories(store) == before
+        assert await _snapshot(store) == before
 
     # --- input observation (ADR-0065) ---------------------------------------
 
@@ -3740,3 +3738,176 @@ class MemoryWriterContract:
             )
 
         assert await store.get("existing") == moved
+
+    async def test_apply_refuses_a_raise_question_citing_a_support_it_does_not_rest_on(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§5's table: a raise question cites a support the question rests on."""
+        store = FakeMemoryStore(now=_long_ago)
+        await _cite(store)
+        await store.add(_episodic(_OTHER_CITED, "a second exchange"))
+        read = await self._stored(store, _preference("existing", evidence=(_CITED, _OTHER_CITED)))
+        first, second = read.supports
+        question = OpenQuestion(
+            id="q-1",
+            kind=OpenQuestionKind.RECHECK,
+            asks="does this still hold?",
+            rests_on=(second.points_at,),
+            raised_at=_WHEN,
+            raised_by=MemoryWriterName.REMEMBER,
+        )
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.RAISE_QUESTION,
+            cites=first.points_at,
+            question="q-1",
+            at=_WHEN,
+            by=MemoryWriterName.REMEMBER,
+        )
+        before = await _snapshot(store)
+
+        with pytest.raises(MemoryStoreError):
+            await make_writer(store, FakeMemoryPolicy()).apply(
+                MemoryChange(memory=read, operation=operation, question=question)
+            )
+
+        assert await _snapshot(store) == before
+
+    async def test_apply_of_a_carried_support_whose_episode_went_writes_nothing(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§4:8 before §4:7: a duplicate addition changes nothing, its episode gone or not.
+
+        §4:7's episode check binds a support actually added; one whose part the memory
+        already carries is no addition, so it raises nothing and writes nothing.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        await _cite(store)
+        read = await self._stored(store, _preference("existing"))
+        assert await store.delete(_CITED)  # forgotten, as an expiry would leave it
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.ADD_SUPPORT,
+            cites=read.supports[0].points_at,
+            at=_WHEN,
+            by=MemoryWriterName.REMEMBER,
+        )
+        before = await _snapshot(store)
+
+        await make_writer(store, FakeMemoryPolicy()).apply(
+            MemoryChange(memory=read, operation=operation, support=read.supports[0])
+        )
+
+        assert await _snapshot(store) == before
+
+    async def test_apply_with_a_successor_retires_the_predecessor_and_links_both(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§5:6, §5:7: the predecessor is ended, its window closed, and each names the other."""
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        read = await self._stored(store, _preference("existing"))
+        successor_base = _preference("successor", _DISAGREEING)
+        create = successor_base.operations[0].model_copy(update={"replaces": ("existing",)})
+        successor = successor_base.model_copy(update={"operations": (create,)})
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.END,
+            cites=read.supports[0].points_at,
+            at=_WHEN,
+            by=MemoryWriterName.REMEMBER,
+            successor="successor",
+        )
+
+        await make_writer(store, FakeMemoryPolicy()).apply(
+            MemoryChange(memory=read, operation=operation, successor=successor)
+        )
+
+        kept = {record.id: record for record in await _memories(store)}
+        predecessor = kept["existing"]
+        assert isinstance(predecessor, Memory)
+        assert predecessor.status is MemoryStatus.ENDED
+        assert predecessor.validity.valid_until == _WHEN
+        assert predecessor.operations[-1].successor == "successor"
+        written = kept["successor"]
+        assert isinstance(written, Memory)
+        assert written.status is MemoryStatus.CURRENT
+        assert "existing" in written.operations[0].replaces
+
+    async def test_apply_with_a_successor_over_a_moved_predecessor_writes_neither(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§5:4 with §5:6: a stale predecessor refuses the whole write, successor included."""
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        read = await self._stored(store, _preference("existing"))
+        await store.add(read)  # another writer moves it on
+        before = await _snapshot(store)
+        successor_base = _preference("successor", _DISAGREEING)
+        create = successor_base.operations[0].model_copy(update={"replaces": ("existing",)})
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.END,
+            cites=read.supports[0].points_at,
+            at=_WHEN,
+            by=MemoryWriterName.REMEMBER,
+            successor="successor",
+        )
+
+        with pytest.raises(MemoryStoreStaleError):
+            await make_writer(store, FakeMemoryPolicy()).apply(
+                MemoryChange(
+                    memory=read,
+                    operation=operation,
+                    successor=successor_base.model_copy(update={"operations": (create,)}),
+                )
+            )
+
+        assert await _snapshot(store) == before
+
+    async def test_a_reinforce_never_carries_a_confirmation_onto_other_wording(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§4:6: a confirmation backs only a wording agreeing with what the user approved.
+
+        A policy ruling ``REINFORCE`` onto a differently worded inference would
+        otherwise lift that wording to "you confirmed this wording". Refused, with
+        nothing written.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        await _cite(store)
+        await store.add(_preference("existing", _DISAGREEING, source=MemorySource.INFERRED))
+        before = await _snapshot(store)
+        writer = make_writer(store, _RulesExactly(MemoryDecisionKind.REINFORCE))
+
+        with pytest.raises(MemoryStoreError):
+            await writer.ingest(_proposal(_confirmed_memory("new")))
+
+        assert await _snapshot(store) == before
+
+    async def test_a_supersede_with_a_proposal_that_cannot_stand_live_is_a_store_error(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """A proposal already ended cannot take a fresh open window: refused, not raw.
+
+        The refusal is a ``MemoryStoreError`` — what every caller of ``ingest`` handles
+        — never a bare validation failure, and nothing is written.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await store.add(_preference("existing", source=MemorySource.INFERRED))
+        before = await _snapshot(store)
+        correction = _correcting("new")
+        ended = applied_operation(
+            correction,
+            MemoryOperation(
+                kind=MemoryOperationKind.END,
+                cites=correction.supports[0].points_at,
+                at=_WHEN,
+                by=MemoryWriterName.REMEMBER,
+            ),
+        )
+        writer = make_writer(
+            store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=_scripted("c")
+        )
+
+        with pytest.raises(MemoryStoreError):
+            await writer.ingest(_proposal(ended))
+
+        assert await _snapshot(store) == before
