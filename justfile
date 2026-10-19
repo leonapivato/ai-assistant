@@ -640,6 +640,16 @@ upgrade-check *args:
 deploy-hub host *args:
     uv run python scripts/deploy_hub.py "$@"
 
+# The image holding one person's hub and its gateway (#3142), built from a wheel of
+# a clean tree and `uv.lock`'s runtime set, installed with no resolution — the set
+# `deploy-hub` installs. The optional argument is the tag; CONTAINER_RUNTIME=podman
+# builds with Podman. docs/guide/container.md runs what it builds.
+#
+# Last line, because `just --list` shows only that one: what this recipe does.
+# Build the container image for one person's hub and gateway (issue #3142)
+container-image *args:
+    deploy/container/build.sh "$@"
+
 # One agent per clone (ADR-0015 §2), and each clone carries untracked local state
 # no merge ever moves between them. This mirrors the documented list —
 # `scripts/clone_sync_files.txt`, which is data and carries its own note that

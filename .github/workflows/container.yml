@@ -1,0 +1,73 @@
+name: container
+
+# Builds the image for one person's hub and its gateway (#3142) and drives it end to
+# end: readiness on a fresh volume, the gateway answering on the published port, the
+# admin acts through exec, a restart carrying the data, and the deployment faults
+# exiting 78. Neither the development machine nor the box has a container runtime;
+# GitHub's runners do, so this is where the image is proven.
+#
+# **Not part of `gate`**, deliberately. `gate` is the one check branch protection
+# requires (ADR-0167 §1:1), and this workflow's job is not named `gate` and is not
+# among the jobs `gate.yml`'s `gate` requires, so it reports beside the gate and never
+# blocks a merge. It costs a wheel build and an image build, so it runs only where
+# what it proves can have moved: the image's own files, this workflow, and the two
+# files the image's dependency set is built from. A change elsewhere that breaks the
+# image is caught by the weekly run on `main`, and by any run started by hand.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "deploy/container/**"
+      - ".github/workflows/container.yml"
+      - "tests/deploy/**"
+      - "pyproject.toml"
+      - "uv.lock"
+  push:
+    branches: [main]
+    paths:
+      - "deploy/container/**"
+      - ".github/workflows/container.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install the pinned Python
+        run: uv python install
+
+      # The supervisor's own tests and its static checks. `gate` runs the tests too;
+      # mypy here because `[tool.mypy].files` does not reach `deploy/`.
+      - name: Supervisor checks
+        run: |
+          uv sync --locked
+          uv run ruff format --check deploy/container
+          uv run ruff check deploy/container
+          uv run mypy --strict deploy/container/supervise.py deploy/container/smoke.py
+          uv run pytest tests/deploy -p no:cacheprovider
+
+      - name: Build the image
+        run: deploy/container/build.sh ai-assistant-hub:ci
+
+      - name: Smoke test
+        run: uv run --no-project --with cryptography python deploy/container/smoke.py ai-assistant-hub:ci
