@@ -23,9 +23,13 @@ Type=exec
 # on the host's loopback. Written by the deploy, and by nothing else.
 EnvironmentFile=/srv/hubs/%i/unit.env
 ExecStartPre=-/usr/bin/docker rm --force hub-%i
+# The person's own bridge network: Docker's protection of a container's address from
+# other machines (its raw-table drop) is per user-defined bridge network, and one per
+# person keeps the people's containers apart. Already made is not a failure.
+ExecStartPre=-/usr/bin/docker network create --driver bridge hub-%i
 # --pull never: the image is the one the deploy built or was given on this box, and a
 # name that is missing here is never fetched from a registry instead.
-ExecStart=/usr/bin/docker run --rm --pull never --name hub-%i --network bridge \
+ExecStart=/usr/bin/docker run --rm --pull never --name hub-%i --network hub-%i \
     --env-file /srv/hubs/%i/hub.env \
     --volume hub-%i-data:/data \
     --volume hub-%i-keyring:/home/assistant/.local/share/keyrings \
@@ -36,7 +40,7 @@ ExecStart=/usr/bin/docker run --rm --pull never --name hub-%i --network bridge \
 # ADR-0083's D2 is shutdown_drain_seconds plus thirty, sixty by default. Docker waits 90
 # for the drain before it kills, and systemd waits 120 for Docker, so the drain is cut
 # by Docker's own SIGKILL at 90, never by systemd's earlier.
-ExecStop=/usr/bin/docker stop --time 90 hub-%i
+ExecStop=/usr/bin/docker stop --timeout 90 hub-%i
 TimeoutStopSec=120
 Restart=on-failure
 RestartSec=5

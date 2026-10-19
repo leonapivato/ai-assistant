@@ -46,7 +46,7 @@ def test_unit_stop_timeouts_sit_above_the_drain_bound() -> None:
     drain = Settings.model_fields["shutdown_drain_seconds"].default.total_seconds()
     d2 = drain + 30  # ADR-0083 §3's reference margin
     run_timeout = int(re.search(r"--stop-timeout (\d+)", _directive("ExecStart")).group(1))  # type: ignore[union-attr]
-    stop_timeout = int(re.search(r"--time (\d+)", _directive("ExecStop")).group(1))  # type: ignore[union-attr]
+    stop_timeout = int(re.search(r"--timeout (\d+)", _directive("ExecStop")).group(1))  # type: ignore[union-attr]
 
     assert run_timeout == stop_timeout > d2
     assert int(_directive("TimeoutStopSec")) > stop_timeout
@@ -59,7 +59,8 @@ def test_unit_mounts_what_the_guide_runs_and_publishes_to_loopback_alone() -> No
     assert "--volume hub-%i-keyring:/home/assistant/.local/share/keyrings" in start
     assert "--volume /srv/hubs/%i/keyring-passphrase:/run/secrets/keyring-passphrase:ro" in start
     assert "--env-file /srv/hubs/%i/hub.env" in start
-    assert "--network bridge" in start
+    assert "--network hub-%i" in start
+    assert "/usr/bin/docker network create --driver bridge hub-%i" in _unit()
     assert re.findall(r"--publish (\S+)", start) == ["127.0.0.1:${HUB_PORT}:8423"]
     assert start.rstrip().endswith("${HUB_IMAGE}")
     assert _directive("EnvironmentFile") == "/srv/hubs/%i/unit.env"
