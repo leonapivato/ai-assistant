@@ -190,8 +190,8 @@ nothing: its exit is the container's, and it uses the hub's three codes (ADR-008
 | Exit | Meaning | The supervisor outside should |
 | --- | --- | --- |
 | `0` | A stop was asked for, and the hub drained. | Not restart. |
-| `1` | Something stopped that should come back: the hub crashed, or the gateway or the keyring stopped after the container was ready. | Restart. |
-| `78` | The deployment is wrong, and restarting changes nothing until someone acts. The cause and the action are the last lines of the log. | Not restart. |
+| `1` | Something stopped that should come back: the hub crashed, the gateway or the keyring stopped after the container was ready, or a signal ended the gateway before it was. | Restart. |
+| `78` | The deployment is wrong, and restarting changes nothing until someone acts — the gateway exiting on its own before its listener ever accepted among it. The cause and the action are the last lines of the log. | Not restart. |
 
 A stop is `docker stop`. It sends the gateway `SIGINT` and the hub `SIGTERM`
 together and waits for both; a second stop changes nothing.
@@ -247,9 +247,9 @@ Every refusal ends with `(exit 78)` on a `hub-container:` line, or with the hub'
 | `ASSISTANT_DATA_DIR is …, but the data volume is mounted at /data` | Remove `ASSISTANT_DATA_DIR` from the env file. |
 | `… configured. In this container the gateway reaches the hub over the local socket` | Remove the remote settings it names from the env file. |
 | `the container holds 2 besides loopback` (or any count but 1) | Run it on a bridge network, not `--network host`. |
-| `ASSISTANT_GATEWAY_HOSTED_ADDRESS=127.0.0.1 is a loopback address` | Remove it from the env file. |
+| `ASSISTANT_GATEWAY_HOSTED_ADDRESS=127.0.0.1 is a loopback address`, or `… is set but blank` | Remove it from the env file. |
 | `the passphrase at … does not unlock the login keyring` | Mount the passphrase this keyring volume was created with. |
-| `the gateway stopped before its hosted listener accepted` | Read the gateway's own message just above it: usually an edge setting. |
+| `the gateway exited 1 before its hosted listener accepted` | Read the gateway's own message just above it: usually an edge setting. |
 | `hub: cannot start: … holds no credential` | Put the model key in the env file. |
 
 ## What this page is not

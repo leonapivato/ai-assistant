@@ -284,7 +284,15 @@ def settle_hosted_address(
             read off the namespace unambiguously, or the one read is not private-use.
     """
     configured = setting(environ, HOSTED_ADDRESS)
-    if configured is not None and configured.strip():
+    if configured is not None and not configured.strip():
+        # Not read as unset: the blank stays in the container's own environment, where
+        # it outranks the `.env` for every `docker exec`, and `Settings` refuses it.
+        msg = (
+            f"{HOSTED_ADDRESS} is set but blank. Remove it from the env file, and the "
+            f"container binds its own private-use address"
+        )
+        raise DeploymentError(msg)
+    if configured is not None:
         address = configured.strip()
         with contextlib.suppress(ValueError):
             if ipaddress.ip_address(address).is_loopback:
@@ -621,17 +629,42 @@ class Supervisor:
         address, port = self._hosted
         outcome = self._wait(lambda: tcp_accepts(address, port))
         if outcome is _Outcome.EXITED and self.exited is gateway:
-            msg = (
-                f"the gateway stopped before its hosted listener accepted on "
-                f"{address}:{port}; its own message above says why, and a restart "
-                f"unchanged would stop the same way"
-            )
-            raise DeploymentError(msg)
+            self._gateway_did_not_start(gateway, address, port)
         if outcome is not _Outcome.READY:
             return self._ended(outcome)
         _write_private(self._layout.ready, f"{hub.process.pid} {gateway.process.pid}\n")
         say(f"ready: the gateway's hosted listener accepts on {address}:{port}")
         return self._ended(self._wait(lambda: False))
+
+    def _gateway_did_not_start(self, gateway: _Child, address: str, port: int) -> None:
+        """Classify a gateway that exited before its hosted listener ever accepted.
+
+        **A status the gateway chose is a deployment fault.** ``assistant gateway``
+        renders every fault it can name — a setting, a key, an address — and exits
+        ``1`` (``_serve_gateway``), and anything else it can fail on before it binds
+        is in the image. Neither changes by starting again, which is ADR-0083 §5's
+        test for ``78``. **A signal is not its choice** (S4): something ended it from
+        outside, and that may not happen twice.
+
+        Args:
+            gateway: The gateway, which has exited.
+            address: The hosted address it was to bind.
+            port: The hosted port.
+
+        Raises:
+            DeploymentError: Where it exited with a status of its own.
+            StartError: Where a signal ended it, or it exited ``0`` unasked.
+        """
+        status = gateway.process.returncode
+        if status is not None and status > 0:
+            msg = (
+                f"the gateway exited {status} before its hosted listener accepted on "
+                f"{address}:{port}; its own message above says why, and a restart "
+                f"unchanged would stop the same way"
+            )
+            raise DeploymentError(msg)
+        msg = f"the gateway ended ({status}) before its hosted listener accepted"
+        raise StartError(msg)
 
     def _start_keyring(self) -> None:
         self._layout.bus.unlink(missing_ok=True)

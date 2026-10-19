@@ -38,7 +38,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
@@ -395,13 +395,34 @@ def main(argv: Sequence[str]) -> int:
         print(f"usage: smoke.py IMAGE, with {RUNTIME} on PATH", file=sys.stderr)
         return 2
     with tempfile.TemporaryDirectory(prefix="hub-smoke-") as scratch:
-        smoke = Smoke(argv[0], Path(scratch))
-        try:
-            smoke.run()
-        except SmokeError as failure:
-            print(f"smoke: FAILED: {failure}", file=sys.stderr, flush=True)
-            smoke.clean()
-            return 1
+        return drive(Smoke(argv[0], Path(scratch)))
+
+
+class _Run(Protocol):
+    def run(self) -> None: ...
+
+    def clean(self) -> None: ...
+
+
+def drive(smoke: _Run) -> int:
+    """Run every check, and clean up however the run ends.
+
+    A failed check is reported and is a ``1``. Anything else — a refused connection,
+    a timeout, a runtime that went away — is left to raise with its traceback, after
+    the cleanup, so that a later run does not find this run's container and volumes.
+
+    Args:
+        smoke: The run.
+
+    Returns:
+        ``0`` when every check passed, ``1`` when one failed.
+    """
+    try:
+        smoke.run()
+    except SmokeError as failure:
+        print(f"smoke: FAILED: {failure}", file=sys.stderr, flush=True)
+        return 1
+    finally:
         smoke.clean()
     print("smoke: every check passed", flush=True)
     return 0

@@ -60,6 +60,8 @@ def main(role: str) -> None:
     elif role == "gateway":
         if os.environ.get("FAKE_GATEWAY_REFUSES"):
             sys.exit(1)
+        if os.environ.get("FAKE_GATEWAY_KILLED"):
+            os.kill(os.getpid(), signal.SIGKILL)
         listener = socket.create_server(
             (os.environ["ASSISTANT_GATEWAY_HOSTED_ADDRESS"], int(os.environ["FAKE_PORT"]))
         )

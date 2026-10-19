@@ -183,6 +183,21 @@ def test_a_configured_address_is_kept_and_nothing_is_written(layout: Any) -> Non
     assert not layout.dotenv.exists()
 
 
+@pytest.mark.parametrize("configured", ["", "  "])
+def test_a_blank_configured_address_is_refused_rather_than_read_as_unset(
+    layout: Any, configured: str
+) -> None:
+    # The blank would stay in the container's environment and outrank the `.env` for
+    # every `docker exec`, whose `Settings` would then refuse it.
+    with pytest.raises(supervise.DeploymentError, match="set but blank"):
+        supervise.settle_hosted_address(
+            {supervise.HOSTED_ADDRESS: configured},
+            layout,
+            addresses=lambda: [("eth0", "172.17.0.2")],
+        )
+    assert not layout.dotenv.exists()
+
+
 @pytest.mark.parametrize("configured", ["127.0.0.1", "::1"])
 def test_a_configured_loopback_address_is_refused(layout: Any, configured: str) -> None:
     with pytest.raises(supervise.DeploymentError, match="never its loopback"):
@@ -362,6 +377,13 @@ def test_a_gateway_that_never_listens_is_a_deployment_fault(layout: Any) -> None
     assert run.all_ended()
 
 
+def test_a_gateway_a_signal_ends_before_it_listens_is_a_restart(layout: Any) -> None:
+    run = _Run(layout, FAKE_GATEWAY_KILLED="1")
+    assert run.result() == supervise.EXIT_RESTART
+    assert run.saw("hub.signal") == "SIGTERM"
+    assert run.all_ended()
+
+
 def test_a_gateway_that_stops_after_ready_restarts_the_container(layout: Any) -> None:
     run = _Run(layout, FAKE_GATEWAY_EXIT_AFTER="1.5:1")
     run.until_ready()
@@ -449,3 +471,54 @@ def test_settings_that_move_the_data_are_refused_before_any_child(layout: Any) -
         ignored_signals=(),
     )
     assert supervise.run(layout, {}, machine=machine) == supervise.EXIT_DEPLOYMENT
+
+
+# --- The smoke test's own cleanup ---------------------------------------------------
+
+
+def _load_smoke() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "container_smoke", _ROOT / "deploy" / "container" / "smoke.py"
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["container_smoke"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+smoke = _load_smoke()
+
+
+class _Smoke:
+    def __init__(self, failure: BaseException | None) -> None:
+        self.failure = failure
+        self.cleaned = False
+
+    def run(self) -> None:
+        if self.failure is not None:
+            raise self.failure
+
+    def clean(self) -> None:
+        self.cleaned = True
+
+
+def test_a_passing_smoke_run_cleans_up() -> None:
+    run = _Smoke(None)
+    assert smoke.drive(run) == 0
+    assert run.cleaned
+
+
+def test_a_failed_check_is_a_one_and_cleans_up() -> None:
+    run = _Smoke(smoke.SmokeError("the door was shut"))
+    assert smoke.drive(run) == 1
+    assert run.cleaned
+
+
+@pytest.mark.parametrize("failure", [ConnectionRefusedError(), TimeoutError()])
+def test_a_transport_failure_raises_after_cleaning_up(failure: OSError) -> None:
+    run = _Smoke(failure)
+    with pytest.raises(type(failure)):
+        smoke.drive(run)
+    assert run.cleaned
