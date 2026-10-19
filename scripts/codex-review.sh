@@ -332,6 +332,17 @@ _last_verdict_line() {
         tr -d '*#`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
 }
 
+# The verdict word itself — `BLOCK`, `APPROVE WITH NITS` or `APPROVE` — from a
+# line `_last_verdict_line` produced and the round's verdict guard accepted: the
+# optional label stripped, a trailing period dropped, upper-cased. `--wait`
+# reports it, and the disposition snapshot reads it (issue #3179). `LC_ALL=C` for
+# the reason that guard states at length: `[^[:alnum:]]` is locale-dependent, and
+# in a single-byte non-ASCII locale an em dash's leading byte reads as a letter.
+_verdict_word() {
+    LC_ALL=C sed -E 's/^[Vv][Ee][Rr][Dd][Ii][Cc][Tt][^[:alnum:]]*//; s/\.$//' <<<"$1" |
+        tr '[:lower:]' '[:upper:]'
+}
+
 # One field of a round marker (`key=value` per line), first occurrence.
 _marker_field() {
     [[ -n "$1" && -f "$1" ]] || return 0
@@ -1004,12 +1015,8 @@ _mode_wait() {
             line="$(head -n 1 "$artifact")"
             # The artifact only exists because the round's own verdict guard
             # accepted its last line, so what is left is stripping the optional
-            # label the guard permits. `LC_ALL=C` for the reason that guard states
-            # at length: `[^[:alnum:]]` is locale-dependent, and in a single-byte
-            # non-ASCII locale an em dash's leading byte reads as a letter.
-            verdict="$(_last_verdict_line "$artifact")"
-            verdict="$(LC_ALL=C sed -E 's/^[Vv][Ee][Rr][Dd][Ii][Cc][Tt][^[:alnum:]]*//; s/\.$//' \
-                <<<"$verdict" | tr '[:lower:]' '[:upper:]')"
+            # label the guard permits, which `_verdict_word` does.
+            verdict="$(_verdict_word "$(_last_verdict_line "$artifact")")"
             printf 'artifact=%s\n' "${artifact#"${repo_root}/"}"
             printf 'persona=%s\n' "$persona"
             printf 'tree=%s\n' "$tree"
@@ -1969,7 +1976,19 @@ _write_snapshot() {
     # A review the reviewer did not format as a ranked list yields no blocks
     # above. Rather than silently lose it (a lost finding is exactly what §4
     # forbids), record the whole body as one finding.
-    if ! compgen -G "${work}/cur-*" >/dev/null; then
+    #
+    # Except under a plain `APPROVE`, which records no current finding at all
+    # (issue #3179). The rubric reserves that verdict for a run with no findings
+    # — a nit takes `APPROVE WITH NITS` — and docs/review/guide.md asks a clean
+    # run to "say so explicitly and state what you checked", which is exactly an
+    # unranked body. Recorded as a finding, every clean round put its own "No
+    # findings" paragraph on the ledger as an open finding, which `ship` then
+    # posted, mechanism (b) re-injected, and the next round carried forward as
+    # retired. Nothing is lost by skipping it: a body that holds a finding under
+    # `BLOCK` or `APPROVE WITH NITS` still takes the fallback, and the prior
+    # snapshot's findings are still carried forward as retired below.
+    if ! compgen -G "${work}/cur-*" >/dev/null &&
+        [[ "$(_verdict_word "$last_line")" != "APPROVE" ]]; then
         cp "${work}/body" "${work}/cur-0001"
     fi
 
