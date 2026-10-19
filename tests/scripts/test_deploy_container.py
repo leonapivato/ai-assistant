@@ -458,7 +458,7 @@ def test_deploy_failed_backup_restarts_the_earlier_image(outcome: str, said: str
     message = str(caught.value)
     assert said in message
     assert "Nothing was installed." in message
-    assert f"started again on its earlier image, {OLD_ID}, and is healthy" in message
+    assert f"started again on its earlier image, {OLD_ID}, healthy" in message
     assert box.files[str(PERSON.unit_env)].data == env_before
     assert box.container_image == OLD_ID
     assert "unit.env" not in verbs(box)
@@ -491,14 +491,15 @@ def test_deploy_new_image_that_stays_down_is_not_rolled_back() -> None:
     assert len(starts) == 1, "the earlier image is never started on data the new one served"
 
 
-def test_deploy_not_ready_and_not_contained_is_stopped() -> None:
+def test_deploy_uncontained_is_stopped_before_it_is_healthy() -> None:
     box = served_box(health="starting", raw_rules="-P PREROUTING ACCEPT\n")
+    slept: list[float] = []
 
     with pytest.raises(dc.DeployError) as caught:
-        deployment(box).run()
+        deployment(box, sleep=slept.append).run()
 
     message = str(caught.value)
-    assert "was not healthy within" in message
+    assert slept == [], "the check runs on the first sight of the running container"
     assert "ADR-0327 §5:2 cannot be established" in message
     assert "hub@alice.service is stopped" in message
     assert box.active == "inactive"
@@ -516,10 +517,11 @@ def test_deploy_not_ready_but_contained_is_left_to_its_unit() -> None:
     assert [argv[:2] for argv in box.ran].count(["systemctl", "stop"]) == 1
 
 
-def test_deploy_interrupted_while_starting_is_contained() -> None:
-    box = served_box(health="starting", raw_rules="-P PREROUTING ACCEPT\n")
+def test_deploy_interrupted_while_starting_is_checked_before_it_is_left() -> None:
+    box = served_box(health="starting")
 
     def interrupt(_seconds: float) -> None:
+        box.raw_rules = "-P PREROUTING ACCEPT\n"  # the box changed under the start
         raise KeyboardInterrupt
 
     with pytest.raises(dc.DeployError) as caught:
@@ -527,9 +529,47 @@ def test_deploy_interrupted_while_starting_is_contained() -> None:
 
     message = str(caught.value)
     assert message.startswith("interrupted once the new image")
-    assert "hub@alice.service is stopped" in message
+    assert "hub@alice.service is stopped and disabled" in message
     assert box.active == "inactive"
     assert str(PERSON.lock) not in box.files
+
+
+def test_deploy_recovery_start_is_held_to_the_same_checks() -> None:
+    box = served_box(backup="refused", enabled=True)
+    box.raw_rules = "-P PREROUTING ACCEPT\n"
+
+    with pytest.raises(dc.DeployError) as caught:
+        deployment(box).run()
+
+    message = str(caught.value)
+    assert "could NOT be started again on its earlier image, checked" in message
+    assert "is stopped and disabled" in message
+    assert box.active == "inactive"
+    assert not box.enabled
+
+
+def test_deploy_first_install_interrupted_after_its_record_is_undone_whole() -> None:
+    box = FakeBox(files=person_files(served=False))
+
+    def interrupted_rename(argv: list[str], data: bytes) -> tuple[int, str, str]:
+        box.files[argv[-1]] = box.files.pop(argv[-2])
+        raise KeyboardInterrupt
+
+    box.cmd_mv = interrupted_rename  # type: ignore[assignment]
+
+    with pytest.raises(KeyboardInterrupt):
+        deployment(box, port=8501).run()
+
+    assert str(PERSON.unit_env) not in box.files
+    assert box.volumes == set()
+    assert not box.enabled
+    assert str(PERSON.lock) not in box.files
+
+
+def test_deploy_refuses_docker_before_28() -> None:
+    box = served_box()
+    box.docker_version = lambda _argv, _data: (0, "27.5.1\n", "")  # type: ignore[assignment]
+    _refused_untouched(box, "Docker Engine 28 is the first")
 
 
 def test_deploy_interrupted_after_naming_the_new_image_starts_nothing() -> None:
