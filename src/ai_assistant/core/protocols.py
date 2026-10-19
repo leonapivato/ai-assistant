@@ -151,7 +151,6 @@ if TYPE_CHECKING:
         EpisodeChunk,
         EpisodePage,
         EvaluationTrace,
-        FeedbackEvent,
         FetchOutcome,
         ForecastOutcome,
         FrozenJsonMapping,
@@ -2176,9 +2175,6 @@ class MemoryWriter(Protocol):
         :class:`~ai_assistant.core.types.Goal` carries a ``Provenance`` too and
         does not cross this seam; ADR-0077 §11 assigns that to the lane adding an
         inferred-goal producer.
-        :class:`~ai_assistant.core.types.FeedbackEvent` is likewise unbounded and
-        needs no rule of its own: a proposal derived from one crosses this seam
-        like any other, and is bounded and counted here.
 
         Args:
             proposal: The candidate memory and why it was proposed. Its
@@ -2236,22 +2232,6 @@ class MemoryWriter(Protocol):
 
 
 @runtime_checkable
-class FeedbackProcessor(Protocol):
-    """Turns feedback into memory-update proposals — the learning step (ADR-0009).
-
-    Implementations (in `learning`) map a
-    :class:`~ai_assistant.core.types.FeedbackEvent` into zero or more
-    :class:`~ai_assistant.core.types.MemoryUpdateProposal`s. They *propose* only;
-    the pipeline feeds the proposals to the memory write-path, so the model never
-    writes memory directly.
-    """
-
-    async def process(self, event: FeedbackEvent) -> Sequence[MemoryUpdateProposal]:
-        """Return the memory-update proposals implied by ``event`` (possibly none)."""
-        ...
-
-
-@runtime_checkable
 class Reader(Protocol):
     """Reads one source and proposes what it read (ADR-0093, ADR-0095 §1).
 
@@ -2259,7 +2239,7 @@ class Reader(Protocol):
     onto the box, the maildir a co-located fetcher writes — and returns one bounded
     :class:`~ai_assistant.core.types.SourceReading` of what that source currently
     says. Named for its product role, as every Protocol here is
-    (``FeedbackProcessor``, ``MemoryPolicy``): the role is *reading a source*.
+    (``MemoryWriter``, ``MemoryPolicy``): the role is *reading a source*.
 
     **It holds no store handle, no writer, no policy and no engine**, which is the
     scope limit rather than a rule about it. An implementation may not write to any
@@ -2455,7 +2435,7 @@ class Fetcher(Protocol):
     The **fetch** seam: it shows what a configured local root currently holds, and
     reads one entry of that listing into a single attested
     :class:`~ai_assistant.core.types.MemoryRecord` carrying the file's own text.
-    Named for its product role, as every Protocol here is (``FeedbackProcessor``,
+    Named for its product role, as every Protocol here is (``MemoryWriter``,
     ``Reader``): the role is *fetching one named thing, now, for this turn*.
 
     **It is not a ``Reader`` and reusing that seam was never available.** A

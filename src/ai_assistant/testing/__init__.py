@@ -71,7 +71,6 @@ from ai_assistant.testing.invoker import (
     invoker_over,
     succeeds,
 )
-from ai_assistant.testing.learning import FakeFeedbackProcessor
 from ai_assistant.testing.memory import FakeMemoryStore
 from ai_assistant.testing.models import FakeModelProvider, ModelCall
 from ai_assistant.testing.notifications import (
@@ -218,7 +217,6 @@ __all__ = [
     "FakeDiagnosticSink",
     "FakeEgressBinder",
     "FakeEmbedder",
-    "FakeFeedbackProcessor",
     "FakeFetcher",
     "FakeForecaster",
     "FakeIdentifierSpace",

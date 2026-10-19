@@ -5,7 +5,7 @@ enforce the same limits, so a wire client is never silently less capable than th
 in-process engine, and ADR-0087 fixed the encoding as canonical JSON over UTF-8.
 A lone surrogate is a ``str`` Python holds happily and UTF-8 cannot express, so a
 plain ``str`` field made the two implementations disagree about which calls they
-accept: ``FeedbackEvent(content="\ud800")`` constructed, the in-process engine
+accept: a feedback event carrying ``"\ud800"`` constructed, the in-process engine
 took it, and no encoder could put it on the socket.
 
 ADR-0087 §7 puts the refusal on the **type** rather than at each boundary, and
@@ -46,12 +46,9 @@ from ai_assistant.core import types as core_types
 from ai_assistant.core.types import (
     EncodableText,
     EpisodicMemory,
-    FeedbackEvent,
-    FeedbackKind,
     FrozenJsonMapping,
     FrozenJsonValue,
     Identifier,
-    MemoryKind,
     MemorySource,
     Message,
     Provenance,
@@ -190,7 +187,7 @@ def test_the_scan_actually_finds_the_core_models() -> None:
         "Message",
         "Provenance",
         "MemoryBase",
-        "FeedbackEvent",
+        "EpisodicMemory",
         "ActivationEffect",
         "ToolDefinition",
     } <= names
@@ -351,33 +348,6 @@ def _provenance() -> Provenance:
     return Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT)
 
 
-@pytest.mark.parametrize(
-    "field",
-    [
-        pytest.param({"content": SURROGATE}, id="content"),
-        pytest.param({"subject": SURROGATE}, id="subject"),
-        pytest.param({"evidence": (SURROGATE,)}, id="evidence"),
-    ],
-)
-def test_feedback_with_no_utf8_encoding_is_refused(field: dict[str, Any]) -> None:
-    r"""The exact call issue #565 opens on.
-
-    ``learn(FeedbackEvent(content="\ud800"))`` constructed before this, the
-    in-process engine accepted it, and the wire client could not encode it —
-    two implementations of one Protocol disagreeing about which calls they take,
-    which is what ADR-0084 §4 exists to prevent.
-    """
-    payload: dict[str, Any] = {
-        "kind": FeedbackKind.CORRECTION,
-        "memory_kind": MemoryKind.SEMANTIC,
-        "content": "the office is in Boston",
-        "created_at": AT,
-        **field,
-    }
-    with pytest.raises(ValidationError, match="UTF-8"):
-        FeedbackEvent(**payload)
-
-
 def test_a_memory_record_with_no_utf8_encoding_is_refused() -> None:
     with pytest.raises(ValidationError, match="UTF-8"):
         SemanticMemory(id="m-1", content="fine", fact=SURROGATE, provenance=_provenance())
@@ -460,7 +430,7 @@ def _canonical(value: object) -> bytes:
     ).encode("utf-8")
 
 
-def test_an_accepted_feedback_event_round_trips_through_the_canonical_encoding() -> None:
+def test_an_accepted_message_round_trips_through_the_canonical_encoding() -> None:
     """The refusal is narrow: everything with an encoding still goes through.
 
     A supplementary character, an accented letter, a C0 control and U+2028 are
@@ -468,16 +438,13 @@ def test_an_accepted_feedback_event_round_trips_through_the_canonical_encoding()
     written against "looks dangerous" rather than against "has an encoding" would
     fail here.
     """
-    event = FeedbackEvent(
-        kind=FeedbackKind.PREFERENCE,
-        memory_kind=MemoryKind.PREFERENCE,
+    message = Message(
+        role=Role.USER,
         content="tone: caf\u00e9 " + SUPPLEMENTARY + " \u0007 \u007f \u2028 ",
-        subject=f"email {SUPPLEMENTARY}",
-        evidence=(f"turn-{SUPPLEMENTARY}",),
-        created_at=AT,
+        name=f"turn-{SUPPLEMENTARY}",
     )
-    encoded = _canonical(event.model_dump(mode="json"))
-    assert FeedbackEvent.model_validate(json.loads(encoded.decode("utf-8"))) == event
+    encoded = _canonical(message.model_dump(mode="json"))
+    assert Message.model_validate(json.loads(encoded.decode("utf-8"))) == message
 
 
 def test_a_supplementary_character_is_not_mistaken_for_a_surrogate() -> None:

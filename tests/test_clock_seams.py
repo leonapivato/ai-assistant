@@ -69,11 +69,8 @@ from ai_assistant.core.types import (
     ChannelInput,
     CostBasis,
     DataTier,
-    FeedbackEvent,
-    FeedbackKind,
     Idempotency,
     MemoryDecisionKind,
-    MemoryKind,
     MemorySource,
     MemoryUpdateProposal,
     PermissionDecision,
@@ -95,7 +92,6 @@ from ai_assistant.core.types import (
     ToolOutcome,
     ToolResult,
 )
-from ai_assistant.learning import RuleBasedFeedbackProcessor
 from ai_assistant.memory import (
     InMemoryMemoryStore,
     MemoryIngestor,
@@ -157,7 +153,6 @@ from ai_assistant.testing import (
     FakeConnectionProvisioner,
     FakeConversationStore,
     FakeEmbedder,
-    FakeFeedbackProcessor,
     FakeFetcher,
     FakeMemoryPolicy,
     FakeMemoryStore,
@@ -626,16 +621,6 @@ def _writes(memory: FakeMemoryStore) -> MemoryWriteStage:
     )
 
 
-def _feedback() -> FeedbackEvent:
-    """A correction carrying the resolved kind a ``FeedbackProcessor`` requires."""
-    return FeedbackEvent(
-        kind=FeedbackKind.CORRECTION,
-        content="that is wrong",
-        created_at=_AWARE,
-        memory_kind=MemoryKind.SEMANTIC,
-    )
-
-
 def _tool() -> ToolDefinition:
     """The one side-effecting tool the permission seams are driven over."""
     return ToolDefinition(
@@ -718,11 +703,6 @@ async def _fake_conversation_store(now: Clock) -> None:
     await FakeConversationStore(now=now).start()
 
 
-async def _fake_feedback_processor(now: Clock) -> None:
-    """Every proposal the fake synthesises carries a provenance it stamps."""
-    await FakeFeedbackProcessor(now=now).process(_feedback())
-
-
 async def _fake_notification_outbox(now: Clock) -> None:
     """A claim reads the clock to settle leases before it answers."""
     await FakeNotificationOutbox(now=now).claim()
@@ -731,11 +711,6 @@ async def _fake_notification_outbox(now: Clock) -> None:
 async def _fake_notification_store(now: Clock) -> None:
     """The retention purge reads the clock, as the durable store's does (#1964)."""
     await FakeNotificationStore(now=now).purge()
-
-
-async def _rule_based_processor(now: Clock) -> None:
-    """Every proposal the rules produce carries a provenance stamped from the clock."""
-    await RuleBasedFeedbackProcessor(now=now).process(_feedback())
 
 
 async def _sqlite_audit_trail(now: Clock) -> None:
@@ -890,10 +865,8 @@ SEAMS = [
     Seam("CurrentTime", _current_time, ClockReadingError),
     Seam("FakeAuditTrail", _fake_audit_trail, AuditError),
     Seam("FakeConversationStore", _fake_conversation_store, ConversationStoreError),
-    Seam("FakeFeedbackProcessor", _fake_feedback_processor, ClockReadingError),
     Seam("FakeNotificationOutbox", _fake_notification_outbox, NotificationOutboxError),
     Seam("FakeNotificationStore", _fake_notification_store, NotificationStoreError),
-    Seam("RuleBasedFeedbackProcessor", _rule_based_processor, ClockReadingError),
     Seam("SqliteAuditTrail", _sqlite_audit_trail, AuditError),
     Seam("SqliteConversationStore", _sqlite_conversation_store, ConversationStoreError),
     Seam("FakeStoryStore", _fake_story_store, StoryStoreError),
@@ -1195,12 +1168,6 @@ PROPAGATED: Final[dict[str, str]] = {
     ),
     "ConsolidationStage": _UNDECLARED,
     "CurrentTime": ("documented at ``tools/builtin.py:148``, and `tools` is not in §4's list"),
-    "FakeFeedbackProcessor": (
-        "documented at ``testing/learning.py:207``, doubling a `learning` seam that propagates"
-    ),
-    "RuleBasedFeedbackProcessor": (
-        "documented at ``learning/processor.py:146``, and `learning` owns no error class"
-    ),
     "StoreHealthReader": _UNDECLARED,
     "UpcomingEventStage": _UNDECLARED,
 }

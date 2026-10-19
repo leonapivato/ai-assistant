@@ -14,13 +14,10 @@ from ai_assistant.core.types import (
     BeliefBand,
     DataTier,
     EpisodicMemory,
-    FeedbackEvent,
-    FeedbackKind,
     MemoryBase,
     MemoryDecision,
     MemoryDecisionKind,
     MemoryIngestResult,
-    MemoryKind,
     MemoryRecord,
     MemorySource,
     MemoryUpdateProposal,
@@ -377,29 +374,6 @@ def test_provenance_admits_more_citations_than_the_bound() -> None:
     # And it survives a round trip through the serialised form, which is the path
     # a stored record actually takes back out of a store.
     assert Provenance.model_validate_json(prov.model_dump_json()).evidence == over_bound
-
-
-def test_a_feedback_event_is_not_bounded_either() -> None:
-    """ADR-0086 §1 says so explicitly, and the reason is the placement.
-
-    A ``FeedbackEvent`` carrying more ids than the bound is constructible, and
-    ``RuleBasedFeedbackProcessor`` copies all of them into the record it proposes.
-    Nothing there is stored: the proposal crosses ``MemoryWriter``, which installs
-    the retained subset and records the elision like any other. A second
-    enforcement point at the feedback boundary would put one rule in two places to
-    drift.
-    """
-    over_bound = tuple(f"ev-{index:03d}" for index in range(MAX_EVIDENCE_CITATIONS + 1))
-
-    event = FeedbackEvent(
-        kind=FeedbackKind.CORRECTION,
-        memory_kind=MemoryKind.SEMANTIC,
-        content="the office is in Boston",
-        evidence=over_bound,
-        created_at=_WHEN,
-    )
-
-    assert event.evidence == over_bound
 
 
 def test_provenance_defaults_to_having_elided_nothing() -> None:
@@ -851,142 +825,6 @@ def test_decision_rejects_fields_foreign_to_its_kind() -> None:
         MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="x", ttl=timedelta(days=1))
 
 
-def test_feedback_event_constructs_with_defaults() -> None:
-    event = FeedbackEvent(
-        kind=FeedbackKind.PREFERENCE,
-        memory_kind=MemoryKind.PREFERENCE,
-        content="prefers concise replies",
-        created_at=_WHEN,
-    )
-    assert event.subject is None
-    assert event.evidence == ()
-    assert event.guarded is False
-
-
-def test_a_feedback_events_guard_is_absent_by_default_and_carried_when_set() -> None:
-    """ADR-0217 §7: the owner's explicit placement act at write, defaulting to none.
-
-    Defaulted so that no existing producer becomes wrong on the day the member
-    lands: ``False`` is **not an act of any kind**, and a record built from it
-    carries §6's default placement, which is ADR-0199 §3's placement of its class.
-    That is also what makes ``assistant learn --guarded`` a purely additive
-    follow-on consumer lane rather than a change nothing compiles without
-    (ADR-0217 §11) — nothing is red between the two.
-
-    It is a ``bool`` and not a :class:`Placement`, because the act it records has
-    exactly one direction: there is no widening act at write, which on a fresh
-    record would be a no-op, and the reach and setter it writes are fixed by §7
-    rather than chosen by the caller. A ``Placement`` on the event would let a
-    client author a setter — ``DERIVED`` above all, the one stamp §3's closing
-    clause forbids an owner's act to lift — over the wire.
-    """
-    guarded = FeedbackEvent(
-        kind=FeedbackKind.PREFERENCE,
-        memory_kind=MemoryKind.PREFERENCE,
-        content="prefers concise replies",
-        created_at=_WHEN,
-        guarded=True,
-    )
-
-    assert guarded.guarded is True
-    assert FeedbackEvent.model_validate_json(guarded.model_dump_json()) == guarded
-
-
-def test_feedback_event_memory_kind_is_optional_and_absent_by_default() -> None:
-    """ADR-0122 §1: a field every producer had to fill, some of which cannot.
-
-    That is the whole defect. The CLI did not know, could not know, and was made to
-    answer anyway — and the answer it invented was indistinguishable at every layer
-    downstream from one a user had chosen deliberately. ``None`` means "resolve it
-    from the belief this touches"; it never means the record type is *unknowable*,
-    and it is never stored on a record.
-
-    It is ``None`` rather than a sentinel ``MemoryKind`` member because a member
-    would enter every exhaustive ``match`` over ``MemoryKind`` in the tree — and
-    every kind filter on ``search`` and ``list_beliefs`` — to express a state no
-    record ever carries. ``MemoryKind`` is a record's *type*; a request that has not
-    chosen one is not a type.
-    """
-    event = FeedbackEvent(
-        kind=FeedbackKind.CORRECTION,
-        content="the office is in Boston",
-        created_at=_WHEN,
-    )
-
-    assert event.memory_kind is None
-    assert {member.value for member in MemoryKind} == {
-        "semantic",
-        "preference",
-        "procedural",
-        "episodic",
-    }, "no sentinel member was added"
-
-
-def test_an_absent_memory_kind_is_rendered_as_null_rather_than_omitted() -> None:
-    """ADR-0122 §1: "absent" is spelled ``null``, and the codec needs no change.
-
-    ``wire``'s ``project`` renders a model through ``model_dump()``, which emits
-    every field including a defaulted one and gives ``None`` a form of its own — so
-    an unpinned correction crosses as ``"memory_kind": null`` rather than as a
-    missing member, and no projection change is owed. It is also exactly why the
-    *protocol version* is owed: a version 1 hub refuses that ``null`` for a required
-    ``MemoryKind``, inside a ``learn`` rather than at the handshake, unless the two
-    versions disagree at connect.
-    """
-    event = FeedbackEvent(
-        kind=FeedbackKind.CORRECTION,
-        content="the office is in Boston",
-        created_at=_WHEN,
-    )
-
-    assert "memory_kind" in event.model_dump()
-    assert event.model_dump()["memory_kind"] is None
-
-
-def test_feedback_event_created_at_naive_is_refused() -> None:
-    with pytest.raises(ValidationError, match="created_at must be timezone-aware"):
-        FeedbackEvent(
-            kind=FeedbackKind.CORRECTION,
-            memory_kind=MemoryKind.SEMANTIC,
-            content="office is in Boston",
-            created_at=datetime(2026, 1, 1, 9),  # noqa: DTZ001 — a naive value is the subject
-        )
-
-
-def test_feedback_event_created_at_aware_is_converted_to_utc() -> None:
-    # 09:00 in New York (UTC-5 in January) is 14:00 UTC — the same instant, in UTC.
-    aware = datetime(2026, 1, 1, 9, tzinfo=ZoneInfo("America/New_York"))
-    event = FeedbackEvent(
-        kind=FeedbackKind.CORRECTION,
-        memory_kind=MemoryKind.SEMANTIC,
-        content="office is in Boston",
-        created_at=aware,
-    )
-    assert event.created_at == datetime(2026, 1, 1, 14, tzinfo=UTC)
-    assert event.created_at.utcoffset() == timedelta(0)
-
-
-@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
-def test_feedback_event_rejects_blank_content(blank: str) -> None:
-    with pytest.raises(ValidationError, match="content must not be empty"):
-        FeedbackEvent(
-            kind=FeedbackKind.PREFERENCE,
-            memory_kind=MemoryKind.PREFERENCE,
-            content=blank,
-            created_at=_WHEN,
-        )
-
-
-def test_feedback_event_strips_content() -> None:
-    event = FeedbackEvent(
-        kind=FeedbackKind.PREFERENCE,
-        memory_kind=MemoryKind.PREFERENCE,
-        content="  prefers tea  ",
-        created_at=_WHEN,
-    )
-    assert event.content == "prefers tea"
-
-
 def test_proposal_defaults_to_personal_sensitivity() -> None:
     record = SemanticMemory(
         id="1",
@@ -1112,48 +950,6 @@ def test_the_confirming_instant_enters_a_proposal_fingerprint() -> None:
     assert proposed(later).proposal_fingerprint == proposed(later).proposal_fingerprint
 
 
-def test_a_feedback_event_states_no_subject_by_default() -> None:
-    event = FeedbackEvent(
-        kind=FeedbackKind.PREFERENCE,
-        memory_kind=MemoryKind.PREFERENCE,
-        content="prefers a window seat",
-        created_at=_WHEN,
-    )
-    assert event.about_person is None
-
-
-def test_a_feedback_event_keeps_its_scope_and_its_subject_apart() -> None:
-    """``subject`` is a preference scope; ``about_person`` is whom it is about.
-
-    Side by side on one type is the clearest statement that they are two axes
-    (ADR-0100 §7), and the older field keeps its name and its meaning — no lane
-    may rename it on ADR-0100's authority (#688).
-    """
-    event = FeedbackEvent(
-        kind=FeedbackKind.PREFERENCE,
-        memory_kind=MemoryKind.PREFERENCE,
-        content="prefers a window seat",
-        subject="travel",
-        about_person="Marta",
-        created_at=_WHEN,
-    )
-
-    assert event.subject == "travel"
-    assert event.about_person == "Marta"
-
-
-@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
-def test_a_feedback_event_refuses_a_blank_subject(blank: str) -> None:
-    with pytest.raises(ValidationError, match="must not be blank"):
-        FeedbackEvent(
-            kind=FeedbackKind.PREFERENCE,
-            memory_kind=MemoryKind.PREFERENCE,
-            content="prefers a window seat",
-            about_person=blank,
-            created_at=_WHEN,
-        )
-
-
 # --- ADR-0068: the memory record graph is frozen all the way down -------
 
 
@@ -1193,17 +989,6 @@ def test_memory_decision_and_ingest_result_are_frozen() -> None:
         result.decision.reason = "rewritten"  # the nested decision is frozen
 
 
-def test_feedback_event_is_frozen() -> None:
-    event = FeedbackEvent(
-        kind=FeedbackKind.PREFERENCE,
-        memory_kind=MemoryKind.PREFERENCE,
-        content="prefers tea",
-        created_at=_WHEN,
-    )
-    with pytest.raises(ValidationError):
-        event.content = "rewritten"
-
-
 def test_memory_write_is_deeply_immutable() -> None:
     """ADR-0065's counterexample resolved: the frozen wrapper's record is frozen too."""
     write = MemoryWrite(record=_semantic("1"))
@@ -1230,7 +1015,10 @@ def test_construction_coerces_a_list_to_a_tuple_on_the_wire() -> None:
 
 
 def test_every_ex_list_field_is_an_immutable_tuple_that_round_trips() -> None:
-    """The ADR-0068 depth rule, for all five former ``list`` fields.
+    """The ADR-0068 depth rule, for every former ``list`` field still standing.
+
+    There were five; the fifth, ``FeedbackEvent.evidence``, retired with its type
+    (ADR-0328 §14:1).
 
     Each reads back as an immutable ``tuple``; ``model_dump(mode="json")`` renders
     it as a JSON array (so there is no wire change); and ``model_validate`` of the
@@ -1246,20 +1034,12 @@ def test_every_ex_list_field_is_an_immutable_tuple_that_round_trips() -> None:
         id="2", content="c", provenance=prov, situation="s", steps=("one", "two")
     )
     proposal = MemoryUpdateProposal(proposed=_semantic("3"), rationale="r", conflicts=("x", "y"))
-    feedback = FeedbackEvent(
-        kind=FeedbackKind.PREFERENCE,
-        memory_kind=MemoryKind.PREFERENCE,
-        content="c",
-        created_at=_WHEN,
-        evidence=("ev",),
-    )
 
     cases: list[tuple[BaseModel, str, tuple[str, ...]]] = [
         (prov, "evidence", ("e1", "e2")),
         (episodic, "participants", ("a", "b")),
         (procedural, "steps", ("one", "two")),
         (proposal, "conflicts", ("x", "y")),
-        (feedback, "evidence", ("ev",)),
     ]
     for model, field, expected in cases:
         value = getattr(model, field)
