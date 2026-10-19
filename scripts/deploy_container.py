@@ -169,6 +169,8 @@ _REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]*")
 _DOCKER_INTERFACE = re.compile(r"docker0|br-[0-9a-f]+|veth[0-9a-f]+")
 #: Raw-table targets that never accept a packet, and so cannot let one past a drop.
 _NON_ACCEPTING_TARGETS = frozenset({"DROP", "CT", "NOTRACK", "LOG", "MARK", "TRACE", "NFLOG"})
+#: The options that send a packet to a target or a chain: a rule has one, or is refused.
+_JUMPS = frozenset({"-j", "--jump", "-g", "--goto"})
 #: The setting that sizes ADR-0083's D2, which the unit's stop timeout is fixed against.
 _DRAIN_SETTING = "ASSISTANT_SHUTDOWN_DRAIN_SECONDS"
 #: The template ``docker inspect`` fills for a container: the fields this deploy reads
@@ -583,16 +585,32 @@ def accepting_rule(rules: str) -> str | None:
         rules: ``iptables -t raw -S PREROUTING``.
 
     Returns:
-        The first rule whose target is not one that never accepts, or ``None``.
+        The first line that is not a policy, a chain's name or a rule with one jump to a
+        target that never accepts, or ``None``. A line that cannot be read is returned.
     """
     for line in rules.splitlines():
-        words = line.split()
-        if not words or words[0] != "-A":
+        words = _rule_words(line)
+        if words is not None and (not words or words[0] in {"-P", "-N"}):
             continue
-        target = words[words.index("-j") + 1] if "-j" in words[:-1] else None
-        if target not in _NON_ACCEPTING_TARGETS:
+        if words is None or words[0] != "-A" or _target(words) not in _NON_ACCEPTING_TARGETS:
             return line.strip()
     return None
+
+
+def _rule_words(line: str) -> list[str] | None:
+    """Split a line of ``iptables -S`` as iptables quotes it, or ``None`` if it cannot be."""
+    try:
+        return shlex.split(line)
+    except ValueError:
+        return None
+
+
+def _target(words: list[str]) -> str | None:
+    """A rule's one ``-j`` target, or ``None`` if it has none, several, or a ``-g``."""
+    jumps = [at for at, word in enumerate(words) if word in _JUMPS]
+    if len(jumps) != 1 or words[jumps[0]] not in {"-j", "--jump"} or jumps[0] + 1 == len(words):
+        return None
+    return words[jumps[0] + 1]
 
 
 def raw_rule_problem(rules: str, address: str, bridge: str) -> str | None:
@@ -622,7 +640,7 @@ def raw_rule_problem(rules: str, address: str, bridge: str) -> str | None:
     whole = ["-A", "PREROUTING", "-d", f"{address}/32", "!", "-i", bridge]
     port = [*whole, "-p", "tcp", "-m", "tcp", "--dport", str(HOSTED_PORT)]
     wanted = ([*whole, "-j", "DROP"], [*port, "-j", "DROP"])
-    if any(line.split() in wanted for line in rules.splitlines()):
+    if any(_rule_words(line) in wanted for line in rules.splitlines()):
         return None
     return (
         f"the raw table's PREROUTING chain has no `{' '.join(whole[2:])} -j DROP`.\n"
