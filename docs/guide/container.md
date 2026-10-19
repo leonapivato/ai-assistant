@@ -137,7 +137,7 @@ just deploy-container alice box.example.com --port 8501   # the first install
 just deploy-container alice box.example.com               # every deploy after it
 ```
 
-The box needs Docker, systemd, `curl` and `iptables`. For each person it reads a
+The box needs Docker Engine 28 or later, systemd, `curl` and `iptables`. For each person it reads a
 directory the operator writes by hand, `/srv/hubs/<person>/` (`--hubs-dir` moves it, for
 every person on the box at once), owned by root and writable by root alone:
 
@@ -171,7 +171,8 @@ runs: the next deploy backs up with it.
 Before it stops anything, the deploy also checks what ADR-0327 §5:2 asks of the box,
 that no other machine reaches the hosted listener. It checks that `route_localnet` is
 `0` for every interface but the loopback and Docker's own, so nothing routes a packet
-for the loopback port in from another machine. Once the container runs, it checks that
+for the loopback port in from another machine. As soon as the container runs, before
+its health check passes, and again on every start the deploy makes, it checks that
 the container is on its own bridge network, publishes `8423` to `127.0.0.1` alone and
 has no IPv6 address, and that the raw table's `PREROUTING` chain drops what arrives for
 the container's bridge address, at the hosted port, on any other interface. Docker

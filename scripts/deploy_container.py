@@ -12,12 +12,12 @@ is scriptable end to end: the person, the box and the paths are arguments, nothi
 prompted for, and the exit status is ``0`` only when the new container is up and
 verified.
 
-**The box.** It has Docker and systemd, ``curl`` and ``iptables``, and ssh logs in as a
-user that may run them, ``root`` by default. Every box command is one argv, quoted for
-the remote shell by :func:`shlex.join` and never assembled from text. ``--local`` makes
-this machine the box, its commands run as root through ``sudo -n``; that is how the
-``container`` workflow deploys to its own runner. Per person, under ``--hubs-dir``
-(``/srv/hubs``):
+**The box.** It has Docker Engine 28 or later, systemd, ``curl`` and ``iptables``, and
+ssh logs in as a user that may run them, ``root`` by default. Every box command is one
+argv, quoted for the remote shell by :func:`shlex.join` and never assembled from text.
+``--local`` makes this machine the box, its commands run as root through ``sudo -n``;
+that is how the ``container`` workflow deploys to its own runner. Per person, under
+``--hubs-dir`` (``/srv/hubs``):
 
 * ``<person>/hub.env``: the container's environment, Docker's ``--env-file`` format,
   holding the model key. The operator writes it; mode ``0600``, read by the docker
@@ -88,7 +88,10 @@ establishes, and refuses or fails loudly without:
   and later writes for a published port (``-d <address>/32 ! -i <bridge> -p tcp -m tcp
   --dport 8423 -j DROP``), and no rule before it can accept the packet first.
 
-What it cannot see: a firewall that is not iptables' (Docker's nftables backend is
+The check runs as soon as the container runs, before it is healthy, and again on every
+start the deploy makes, the earlier image's after a failed backup among them; the
+version floor is what it rests on before then. What it cannot see: a firewall that is
+not iptables' (Docker's nftables backend is
 refused, not read), the network beyond the box, and any process on the box that
 forwards the port itself, which is the box's own act. Every process *on* the box can
 reach the listener, as ADR-0327 §6 expects: the edge's signature stands between them.
@@ -158,6 +161,8 @@ _POLL_SECONDS = 2.0
 _PERSON = re.compile(r"[a-z][a-z0-9-]{0,30}[a-z0-9]|[a-z]")
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
+#: The first Docker Engine that writes the raw-table drop for a published port.
+_DOCKER_MAJOR = 28
 _PLAIN_PATH = re.compile(r"/[A-Za-z0-9._/-]*")
 _REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]*")
 #: Interfaces Docker makes for its bridges, whose ``route_localnet`` is Docker's own.
@@ -688,6 +693,8 @@ class Deployment:
     clock: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
     stage_context: Callable[[Path, Path], str] | None = None
+    #: What the last reachability check established, for the report.
+    established: str = ""
 
     # -- small helpers --------------------------------------------------------
 
@@ -812,6 +819,14 @@ class Deployment:
             [DOCKER, "version", "--format", "{{.Server.Version}}"], "asking Docker its version"
         ).strip()
         say(f"the box runs Docker {version}")
+        major = version.split(".", 1)[0]
+        if not major.isdigit() or int(major) < _DOCKER_MAJOR:
+            raise DeployError(
+                f"the box runs Docker {version or '(no version)'}. Docker Engine "
+                f"{_DOCKER_MAJOR} is the first to drop,\nbefore a container starts, what "
+                "other machines send to its published ports at its bridge\naddress, which "
+                f"ADR-0327 §5:2 rests on here. Upgrade it.\n{_UNTOUCHED}"
+            )
         for tool in (["systemctl", "--version"], ["curl", "--version"], ["iptables", "--version"]):
             self._ok(tool, f"{tool[0]} on the box")
         self._check_env_file()
@@ -1222,9 +1237,18 @@ class Deployment:
         try:
             self._start()
             self.await_ready(earlier.image)
-        except DeployError as exc:
-            return f"The hub could NOT be started again on its earlier image:\n{exc}"
-        return f"The hub was started again on its earlier image, {earlier.image}, and is healthy."
+            self._door()
+        except (DeployError, KeyboardInterrupt) as exc:
+            # The earlier image is held to the same checks as a new one: a box that lost
+            # its isolation since it last ran is no reason to serve unchecked.
+            return (
+                f"The hub could NOT be started again on its earlier image, checked:\n"
+                f"{_reason(exc)}\n{self._contain()}"
+            )
+        return (
+            f"The hub was started again on its earlier image, {earlier.image}, healthy, its\n"
+            f"door refusing, and {self.established}."
+        )
 
     # -- 3 and 4. the cutover and its verification ----------------------------
 
@@ -1255,10 +1279,14 @@ class Deployment:
             # Replaced whole, so until this lands the unit's next start is the earlier image.
             self._write(person.unit_env, render_unit_env(image, self.port, self.stamp))
         except BaseException:
-            # Nothing has run on a volume made here, and one left behind with no
-            # unit.env would read, to the next deploy, as data no record explains.
-            for volume in created:
-                self.box.run([DOCKER, "volume", "rm", volume])
+            if first:
+                # Nothing has started, so the first install is undone whole: no unit at
+                # boot, no record (its rename may have landed before the failure), and no
+                # volume a later deploy would read as data no record explains.
+                self.box.run(["systemctl", "disable", person.unit])
+                self.box.run(["rm", "-f", "--", str(person.unit_env)])
+                for volume in created:
+                    self.box.run([DOCKER, "volume", "rm", volume])
             raise
 
     def await_ready(self, image_id: str) -> None:
@@ -1272,6 +1300,7 @@ class Deployment:
                 not healthy within the deadline.
         """
         give_up = self.clock() + self.ready_timeout
+        checked: object = None
         while True:
             state = self._unit_state()
             if state.get("ActiveState") in {"failed", "inactive"}:
@@ -1285,6 +1314,13 @@ class Deployment:
                     raise DeployError(
                         f"{self.person.container} runs {fields.get('image')}, not {image_id}"
                     )
+                # Checked as soon as the container runs, not once it is healthy: the
+                # gateway binds before the health check passes. Again after a restart,
+                # which is a new address and new rules.
+                address = container_address(fields, self.person.network)
+                if address != checked:
+                    self.established = self.reachability()
+                    checked = address
                 if fields.get("health") == "healthy":
                     return
             if self.clock() >= give_up:
