@@ -58,6 +58,7 @@ from gateway_tls import browser_context, issue_pair
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import DEFAULT_PAGE_SIZE
+from ai_assistant.interfaces.gateway import exits
 from ai_assistant.interfaces.gateway.server import Gateway, _hold_what_the_peer_sent_for_tls
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire.errors import OverlayIdentityUnavailableError
@@ -613,8 +614,11 @@ async def test_a_gateway_refuses_to_bind_an_address_the_overlay_does_not_place(
         timers=Timers(),
     )
 
-    with pytest.raises(ConfigurationError, match="places no node there"):
+    with pytest.raises(ConfigurationError, match="places no node there") as refused:
         await gateway.start_remote()
+    # Not bound, but not a `78` either (#3167): the same error carries an agent that
+    # timed out or has not started yet, which clears unattended (ADR-0083 §5).
+    assert exits.exit_code(refused.value) == exits.EXIT_RESTART
 
 
 async def test_a_gateway_refuses_to_bind_an_overlay_address_that_is_not_its_own(
@@ -642,8 +646,10 @@ async def test_a_gateway_refuses_to_bind_an_overlay_address_that_is_not_its_own(
         timers=Timers(),
     )
 
-    with pytest.raises(ConfigurationError, match="not an address of this machine"):
+    with pytest.raises(ConfigurationError, match="not an address of this machine") as refused:
         await gateway.start_remote()
+    # The overlay put another node at the address, so it is the setting that is wrong.
+    assert exits.exit_code(refused.value) == exits.EXIT_DEPLOYMENT
 
 
 async def test_a_gateway_refuses_to_bind_when_its_agent_is_not_answering(
@@ -665,8 +671,11 @@ async def test_a_gateway_refuses_to_bind_when_its_agent_is_not_answering(
         timers=Timers(),
     )
 
-    with pytest.raises(ConfigurationError, match="ASSISTANT_GATEWAY_REMOTE_ADDRESS"):
+    with pytest.raises(ConfigurationError, match="ASSISTANT_GATEWAY_REMOTE_ADDRESS") as refused:
         await gateway.start_remote()
+    # An agent that is not answering yet comes back without anyone acting, so the
+    # gateway exits `1` and is restarted rather than left down (#3167).
+    assert exits.exit_code(refused.value) == exits.EXIT_RESTART
 
 
 def test_a_gateway_configured_on_with_no_agent_does_not_get_built(tmp_path: Path) -> None:

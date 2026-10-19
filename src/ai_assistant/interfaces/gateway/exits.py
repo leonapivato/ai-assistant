@@ -14,21 +14,33 @@ diagnosis" (ADR-0083 §5).
 ``ai_assistant.service.exits``, and ``interfaces`` may not import ``service``
 (ADR-0084 §6), so the gateway's are written here and a test holds the two equal.
 
-**The verdict is fixed where the refusal is raised, not here.** Every refusal the
-gateway raises at start is a :class:`~ai_assistant.core.errors.ConfigurationError`,
-and nearly all of them are about a setting or a file that does not change by being
-read again — so a ``ConfigurationError`` is a ``78``, exactly as the hub's
-:func:`ai_assistant.service.exits.classify` reads one. The few that a restart *can*
-get past are raised as :class:`ClearableRefusalError`, a ``ConfigurationError`` still
-(so every caller that catches the family is unchanged) that says which side of the
-test it is on. Only the place that raises one knows whether the cause can clear,
-which is why a classifier reading a message, or an errno three causes down, would
-be guessing.
+**Two things decide a refusal's code, and both are a test rather than a list of
+refusals** — §5's own instruction, "because a list is what gets out of date the
+first time a fault arrives by a route nobody enumerated":
+
+1. **What the refusal is.** Every refusal the gateway raises at start is a
+   :class:`~ai_assistant.core.errors.ConfigurationError`, and a
+   ``ConfigurationError`` is a ``78``, as the hub's
+   :func:`ai_assistant.service.exits.classify` reads one. A refusal whose author
+   knows a restart can get past it is raised as :class:`ClearableRefusalError` — a
+   ``ConfigurationError`` still, so every caller catching the family is unchanged —
+   and is a ``1``: a certificate the clock has not reached, an overlay agent that
+   would not answer, a port something else holds.
+2. **What it retypes.** A ``ConfigurationError`` raised *from* an ``OSError`` says
+   "the operating system refused while this was being read", and whether that
+   clears is the errno's to say, not the refusal's. A path that names nothing, a
+   permission, an address this machine does not hold: ``78``. Descriptors
+   exhausted, an I/O error, anything else: ``1``. Without this, a certificate read
+   that met ``ENFILE`` would leave a correctly configured gateway down for good —
+   and the refusals that retype an ``OSError`` are spread across ``tls.py``,
+   ``server.py`` and ``ai_assistant.wire.overlay``'s custody checks, which is
+   exactly the route nobody enumerated.
 """
 
 from __future__ import annotations
 
 import errno
+import ssl
 from typing import Final
 
 from ai_assistant.core.errors import ConfigurationError
@@ -54,8 +66,11 @@ EXIT_DEPLOYMENT: Final = 78
 #:
 #: Left out as deliberately as there: ``EADDRINUSE``, because whatever holds the port
 #: is either serving or stopping, as a contended hub lock is (ADR-0083 §1);
-#: ``EADDRNOTAVAIL``, ``EMFILE``, ``ENFILE`` and ``ENOSPC``, because some of those
-#: clear; and every errno nobody listed, by §5's tie-break.
+#: ``EMFILE``, ``ENFILE``, ``ENOSPC`` and ``EIO``, because those clear; and every
+#: errno nobody listed, by §5's tie-break. ``ENOENT`` and ``EADDRNOTAVAIL`` are left
+#: out *here* because a raw one is not about anything configured — an agent socket
+#: not there yet, an address that went away under a bind — see
+#: :data:`_CONFIGURED_ERRNOS` for where they are.
 _STAY_DOWN_ERRNOS: Final = frozenset(
     {
         errno.EACCES,  # permission denied
@@ -64,6 +79,16 @@ _STAY_DOWN_ERRNOS: Final = frozenset(
         errno.ENOTDIR,  # a path component is not a directory
         errno.EISDIR,  # a directory occupies a file's path
     }
+)
+
+#: The ``errno`` values that, under a refusal about something **configured**, mean
+#: the configuration is what is wrong: :data:`_STAY_DOWN_ERRNOS`, and a configured
+#: path that names nothing (``ENOENT``, ``ELOOP``, ``ENAMETOOLONG``) or a configured
+#: address no interface here holds (``EADDRNOTAVAIL``). A file that appears later is
+#: one a person or their tooling put there, which is the human act §5's ``78``
+#: waits for.
+_CONFIGURED_ERRNOS: Final = _STAY_DOWN_ERRNOS | frozenset(
+    {errno.ENOENT, errno.ELOOP, errno.ENAMETOOLONG, errno.EADDRNOTAVAIL}
 )
 
 #: How far the cause chain is walked before giving up: a guard against a cycle a
@@ -84,10 +109,11 @@ class ClearableRefusalError(ConfigurationError):
 
 
 def stays_down(exc: OSError) -> bool:
-    """Whether the operating system refused in a way no restart changes.
+    """Whether a raw operating-system refusal is one no restart changes.
 
     Args:
-        exc: What a start raised.
+        exc: What a start raised, not yet retyped by anything that knew what it was
+            reading.
 
     Returns:
         ``True`` exactly where its errno is one of :data:`_STAY_DOWN_ERRNOS`.
@@ -95,17 +121,37 @@ def stays_down(exc: OSError) -> bool:
     return exc.errno in _STAY_DOWN_ERRNOS
 
 
+def _retypes_a_fault_that_clears(refusal: ConfigurationError) -> bool:
+    """Whether ``refusal`` retypes an operating-system fault a restart may clear.
+
+    ``ssl.SSLError`` is an ``OSError`` whose ``errno`` is the TLS library's own code
+    rather than the kernel's, and it says the material is unusable — a key that is
+    not the certificate's — so it is the refusal's verdict that stands, not an errno.
+
+    Args:
+        refusal: A refusal at start.
+
+    Returns:
+        ``True`` where its direct cause is such a fault.
+    """
+    cause = refusal.__cause__
+    if not isinstance(cause, OSError) or isinstance(cause, ssl.SSLError):
+        return False
+    return cause.errno not in _CONFIGURED_ERRNOS
+
+
 def exit_code(exc: BaseException) -> int:
     """The gateway's exit code for a fault that ended it (ADR-0083 §5's test).
 
     The outermost exception and its explicit ``raise ... from`` chain are read,
-    outermost first, and the first that answers decides: a
-    :class:`ClearableRefusalError` is :data:`EXIT_RESTART`, any other
+    outermost first, and the first refusal decides: a
+    :class:`ClearableRefusalError` is :data:`EXIT_RESTART`; any other
     :class:`~ai_assistant.core.errors.ConfigurationError` is
-    :data:`EXIT_DEPLOYMENT`. **Only ``__cause__`` is followed, never
-    ``__context__``**, for the hub's reason: a cause is an author saying "this
-    failure *is* that one, retyped", and a context is whatever happened to be in
-    flight.
+    :data:`EXIT_DEPLOYMENT`, unless it retypes an operating-system fault that may
+    clear (the module's second rule), which is :data:`EXIT_RESTART`. **Only
+    ``__cause__`` is followed, never ``__context__``**, for the hub's reason: a
+    cause is an author saying "this failure *is* that one, retyped", and a context
+    is whatever happened to be in flight.
 
     **Everything else restarts.** A transport failure, a hub that declined, an
     error nobody classified: §5's tie-break, which is the default the hub takes too.
@@ -123,6 +169,8 @@ def exit_code(exc: BaseException) -> int:
         if isinstance(current, ClearableRefusalError):
             return EXIT_RESTART
         if isinstance(current, ConfigurationError):
+            if _retypes_a_fault_that_clears(current):
+                return EXIT_RESTART
             return EXIT_DEPLOYMENT
         current = current.__cause__
     return EXIT_RESTART

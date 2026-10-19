@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import errno
 import socket
+import ssl
 import sys
 from io import StringIO
 from typing import TYPE_CHECKING, Any
@@ -97,6 +98,31 @@ def test_a_refusal_that_may_clear_comes_back_though_it_is_a_configuration_error(
 def test_every_other_fault_comes_back(fault: BaseException) -> None:
     # §5's tie-break: "a spurious restart is recoverable and a spurious `78` is an outage".
     assert exits.exit_code(fault) == exits.EXIT_RESTART
+
+
+@pytest.mark.parametrize(
+    ("cause", "verdict"),
+    [
+        (OSError(errno.ENFILE, "too many open files in system"), exits.EXIT_RESTART),
+        (OSError(errno.EMFILE, "too many open files"), exits.EXIT_RESTART),
+        (OSError(errno.EIO, "input/output error"), exits.EXIT_RESTART),
+        (OSError("no errno"), exits.EXIT_RESTART),
+        (OSError(errno.ENOENT, "no such file"), exits.EXIT_DEPLOYMENT),
+        (OSError(errno.EACCES, "permission denied"), exits.EXIT_DEPLOYMENT),
+        (OSError(errno.EADDRNOTAVAIL, "cannot assign"), exits.EXIT_DEPLOYMENT),
+        (ssl.SSLError(116, "key values mismatch"), exits.EXIT_DEPLOYMENT),
+        (ValueError("not a point"), exits.EXIT_DEPLOYMENT),
+    ],
+)
+def test_a_refusal_retyping_an_operating_system_fault_takes_its_errno(
+    cause: BaseException, verdict: int
+) -> None:
+    # A certificate read that met `ENFILE` would otherwise leave a correctly
+    # configured gateway down for good; one that met `ENOENT` names nothing.
+    refusal = ConfigurationError("cannot be read")
+    refusal.__cause__ = cause
+
+    assert exits.exit_code(refusal) == verdict
 
 
 def test_a_refusal_retyped_by_its_author_keeps_its_verdict() -> None:
