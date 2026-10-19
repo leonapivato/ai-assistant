@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Final
 from story_support import episode
 
 from ai_assistant.core.types import (
+    ActionRequest,
     ActivationDigest,
     ActivationEffect,
     AskedCall,
@@ -31,6 +32,8 @@ from ai_assistant.core.types import (
     RememberCallPart,
     RoundMessagePart,
 )
+from ai_assistant.orchestration.authorizer import values_digest
+from ai_assistant.orchestration.planning import LOOKING_FOR
 from ai_assistant.orchestration.remembering import (
     EPISODE_ARGUMENT,
     OUTSIDE_CONTENT_ARGUMENT,
@@ -67,18 +70,42 @@ def _round(round_id: str, text: str = "", **fields: object) -> PlanningRound:
 
 
 def _remember_call(call_id: str, statement: str) -> ProposedCall:
+    """A remember call as planning proposed it, its *looking for* argument still on."""
     return ProposedCall(
-        call_id=call_id, name=REMEMBER_CAPABILITY, arguments={"statement": statement}
+        call_id=call_id,
+        name=REMEMBER_CAPABILITY,
+        arguments={"statement": statement, LOOKING_FOR: "to keep it"},
     )
 
 
-def _effect(effect_id: str, activation_id: str, round_id: str) -> ActivationEffect:
+def _ran_digest(statement: str) -> str:
+    """The digest acting claims for the remember call it ran with ``statement``.
+
+    Computed by authorizing's twin of acting's digest (a test holds the two to one
+    answer), over the values the call ran with: the hub's two filled in, the *looking
+    for* argument removed.
+    """
+    return values_digest(
+        ActionRequest(
+            tool=REMEMBER,
+            parameters={
+                "statement": statement,
+                EPISODE_ARGUMENT: "activation:a",
+                OUTSIDE_CONTENT_ARGUMENT: False,
+            },
+        )
+    )
+
+
+def _effect(
+    effect_id: str, activation_id: str, round_id: str, digest: str = _DIGEST_SHA
+) -> ActivationEffect:
     return ActivationEffect(
         id=effect_id,
         activation_id=activation_id,
         round=round_id,
         capability=REMEMBER_CAPABILITY,
-        values_digest=_DIGEST_SHA,
+        values_digest=digest,
         decision_id="decision-1",
         claimed_at=AT,
     )
@@ -210,8 +237,30 @@ def test_a_remember_call_reads_as_the_statement_of_the_call_its_effect_claims() 
     assert _content(part, episodes, effects=elsewhere) is None
 
 
-def test_two_remember_calls_one_effect_cannot_tell_apart_are_not_resolved() -> None:
-    """The effect record names the round, not the call: two statements leave it unresolved.
+def test_the_effects_digest_picks_its_call_among_two_in_one_round() -> None:
+    """The effect record carries the digest of the values acting ran: that is the call."""
+    record = _held(
+        episode("a"),
+        rounds=(
+            _round(
+                "r-1",
+                calls=(
+                    _remember_call("c-1", "likes tea"),
+                    _remember_call("c-2", "prefers coffee"),
+                ),
+            ),
+        ),
+    )
+    part = RememberCallPart(episode=record.id, effect="effect-1")
+    episodes = {record.id: record}
+
+    for statement in ("likes tea", "prefers coffee"):
+        effects = {"effect-1": _effect("effect-1", "a", "r-1", _ran_digest(statement))}
+        assert _content(part, episodes, effects=effects) == statement
+
+
+def test_two_remember_calls_no_digest_tells_apart_are_not_resolved() -> None:
+    """Where the effect's digest matches no call, two statements leave it unresolved.
 
     Never resolved by a memory's wording, which a reinforcement keeps as the target's
     (§11:6): "prefers tea" reinforcing "likes tea" would otherwise show the other call.

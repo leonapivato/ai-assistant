@@ -46,6 +46,8 @@ from ai_assistant.memory._episode_format import MEMORY_RECORD_FORMAT
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.testing import FakeTraceSink
 
+pytestmark = pytest.mark.integration
+
 _FIXTURE = Path(__file__).parent / "legacy" / "memory-before-adr-0328.db"
 
 #: The instant the head opens the file at: the day after the previous release wrote it.

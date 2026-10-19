@@ -314,6 +314,7 @@ def test_the_memory_carry_reads_a_users_assertion_as_its_upgrade_does() -> None:
     assert upgraded.supports[0].origin.value == "legacy"
 
 
+@pytest.mark.integration
 def test_the_memory_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> None:
     """ADR-0328 §16:9: the carry from shape 1 says what the head's upgrade writes.
 

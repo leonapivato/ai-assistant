@@ -3845,6 +3845,41 @@ class MemoryWriterContract:
         assert written.status is MemoryStatus.CURRENT
         assert "existing" in written.operations[0].replaces
 
+    async def test_apply_with_a_successor_resting_on_a_missing_episode_writes_neither(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§4:7 on the successor: its supports must resolve, or nothing is written (§5:6).
+
+        The predecessor is valid and the end alone would land; the successor's support
+        points at an episode the store does not hold, so the whole write is refused,
+        naming that episode, and the predecessor stays live.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        read = await self._stored(store, _preference("existing"))
+        before = await _snapshot(store)
+        successor_base = _preference("successor", _DISAGREEING, evidence=("missing-episode",))
+        create = successor_base.operations[0].model_copy(update={"replaces": ("existing",)})
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.END,
+            cites=read.supports[0].points_at,
+            at=_WHEN,
+            by=MemoryWriterName.REMEMBER,
+            successor="successor",
+        )
+
+        with pytest.raises(UnresolvedEvidenceError) as caught:
+            await make_writer(store, FakeMemoryPolicy()).apply(
+                MemoryChange(
+                    memory=read,
+                    operation=operation,
+                    successor=successor_base.model_copy(update={"operations": (create,)}),
+                )
+            )
+
+        assert tuple(caught.value.unresolved_ids) == ("missing-episode",)
+        assert await _snapshot(store) == before
+
     async def test_apply_with_a_successor_over_a_moved_predecessor_writes_neither(
         self, make_writer: WriterFactory
     ) -> None:
