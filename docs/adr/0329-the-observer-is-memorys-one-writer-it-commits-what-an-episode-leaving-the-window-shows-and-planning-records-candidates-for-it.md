@@ -337,9 +337,10 @@ the ask comes from planning, through the same question and approval.
 > **Normative.** ADR-0328 §4's part table gains one part, **an observer's inference**,
 > addressed by the episode whose processing drew it, and its origin table one origin,
 > `observer_inference`, which ranks at inference and is not outside. The observer adds
-> such a support, `for` and backing the claim as worded, only where the claim is its own
-> reading of the other supports it adds with it, which are `for` and do not back the claim
-> as worded, as a preference drawn from several choices is. Its how sure is the commit
+> such a support, `for` and backing the claim as worded, only to a memory whose claim is its
+> own reading of the other supports it adds with it, which are `for` and do not back the
+> claim as worded, as a preference drawn from several choices is; and `against` only to a
+> memory that the ingest creating that memory retires (§12:4). Its how sure is the commit
 > step's, its `when` is that episode's `occurred_at`, and it carries no source details.
 
 > **Normative.** A memory from a source is worded as what its source said — which source,
@@ -416,7 +417,9 @@ the ask comes from planning, through the same question and approval.
 > proposal to `ingest` carrying the new memory and that one retiring operation, citing a
 > counted `for` support of the new memory that backs it as worded, added to the retired one
 > as `against`, so the cited support never ranks above the new memory's standing and an
-> inference retires only a memory at inference. `MemoryPolicy` rules on the new memory over
+> inference retires only a memory at inference. A confirmation is cited only where ADR-0328
+> §4:6 lets that ingest retire the memory, and otherwise another support backing the new
+> memory as worded is cited, or nothing is retired. `MemoryPolicy` rules on the new memory over
 > every conflict but the memory it retires. On an `ACCEPT` the ingest
 > installs the new memory and applies the operation in one atomic write, each naming the
 > other (ADR-0328 §5:6). On a `REINFORCE` of an end or a mark wrong, it adds the supports
@@ -434,10 +437,12 @@ the ask comes from planning, through the same question and approval.
 > decide for a producer deriving a record, and a fold takes the meet as the write path
 > does.
 
-> **Normative.** A re-run is additive. When an episode is processed again, the observer
-> creates memories and adds supports and nothing else: no end, mark wrong, replace or stop
-> counting. A support already on a memory changes nothing (ADR-0328 §4:8), so a re-run adds
-> nothing twice. Nothing rebuilds the memory store automatically.
+> **Normative.** Every write the observer makes adds to the record — a memory, a support, an
+> operation, a track-record entry, an open question — and none removes anything (ADR-0328
+> §5:5). Processing an episode again, after a clear or by an explicit re-run, follows the
+> same rules as processing it the first time, against the store as it then stands; a
+> support already on a memory changes nothing (ADR-0328 §4:8), so it adds nothing twice.
+> Nothing rebuilds the memory store automatically.
 
 ### 13. Open questions
 
@@ -447,9 +452,12 @@ the ask comes from planning, through the same question and approval.
 > proposal, on each stored memory the ruling names; and `recheck`, where the commit step
 > finds evidence that bears on a memory without establishing a change.
 
-> **Normative.** The question rests on the finding's support, added to the memory by the
-> raise question operation (ADR-0328 §5:3), `against` for a conflict or an ask and as the
-> commit step judges for a re-check.
+> **Normative.** The question rests on one of the finding's supports, added to the memory by
+> the raise question operation (ADR-0328 §5:3), `against` for a conflict or an ask and as
+> the commit step judges for a re-check. It is never a confirmation, which ADR-0328 §4:6
+> adds to no memory but the one it backs or one its ingest retires, nor an observer's
+> inference (§9:7): for a confirmation the question rests on the yes's input instead, and
+> for an observer's inference on the supports that inference reads.
 
 > **Normative.** An `ASK_USER` ruling that names no stored memory writes nothing and raises
 > nothing. The finding's outcome records the ask, and its candidate waits on its episode.
@@ -669,6 +677,8 @@ Read through and not superseded:
   Meanwhile the episode window and recall carry it, and the panel shows it as pending.
 - A missed candidate is a missed memory unless the scout catches it in the record. A
   re-run can sweep later.
+- A clear of the plan store makes every episode since §7:5's instant due again, and the
+  observer spends its budget re-reading them, adding nothing twice.
 - Two interfaces of the observer are new prompts, owed to the owner's reading as every
   prompt is.
 
