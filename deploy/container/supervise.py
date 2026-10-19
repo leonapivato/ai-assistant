@@ -28,8 +28,8 @@ leave a ``78`` down, which is ADR-0083's D1, so the reference is a systemd unit 
    secret store use. A passphrase that leaves the login keyring locked is a ``78``.
 3. The hub, until its socket accepts (ADR-0083 §3 step 6).
 4. The gateway, until its hosted listener accepts. A gateway that stops before it
-   ever accepted is a ``78``: every way it can fail there is its configuration or the
-   image, and restarting either unchanged changes nothing.
+   ever accepted is a ``1``: its exit cannot tell a setting it refused from a fault
+   that clears, and ADR-0083 §5 makes that case a restart.
 5. ``/run/assistant/ready``, which the image's health check reads.
 
 **A stop is one signal to each.** ``SIGTERM`` or ``SIGINT`` here sends ``SIGINT`` to
@@ -637,14 +637,16 @@ class Supervisor:
         return self._ended(self._wait(lambda: False))
 
     def _gateway_did_not_start(self, gateway: _Child, address: str, port: int) -> None:
-        """Classify a gateway that exited before its hosted listener ever accepted.
+        """Report a gateway that exited before its hosted listener ever accepted.
 
-        **A status the gateway chose is a deployment fault.** ``assistant gateway``
-        renders every fault it can name — a setting, a key, an address — and exits
-        ``1`` (``_serve_gateway``), and anything else it can fail on before it binds
-        is in the image. Neither changes by starting again, which is ADR-0083 §5's
-        test for ``78``. **A signal is not its choice** (S4): something ended it from
-        outside, and that may not happen twice.
+        **It is a ``1``, whatever its status**, because the status cannot say which
+        kind of fault it was. ``assistant gateway`` exits ``1`` both for a setting it
+        refused and for a fault that clears on its own — descriptors exhausted for a
+        moment, say — and ADR-0083 §5 settles the case where a fault does not answer
+        "would restarting, unchanged, ever succeed?": "the answer is ``1``: a spurious
+        restart is recoverable and a spurious ``78`` is an outage." Most of the
+        gateway's settings are the hub's too, and the hub refuses them first with its
+        own ``78``; a gateway that told the two apart is #3167.
 
         Args:
             gateway: The gateway, which has exited.
@@ -652,18 +654,12 @@ class Supervisor:
             port: The hosted port.
 
         Raises:
-            DeploymentError: Where it exited with a status of its own.
-            StartError: Where a signal ended it, or it exited ``0`` unasked.
+            StartError: Always.
         """
-        status = gateway.process.returncode
-        if status is not None and status > 0:
-            msg = (
-                f"the gateway exited {status} before its hosted listener accepted on "
-                f"{address}:{port}; its own message above says why, and a restart "
-                f"unchanged would stop the same way"
-            )
-            raise DeploymentError(msg)
-        msg = f"the gateway ended ({status}) before its hosted listener accepted"
+        msg = (
+            f"the gateway exited {gateway.process.returncode} before its hosted listener "
+            f"accepted on {address}:{port}; its own message above says why"
+        )
         raise StartError(msg)
 
     def _start_keyring(self) -> None:
