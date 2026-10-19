@@ -20,7 +20,8 @@ speech input whose transcript was discarded).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, assert_never
+import hashlib
+from typing import TYPE_CHECKING, Final, assert_never
 
 from ai_assistant.core.types import (
     ConfirmationPart,
@@ -35,15 +36,22 @@ from ai_assistant.core.types import (
     RememberCallPart,
     RoundMessagePart,
     SupportPart,
+    canonical_json_bytes,
     part_episode,
 )
-from ai_assistant.orchestration.remembering import STATEMENT_ARGUMENT
+from ai_assistant.orchestration.planning import DELIBERATE_REPEAT, LOOKING_FOR
+from ai_assistant.orchestration.remembering import REMEMBER, STATEMENT_ARGUMENT
 from ai_assistant.orchestration.stories import episode_address
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
-    from ai_assistant.core.types import ActivationEffect, EpisodeProcessingRecord
+    from ai_assistant.core.types import (
+        ActivationEffect,
+        EpisodeProcessingRecord,
+        FrozenJson,
+        ProposedCall,
+    )
 
 __all__ = [
     "episodes_to_read",
@@ -144,7 +152,7 @@ def part_content(  # noqa: PLR0911 — one arm per part §4's part table names
                 return None
             if effect.activation_id != processing.activation_id or effect.round is None:
                 return None
-            return _remembered(_round(processing, effect.round), effect.capability)
+            return _remembered(_round(processing, effect.round), effect)
         case _:  # pragma: no cover - exhaustive over the discriminated union
             assert_never(part)
 
@@ -206,23 +214,47 @@ def _approved(processing: EpisodeProcessingRecord | None, round_id: str, part: i
     return round_.text or None
 
 
-def _remembered(round_: PlanningRound | None, capability: str | None) -> str | None:
-    """The statement of the remember call one effect record claims, where it is told apart.
+#: The arguments a proposed remember call carries that never reach acting's digest: the
+#: two the hub fills (``system_supplied``, ADR-0254 §3), and the *looking for* argument
+#: and *deliberate repeat* mark, removed before the call reaches acting (ADR-0306 §2:10).
+_UNDIGESTED: Final = frozenset({*REMEMBER.system_supplied, LOOKING_FOR, DELIBERATE_REPEAT})
 
-    The effect record names its round and its capability, not the call (ADR-0306 §6), so
-    the round's calls to that capability are the candidates, and one distinct statement
-    among them is the call's. Where the round made two with different statements the
-    record does not say which it claims, and the part is left unresolved rather than
-    resolved to another call's statement: a memory's wording cannot tell them apart,
-    since a reinforcement keeps the target's wording (§11:6).
+
+def _remembered(round_: PlanningRound | None, effect: ActivationEffect) -> str | None:
+    """The statement of the remember call one effect record claims.
+
+    The effect record names its round and its capability, and carries the digest of the
+    values acting ran the call with (ADR-0306 §5, §6): the round's call to that
+    capability whose values give that digest is the call. Where no call's digest
+    matches, one distinct statement among the round's calls to the capability is still
+    the call's; where neither tells the calls apart, the part is left unresolved rather
+    than resolved to another call's statement.
     """
-    if round_ is None or capability is None:
+    if round_ is None or effect.capability is None:
         return None
-    statements = {
+    candidates = [call for call in round_.calls if call.name == effect.capability]
+    matched = {
         statement
-        for call in round_.calls
-        if call.name == capability
-        and isinstance(statement := call.arguments.get(STATEMENT_ARGUMENT), str)
-        and statement
+        for call in candidates
+        if _digest(call) == effect.values_digest and (statement := _statement(call)) is not None
     }
+    if len(matched) == 1:
+        return next(iter(matched))
+    statements = {statement for call in candidates if (statement := _statement(call)) is not None}
     return next(iter(statements)) if len(statements) == 1 else None
+
+
+def _statement(call: ProposedCall) -> str | None:
+    statement = call.arguments.get(STATEMENT_ARGUMENT)
+    return statement if isinstance(statement, str) and statement else None
+
+
+def _digest(call: ProposedCall) -> str:
+    """Acting's digest of a call's values (``acting.values_digest``), for a call with no binding.
+
+    The canonical JSON of its arguments less those that never reach acting's digest,
+    beside a ``null`` binding: a remember call leaves no hub, so carries none.
+    """
+    arguments = {key: value for key, value in call.arguments.items() if key not in _UNDIGESTED}
+    document: FrozenJson = {"arguments": arguments, "binding": None}
+    return hashlib.sha256(canonical_json_bytes(document)).hexdigest()

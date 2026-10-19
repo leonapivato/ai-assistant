@@ -37,7 +37,10 @@ from ai_assistant.core.errors import (
     MemoryStoreError,
 )
 from ai_assistant.core.types import (
+    Attestation,
+    BeliefBand,
     EpisodicMemory,
+    Memory,
     MemoryRecord,
     MemorySource,
     Provenance,
@@ -54,7 +57,7 @@ from ai_assistant.memory.reembed import (
 )
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.testing import FakeTraceSink
-from ai_assistant.testing.memories import memory
+from ai_assistant.testing.memories import memory, memory_in_band
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -69,7 +72,8 @@ _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 #: Every column of ``records``, for the case that asserts the migration changes
 #: none of them. A module-level literal, never caller data.
 _ALL_COLUMNS = (
-    "SELECT rowid, id, kind, data, expires_at, valid_until, valid_from, about_person FROM records"
+    "SELECT rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, band "
+    "FROM records"
 )
 
 #: The two embedding spaces every case migrates between. Different widths, so the
@@ -246,6 +250,50 @@ async def test_rowids_and_stored_json_survive_the_migration_byte_for_byte(tmp_pa
     # `SqliteMemoryStore.export` orders by it, so renumbering would silently
     # reorder a data-rights export.
     assert after == before
+
+
+async def test_every_band_survives_a_re_embed_and_still_scopes_a_search(tmp_path: Path) -> None:
+    """ADR-0328 §7:11's persisted band is rebuilt as each memory's own, in every band.
+
+    A rebuild that wrote one band for every row would leave the column comparison above
+    blind if every row were derived, so each band is seeded, compared before and after,
+    and read back through a band-scoped search.
+    """
+    store = tmp_path / "memory.db"
+    records = [
+        memory_in_band("said", "espresso every morning", BeliefBand.ASSERTED),
+        memory_in_band(
+            "sourced",
+            "the café opens at seven",
+            BeliefBand.ATTESTED,
+            attestation=Attestation(reported_by="calendar", reported_at=_WHEN),
+        ),
+        memory_in_band("inferred", "prefers oat milk", BeliefBand.DERIVED),
+    ]
+    await _seed(store, records)
+    before = {row[0]: row[1] for row in _read(store, "SELECT id, band FROM records")}
+
+    target = HashingEmbedder(dimensions=_NEW)
+    await Reembedder(store=store, embedder=target).run()
+
+    after = {row[0]: row[1] for row in _read(store, "SELECT id, band FROM records")}
+    assert (
+        after
+        == before
+        == {
+            "said": BeliefBand.ASSERTED.value,
+            "sourced": BeliefBand.ATTESTED.value,
+            "inferred": BeliefBand.DERIVED.value,
+        }
+    )
+    opened = SqliteMemoryStore(traces_sink=FakeTraceSink(), path=store, embedder=target)
+    try:
+        for record in records:
+            assert isinstance(record, Memory)
+            found = await opened.search(record.content, limit=1, bands=[record.band])
+            assert [one.id for one in found.records] == [record.id]
+    finally:
+        opened.close()
 
 
 async def test_only_the_vectors_change(tmp_path: Path) -> None:

@@ -311,6 +311,23 @@ def test_the_highest_backing_support_decides_and_a_stopped_one_counts_for_nothin
     assert inferred not in stopped.counted_supports
 
 
+def test_a_for_support_not_backing_the_wording_ranks_for_nothing() -> None:
+    """§6:2's two conditions apart: ``for`` *and* backing the memory as worded.
+
+    The user's message bears on the claim without stating it as worded, so it does not
+    lift the standing: the remembered support over outside content alone ranks, the
+    memory stands at inference in band ``DERIVED`` and rests on outside content, and
+    the user's message still counts in the evidence summary.
+    """
+    over_outside = remembered_support(outside=True)
+    related = said_support("activation:related").model_copy(update={"backs_as_worded": False})
+    held = memory("m", "c", over_outside, related)
+
+    assert (held.standing, held.band) == (MemoryStanding.INFERENCE, BeliefBand.DERIVED)
+    assert held.rests_on_outside_content
+    assert held.evidence_summary.supporting == 2
+
+
 def test_stopping_the_highest_backing_support_lowers_the_standing_and_its_band() -> None:
     """§5:8, §6:2: a stopped support ranks for nothing, so the standing falls with it.
 
