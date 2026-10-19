@@ -1,6 +1,6 @@
 # 329. The observer is memory's one writer: it commits what an episode leaving the window shows, and planning records candidates for it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-18
 - Scope: who writes memories once the observer exists, and when. Planning's side — `remember` repurposed to record a candidate, the lookup that answers it, asking the user to confirm a wording, noting reliance, planning's instruction and what it is shown — and the observer's side: its trigger, what it reads, its two steps, its keep rules and evidence bar, its writes, open questions, the track record, where it lives, its limits and records, the catch-up, and what the user sees. Batch [#3148](https://github.com/leonapivato/ai-assistant/issues/3148), lane L-β, for milestone 3, "Learning v1: the observer" (acceptance [#3154](https://github.com/leonapivato/ai-assistant/issues/3154)).
 - Dependency: ADR-0328, which this decision builds on and changes only where §20 names a clause; ADR-0276, ADR-0284, ADR-0292, ADR-0306, ADR-0307, ADR-0309, ADR-0321 and ADR-0326, as their status lines leave them.
