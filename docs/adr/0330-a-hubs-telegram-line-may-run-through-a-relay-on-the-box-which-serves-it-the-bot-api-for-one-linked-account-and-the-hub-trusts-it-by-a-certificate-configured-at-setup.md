@@ -1,6 +1,6 @@
 # 330. A hub's Telegram line may run through a relay on the box, which serves it the Bot API for one linked account, and the hub trusts it by a certificate configured at setup
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-18
 - Scope: the hub's side of the shared Telegram bot: what a hub requires of a relay that holds the bot, and how the line changes when it reaches one. Tracker: [#3140](https://github.com/leonapivato/ai-assistant/issues/3140), acceptance [#3133](https://github.com/leonapivato/ai-assistant/issues/3133), the client-side implementation [#3141](https://github.com/leonapivato/ai-assistant/issues/3141). The relay itself and the account-linking flow are the private repository's.
 - Dependency: ADR-0323, ADR-0327, ADR-0191, ADR-0231, ADR-0125 and ADR-0154, as their status lines leave them.
