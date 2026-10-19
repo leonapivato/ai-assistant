@@ -871,9 +871,9 @@ def test_a_blank_claim_is_refused(name: str, value: str) -> None:
 def test_a_non_blank_subject_is_never_refused_so_never_echoed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """§7:8 keeps the subject out of every record, and a field's refusal is rendered
-    with the value it refused — so the only refusal of the subject is a blank one, and
-    no configuration error ever carries an account id (adversarial review, round 1).
+    """§7:8 keeps the subject out of every record, and a refusal's own message is
+    printed whole — so the only refusal of the subject is a blank one, and no
+    configuration error ever carries an account id (adversarial review, round 1).
 
     Read through ``load_settings``, whose rendering of the whole ``ValidationError`` is
     what the gateway prints at start, and asserted over all of it.
@@ -891,6 +891,22 @@ def test_a_non_blank_subject_is_never_refused_so_never_echoed(
     assert "acct_7f3a9c" not in str(refused.value)
     monkeypatch.setenv("ASSISTANT_GATEWAY_EDGE_PUBLIC_KEYS", _EDGE_KEY)
     assert load_settings().gateway_edge_subject == "acct_7f3a9c"
+
+
+def test_a_cross_field_refusal_beside_the_subject_does_not_carry_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§6:13 refuses the subject set while the listener is off, and a cross-field
+    refusal is the one pydantic would render with the whole input mapping — the
+    subject's value in it. ``Settings`` hides the input from every refusal (#3152), so
+    the refusal names the setting and not the account id it was given."""
+    monkeypatch.setenv("ASSISTANT_GATEWAY_EDGE_SUBJECT", "acct_7f3a9c")
+    with pytest.raises(ConfigurationError) as refused:
+        load_settings()
+
+    assert "gateway_edge_subject" in str(refused.value)
+    assert "acct_7f3a9c" not in str(refused.value)
+    assert "input_value" not in str(refused.value)
 
 
 @pytest.mark.parametrize(

@@ -44,6 +44,25 @@ def test_load_settings_wraps_invalid_config_as_configuration_error(
         load_settings()
 
 
+def test_a_refused_configuration_does_not_print_the_values_it_was_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3152: a refusal names the setting and the reason, never the input pydantic was
+    handed. A boolean pydantic cannot parse is refused by pydantic's own message, which
+    has no value in it, so only the rendered input could carry the configured text —
+    and a configured value the refusal is not about must not ride along either."""
+    monkeypatch.setenv("ASSISTANT_DIAGNOSTIC_RECORD", "not-a-flag-7e1d")
+    monkeypatch.setenv("ASSISTANT_CONSOLIDATION_MODEL", "openai:beside-it-4c2b")
+    with pytest.raises(ConfigurationError) as refused:
+        load_settings()
+
+    printed = str(refused.value)
+    assert "diagnostic_record" in printed
+    assert "not-a-flag-7e1d" not in printed
+    assert "beside-it-4c2b" not in printed
+    assert "input_value" not in printed
+
+
 def test_load_settings_succeeds_with_valid_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ASSISTANT_TIMEZONE", "America/New_York")
     settings = load_settings()

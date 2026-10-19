@@ -281,11 +281,12 @@ def _exactly_an_integer(value: object) -> object:
     # branch is reached by *arbitrary* objects, and a `__repr__` that raises would
     # otherwise replace the `ValueError` pydantic turns into a `ValidationError`
     # with whatever it threw — the diagnostic destroying the diagnosis, which is
-    # the promise that helper exists to keep. Pydantic renders such an input as
-    # "<unprintable X object>" on its own, so without this the guard would be the
-    # only thing in the chain that could not survive being told about it. The bool
-    # branch above cannot be reached by one — `bool` has two values and a final
-    # type — but uses the same helper so this function has one rule, not two.
+    # the promise that helper exists to keep. Pydantic, where it renders an input at
+    # all (`Settings` hides it, #3152), renders such an input as "<unprintable X
+    # object>", so without this the guard would be the only thing in the chain that
+    # could not survive being told about it. The bool branch above cannot be
+    # reached by one — `bool` has two values and a final type — but uses the same
+    # helper so this function has one rule, not two.
     msg = (
         f"expected an integer or its decimal spelling, got {describe_untrusted(value)} "
         f"of type {describe_untrusted(type(value))}; only an exact int or a str is "
@@ -1306,6 +1307,13 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # A refused configuration names the setting and the reason, never the input
+        # pydantic was handed (#3152). Without this, ``load_settings`` would print a
+        # field refusal's ``input_value`` and, for a cross-field one, a repr of the
+        # whole input mapping: configured values the refusal is not about, as many as
+        # fit. A refusal that should name its value says so in its own message, so
+        # nothing else configured reaches the start diagnostic.
+        hide_input_in_errors=True,
     )
 
     # --- General ---------------------------------------------------------
@@ -2755,12 +2763,12 @@ class Settings(BaseSettings):
         could never be equalled by a claim the edge signs.
 
         **Nothing else about the subject is refused here**, and the reason is where a
-        refusal is written. A field's refusal is reported with the value it refused
-        (``load_settings`` renders the whole ``ValidationError``), so any refusal of a
-        non-blank subject would print the account id it was given — which §7:8 keeps
-        out of every record — to the gateway's start diagnostic. §6:9's "not an email
-        address or any other contact detail" is the setup's to hold: the subject is
-        copied from the edge's own account record (§13:1).
+        refusal is written. ``Settings`` hides the input pydantic was handed from every
+        refusal (#3152), but a refusal's own message is printed whole to the gateway's
+        start diagnostic, and a check on a non-blank subject could say little that did
+        not name the account id — which §7:8 keeps out of every record. §6:9's "not an
+        email address or any other contact detail" is the setup's to hold: the subject
+        is copied from the edge's own account record (§13:1).
 
         Args:
             value: The configured value, or ``None`` when the listener is off.
