@@ -33,7 +33,8 @@ belief outside the ``ATTESTED`` band, to drive some caller's refusal — is test
 a reaction to a non-conforming producer and supplies its own stub for it. This
 fake must stay the thing a conforming implementation is compared against, so a
 script it could only honour by violating its own contract is refused at
-construction (``FakeObserver`` and ``FakeFeedbackProcessor`` make the same trade).
+construction (the since-retired ``FakeObserver`` and ``FakeFeedbackProcessor``
+made the same trade).
 """
 
 from __future__ import annotations
@@ -105,9 +106,9 @@ def _mint(factory: Callable[[], str] | None = None) -> str:
     retired record's id and overwrites its closed validity window through
     ``ACCEPT``'s blind upsert.
 
-    That is why this fake breaks with ``FakeObserver``'s and
-    ``FakeFeedbackProcessor``'s deterministic content-derived ids rather than
-    copying them. Those producers are inside the class ADR-0081 §8's deferral
+    That is why this fake broke with the deterministic content-derived ids of
+    ``FakeObserver`` and ``FakeFeedbackProcessor``, both since retired, rather than
+    copying them. Those producers were inside the class ADR-0081 §8's deferral
     assumes safe; the first ``EXTERNAL`` producer is exactly the one §6 rules on. A
     test that needs a stable id supplies one — a caller *choosing* an id is not a
     producer *deriving* one.
@@ -670,10 +671,10 @@ def _refuse_unconformable(index: int, name: str, proposal: MemoryUpdateProposal)
     **What is checked, and the one half of ADR-0093 §4 that is not.** §4 obliges a
     reader's proposals to "carry a ``rationale`` naming the source, and a
     ``sensitivity`` chosen for what the source holds rather than defaulted". The
-    *carrying* is checked below, as ``FeedbackProcessorContract`` checks it for the
-    sibling producer. **Naming** is not, and neither is *chosen*: a substring test
-    for the identity would both over- and under-fire — ``"your work calendar said
-    so"`` names the source without containing
+    *carrying* is checked below, as the since-retired ``FeedbackProcessorContract``
+    checked it for the sibling producer. **Naming** is not, and neither is
+    *chosen*: a substring test for the identity would both over- and under-fire —
+    ``"your work calendar said so"`` names the source without containing
     ``calendar:0f3c9d1a7b45e28c6d90fa3b17e4c852``, while ``"scheduled calendar
     import"`` contains ``calendar`` and names a mechanism rather than a source —
     and no check can distinguish a deliberate ``PERSONAL`` from a defaulted one.

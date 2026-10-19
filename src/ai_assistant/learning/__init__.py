@@ -1,20 +1,12 @@
-"""Learning: converts feedback into memory-update proposals over time.
+"""Learning: how what the user says about memory reaches it.
 
-Observes explicit (and, later, implicit) feedback and turns it into
-:class:`~ai_assistant.core.types.MemoryUpdateProposal`s, so personalization
-improves with use. It *proposes* only — the pipeline feeds the proposals to the
-memory write-path, which disposes of them via the policy (ADR-0009). No
-subsystem here writes memory directly.
+The package holds no code. Its first processor, ``RuleBasedFeedbackProcessor``,
+retired under ADR-0328 §14:1, together with the ``FeedbackProcessor`` Protocol, its
+canonical fake and conformance suite, and the ``FeedbackEvent`` and ``FeedbackKind``
+types it consumed: feedback is interpreted by models and never mechanically, and how
+it reaches memory is the observer's decision's. Where that observer lives is
+ADR-0329's to decide, so the package is kept rather than removed until it does.
 
-The public contract is the ``FeedbackProcessor`` Protocol in
-`ai_assistant.core.protocols`. ``RuleBasedFeedbackProcessor`` turns explicit,
-user-stated feedback into proposals, and writes nothing: it proposes, and a
-deterministic policy disposes. Nothing here distils beliefs out of episodes.
-ADR-0285 retired the observer that did, and adds no producer in its place.
+Whatever lands here *proposes* only: the memory write path disposes of a proposal
+through the policy, and nothing in this package writes memory directly (ADR-0005 §3).
 """
-
-from ai_assistant.learning.processor import RuleBasedFeedbackProcessor
-
-__all__ = [
-    "RuleBasedFeedbackProcessor",
-]

@@ -69,12 +69,11 @@ record; this module re-rules nothing, re-orders nothing, and computes no reach.
 Its **one** clock reading is the listing's, taken once per page: ADR-0130 §7 has
 an expired record stay enumerable and render *as expired*, no field says which
 side of that line a record is on, and the comparison itself belongs to the core
-type — so what the adapter supplies is the reading, exactly as it does when it
-stamps a ``FeedbackEvent``. It answers expiry and nothing else: dismissal and a
-``DROP`` are stamped by the hub and are taken as final. On a remote hub the
-reading is this device's, so a record within clock skew of its expiry may be
-labelled from the wrong side; that moves a label and never a verb, the engine
-staying the authority on what any act does.
+type — so what the adapter supplies is the reading and nothing more. It answers
+expiry and nothing else: dismissal and a ``DROP`` are stamped by the hub and are
+taken as final. On a remote hub the reading is this device's, so a record within
+clock skew of its expiry may be labelled from the wrong side; that moves a label
+and never a verb, the engine staying the authority on what any act does.
 
 ``connect``, ``reconnect``, ``disconnect``, ``connections`` and ``connection-log``
 are the connection surface — the five engine operations ADR-0151 §1 ratifies and
@@ -7582,7 +7581,7 @@ def _render_notification(record: HeldNotification, *, now: datetime) -> None:
     :meth:`~ai_assistant.core.types.NotificationCandidate.is_perishable_at` is the
     boundary "spelled once so that a policy, a store and a suite cannot disagree about
     it", and this asks it rather than restating ``<=``. What the adapter supplies is a
-    clock reading, which is what it already does when it stamps a ``FeedbackEvent``.
+    clock reading and nothing more.
 
     **On a remote hub that reading is this device's, not the hub's** (ADR-0124), so a
     record within clock skew of its expiry may be labelled from the wrong side. It

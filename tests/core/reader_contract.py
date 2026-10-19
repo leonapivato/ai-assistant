@@ -473,8 +473,8 @@ class ReaderContract:
         ADR-0093 §4 obliges a reader's proposals to "carry a ``rationale`` naming
         the source, and a ``sensitivity`` chosen for what the source holds rather
         than defaulted". Only the **carrying** is assertable here, and it is
-        asserted for the reason ``FeedbackProcessorContract`` asserts it of the
-        sibling producer: ``MemoryUpdateProposal.rationale`` is
+        asserted for the reason the since-retired ``FeedbackProcessorContract``
+        asserted it of the sibling producer: ``MemoryUpdateProposal.rationale`` is
         :data:`~ai_assistant.core.types.EncodableText`, which admits ``""``, so
         nothing downstream refuses a proposal that explains itself with nothing.
 

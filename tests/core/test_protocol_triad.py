@@ -109,9 +109,10 @@ TRIAD_PARTS: Final = ("suite", "fake", "binding")
 #: ``test_no_exemption_is_stale``). Adding an entry is how you record a
 #: backfill you are not doing; it is not a way to skip the rule for new work.
 #:
-#: **Empty, and it stays that way.** ``FeedbackProcessor`` was the last entry;
-#: its triad was completed in issue #46, so every Protocol now has all three
-#: parts. With ``_LEGACY_DEBT`` empty too, no further entry is admissible --
+#: **Empty, and it stays that way.** ``FeedbackProcessor``, since retired
+#: (ADR-0328 §14:1), was the last entry; its triad was completed in issue #46,
+#: so every Protocol now has all three parts. With ``_LEGACY_DEBT`` empty too,
+#: no further entry is admissible --
 #: ``test_no_new_protocol_can_be_exempted`` rejects any Protocol added here.
 EXEMPTIONS: Final[tuple[TriadExemption, ...]] = ()
 

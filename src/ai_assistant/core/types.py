@@ -336,9 +336,9 @@ def encodable_text(value: str) -> str:
     client is never less capable than the in-process engine; ADR-0087 §7 then
     argues against re-validating one value at each boundary it crosses, and fixes
     that "the place a non-encodable value is refused is the type, not the frame".
-    A plain ``str`` field made the two implementations disagree: ``learn(
-    FeedbackEvent(content="\ud800"))`` constructed, the in-process engine
-    accepted it, and no encoder could put it on the socket (issue #565).
+    A plain ``str`` field made the two implementations disagree: a feedback
+    event carrying ``"\ud800"`` constructed, the in-process engine's since-retired
+    ``learn`` accepted it, and no encoder could put it on the socket (issue #565).
     Refusing at construction is what makes the two agree *by default* rather
     than by discipline, and it is the shape :func:`_freeze_json` already uses for
     the values a :data:`FrozenJson` holder carries.
@@ -6165,138 +6165,6 @@ class SourceReading(BaseModel):
             )
             raise ValueError(msg)
         return self
-
-
-# --- learning: explicit, memory-affecting feedback (ADR-0009) ----------------
-# `learning` turns one of these into a `MemoryUpdateProposal` above.
-
-
-class FeedbackKind(StrEnum):
-    """The kind of explicit feedback the user gave (see ADR-0009)."""
-
-    CORRECTION = "correction"
-    PREFERENCE = "preference"
-
-
-class FeedbackEvent(BaseModel):
-    """A unit of explicit, memory-affecting feedback (see ADR-0009).
-
-    The learning subsystem turns this into a :class:`MemoryUpdateProposal`.
-    ``memory_kind`` says which typed record it establishes, and it is **optional**
-    (ADR-0122 §1): ``None`` means the feedback does not name a record type and one
-    is to be resolved from the belief the feedback touches — by `orchestration`,
-    before the :class:`~ai_assistant.core.protocols.FeedbackProcessor` is called.
-
-    **Absent never means "unknowable", and it is never stored.** A producer that
-    cannot know the drawer — a correction's target is a property of the belief it
-    corrects, which the producer has not read — reports what it knows by leaving
-    the field ``None``. A value present is the caller's **pin**: it is honoured
-    unchanged, and it suppresses the resolution's store read entirely (ADR-0122
-    §6). That distinction is the whole point of the field's domain: an invented
-    default and a user's deliberate choice were indistinguishable once the field
-    was filled, so a fixed table in ``interfaces/cli.py`` filed every correction as
-    a :class:`SemanticMemory` and the one command named for corrections could not
-    correct a preference (#864).
-
-    **A ``FeedbackEvent`` reaching a ``FeedbackProcessor`` carries a resolved
-    kind** (ADR-0122 §7); establishing that is the calling stage's obligation, and
-    :class:`~ai_assistant.learning.processor.RuleBasedFeedbackProcessor` raises on
-    an unresolved event rather than answering it with the silence it owes a
-    deferred target.
-
-    **``subject`` and ``about_person`` are two different axes, side by side on
-    purpose** (ADR-0100 §7). ``subject`` is the older field and keeps its meaning
-    exactly: an optional *scope* for a preference — "email tone", "units" — which
-    :class:`~ai_assistant.learning.processor.RuleBasedFeedbackProcessor` lands as
-    :attr:`PreferenceMemory.context`. ``about_person`` is whom the belief is
-    *about*, with :class:`MemoryBase`'s semantics unchanged. The word "subject" is
-    taken at least five times over in this corpus and none of its senses is a
-    person, so the person axis does not get it: two fields called ``subject`` on
-    one type is not available, and their standing side by side is the clearest
-    statement that they are not one thing. Whether the older field would be better
-    named ``scope`` is a decision of ADR-0009's that no lane may change on
-    ADR-0100's authority (issue #688).
-
-    **This is the only route by which a non-owner subject enters the store**
-    (ADR-0100 §4): a user states one, or nothing does. It shipped *with* the route —
-    ``assistant learn --about-person`` — because a field with no route would leave
-    every third-party belief constructing ``about_person=None``, which §3 reads as
-    the owner's, making a false record of the exact case the field was added for.
-    ADR-0293 §11 retired ``learn`` from the engine surface, a reply in the
-    conversation being its replacement, so no surface constructs this event.
-
-    **``guarded`` is the owner's explicit placement act at write** (ADR-0217 §7),
-    and it is on this event rather than encoded by an adapter because deciding a
-    record's placement is not adapter work: golden rule 3 keeps business logic out
-    of `interfaces/`, and an adapter translating a flag into a :class:`Placement`
-    would be deciding disclosure in the thinnest layer in the system. The adapter
-    sets a field; `learning` reads it. The
-    :class:`~ai_assistant.core.protocols.FeedbackProcessor` that builds the record
-    honours it. It is a **narrowing only**, and ``False`` is not an act of any
-    kind: it leaves the record with ADR-0217 §6's default, which is ADR-0199 §3's
-    placement of its class. It is not a widening act, not an unguard, and not a
-    record that the owner considered this belief and declined to guard it.
-
-    **Honouring it is a change to the ``FeedbackProcessor`` Protocol's behavioural
-    contract, not to one implementation** (§7). An implementation that built its
-    normal proposal and ignored this member would be structurally conformant and
-    would silently discard an explicit owner act, so the obligation is pinned by
-    the shared ``FeedbackProcessorContract`` and every implementation bound to that
-    suite — the canonical fake in ``ai_assistant.testing`` included — is held to
-    it. That suite, and not this docstring, is what makes the obligation enforced
-    rather than assumed.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    kind: FeedbackKind
-    memory_kind: MemoryKind | None = Field(
-        default=None,
-        description=(
-            "The typed memory this feedback establishes, or ``None`` to have it "
-            "resolved from the belief the feedback touches (ADR-0122 §1). A value "
-            "present is the caller's pin and is honoured unchanged."
-        ),
-    )
-    content: EncodableText = Field(
-        description="Canonical text of the feedback, e.g. 'office is in Boston'."
-    )
-    subject: EncodableText | None = Field(
-        default=None, description="Optional scope/context, e.g. 'email tone'."
-    )
-    about_person: NonBlankEncodableText | None = Field(
-        default=None,
-        description=(
-            "Whom this feedback is about, when that is someone other than the owner "
-            "(ADR-0100 §7). Carried onto the record the processor builds. Distinct "
-            "from ``subject``, which is a preference scope."
-        ),
-    )
-    evidence: tuple[EncodableText, ...] = Field(
-        default=(),
-        description="Interaction/episode ids supporting this, carried into provenance.",
-    )
-    created_at: UtcInstant = Field(description="When the feedback was given (tz-aware).")
-    guarded: bool = Field(
-        default=False,
-        description=(
-            "The owner's explicit act placing what this feedback establishes for "
-            "themselves alone (ADR-0217 §7). ``True`` writes every record this event "
-            "produces with reach ``OWNER`` and setter ``OWNER_ACT``; ``False`` — the "
-            "default — is not an act of any kind and leaves ADR-0217 §6's default "
-            "placement. A narrowing only: there is no widening act at write."
-        ),
-    )
-
-    @field_validator("content")
-    @classmethod
-    def _content_is_present(cls, value: str) -> str:
-        """Require non-empty content, so feedback cannot become a blank memory."""
-        stripped = value.strip()
-        if not stripped:
-            msg = "feedback content must not be empty"
-            raise ValueError(msg)
-        return stripped
 
 
 #: An ISO-4217 alphabetic code is exactly this long.
