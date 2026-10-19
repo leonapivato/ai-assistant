@@ -59,13 +59,15 @@ from ai_assistant.core.types import (
     EpisodeCursor,
     EpisodePage,
     EpisodicMemory,
+    MemoryKind,
     MemorySearchResult,
     MemoryWriteMode,
     NonBlankEncodableText,
     ProcessingStatus,
     RecordChunk,
     WalkPosition,
-    band_of,
+    record_band,
+    record_transaction_time,
 )
 from ai_assistant.testing.cancellation import SuspendableResource
 
@@ -75,7 +77,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
         BeliefBand,
-        MemoryKind,
         MemoryRecord,
         MemoryWrite,
     )
@@ -290,13 +291,13 @@ def _selects_nothing(*axes: frozenset[object] | None) -> bool:
 
 
 def _newest_revision_first(records: list[MemoryRecord]) -> list[MemoryRecord]:
-    """ADR-0073 §2's total order: ``last_updated`` descending, ``id`` ascending.
+    """ADR-0073 §2's total order: transaction time descending, ``id`` ascending.
 
     Two passes over a stable sort rather than one composite key, because the two
     halves run in opposite directions and ``datetime`` has no negation.
     """
     by_id = sorted(records, key=lambda record: record.id)
-    return sorted(by_id, key=lambda record: record.provenance.last_updated, reverse=True)
+    return sorted(by_id, key=record_transaction_time, reverse=True)
 
 
 class FakeMemoryStore:
@@ -758,10 +759,7 @@ class FakeMemoryStore:
                     or (wanted is not None and record.kind not in wanted)
                 ):
                     continue
-                if (
-                    wanted_bands is not None
-                    and band_of(record.provenance.source) not in wanted_bands
-                ):
+                if wanted_bands is not None and record_band(record) not in wanted_bands:
                     continue
                 content = record.content.lower()
                 hits = sum(1 for term in query_terms if term in content)
@@ -979,7 +977,8 @@ class FakeMemoryStore:
 
         Args:
             bands: Belief bands to include; ``None`` is every band, ``()`` none.
-            kinds: Memory kinds to include; ``None`` is every kind, ``()`` none.
+            kinds: Kinds to include; ``None`` is the memory kind alone, so episodes
+                are excluded by default (ADR-0328 §11:2), and ``()`` is none.
             limit: Page size; ``0`` returns an empty page.
             offset: How many ordered, filtered records to skip.
 
@@ -993,11 +992,11 @@ class FakeMemoryStore:
                 nothing is answered without reaching either.
         """
         wanted_bands = None if bands is None else frozenset(bands)
-        wanted_kinds = None if kinds is None else frozenset(str(kind) for kind in kinds)
-        _check_page_bounds(limit, offset)
-        selects_nothing = (wanted_bands is not None and not wanted_bands) or (
-            wanted_kinds is not None and not wanted_kinds
+        wanted_kinds = frozenset(
+            str(kind) for kind in ((MemoryKind.MEMORY,) if kinds is None else kinds)
         )
+        _check_page_bounds(limit, offset)
+        selects_nothing = (wanted_bands is not None and not wanted_bands) or not wanted_kinds
         if limit == 0 or selects_nothing:
             return []
 
@@ -1008,8 +1007,8 @@ class FakeMemoryStore:
                 record
                 for record in self._records.values()
                 if self._is_readable(record, now)
-                and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
-                and (wanted_kinds is None or record.kind in wanted_kinds)
+                and (wanted_bands is None or record_band(record) in wanted_bands)
+                and record.kind in wanted_kinds
             ]
         page = _newest_revision_first(matched)[offset : offset + limit]
         # Cleared, not merely absent: a record re-added after a search carries that

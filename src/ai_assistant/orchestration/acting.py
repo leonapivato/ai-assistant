@@ -114,7 +114,7 @@ from ai_assistant.core.types import (
     CapabilityEffect,
     CapabilityResult,
     EgressBinding,
-    SemanticMemory,
+    Memory,
     ToolCall,
     ToolFailure,
     ToolFailureKind,
@@ -517,7 +517,7 @@ class ActedCall:
     route: ResultRoute | None = None
     result_id: str | None = None
     effect_id: str | None = None
-    replaces: tuple[SemanticMemory, ...] = ()
+    replaces: tuple[Memory, ...] = ()
 
     def __post_init__(self) -> None:
         """Only a call that needs you shows what it replaces (ADR-0321 §5:5)."""
@@ -773,9 +773,8 @@ class ActingStage:
         Its record is finished not done, since nothing happened, and the call is
         reported as needing you, with the assertions its question will show replaced.
         """
-        replaces = tuple(
-            SemanticMemory.model_validate(record.model_dump()) for record in answer.replaces
-        )
+        # Detached and revalidated, so planning never holds the runner's own objects.
+        replaces = tuple(Memory.model_validate(record.model_dump()) for record in answer.replaces)
         _log.info("acting_call_needs_you", stage="acting", reason="needs_you")
         if effect_id is not None:
             await self._plans.finish_activation_effect(

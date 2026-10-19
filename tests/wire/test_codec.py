@@ -52,11 +52,9 @@ from ai_assistant.core.types import (
     CostBasis,
     DataTier,
     EncodableText,
-    Evidence,
     FrozenJsonMapping,
     Idempotency,
     Identifier,
-    MemoryKind,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
@@ -64,8 +62,10 @@ from ai_assistant.core.types import (
     RiskLevel,
     ToolCost,
     ToolDefinition,
+    belief_view,
 )
 from ai_assistant.orchestration.payloads import canonical_payload as engine_encode
+from ai_assistant.testing.memories import memory, remembered_support, said_support
 from ai_assistant.wire.codec import canonical_payload, project
 
 
@@ -421,141 +421,75 @@ def test_a_request_argument_object_sorts_rather_than_keeping_keyword_order(
     assert _both(dict(reversed(list(arguments.items())))) == expected
 
 
+#: :func:`_belief`'s bytes: ADR-0328 §15's field set, every member sorted at every
+#: depth (§2), 824 bytes.
+_BELIEF_BYTES: Final = (
+    b'{"as_of":"2026-08-01T12:00:00Z","band":"asserted","content":"prefers dark mode",'
+    b'"evidence":{"against":0,"episodes":2,"latest":"2026-08-01T12:00:00Z","supporting":2},'
+    b'"id":"b-1","learned":"2026-08-01T12:00:00Z","legacy":false,"reading_certainty":null,'
+    b'"rests_on_outside_content":false,"standing":"said","status":"current",'
+    b'"supports":[{"about_when":null,"content":"said so","counts":true,"direction":"for",'
+    b'"how_sure":null,"note":"","origin":"user_message","part":"input",'
+    b'"source_details":null,"when":"2026-08-01T12:00:00Z"},'
+    b'{"about_when":null,"content":null,"counts":true,"direction":"for","how_sure":null,'
+    b'"note":"","origin":"remembered","part":"remember_call","source_details":null,'
+    b'"when":null}],"supports_gone":false,'
+    b'"track_record":{"held_up":0,"last_used":null,"let_down":0,"relied_on":0},'
+    b'"unbacked":false,"valid_until":null}'
+)
+
+
+def _belief() -> Belief:
+    """A memory the user said, one support resolved and one gone, as its view projects it."""
+    held = memory(
+        "b-1",
+        "prefers dark mode",
+        said_support("activation:said", when=_AT, added_at=_AT),
+        remembered_support("activation:gone", when=None, added_at=_AT),
+    )
+    said = held.supports[0].points_at
+    return belief_view(held, now=_AT, contents={said: "said so"})
+
+
 def test_a_belief_shaped_model_takes_its_ratified_bytes() -> None:
     """§5e's composite: nested models, an optional inside a tuple, an enum, an
-    instant, a float and a ``null`` field together.
+    instant and a ``null`` field together.
 
-    Built over the real promoted :class:`~ai_assistant.core.types.Belief` rather
-    than over a fixture, so it is both the ADR's vector and a live check on the
-    promoted type's byte shape. The type's field set has since moved past the one
-    §5e states inline — three times now — and the arithmetic below walks back to
-    §5e's own figure rather than leaving the divergence to be rediscovered.
-
-    Left at ``evidence_elided``'s default ``0``, unlike every case ADR-0107 §8 item
-    6 governs: this vector is about the byte shape, and the field appearing *at* its
-    default is the stronger witness that the codec projects generically over the
-    whole model. What proves the *value* survives is
-    :func:`test_a_belief_carries_its_elision_across_the_wire_unchanged`.
-
-    **ADR-0189 §2's two members are here at their defaults for the same reason, and
-    they are the evidence ADR-0124 §9's second limb rests on for version 13.** A
-    ``Belief`` this vector builds is a user's own assertion with no attestation and a
-    warrant resting on nothing external — so both members are absent-valued, and both
-    are in the bytes anyway, because ``project`` renders a model by ``model_dump()``
-    and a ``None`` member is included rather than omitted. That is precisely why a
-    version 12 client fails ``extra_forbidden`` on **every** belief a version 13 hub
-    sends rather than only on the attested ones (``wire/envelope.py``'s note at 13).
+    Built over the real promoted :class:`~ai_assistant.core.types.Belief`, projected by
+    ``core``'s own :func:`belief_view`, so it is both the ADR's vector and a live check
+    on the promoted type's byte shape. ADR-0328 §15 reshaped the type: its supports are
+    the nested models in a tuple, a gone support's ``content`` the optional inside it,
+    and no float remains on it (§15:3 took the confidence off). ADR-0087 §5 rules that
+    §5e's composite vectors "state the field set they were built over inline, so that a
+    vector remains verifiable whatever the surface ADR settles": this one states the
+    field set of ADR-0328 §15:1-§15:2. What the row exists to witness is unmoved:
+    sorted members at every depth, an enum as its member value, an instant, and a
+    ``null`` field emitted rather than omitted, which is what ADR-0124 §9's second limb
+    rests on for version 110.
     """
-    belief = Belief(
-        id="b-1",
-        band=BeliefBand.ASSERTED,
-        kind=MemoryKind.PREFERENCE,
-        content="prefers dark mode",
-        confidence=0.9,
-        last_updated=_AT,
-        evidence=(Evidence(content="said so"), Evidence()),
-        valid_until=None,
-    )
-    expected = (
-        b'{"attestation":null,"band":"asserted","confidence":0.9,'
-        b'"content":"prefers dark mode",'
-        b'"evidence":[{"content":"said so"},{"content":null}],"evidence_elided":0,'
-        b'"id":"b-1","kind":"preference","last_updated":"2026-08-01T12:00:00Z",'
-        b'"rests_on_recorded_external_content":false,"valid_until":null}'
-    )
-    assert _both(belief) == expected
-    # 288, not §5e's 204, and the three later field-set changes are subtracted in turn
-    # rather than the difference being asserted as a bare number. ADR-0087 §5
-    # anticipates exactly this and rules on it twice: §5e's composite vectors "state
-    # the field set they were built over inline, so that a vector remains verifiable
-    # whatever the surface ADR settles", and they "stay verifiable if a field is
-    # later selected differently". What the row exists to witness is unmoved: sorted
-    # members, a nested model, an optional inside a tuple, an enum as its member
-    # value, an instant, a float, and a ``null`` field.
-    assert len(expected) == 288
-    # ADR-0189 §2 gave the projection the origin of what it shows: ``attestation``
-    # sorts first of all members and ``rests_on_recorded_external_content`` between
-    # ``last_updated`` and ``valid_until`` — §2's member sort doing its job on two
-    # more fields nobody chose the position of.
-    without_origin = (
-        len(expected)
-        - len(b'"attestation":null,')
-        - len(b'"rests_on_recorded_external_content":false,')
-    )
-    assert without_origin == 226
-    # ADR-0107 §3 appended ``evidence_elided``, which §2's member sort places between
-    # ``evidence`` and ``id``. ADR-0107 §11 finds no record owed on ADR-0087, because
-    # it "fixes the encoding an integer already had" — as this arithmetic shows.
-    without_elision = without_origin - len(b'"evidence_elided":0,')
-    assert without_elision == 206
-    # And 206 rather than 204 because the vector was measured against
-    # ``BeliefBand.STATED`` at ``main`` @ 89e0cfe, while the member is spelled
-    # ``asserted`` here — two bytes wider.
-    assert without_elision - len(b'"asserted"') + len(b'"stated"') == 204
+    assert len(_BELIEF_BYTES) == 824
+    assert _both(_belief()) == _BELIEF_BYTES
 
 
-@pytest.mark.parametrize(
-    ("dto", "elided"),
-    [
-        (
-            Belief(
-                id="b-1",
-                band=BeliefBand.DERIVED,
-                kind=MemoryKind.SEMANTIC,
-                content="prefers metric units",
-                confidence=0.62,
-                last_updated=_AT,
-                evidence=(Evidence(content="said so"), Evidence()),
-                evidence_elided=900,
-            ),
-            900,
-        ),
-        (
-            BeliefSummary(
-                id="b-1",
-                band=BeliefBand.DERIVED,
-                kind=MemoryKind.SEMANTIC,
-                content="prefers metric units",
-                confidence=0.62,
-                last_updated=_AT,
-                evidence_count=2,
-                lost_evidence=1,
-                evidence_elided=900,
-            ),
-            900,
-        ),
-    ],
-    ids=["belief", "belief_summary"],
-)
-def test_a_belief_carries_its_elision_across_the_wire_unchanged(
-    dto: Belief | BeliefSummary, elided: int
-) -> None:
-    """ADR-0107 §8 item 6's wire boundary, over **both** DTO shapes.
+def test_a_belief_carries_its_computed_values_across_the_wire_unchanged() -> None:
+    """ADR-0328 §15:1's values cross both DTO shapes, at non-default values.
 
     **This test is the proof that ``codec.py`` needs no edit.** :func:`project`
-    dispatches on ``BaseModel`` and recurses over ``model_dump()``, so a field added
-    to a promoted type crosses the wire without anyone touching this module — and a
-    claim of that form is worth exactly as much as the test that checks it. ADR-0107
-    §3 also turns on the field being *plain*: it is deliberately not a
-    ``computed_field``, because a value one implementation sends and another omits
-    would make the same call measure two different sizes against ADR-0085 §8c's
-    limit, and ``evidence_elided`` is not computable by a client in the first place.
-
-    **Only a non-default value proves it**, which is ADR-0107 §8 item 6's governing
-    rule and the reason the two ``major`` findings in that ADR's own review were
-    vacuous tests: at ``0`` this passes whether the number is carried, defaulted or
-    silently dropped, and the decode would reconstruct the same object either way.
-
-    The round trip is the real client's: encode with the wire's codec, read the
-    bytes back as JSON, and revalidate the model. Both halves are asserted — the
-    field is in the transmitted bytes, and it survives the return journey exactly.
+    dispatches on ``BaseModel`` and recurses over ``model_dump()``, so the reshaped
+    projection crosses the wire without anyone touching this module. **Only a
+    non-default value proves it** (ADR-0107 §8 item 6's rule): two supports over two
+    episodes, one of them gone, and a ``when``.
     """
-    payload = _both(dto)  # and the engine's encoder agrees, per _both
-    assert f'"evidence_elided":{elided}'.encode() in payload
-
-    decoded = type(dto).model_validate(json.loads(payload))
-    assert decoded.evidence_elided == elided
-    assert decoded == dto
+    belief = _belief()
+    summary = BeliefSummary.model_validate(belief.model_dump(exclude={"supports"}))
+    for dto in (belief, summary):
+        payload = _both(dto)
+        assert b'"supporting":2' in payload
+        assert b'"episodes":2' in payload
+        assert b'"standing":"said"' in payload
+        decoded = type(dto).model_validate(json.loads(payload))
+        assert decoded == dto
+    assert b'"content":null' in _both(belief)
 
 
 def test_a_page_of_beliefs_is_the_same_bytes_comma_separated() -> None:
@@ -565,16 +499,7 @@ def test_a_page_of_beliefs_is_the_same_bytes_comma_separated() -> None:
     measure-then-send sound and what lets ADR-0085 §8b's reserve be *sufficient*
     rather than hopeful.
     """
-    belief = Belief(
-        id="b-1",
-        band=BeliefBand.ASSERTED,
-        kind=MemoryKind.PREFERENCE,
-        content="prefers dark mode",
-        confidence=0.9,
-        last_updated=_AT,
-        evidence=(Evidence(content="said so"), Evidence()),
-        valid_until=None,
-    )
+    belief = _belief()
     alone = canonical_payload(belief)
     assert canonical_payload((belief, belief)) == b"[" + alone + b"," + alone + b"]"
 

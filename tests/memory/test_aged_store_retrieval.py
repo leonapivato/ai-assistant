@@ -216,7 +216,7 @@ async def _measured_search(  # noqa: PLR0913 — the graded call needs all of it
 
     * **Every returned row is eligible.** Checked first and by identity, because
       the distance test below cannot see this: the ineligible records are by
-      construction the *nearer* ones, so a leaked ``PREFERENCE`` or window-closed
+      construction the *nearer* ones, so a leaked episode or window-closed
       row sits comfortably inside any cutoff drawn from the eligible ranking. A
       store that leaked one while dropping an eligible row would otherwise have
       matched the predicted count and passed. Since ADR-0128 §1 this is also the
@@ -353,7 +353,7 @@ async def test_no_shortfall_at_any_filtered_neighbour_density(
     )
     store = make_store(f"sweep-{crowding}-{closed_fraction}")
     aged = await _aged(spec, store)
-    kinds = [MemoryKind.SEMANTIC]
+    kinds = [MemoryKind.MEMORY]
 
     shortfalls = 0
     densities: list[int] = []
@@ -420,7 +420,7 @@ async def test_a_concentrated_topic_is_served_in_full_like_an_untouched_one(
     evidence that it is still the crowded one.
     """
     limit = _SWEEP_LIMIT
-    kinds = [MemoryKind.SEMANTIC]
+    kinds = [MemoryKind.MEMORY]
     spec = AgedStoreSpec.sized(
         total=profile.sweep_total, crowding=100, closed_fraction=0.5, closed_concentration=1.0
     )

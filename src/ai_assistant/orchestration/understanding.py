@@ -14,8 +14,9 @@ superseding ADR-0276 §1:5 for those alone).
 ``M1``, ``M2``… in recall's order, only where recall made a decision for the pass: its
 records as the understanding phase fetched them (ADR-0282 §5). A recalled record either
 window already rendered stays there only. A recalled episode
-takes the episode window's projection; a recalled semantic record renders its fact,
-cut with the cut disclosed, its last update and an attribution by band, marked
+takes the episode window's projection; a recalled memory renders its wording,
+cut with the cut disclosed, its last update (ADR-0328 §7:8's transaction time) and an
+attribution by band, marked
 ``not_linkable`` on every pass (ADR-0305 §3), and its label resolves to a ``memory``
 referent. Where recall kept nothing, or failed, the section says so.
 
@@ -38,8 +39,8 @@ the episode window, to its episode's activation
 records as having taken it in, which the reader brings with the window. All of it is
 read off what the pass already holds, and nothing is fetched. An item that links to no
 activation is rendered marked ``not_linkable``, and a story label naming it is dropped
-and counted, with no repair (ADR-0303 §7:5, §7:6); so is one naming a recalled semantic
-record, which is never a story link (ADR-0305 §3). A story label resolving to nothing
+and counted, with no repair (ADR-0303 §7:5, §7:6); so is one naming a recalled memory,
+which is never a story link (ADR-0305 §3). A story label resolving to nothing
 rendered, or to an episode recording no activation, is a label defect, repaired once
 and then dropped and counted (§6:8). An ``S`` label is also cited wherever a label may
 be — in ``meaning_labels``, a reference or a relationship — and resolves there to a ``story``
@@ -148,12 +149,12 @@ from ai_assistant.core.types import (
     DiagnosticSource,
     EpisodicMemory,
     InputOrigin,
+    Memory,
     Message,
     MessageAuthor,
     ProposedActivationUnderstanding,
     RecallOutcome,
     Role,
-    SemanticMemory,
     StoryMember,
     StoryMemberKind,
     StoryNoteAuthor,
@@ -163,7 +164,6 @@ from ai_assistant.core.types import (
     UnderstandingReferent,
     UnderstandingRelationship,
     UnresolvedMatter,
-    band_of,
 )
 from ai_assistant.orchestration.channel_kinds import place_of
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
@@ -428,7 +428,7 @@ def _instruction(*, recalled: bool, stories: bool) -> str:
     )
 
 
-#: How a recalled semantic record is attributed, by its band (ADR-0281 §7).
+#: How a recalled memory is attributed, by its band (ADR-0281 §7, ADR-0328 §12).
 _BAND_ATTRIBUTION: Final = {
     BeliefBand.ASSERTED: "a remembered fact: something the user said",
     BeliefBand.DERIVED: "a remembered fact: something the assistant worked out",
@@ -822,7 +822,7 @@ class Fetched:
     """
 
     episodes: tuple[EpisodicMemory, ...] | None
-    recalled: tuple[EpisodicMemory | SemanticMemory, ...]
+    recalled: tuple[EpisodicMemory | Memory, ...]
     fetched: tuple[str, ...]
     missing: tuple[str, ...]
 
@@ -838,7 +838,7 @@ async def fetch_held(
 
     One ``get_many`` returns each record's current version (ADR-0282 §5:1). An id with
     no record, a record no longer of the kind held — an episode for the window, an
-    episode or semantic record for recall — and one the predicate now refuses are not
+    episode or memory for recall — and one the predicate now refuses are not
     errors: each is recorded as missing and left out, and the rest keep their order
     (§2, §5:2).
 
@@ -856,9 +856,7 @@ async def fetch_held(
     # ADR-0286 §6:4: an open episode is an id with no record, recorded as missing.
     found = without_open_episodes(await memory.get_many(ids)) if ids else {}
     candidates = [
-        record
-        for id_ in ids
-        if isinstance(record := found.get(id_), EpisodicMemory | SemanticMemory)
+        record for id_ in ids if isinstance(record := found.get(id_), EpisodicMemory | Memory)
     ]
     admitted = {record.id: record for record in admitted_to_understanding(audience, candidates)}
     episodes = (
@@ -904,7 +902,7 @@ class _Brief:
     #: ``P`` or ``M`` label naming an episode that episode's activation, and an ``H``
     #: label naming a place-window item that links to an activation that activation
     #: (ADR-0303 §7:4). An ``H`` label not here names an item that links to nothing,
-    #: and an ``M`` label naming a recalled semantic record names a fact, which is never
+    #: and an ``M`` label naming a recalled memory names a fact, which is never
     #: a story link: each is dropped and counted with no repair (§7:6, ADR-0305 §3). Any
     #: other label not here — an episode of no activation, or nothing rendered — is a
     #: story-label defect (ADR-0300 §6:8).
@@ -1010,7 +1008,7 @@ class UnderstandingStage:
         now: Callable[[], datetime],
         deadline: float,
         recall: ActivationRecall | None = None,
-        recalled: tuple[EpisodicMemory | SemanticMemory, ...] = (),
+        recalled: tuple[EpisodicMemory | Memory, ...] = (),
         stories: Candidates | None = None,
         origin: InputOrigin | None = None,
     ) -> ActivationUnderstanding:
@@ -1129,7 +1127,7 @@ class UnderstandingStage:
         audience: TurnSupply,
         episodes: tuple[EpisodicMemory, ...] | None,
         recall: ActivationRecall | None,
-        recalled: tuple[EpisodicMemory | SemanticMemory, ...],
+        recalled: tuple[EpisodicMemory | Memory, ...],
         stories: Candidates | None,
         origin: InputOrigin | None = None,
     ) -> _Brief:
@@ -1289,7 +1287,7 @@ class UnderstandingStage:
     def _recalled_section(  # noqa: PLR0913 — the outcome, its records, what is shown, and the three label maps it mints into
         self,
         outcome: RecallOutcome,
-        recalled: tuple[EpisodicMemory | SemanticMemory, ...],
+        recalled: tuple[EpisodicMemory | Memory, ...],
         rendered: frozenset[str],
         labels: dict[str, UnderstandingReferent],
         story_members: dict[str, StoryMember],
@@ -1876,16 +1874,16 @@ class _ProjectedEpisode:
 
 @dataclass(frozen=True, slots=True)
 class _RecalledFact:
-    """ADR-0281 §7's projection of one recalled semantic record."""
+    """ADR-0281 §7's projection of one recalled memory."""
 
-    record: SemanticMemory
+    record: Memory
     fact: str
     cut: bool
 
     @classmethod
-    def of(cls, record: SemanticMemory, *, excerpt_chars: int) -> _RecalledFact:
-        """Its fact, cut to the episode excerpt bound with the cut disclosed."""
-        fact, cut = _cut(record.fact, excerpt_chars)
+    def of(cls, record: Memory, *, excerpt_chars: int) -> _RecalledFact:
+        """Its wording, cut to the episode excerpt bound with the cut disclosed."""
+        fact, cut = _cut(record.content, excerpt_chars)
         return cls(record=record, fact=fact or "", cut=cut)
 
     def rendering(self, label: str) -> dict[str, object]:
@@ -1895,11 +1893,10 @@ class _RecalledFact:
         not a stories section renders beside it: a remembered fact is never a story
         link (ADR-0305 §3).
         """
-        provenance = self.record.provenance
         return {
             "label": label,
-            "item": _BAND_ATTRIBUTION[band_of(provenance.source)],
-            "last_updated": provenance.last_updated.isoformat(),
+            "item": _BAND_ATTRIBUTION[self.record.band],
+            "last_updated": self.record.transaction_time.isoformat(),
             "fact": self.fact,
             "fact_cut_to_first_chars": self.cut,
             "not_linkable": True,
@@ -1908,7 +1905,7 @@ class _RecalledFact:
     def referent(self) -> UnderstandingReferent:
         """The record's stored id **exactly as stored**, as a ``memory`` referent."""
         return UnderstandingReferent(
-            kind="memory", id=self.record.id, source="semantic memory", excerpt=_excerpt(self.fact)
+            kind="memory", id=self.record.id, source="memory", excerpt=_excerpt(self.fact)
         )
 
 
@@ -2009,7 +2006,7 @@ def _marked_not_linkable(label: str, brief: _Brief) -> bool:
     """Whether ``label`` names something rendered whose kind may be marked not linkable.
 
     An exact lookup: an ``H`` label this call rendered (ADR-0303 §7:5), or an ``M``
-    label naming a recalled semantic record (ADR-0305 §3). Read beside
+    label naming a recalled memory (ADR-0305 §3). Read beside
     ``story_members``, which holds every ``H`` label that does link; a fact never does.
     """
     referent = brief.labels.get(label)

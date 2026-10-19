@@ -7,7 +7,7 @@ remains here is what makes *this* policy the default one: its specific rules.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -20,17 +20,24 @@ from ai_assistant.core.types import (
     ConflictRelation,
     DataTier,
     EpisodicMemory,
+    Memory,
     MemoryDecisionKind,
     MemoryRecord,
     MemorySource,
     MemoryUpdateProposal,
     Provenance,
     QuestionPart,
-    SemanticMemory,
     UserConfirmation,
     band_of,
 )
 from ai_assistant.memory import DefaultMemoryPolicy
+from ai_assistant.testing.memories import (
+    legacy_support,
+    memory,
+    remembered_support,
+    said_support,
+    sourced_support,
+)
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import MemoryPolicy
@@ -60,32 +67,37 @@ def _attestation_for(source: MemorySource) -> Attestation | None:
     return _ATTESTED_BY if band_of(source) is BeliefBand.ATTESTED else None
 
 
-def _semantic(  # noqa: PLR0913 — one keyword per record axis a case may vary
+def _semantic(
     record_id: str,
     *,
     content: str | None = None,
     source: MemorySource = MemorySource.OBSERVED,
-    confidence: float = 0.6,
     evidence: tuple[str, ...] = (_EPISODE,),
     derived_from_external: bool = False,
-) -> MemoryRecord:
+) -> Memory:
+    """A memory in the band ``source`` names, read through ADR-0328 §12.
+
+    ``USER_ASSERTED`` rests on the user's message, ``EXTERNAL`` on a source's evidence
+    item, and ``OBSERVED`` or ``INFERRED`` on a remember call — outside where
+    ``derived_from_external`` says so. A derived memory citing **no** ``evidence``
+    rests on a legacy record alone, which points at no episode (ADR-0077 §5 read
+    through §12). No memory carries a confidence (ADR-0328 §10:2).
+    """
     # Content defaults to the id, so a case not about ADR-0121's agreement predicate
     # gets records that cannot accidentally agree: two records agree only when their
     # `content` matches, and no two ids here do.
     content = record_id if content is None else content
-    return SemanticMemory(
-        id=record_id,
-        content=content,
-        fact=content,
-        provenance=Provenance(
-            source=source,
-            confidence=confidence,
-            last_updated=_WHEN,
-            evidence=evidence,
-            attestation=_attestation_for(source),
-            derived_from_external=derived_from_external,
-        ),
-    )
+    episode = evidence[0] if evidence else _EPISODE
+    match band_of(source):
+        case BeliefBand.ASSERTED:
+            support = said_support(episode)
+        case BeliefBand.ATTESTED:
+            support = sourced_support(_attestation_for(source), episode=episode)
+        case BeliefBand.DERIVED if not evidence:
+            support = legacy_support({"id": record_id}, outside=derived_from_external)
+        case _:
+            support = remembered_support(episode, outside=derived_from_external)
+    return memory(record_id, content, support)
 
 
 def _episodic(
@@ -110,7 +122,7 @@ def _episodic(
 
 
 def _proposal(
-    record: MemoryRecord,
+    record: Memory,
     *,
     sensitivity: DataTier = DataTier.PERSONAL,
 ) -> MemoryUpdateProposal:
@@ -144,7 +156,7 @@ async def test_a_derived_proposal_citing_no_evidence_is_rejected(source: MemoryS
     # because the gate serves every producer and cannot know which epistemic step
     # a record took. Without it, ADR-0077's "every proposal cites" would hold only
     # for the producer that happens to obey it.
-    proposal = _proposal(_semantic("unsupported", source=source, confidence=0.9, evidence=()))
+    proposal = _proposal(_semantic("unsupported", source=source, evidence=()))
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
 
@@ -157,29 +169,15 @@ async def test_a_derived_proposal_citing_no_evidence_is_rejected_even_with_confl
     # deferring to the user about, and it must not be folded into a live record
     # either. A rule placed after rule 4 would rule ASK_USER here, and one placed
     # after rule 9 would REINFORCE an unsupported belief onto a real one.
-    proposal = _proposal(_semantic("unsupported", confidence=0.9, evidence=()))
+    proposal = _proposal(_semantic("unsupported", evidence=()))
     conflicts = [
-        _semantic("their-words", source=MemorySource.USER_ASSERTED, confidence=1.0),
+        _semantic("their-words", source=MemorySource.USER_ASSERTED),
         _semantic("our-guess", source=MemorySource.INFERRED),
     ]
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
 
     assert decision.kind is MemoryDecisionKind.REJECT
-
-
-async def test_an_episodic_record_is_not_rejected_for_citing_nothing() -> None:
-    # ADR-0074 §4 binds this policy: an episode's warrant is that it happened, and
-    # requiring it to cite something would demand a regress. The exemption guards a
-    # path nothing takes today — capture does not reach the gate (ADR-0075 §1) and
-    # ADR-0077 §2 forbids the observer to propose an episode — and is written
-    # anyway, so the rule is not one refactor away from making its own substrate
-    # unwritable.
-    proposal = _proposal(_episodic("what-happened"))
-
-    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
-
-    assert decision.kind is MemoryDecisionKind.ACCEPT
 
 
 @pytest.mark.parametrize("source", [MemorySource.USER_ASSERTED, MemorySource.EXTERNAL], ids=str)
@@ -190,7 +188,7 @@ async def test_an_asserted_or_external_proposal_citing_nothing_is_untouched(
     # word is its own warrant and an integration's report is that system's, so
     # neither is constrained — which is exactly why ADR-0072 §3 put the rule at the
     # policy gate rather than on the type.
-    proposal = _proposal(_semantic("stated", source=source, confidence=1.0, evidence=()))
+    proposal = _proposal(_semantic("stated", source=source, evidence=()))
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
 
@@ -226,7 +224,7 @@ async def test_a_tainted_derived_proposal_defers_with_a_reason_naming_its_warran
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
 
     assert decision.kind is MemoryDecisionKind.ASK_USER
-    assert "external" in decision.reason.lower()
+    assert "outside content" in decision.reason.lower()
 
 
 async def test_a_tainted_derived_proposal_defers_ahead_of_every_conflict_rule() -> None:
@@ -318,9 +316,7 @@ async def test_an_attested_proposal_carrying_the_marker_still_commits() -> None:
     changes nothing outside the ``DERIVED`` band.
     """
     proposal = _proposal(
-        _semantic(
-            "import", source=MemorySource.EXTERNAL, confidence=0.9, derived_from_external=True
-        )
+        _semantic("import", source=MemorySource.EXTERNAL, derived_from_external=True)
     )
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
@@ -342,7 +338,6 @@ async def test_a_user_assertion_carrying_a_stray_marker_is_not_deferred() -> Non
         _semantic(
             "their-words",
             source=MemorySource.USER_ASSERTED,
-            confidence=1.0,
             derived_from_external=True,
         )
     )
@@ -356,7 +351,7 @@ async def test_an_untainted_derived_proposal_is_untouched_by_the_rule() -> None:
     # The negative control: without it every case above passes a policy that
     # defers every derived proposal, which would stop the observer landing
     # anything at all.
-    proposal = _proposal(_semantic("our-guess", source=MemorySource.INFERRED, confidence=0.9))
+    proposal = _proposal(_semantic("our-guess", source=MemorySource.INFERRED))
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
 
@@ -364,8 +359,8 @@ async def test_an_untainted_derived_proposal_is_untouched_by_the_rule() -> None:
 
 
 async def test_inference_conflicting_with_asserted_defers_to_user() -> None:
-    proposal = _proposal(_semantic("new", source=MemorySource.INFERRED, confidence=0.9))
-    asserted = _semantic("old", source=MemorySource.USER_ASSERTED, confidence=1.0)
+    proposal = _proposal(_semantic("new", source=MemorySource.INFERRED))
+    asserted = _semantic("old", source=MemorySource.USER_ASSERTED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[asserted])
 
@@ -373,7 +368,7 @@ async def test_inference_conflicting_with_asserted_defers_to_user() -> None:
 
 
 async def test_user_asserted_is_accepted() -> None:
-    proposal = _proposal(_semantic("a", source=MemorySource.USER_ASSERTED, confidence=1.0))
+    proposal = _proposal(_semantic("a", source=MemorySource.USER_ASSERTED))
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
 
@@ -383,8 +378,8 @@ async def test_user_asserted_is_accepted() -> None:
 async def test_user_assertion_supersedes_a_conflicting_inference() -> None:
     # ADR-0038: the correction must displace the stale belief, not land beside
     # it. Before this rule the ACCEPT above fired first and both stayed live.
-    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
-    stale = _semantic("stale", source=MemorySource.INFERRED, confidence=0.6)
+    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED))
+    stale = _semantic("stale", source=MemorySource.INFERRED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[stale])
 
@@ -399,10 +394,10 @@ async def test_user_assertion_contradicting_an_assertion_defers_even_with_an_inf
     # new assertion beside "their-words", leaving two live contradictory profile
     # records. The assertion-conflict check wins over the inference, so the policy
     # defers the whole thing to the user rather than half-resolving it.
-    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
+    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED))
     conflicts = [
-        _semantic("their-words", source=MemorySource.USER_ASSERTED, confidence=1.0),
-        _semantic("our-guess", source=MemorySource.OBSERVED, confidence=0.6),
+        _semantic("their-words", source=MemorySource.USER_ASSERTED),
+        _semantic("our-guess", source=MemorySource.OBSERVED),
     ]
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
@@ -419,8 +414,8 @@ async def test_user_assertion_supersedes_an_external_record() -> None:
     # recoverable side, since an attested belief is re-reportable by its source on
     # a schedule. What ADR-0092 §4 did *not* touch is the REINFORCE refusal, which
     # still inherits the id; the ingest-level case pins that.
-    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
-    imported = _semantic("imported", source=MemorySource.EXTERNAL, confidence=1.0)
+    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED))
+    imported = _semantic("imported", source=MemorySource.EXTERNAL)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[imported])
 
@@ -440,9 +435,8 @@ async def test_an_assertion_never_lands_beside_a_conflict_any_more(
     # source either gets retired (the class) or gets deferred to the user
     # (USER_ASSERTED, ADR-0050 §2). Parametrised so a `MemorySource` added later
     # cannot restore the shape by being left out of the class.
-    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
-    confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.6
-    conflict = _semantic("prior", source=source, confidence=confidence)
+    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED))
+    conflict = _semantic("prior", source=source)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[conflict])
 
@@ -455,10 +449,10 @@ async def test_user_assertion_takes_the_best_ranked_retirable_conflict() -> None
     # supersession — which is what it was always for; before ADR-0092 §4 it also
     # had an EXTERNAL hold-out to step over, and now it does not. An imported
     # record ranked first is simply the target.
-    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
+    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED))
     conflicts = [
-        _semantic("imported", source=MemorySource.EXTERNAL, confidence=1.0),
-        _semantic("our-guess", source=MemorySource.INFERRED, confidence=0.6),
+        _semantic("imported", source=MemorySource.EXTERNAL),
+        _semantic("our-guess", source=MemorySource.INFERRED),
     ]
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
@@ -470,8 +464,8 @@ async def test_user_assertion_takes_the_best_ranked_retirable_conflict() -> None
 async def test_external_proposal_conflicting_with_an_assertion_defers() -> None:
     # Rule 5, restated for EXTERNAL specifically: a sync is a non-asserted
     # proposal, so it may not silently overwrite what the user told us.
-    proposal = _proposal(_semantic("sync", source=MemorySource.EXTERNAL, confidence=1.0))
-    corrected = _semantic("corrected", source=MemorySource.USER_ASSERTED, confidence=1.0)
+    proposal = _proposal(_semantic("sync", source=MemorySource.EXTERNAL))
+    corrected = _semantic("corrected", source=MemorySource.USER_ASSERTED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[corrected])
 
@@ -484,8 +478,8 @@ async def test_user_assertion_contradicting_only_an_assertion_defers_to_the_user
     # be destroyed (ADR-0045 §5 / clause 1); but leaving both live is the honesty gap
     # #245 reports. The policy defers to the user — the acceptable gate ADR-0045 §7
     # named — superseding ADR-0038 §5's "accept beside".
-    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
-    earlier = _semantic("earlier", source=MemorySource.USER_ASSERTED, confidence=1.0)
+    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED))
+    earlier = _semantic("earlier", source=MemorySource.USER_ASSERTED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
 
@@ -496,10 +490,10 @@ async def test_secret_tier_assertion_still_defers_before_superseding() -> None:
     # Rule 1 outranks supersession: a secret-tier correction must not silently
     # overwrite a record on its way to being confirmed.
     proposal = _proposal(
-        _semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0),
+        _semantic("new", source=MemorySource.USER_ASSERTED),
         sensitivity=DataTier.SECRET,
     )
-    stale = _semantic("stale", source=MemorySource.INFERRED, confidence=0.6)
+    stale = _semantic("stale", source=MemorySource.INFERRED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[stale])
 
@@ -729,18 +723,20 @@ async def test_the_certain_rung_outranks_a_reconciler_that_disagrees_with_it() -
     assert decision.target_id == "identical"
 
 
-async def test_a_low_confidence_proposal_beside_an_unrelated_conflict_stores_temporarily() -> None:
-    """ADR-0159 §4c is "the confidence arm exactly as it stands", now reachable here.
+async def test_a_proposal_beside_an_unrelated_conflict_is_accepted() -> None:
+    """ADR-0159 §4c, with the confidence arm retired (ADR-0328 §10:3).
 
-    Before this ADR a non-empty set never reached the confidence arm at all: it
-    folded first. The arm is unchanged; what changed is that it is reached.
+    Before ADR-0328 a weak proposal beside an unrelated conflict reached the
+    confidence arm and was stored tentatively. That arm is gone, so §4c's default
+    rules: accepted, with a reason telling "conflicts, none restating and none
+    contradicting" from "no conflict".
     """
-    proposal = _proposal(_semantic("weak", confidence=0.1))
+    proposal = _proposal(_semantic("weak"))
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[_semantic("existing")])
 
-    assert decision.kind is MemoryDecisionKind.STORE_TEMPORARY
-    assert decision.ttl is not None
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+    assert "none restates or contradicts" in decision.reason
 
 
 async def test_an_asserted_conflict_still_defers_whatever_the_relations_say() -> None:
@@ -751,7 +747,7 @@ async def test_an_asserted_conflict_still_defers_whatever_the_relations_say() ->
     set *agrees* with the proposal, and this one does not (the contents differ), so
     the clause rules here exactly as it was written.
     """
-    asserted = _semantic("asserted", source=MemorySource.USER_ASSERTED, confidence=1.0, evidence=())
+    asserted = _semantic("asserted", source=MemorySource.USER_ASSERTED, evidence=())
 
     decision = await DefaultMemoryPolicy().decide(
         _proposal(_semantic("new")),
@@ -762,31 +758,27 @@ async def test_an_asserted_conflict_still_defers_whatever_the_relations_say() ->
     assert decision.kind is MemoryDecisionKind.ASK_USER
 
 
-async def test_low_confidence_is_stored_temporarily() -> None:
-    proposal = _proposal(_semantic("weak", confidence=0.1))
+async def test_no_proposal_is_stored_temporarily() -> None:
+    """ADR-0328 §10:3: rule 13 retired with the confidence it read.
 
-    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
-
-    assert decision.kind is MemoryDecisionKind.STORE_TEMPORARY
-    assert decision.ttl is not None
-
-
-async def test_confident_and_unconflicted_is_accepted() -> None:
-    proposal = _proposal(_semantic("ok", confidence=0.9))
+    A memory carries no confidence (§10:2), so a proposal the old rule would have
+    stored tentatively — the weakest a producer can build, one remember call — is
+    accepted when nothing else rules on it, and never stored tentatively.
+    """
+    proposal = _proposal(_semantic("weak"))
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
 
     assert decision.kind is MemoryDecisionKind.ACCEPT
+    assert decision.ttl is None
 
 
-@pytest.mark.parametrize("ttl", [timedelta(0), timedelta(seconds=-1)])
-def test_non_positive_temporary_ttl_is_rejected_at_construction(ttl: timedelta) -> None:
-    # Without this guard the policy builds fine and raises later from `decide`,
-    # and only for a low-confidence proposal — a crash far from its cause. Both
-    # zero and negative are checked: a guard narrowed to `== 0` would let a
-    # negative window through and restore exactly that delayed failure.
-    with pytest.raises(ValueError, match="temporary_ttl must be positive"):
-        DefaultMemoryPolicy(temporary_ttl=ttl)
+async def test_unconflicted_is_accepted() -> None:
+    proposal = _proposal(_semantic("ok"))
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
 
 
 # `test_decide_does_not_mutate_its_inputs` moved to the shared `MemoryPolicyContract`
@@ -809,7 +801,7 @@ async def test_decision_carries_a_non_blank_reason() -> None:
 
 
 def _confirmed(
-    record: MemoryRecord,
+    record: Memory,
     *,
     retires: tuple[str, ...],
     frozen: tuple[str, ...] | None = None,
@@ -845,9 +837,9 @@ async def test_a_confirmed_proposal_supersedes_the_assertion_the_answer_named() 
     forever. It comes ahead of the conflict rules for exactly that reason, and step 1
     is what keeps that precedence from becoming a blanket override.
     """
-    prior = _semantic("prior", source=MemorySource.USER_ASSERTED, confidence=1.0)
+    prior = _semantic("prior", source=MemorySource.USER_ASSERTED)
     proposal = _confirmed(
-        _semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0),
+        _semantic("new", source=MemorySource.USER_ASSERTED),
         retires=("prior",),
     )
 
@@ -865,10 +857,10 @@ async def test_a_confirmed_proposal_re_defers_on_an_assertion_it_was_never_shown
     did not see would forge consent. So the answer becomes a **re-deferral**, and
     nothing is retired on the way out (ADR-0079 §2: only a ``SUPERSEDE`` retires).
     """
-    shown = _semantic("prior", source=MemorySource.USER_ASSERTED, confidence=1.0)
-    unshown = _semantic("surprise", source=MemorySource.USER_ASSERTED, confidence=1.0)
+    shown = _semantic("prior", source=MemorySource.USER_ASSERTED)
+    unshown = _semantic("surprise", source=MemorySource.USER_ASSERTED)
     proposal = _confirmed(
-        _semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0),
+        _semantic("new", source=MemorySource.USER_ASSERTED),
         retires=("prior",),
     )
 
@@ -895,9 +887,9 @@ async def test_a_confirmed_proposal_targets_the_assertion_and_not_an_external_re
     no longer needs to be, because the applier's widening now sweeps it anyway.
     """
     external = _semantic("ext", source=MemorySource.EXTERNAL)
-    prior = _semantic("prior", source=MemorySource.USER_ASSERTED, confidence=1.0)
+    prior = _semantic("prior", source=MemorySource.USER_ASSERTED)
     proposal = _confirmed(
-        _semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0),
+        _semantic("new", source=MemorySource.USER_ASSERTED),
         retires=("ext", "prior"),
     )
 
@@ -920,7 +912,7 @@ async def test_a_confirmed_proposal_falls_through_and_still_retires_a_stale_infe
     """
     inference = _semantic("stale", source=MemorySource.INFERRED)
     proposal = _confirmed(
-        _semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0),
+        _semantic("new", source=MemorySource.USER_ASSERTED),
         retires=("gone",),
     )
 
@@ -938,9 +930,7 @@ async def test_a_confirmed_proposal_with_nothing_live_to_retire_is_accepted() ->
     read as "no confirmation" under a truthiness check, which would re-defer an
     answered question forever.
     """
-    proposal = _confirmed(
-        _semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0), retires=()
-    )
+    proposal = _confirmed(_semantic("new", source=MemorySource.USER_ASSERTED), retires=())
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
 
@@ -959,10 +949,8 @@ async def test_the_secret_gate_still_precedes_the_confirmed_rule() -> None:
     it past the validator: a floor that holds only while a coincidence holds is not a
     floor, and ADR-0078 wants the ordering stated rather than left to that argument.
     """
-    prior = _semantic("prior", source=MemorySource.USER_ASSERTED, confidence=1.0)
-    honest = _confirmed(
-        _semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0), retires=("prior",)
-    )
+    prior = _semantic("prior", source=MemorySource.USER_ASSERTED)
+    honest = _confirmed(_semantic("new", source=MemorySource.USER_ASSERTED), retires=("prior",))
     bypassed = MemoryUpdateProposal.model_construct(
         proposed=honest.proposed,
         rationale=honest.rationale,
@@ -991,7 +979,7 @@ async def test_a_secret_tier_proposal_cannot_carry_a_confirmation_at_all() -> No
     # ADR-0078 §5b's check 0 exists at the writer boundary as well.
     with pytest.raises(ValidationError, match="cannot carry a confirmation"):
         MemoryUpdateProposal(
-            proposed=_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0),
+            proposed=_semantic("new", source=MemorySource.USER_ASSERTED),
             rationale="because",
             sensitivity=DataTier.SECRET,
             confirmation=UserConfirmation(
@@ -1050,12 +1038,8 @@ async def test_a_verbatim_self_restatement_reinforces_rather_than_asking() -> No
     about agreeing with themselves, three times out of three, which is exactly the
     interaction ADR-0038 §5 predicted when it rejected ``ASK_USER`` for this case.
     """
-    proposal = _proposal(
-        _semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0)
-    )
-    earlier = _semantic(
-        "said-before", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0
-    )
+    proposal = _proposal(_semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED))
+    earlier = _semantic("said-before", content=_SEAT, source=MemorySource.USER_ASSERTED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
 
@@ -1072,9 +1056,7 @@ async def test_a_restatement_agreeing_with_an_observed_belief_reinforces_it() ->
     correction rate is a measure-fidelity defect §5's own justification forbids:
     "One ruling kind means 'what was held is now wrong', and it is the one counted."
     """
-    proposal = _proposal(
-        _semantic("told-you", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0)
-    )
+    proposal = _proposal(_semantic("told-you", content=_SEAT, source=MemorySource.USER_ASSERTED))
     observed = _semantic("we-noticed", content=_SEAT, source=MemorySource.OBSERVED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[observed])
@@ -1092,12 +1074,8 @@ async def test_a_one_token_contradiction_still_defers_to_the_user() -> None:
     is one token apart and would score at the top of any threshold drawn high
     enough to call a restatement an agreement.
     """
-    proposal = _proposal(
-        _semantic("correction", content=_AISLE, source=MemorySource.USER_ASSERTED, confidence=1.0)
-    )
-    earlier = _semantic(
-        "said-before", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0
-    )
+    proposal = _proposal(_semantic("correction", content=_AISLE, source=MemorySource.USER_ASSERTED))
+    earlier = _semantic("said-before", content=_SEAT, source=MemorySource.USER_ASSERTED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
 
@@ -1114,12 +1092,10 @@ async def test_a_restatement_beside_a_disagreeing_assertion_still_defers() -> No
     defect ADR-0050 §2 exists to prevent, reached by a new path. So the ruling here
     is the deferral even though a perfectly good foldable agreeing member is present.
     """
-    proposal = _proposal(
-        _semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0)
-    )
+    proposal = _proposal(_semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED))
     conflicts = [
-        _semantic("agrees", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0),
-        _semantic("disagrees", content=_AISLE, source=MemorySource.USER_ASSERTED, confidence=1.0),
+        _semantic("agrees", content=_SEAT, source=MemorySource.USER_ASSERTED),
+        _semantic("disagrees", content=_AISLE, source=MemorySource.USER_ASSERTED),
     ]
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
@@ -1137,9 +1113,7 @@ async def test_a_disagreeing_derived_conflict_does_not_block_the_agreement() -> 
     alone, which ADR-0045 §5 refuses. It stays live, and the ruling names the
     agreeing member.
     """
-    proposal = _proposal(
-        _semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0)
-    )
+    proposal = _proposal(_semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED))
     conflicts = [
         _semantic("our-guess", content=_AISLE, source=MemorySource.INFERRED),
         _semantic("we-noticed", content=_SEAT, source=MemorySource.OBSERVED),
@@ -1166,10 +1140,8 @@ async def test_an_agreeing_external_record_is_never_named_by_the_arm() -> None:
     the store outcome is defensible: the user's own words land at a fresh id and the
     import is retired, which is what ADR-0092 §4 decided a user assertion does.
     """
-    proposal = _proposal(
-        _semantic("told-you", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0)
-    )
-    imported = _semantic("calendar", content=_SEAT, source=MemorySource.EXTERNAL, confidence=1.0)
+    proposal = _proposal(_semantic("told-you", content=_SEAT, source=MemorySource.USER_ASSERTED))
+    imported = _semantic("calendar", content=_SEAT, source=MemorySource.EXTERNAL)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[imported])
 
@@ -1186,11 +1158,9 @@ async def test_the_arm_names_the_best_ranked_foldable_agreeing_member() -> None:
     past a member it may not name. Taking ``conflicts[0]`` would name a record the
     writer refuses to fold onto, turning an agreement into a ``MemoryStoreError``.
     """
-    proposal = _proposal(
-        _semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0)
-    )
+    proposal = _proposal(_semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED))
     conflicts = [
-        _semantic("calendar", content=_SEAT, source=MemorySource.EXTERNAL, confidence=1.0),
+        _semantic("calendar", content=_SEAT, source=MemorySource.EXTERNAL),
         _semantic("we-noticed", content=_SEAT, source=MemorySource.OBSERVED),
     ]
 
@@ -1209,9 +1179,7 @@ async def test_records_of_different_kinds_never_agree() -> None:
     holds only while a coincidence holds is not a floor, and ADR-0121 §11 leaves
     #864's cross-kind reach explicitly undecided rather than foreclosed.
     """
-    proposal = _proposal(
-        _semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0)
-    )
+    proposal = _proposal(_semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED))
     other_kind = _episodic("that-time", content=_SEAT, source=MemorySource.USER_ASSERTED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[other_kind])
@@ -1249,9 +1217,7 @@ async def test_an_observation_agreeing_with_an_assertion_corroborates_it(
     stage that produces most of them today.
     """
     proposal = _proposal(_semantic("we-noticed", content=_ASSERTION, source=source))
-    theirs = _semantic(
-        "their-words", content=_ASSERTION, source=MemorySource.USER_ASSERTED, confidence=1.0
-    )
+    theirs = _semantic("their-words", content=_ASSERTION, source=MemorySource.USER_ASSERTED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[theirs])
 
@@ -1272,14 +1238,11 @@ async def test_a_second_disagreeing_assertion_still_defers() -> None:
     the agreeing set or the proposal falls through to the deferral unchanged.
     """
     proposal = _proposal(_semantic("we-noticed", content=_ASSERTION))
-    theirs = _semantic(
-        "their-words", content=_ASSERTION, source=MemorySource.USER_ASSERTED, confidence=1.0
-    )
+    theirs = _semantic("their-words", content=_ASSERTION, source=MemorySource.USER_ASSERTED)
     also_theirs = _semantic(
         "the-other-one",
         content=_OTHER_ASSERTION,
         source=MemorySource.USER_ASSERTED,
-        confidence=1.0,
     )
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[theirs, also_theirs])
@@ -1303,7 +1266,6 @@ async def test_an_agreeing_import_is_no_target_and_does_not_rescue_the_arm() -> 
         "their-words",
         content=_OTHER_ASSERTION,
         source=MemorySource.USER_ASSERTED,
-        confidence=1.0,
     )
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[imported, theirs])
@@ -1321,9 +1283,7 @@ async def test_the_arm_steps_over_a_better_ranked_agreeing_import() -> None:
     """
     proposal = _proposal(_semantic("we-noticed", content=_ASSERTION))
     imported = _semantic("from-the-calendar", content=_ASSERTION, source=MemorySource.EXTERNAL)
-    theirs = _semantic(
-        "their-words", content=_ASSERTION, source=MemorySource.USER_ASSERTED, confidence=1.0
-    )
+    theirs = _semantic("their-words", content=_ASSERTION, source=MemorySource.USER_ASSERTED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[imported, theirs])
 
@@ -1341,12 +1301,8 @@ async def test_an_external_proposal_agreeing_with_an_assertion_still_defers() ->
     a failure the writer-side conformance cases cannot catch, because the ruling
     never reaches them from a conforming policy.
     """
-    proposal = _proposal(
-        _semantic("sync", content=_ASSERTION, source=MemorySource.EXTERNAL, confidence=1.0)
-    )
-    theirs = _semantic(
-        "their-words", content=_ASSERTION, source=MemorySource.USER_ASSERTED, confidence=1.0
-    )
+    proposal = _proposal(_semantic("sync", content=_ASSERTION, source=MemorySource.EXTERNAL))
+    theirs = _semantic("their-words", content=_ASSERTION, source=MemorySource.USER_ASSERTED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[theirs])
 
@@ -1407,7 +1363,7 @@ async def test_the_arm_names_the_best_ranked_member_and_not_the_assertion_by_sou
     records = {
         "observation": _semantic("already-held", content=_ASSERTION),
         "assertion": _semantic(
-            "their-words", content=_ASSERTION, source=MemorySource.USER_ASSERTED, confidence=1.0
+            "their-words", content=_ASSERTION, source=MemorySource.USER_ASSERTED
         ),
     }
     proposal = _proposal(_semantic("we-noticed", content=_ASSERTION))
@@ -1461,12 +1417,8 @@ async def test_agreement_absorbs_exactly_the_four_transformations(
     Driven through ``decide`` rather than against the predicate directly, so what is
     pinned is the behaviour the ADR rules and not one implementation's helper.
     """
-    proposal = _proposal(
-        _semantic("again", content=restatement, source=MemorySource.USER_ASSERTED, confidence=1.0)
-    )
-    earlier = _semantic(
-        "said-before", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0
-    )
+    proposal = _proposal(_semantic("again", content=restatement, source=MemorySource.USER_ASSERTED))
+    earlier = _semantic("said-before", content=_SEAT, source=MemorySource.USER_ASSERTED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
 
@@ -1484,12 +1436,8 @@ async def test_agreement_normalises_composed_and_decomposed_forms_alike() -> Non
     """
     composed = "the user prefers a window seat in the caf\u00e9 car"
     decomposed = "the user prefers a window seat in the cafe\u0301 car"
-    proposal = _proposal(
-        _semantic("again", content=decomposed, source=MemorySource.USER_ASSERTED, confidence=1.0)
-    )
-    earlier = _semantic(
-        "said-before", content=composed, source=MemorySource.USER_ASSERTED, confidence=1.0
-    )
+    proposal = _proposal(_semantic("again", content=decomposed, source=MemorySource.USER_ASSERTED))
+    earlier = _semantic("said-before", content=composed, source=MemorySource.USER_ASSERTED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
 
@@ -1510,12 +1458,8 @@ async def test_agreement_folds_case_beyond_ascii_lowering() -> None:
     """
     sharp = "the user prefers window seats on the Stra\u00dfe"
     folded = "the user prefers window seats on the STRASSE"
-    proposal = _proposal(
-        _semantic("again", content=folded, source=MemorySource.USER_ASSERTED, confidence=1.0)
-    )
-    earlier = _semantic(
-        "said-before", content=sharp, source=MemorySource.USER_ASSERTED, confidence=1.0
-    )
+    proposal = _proposal(_semantic("again", content=folded, source=MemorySource.USER_ASSERTED))
+    earlier = _semantic("said-before", content=sharp, source=MemorySource.USER_ASSERTED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
 
@@ -1533,12 +1477,10 @@ async def test_the_agreement_arm_stays_behind_the_admissibility_floor() -> None:
     argument that puts the *confirmed* rule behind the floor (ADR-0078 §5a).
     """
     proposal = _proposal(
-        _semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0),
+        _semantic("again", content=_SEAT, source=MemorySource.USER_ASSERTED),
         sensitivity=DataTier.SECRET,
     )
-    earlier = _semantic(
-        "said-before", content=_SEAT, source=MemorySource.USER_ASSERTED, confidence=1.0
-    )
+    earlier = _semantic("said-before", content=_SEAT, source=MemorySource.USER_ASSERTED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
 
@@ -1576,24 +1518,14 @@ def _imported(
     *,
     content: str = _ENTRY,
     attestation: Attestation = _ATTESTED_BY,
-) -> MemoryRecord:
-    """An `EXTERNAL` belief in the shape a reader proposes and stores it.
+) -> Memory:
+    """A memory from a source, in the shape a reader's proposal is written (ADR-0328 §12).
 
-    `EXTERNAL` is in the `ATTESTED` band, which ADR-0092 §1 requires to carry an
-    attestation — so `reported_by` is always available where clause (ii) reaches,
-    and the comparison it makes is total.
+    It rests on one evidence item carrying ``attestation``, so its standing's source
+    details name ``reported_by`` wherever clause (ii) reaches, and the comparison it
+    makes is total.
     """
-    return SemanticMemory(
-        id=record_id,
-        content=content,
-        fact=content,
-        provenance=Provenance(
-            source=MemorySource.EXTERNAL,
-            confidence=1.0,
-            last_updated=_WHEN,
-            attestation=attestation,
-        ),
-    )
+    return memory(record_id, content, sourced_support(attestation))
 
 
 async def test_an_attested_re_read_folds_onto_the_record_it_already_reported() -> None:
@@ -1809,12 +1741,8 @@ async def test_the_degraded_path_refuses_a_derived_proposal_onto_an_import(
     exclusion holding exactly as ratified — what is new is that ADR-0161 §1 is the
     first place §6's target class is written down, so it is §1 an implementer now
     builds from.
-
-    Confidence is above `min_confidence`, so a fall to the confidence arm is an
-    `ACCEPT` and not a `STORE_TEMPORARY` — otherwise this case would be measuring
-    the wrong arm.
     """
-    proposal = _proposal(_semantic("derived", content=_ENTRY, source=source, confidence=0.9))
+    proposal = _proposal(_semantic("derived", content=_ENTRY, source=source))
 
     decision = await DefaultMemoryPolicy().decide(
         proposal, conflicts=[_imported("stored")], relations=relations

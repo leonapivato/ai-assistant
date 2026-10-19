@@ -48,14 +48,13 @@ from ai_assistant.core.types import (
     Attestation,
     BeliefBand,
     DataTier,
-    MemoryKind,
     MemorySource,
-    MemoryUpdateProposal,
     Provenance,
     ReadCoverage,
     ReadingFacet,
     ReportedExtent,
     SemanticMemory,
+    SourceProposal,
     SourceReading,
     band_of,
 )
@@ -157,7 +156,7 @@ def attested_proposal(  # noqa: PLR0913 — the belief, its reporter, its id and
     reported_at: datetime = _DEFAULT_REPORTED_AT,
     last_updated: datetime = _DEFAULT_READ_AT,
     extent: ReportedExtent | None = None,
-) -> MemoryUpdateProposal:
+) -> SourceProposal:
     """One well-formed proposal of the shape a ``Reader`` may emit.
 
     Exported rather than private, for :func:`~ai_assistant.testing.\
@@ -225,7 +224,7 @@ def attested_proposal(  # noqa: PLR0913 — the belief, its reporter, its id and
     The ``rationale`` and the ``sensitivity`` are set rather than parameterised,
     because ADR-0093 §4 obliges a reader to make both a choice: the rationale
     **names the source**, and the tier is stated explicitly —
-    ``MemoryUpdateProposal.sensitivity`` defaults to ``PERSONAL``, which is right
+    ``SourceProposal.sensitivity`` defaults to ``PERSONAL``, which is right
     for a calendar and must not be *assumed* right for the next source. A caller
     that needs different values for either builds the proposal itself; the point
     of this helper is the four decisions that must line up, not a knob for each
@@ -247,7 +246,7 @@ def attested_proposal(  # noqa: PLR0913 — the belief, its reporter, its id and
     if not reported_by.strip():
         msg = "reported_by must not be blank"
         raise ValueError(msg)
-    return MemoryUpdateProposal(
+    return SourceProposal(
         proposed=SemanticMemory(
             id=record_id if record_id is not None else _mint(),
             content=content,
@@ -296,7 +295,7 @@ class FakeReader:
 
     def __init__(  # noqa: PLR0913 — a script, an identity's two halves, two instants, a coverage, a facet, a failure and an id factory; each is one knob a consumer sets on its own
         self,
-        proposals: Sequence[MemoryUpdateProposal] | None = None,
+        proposals: Sequence[SourceProposal] | None = None,
         *,
         name: str = DEFAULT_READER_NAME,
         discriminator: str | None = None,
@@ -465,7 +464,7 @@ class FakeReader:
         """
         return self._resource.suspend_next()
 
-    def _build(self, proposals: tuple[MemoryUpdateProposal, ...]) -> SourceReading:
+    def _build(self, proposals: tuple[SourceProposal, ...]) -> SourceReading:
         """One validated reading over ``proposals``, with this reader's identity.
 
         Every reading goes through here — scripted at construction, synthesised per
@@ -530,7 +529,7 @@ class FakeReader:
 
 def _synthesise(
     name: str, read_at: datetime, id_factory: Callable[[], str] | None = None
-) -> tuple[MemoryUpdateProposal, ...]:
+) -> tuple[SourceProposal, ...]:
     """The default script: one attested belief, so no clause passes vacuously.
 
     A suite running this fake asserts over ``reading.proposals``, and every one of
@@ -665,7 +664,7 @@ def _refuse_malformed_discriminator(discriminator: str) -> None:
         raise ValueError(msg)
 
 
-def _refuse_unconformable(index: int, name: str, proposal: MemoryUpdateProposal) -> None:
+def _refuse_unconformable(index: int, name: str, proposal: SourceProposal) -> None:
     """Refuse a scripted proposal no conforming reader could have emitted.
 
     **What is checked, and the one half of ADR-0093 §4 that is not.** §4 obliges a
@@ -683,17 +682,12 @@ def _refuse_unconformable(index: int, name: str, proposal: MemoryUpdateProposal)
     property as held is worse than none, because it is believed.
 
     Raises:
-        ValueError: If the proposal is an ``EpisodicMemory`` (ADR-0093 §4), its
-            provenance is outside the ``ATTESTED`` band (ADR-0093 §4, ADR-0072 §2),
+        ValueError: If the proposal's provenance is outside the ``ATTESTED`` band
+            (a reader never proposes an episode, which the proposal's type makes
+            unconstructable) (ADR-0093 §4, ADR-0072 §2),
             its attestation names a source other than ``name`` (ADR-0093 §10), or
             it carries no rationale at all (ADR-0093 §4).
     """
-    if proposal.proposed.kind == MemoryKind.EPISODIC.value:
-        msg = (
-            f"proposals[{index}]: a reader never proposes an EpisodicMemory — it has "
-            f"neither a gate it can survive nor an exemption it can claim (ADR-0093 §4)"
-        )
-        raise ValueError(msg)
     band = band_of(proposal.proposed.provenance.source)
     if band is not BeliefBand.ATTESTED:
         msg = (

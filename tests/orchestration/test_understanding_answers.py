@@ -29,18 +29,16 @@ from ai_assistant.core.types import (
     ChannelContextItem,
     CostBasis,
     Idempotency,
+    Memory,
     MemoryKind,
-    MemorySource,
     MessageAuthor,
     PlanningRound,
-    Provenance,
     RecallCue,
     RecalledItem,
     RecallOutcome,
     RecallProvenance,
     Reversibility,
     RiskLevel,
-    SemanticMemory,
     ToolCost,
     ToolDefinition,
     TranscriptMessage,
@@ -57,6 +55,7 @@ from ai_assistant.orchestration.understanding import (
     _place_of,
 )
 from ai_assistant.testing import FakeModelProvider, with_phase_declaration
+from ai_assistant.testing.memories import memory, remembered_support
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import ActivationUnderstanding, EpisodicMemory
@@ -176,7 +175,7 @@ async def _understand(  # noqa: PLR0913 — one knob per section a case renders
     *,
     window: ChannelWindow = _NO_WINDOW,
     episodes: tuple[EpisodicMemory, ...] | None = (),
-    recalled: tuple[EpisodicMemory | SemanticMemory, ...] = (),
+    recalled: tuple[EpisodicMemory | Memory, ...] = (),
     stories: Candidates | None = None,
     channel: Any = CONVERSATION,
 ) -> ActivationUnderstanding:
@@ -936,12 +935,7 @@ async def test_a_bare_yes_with_nothing_to_connect_it_to_records_no_pointer() -> 
 
 
 async def test_a_recalled_fact_carries_no_question() -> None:
-    fact = SemanticMemory(
-        id="fact-1",
-        content="Dinner is at eight.",
-        fact="Dinner is at eight.",
-        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
-    )
+    fact = memory("fact-1", "Dinner is at eight.", remembered_support(when=AT, added_at=AT))
     model = FakeModelProvider(_proposal())
 
     await _understand(model, recalled=(fact,))

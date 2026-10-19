@@ -40,7 +40,7 @@ import enum
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
@@ -67,14 +67,19 @@ from ai_assistant.core.types import (
     GrantScope,
     Idempotency,
     InputOrigin,
+    InputPart,
+    Memory,
+    MemoryOperation,
+    MemoryOperationKind,
     MemorySource,
+    MemorySupport,
+    MemoryWriterName,
     MessageAuthor,
     NewMessage,
     NotificationCandidate,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
-    PreferenceMemory,
     ProcessingReason,
     ProcessingStatus,
     Provenance,
@@ -82,11 +87,11 @@ from ai_assistant.core.types import (
     ReadOutcome,
     RecordedChannelTrigger,
     RecordedTextInput,
+    RememberCallPart,
     Reversibility,
     RiskLevel,
     SecretName,
     SecretScope,
-    SemanticMemory,
     SourceGrant,
     SourceReadRecord,
     StoryActor,
@@ -95,6 +100,8 @@ from ai_assistant.core.types import (
     StoryNoteAuthor,
     StorySummaryDraft,
     StorySummaryLine,
+    SupportDirection,
+    SupportOrigin,
     TelegramOutcome,
     ToolCost,
     ToolDefinition,
@@ -112,6 +119,7 @@ from ai_assistant.memory import (
     SqliteStoryStore,
     SqliteTelegramIntakeRecord,
 )
+from ai_assistant.memory._legacy import LEGACY_KINDS, LEGACY_NOTE, legacy_wording
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.permissions import (
@@ -401,26 +409,66 @@ def _activation_episode(moment: Moment) -> EpisodicMemory:
     )
 
 
+def _support(
+    part: InputPart | RememberCallPart, origin: SupportOrigin, moment: Moment
+) -> MemorySupport:
+    """One support for a memory the check writes, added by ``remember`` (ADR-0328 §4)."""
+    return MemorySupport(
+        points_at=part,
+        origin=origin,
+        direction=SupportDirection.FOR,
+        backs_as_worded=True,
+        when=moment.ago(minutes=20),
+        added_at=moment.ago(minutes=19),
+        added_by=MemoryWriterName.REMEMBER,
+    )
+
+
+def _memory_record(
+    record_id: str, content: str, support: MemorySupport, **envelope: object
+) -> Memory:
+    """A memory resting on ``support``, created citing it (ADR-0328 §3, §5)."""
+    return Memory.model_validate(
+        {
+            **envelope,
+            "id": record_id,
+            "content": content,
+            "supports": (support,),
+            "operations": (
+                MemoryOperation(
+                    kind=MemoryOperationKind.CREATE,
+                    cites=support.points_at,
+                    at=support.added_at,
+                    by=support.added_by,
+                ),
+            ),
+        }
+    )
+
+
 async def _write_memory(directory: Path, moment: Moment) -> None:
     traces = _traces(directory)
     store = _memory(directory, traces)
+    episode = _activation_episode(moment)
     try:
         await store.add(
-            SemanticMemory(
-                id="mem-semantic",
-                content="The user's sister is called Ada.",
-                fact="The user's sister is called Ada.",
-                provenance=_provenance(moment, MemorySource.USER_ASSERTED),
+            _memory_record(
+                "mem-said",
+                "The user's sister is called Ada.",
+                _support(InputPart(episode=episode.id), SupportOrigin.USER_MESSAGE, moment),
                 topics=("family",),
                 about_person="Ada",
             )
         )
         await store.add(
-            PreferenceMemory(
-                id="mem-preference",
-                content="The user prefers mornings for appointments.",
-                preference="The user prefers mornings for appointments.",
-                provenance=_provenance(moment),
+            _memory_record(
+                "mem-remembered",
+                "The user prefers mornings for appointments.",
+                _support(
+                    RememberCallPart(episode=episode.id, effect="effect-upgrade"),
+                    SupportOrigin.REMEMBERED,
+                    moment,
+                ),
             )
         )
         await store.add(
@@ -431,13 +479,91 @@ async def _write_memory(directory: Path, moment: Moment) -> None:
                 occurred_at=moment.ago(days=2),
             )
         )
-        await store.add(_activation_episode(moment))
+        await store.add(episode)
         chunk = await store.walk_records(_WALK, limit=2)
         if chunk.position is not None:
             await store.advance_walk(_WALK, position=chunk.position)
     finally:
         store.close()
         traces.close()
+
+
+def _validity_end(record: Mapping[str, Json]) -> str | None:
+    """The validity end a record read back carries, as read, or ``None`` where it is open."""
+    validity = record.get("validity")
+    end = validity.get("valid_until") if isinstance(validity, dict) else None
+    return end if isinstance(end, str) else None
+
+
+def _memory_record_carry(records: Records) -> Records:
+    """What a memory store read back before ADR-0328 reads back after it (§16).
+
+    Each semantic, preference or procedural record becomes a memory at its id: its
+    wording by §16:3, its envelope fields unchanged (§16:2), one legacy support that
+    points at it and carries it whole (§16:4), and a create by ``migration`` at its
+    ``last_updated`` (§16:6), followed by an end at its validity end where that had
+    already passed, as the head's upgrade, run before this carry, also found. The
+    support's ``added_at`` and ``when`` are the upgrade's instant and the cited
+    episodes', which this carry leaves to the comparison, which lets the head read back
+    more than is said here. The support's ``carries`` is the
+    record as stored, which the read-back shows less of than the stored blob holds
+    (its ``revision`` is the row's), so the carry names the record's id, kind and
+    content in it. Every episode, the walk and the nearest hits are unchanged: a
+    record's vector embeds its ``content``, and the records this check writes are worded
+    as they were stored.
+    """
+    carried: Records = {}
+    for key, value in records.items():
+        if not key.startswith("record/") or not isinstance(value, dict):
+            carried[key] = value
+            continue
+        kind = value.get("kind")
+        if kind not in LEGACY_KINDS:
+            carried[key] = value
+            continue
+        provenance = value.get("provenance")
+        if not isinstance(provenance, dict):
+            carried[key] = value
+            continue
+        source = provenance.get("source")
+        outside = source == "external" or bool(provenance.get("derived_from_external"))
+        part: Json = {"part": "legacy", "record": value["id"]}
+        support: dict[str, Json] = {
+            "points_at": part,
+            "origin": "legacy_outside" if outside else "legacy",
+            "direction": "for",
+            "note": LEGACY_NOTE,
+            "backs_as_worded": True,
+            "source_details": provenance.get("attestation"),
+            "added_by": "migration",
+            "carries": {"id": value["id"], "kind": kind, "content": value["content"]},
+        }
+        memory: dict[str, Json] = {
+            name: value[name]
+            for name in ("id", "validity", "expires_at", "about_person", "topics", "placement")
+            if name in value
+        }
+        operations: list[Json] = [
+            {
+                "kind": "create",
+                "cites": part,
+                "note": LEGACY_NOTE,
+                "at": provenance.get("last_updated"),
+                "by": "migration",
+            }
+        ]
+        end = _validity_end(value)
+        if end is not None and datetime.fromisoformat(end) <= datetime.now(UTC):
+            operations.append({"kind": "end", "cites": part, "at": end})
+        memory |= {
+            "kind": "memory",
+            "content": legacy_wording(value),
+            "supports": [support],
+            "operations": operations,
+            "status": "current" if len(operations) == 1 else "ended",
+        }
+        carried[key] = memory
+    return carried
 
 
 async def _read_memory(directory: Path) -> Records:
@@ -1110,7 +1236,14 @@ async def _read_devices(directory: Path) -> Records:
 #: Every store a person's hub keeps, in the order the writer fills them.
 STORES: Final[tuple[Store, ...]] = (
     Store("traces", ("traces.db",), _write_traces, _read_traces),
-    Store("memory", ("memory.db",), _write_memory, _read_memory),
+    Store(
+        "memory",
+        ("memory.db",),
+        _write_memory,
+        _read_memory,
+        shape=2,
+        carries={1: _memory_record_carry},
+    ),
     Store("stories", ("stories.db",), _write_stories, _read_stories),
     Store("audit", ("audit.db",), _write_audit, _read_audit),
     Store("plans", ("plans.db",), _write_plans, _read_plans),

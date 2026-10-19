@@ -24,7 +24,6 @@ from ai_assistant.core.types import (
     EgressSpan,
     ForecastOutcome,
     ForecastRefusal,
-    MemoryRecord,
     MemorySource,
     Placement,
     Provenance,
@@ -48,7 +47,7 @@ _EXTENT: Final = ReportedExtent(
 _SOURCE: Final = "forecast"
 
 
-def _record(**overrides: Any) -> MemoryRecord:
+def _record(**overrides: Any) -> SemanticMemory:
     """One record ADR-0260 §5 would have minted, with ``overrides`` applied.
 
     Args:

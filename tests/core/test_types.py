@@ -9,11 +9,11 @@ import pytest
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
-    MAX_EVIDENCE_CITATIONS,
     Attestation,
     BeliefBand,
     DataTier,
     EpisodicMemory,
+    Memory,
     MemoryBase,
     MemoryDecision,
     MemoryDecisionKind,
@@ -27,8 +27,6 @@ from ai_assistant.core.types import (
     Placement,
     PlacementReach,
     PlacementSetter,
-    PreferenceMemory,
-    ProceduralMemory,
     Provenance,
     QuestionPart,
     Role,
@@ -38,6 +36,7 @@ from ai_assistant.core.types import (
     band_of,
     rests_on_recorded_external_content,
 )
+from ai_assistant.testing.memories import memory, said_support
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 _LATER = datetime(2026, 6, 1, tzinfo=UTC)
@@ -344,27 +343,18 @@ def test_an_attested_provenance_round_trips_through_json() -> None:
     assert restored.attestation == _ATTESTED_BY
 
 
-# --- the evidence bound is not on this type (ADR-0086 §1, §2) ----------------
+# --- no evidence bound is on this type (ADR-0086 §2) ---------------------------
 
 
-def test_provenance_admits_more_citations_than_the_bound() -> None:
-    """The bound is a ``MemoryWriter`` obligation, and this is the other half of it.
+def test_provenance_admits_any_number_of_citations() -> None:
+    """A stored record's citations are never refused on read.
 
-    A ``max_length=MAX_EVIDENCE_CITATIONS`` on ``evidence`` is the obvious
-    implementation and is the wrong one: a pydantic validator runs on
-    *deserialisation* as well as on construction, and ``SqliteMemoryStore``
-    reconstructs every record through the model on every read. A deployment
-    running since ADR-0077's observer shipped may already hold a belief above the
-    bound — four disjoint batches of 20 is 80 — and on the day such a validator
-    landed, ``get``, ``list_beliefs`` and ``export`` would all start failing on it.
-    "A belief that becomes unreadable through any implementation" is the sentence
-    ADR-0084 §4 asked ADR-0086 to make false.
-
-    So this case fails the moment anyone adds that ``max_length``, which no
-    assertion about a *writer's* output can do — a writer that truncates correctly
-    satisfies its whole suite whether or not the type also refuses.
+    The writer's citation bound retired with the evidence it bounded (ADR-0328
+    §10), but a ``Provenance`` an episode or a minted record already carries must
+    still decode whatever it holds: a ``max_length`` here would make a record
+    written before it unreadable through every implementation (ADR-0084 §4).
     """
-    over_bound = tuple(f"ev-{index:03d}" for index in range(MAX_EVIDENCE_CITATIONS + 16))
+    over_bound = tuple(f"ev-{index:03d}" for index in range(80))
 
     prov = Provenance(
         source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN, evidence=over_bound
@@ -691,33 +681,55 @@ def test_aware_expires_at_is_left_unchanged() -> None:
     ("payload", "expected"),
     [
         ({"kind": "episodic", "occurred_at": _WHEN}, EpisodicMemory),
-        ({"kind": "semantic", "fact": "f"}, SemanticMemory),
-        ({"kind": "preference", "preference": "concise"}, PreferenceMemory),
-        ({"kind": "procedural", "situation": "s"}, ProceduralMemory),
+        (
+            {
+                "kind": "memory",
+                "provenance": None,
+                "supports": [said_support().model_dump()],
+                "operations": [memory("1", "c").operations[0].model_dump()],
+            },
+            Memory,
+        ),
     ],
 )
 def test_discriminated_union_resolves_by_kind(
     payload: dict[str, object], expected: type[object]
 ) -> None:
+    """A stored record is an episode or a memory, by ``kind`` (ADR-0328 §2:1)."""
     adapter: TypeAdapter[MemoryRecord] = TypeAdapter(MemoryRecord)
-    record = adapter.validate_python(
-        {
-            "id": "1",
-            "content": "c",
-            "provenance": {"source": "inferred", "confidence": 0.4, "last_updated": _WHEN},
-            **payload,
-        }
-    )
+    fields: dict[str, object] = {
+        "id": "1",
+        "content": "c",
+        "provenance": {"source": "inferred", "confidence": 0.4, "last_updated": _WHEN},
+        **payload,
+    }
+    if fields["provenance"] is None:
+        del fields["provenance"]
+    record = adapter.validate_python(fields)
     assert isinstance(record, expected)
 
 
-def _semantic(record_id: str) -> SemanticMemory:
-    return SemanticMemory(
-        id=record_id,
-        content="c",
-        fact="f",
-        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.4, last_updated=_WHEN),
-    )
+@pytest.mark.parametrize("kind", ["semantic", "preference", "procedural"])
+def test_a_retired_kind_is_no_stored_record(kind: str) -> None:
+    """The semantic, preference and procedural kinds retire from the store (ADR-0328 §2:3).
+
+    A record of one reaches a store only through §16's upgrade, which carries it on a
+    legacy support; the union refuses it as a stored record.
+    """
+    adapter: TypeAdapter[MemoryRecord] = TypeAdapter(MemoryRecord)
+    with pytest.raises(ValidationError):
+        adapter.validate_python(
+            {
+                "kind": kind,
+                "id": "1",
+                "content": "c",
+                "provenance": {"source": "inferred", "confidence": 0.4, "last_updated": _WHEN},
+            }
+        )
+
+
+def _semantic(record_id: str) -> Memory:
+    return memory(record_id, "c")
 
 
 def test_memory_write_defaults_to_upsert() -> None:
@@ -826,30 +838,16 @@ def test_decision_rejects_fields_foreign_to_its_kind() -> None:
 
 
 def test_proposal_defaults_to_personal_sensitivity() -> None:
-    record = SemanticMemory(
-        id="1",
-        content="c",
-        fact="f",
-        provenance=Provenance(source=MemorySource.INFERRED, confidence=0.4, last_updated=_WHEN),
-    )
-    proposal = MemoryUpdateProposal(proposed=record, rationale="because")
+    proposal = MemoryUpdateProposal(proposed=_semantic("1"), rationale="because")
     assert proposal.sensitivity is DataTier.PERSONAL
 
 
 # --- the subject axis: whom a belief is about (ADR-0100) ---------------------
 
 
-def _believed(subject: str | None = None) -> SemanticMemory:
-    """One well-formed semantic record, varying only its stated subject."""
-    return SemanticMemory(
-        id="r1",
-        content="prefers a window seat",
-        fact="prefers a window seat",
-        about_person=subject,
-        provenance=Provenance(
-            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_WHEN
-        ),
-    )
+def _believed(subject: str | None = None) -> Memory:
+    """One well-formed memory, varying only its stated subject."""
+    return memory("r1", "prefers a window seat", about_person=subject)
 
 
 def test_a_record_states_no_subject_by_default() -> None:
@@ -910,44 +908,45 @@ def test_the_subject_enters_a_proposal_fingerprint() -> None:
     assert owners.proposal_fingerprint != martas.proposal_fingerprint
 
 
-def test_the_confirming_instant_enters_a_proposal_fingerprint() -> None:
-    """ADR-0078 §7's criterion applied, not amended (ADR-0109 §8).
+def test_a_supports_when_enters_a_proposal_fingerprint_and_its_added_at_does_not() -> None:
+    """ADR-0078 §7's criterion, applied to a support (ADR-0328 §11:11).
 
-    The projection is "the whole record minus the fields that are bookkeeping
-    about the record rather than the belief it states", and ``core/types.py``
-    records that the criterion "decides the next one rather than an inventory
-    having to be extended by whoever adds it". ``last_confirmed_at`` is a fact
-    about the belief — when the world last confirmed it — so it is *in*, and the
-    checkable form of that is two proposals differing only here.
-
-    Contrast ``provenance.last_updated``, which is excluded because two identical
-    observations a minute apart carry different stamps and the user would be
-    nagged by the mechanism whose job is to stop that. The nag is unreachable
-    through this field in any band: a ``DERIVED`` re-observation of the same
-    episodes yields the same maximum, an ``ATTESTED`` re-import carries the same
-    ``reported_at``, and two distinct utterances are a second confirming act
-    rather than a second look at one.
+    The projection is the whole memory minus what is bookkeeping about it. When the
+    part a support points at happened is a fact about the evidence, so it is *in*;
+    when the support was added is the writer's bookkeeping, so it is *out*, as an
+    operation's ``at`` is — two identical proposals a minute apart are one question.
     """
-    when = _WHEN
-    later = _LATER
 
-    def proposed(confirmed_at: datetime) -> MemoryUpdateProposal:
-        record = _believed().model_copy(
-            update={
-                "provenance": Provenance(
-                    source=MemorySource.USER_ASSERTED,
-                    confidence=1.0,
-                    last_updated=when,
-                    last_confirmed_at=confirmed_at,
-                )
-            }
-        )
+    def proposed(*, when: datetime, added_at: datetime) -> MemoryUpdateProposal:
+        record = memory("r1", "prefers a window seat", said_support(when=when, added_at=added_at))
         return MemoryUpdateProposal(proposed=record, rationale="because")
 
-    assert proposed(when).proposal_fingerprint != proposed(later).proposal_fingerprint
-    # ...and it is genuinely *this* field doing it: the same value twice agrees,
-    # so the inequality above is not two arbitrary digests over a jittering record.
-    assert proposed(later).proposal_fingerprint == proposed(later).proposal_fingerprint
+    assert (
+        proposed(when=_WHEN, added_at=_WHEN).proposal_fingerprint
+        != proposed(when=_LATER, added_at=_WHEN).proposal_fingerprint
+    )
+    assert (
+        proposed(when=_WHEN, added_at=_WHEN).proposal_fingerprint
+        == proposed(when=_WHEN, added_at=_LATER).proposal_fingerprint
+    )
+
+
+def test_a_proposals_supports_are_a_set_to_its_fingerprint() -> None:
+    """Two gatherings of one set of supports, in either order, are one question (§11:11)."""
+    first = said_support("activation:a")
+    second = said_support("activation:b")
+
+    one = MemoryUpdateProposal(proposed=memory("r1", "c", first, second), rationale="r")
+    other = MemoryUpdateProposal(proposed=memory("r1", "c", second, first), rationale="r")
+
+    assert (
+        one.proposal_fingerprint
+        != MemoryUpdateProposal(
+            proposed=memory("r1", "c", first), rationale="r"
+        ).proposal_fingerprint
+    )
+    # The create cites the first support, so the two logs differ: the log is its order.
+    assert one.proposed.operations != other.proposed.operations
 
 
 # --- ADR-0068: the memory record graph is frozen all the way down -------
@@ -965,7 +964,7 @@ def test_memory_record_is_frozen_including_its_nested_models() -> None:
     with pytest.raises(ValidationError):
         record.content = "rewritten"
     with pytest.raises(ValidationError):
-        record.provenance.confidence = 0.9  # the nested Provenance is frozen
+        record.supports[0].note = "rewritten"  # the nested support is frozen
     with pytest.raises(ValidationError):
         record.validity.valid_until = _LATER  # the nested Validity is frozen
 
@@ -1030,15 +1029,11 @@ def test_every_ex_list_field_is_an_immutable_tuple_that_round_trips() -> None:
     episodic = EpisodicMemory(
         id="1", content="c", provenance=prov, occurred_at=_WHEN, participants=("a", "b")
     )
-    procedural = ProceduralMemory(
-        id="2", content="c", provenance=prov, situation="s", steps=("one", "two")
-    )
     proposal = MemoryUpdateProposal(proposed=_semantic("3"), rationale="r", conflicts=("x", "y"))
 
     cases: list[tuple[BaseModel, str, tuple[str, ...]]] = [
         (prov, "evidence", ("e1", "e2")),
         (episodic, "participants", ("a", "b")),
-        (procedural, "steps", ("one", "two")),
         (proposal, "conflicts", ("x", "y")),
     ]
     for model, field, expected in cases:
@@ -1162,7 +1157,7 @@ def test_a_record_whose_model_dump_lies_is_fingerprinted_on_its_real_field_state
     answered, or to escape one they have not.
     """
     record = _semantic("1")
-    elsewhere = _semantic("1").model_copy(update={"fact": "something else entirely"})
+    elsewhere = _semantic("1").model_copy(update={"content": "something else entirely"})
     record.__dict__["model_dump"] = elsewhere.model_dump
     proposal = MemoryUpdateProposal(proposed=record, rationale="because")
 
@@ -1185,15 +1180,10 @@ def test_a_subclass_of_a_record_is_fingerprinted_under_the_declared_union() -> N
     type instead of through a field.
     """
 
-    class NotedSemanticMemory(SemanticMemory):
+    class NotedMemory(Memory):
         note_to_self: str = "not part of the belief"
 
-    subclassed = NotedSemanticMemory(
-        id="1",
-        content="c",
-        fact="f",
-        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.4, last_updated=_WHEN),
-    )
+    subclassed = NotedMemory.model_validate(_semantic("1").model_dump())
     proposal = MemoryUpdateProposal(proposed=subclassed, rationale="because")
     plain = MemoryUpdateProposal(proposed=_semantic("1"), rationale="because")
 

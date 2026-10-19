@@ -169,7 +169,7 @@ def assert_conforms(reading: SourceReading, name: str) -> None:
     if reading.coverage is not None:
         assert_bounded_by_instants(reading.coverage.covers_from, reading.coverage.covers_until)
     for proposal in reading.proposals:
-        assert proposal.proposed.kind != MemoryKind.EPISODIC.value
+        assert proposal.proposed.kind == MemoryKind.SEMANTIC.value
         assert band_of(proposal.proposed.provenance.source) is BeliefBand.ATTESTED
         assert proposal.rationale.strip()
         attestation = proposal.proposed.provenance.attestation
@@ -408,8 +408,11 @@ class ReaderContract:
         reading = await reader.read()
 
         assert reading.proposals, "the subject proposed nothing, so this clause is vacuous"
+        # Since ADR-0328 §2:4 a reader's proposal carries a minted ``SemanticMemory``
+        # (``SourceProposal``), so an episode is unconstructable here; the read-back
+        # still pins it.
         assert all(
-            proposal.proposed.kind != MemoryKind.EPISODIC.value for proposal in reading.proposals
+            proposal.proposed.kind == MemoryKind.SEMANTIC.value for proposal in reading.proposals
         )
 
     async def test_every_proposal_is_in_the_attested_band(self, reader: Reader) -> None:
@@ -474,7 +477,7 @@ class ReaderContract:
         the source, and a ``sensitivity`` chosen for what the source holds rather
         than defaulted". Only the **carrying** is assertable here, and it is
         asserted for the reason the since-retired ``FeedbackProcessorContract``
-        asserted it of the sibling producer: ``MemoryUpdateProposal.rationale`` is
+        asserted it of the sibling producer: ``SourceProposal.rationale`` is
         :data:`~ai_assistant.core.types.EncodableText`, which admits ``""``, so
         nothing downstream refuses a proposal that explains itself with nothing.
 

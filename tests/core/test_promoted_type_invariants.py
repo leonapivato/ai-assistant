@@ -22,63 +22,50 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.types import (
-    BeliefBand,
     BeliefSummary,
-    MemoryKind,
+    EvidenceSummary,
+    SupportDirection,
+    belief_summary,
 )
+from ai_assistant.testing.memories import memory, said_support
 
 AT = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
 
 
 class TestBeliefSummary:
-    """The price of counts-as-fields (§4a, §4b)."""
+    """The listing's shape (ADR-0085 §4a, ADR-0328 §15:1).
 
-    def test_more_citations_cannot_be_gone_than_were_made(self) -> None:
-        """On ``Belief`` the counts cannot disagree with the evidence; here they can.
+    ADR-0328 §15 retired the citation counts ADR-0085 §4b's invariant was over: the
+    listing now carries the evidence summary §7:2 computes, so the cross-field rule
+    between two stored counts has nothing left to bind (``lost_evidence`` and
+    ``unsupported`` are gone; a memory none of whose counted supports backs it is
+    ``unbacked``, computed in ``core``).
+    """
 
-        Moving them to fields is what buys the listing its shape — no field a
-        citation's content could occupy — at the cost of the one constraint the
-        model must now assert for itself.
-        """
-        with pytest.raises(ValidationError, match="lost_evidence"):
-            _summary(evidence_count=1, lost_evidence=2)
+    def test_an_evidence_count_is_never_negative(self) -> None:
+        """The counts are strict non-negative integers, so no projection ships ``-1``."""
+        with pytest.raises(ValidationError):
+            EvidenceSummary(supporting=-1, against=0, episodes=0)
 
-    @pytest.mark.parametrize(
-        ("cited", "lost", "unsupported"),
-        [(0, 0, False), (2, 0, False), (2, 1, False), (2, 2, True)],
-    )
-    def test_unsupported_is_derived_from_the_two_counts(
-        self, cited: int, lost: int, unsupported: bool
-    ) -> None:
-        """One definition everywhere, and a belief citing nothing is *not* unsupported.
+    def test_unbacked_is_computed_from_the_supports(self) -> None:
+        """One definition everywhere (ADR-0328 §7:10): no counted ``for`` support backs it."""
+        backed = memory("rec-1", "the office is in Boston")
+        against = memory(
+            "rec-2",
+            "the office is in Boston",
+            said_support(),
+            said_support("activation:other", direction=SupportDirection.AGAINST),
+        )
+        assert not belief_summary(backed, now=AT, supports_gone=False).unbacked
+        assert not belief_summary(against, now=AT, supports_gone=False).unbacked
+        assert belief_summary(against, now=AT, supports_gone=False).evidence.against == 1
 
-        An assertion is supported by the user's own word (ADR-0038 §1a). It stays a
-        property rather than a field because the counts already determine it: a
-        field would be a second source of truth for a value a client can compute
-        exactly, so one implementation could send it and another omit it, and the
-        same call would measure two different sizes against the contract limit.
-        """
-        assert _summary(evidence_count=cited, lost_evidence=lost).unsupported is unsupported
-
-    def test_it_has_no_evidence_field_at_all(self) -> None:
+    def test_it_has_no_supports_field_at_all(self) -> None:
         """§4a's structural guarantee: the wrong behaviour is unrepresentable.
 
-        Every alternative shape leaves a ``beliefs()`` implementation *able* to ship
-        citation contents, so the ratified split survives only as a clause a
-        conformance suite has to police.
+        Every alternative shape leaves a ``beliefs()`` implementation *able* to ship a
+        support's content, so the ratified split survives only as a clause a conformance
+        suite has to police.
         """
-        assert "evidence" not in BeliefSummary.model_fields
-
-
-def _summary(*, evidence_count: int = 0, lost_evidence: int = 0) -> BeliefSummary:
-    """One listing row with the given counts."""
-    return BeliefSummary(
-        id="rec-1",
-        band=BeliefBand.DERIVED,
-        kind=MemoryKind.SEMANTIC,
-        content="the office is in Boston",
-        confidence=0.5,
-        last_updated=AT,
-        evidence_count=evidence_count,
-        lost_evidence=lost_evidence,
-    )
+        assert "supports" not in BeliefSummary.model_fields
+        assert "evidence" in BeliefSummary.model_fields

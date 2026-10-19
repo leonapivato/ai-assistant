@@ -1,22 +1,23 @@
-"""ADR-0109 §5 and §6: the fold selects the confirming instant, in both writers.
+"""ADR-0109 §5 and §6 under ADR-0328 §7:3: a fold keeps every confirming instant, in both writers.
 
 Every case here runs against **both** ``MemoryIngestor`` and the canonical
 ``FakeMemoryWriter``, over the same store and the same policy, so the only thing
 that varies is the fold. ADR-0109 §9 declines to promote its §5 and §6 to the
-``MemoryWriter`` conformance suite — ADR-0040 §5a's "a writer that combines
-confidence differently conforms, and must" would become false, and ADR-0028 §8's
-exclusion would be void — while requiring *this* fake to implement them
-identically to the ingestor. Parameterising one table over the two is how that
-obligation is discharged without asserting it of every implementation: a third
-writer is free to compose currency differently and is not run here.
+``MemoryWriter`` conformance suite while requiring *this* fake to implement them
+identically to the ingestor; parameterising one table over the two is how that
+obligation is discharged without asserting it of every implementation.
+
+Since ADR-0328 a memory stores no confirming instant: its *as of* is computed on
+read, the latest usable confirming instant among its counted ``for`` supports
+(§7:3), and a reinforcement only adds the proposal's supports to the target
+(§11:6). So ADR-0109 §5's selection is no longer made at the fold but by every
+reader, against the reader's own clock — and what this file guards is that neither
+writer drops or re-dates a side's support on the way, which is how a fold would
+still make a survivor's currency older or invent one.
 
 **Every instant below is distinct, and that is load-bearing** (ADR-0109 §10). A
-case whose expected value coincided with the injected clock's reading, with the
-other record's value, or with either ``last_updated`` would pass against a fold
-that read the wrong one. :data:`_REPORTED_AT` is distinct for the same reason on
-the corroboration arm: the target's attestation is an instant the fold could have
-reached for instead of ``last_confirmed_at``, and a fixture that made the two
-equal would not notice.
+case whose expected value coincided with the writer's clock or with either side's
+``added_at`` would pass against a writer that stamped the wrong one.
 """
 
 from __future__ import annotations
@@ -28,26 +29,25 @@ from typing import TYPE_CHECKING, Final
 import pytest
 
 from ai_assistant.core.types import (
-    MAX_EVIDENCE_CITATIONS,
-    Attestation,
+    BeliefBand,
     EpisodicMemory,
+    Memory,
     MemoryDecisionKind,
     MemorySource,
     MemoryUpdateProposal,
-    PreferenceMemory,
     Provenance,
 )
 from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryWriter, FakeTraceSink
+from ai_assistant.testing.memories import memory, message_support, remembered_support, said_support
 
 if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, MemoryWriter
-    from ai_assistant.core.types import MemoryRecord
+    from ai_assistant.core.types import MemorySupport
 
 #: The writers' injected clock. Every fold below is decided against *this*, never
-#: against a wall clock — which is what makes the future-dated cases deterministic
-#: instead of a date the suite outlives (ADR-0109 §5's last clause).
+#: against a wall clock.
 _CLOCK: Final = datetime(2026, 6, 1, tzinfo=UTC)
 
 #: The two ordinary confirming instants, both in the clock's past and distinct
@@ -59,55 +59,27 @@ _MARCH: Final = datetime(2026, 3, 20, tzinfo=UTC)
 #: ADR-0092 §3 stores unchanged and ADR-0109 §5 refuses to *select*.
 _FUTURE: Final = datetime(2027, 2, 11, tzinfo=UTC)
 
-#: Transaction time on each side (ADR-0045 §3), distinct from every confirming
-#: instant and from the clock: ADR-0109 §10's third clause wants at least one fold
-#: case where a survivor taking `last_updated` for its currency would be visible.
-_TARGET_UPDATED: Final = datetime(2026, 2, 2, tzinfo=UTC)
-_INCOMING_UPDATED: Final = datetime(2026, 4, 4, tzinfo=UTC)
+#: When each side's support was added, distinct from every confirming instant and
+#: from the clock: ADR-0109 §10's third clause wants a case where a survivor taking
+#: transaction time for its currency would be visible.
+_TARGET_ADDED: Final = datetime(2026, 2, 2, tzinfo=UTC)
+_INCOMING_ADDED: Final = datetime(2026, 4, 4, tzinfo=UTC)
 
-#: The attested target's ``Attestation.reported_at``. Deliberately *not* its
-#: ``last_confirmed_at``: a corroborated survivor keeps the target's attestation
-#: while its instant may be the incoming derived record's (ADR-0103 §6), so the
-#: two fields legitimately disagree and the fold must read the right one
-#: (ADR-0109 §8, §11).
-_REPORTED_AT: Final = datetime(2025, 11, 9, tzinfo=UTC)
-
-#: The content both records carry, so retrieval detects the conflict.
+#: The content both memories carry, so retrieval detects the conflict and the fold
+#: onto an asserted target is the agreeing one clause 1 admits (ADR-0121 §5).
 _CONTENT: Final = "prefers concise emails"
 
-#: The episode a well-formed `DERIVED` proposal must cite, and which the store
-#: must be holding for the ingestor to accept it (ADR-0077 §5).
+#: The episode every support points into, which the store must hold (ADR-0328 §4:7).
 _EPISODE: Final = "episode-1"
 
-#: Builds a writer over a store, a policy and a clock. The clock is a parameter
-#: rather than a constant because ADR-0109 §5's usability test *is* a clock read:
-#: the case that moves it is what proves the earlier cases turned on it.
-#: The three arms :func:`_merge` selects between, named by the **target** each fold
-#: puts under it. ``_ORDINARY`` is the arm where the survivor is the incoming record
-#: wearing the target's id. The other two are corroboration arms, where the survivor
-#: is the *target* wearing a new provenance: ADR-0103 §6's ``ATTESTED`` pairing, and
-#: ADR-0214 §4's, which is keyed on the target's ``USER_ASSERTED`` source and is
-#: **total** over the incoming record's.
-#:
-#: **The asserted arm is reached through clause 1's agreeing-fold exception**
-#: (ADR-0121 §5 as widened by ADR-0214 §3), which is why every case below folds
-#: content the target already carries: an ``OBSERVED`` proposal that did not agree
-#: would be refused at the writer rather than folded, and the case would measure the
-#: refusal instead of the fold.
-_ORDINARY: Final = "ordinary"
-_ATTESTED: Final = "attested"
-_ASSERTED: Final = "asserted"
-
-#: The source each arm's target carries — and, since every proposal below is
-#: ``OBSERVED``, the survivor's source under a conforming fold. That makes it the
-#: discriminator: on the ordinary arm the survivor takes the incoming record's
-#: source, so an ``_ASSERTED`` case that silently ran the ordinary arm would show
-#: ``OBSERVED`` here, which is the demotion ADR-0038 §2a names.
-_ARM_TARGET: Final = {
-    _ORDINARY: MemorySource.OBSERVED,
-    _ATTESTED: MemorySource.EXTERNAL,
-    _ASSERTED: MemorySource.USER_ASSERTED,
-}
+#: The band each arm's target stands in. Since ADR-0328 there is one fold, so the
+#: arms are kept for ADR-0109 §6's reading of ADR-0103 §9's fourth clause: currency
+#: is refreshed "whatever band that record came from".
+_ARMS: Final = pytest.mark.parametrize(
+    "band",
+    [BeliefBand.DERIVED, BeliefBand.ATTESTED, BeliefBand.ASSERTED],
+    ids=["derived-target", "attested-target", "asserted-target"],
+)
 
 WriterFactory = Callable[["MemoryStore", "MemoryPolicy", "Clock"], "MemoryWriter"]
 
@@ -131,118 +103,56 @@ def make_writer(request: pytest.FixtureRequest) -> WriterFactory:
     return factory
 
 
-async def _plant_episodes(store: MemoryStore, *episodes: EpisodicMemory) -> None:
-    for record in episodes:
-        await store.add(record)
-
-
-def _episode(episode_id: str, occurred_at: datetime) -> EpisodicMemory:
-    return EpisodicMemory(
-        id=episode_id,
-        content=f"the exchange {episode_id} records",
-        occurred_at=occurred_at,
-        provenance=Provenance(
-            source=MemorySource.OBSERVED, confidence=0.6, last_updated=_TARGET_UPDATED
-        ),
-    )
-
-
-def _target(
-    *,
-    last_confirmed_at: datetime | None,
-    arm: str,
-    record_id: str = "target",
-) -> MemoryRecord:
-    """The stored record the ruling folds into, on whichever arm the case wants.
-
-    ``arm`` selects which arm of ``_merge`` the fold takes (:data:`_ARM_TARGET`):
-    ``_ATTESTED`` is ADR-0103 §6's pairing and ``_ASSERTED`` is ADR-0214 §4's, and on
-    both the survivor is the *target* wearing a new provenance. ``_ORDINARY`` is the
-    arm where the survivor is the incoming record wearing the target's id. ADR-0109
-    §6 rules the instant identically on all three, which is what running every case
-    over them checks.
-    """
-    source = _ARM_TARGET[arm]
-    return PreferenceMemory(
-        id=record_id,
-        content=_CONTENT,
-        preference=_CONTENT,
-        provenance=Provenance(
-            source=source,
-            confidence=1.0 if arm == _ASSERTED else 0.6,
-            last_updated=_TARGET_UPDATED,
-            attestation=(
-                Attestation(reported_by="calendar:work", reported_at=_REPORTED_AT)
-                if arm == _ATTESTED
-                else None
+async def _seeded(*memories: Memory, now: Clock = _fixed_now) -> InMemoryMemoryStore:
+    """A store holding the episode every support points into, and ``memories``."""
+    store = InMemoryMemoryStore(now=now)
+    await store.add(
+        EpisodicMemory(
+            id=_EPISODE,
+            content="the exchange the memories rest on",
+            occurred_at=_JANUARY,
+            provenance=Provenance(
+                source=MemorySource.OBSERVED, confidence=0.6, last_updated=_TARGET_ADDED
             ),
-            last_confirmed_at=last_confirmed_at,
+        )
+    )
+    for one in memories:
+        await store.add(one)
+    return store
+
+
+def _target(*, confirmed: datetime | None, band: BeliefBand) -> Memory:
+    """The stored memory the ruling folds into, its one support confirmed at ``confirmed``.
+
+    Each support takes its confirming instant from its ``when`` (§7:3): a said one,
+    a round's message (``ATTESTED``, carrying no source details), or a remember call.
+    """
+    support: MemorySupport
+    match band:
+        case BeliefBand.ASSERTED:
+            support = said_support(_EPISODE, when=confirmed, added_at=_TARGET_ADDED)
+        case BeliefBand.ATTESTED:
+            support = message_support(_EPISODE, when=confirmed, added_at=_TARGET_ADDED)
+        case BeliefBand.DERIVED:
+            support = remembered_support(
+                _EPISODE, effect="effect-target", when=confirmed, added_at=_TARGET_ADDED
+            )
+    return memory("target", _CONTENT, support)
+
+
+def _incoming(*, confirmed: datetime | None, record_id: str = "incoming") -> Memory:
+    """The proposed memory: always ``DERIVED``, on its own remember call."""
+    return memory(
+        record_id,
+        _CONTENT,
+        remembered_support(
+            _EPISODE, effect=f"effect-{record_id}", when=confirmed, added_at=_INCOMING_ADDED
         ),
     )
 
 
-def _incoming(
-    *,
-    last_confirmed_at: datetime | None,
-    evidence: tuple[str, ...] = (_EPISODE,),
-    record_id: str = "incoming",
-) -> MemoryRecord:
-    """The proposed record. Always ``DERIVED``, so either arm is reachable."""
-    return PreferenceMemory(
-        id=record_id,
-        content=_CONTENT,
-        preference=_CONTENT,
-        provenance=Provenance(
-            source=MemorySource.OBSERVED,
-            confidence=0.6,
-            evidence=evidence,
-            last_updated=_INCOMING_UPDATED,
-            last_confirmed_at=last_confirmed_at,
-        ),
-    )
-
-
-def _believed(
-    record_id: str,
-    content: str,
-    *,
-    source: MemorySource,
-    confidence: float,
-    last_confirmed_at: datetime | None,
-) -> MemoryRecord:
-    """A preference at arbitrary content, for the cases that are not folds."""
-    return PreferenceMemory(
-        id=record_id,
-        content=content,
-        preference=content,
-        provenance=Provenance(
-            source=source,
-            confidence=confidence,
-            last_updated=_INCOMING_UPDATED,
-            last_confirmed_at=last_confirmed_at,
-        ),
-    )
-
-
-def _proposal(record: MemoryRecord) -> MemoryUpdateProposal:
+def _proposal(record: Memory) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(proposed=record, rationale="because")
-
-
-#: The policy the fold cases below drive their ``REINFORCE`` from.
-#:
-#: **Injected rather than provoked out of ``DefaultMemoryPolicy``, since ADR-0159.**
-#: These cases are about the *applier's* fold semantics, and they used to reach the
-#: arm through the default policy's rule 5, which folded whenever the conflict set
-#: was non-empty. ADR-0159 §4 replaced that rule with one resting on a *relation*,
-#: and §12 records the consequence for exactly this shape: "§4 excludes ``EXTERNAL``
-#: from both target classes, so ``DefaultMemoryPolicy`` no longer reaches the
-#: ``DERIVED``→``ATTESTED`` fold at all on the observed path. The contradiction is
-#: between two ADRs about how such a fold folds and **survives untouched for any
-#: policy that does reach it**." Both writers take rulings from any injected
-#: ``MemoryPolicy`` (ADR-0040 §3), so this is the seam and not a workaround — and it
-#: makes what these cases always meant explicit: the fold, not the ruling.
-def _folding_policy() -> FakeMemoryPolicy:
-    return FakeMemoryPolicy(MemoryDecisionKind.REINFORCE)
 
 
 async def _fold(
@@ -250,40 +160,24 @@ async def _fold(
     *,
     target_at: datetime | None,
     incoming_at: datetime | None,
-    arm: str,
-) -> MemoryRecord:
+    band: BeliefBand,
+    now: Clock = _fixed_now,
+) -> Memory:
     """Drive one ``REINFORCE`` end to end and return the survivor.
 
-    End to end rather than through ``_merge``: the rule ADR-0109 §5 states is
-    about what is *stored*, and both writers reach their fold through a policy
-    ruling and an install. A unit call on either private function would also have
-    to be written twice, which is the drift this file exists to catch.
+    The ruling is injected (ADR-0040 §3): these cases are about the applier's fold,
+    not about which ruling ``DefaultMemoryPolicy`` would reach (ADR-0159 §12).
     """
-    store = InMemoryMemoryStore(now=_fixed_now)
-    await _plant_episodes(store, _episode(_EPISODE, _JANUARY))
-    await store.add(_target(last_confirmed_at=target_at, arm=arm))
+    store = await _seeded(_target(confirmed=target_at, band=band), now=now)
+    writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE), now)
 
-    writer = make_writer(store, _folding_policy(), _fixed_now)
-    result = await writer.ingest(_proposal(_incoming(last_confirmed_at=incoming_at)))
+    result = await writer.ingest(_proposal(_incoming(confirmed=incoming_at)))
 
     assert result.decision.kind is MemoryDecisionKind.REINFORCE
     survivor = await store.get("target")
-    assert survivor is not None
-    # The arm actually taken, asserted rather than assumed: every arm leaves a
-    # record at the target's id, so a corroboration case that silently ran the
-    # ordinary one would pass every currency assertion below while checking half of
-    # what ADR-0109 §6 rules. `source` is the discriminator, because a corroboration
-    # arm keeps the target's and the ordinary arm takes the incoming record's
-    # (ADR-0103 §6, ADR-0214 §4).
-    assert survivor.provenance.source is _ARM_TARGET[arm]
+    assert isinstance(survivor, Memory)
+    assert survivor.band is band
     return survivor
-
-
-_ARMS: Final = pytest.mark.parametrize(
-    "arm",
-    [_ORDINARY, _ATTESTED, _ASSERTED],
-    ids=["ordinary-arm", "attested-corroboration-arm", "asserted-corroboration-arm"],
-)
 
 
 @_ARMS
@@ -306,57 +200,31 @@ _ARMS: Final = pytest.mark.parametrize(
         "future-incoming-is-not-usable",
     ],
 )
-async def test_the_fold_takes_the_later_usable_confirming_instant(
+async def test_the_survivor_is_as_of_the_later_usable_confirming_instant(
     make_writer: WriterFactory,
     *,
-    arm: str,
+    band: BeliefBand,
     target_at: datetime | None,
     incoming_at: datetime | None,
     expected: datetime,
 ) -> None:
-    """ADR-0103 §6's composition, over the stored field (ADR-0109 §5).
+    """ADR-0103 §6's composition, read off the survivor's supports (ADR-0328 §7:3).
 
-    The later of the two records' **usable** instants, and the usable one where
-    only one is usable. Four of the six cases would pass under a fold that simply
-    took the incoming record's value; ``later-target-wins`` is the one that would
-    not, and it is the backwards-move guard ADR-0109 §5 names — a proposal citing a
-    December episode reinforcing a belief confirmed in January must not make the
-    survivor's currency *older*. "A confirmation we do hold is not unmade" is
-    ADR-0103 §6's own sentence, and it reads identically about the merely-older
-    case as about the unknown one.
+    ``later-target-wins`` is the backwards-move guard ADR-0109 §5 names: a proposal
+    citing a December episode reinforcing a belief confirmed in January must not make
+    the survivor's currency *older*. A writer that replaced the target's supports
+    with the incoming one's would fail exactly there.
 
-    The two future-dated cases are #741's example with teeth. A future instant is
-    stored unchanged by its producer (ADR-0092 §3) and is not *usable*, so the
-    January confirmation on the other side wins. A fold selecting "the later
-    present value" takes the future one and makes the survivor unknown with a
-    perfectly good confirmation in hand — the manufactured staleness ADR-0103 §6
-    and ADR-0103 §9 both refuse, which is the whole reason this fold takes a clock.
-
-    Run on every arm because ADR-0109 §6 reads ADR-0103 §9's fourth clause
-    generally: "whatever band that record came from" is vacuous under ADR-0103 §6's
-    pairing alone, and a same-band rule that withheld currency would age a belief
-    re-observed every week exactly as fast as one nobody has seen since. Since
-    ADR-0214 §4 the asserted arm is where that matters most: watching the user live
-    out what they told us is now the second thing that can refresh an assertion's
-    currency, and before it the only one was their saying it again.
+    The two future-dated cases are #741's example: a future instant is stored
+    unchanged (ADR-0092 §3) and is not *usable*, so the January confirmation on the
+    other side wins rather than the survivor reading as unknown.
     """
-    survivor = await _fold(
-        make_writer,
-        target_at=target_at,
-        incoming_at=incoming_at,
-        arm=arm,
-    )
+    survivor = await _fold(make_writer, target_at=target_at, incoming_at=incoming_at, band=band)
 
-    assert survivor.provenance.last_confirmed_at == expected
-    # Not the clock, and not either side's transaction time. ADR-0109 §5's second
-    # clause forbids writing the moment of the fold, and ADR-0103 §9 forbids
-    # reading currency off transaction time at all; both are reachable mistakes
-    # that every case above would otherwise pass through.
-    assert survivor.provenance.last_confirmed_at not in {
-        _CLOCK,
-        _TARGET_UPDATED,
-        _INCOMING_UPDATED,
-    }
+    assert survivor.as_of(_CLOCK) == expected
+    # Not the clock, and not either side's transaction time: a writer stamping the
+    # moment of the fold onto the added support's `when` is a reachable mistake.
+    assert survivor.as_of(_CLOCK) not in {_CLOCK, _TARGET_ADDED, _INCOMING_ADDED}
 
 
 @_ARMS
@@ -365,148 +233,56 @@ async def test_the_fold_takes_the_later_usable_confirming_instant(
     [(None, None), (_FUTURE, None), (None, _FUTURE), (_FUTURE, _FUTURE)],
     ids=["neither-known", "future-target-only", "future-incoming-only", "both-future"],
 )
-async def test_the_fold_yields_unknown_where_neither_instant_is_usable(
+async def test_the_survivor_is_as_of_unknown_where_neither_instant_is_usable(
     make_writer: WriterFactory,
     *,
-    arm: str,
+    band: BeliefBand,
     target_at: datetime | None,
     incoming_at: datetime | None,
 ) -> None:
-    """ADR-0103 §6's "unknown only where neither is usable" (ADR-0109 §5).
+    """ADR-0103 §6's "unknown only where neither is usable".
 
-    ``is None`` exactly, never merely falsy: ``None`` is ADR-0103 §9's *unknown*,
-    which is a distinct state rather than a small number, and a surface that read
-    it as either fresh or stale would be making a claim nobody measured.
-
-    The sibling the test above provides is what keeps this from being vacuous
-    (ADR-0109 §10): ``is None`` alone passes against a fold that never writes the
-    field at all, and the concrete cases run the same path and would fail there.
-
-    A *future* instant reaching unknown is the deliberate half. The value is not
-    rewritten and not refused — the producer stored what the source said
-    (ADR-0092 §3) — it is simply not selectable, so with nothing usable opposite it
-    the survivor honestly says the store does not know.
+    ``is None`` exactly: ``None`` is ADR-0103 §9's *unknown*, a distinct state rather
+    than a small number. The sibling above is what keeps this from being vacuous.
     """
-    survivor = await _fold(
-        make_writer,
-        target_at=target_at,
-        incoming_at=incoming_at,
-        arm=arm,
-    )
+    survivor = await _fold(make_writer, target_at=target_at, incoming_at=incoming_at, band=band)
 
-    assert survivor.provenance.last_confirmed_at is None
+    assert survivor.as_of(_CLOCK) is None
 
 
 @_ARMS
-async def test_a_future_instant_is_not_promoted_when_the_clock_passes_it(
-    make_writer: WriterFactory, *, arm: str
+async def test_a_future_instant_is_selected_once_the_readers_clock_passes_it(
+    make_writer: WriterFactory, *, band: BeliefBand
 ) -> None:
-    """The selection is made once, at the fold (ADR-0109 §5).
+    """The selection is the reader's, against the reader's clock (ADR-0328 §7:3).
 
-    The same pair of records, folded by a writer whose clock is *past* the
-    "future" instant, selects it — which is what proves the previous cases turned
-    on the injected clock rather than on the value being unusual. Nothing else in
-    the fixture moved, so a fold reading a module-level wall clock, or no clock at
-    all, cannot produce both outcomes.
+    Before ADR-0328 the fold selected once and stored the result; now nothing is
+    stored, so the same survivor reads as of January today and as of the "future"
+    instant once a reader's clock is past it. Both readings, off one stored record,
+    prove the fold kept the future-dated support rather than dropping it.
     """
+    survivor = await _fold(make_writer, target_at=_FUTURE, incoming_at=_JANUARY, band=band)
     later = _FUTURE.replace(year=_FUTURE.year + 1)
-    store = InMemoryMemoryStore(now=lambda: later)
-    await _plant_episodes(store, _episode(_EPISODE, _JANUARY))
-    await store.add(_target(last_confirmed_at=_FUTURE, arm=arm))
 
-    writer = make_writer(store, _folding_policy(), lambda: later)
-    result = await writer.ingest(_proposal(_incoming(last_confirmed_at=_JANUARY)))
-
-    assert result.decision.kind is MemoryDecisionKind.REINFORCE
-    survivor = await store.get("target")
-    assert survivor is not None
-    assert survivor.provenance.last_confirmed_at == _FUTURE
+    assert survivor.as_of(_CLOCK) == _JANUARY
+    assert survivor.as_of(later) == _FUTURE
 
 
-async def test_the_citation_bound_displaces_citations_and_not_the_instant(
-    make_writer: WriterFactory,
-) -> None:
-    """The case ADR-0109 exists to decide (#744, PR #742's finding 2).
+async def test_an_accept_installs_the_proposals_own_instant(make_writer: WriterFactory) -> None:
+    """Only a ``REINFORCE`` combines supports; an ``ACCEPT`` installs what was proposed.
 
-    The incoming record carries one citation more than
-    :data:`MAX_EVIDENCE_CITATIONS`, in an accumulation order that is **not**
-    ``occurred_at`` order: its oldest-accumulated citation is the episode holding
-    the *latest* instant, so ADR-0086 §3's bound displaces exactly that one. A
-    resolver — "the latest ``occurred_at`` among the citations the record still
-    carries" — would answer with a strictly earlier instant, and could never
-    recover the displaced one, because ``evidence_elided`` retains a count and
-    never an id (ADR-0086 §4).
-
-    The stored field answers ``_MARCH``, because it was computed by the producer
-    while the confirming event was in hand — *before* the bound could apply. The
-    two assertions together are what make the point: the instant survived **and**
-    the displacement really happened. Either alone is satisfiable by a fixture
-    where the bound never bit.
-
-    ADR-0086 §3 is untouched by this: the bound displaces exactly what it always
-    displaced, and ADR-0103 §1's promise not to disturb it holds. What changed is
-    what *depends* on the retained tuple, which is now nothing.
+    ``STORE_TEMPORARY``, the other non-folding install this case once ran, is
+    refused since ADR-0328 (§11:7), so the write path has one such install left.
     """
-    overflow = MAX_EVIDENCE_CITATIONS + 1
-    # `ep-00` is accumulated first and so is displaced first, and it is the one
-    # carrying `_MARCH`. Every other episode is older, so the retained tuple's
-    # latest instant is strictly earlier than the answer.
-    episodes = [
-        _episode(f"ep-{index:02d}", _MARCH if index == 0 else _JANUARY) for index in range(overflow)
-    ]
-    store = InMemoryMemoryStore(now=_fixed_now)
-    await _plant_episodes(store, *episodes)
-    await store.add(_target(last_confirmed_at=None, arm=_ORDINARY))
+    store = await _seeded()
+    writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.ACCEPT), _fixed_now)
 
-    writer = make_writer(store, _folding_policy(), _fixed_now)
-    result = await writer.ingest(
-        _proposal(
-            _incoming(
-                last_confirmed_at=_MARCH,
-                evidence=tuple(record.id for record in episodes),
-            )
-        )
-    )
+    result = await writer.ingest(_proposal(_incoming(confirmed=_MARCH)))
 
-    assert result.decision.kind is MemoryDecisionKind.REINFORCE
-    survivor = await store.get("target")
-    assert survivor is not None
-    # The instant the producer measured, intact.
-    assert survivor.provenance.last_confirmed_at == _MARCH
-    # ...and the displacement that would have destroyed it under a resolver.
-    assert len(survivor.provenance.evidence) == MAX_EVIDENCE_CITATIONS
-    assert "ep-00" not in survivor.provenance.evidence
-    assert survivor.provenance.evidence_elided == 1
-    retained = {record.id: record.occurred_at for record in episodes}
-    assert max(retained[cited] for cited in survivor.provenance.evidence) == _JANUARY
-
-
-@pytest.mark.parametrize(
-    "kind",
-    [MemoryDecisionKind.ACCEPT, MemoryDecisionKind.STORE_TEMPORARY],
-    ids=["accept", "store-temporary"],
-)
-async def test_a_non_folding_install_carries_the_proposals_own_instant(
-    make_writer: WriterFactory, kind: MemoryDecisionKind
-) -> None:
-    """Only a ``REINFORCE`` composes; these install what was proposed (ADR-0109 §6).
-
-    Enumerated rather than left to the reader, in the shape ADR-0086 §4 used for
-    ``evidence_elided``'s recurrence and for its reason: stating the rule over
-    every install is what stops a non-fold case quietly inventing or dropping a
-    value. ``STORE_TEMPORARY`` rewrites ``expires_at`` on its way through, so it is
-    the install most able to lose a field it does not name.
-    """
-    store = InMemoryMemoryStore(now=_fixed_now)
-    await _plant_episodes(store, _episode(_EPISODE, _JANUARY))
-
-    writer = make_writer(store, FakeMemoryPolicy(kind), _fixed_now)
-    result = await writer.ingest(_proposal(_incoming(last_confirmed_at=_MARCH)))
-
-    assert result.decision.kind is kind
+    assert result.decision.kind is MemoryDecisionKind.ACCEPT
     stored = await store.get("incoming")
-    assert stored is not None
-    assert stored.provenance.last_confirmed_at == _MARCH
+    assert isinstance(stored, Memory)
+    assert stored.as_of(_CLOCK) == _MARCH
 
 
 async def test_a_supersede_carries_the_correction_and_inherits_nothing(
@@ -515,49 +291,36 @@ async def test_a_supersede_carries_the_correction_and_inherits_nothing(
     """A ``SUPERSEDE`` takes the proposal's instant and none of the target's.
 
     ADR-0040 §5a's "carries nothing of the target onto the surviving record",
-    applied to this field (ADR-0109 §6). The asymmetry with ``evidence_elided`` is
-    real and follows from what each field is: an elision count is a fact about a
-    record's *history*, so it sums over an install's sources; a confirming instant
-    is a fact about the *world*, so it is selected rather than accumulated, and a
-    superseding proposal states a **different belief** — the retired record's
-    confirmation is not evidence about it.
+    applied to currency (ADR-0109 §6): a superseding proposal states a **different
+    belief**, so the retired memory's confirmation is not evidence about it.
 
-    The retirement half is the other clause: closing a window asserts nothing new
-    about the warrant, so the retired record keeps the instant it was stored with
-    (ADR-0080 §1). It is read back through ``export``, which returns records whose
-    window is closed (ADR-0045 §6) — ``get`` will not, because the record is off
-    the read path, which is the point of the retirement.
+    The retirement half is the other clause: the end adds the correction's support
+    to the retired memory as an ``against`` one (ADR-0328 §5:4), which no ``as of``
+    counts, so the retired memory still reads as of the instant it was confirmed. It
+    is read back through ``export``, which returns retired memories (ADR-0045 §6).
     """
-    store = InMemoryMemoryStore(now=_fixed_now)
-    await store.add(
-        _believed(
-            "stale",
-            "user prefers morning meetings",
-            source=MemorySource.OBSERVED,
-            confidence=0.6,
-            last_confirmed_at=_JANUARY,
-        )
+    stale = memory(
+        "stale",
+        "user prefers morning meetings",
+        remembered_support(_EPISODE, effect="effect-stale", when=_JANUARY),
     )
-
+    store = await _seeded(stale)
     # A user assertion contradicting a derived belief is what `DefaultMemoryPolicy`
-    # rules `SUPERSEDE` on (ADR-0038 §1), so the ruling is the policy's rather than
-    # a fake's: the two records have to be near enough for retrieval to surface the
-    # conflict and different enough to be a contradiction.
-    correction = _believed(
-        "correction",
-        "user prefers afternoon meetings",
-        source=MemorySource.USER_ASSERTED,
-        confidence=1.0,
-        last_confirmed_at=_MARCH,
+    # rules `SUPERSEDE` on (ADR-0038 §1), so the ruling is the policy's rather than a
+    # fake's.
+    correction = memory(
+        "correction", "user prefers afternoon meetings", said_support(_EPISODE, when=_MARCH)
     )
     writer = make_writer(store, DefaultMemoryPolicy(), _fixed_now)
+
     result = await writer.ingest(_proposal(correction))
 
     assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
     new_id = result.record_id
     assert new_id is not None
     exported = {record.id: record for record in await store.export()}
-    # The correction, at its fresh id, states its own confirming instant.
-    assert exported[new_id].provenance.last_confirmed_at == _MARCH
-    # The retired record is unedited — a retirement is not an install.
-    assert exported["stale"].provenance.last_confirmed_at == _JANUARY
+    replacement, retired = exported[new_id], exported["stale"]
+    assert isinstance(replacement, Memory)
+    assert isinstance(retired, Memory)
+    assert replacement.as_of(_CLOCK) == _MARCH
+    assert retired.as_of(_CLOCK) == _JANUARY

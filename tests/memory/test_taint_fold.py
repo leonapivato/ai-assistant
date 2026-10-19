@@ -1,41 +1,23 @@
-"""ADR-0106 §4: the fold's taint marker is the disjunction of both sides.
+"""ADR-0106 §4 under ADR-0328 §7:6: a fold rests on outside content if either side did.
 
 Every case here runs against **both** ``MemoryIngestor`` and the canonical
 ``FakeMemoryWriter``, over the same store and the same policy, so the only thing
-that varies is the fold — the shape ``test_currency_fold.py`` established for
-ADR-0109 §5. The obligation is not promoted to the ``MemoryWriter`` conformance
-suite: ADR-0106 §10 assigns the test to "the lane changing `memory`'s fold", and
-ADR-0028 §8 and ADR-0040 §5a keep the fold's own composition rules off that
-contract, so a third writer stays free to compose differently and is not run
-here. What the fake owes is not to *launder*: it builds its survivor's
-``Provenance`` field by field, so a fake that omitted the field would default it
-to ``False`` and clear a tainted target — production's laundering path, performed
-by the double a consumer reaches for instead of `memory`'s internals.
+that varies is the fold. The obligation is not promoted to the ``MemoryWriter``
+conformance suite: ADR-0106 §10 assigns the test to "the lane changing `memory`'s
+fold", so a third writer stays free to compose differently and is not run here.
 
-**Both positions of the tainted side are exercised, and that is the point of the
-parametrisation rather than thoroughness** (ADR-0106 §10). ``_merge`` reads most
-of its ``Provenance`` from one side, so a test in either position alone passes an
-implementation that simply copies that side: a fold written in the majority style
-— ``incoming.provenance.derived_from_external`` — clears a tainted target on the
-first clean reinforcement, which is exactly the laundering ADR-0106 §4 exists to
-stop, and it passes a tainted-incoming case with full marks.
+Since ADR-0328 the marker is no longer a field the fold builds: whether a memory
+rests on outside content is computed from its supports (§7:6), and a reinforcement
+only adds the proposal's supports to the target (§11:6). So the survivor carries
+both sides' supports, and the disjunction falls out of reading them — what this
+file guards is that neither writer *drops* a side's support on the way, which is
+the laundering ADR-0106 §4 exists to stop.
 
-**All three fold arms too**, because a corroboration arm builds its survivor from
-the *target's* provenance and is therefore where a copy-one-side implementation
-looks right for the other reason. ADR-0106 §4 states its clause over the fold
-rather than over either record, so every arm owes the disjunction — ADR-0103 §6's
-``ATTESTED`` pairing, ADR-0214 §4's ``USER_ASSERTED`` one, and the ordinary arm
-(:data:`_ARM_TARGET`). ADR-0214 §7 records why its clause is not disturbed by the
-widening: "a rule stated over the fold does not narrow when the fold's population
-grows", which is a claim this file is where anyone would check.
-
-**Every case carries a ``UserConfirmation``**, and it is what makes the two
-positions one code path rather than two. Since ADR-0106 §6 ``DefaultMemoryPolicy``
-defers an unconfirmed tainted derived proposal, so the tainted-incoming cases
-would never reach a fold at all — while the tainted-*target* cases would, since
-the ceiling is a property of the proposal and says nothing about what it folds
-onto. Confirming both is ADR-0078 §5's re-ingest, which is the one route a tainted
-proposal has to landing, and it keeps the marker as the only thing that varies.
+**Both positions of the outside side are exercised**, because a writer that kept
+only one side's supports passes a case in that position with full marks (ADR-0106
+§10). **And every band of target**, because §7:6 reads the band: an ``ASSERTED``
+memory never reports resting on outside content, however many outside supports it
+carries, so on that arm the case reads the supports themselves.
 """
 
 from __future__ import annotations
@@ -47,60 +29,34 @@ from typing import TYPE_CHECKING, Final
 import pytest
 
 from ai_assistant.core.types import (
-    Attestation,
+    BeliefBand,
     EpisodicMemory,
+    Memory,
     MemoryDecisionKind,
     MemorySource,
     MemoryUpdateProposal,
-    PreferenceMemory,
     Provenance,
     QuestionPart,
     UserConfirmation,
 )
 from ai_assistant.memory import InMemoryMemoryStore, MemoryIngestor
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryWriter, FakeTraceSink
+from ai_assistant.testing.memories import memory, message_support, remembered_support, said_support
 
 if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, MemoryWriter
-    from ai_assistant.core.types import MemoryRecord
+    from ai_assistant.core.types import MemorySupport
 
 _CLOCK: Final = datetime(2026, 6, 1, tzinfo=UTC)
 _WHEN: Final = datetime(2026, 1, 1, tzinfo=UTC)
 
-#: The content both records carry, so retrieval detects the conflict.
+#: The content both memories carry, so retrieval detects the conflict and the fold
+#: onto an asserted target is the agreeing one clause 1 admits (ADR-0121 §5).
 _CONTENT: Final = "prefers concise emails"
 
-#: The episode the `DERIVED` proposal cites, and which the store must hold for the
-#: ingestor to accept it at all (ADR-0077 §5).
+#: The episode every support points into, which the store must hold (ADR-0328 §4:7).
 _EPISODE: Final = "episode-1"
-
-#: The three arms :func:`_merge` selects between, named by the **target** each fold
-#: puts under it. ``_ORDINARY`` is the arm where the survivor is the incoming record
-#: wearing the target's id. The other two are corroboration arms, where the survivor
-#: is the *target* wearing a new provenance: ADR-0103 §6's ``ATTESTED`` pairing, and
-#: ADR-0214 §4's, which is keyed on the target's ``USER_ASSERTED`` source and is
-#: **total** over the incoming record's.
-#:
-#: **The asserted arm is reached through clause 1's agreeing-fold exception**
-#: (ADR-0121 §5 as widened by ADR-0214 §3), which is why every case below folds
-#: content the target already carries: an ``OBSERVED`` proposal that did not agree
-#: would be refused at the writer rather than folded, and the case would measure the
-#: refusal instead of the fold.
-_ORDINARY: Final = "ordinary"
-_ATTESTED: Final = "attested"
-_ASSERTED: Final = "asserted"
-
-#: The source each arm's target carries — and, since every proposal below is
-#: ``OBSERVED``, the survivor's source under a conforming fold. That makes it the
-#: discriminator: on the ordinary arm the survivor takes the incoming record's
-#: source, so an ``_ASSERTED`` case that silently ran the ordinary arm would show
-#: ``OBSERVED`` here, which is the demotion ADR-0038 §2a names.
-_ARM_TARGET: Final = {
-    _ORDINARY: MemorySource.OBSERVED,
-    _ATTESTED: MemorySource.EXTERNAL,
-    _ASSERTED: MemorySource.USER_ASSERTED,
-}
 
 WriterFactory = Callable[["MemoryStore", "MemoryPolicy", "Clock"], "MemoryWriter"]
 
@@ -124,57 +80,47 @@ def make_writer(request: pytest.FixtureRequest) -> WriterFactory:
     return factory
 
 
-def _target(*, tainted: bool, arm: str) -> MemoryRecord:
-    """The stored record the ruling folds into, on whichever arm the case wants.
+def _target(*, outside: bool, band: BeliefBand) -> Memory:
+    """The stored memory the ruling folds into, in ``band``.
 
-    ``arm`` selects which arm of ``_merge`` the fold takes (:data:`_ARM_TARGET`):
-    ``_ATTESTED`` is ADR-0103 §6's pairing and ``_ASSERTED`` is ADR-0214 §4's, and on
-    both the survivor is the *target* wearing a new provenance. ``_ORDINARY`` is the
-    arm where the survivor is the incoming record wearing the target's id.
+    A ``DERIVED`` target rests on a remember call and an ``ATTESTED`` one on a
+    round's message, each outside where ``outside`` says. A said support is never
+    outside, so an ``ASSERTED`` target that is carries a second, outside support.
     """
-    source = _ARM_TARGET[arm]
-    return PreferenceMemory(
-        id="target",
-        content=_CONTENT,
-        preference=_CONTENT,
-        provenance=Provenance(
-            source=source,
-            confidence=1.0 if arm == _ASSERTED else 0.6,
-            last_updated=_WHEN,
-            attestation=(
-                Attestation(reported_by="calendar:work", reported_at=_WHEN)
-                if arm == _ATTESTED
-                else None
-            ),
-            derived_from_external=tainted,
-        ),
+    supports: tuple[MemorySupport, ...]
+    match band:
+        case BeliefBand.DERIVED:
+            supports = (remembered_support(_EPISODE, effect="effect-target", outside=outside),)
+        case BeliefBand.ATTESTED:
+            supports = (message_support(_EPISODE, round_id="round-target", outside=outside),)
+        case BeliefBand.ASSERTED:
+            said = said_support(_EPISODE)
+            supports = (
+                (said, remembered_support(_EPISODE, effect="effect-target", outside=True))
+                if outside
+                else (said,)
+            )
+    return memory("target", _CONTENT, *supports)
+
+
+def _incoming(*, outside: bool) -> Memory:
+    """The proposed memory: always ``DERIVED``, resting on its own remember call."""
+    return memory(
+        "incoming",
+        _CONTENT,
+        remembered_support(_EPISODE, effect="effect-incoming", outside=outside),
     )
 
 
-def _incoming(*, tainted: bool) -> MemoryRecord:
-    """The proposed record. Always ``DERIVED``, so either arm is reachable."""
-    return PreferenceMemory(
-        id="incoming",
-        content=_CONTENT,
-        preference=_CONTENT,
-        provenance=Provenance(
-            source=MemorySource.OBSERVED,
-            confidence=0.6,
-            evidence=(_EPISODE,),
-            last_updated=_WHEN,
-            derived_from_external=tainted,
-        ),
-    )
-
-
-def _confirmed_proposal(record: MemoryRecord) -> MemoryUpdateProposal:
+def _confirmed_proposal(record: Memory) -> MemoryUpdateProposal:
     """``record`` proposed under a user's answer to the question it would raise.
 
-    Built in two steps because the authority binds to the *question*, whose
-    identity is a property of the proposal (ADR-0078 §7): a hand-picked digest
-    would be input no coordinator produces. ``retires`` stays empty — this
-    confirmation authorises nothing to be retired, and the fold it unblocks is a
-    ``REINFORCE``, which retires nothing.
+    **Every case carries one**, and it is what makes the two positions one code
+    path: both policies defer an unconfirmed derived proposal resting on outside
+    content (ADR-0106 §6), so the outside-incoming cases would never reach a fold.
+    Confirming every case is ADR-0078 §5's re-ingest, the one route such a proposal
+    has to landing, and it keeps the outside support the only thing that varies.
+    Built in two steps because the authority binds to the question (ADR-0078 §7).
     """
     unconfirmed = MemoryUpdateProposal(proposed=record, rationale="because")
     return MemoryUpdateProposal(
@@ -188,117 +134,81 @@ def _confirmed_proposal(record: MemoryRecord) -> MemoryUpdateProposal:
     )
 
 
-#: The policy the fold cases below drive their ``REINFORCE`` from.
-#:
-#: **Injected rather than provoked out of ``DefaultMemoryPolicy``, since ADR-0159.**
-#: These cases are about the *applier's* fold semantics, and they used to reach the
-#: arm through the default policy's rule 5, which folded whenever the conflict set
-#: was non-empty. ADR-0159 §4 replaced that rule with one resting on a *relation*,
-#: and §12 records the consequence for exactly this shape: "§4 excludes ``EXTERNAL``
-#: from both target classes, so ``DefaultMemoryPolicy`` no longer reaches the
-#: ``DERIVED``→``ATTESTED`` fold at all on the observed path. The contradiction is
-#: between two ADRs about how such a fold folds and **survives untouched for any
-#: policy that does reach it**." Both writers take rulings from any injected
-#: ``MemoryPolicy`` (ADR-0040 §3), so this is the seam and not a workaround — and it
-#: makes what these cases always meant explicit: the fold, not the ruling.
-def _folding_policy() -> FakeMemoryPolicy:
-    return FakeMemoryPolicy(MemoryDecisionKind.REINFORCE)
-
-
 async def _fold(
-    make_writer: WriterFactory,
-    *,
-    tainted_target: bool,
-    tainted_incoming: bool,
-    arm: str,
-) -> MemoryRecord:
+    make_writer: WriterFactory, *, outside_target: bool, outside_incoming: bool, band: BeliefBand
+) -> Memory:
     """Drive one ``REINFORCE`` end to end and return the survivor.
 
-    End to end rather than through ``_merge``: ADR-0106 §4's clause is about what
-    is *stored*, and a unit call on either private function would have to be
-    written twice — which is the drift running both writers exists to catch.
+    The ruling is injected (ADR-0040 §3): these cases are about the applier's fold,
+    not about which ruling ``DefaultMemoryPolicy`` would reach (ADR-0159 §12).
     """
     store = InMemoryMemoryStore(now=_fixed_now)
     await store.add(
         EpisodicMemory(
             id=_EPISODE,
-            content="the exchange the proposal stands on",
+            content="the exchange the memories rest on",
             occurred_at=_WHEN,
             provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN),
         )
     )
-    await store.add(_target(tainted=tainted_target, arm=arm))
+    target = _target(outside=outside_target, band=band)
+    await store.add(target)
+    incoming = _incoming(outside=outside_incoming)
 
-    writer = make_writer(store, _folding_policy(), _fixed_now)
-    result = await writer.ingest(_confirmed_proposal(_incoming(tainted=tainted_incoming)))
+    writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE), _fixed_now)
+    result = await writer.ingest(_confirmed_proposal(incoming))
 
     assert result.decision.kind is MemoryDecisionKind.REINFORCE
     survivor = await store.get("target")
-    assert survivor is not None
-    # The arm actually taken, asserted rather than assumed: every arm leaves a
-    # record at the target's id, so a corroboration case that silently ran the
-    # ordinary one would pass every assertion below while checking half of what
-    # ADR-0106 §4 rules. `source` is the discriminator (ADR-0103 §6, ADR-0214 §4),
-    # and on the asserted arm it is also the demotion ADR-0038 §2a names.
-    assert survivor.provenance.source is _ARM_TARGET[arm]
+    assert isinstance(survivor, Memory)
+    # Every support of both sides, kept: the reinforcement only adds (§11:6).
+    assert set(survivor.supports) >= set(target.supports)
+    assert survivor.support_at(incoming.supports[0].points_at) is not None
+    assert survivor.band is band
     return survivor
 
 
-_ARMS: Final = pytest.mark.parametrize(
-    "arm",
-    [_ORDINARY, _ATTESTED, _ASSERTED],
-    ids=["ordinary-arm", "attested-corroboration-arm", "asserted-corroboration-arm"],
+_BANDS: Final = pytest.mark.parametrize(
+    "band",
+    [BeliefBand.DERIVED, BeliefBand.ATTESTED, BeliefBand.ASSERTED],
+    ids=["derived-target", "attested-target", "asserted-target"],
 )
 
 
-@_ARMS
+@_BANDS
 @pytest.mark.parametrize(
-    ("tainted_target", "tainted_incoming"),
+    ("outside_target", "outside_incoming"),
     [(True, False), (False, True), (True, True)],
-    ids=["tainted-target", "tainted-incoming", "both-tainted"],
+    ids=["outside-target", "outside-incoming", "both-outside"],
 )
-async def test_a_fold_combining_a_tainted_side_is_tainted(
-    make_writer: WriterFactory,
-    *,
-    tainted_target: bool,
-    tainted_incoming: bool,
-    arm: str,
+async def test_a_fold_combining_an_outside_side_rests_on_outside_content(
+    make_writer: WriterFactory, *, outside_target: bool, outside_incoming: bool, band: BeliefBand
 ) -> None:
-    """ADR-0106 §4, in both positions and on every arm.
+    """ADR-0106 §4, in both positions and on every band of target.
 
-    The direction that has to be exercised is the **tainted target reinforced by
-    an untainted incoming**: the opposite direction passes an implementation that
-    merely copies the incoming field and proves nothing, and the majority of
-    ``_merge``'s fields *are* copied from the incoming record. One parametrised
-    test over the two positions satisfies the clause; either position alone does
-    not.
+    The position that has to be exercised is the **outside target reinforced by a
+    plain incoming**: a writer that rebuilt the survivor from the incoming side alone
+    passes the other position and proves nothing.
     """
     survivor = await _fold(
-        make_writer,
-        tainted_target=tainted_target,
-        tainted_incoming=tainted_incoming,
-        arm=arm,
+        make_writer, outside_target=outside_target, outside_incoming=outside_incoming, band=band
     )
 
-    assert survivor.provenance.derived_from_external is True
+    assert any(support.outside for support in survivor.supports)
+    # §7:6 reads the band: an asserted memory never reports it.
+    assert survivor.rests_on_outside_content is (band is not BeliefBand.ASSERTED)
 
 
-@_ARMS
-async def test_a_fold_of_two_untainted_records_stays_untainted(
-    make_writer: WriterFactory, *, arm: str
+@_BANDS
+async def test_a_fold_of_two_plain_memories_does_not(
+    make_writer: WriterFactory, *, band: BeliefBand
 ) -> None:
     """The negative control, without which the cases above pass a hardcoded ``True``.
 
-    It is also the claim ADR-0106 §2 makes about the default: the field is a
-    disjunction and not a ratchet that starts on. A fold that raised the marker
-    on records neither of which carried it would put every reinforced belief
-    behind a user question, which is the backfill ADR-0106 §2 refuses.
+    It is also ADR-0106 §2's claim: the marker is a disjunction, not a ratchet that
+    starts on.
     """
-    survivor = await _fold(
-        make_writer,
-        tainted_target=False,
-        tainted_incoming=False,
-        arm=arm,
-    )
+    survivor = await _fold(make_writer, outside_target=False, outside_incoming=False, band=band)
 
-    assert survivor.provenance.derived_from_external is False
+    assert not any(support.outside for support in survivor.supports)
+    assert survivor.rests_on_outside_content is False

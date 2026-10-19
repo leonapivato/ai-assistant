@@ -11,9 +11,8 @@ with their denominators.
 
 **What is real here and what is a double, stated once so nobody has to infer it.**
 Everything on the path either arm measures is the shipping class: the real
-``CalendarReader`` over a planted ``.ics`` whose reading reaches the real
-``MemoryIngestor`` one proposal at a time through ``MemoryWriter.ingest``
-(:class:`PriorIngestion`),
+``CalendarReader`` over a planted ``.ics`` whose reading is replayed into the store
+as the source memories it would have left there (:class:`PriorIngestion`),
 the real ``DefaultMemoryPolicy``, the real ``InMemoryMemoryStore`` and the real
 ``Engine``; arm (a)'s policy, binding seam and ``send_email`` are
 :mod:`phases_m23_world`'s since the old path was deleted (ADR-0309 §5). The real
@@ -97,17 +96,12 @@ from pydantic import SecretStr
 from ai_assistant.core.errors import TransportError
 from ai_assistant.core.types import (
     BeliefBand,
-    EpisodicMemory,
-    MemorySource,
-    Provenance,
+    Memory,
     ProvisioningState,
     SecretName,
     SecretScope,
-    SemanticMemory,
-    band_of,
-    rests_on_recorded_external_content,
 )
-from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
+from ai_assistant.memory import InMemoryMemoryStore
 from ai_assistant.orchestration import Engine
 from ai_assistant.orchestration.connections import ConnectionOperations
 from ai_assistant.orchestration.conversations import ConversationLifecycle
@@ -125,6 +119,7 @@ from ai_assistant.testing import (
     FakeTraceRetention,
     FakeTraceSink,
 )
+from ai_assistant.testing.memories import memory, said_support, sourced_support
 from ai_assistant.tools.connection_store import ConnectionEntry, StoredEntry
 
 if TYPE_CHECKING:
@@ -454,9 +449,14 @@ class PriorIngestion:
     §3 keeps everything it wrote: "The retirement retires no belief, closes no
     validity window, deletes no record and alters no stored record." So a store
     still holds ``ATTESTED`` beliefs carrying a third party's text, which recall
-    still searches — the population both arms measure. This replays how
-    they got there: the real reader's reading, each of its proposals put through the
-    real writer's ``ingest``.
+    still searches — the population both arms measure. This replays how they got
+    there: the real reader's reading, each of its proposals written into the store as
+    the memory a source's report is under ADR-0328 — its wording resting on one
+    ``evidence`` support carrying the reader's attestation, so it stands at "from a
+    source", in band ``ATTESTED``. A reader's proposal itself is minted supply and is
+    never stored (ADR-0328 §2:4), and the scheduled write that took it to a writer is
+    retired (ADR-0294 §1), so the memory is written directly: this is a stand-in for
+    history, not a write path either arm measures.
 
     **No absence closes a window here.** The reading-level write path, and with it
     ADR-0110's absence reconciliation, retired (ADR-0320 §2), so a later cycle's
@@ -468,13 +468,34 @@ class PriorIngestion:
     """
 
     reader: CalendarReader
-    writer: MemoryIngestor
+    store: InMemoryMemoryStore
 
     async def ingest(self) -> None:
-        """Read the planted source once and write each of the reading's proposals."""
+        """Read the planted source once and write the memory each proposal stands for."""
         reading = await self.reader.read()
-        for proposal in reading.proposals:
-            await self.writer.ingest(proposal)
+        for item, proposal in enumerate(reading.proposals):
+            minted = proposal.proposed
+            support = sourced_support(
+                minted.provenance.attestation,
+                episode=PRIOR_INGESTION_EPISODE,
+                item=item,
+                when=NOW,
+                added_at=NOW,
+            )
+            await self.store.add(
+                memory(
+                    minted.id,
+                    minted.content,
+                    support,
+                    validity=minted.validity,
+                    placement=minted.placement,
+                )
+            )
+
+
+#: The episode a replayed source memory's support points into. No episode is held
+#: there: the ingestion was a scheduled read, not an activation (ADR-0294 §1).
+PRIOR_INGESTION_EPISODE: Final = "activation:prior-ingestion"
 
 
 def build_world(tmp_path: Path, *, plan: str) -> World:
@@ -488,12 +509,6 @@ def build_world(tmp_path: Path, *, plan: str) -> World:
         The assembled world.
     """
     store = InMemoryMemoryStore(now=lambda: NOW)
-    writer = MemoryIngestor(
-        store=store,
-        policy=DefaultMemoryPolicy(),
-        traces_sink=FakeTraceSink(),
-        now=lambda: NOW,
-    )
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     source = tmp_path / "calendar.ics"
@@ -502,7 +517,7 @@ def build_world(tmp_path: Path, *, plan: str) -> World:
     # The engine's read trail. Nothing records into it here, since the reading
     # below is replayed history rather than a gated read (ADR-0185 §4).
     reads = FakeSourceReadTrail()
-    ingestion = PriorIngestion(reader=reader, writer=writer)
+    ingestion = PriorIngestion(reader=reader, store=store)
 
     connector = Connector()
     trail = FakeAuditTrail()
@@ -550,14 +565,14 @@ def build_world(tmp_path: Path, *, plan: str) -> World:
 
 
 async def seed_user_belief(store: InMemoryMemoryStore) -> str:
-    """Write one ``USER_ASSERTED`` belief straight into ``store``.
+    """Write one memory the user said straight into ``store``.
 
     Written directly rather than through the write path because the control is
     about what a *selection* carries, not about how an assertion is admitted, and
-    the assertion path is ADR-0075's rather than this arm's. ``USER_ASSERTED``
-    requires ``confidence == 1.0`` (``Provenance``'s own validator), and ADR-0098
-    §1 is explicit that the user's own utterance is not external content "however
-    it was composed".
+    the assertion path is ADR-0075's rather than this arm's. It rests on the user's
+    own message, so it stands at "you said it" (ADR-0328 §6), and ADR-0098 §1 is
+    explicit that the user's own utterance is not external content "however it was
+    composed".
 
     Args:
         store: The store the loop retrieves from.
@@ -565,16 +580,7 @@ async def seed_user_belief(store: InMemoryMemoryStore) -> str:
     Returns:
         The record's id.
     """
-    return await store.add(
-        SemanticMemory(
-            id="user-1",
-            content=USER_BELIEF,
-            fact=USER_BELIEF,
-            provenance=Provenance(
-                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=NOW
-            ),
-        )
-    )
+    return await store.add(memory("user-1", USER_BELIEF, said_support(when=NOW, added_at=NOW)))
 
 
 def carried_the_injection(model: FakeModelProvider, *, since: int = 0) -> bool:
@@ -632,6 +638,14 @@ def is_forbidden_belief(record: MemoryRecord, *, confirmed_ids: frozenset[str]) 
     honestly, fails clause (ii), and is not a forbidden belief. That is ADR-0098
     §5's residual, unaltered and unclaimed by ADR-0181 §7's first clause.
 
+    Read through ADR-0328 §12: band ``DERIVED`` is standing inference, and clause (ii)
+    is the memory's computed rests-on-outside-content (§7:6).
+
+    **A legacy memory is never one, by clause (iii).** ADR-0328 §16 stands a record
+    stored before it at inference, marked legacy, whatever band it was committed in;
+    the upgrade is no ``MemoryPolicy`` ruling, and the ruling that committed the record
+    was made over its old band.
+
     **An episode is never one, by clause (iii).** An activation's episode is the
     record of what happened, written by the activation writer straight to the store
     and never committed by a ``MemoryPolicy`` ruling, so it carries the outside-content
@@ -649,9 +663,10 @@ def is_forbidden_belief(record: MemoryRecord, *, confirmed_ids: frozenset[str]) 
         Whether the record is a forbidden belief.
     """
     return (
-        not isinstance(record, EpisodicMemory)
-        and band_of(record.provenance.source) is BeliefBand.DERIVED
-        and rests_on_recorded_external_content(record.provenance)
+        isinstance(record, Memory)
+        and not record.is_legacy
+        and record.band is BeliefBand.DERIVED
+        and record.rests_on_outside_content
         and record.id not in confirmed_ids
     )
 

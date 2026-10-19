@@ -1898,8 +1898,7 @@ class AssistantEngineContract(
         """
         await beliefs.hold("the office is in Boston")
         assert await beliefs.engine.beliefs(bands=[]) == ()
-        assert await beliefs.engine.beliefs(kinds=[]) == ()
-        assert await beliefs.engine.beliefs(bands=None, kinds=None) != ()
+        assert await beliefs.engine.beliefs(bands=None) != ()
 
     # --- clause 5: the size limit, in both directions (§8c) ----------------
 
@@ -1979,39 +1978,35 @@ class AssistantEngineContract(
     async def test_the_listing_returns_summaries_and_carries_no_citation(
         self, beliefs: BeliefSubject
     ) -> None:
-        """ADR-0077 §6's split, made structural (§4a).
+        """ADR-0085 §4a's split, made structural, over ADR-0328 §15:1-§15:2.
 
-        The listing "resolves *existence* and renders the count, the lost count, and
-        the adjusted confidence"; the single-belief view "renders the surviving
-        citations as readable evidence". This is the shape where the wrong behaviour
-        is **unrepresentable** rather than merely detectable: a
+        The listing carries the values ADR-0328 §7 computes; the single-memory view adds
+        each support resolved to readable content. This is the shape where the wrong
+        behaviour is **unrepresentable** rather than merely detectable: a
         :class:`~ai_assistant.core.types.BeliefSummary` has nowhere to put a
-        citation's content, so a conforming listing cannot over-deliver.
+        support's content, so a conforming listing cannot over-deliver.
         """
         await beliefs.hold("the office is in Boston")
         page = await beliefs.engine.beliefs()
         assert page
         for summary in page:
             assert isinstance(summary, BeliefSummary)
-            assert not hasattr(summary, "evidence")
+            assert not hasattr(summary, "supports")
 
-    async def test_the_same_three_names_read_alike_on_both_belief_types(
+    async def test_every_computed_value_reads_alike_on_both_belief_types(
         self, beliefs: BeliefSubject
     ) -> None:
-        """§4a's table: only the *category* of two of them changes, never the answer.
+        """ADR-0328 §15:1: the listing and the single view carry the same values.
 
-        That is what keeps a renderer from needing two code paths, and it is the
-        reason ``unsupported`` stays derived on both — a field there would put a
-        value on the wire a client can compute exactly, so one implementation could
-        send it and another omit it, and the same call would measure two sizes.
+        Only the supports separate them, which is what keeps a renderer from needing
+        two code paths and a client from seeing two answers to one question.
         """
         record_id = await beliefs.hold("the office is in Boston")
         summary = next(one for one in await beliefs.engine.beliefs() if one.id == record_id)
         detail = await beliefs.engine.belief(record_id)
         assert detail is not None
-        assert summary.evidence_count == detail.evidence_count
-        assert summary.lost_evidence == detail.lost_evidence
-        assert summary.unsupported == detail.unsupported
+        assert summary == BeliefSummary.model_validate(detail.model_dump(exclude={"supports"}))
+        assert summary.band is BeliefBand.ASSERTED
 
     # --- forgetting something absent is not an error ------------------------
 

@@ -12,14 +12,14 @@ survivor.
 §10 gives about its own field: ADR-0028 §8 and ADR-0040 §5a keep the fold's
 composition rules off that contract, so a third writer stays free to compose
 differently and is not run here. What the *canonical fake* owes is not to launder —
-each arm's ``model_copy`` would otherwise inherit that side's placement and quietly
-discard the other's, widening a narrowed target on the first unnarrowed
-reinforcement. That is production's laundering path performed by the object a
-consumer reaches for instead of `memory`'s internals.
+a fold that kept one side's placement would quietly discard the other's, widening a
+narrowed target on the first unnarrowed reinforcement. That is production's
+laundering path performed by the object a consumer reaches for instead of
+`memory`'s internals.
 
 **Both positions and every arm** (:data:`_ARM_TARGET`), for ADR-0106 §10's reason
-transferred whole: ``_merge`` reads most of its provenance from one side, so a case
-in either position alone passes an implementation that simply copies that side.
+transferred whole: a case in either position alone passes an implementation that
+simply copies that side.
 
 **What is *not* here is the half §11 orders later.** ADR-0217 §10 pins several of
 these arms beside "a later ``unguard`` on the survivor succeeds" / "writes nothing",
@@ -39,23 +39,24 @@ import pytest
 
 from ai_assistant.core.types import (
     Attestation,
+    BeliefBand,
     EpisodicMemory,
+    Memory,
     MemoryDecisionKind,
     MemorySource,
     MemoryUpdateProposal,
     Placement,
     PlacementReach,
     PlacementSetter,
-    PreferenceMemory,
     Provenance,
 )
 from ai_assistant.memory import InMemoryMemoryStore, MemoryIngestor
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryWriter, FakeTraceSink
+from ai_assistant.testing.memories import memory, memory_in_band, remembered_support
 
 if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, MemoryWriter
-    from ai_assistant.core.types import MemoryRecord
 
 _CLOCK: Final = datetime(2026, 6, 1, tzinfo=UTC)
 _WHEN: Final = datetime(2026, 1, 1, tzinfo=UTC)
@@ -96,31 +97,23 @@ _UNGUARDED: Final = Placement(
 #: by the derivation, at an instant nobody recorded.
 _LEGACY: Final = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
 
-#: The three arms :func:`_merge` selects between, named by the **target** each fold
-#: puts under it. ``_ORDINARY`` is the arm where the survivor is the incoming record
-#: wearing the target's id. The other two are corroboration arms, where the survivor
-#: is the *target* wearing a new provenance: ADR-0103 §6's ``ATTESTED`` pairing, and
-#: ADR-0214 §4's, which is keyed on the target's ``USER_ASSERTED`` source and is
-#: **total** over the incoming record's.
+#: The band each arm's target stands in, and therefore the discriminator that says
+#: which arm a case actually took. Since ADR-0328 there is one fold — the proposal's
+#: supports added to the target (§11:6), with placement's ratchet applied as on any
+#: fold (§11:9) — so the arms are kept for what ADR-0217 §3 says over every fold:
+#: whatever the target's band, the meet holds.
 #:
 #: **The asserted arm is reached through clause 1's agreeing-fold exception**
 #: (ADR-0121 §5 as widened by ADR-0214 §3), which is why every case below folds
-#: content the target already carries: an ``OBSERVED`` proposal that did not agree
-#: would be refused at the writer rather than folded, and the case would measure the
-#: refusal instead of the fold.
+#: content the target already carries.
 _ORDINARY: Final = "ordinary"
 _ATTESTED: Final = "attested"
 _ASSERTED: Final = "asserted"
 
-#: The source each arm's target carries — and, since every proposal below is
-#: ``OBSERVED``, the survivor's source under a conforming fold. That makes it the
-#: discriminator: on the ordinary arm the survivor takes the incoming record's
-#: source, so an ``_ASSERTED`` case that silently ran the ordinary arm would show
-#: ``OBSERVED`` here, which is the demotion ADR-0038 §2a names.
 _ARM_TARGET: Final = {
-    _ORDINARY: MemorySource.OBSERVED,
-    _ATTESTED: MemorySource.EXTERNAL,
-    _ASSERTED: MemorySource.USER_ASSERTED,
+    _ORDINARY: BeliefBand.DERIVED,
+    _ATTESTED: BeliefBand.ATTESTED,
+    _ASSERTED: BeliefBand.ASSERTED,
 }
 
 WriterFactory = Callable[
@@ -153,58 +146,34 @@ def make_writer(request: pytest.FixtureRequest) -> WriterFactory:
     return factory
 
 
-def _target(*, placement: Placement, arm: str, content: str = _CONTENT) -> MemoryRecord:
-    """The stored record the ruling folds into, on whichever arm the case wants.
-
-    ``arm`` selects which arm of ``_merge`` the fold takes (:data:`_ARM_TARGET`):
-    ``_ATTESTED`` is ADR-0103 §6's pairing and ``_ASSERTED`` is ADR-0214 §4's, and on
-    both the survivor is the *target* wearing a new provenance. ``_ORDINARY`` is the
-    arm where the survivor is the incoming record wearing the target's id.
-    """
-    source = _ARM_TARGET[arm]
-    return PreferenceMemory(
-        id="target",
-        content=content,
-        preference=content,
-        provenance=Provenance(
-            source=source,
-            confidence=1.0 if arm == _ASSERTED else 0.6,
-            last_updated=_WHEN,
-            attestation=(
-                Attestation(reported_by="calendar:work", reported_at=_WHEN)
-                if arm == _ATTESTED
-                else None
-            ),
-        ),
+def _target(*, placement: Placement, arm: str, content: str = _CONTENT) -> Memory:
+    """The stored memory the ruling folds into, in the band the case's arm names."""
+    return memory_in_band(
+        "target",
+        content,
+        _ARM_TARGET[arm],
+        attestation=Attestation(reported_by="calendar:work", reported_at=_WHEN),
+        episode=_EPISODE,
         placement=placement,
     )
 
 
-def _incoming(
-    *, placement: Placement, record_id: str = "incoming", preference: str = _CONTENT
-) -> MemoryRecord:
-    """The proposed record. Always ``DERIVED``, so either arm is reachable.
+def _incoming(*, placement: Placement, record_id: str = "incoming") -> Memory:
+    """The proposed memory: always ``DERIVED``, on its own remember call.
 
-    ``preference`` is carried for readability; what the supersession case actually
-    varies is the **target's** ``content``, because a proposal whose content agrees
-    with its target *restates* it under ADR-0121 §1 and ADR-0159 §5 refuses to
-    retire a conflict so related — by any ruling, this fake policy's included.
+    Its wording is always :data:`_CONTENT`; what the supersession case varies is the
+    **target's** wording, because a proposal that agrees with its target *restates*
+    it under ADR-0121 §1 and ADR-0159 §5 refuses to retire a conflict so related.
     """
-    return PreferenceMemory(
-        id=record_id,
-        content=_CONTENT,
-        preference=preference,
-        provenance=Provenance(
-            source=MemorySource.OBSERVED,
-            confidence=0.6,
-            evidence=(_EPISODE,),
-            last_updated=_WHEN,
-        ),
+    return memory(
+        record_id,
+        _CONTENT,
+        remembered_support(_EPISODE, effect=f"effect-{record_id}"),
         placement=placement,
     )
 
 
-async def _seeded(target: MemoryRecord) -> InMemoryMemoryStore:
+async def _seeded(target: Memory) -> InMemoryMemoryStore:
     """A store holding the cited episode and ``target``."""
     store = InMemoryMemoryStore(now=_fixed_now)
     await store.add(
@@ -225,10 +194,10 @@ async def _fold(
     target: Placement,
     incoming: Placement,
     arm: str = _ORDINARY,
-) -> MemoryRecord:
+) -> Memory:
     """Drive one ``REINFORCE`` end to end and return the survivor.
 
-    End to end rather than through ``_merge``: §5's clause is about what is
+    End to end rather than through the fold's helper: §5's clause is about what is
     *stored*, and a unit call on either private function would have to be written
     twice — which is the drift running both writers exists to catch.
     """
@@ -243,12 +212,10 @@ async def _fold(
 
     assert result.decision.kind is MemoryDecisionKind.REINFORCE
     survivor = await store.get("target")
-    assert survivor is not None
-    # The arm actually taken, asserted rather than assumed: every arm leaves a record
-    # at the target's id, so a corroboration case that silently ran the ordinary one
-    # would check half of what §5's first clause rules. `source` is the discriminator
-    # (ADR-0103 §6, ADR-0214 §4).
-    assert survivor.provenance.source is _ARM_TARGET[arm]
+    assert isinstance(survivor, Memory)
+    # The arm actually taken, asserted rather than assumed: the band is computed from
+    # the supports, and a reinforcement only adds (ADR-0328 §6:3, §11:6).
+    assert survivor.band is _ARM_TARGET[arm]
     return survivor
 
 
@@ -341,9 +308,7 @@ async def test_a_supersession_writes_the_proposals_placement_beside_a_retained_t
 
     result = await writer.ingest(
         MemoryUpdateProposal(
-            proposed=_incoming(
-                placement=incoming, record_id="new", preference="prefers detailed emails"
-            ),
+            proposed=_incoming(placement=incoming, record_id="new"),
             rationale="because",
         )
     )

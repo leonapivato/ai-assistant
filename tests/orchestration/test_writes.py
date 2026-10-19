@@ -11,16 +11,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import structlog.testing
+from orchestration_held_episodes import held_episode
 
-from ai_assistant.core.types import (
-    MemoryDecisionKind,
-    MemorySource,
-    MemoryUpdateProposal,
-    Provenance,
-    SemanticMemory,
-)
+from ai_assistant.core.types import MemoryDecisionKind, MemoryUpdateProposal
 from ai_assistant.orchestration.writes import DEFERRED_EVENT, MemoryWriteStage
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore, FakeMemoryWriter
+from ai_assistant.testing.memories import memory, remembered_support
 
 _AT = datetime(2026, 3, 4, 10, 0, tzinfo=UTC)
 
@@ -36,12 +32,7 @@ def _now() -> datetime:
 
 def _proposal(record_id: str) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(
-        proposed=SemanticMemory(
-            id=record_id,
-            content=_CONTENT,
-            fact=_CONTENT,
-            provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_AT),
-        ),
+        proposed=memory(record_id, _CONTENT, remembered_support()),
         rationale=_RATIONALE,
     )
 
@@ -55,6 +46,7 @@ def _stage(store: FakeMemoryStore, kind: MemoryDecisionKind) -> MemoryWriteStage
 async def test_an_ask_user_ruling_writes_nothing_and_logs_one_event_by_kind() -> None:
     """Nothing is written and nothing is parked; one event names the two kinds alone."""
     store = FakeMemoryStore(now=_now)
+    await store.add(held_episode())
     stage = _stage(store, MemoryDecisionKind.ASK_USER)
 
     with structlog.testing.capture_logs() as logs:
@@ -68,7 +60,7 @@ async def test_an_ask_user_ruling_writes_nothing_and_logs_one_event_by_kind() ->
             "event": DEFERRED_EVENT,
             "log_level": "info",
             "ruling": MemoryDecisionKind.ASK_USER.value,
-            "memory_kind": "semantic",
+            "memory_kind": "memory",
         }
     ]
 
@@ -82,6 +74,7 @@ async def test_the_deferral_event_carries_no_proposal_id_and_no_content() -> Non
     """
     record_id = "imogen-sister-deferred-2"
     store = FakeMemoryStore(now=_now)
+    await store.add(held_episode())
     stage = _stage(store, MemoryDecisionKind.ASK_USER)
 
     with structlog.testing.capture_logs() as logs:
@@ -99,6 +92,7 @@ async def test_the_deferral_event_carries_no_proposal_id_and_no_content() -> Non
 async def test_a_committing_ruling_writes_and_logs_no_deferral() -> None:
     """Only a deferral is logged: a committed proposal is in the store, not the log."""
     store = FakeMemoryStore(now=_now)
+    await store.add(held_episode())
     stage = _stage(store, MemoryDecisionKind.ACCEPT)
 
     with structlog.testing.capture_logs() as logs:

@@ -30,7 +30,7 @@ import json
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -64,15 +64,16 @@ from ai_assistant.core.types import (
     EpisodeCursor,
     EpisodePage,
     EpisodicMemory,
+    MemoryKind,
     MemoryRecord,
     MemorySearchResult,
-    MemorySource,
     MemoryWriteMode,
     ProcessingStatus,
     RecordChunk,
     TraceKind,
     TraceRecordSet,
-    band_of,
+    record_band,
+    record_transaction_time,
 )
 from ai_assistant.memory import traces
 from ai_assistant.memory._channel_reads import (
@@ -82,10 +83,13 @@ from ai_assistant.memory._channel_reads import (
 )
 from ai_assistant.memory._episode_format import (
     EPISODE_RECORD_FORMAT,
-    check_format,
+    MEMORY_RECORD_FORMAT,
+    MEMORY_RECORD_FORMATS,
     inspect_existing,
+    stored_format,
 )
 from ai_assistant.memory._episode_guard import is_open, refuse_episode_change
+from ai_assistant.memory._legacy import LEGACY_KINDS, memory_from_legacy
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory._walk import (
     check_walk_limit,
@@ -103,7 +107,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import Embedder, TraceSink
     from ai_assistant.core.types import (
         BeliefBand,
-        MemoryKind,
         MemoryWrite,
         WalkPosition,
     )
@@ -266,37 +269,33 @@ def _check_page_bounds(limit: int, offset: int) -> None:
 
 
 def _newest_revision_first(records: list[MemoryRecord]) -> list[MemoryRecord]:
-    """ADR-0073 §2's total order: ``last_updated`` descending, ``id`` ascending.
+    """ADR-0073 §2's total order: transaction time descending, ``id`` ascending.
 
     Two passes over a stable sort rather than one composite key, because the two
     halves run in opposite directions and ``datetime`` has no negation.
     """
     by_id = sorted(records, key=lambda record: record.id)
-    return sorted(by_id, key=lambda record: record.provenance.last_updated, reverse=True)
+    return sorted(by_id, key=record_transaction_time, reverse=True)
 
 
-def _sources_in(bands: Sequence[BeliefBand]) -> frozenset[str]:
-    """The stored ``provenance.source`` values whose band is among ``bands``.
+def _band_values(bands: Sequence[BeliefBand]) -> frozenset[str]:
+    """The stored ``band`` column values ``bands`` selects.
 
-    ``search``'s band restriction runs in SQL against the source string stored in
-    each record's JSON blob, so the band selection has to be turned into a source
-    selection somewhere. It is **derived from** ``band_of`` rather than written out,
-    which is ADR-0113 §3's requirement and ADR-0073 §1's reason: a second,
-    hand-written ``band -> sources`` mapping is a mapping that can drift from the
-    one whose totality the gate enforces. Adding a new ``MemorySource`` therefore
-    cannot silently fall out of the filter — ``band_of`` is exhaustive over the
-    enum, so the new member lands in whichever band it declares.
+    ``search``'s band restriction runs in SQL against the ``band`` column, which every
+    write fills from :func:`~ai_assistant.core.types.record_band` (ADR-0328 §7:11's
+    derivation, rewritten on every write of the row). A memory's band is computed
+    from its supports and no field of its blob holds it, so the restriction cannot
+    read the blob as it once read ``provenance.source``.
 
     The caller's ``Sequence`` is consumed here, on ``search``'s first executed line,
     which is also ADR-0065 §3's discharge for this parameter. Duplicates in it are
     set semantics and change nothing.
 
     Returns:
-        The matching source values as stored (the ``StrEnum``'s values), empty when
-        ``bands`` is empty — the selection that selects nothing.
+        The selected bands' values, empty when ``bands`` is empty — the selection
+        that selects nothing.
     """
-    wanted = frozenset(bands)
-    return frozenset(str(source) for source in MemorySource if band_of(source) in wanted)
+    return frozenset(str(band) for band in bands)
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -484,12 +483,12 @@ class SqliteMemoryStore:
             # old state before chmod or schema writes, then restrict permissions
             # before the first write creates a rollback journal (ADR-0004).
             conn.execute("BEGIN IMMEDIATE")
-            existing_format = check_format(conn, allow_empty=True)
+            existing_format = stored_format(conn, allow_empty=True, accepted=MEMORY_RECORD_FORMATS)
             self._restrict_permissions()
-            if not existing_format:
+            if existing_format is None:
                 conn.execute("CREATE TABLE episode_record_format(version INTEGER NOT NULL)")
                 conn.execute(
-                    "INSERT INTO episode_record_format VALUES (?)", (EPISODE_RECORD_FORMAT,)
+                    "INSERT INTO episode_record_format VALUES (?)", (MEMORY_RECORD_FORMAT,)
                 )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -522,7 +521,8 @@ class SqliteMemoryStore:
                 "kind TEXT NOT NULL, data TEXT NOT NULL, "
                 "expires_at INTEGER, valid_until INTEGER, valid_from INTEGER, "
                 "about_person TEXT, revision INTEGER NOT NULL DEFAULT 0, occurred_at INTEGER, "
-                "channel_type TEXT, channel_instance TEXT, is_open INTEGER NOT NULL DEFAULT 0)"
+                "channel_type TEXT, channel_instance TEXT, is_open INTEGER NOT NULL DEFAULT 0, "
+                "band TEXT)"
             )
             self._init_revision_issuer(conn)
             conn.execute(
@@ -537,6 +537,7 @@ class SqliteMemoryStore:
             )
             self._migrate_records(conn)
             self._migrate_walk_key(conn)
+            self._upgrade_to_memories(conn, existing_format)
             self._index_channels(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
@@ -963,6 +964,97 @@ class SqliteMemoryStore:
         conn.execute("DROP TABLE records")
         conn.execute("ALTER TABLE records_walkable RENAME TO records")
 
+    def _upgrade_to_memories(self, conn: sqlite3.Connection, found: int | None) -> None:
+        """Upgrade a file at the previous label into the memory record (ADR-0328 §16).
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, after the column migrations
+        and before any read or write is admitted, and either completes or leaves the
+        file as it found it (ADR-0326 §4:3): every statement below rolls back with the
+        transaction on any failure, the label included.
+
+        - **The band column** is added where the file lacks it, and filled for every
+          row from :func:`~ai_assistant.core.types.record_band` — ADR-0328 §7:11's
+          derivation, which every later write rewrites.
+        - **Each semantic, preference or procedural record becomes a memory at the
+          same id**, by §16's table (:func:`~ai_assistant.memory._legacy.memory_from_legacy`):
+          no model, and nothing dropped (§16:1, ADR-0326 §4:4). Its ``revision`` is
+          carried rather than reissued, as :meth:`_migrate_walk_key` carries it: the
+          upgrade is no caller's write. Its vector is kept: it embeds the record's
+          ``content``, which is the wording except where a preference's context or a
+          procedural record's steps were appended.
+        - **No episode is rewritten** (§16:7), a recall item naming ``semantic``
+          included; only its band column is filled.
+        - **The label advances** to :data:`MEMORY_RECORD_FORMAT` (§16:8).
+
+        A fresh store, written at the new label from its first open, has nothing to
+        upgrade, and neither has a file already at it.
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store.
+
+        Raises:
+            MemoryStoreError: If a stored record cannot be upgraded. Nothing is
+                written, and the file is left as it was found.
+        """
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(records)")}
+        if "band" not in columns:
+            conn.execute("ALTER TABLE records ADD COLUMN band TEXT")
+        if found != EPISODE_RECORD_FORMAT:
+            return
+        now = self._now()
+        chunk = conn.execute(
+            "SELECT rowid, kind, data FROM records ORDER BY rowid LIMIT ?", (_BACKFILL_CHUNK,)
+        ).fetchall()
+        while chunk:
+            for rowid, kind, data in chunk:
+                self._upgrade_row(conn, int(rowid), str(kind), str(data), now)
+            chunk = conn.execute(
+                "SELECT rowid, kind, data FROM records WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                (chunk[-1][0], _BACKFILL_CHUNK),
+            ).fetchall()
+        conn.execute("UPDATE episode_record_format SET version = ?", (MEMORY_RECORD_FORMAT,))
+
+    def _upgrade_row(
+        self, conn: sqlite3.Connection, rowid: int, kind: str, data: str, now: datetime
+    ) -> None:
+        """Upgrade one stored row in place (ADR-0328 §16), inside the caller's transaction.
+
+        Raises:
+            MemoryStoreError: If the row cannot be read or upgraded.
+        """
+        if kind not in LEGACY_KINDS:
+            conn.execute(
+                "UPDATE records SET band = ? WHERE rowid = ?",
+                (str(record_band(self._decode(data))), rowid),
+            )
+            return
+
+        def occurred_at(episode_id: str) -> datetime | None:
+            found = conn.execute(
+                "SELECT occurred_at FROM records WHERE id = ? AND kind = ?",
+                (episode_id, MemoryKind.EPISODIC.value),
+            ).fetchone()
+            if found is None or found[0] is None:
+                return None
+            return _EPOCH + timedelta(microseconds=int(found[0]))
+
+        try:
+            memory = memory_from_legacy(json.loads(data), occurred_at=occurred_at, now=now)
+        except (ValueError, TypeError, KeyError) as exc:
+            msg = f"a record stored before ADR-0328 could not be upgraded: {exc}"
+            raise MemoryStoreError(msg) from exc
+        conn.execute(
+            "UPDATE records SET kind = ?, data = ?, band = ? WHERE rowid = ?",
+            (
+                memory.kind,
+                memory.model_dump_json(exclude={"revision"}),
+                str(record_band(memory)),
+                rowid,
+            ),
+        )
+
     @staticmethod
     def _index_channels(conn: sqlite3.Connection) -> None:
         """Create the indexes ADR-0283's and ADR-0286's reads are served from, in ``_setup``.
@@ -1275,6 +1367,11 @@ class SqliteMemoryStore:
         channel = channel_of(record)
         channel_type = None if channel is None else channel.channel_type
         channel_instance = None if channel is None else channel.instance_id
+        # ADR-0328 §7:11: a store may persist a value §7 computes, as a derivation it
+        # rewrites on every write of the row and reads to compute nothing else.
+        # ``search`` binds the band before its cut and cannot compute a memory's band
+        # in SQL, so the band is that derivation.
+        band = str(record_band(record))
         row = conn.execute(
             "SELECT rowid, kind, data FROM records WHERE id = ?", (record.id,)
         ).fetchone()
@@ -1295,8 +1392,8 @@ class SqliteMemoryStore:
             cursor = conn.execute(
                 "INSERT INTO records"
                 "(id, kind, data, expires_at, valid_until, valid_from, about_person, revision, "
-                "occurred_at, channel_type, channel_instance, is_open) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "occurred_at, channel_type, channel_instance, is_open, band) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.id,
                     record.kind,
@@ -1310,6 +1407,7 @@ class SqliteMemoryStore:
                     channel_type,
                     channel_instance,
                     int(open_episode),
+                    band,
                 ),
             )
             rowid = cursor.lastrowid
@@ -1318,7 +1416,7 @@ class SqliteMemoryStore:
             conn.execute(
                 "UPDATE records SET kind = ?, data = ?, expires_at = ?, valid_until = ?, "
                 "valid_from = ?, about_person = ?, revision = ?, occurred_at = ?, "
-                "channel_type = ?, channel_instance = ?, is_open = ? WHERE rowid = ?",
+                "channel_type = ?, channel_instance = ?, is_open = ?, band = ? WHERE rowid = ?",
                 (
                     record.kind,
                     data,
@@ -1331,6 +1429,7 @@ class SqliteMemoryStore:
                     channel_type,
                     channel_instance,
                     int(open_episode),
+                    band,
                     rowid,
                 ),
             )
@@ -1724,13 +1823,13 @@ class SqliteMemoryStore:
             and the lock's, so a caller mutating the list it passed while the
             embedding was in flight was answered from the later version (#436).
             ``bands`` is snapshotted on that same first line, and **both** the
-            source set the SQL wants and the count the trace records come off that
+            band set the SQL wants and the count the trace records come off that
             one copy — two reads of the caller's sequence would let the search and
             its own trace disagree about what was asked for.
         """
         wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
         # **One read of the caller's sequence, and both derivations off the copy.**
-        # ``_sources_in(bands)`` followed by ``frozenset(bands)`` would be two reads
+        # ``_band_values(bands)`` followed by ``frozenset(bands)`` would be two reads
         # of a caller-owned mutable container. No ``await`` separates them, so on one
         # event loop they cannot disagree and ADR-0065 §3 is discharged either way;
         # what the snapshot buys is that the restriction the SQL applies and the
@@ -1738,7 +1837,7 @@ class SqliteMemoryStore:
         # happen to be adjacent — so no later edit between them can make the record
         # describe a selection the read never applied.
         selected = None if bands is None else tuple(bands)
-        wanted_sources = None if selected is None else _sources_in(selected)
+        wanted_bands = None if selected is None else _band_values(selected)
         selected_bands = None if selected is None else len(frozenset(selected))
         # Observed before any work, so §8's "the trace still carries its ``limit``"
         # holds on the fault path too. ``_searched`` is *constructed* here and not
@@ -1749,7 +1848,7 @@ class SqliteMemoryStore:
             entry[traces.BANDS] = selected_bands
         retrieved = await self._traces.observing(
             traces.SEAM_SEARCH,
-            self._searched(query, limit, wanted, wanted_sources),
+            self._searched(query, limit, wanted, wanted_bands),
             _retrieval_reading,
             entry=entry,
         )
@@ -1760,7 +1859,7 @@ class SqliteMemoryStore:
         query: str,
         limit: int,
         wanted: frozenset[str] | None,
-        wanted_sources: frozenset[str] | None,
+        wanted_bands: frozenset[str] | None,
     ) -> _Retrieved:
         """The read itself, returning its records **and** what only it can count.
 
@@ -1773,7 +1872,7 @@ class SqliteMemoryStore:
             query: The search text.
             limit: The caller's ceiling.
             wanted: The kind restriction, already materialised.
-            wanted_sources: The band restriction as source names, already
+            wanted_bands: The band restriction as stored band values, already
                 materialised; ``None`` for every band.
 
         Returns:
@@ -1785,10 +1884,9 @@ class SqliteMemoryStore:
         """
         if limit <= 0 or not query.strip():
             return _Retrieved(records=[], capped=False, observed={})
-        # An empty ``bands`` selects nothing (ADR-0113 §3), and so does a selection
-        # no source maps into — the same answer by the same reasoning, and taken
-        # before the embedder is paid for a query whose result is already known.
-        if _selects_nothing(wanted_sources):
+        # An empty ``bands`` selects nothing (ADR-0113 §3), taken before the embedder
+        # is paid for a query whose result is already known.
+        if _selects_nothing(wanted_bands):
             return _Retrieved(records=[], capped=False, observed={})
         vector = await self._embed_one(query)
         async with self._lock:
@@ -1797,7 +1895,7 @@ class SqliteMemoryStore:
                 vector,
                 limit,
                 wanted,
-                wanted_sources,
+                wanted_bands,
                 self._now_micros(),
             )
         return _Retrieved(
@@ -1814,7 +1912,7 @@ class SqliteMemoryStore:
         vector: Embedding,
         limit: int,
         wanted: frozenset[str] | None,
-        wanted_sources: frozenset[str] | None,
+        wanted_bands: frozenset[str] | None,
         now: int,
     ) -> tuple[list[tuple[str, int, float]], bool, dict[str, int]]:
         """Run the KNN with every eligibility predicate bound into it.
@@ -1840,24 +1938,17 @@ class SqliteMemoryStore:
 
         **Where each predicate reads from.** ``kind``, ``expires_at`` and both
         window ends are columns on ``records`` and are compared as exact integer
-        microsecond epochs; the band is still ``json_extract`` over the stored blob,
-        because a source is not a column and ADR-0113 §10 left that mechanism here.
+        microsecond epochs; the band is the ``band`` column every write fills from
+        :func:`~ai_assistant.core.types.record_band` (ADR-0328 §7:11), since a
+        memory's band is computed from its supports and no field of its blob holds it.
         ``valid_from`` **became** a column for this method (see
         :meth:`_migrate_records`): as ISO text of variable precision it cannot be
         compared correctly in SQL at all, and it is the only axis the old post-cut
         pass had to decode a blob to apply.
 
-        **What the subquery costs on a corrupt store, stated rather than hidden.**
-        Where a band is selected the restriction reads *every* row's JSON, so a
-        single malformed ``data`` blob makes that search raise whichever band was
-        asked for — where an unfiltered search raises only when the corrupt row is
-        actually among the KNN's hits. That is a real amplification and it is
-        accepted: the store is corrupt either way, the failure is a conforming
-        ``MemoryStoreError`` that a caller can degrade on, and the
-        alternative — a ``json_valid`` guard that skips unreadable rows — would
-        silently drop a live belief out of a band-scoped answer, which is worse than
-        failing loudly. An indexed source column would remove it, and is the reason
-        to reach for one.
+        **The band column removed the corrupt-store amplification** a band read over
+        every row's JSON once carried: a malformed ``data`` blob now raises only when
+        the corrupt row is among the KNN's hits, as an unfiltered search always did.
 
         **All four exclusion counts are structural zeros, written as literals**
         (ADR-0128 §3). Each predicate binds before the cut, so this method has no
@@ -1917,14 +2008,11 @@ class SqliteMemoryStore:
             # conjunctive reading ``bands=()`` gets by short circuit.
             eligible.append(f"kind IN ({', '.join('?' * len(wanted))})")
             restriction.extend(sorted(wanted))
-        if wanted_sources is not None:
+        if wanted_bands is not None:
             # Non-empty: ``search`` short-circuits an empty band selection before
             # the embedder is paid for it.
-            eligible.append(
-                f"json_extract(data, '$.provenance.source') "
-                f"IN ({', '.join('?' * len(wanted_sources))})"
-            )
-            restriction.extend(sorted(wanted_sources))
+            eligible.append(f"band IN ({', '.join('?' * len(wanted_bands))})")
+            restriction.extend(sorted(wanted_bands))
         sql = (
             "SELECT r.data, r.revision, v.distance FROM vec_records v "  # noqa: S608 — bound above
             "JOIN records r ON r.rowid = v.rowid "
@@ -1937,16 +2025,9 @@ class SqliteMemoryStore:
             # what makes a distance undefined.
             "ORDER BY v.distance IS NULL, v.distance"
         )
-        # Wrapped as ``_list_beliefs_sync`` wraps its own, because the restriction
-        # genuinely *does* add a failure mode the plain KNN lacked. ``json_extract``
-        # raises ``malformed JSON`` on a corrupt ``data`` blob, and it raises during
-        # the subquery — before the decode path that used to translate that same
-        # corruption. Unfiltered, a corrupt row surfaces as ``MemoryStoreError`` out
-        # of ``_decode``; band-scoped and unwrapped it surfaced as a raw
-        # ``sqlite3.OperationalError``, which ``LoopEngine._retrieve`` did not
-        # catch, so a corrupt store aborted the turn instead of degrading it. An
-        # earlier revision of this comment asserted the opposite and was wrong; the
-        # case is pinned by test.
+        # Wrapped as ``_list_beliefs_sync`` wraps its own, so a driver failure on the
+        # restricted KNN surfaces as ``MemoryStoreError`` rather than as a raw
+        # ``sqlite3.Error`` a caller degrading on the store's own error would miss.
         try:
             rows = self._conn.execute(sql, [blob, fetch_k, *restriction]).fetchall()
         except sqlite3.Error as exc:
@@ -2325,7 +2406,8 @@ class SqliteMemoryStore:
 
         Args:
             bands: Belief bands to include; ``None`` is every band, ``()`` none.
-            kinds: Memory kinds to include; ``None`` is every kind, ``()`` none.
+            kinds: Kinds to include; ``None`` is the memory kind alone, so episodes
+                are excluded by default (ADR-0328 §11:2), and ``()`` is none.
             limit: Page size; ``0`` returns an empty page.
             offset: How many ordered, filtered records to skip.
 
@@ -2338,11 +2420,11 @@ class SqliteMemoryStore:
                 corrupt, or the injected clock's reading is not conforming.
         """
         wanted_bands = None if bands is None else frozenset(bands)
-        wanted_kinds = None if kinds is None else frozenset(str(kind) for kind in kinds)
-        _check_page_bounds(limit, offset)
-        selects_nothing = (wanted_bands is not None and not wanted_bands) or (
-            wanted_kinds is not None and not wanted_kinds
+        wanted_kinds = frozenset(
+            str(kind) for kind in ((MemoryKind.MEMORY,) if kinds is None else kinds)
         )
+        _check_page_bounds(limit, offset)
+        selects_nothing = (wanted_bands is not None and not wanted_bands) or not wanted_kinds
         if limit == 0 or selects_nothing:
             return []
 
@@ -2353,30 +2435,28 @@ class SqliteMemoryStore:
             record
             for record in (self._decoded_at(data, revision) for data, revision in rows)
             if record.validity.live_at(now)
-            and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
+            and (wanted_bands is None or record_band(record) in wanted_bands)
         ]
         page = _newest_revision_first(matched)[offset : offset + limit]
         # Cleared, not merely absent: a record re-added after a search carries that
         # query's relevance, and nothing was ranked here (ADR-0073 §2).
         return [record.model_copy(update={"score": None}) for record in page]
 
-    def _list_beliefs_sync(self, kinds: frozenset[str] | None, now: int) -> list[tuple[str, int]]:
+    def _list_beliefs_sync(self, kinds: frozenset[str], now: int) -> list[tuple[str, int]]:
         """Read every candidate row for one page: the column predicates, unpaged.
 
-        ``kinds`` is non-empty when it is not ``None`` — the caller short-circuits an
-        empty filter — so the ``IN`` list always has at least one placeholder. Only
-        the *placeholders* are interpolated; every value is bound, so the assembled
-        text carries no caller data.
+        ``kinds`` is non-empty — the caller short-circuits an empty filter — so the
+        ``IN`` list always has at least one placeholder. Only the *placeholders* are
+        interpolated; every value is bound, so the assembled text carries no caller
+        data.
         """
         sql = (
-            "SELECT data, revision FROM records "
+            "SELECT data, revision FROM records "  # noqa: S608 — placeholders only, bound below
             "WHERE (expires_at IS NULL OR expires_at > ?) "
-            "AND (valid_until IS NULL OR valid_until > ?)"
+            "AND (valid_until IS NULL OR valid_until > ?) "
+            f"AND kind IN ({', '.join('?' * len(kinds))})"
         )
-        params: list[object] = [now, now]
-        if kinds is not None:
-            sql += f" AND kind IN ({', '.join('?' * len(kinds))})"
-            params.extend(sorted(kinds))
+        params: list[object] = [now, now, *sorted(kinds)]
         try:
             rows = self._conn.execute(sql, params).fetchall()
         except sqlite3.Error as exc:

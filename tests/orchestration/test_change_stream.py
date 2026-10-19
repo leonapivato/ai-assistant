@@ -43,13 +43,10 @@ from ai_assistant.core.types import (
     DeviceAccess,
     DeviceChange,
     DevicesChangedChange,
-    MemorySource,
     MessageAddedChange,
     MessageAuthor,
     NewMessage,
-    Provenance,
     RequestingDevice,
-    SemanticMemory,
     TranscriptMessage,
     UserMessage,
 )
@@ -62,6 +59,8 @@ from ai_assistant.orchestration.conversations import (
 )
 from ai_assistant.orchestration.payloads import canonical_payload
 from ai_assistant.testing import FakeConversationStore, FakeMemoryStore
+from ai_assistant.testing.memories import memory as memory_record
+from ai_assistant.testing.memories import said_support
 from ai_assistant.wire.client import HubEngineClient
 from ai_assistant.wire.server import ConnectionLimits, serve_connection
 
@@ -650,16 +649,7 @@ class _Unreadable(FakeMemoryStore):
 async def test_a_record_that_cannot_be_read_is_still_forgotten() -> None:
     """ADR-0073 §5: the read a forget makes for the stream never stands in its way."""
     memory = _Unreadable("note-1")
-    await memory.add(
-        SemanticMemory(
-            id="note-1",
-            content="unreadable",
-            fact="unreadable",
-            provenance=Provenance(
-                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AT
-            ),
-        )
-    )
+    await memory.add(memory_record("note-1", "unreadable", said_support(when=_AT, added_at=_AT)))
     engine = Harness(chat_reader=False, memory=memory).engine
     try:
         assert await engine.forget("note-1") is True

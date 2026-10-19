@@ -94,7 +94,7 @@ from ai_assistant.testing.spend import countable
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from ai_assistant.core.types import FrozenJson, MemoryRecord, ToolCall
+    from ai_assistant.core.types import FrozenJson, ToolCall
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: The id this fake's declaration carries. Distinct from the production searcher's,
@@ -607,7 +607,7 @@ class FakeWebSearcher:
                 return SearchOutcome(refusal=SearchRefusal.NO_RESULT)
             return SearchOutcome(reported_at=self._reported_at, records=minted)
 
-    def _mint(self, content: str) -> MemoryRecord:
+    def _mint(self, content: str) -> SemanticMemory:
         """One ``SEMANTIC``, ``EXTERNAL``-sourced record carrying ``content``.
 
         Args:

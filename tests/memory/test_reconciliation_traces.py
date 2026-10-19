@@ -36,12 +36,11 @@ from ai_assistant.core.errors import UnresolvedEvidenceError
 from ai_assistant.core.types import (
     ConflictRelation,
     EpisodicMemory,
+    Memory,
     MemoryDecisionKind,
     MemorySource,
     MemoryUpdateProposal,
-    PreferenceMemory,
     Provenance,
-    SemanticMemory,
     TraceKind,
     TraceOutcome,
 )
@@ -52,6 +51,7 @@ from ai_assistant.memory._reconciler import (
     ReconcilerReport,
 )
 from ai_assistant.testing import FakeMemoryPolicy, FakeModelProvider, FakeTraceSink
+from ai_assistant.testing.memories import memory, remembered_support, said_support
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -81,22 +81,17 @@ def _fixed_now() -> datetime:
     return datetime(2026, 6, 1, tzinfo=UTC)
 
 
-def _prov(source: MemorySource = MemorySource.OBSERVED) -> Provenance:
-    return Provenance(
-        source=source,
-        confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.6,
-        last_updated=_WHEN,
-        evidence=(_EPISODE,),
-    )
+def _prov() -> Provenance:
+    return Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN)
 
 
 async def _plant_episode(store: MemoryStore) -> None:
-    """Store the episode every proposal here cites, so the citation resolves.
+    """Store the episode every memory here rests on, so its support resolves.
 
-    ``OBSERVED`` is in the ``DERIVED`` band, where ADR-0072 §3 obliges a citation
-    and the admissibility floor rejects one that cites nothing — and that floor is
-    *inside* ADR-0159 §2's invocation condition, so a proposal citing nothing would
-    never be reconciled and every count here would be zero for the wrong reason.
+    ADR-0328 §4:7 refuses a proposal whose support points at no held episode, and
+    the admissibility floor is *inside* ADR-0159 §2's invocation condition, so a
+    proposal resting on nothing would never be reconciled and every count here
+    would be zero for the wrong reason.
     """
     await store.add(
         EpisodicMemory(
@@ -108,15 +103,17 @@ async def _plant_episode(store: MemoryStore) -> None:
     )
 
 
-def _belief(
-    record_id: str, content: str, *, source: MemorySource = MemorySource.OBSERVED
-) -> MemoryRecord:
-    return PreferenceMemory(
-        id=record_id, content=content, preference=content, provenance=_prov(source)
+def _belief(record_id: str, content: str, *, asserted: bool = False) -> Memory:
+    """An inference on a remember call of its own, or, where ``asserted``, a said memory."""
+    support = (
+        said_support(_EPISODE)
+        if asserted
+        else remembered_support(_EPISODE, effect=f"effect-{record_id}")
     )
+    return memory(record_id, content, support)
 
 
-def _proposal(record: MemoryRecord) -> MemoryUpdateProposal:
+def _proposal(record: Memory) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(proposed=record, rationale="because")
 
 
@@ -137,7 +134,7 @@ def _writer(
     )
 
 
-async def _planted(*beliefs: MemoryRecord) -> InMemoryMemoryStore:
+async def _planted(*beliefs: Memory) -> InMemoryMemoryStore:
     store = InMemoryMemoryStore(now=_fixed_now)
     await _plant_episode(store)
     for belief in beliefs:
@@ -798,7 +795,7 @@ async def test_a_proposal_the_invocation_condition_excludes_contributes_zero_to_
     reconciler = _Reporting({"same": ConflictRelation.ADDS})
 
     await _writer(store, sink, reconciler=reconciler).ingest(
-        _proposal(_belief("new", _MORNING, source=MemorySource.USER_ASSERTED))
+        _proposal(_belief("new", _MORNING, asserted=True))
     )
 
     trace = _only(sink)
@@ -819,16 +816,8 @@ async def test_a_crossing_that_took_no_reading_carries_none_of_the_ten(
     that far".
     """
     store = await _planted()
-    unwarranted = SemanticMemory(
-        id="derived",
-        content="a conclusion drawn from nothing",
-        fact="a conclusion drawn from nothing",
-        provenance=Provenance(
-            source=MemorySource.INFERRED,
-            confidence=0.6,
-            last_updated=_WHEN,
-            evidence=("missing",),
-        ),
+    unwarranted = memory(
+        "derived", "a conclusion drawn from nothing", remembered_support("missing")
     )
 
     with pytest.raises(UnresolvedEvidenceError):

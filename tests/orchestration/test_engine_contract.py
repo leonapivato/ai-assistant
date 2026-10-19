@@ -89,16 +89,13 @@ from ai_assistant.core.types import (
     DataTier,
     GrantScope,
     Idempotency,
-    MemorySource,
     MemoryWrite,
     MemoryWriteMode,
     Placement,
     PlacementReach,
     PlacementSetter,
-    Provenance,
     Reversibility,
     RiskLevel,
-    SemanticMemory,
     StoryMember,
     StoryMemberKind,
     ToolCost,
@@ -113,10 +110,6 @@ from ai_assistant.orchestration import (
     GrantOperations,
     HeldSource,
 )
-
-# The engine's own default confirmation ceiling, read from where it is declared so
-# this helper cannot drift from it. Every fixture below wires at the default; the
-# one that does not says which value it wants and why (ADR-0198 §4).
 from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
@@ -135,6 +128,12 @@ from ai_assistant.testing import (
     FakeTraceSink,
 )
 from ai_assistant.testing.grants import source_grant
+
+# The engine's own default confirmation ceiling, read from where it is declared so
+# this helper cannot drift from it. Every fixture below wires at the default; the
+# one that does not says which value it wants and why (ADR-0198 §4).
+from ai_assistant.testing.memories import memory as memory_record
+from ai_assistant.testing.memories import said_support
 from ai_assistant.tools.registry import InMemoryToolRegistry
 
 if TYPE_CHECKING:
@@ -282,14 +281,11 @@ def _store_belief_holder(memory: FakeMemoryStore) -> BeliefHolder:
         await memory.write_atomic(
             [
                 MemoryWrite(
-                    record=SemanticMemory(
-                        id=record_id,
-                        content=content,
-                        fact=content,
+                    record=memory_record(
+                        record_id,
+                        content,
+                        said_support(when=AT, added_at=AT),
                         validity=Validity(),
-                        provenance=Provenance(
-                            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
-                        ),
                         placement=Placement() if placement is None else placement,
                     ),
                     mode=MemoryWriteMode.INSERT_IF_ABSENT,
@@ -758,14 +754,11 @@ class TestEngineContract(AssistantEngineContract):
         await records.write_atomic(
             [
                 MemoryWrite(
-                    record=SemanticMemory(
-                        id="rec-derived",
-                        content="the user's consultant said the merger is off",
-                        fact="the user's consultant said the merger is off",
+                    record=memory_record(
+                        "rec-derived",
+                        "the user's consultant said the merger is off",
+                        said_support(when=AT, added_at=AT),
                         validity=Validity(),
-                        provenance=Provenance(
-                            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
-                        ),
                         placement=Placement(
                             reach=PlacementReach.OWNER,
                             set_by=PlacementSetter.DERIVED,

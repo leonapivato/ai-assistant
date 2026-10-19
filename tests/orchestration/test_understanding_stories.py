@@ -39,15 +39,13 @@ from ai_assistant.core.types import (
     BeliefBand,
     ChannelContext,
     ChannelContextItem,
+    Memory,
     MemoryKind,
-    MemorySource,
     MessageAuthor,
-    Provenance,
     RecallCue,
     RecalledItem,
     RecallOutcome,
     RecallProvenance,
-    SemanticMemory,
     StoryActor,
     StoryNote,
     StoryNoteAuthor,
@@ -65,6 +63,7 @@ from ai_assistant.orchestration.understanding import (
     place_window_links,
 )
 from ai_assistant.testing import FakeModelProvider, FakeStoryStore
+from ai_assistant.testing.memories import memory, remembered_support
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import ActivationUnderstanding, EpisodicMemory
@@ -120,7 +119,7 @@ async def _understand(  # noqa: PLR0913 — the model, then one knob per input a
     *,
     stories: Candidates | None,
     episodes: tuple[EpisodicMemory, ...] | None = (),
-    recalled: tuple[EpisodicMemory | SemanticMemory, ...] = (),
+    recalled: tuple[EpisodicMemory | Memory, ...] = (),
     window: ChannelWindow = WINDOW,
     audience: TurnSupply = BOUNDED,
 ) -> ActivationUnderstanding:
@@ -158,12 +157,7 @@ def _item(record_id: str, kind: MemoryKind) -> RecalledItem:
     )
 
 
-_FACT: Final = SemanticMemory(
-    id="fact-1",
-    content="The canoe holds two.",
-    fact="The canoe holds two.",
-    provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
-)
+_FACT: Final = memory("fact-1", "The canoe holds two.", remembered_support(when=AT, added_at=AT))
 
 
 def _payload(model: FakeModelProvider, call: int = 0) -> dict[str, Any]:

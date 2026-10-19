@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from pydantic import BaseModel, ConfigDict
@@ -27,10 +27,11 @@ from ai_assistant.core.types import (
     Belief,
     BeliefBand,
     EncodableText,
-    Evidence,
+    EvidenceSummary,
     FrozenJsonMapping,
     Identifier,
-    MemoryKind,
+    TrackRecordSummary,
+    belief_view,
 )
 from ai_assistant.orchestration.payloads import (
     canonical_payload,
@@ -39,6 +40,7 @@ from ai_assistant.orchestration.payloads import (
     identifier,
     page_argument,
 )
+from ai_assistant.testing.memories import memory, message_support, said_support
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -47,6 +49,20 @@ if TYPE_CHECKING:
 def _encoded(value: object) -> str:
     """The canonical bytes as text, so a failure message is readable."""
     return canonical_payload(value).decode("utf-8")
+
+
+_SAID_AT: Final = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
+
+
+def _belief() -> Belief:
+    """A single-memory view with two supports, the second gone (ADR-0328 §15:2)."""
+    record = memory(
+        "b-1",
+        "prefers dark mode",
+        said_support("activation:a", when=_SAID_AT, added_at=_SAID_AT),
+        message_support("activation:b", when=_SAID_AT, added_at=_SAID_AT),
+    )
+    return belief_view(record, now=_SAID_AT, contents={record.supports[0].points_at: "said so"})
 
 
 class _Token(BaseModel):
@@ -240,17 +256,11 @@ class TestInstants:
         """
         offset = datetime.fromisoformat("2026-08-01T07:00:00-05:00")
         utc = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
-        as_offset = Belief(
-            id="b-1",
-            band=BeliefBand.ASSERTED,
-            kind=MemoryKind.PREFERENCE,
-            content="x",
-            confidence=1.0,
-            last_updated=offset,
-        )
-        as_utc = as_offset.model_copy(update={"last_updated": utc})
+        fields = _belief().model_dump()
+        as_offset = Belief.model_validate(fields | {"as_of": offset})
+        as_utc = as_offset.model_copy(update={"as_of": utc})
         assert canonical_payload(as_offset) == canonical_payload(as_utc)
-        assert b'"last_updated":"2026-08-01T12:00:00Z"' in canonical_payload(as_offset)
+        assert b'"as_of":"2026-08-01T12:00:00Z"' in canonical_payload(as_offset)
 
 
 class TestDurations:
@@ -323,45 +333,29 @@ class TestComposites:
         assert one == other
 
     def test_a_belief_shaped_model(self) -> None:
-        """§5e's composite vector: nested models, an optional in a tuple, an enum, a float.
+        """§5e's composite vector: nested models, a tuple of them, enums and a null.
 
-        ``evidence_elided`` is in the bytes because ADR-0107 §3 put it on the type,
-        and it sorts between ``evidence`` and ``id`` — §2's member sort doing its job
-        on a field nobody chose the position of. **ADR-0087 §5 wrote this case's
-        disposition in advance**: §5e's composite vectors "state the field set they
-        were built over inline, so that a vector remains verifiable whatever the
-        surface ADR settles", and they "stay verifiable if a field is later selected
-        differently". The vector witnesses the *encoding rules*, not a frozen field
-        list, and every rule it was built for still shows here. ADR-0107 §11 reaches
-        the same place from the other side, finding no record owed on ADR-0087
-        because it "fixes the encoding an integer already had".
-
-        Left at the default ``0`` deliberately, unlike every case ADR-0107 §8 item 6
-        governs: what this vector is for is the byte shape, and the field appearing
-        *at* its default is the stronger witness that the codec projects generically
-        over the whole model rather than over a chosen subset.
-
-        ADR-0189 §2's ``attestation`` and ``rests_on_recorded_external_content`` join
-        it on the same ground, and at their defaults for the same reason: this belief
-        is a user's own assertion, so neither carries a value, and both are in the
-        bytes anyway. Which is what makes the ADR-0124 §9 bump ``wire/envelope.py``
-        records at version 13 bite on **every** belief rather than on attested ones.
+        ADR-0087 §5 wrote this case's disposition in advance: §5e's composite vectors
+        "state the field set they were built over inline, so that a vector remains
+        verifiable whatever the surface ADR settles". ADR-0328 §15 reshaped the
+        single-memory view, so the vector is rebuilt over its fields: the nested
+        evidence summary and track record sort their own members, the supports are a
+        tuple of models in the memory's order, a gone support's ``content`` is ``null``,
+        and every instant is ``Z``-suffixed.
         """
-        belief = Belief(
-            id="b-1",
-            band=BeliefBand.ASSERTED,
-            kind=MemoryKind.PREFERENCE,
-            content="prefers dark mode",
-            confidence=0.9,
-            last_updated=datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC),
-            evidence=(Evidence(content="said so"), Evidence()),
-        )
-        assert _encoded(belief) == (
-            '{"attestation":null,"band":"asserted","confidence":0.9,'
-            '"content":"prefers dark mode",'
-            '"evidence":[{"content":"said so"},{"content":null}],"evidence_elided":0,'
-            '"id":"b-1","kind":"preference","last_updated":"2026-08-01T12:00:00Z",'
-            '"rests_on_recorded_external_content":false,"valid_until":null}'
+        assert _encoded(_belief()) == (
+            '{"as_of":"2026-08-01T12:00:00Z","band":"asserted","content":"prefers dark mode",'
+            '"evidence":{"against":0,"episodes":2,"latest":"2026-08-01T12:00:00Z",'
+            '"supporting":2},"id":"b-1","learned":"2026-08-01T12:00:00Z","legacy":false,'
+            '"reading_certainty":"sure","rests_on_outside_content":false,"standing":"said",'
+            '"status":"current","supports":[{"about_when":null,"content":"said so",'
+            '"counts":true,"direction":"for","how_sure":null,"note":"",'
+            '"origin":"user_message","part":"input","source_details":null,'
+            '"when":"2026-08-01T12:00:00Z"},{"about_when":null,"content":null,"counts":true,'
+            '"direction":"for","how_sure":"sure","note":"","origin":"assistant_message",'
+            '"part":"round_message","source_details":null,"when":"2026-08-01T12:00:00Z"}],'
+            '"supports_gone":false,"track_record":{"held_up":0,"last_used":null,'
+            '"let_down":0,"relied_on":0},"unbacked":false,"valid_until":null}'
         )
 
     def test_a_confirmation_shaped_model_sorts_a_frozen_mapping_s_keys(self) -> None:
@@ -402,9 +396,12 @@ class TestComposites:
 
     def test_a_page_is_the_elements_comma_separated(self) -> None:
         """§5e: a page of models is a JSON array of exactly those bytes, no whitespace."""
-        first = Evidence(content="a")
-        second = Evidence()
-        assert _encoded((first, second)) == '[{"content":"a"},{"content":null}]'
+        first = EvidenceSummary(supporting=1, against=0, episodes=1)
+        second = EvidenceSummary(supporting=0, against=2, episodes=0)
+        assert _encoded((first, second)) == (
+            '[{"against":0,"episodes":1,"latest":null,"supporting":1},'
+            '{"against":2,"episodes":0,"latest":null,"supporting":0}]'
+        )
 
 
 class TestTheVectorsDiscriminate:
@@ -416,15 +413,7 @@ class TestTheVectorsDiscriminate:
 
     def test_model_dump_json_is_caught(self) -> None:
         """It leaves members in declaration order and spells a year duration ``P1Y``."""
-        belief = Belief(
-            id="b-1",
-            band=BeliefBand.ASSERTED,
-            kind=MemoryKind.PREFERENCE,
-            content="prefers dark mode",
-            confidence=0.9,
-            last_updated=datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC),
-            evidence=(Evidence(content="said so"), Evidence()),
-        )
+        belief = _belief()
         assert belief.model_dump_json().encode("utf-8") != canonical_payload(belief)
 
     def test_unsorted_keys_are_caught(self) -> None:
@@ -480,7 +469,7 @@ class TestTheContractLimit:
 
     def test_a_bare_payload_names_no_field(self) -> None:
         """§9: the ``None`` case is reachable, not defensive — a page is a bare array."""
-        page = tuple(Evidence(content="x" * 32) for _ in range(4))
+        page = tuple(TrackRecordSummary(relied_on=n, held_up=n, let_down=0) for n in range(4))
         with pytest.raises(OversizedValueError) as caught:
             check_payload(page, max_bytes=8, subject="the result of beliefs()")
         assert caught.value.field is None

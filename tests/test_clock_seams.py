@@ -69,7 +69,9 @@ from ai_assistant.core.types import (
     ChannelInput,
     CostBasis,
     DataTier,
+    EpisodicMemory,
     Idempotency,
+    Memory,
     MemoryDecisionKind,
     MemorySource,
     MemoryUpdateProposal,
@@ -81,7 +83,6 @@ from ai_assistant.core.types import (
     Provenance,
     Reversibility,
     RiskLevel,
-    SemanticMemory,
     StoryActor,
     StoryMember,
     StoryMemberKind,
@@ -173,6 +174,7 @@ from ai_assistant.testing import (
     FakeTraceSink,
     source_grant,
 )
+from ai_assistant.testing.memories import HELD_EPISODE, memory
 from ai_assistant.tools.builtin import CurrentTime
 
 if TYPE_CHECKING:
@@ -209,21 +211,39 @@ def _failing_clock() -> datetime:
     raise ValueError(msg)
 
 
-def _record(*, expires_at: datetime | None = None) -> SemanticMemory:
-    """A record carrying an expiry, since that is what makes a store read its clock."""
-    return SemanticMemory(
-        id="m1",
-        content="the user drinks coffee",
-        fact="the user drinks coffee",
-        provenance=Provenance(
-            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AWARE
-        ),
-        expires_at=expires_at,
-    )
+def _record(*, expires_at: datetime | None = None, record_id: str = "m1") -> Memory:
+    """A memory carrying an expiry, since that is what makes a store read its clock."""
+    return memory(record_id, "the user drinks coffee", expires_at=expires_at)
 
 
 def _proposal() -> MemoryUpdateProposal:
     return MemoryUpdateProposal(proposed=_record(), rationale="the user said so")
+
+
+async def _held_episode(store: InMemoryMemoryStore | FakeMemoryStore) -> None:
+    """The episode a proposal's support points into (ADR-0328 §4:7)."""
+    await store.add(
+        EpisodicMemory(
+            id=HELD_EPISODE,
+            content="the user said they drink coffee",
+            provenance=Provenance(
+                source=MemorySource.OBSERVED, confidence=0.9, last_updated=_AWARE
+            ),
+            occurred_at=_AWARE,
+        )
+    )
+
+
+async def _held(store: InMemoryMemoryStore | FakeMemoryStore) -> None:
+    """The episode the proposal's support points into, and a memory it reinforces.
+
+    A ``REINFORCE`` is the ruling whose added support's ``added_at`` the writer stamps
+    from its clock (ADR-0328 §5), through ``model_copy(update=...)``, past every
+    validator; the writer refuses a proposal whose support's episode it does not hold
+    (ADR-0328 §4:7), so the episode is seeded too.
+    """
+    await _held_episode(store)
+    await store.add(_record(record_id="m0"))
 
 
 @dataclass(frozen=True)
@@ -268,12 +288,12 @@ async def _sqlite_store(now: Clock) -> None:
 
 
 async def _ingestor(now: Clock) -> None:
-    # STORE_TEMPORARY is the ruling whose expiry stamp reads the clock, and it
-    # reaches the store through `model_copy(update=...)`, past every validator.
+    store = InMemoryMemoryStore(now=lambda: _AWARE)
+    await _held(store)
     await MemoryIngestor(
         traces_sink=FakeTraceSink(),
-        store=InMemoryMemoryStore(now=lambda: _AWARE),
-        policy=FakeMemoryPolicy(MemoryDecisionKind.STORE_TEMPORARY),
+        store=store,
+        policy=FakeMemoryPolicy(MemoryDecisionKind.REINFORCE),
         now=now,
     ).ingest(_proposal())
 
@@ -285,9 +305,11 @@ async def _fake_store(now: Clock) -> None:
 
 
 async def _fake_writer(now: Clock) -> None:
+    store = FakeMemoryStore(now=lambda: _AWARE)
+    await _held(store)
     await FakeMemoryWriter(
-        store=FakeMemoryStore(now=lambda: _AWARE),
-        policy=FakeMemoryPolicy(MemoryDecisionKind.STORE_TEMPORARY),
+        store=store,
+        policy=FakeMemoryPolicy(MemoryDecisionKind.REINFORCE),
         now=now,
     ).ingest(_proposal())
 
@@ -953,9 +975,11 @@ async def _ingestor_write_traces(now: Clock, sink: FakeTraceSink) -> None:
     instant on the emitter, not on the store), so the ingestor's ``now`` is left
     conforming: the reading under test is the instrument's.
     """
+    store = InMemoryMemoryStore(now=lambda: _AWARE)
+    await _held_episode(store)
     await MemoryIngestor(
         traces_sink=sink,
-        store=InMemoryMemoryStore(now=lambda: _AWARE),
+        store=store,
         policy=FakeMemoryPolicy(MemoryDecisionKind.ACCEPT),
         now=lambda: _AWARE,
         traces_now=now,

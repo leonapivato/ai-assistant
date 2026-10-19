@@ -45,28 +45,80 @@ from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 #: an older store (ADR-0309 §6:4).
 EPISODE_RECORD_FORMAT: Final[int] = 12
 
+#: The memory store's own label, written into the same ``episode_record_format`` table
+#: of ``memory.db`` alone (ADR-0328 §16:8). ADR-0328 advances it from
+#: :data:`EPISODE_RECORD_FORMAT`, which the conversation store keeps, to 13 for the
+#: memory record: a file at 12 is **upgraded** in place when the store opens, never
+#: refused (ADR-0326 §4:7), and an older build, which serves exactly 12, refuses a file
+#: at 13 rather than misreading it (ADR-0326 §5:3).
+MEMORY_RECORD_FORMAT: Final[int] = 13
 
-def check_format(conn: sqlite3.Connection, *, allow_empty: bool = False) -> bool:
-    """Refuse pre-M39 state before mutation; return whether the current marker exists."""
+#: The memory store's labels a build opens: its own, and each it upgrades from
+#: (ADR-0326 §4:5, §5:1).
+MEMORY_RECORD_FORMATS: Final[frozenset[int]] = frozenset(
+    {EPISODE_RECORD_FORMAT, MEMORY_RECORD_FORMAT}
+)
+
+
+def stored_format(
+    conn: sqlite3.Connection,
+    *,
+    allow_empty: bool = False,
+    accepted: frozenset[int] = frozenset({EPISODE_RECORD_FORMAT}),
+) -> int | None:
+    """The format marker a store holds, refusing one this build does not open.
+
+    Args:
+        conn: An open connection to the store.
+        allow_empty: Whether a store holding no table at all is admitted, as a fresh
+            one about to be created.
+        accepted: The markers this build opens.
+
+    Returns:
+        The marker, or ``None`` for an admitted empty store.
+
+    Raises:
+        MemoryStoreError: If the marker cannot be read.
+        IncompatibleStateError: If the store holds no marker, or one not accepted.
+    """
     try:
         tables = {
             row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         if not tables and allow_empty:
-            return False
+            return None
         if "episode_record_format" in tables:
             rows = conn.execute("SELECT version FROM episode_record_format").fetchall()
-            if rows == [(EPISODE_RECORD_FORMAT,)]:
-                return True
+            if len(rows) == 1 and rows[0][0] in accepted:
+                return int(rows[0][0])
     except sqlite3.Error as exc:
         msg = "cannot read episode record format"
         raise MemoryStoreError(msg) from exc
     raise IncompatibleStateError(
         "memory store requires a fresh M39 data directory",
-        expected=f"episode record format {EPISODE_RECORD_FORMAT}",
+        expected=f"episode record format in {sorted(accepted)}",
         found="missing or unsupported episode record format",
         operator_action=("Stop the old hub and configure a new empty development data directory."),
     )
+
+
+def check_format(conn: sqlite3.Connection, *, allow_empty: bool = False) -> bool:
+    """Refuse pre-M39 state before mutation; return whether the current marker exists."""
+    return stored_format(conn, allow_empty=allow_empty) is not None
+
+
+def check_memory_format(conn: sqlite3.Connection, *, allow_empty: bool = False) -> bool:
+    """Refuse a memory store at any marker but this build's own (ADR-0328 §16:8).
+
+    For a reader of ``memory.db`` that does not upgrade it — the re-embedding
+    migration, which copies what the store holds and has no upgrade of its own. The
+    store itself opens a file at any of :data:`MEMORY_RECORD_FORMATS`.
+
+    Returns:
+        Whether the current marker exists; ``False`` only for an admitted empty store.
+    """
+    found = stored_format(conn, allow_empty=allow_empty, accepted=frozenset({MEMORY_RECORD_FORMAT}))
+    return found is not None
 
 
 def inspect_existing(path: str) -> None:
@@ -112,7 +164,9 @@ def _wal_header(path: Path) -> bool:
 
 
 def _inspect_connection(conn: sqlite3.Connection) -> None:
-    check_format(conn, allow_empty=True)
+    # Any marker some store of this build opens is admitted here, and the opener
+    # rechecks its own inside its initialization transaction.
+    stored_format(conn, allow_empty=True, accepted=MEMORY_RECORD_FORMATS)
 
 
 def _file_state(path: Path) -> tuple[int, int, int, int, int] | None:

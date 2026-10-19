@@ -23,12 +23,10 @@ from ai_assistant.core.types import (
     DigestOutcome,
     EvidenceItem,
     LabelKind,
-    MemorySource,
+    Memory,
     Message,
     PlanningLabel,
-    Provenance,
     Role,
-    SemanticMemory,
 )
 from ai_assistant.orchestration.digesting import (
     ActivationLabels,
@@ -36,6 +34,7 @@ from ai_assistant.orchestration.digesting import (
 )
 from ai_assistant.orchestration.held_results import HeldResult
 from ai_assistant.testing import FakeModelProvider
+from ai_assistant.testing.memories import memory, sourced_support
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -600,18 +599,12 @@ def test_a_label_names_one_thing_and_a_thing_takes_one_label(clash: PlanningLabe
 _MEANING: Final = "the dentist appointment on Elm Street"
 
 
-def _reported(memory_id: str, fact: str) -> SemanticMemory:
-    """A remembered fact a connected source reported: its source is outside."""
-    return SemanticMemory(
-        id=memory_id,
-        content=fact,
-        fact=fact,
-        provenance=Provenance(
-            source=MemorySource.EXTERNAL,
-            confidence=0.8,
-            last_updated=_AT,
-            attestation=Attestation(reported_by="mail", reported_at=_AT),
-        ),
+def _reported(memory_id: str, fact: str) -> Memory:
+    """A remembered fact a connected source reported: it rests on outside content."""
+    return memory(
+        memory_id,
+        fact,
+        sourced_support(Attestation(reported_by="mail", reported_at=_AT), when=_AT, added_at=_AT),
     )
 
 
@@ -622,11 +615,11 @@ _RECORDS: Final = (
 
 
 def _fetching(
-    records: Sequence[SemanticMemory] = _RECORDS, *, raises: Exception | None = None
-) -> tuple[Callable[[], Awaitable[Sequence[SemanticMemory]]], list[int]]:
+    records: Sequence[Memory] = _RECORDS, *, raises: Exception | None = None
+) -> tuple[Callable[[], Awaitable[Sequence[Memory]]], list[int]]:
     fetched: list[int] = []
 
-    async def fetch() -> Sequence[SemanticMemory]:
+    async def fetch() -> Sequence[Memory]:
         fetched.append(1)
         if raises is not None:
             raise raises
@@ -637,7 +630,7 @@ def _fetching(
 
 async def _recall(
     stage: DigestingStage,
-    fetch: Callable[[], Awaitable[Sequence[SemanticMemory]]],
+    fetch: Callable[[], Awaitable[Sequence[Memory]]],
     *,
     labels: ActivationLabels | None = None,
     deadline: datetime = _DEADLINE,
@@ -736,7 +729,7 @@ async def test_a_deadline_passed_before_the_fetch_fails_recalls_digest_unfetched
 async def test_a_fetch_outlasting_the_deadline_fails_recalls_digest() -> None:
     stage, _ = _stage(_Provider(lambda _: _reply()))
 
-    async def slow() -> Sequence[SemanticMemory]:
+    async def slow() -> Sequence[Memory]:
         await asyncio.sleep(1)
         return _RECORDS
 

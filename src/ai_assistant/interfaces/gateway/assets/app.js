@@ -4264,8 +4264,9 @@ async function readBeliefs(more, run) {
   }
 }
 
-// The band's own name, in the words a person reads it in. Every belief carries one
-// and it is never left to be implied by position (ADR-0073 §4).
+// The band's own name, in the words a person reads it in. Every memory carries one
+// and it is never left to be implied by position (ADR-0073 §4); the panel's three
+// filter checkboxes are labelled with the same words.
 function bandWords(band) {
   if (band === "asserted") {
     return "You told me";
@@ -4279,247 +4280,140 @@ function bandWords(band) {
   return band;
 }
 
-// Why a belief is held — band-dependent, and the answer is complete for all three
-// bands since ADR-0189 §2 gave the projection somewhere to put the attestation.
-//
-// **The floor is what stops the gap being papered over.** A derived belief conveys
-// how many citations stand behind it and is never presented as carrying a warrant
-// this surface cannot show; an attested one **names the reporting source and states
-// the instant that source said the fact was current** (ADR-0189 §4), and the line
-// still says outright that "last revised" is this system's clock rather than the
-// source's — which matters more now, not less, because there are two instants on the
-// screen and ADR-0073 §4 forbids offering ours as the source's. Beside any rendered
-// count sits ADR-0107 §5's ceiling, because a displaced citation is not a lost one.
-//
-// This line used to say the source and the instant were recorded and could not be
-// shown here. That was true while the projection dropped them, and it is the
-// limitation #1276 tracked; ADR-0189 §2 removed the limitation, so the sentence goes.
-//
-// **The source is named at source granularity and no finer.** ADR-0098 §8's third
-// clause is adopted unchanged by ADR-0189 §4: no surface claims to identify the author
-// within a source, so the value is apposed to "a connected source" and cannot be read
-// as a person. ADR-0093 §7 forbids deriving a reader's identity from the source's
-// location or contents, so the organiser of an invite and the sender of a mail are not
-// on the record and cannot be. Where a display label exists it renders in the
-// identity's place and the identity is the fallback (ADR-0189 §5, ADR-0093 §7's own
-// wording) — no label is configured anywhere yet, ADR-0189 §8 leaves the mechanism to
-// the registry lane, and no response on this surface carries one.
-function whyHeld(belief) {
-  if (belief.band === "asserted") {
-    return "You told me, and your own word is the whole of it.";
+// A memory's standing in plain words (ADR-0328 §6:1, §15:4). The sibling CLI says the
+// same four (`_STANDING_WORDS`).
+function standingWords(standing) {
+  if (standing === "confirmed") {
+    return "you confirmed this wording";
   }
-  if (belief.band === "attested") {
-    // Off-contract rather than impossible: ADR-0189 §2 adds no cross-field validator
-    // to the belief DTOs, so the type admits a state no store produces. Claiming
-    // nothing was recorded would err in the direction ADR-0073 §4 forgives least, and
-    // the old sentence would claim a limit this projection no longer has — what is
-    // true either way is that this surface was not handed it.
-    if (belief.attestation === null) {
-      return (
-        "A source you connected reported it — neither your word nor my inference. " +
-        "What reached me here does not name that source or say when it spoke, so " +
-        "'last revised' is when I changed my mind and not when the source spoke."
-      );
-    }
-    return (
-      `A connected source reported it — ${belief.attestation.reported_by}, neither ` +
-      "your word nor my inference. That source said this was current as of " +
-      `${belief.attestation.reported_at}, on its own clock; 'last revised' is when ` +
-      "I changed my mind and not when the source spoke."
-    );
+  if (standing === "said") {
+    return "you said it";
   }
-  // Reached only after the asserted and attested arms have returned, so this is the
-  // derived arm — which is where ADR-0189 §4 binds the externality clause, and where
-  // a captured episode lands because its provenance is `OBSERVED` (ADR-0074 §4).
-  if (belief.kind === "episodic") {
-    return whyEpisodic(belief);
+  if (standing === "source") {
+    return "from a source";
   }
-  return whyDerived(belief);
+  if (standing === "inference") {
+    return "my inference";
+  }
+  return standing;
 }
 
-// Why a captured **episode** is held: because it happened (#1891, ADR-0075 §2).
+// Where a support came from, in plain words (ADR-0328 §4's origin table), as the CLI
+// says it (`_ORIGIN_WORDS`).
+const ORIGIN_WORDS = {
+  user_message: "your message",
+  outside_input: "a report from outside",
+  confirmation: "your yes to my question",
+  evidence: "a connected source",
+  assistant_message: "my own message",
+  assistant_message_over_outside: "my own message, over outside content",
+  remembered: "something I chose to remember",
+  remembered_over_outside: "something I chose to remember, over outside content",
+  legacy: "a record kept before memories had supports",
+  legacy_outside: "a record kept before memories had supports, resting on outside content",
+};
+
+// That some of its warrant came from outside, or nothing (ADR-0189 §4, ADR-0328 §12).
 //
-// A captured turn is one of the rows this page lists, and it used to be explained by
-// `whyDerived`: "I worked it out, and no supporting evidence was recorded." Every
-// clause of that is false of a recorded exchange. Nothing worked it out; there is
-// nothing it was worked out *from*, because ADR-0074 §4 leaves an episode's evidence
-// empty by decision rather than by accident; and "no supporting evidence was recorded"
-// reads as a deficiency where there is none. ADR-0075 §2 is the doctrine: recording
-// that an exchange happened "is true because it happened, a policy has nothing to
-// weigh".
-//
-// **The heading above the line is deliberately unchanged.** ADR-0073 §4 requires every
-// row to convey its band — "never omitted, never implied by position alone" — and its
-// confidence, with no exemption for a kind, and on this surface the heading is also
-// what tells a user which of the three band checkboxes selected the row. So both stay
-// and this line says what they are: a filing, and a standing figure (ADR-0074 §4 sets
-// the confidence at capture and documents it as "standing rather than certainty").
-//
-// The sibling CLI renders the same sentence (`_why_episodic`), to the leading capital
-// this page gives every `Why:` line and the terminal gives none of them.
-//
-// ADR-0223 §5's clause is appended through the same `outsideWarrant` a belief's line
-// appends, so that arm survives this rewording unaltered: §5's first clause is that
-// the fact is never omitted for an episode, its second fixes the wording, and neither
-// is touched by giving the sentence in front of it an honest voice.
-function whyEpisodic(belief) {
+// Read off the projection's own `rests_on_outside_content`, never recomputed here
+// (ADR-0189 §2). Silent on false rather than negative: a false is *nothing outside is
+// recorded in this warrant*, never *nothing outside influenced it* (ADR-0328 §7:7). It
+// says nothing about the memory's own wording, which is this system's sentence.
+function outsideWarrant(belief) {
+  if (!belief.rests_on_outside_content) {
+    return "";
+  }
   return (
-    "This records an exchange that happened — I captured it at the time, so " +
-    "there was nothing to work out and nothing to weigh. The line above files it " +
-    "among my beliefs because that is where a captured turn sits, and the " +
-    "confidence there is a standing figure rather than a measure of doubt that " +
-    "it happened." +
+    " Some of what it rests on came from outside rather than from you — the wording " +
+    "is still my own sentence, but its warrant is not entirely mine."
+  );
+}
+
+// Why a memory is held: its standing, said in plain words (ADR-0328 §15:4). An
+// inference says its evidence summary, and whether any of it came from outside.
+function whyHeld(belief) {
+  if (belief.standing === "confirmed") {
+    return "You confirmed this wording when I asked you.";
+  }
+  if (belief.standing === "said") {
+    return "You told me, and your own word is the whole of it.";
+  }
+  if (belief.standing === "source") {
+    return "A source you connected reported it — neither your word nor my inference.";
+  }
+  const evidence = belief.evidence;
+  const against = evidence.against > 0 ? `, ${evidence.against} against it` : "";
+  // A legacy support points at no exchange (ADR-0328 §16:4), so a count of none is left
+  // unsaid rather than rendered as "across 0 exchange(s)", as the CLI does.
+  const across = evidence.episodes > 0 ? ` across ${evidence.episodes} exchange(s)` : "";
+  return (
+    `I worked it out from ${evidence.supporting} piece(s) of support${across}${against}.` +
     outsideWarrant(belief)
   );
 }
 
-// That a **derived** row's origin came from outside, or nothing (ADR-0189 §4).
-//
-// **Two arms, because the clause reaches a record whose warrant is not a derivation**
-// (ADR-0223 §5). A captured episode is listed here like anything else — this page asks
-// for beliefs without a kind filter, so every kind comes back — and ADR-0223 §1 stamps
-// the mark on one, so the predicate is now true of a record the belief sentence is
-// false of in every clause: this system did not work an episode out, there is nothing
-// it worked it out from (ADR-0074 §4 makes its evidence empty by decision), and its
-// warrant is that it happened. §5 rules a distinct arm rather than a suppression: the
-// clause is not narrowed and the projection stays kind-blind.
-//
-// The episodic wording meets §5's three conditions — it attributes no part of the
-// episode's content to a source outside this system, states no derivation from an
-// external report, and does state what the mark records: that the exchange was
-// conducted over material that included a record resting on recorded external content.
-// It says *traces back to* rather than *came from* because the mark is a disjunction
-// over `rests_on_recorded_external_content` and not over the band, so the material may
-// be this system's own derived sentence whose warrant reaches a source.
-//
-// The sibling CLI renders the same two sentences (`_outside_warrant`), because §5's
-// third clause is that every surface rendering the listing renders the arm or none
-// does: "a fact stated on one surface and not on its sibling is a fact a user learns
-// to distrust on both".
-//
-// Read off the projection's own field beside its band, and never recomputed from the
-// band: ADR-0189 §2 forbids that in as many words, and a client re-deriving the
-// disjunction is exactly how its second half gets dropped (ADR-0106 §2).
-//
-// **It says nothing about the belief's own content, and that prohibition is the
-// clause itself.** §4: a surface "does **not** present the record's own content as
-// third-party text on that ground: the content is a sentence this system's model
-// wrote". ADR-0098 §7's own round-6 draft made that reach and had to be repaired, so
-// this names the warrant and affirms the words are ours in one breath.
-//
-// **And it is silent on false rather than negative.** A false is *nothing external is
-// recorded in this warrant*, never *nothing external influenced it* (ADR-0098 §5) —
-// the link is unrecoverable once a model's output is recorded truthfully, so a line
-// claiming the negative would assert what no field holds.
-function outsideWarrant(belief) {
-  // The silence is taken before the kind is looked at, so neither arm can render a
-  // false as an assurance and a third arm could not either.
-  if (!belief.rests_on_recorded_external_content) {
-    return "";
+// The lines ADR-0328 §15:4 requires a surface showing a memory to show, beyond its
+// standing and wording: its age, its reading certainty where that is not `sure`,
+// every let-down, the legacy mark, and the two marks §7:10 and §15:7 add. One list,
+// so the row and the forget confirmation cannot show different facts.
+function beliefLines(belief) {
+  const lines = [
+    `Why: ${whyHeld(belief)}`,
+    `Learned: ${belief.learned === null ? "unknown" : belief.learned}`,
+    `As of: ${belief.as_of === null ? "unknown" : belief.as_of}`,
+  ];
+  if (belief.reading_certainty !== "sure") {
+    const reading = belief.reading_certainty === null ? "not judged" : belief.reading_certainty;
+    lines.push(`How sure the reading was: ${reading}`);
   }
-  if (belief.kind === "episodic") {
-    return (
-      " Some of the material I had in front of me during this exchange traces " +
-      "back to a connected source rather than to you — the record above is " +
-      "still my own account of what was said."
+  const track = belief.track_record;
+  if (track.let_down > 0) {
+    lines.push(`Let you down ${track.let_down} time(s) of the ${track.relied_on} I relied on it.`);
+  }
+  if (belief.legacy) {
+    lines.push(
+      "Legacy: kept before memories had supports; what it rested on then is shown as " +
+        "it was recorded."
     );
   }
-  return (
-    " Some of what I worked it out from came from a connected source rather than " +
-    "from you — the belief above is still my own sentence, but its warrant is " +
-    "not entirely mine."
-  );
-}
-
-function whyDerived(belief) {
-  const ceiling =
-    belief.evidence_elided > 0
-      ? ` Up to ${belief.evidence_elided} more piece(s) stood behind it that I no ` +
-        "longer keep a reference to — those may still exist; I stopped carrying " +
-        "them, they were not lost."
-      : "";
-  // Appended once here rather than per branch, for the ceiling's own reason: ADR-0189
-  // §4 binds the clause to the band and not to any of the four count states, so a
-  // per-branch append would be four chances to forget it — and the belief whose
-  // warrant came from outside is the one a user needs told on every one of them.
-  const outside = outsideWarrant(belief);
-  if (belief.evidence_count === 0) {
-    return (
-      (ceiling
-        ? "I worked it out, and I carry no evidence for it now."
-        : "I worked it out, and no supporting evidence was recorded.") +
-      ceiling +
-      outside
+  if (belief.unbacked) {
+    lines.push("Nothing that counts backs this wording now.");
+  }
+  if (belief.supports_gone) {
+    lines.push(
+      "Everything it rested on is gone. I still hold it — I have not unlearnt it " +
+        "because the evidence went."
     );
   }
-  if (belief.unsupported) {
-    return (
-      `I worked it out from ${belief.evidence_count} piece(s) of evidence, none of ` +
-      "which still exists. I still hold it — I have not unlearnt it because the " +
-      (ceiling ? "evidence went." : "evidence went — but nothing supports it any more.") +
-      ceiling +
-      outside
-    );
-  }
-  if (belief.lost_evidence > 0) {
-    return (
-      `I worked it out from ${belief.evidence_count} piece(s) of evidence, ` +
-      `${belief.lost_evidence} of which no longer exists. The confidence shown ` +
-      "reflects what is left." +
-      ceiling +
-      outside
-    );
-  }
-  return (
-    `I worked it out from ${belief.evidence_count} piece(s) of evidence.` + ceiling + outside
-  );
-}
-
-// The words a listed row leads with: its band, and for a captured turn the fact that
-// the band is a *filing* (#1891).
-//
-// `bandWords` renders a band as a first-person sentence, which is what this page shows
-// and what its three filter checkboxes are labelled with. On an episode "I worked it
-// out" is not a label — it is a claim, and a false one: nothing worked a recorded turn
-// out (ADR-0075 §2, "it is true because it happened"). Left as it was, the row would
-// have asserted it one line above a `Why` that denies it.
-//
-// **The band's own words stay inside the phrase rather than being replaced**, and that
-// is what keeps ADR-0073 §4 met — the band is conveyed, "never omitted, never implied
-// by position alone" — while also keeping something this surface owes that the terminal
-// does not: the heading is how a user reads a row back to the checkbox that selected
-// it, so a row that stopped naming its band would stop saying which box it arrived
-// under. The terminal's heading needs no such repair; it leads with the band's bare
-// value, which is a filing already and claims nothing.
-//
-// **The confidence beside it is left exactly as it is**, for ADR-0073 §4's other
-// clause: every row conveys one, no kind is exempt, and ADR-0072 §6 rules the same of
-// anything rendered as a belief. What an episode's figure *means* — a standing value
-// ADR-0074 §4 sets at capture, not a measure of doubt that the exchange happened — is
-// said in the `Why` line, where there is room to say it.
-function beliefHeading(belief) {
-  if (belief.kind === "episodic") {
-    return `Filed under '${bandWords(belief.band)}'`;
-  }
-  return bandWords(belief.band);
-}
-
-// One belief, carrying everything ADR-0073 §4 requires of both views: the band, the
-// confidence, the kind, the content, why it is held, when it was last revised, the
-// end of its validity window where one is set, and its id.
-function renderBeliefFields(item, belief) {
-  line(
-    item,
-    `${beliefHeading(belief)} · ${belief.kind} · confidence ${belief.confidence.toFixed(2)}`,
-    "hint"
-  );
-  line(item, belief.content, "reply");
-  line(item, `Why: ${whyHeld(belief)}`, "hint");
-  line(item, `Last revised: ${belief.last_updated}`, "hint");
   if (belief.valid_until !== null) {
-    line(item, `Believed until: ${belief.valid_until}`, "hint");
+    lines.push(`Believed until: ${belief.valid_until}`);
   }
-  line(item, `id: ${belief.id}`, "hint");
+  lines.push(`id: ${belief.id}`);
+  return lines;
+}
+
+// A memory's heading: its band's words and its standing (ADR-0073 §4, ADR-0328 §15:4).
+function beliefHeading(belief) {
+  return `${bandWords(belief.band)} · ${standingWords(belief.standing)}`;
+}
+
+// One support of the single view, its part resolved or shown as gone (ADR-0328 §15:2,
+// §15:7): never a bare id, never shown as evidence once it is gone.
+function supportLine(support) {
+  const origin = ORIGIN_WORDS[support.origin] || support.origin;
+  const named = support.source_details === null ? "" : ` · ${support.source_details.reported_by}`;
+  const when = support.when === null ? "" : ` · ${support.when}`;
+  const against = support.direction === "against" ? " · against it" : "";
+  const stopped = support.counts ? "" : " · no longer counted";
+  const said = support.content === null ? "what it pointed at is gone" : support.content;
+  return `- ${origin}${named}${when}${against}${stopped}: ${said}`;
+}
+
+// One memory on the listing, carrying everything ADR-0328 §15:4 requires.
+function renderBeliefFields(item, belief) {
+  line(item, beliefHeading(belief), "hint");
+  line(item, belief.content, "reply");
+  beliefLines(belief).forEach((text) => line(item, text, "hint"));
 }
 
 function renderBelief(list, belief) {
@@ -4587,17 +4481,14 @@ async function forgetBelief(id) {
       return;
     }
     const belief = held.belief;
-    // Every field ADR-0073 §4 requires, from the read just taken — the window's end
-    // included, where one is set. A confirmation that showed the listing's fields but
-    // dropped one of them would be showing *less* than the screen the user came from,
-    // which is the opposite of what a ceremony is for.
-    const until =
-      belief.valid_until === null ? "" : `\nBelieved until: ${belief.valid_until}`;
+    // Every field ADR-0328 §15:4 requires, and every support, from the read just
+    // taken. A confirmation that showed the listing's fields but dropped one of them
+    // would be showing *less* than the screen the user came from, which is the
+    // opposite of what a ceremony is for.
+    const supports = belief.supports.map(supportLine).join("\n");
     const asked = window.confirm(
-      `About to forget this belief.\n\n${bandWords(belief.band)} · ${belief.kind} · ` +
-        `confidence ${belief.confidence.toFixed(2)}\n${belief.content}\n\n` +
-        `Why: ${whyHeld(belief)}\nLast revised: ${belief.last_updated}${until}\n` +
-        `id: ${belief.id}\n\n` +
+      `About to forget this belief.\n\n${beliefHeading(belief)}\n${belief.content}\n\n` +
+        `${beliefLines(belief).join("\n")}\n\nRests on:\n${supports}\n\n` +
         `${forgetWarning(belief.band)}\n\nThis destroys the record: nothing of it is ` +
         "kept, not even in an export. To fix it instead, tell me it is wrong in a " +
         "conversation.\n\nYou are forgetting whatever belief that id names when you " +

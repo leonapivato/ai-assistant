@@ -21,14 +21,12 @@ from ai_assistant.core.types import (
     CapabilityEffect,
     CapabilityResult,
     LabelKind,
+    Memory,
     MemorySearchResult,
-    MemorySource,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
-    Provenance,
     Reversibility,
-    SemanticMemory,
     ToolCall,
     ToolDefinition,
     ToolFailureKind,
@@ -53,6 +51,7 @@ from ai_assistant.orchestration.lookups import (
 )
 from ai_assistant.orchestration.planning import LOOKING_FOR, PlanningStory, offered_tools
 from ai_assistant.testing import FakeMemoryStore
+from ai_assistant.testing.memories import memory, remembered_support, said_support, sourced_support
 
 if TYPE_CHECKING:
     from ai_assistant.orchestration.acting import OwnRecordsAnswer
@@ -63,21 +62,14 @@ BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 UNBOUNDED: Final = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
 
 
-def _fact(memory_id: str, fact: str, *, outside: bool = False, **fields: Any) -> SemanticMemory:
+def _fact(memory_id: str, fact: str, *, outside: bool = False, **fields: Any) -> Memory:
     """A remembered fact: the user's word, or what a source reported."""
-    source = MemorySource.EXTERNAL if outside else MemorySource.USER_ASSERTED
-    return SemanticMemory(
-        id=memory_id,
-        content=fact,
-        fact=fact,
-        provenance=Provenance(
-            source=source,
-            confidence=0.8 if outside else 1.0,
-            last_updated=_AT,
-            attestation=Attestation(reported_by="mail", reported_at=_AT) if outside else None,
-        ),
-        **fields,
+    support = (
+        sourced_support(Attestation(reported_by="mail", reported_at=_AT), when=_AT, added_at=_AT)
+        if outside
+        else said_support(when=_AT, added_at=_AT)
     )
+    return memory(memory_id, fact, support, **fields)
 
 
 def _call(tool: ToolDefinition, *, decision: str = "d1", **parameters: Any) -> ToolCall:
@@ -111,7 +103,7 @@ class _Views:
         return self.views.get(story_id)
 
 
-async def _store(*records: SemanticMemory) -> FakeMemoryStore:
+async def _store(*records: Memory) -> FakeMemoryStore:
     store = FakeMemoryStore(now=lambda: _AT)
     for record in records:
         await store.add(record)
@@ -251,7 +243,7 @@ async def test_a_search_asks_for_remembered_facts_alone_each_band_on_its_own() -
 
     assert [search["query"] for search in store.searches] == ["dentist"] * 3
     assert all(search["limit"] == 4 for search in store.searches)
-    assert all([kind.value for kind in one["kinds"]] == ["semantic"] for one in store.searches)
+    assert all([kind.value for kind in one["kinds"]] == ["memory"] for one in store.searches)
     assert [tuple(one["bands"]) for one in store.searches] == [
         (BeliefBand.ASSERTED,),
         (BeliefBand.ATTESTED,),
@@ -265,11 +257,10 @@ async def test_inferences_never_displace_an_assertion_below_the_limit() -> None:
     At a limit of one, the user's own fact is kept over an inference that matches the
     query more closely, and the later bands are not searched once the limit is filled.
     """
-    inferred = SemanticMemory(
-        id="inferred",
-        content="dentist appointment probably with Dr Lee",
-        fact="dentist appointment probably with Dr Lee",
-        provenance=Provenance(source=MemorySource.INFERRED, confidence=0.4, last_updated=_AT),
+    inferred = memory(
+        "inferred",
+        "dentist appointment probably with Dr Lee",
+        remembered_support(when=_AT, added_at=_AT),
     )
     store = _Searched()
     for record in (inferred, _fact("said", "my dentist is Dr Rao")):

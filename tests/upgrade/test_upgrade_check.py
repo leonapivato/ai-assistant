@@ -177,7 +177,7 @@ def test_a_memory_store_whose_vectors_moved_fails_the_check(
     directory, snapshot = _copy(written, tmp_path)
     conn = _vectors(directory)
     rows = dict(conn.execute("SELECT id, rowid FROM records").fetchall())
-    one, other = rows["mem-semantic"], rows["mem-preference"]
+    one, other = rows["mem-said"], rows["mem-remembered"]
     vectors = dict(conn.execute("SELECT rowid, embedding FROM vec_records").fetchall())
     with conn:
         conn.execute("DELETE FROM vec_records WHERE rowid IN (?, ?)", (one, other))
@@ -187,10 +187,9 @@ def test_a_memory_store_whose_vectors_moved_fails_the_check(
         )
     conn.close()
     assert sorted(read(directory, snapshot)) == [
-        'memory nearest/mem-preference: [0]: the base read "mem-preference", '
-        'the head reads "mem-semantic"',
-        'memory nearest/mem-semantic: [0]: the base read "mem-semantic", '
-        'the head reads "mem-preference"',
+        'memory nearest/mem-remembered: [0]: the base read "mem-remembered", '
+        'the head reads "mem-said"',
+        'memory nearest/mem-said: [0]: the base read "mem-said", the head reads "mem-remembered"',
     ]
 
 
@@ -276,6 +275,50 @@ def test_a_base_shape_the_head_does_not_know_fails_the_check() -> None:
     assert problems == [
         "things: the base reads it back at shape 2 and the head only knows shapes up to 1"
     ]
+
+
+def test_the_memory_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> None:
+    """ADR-0328 §16:9: the carry from shape 1 says what the head's upgrade writes.
+
+    Taken over the file the previous release wrote (``tests/memory/legacy``), so the
+    carry is held to the store's real upgrade rather than to a hand-built record: every
+    record that release read back, carried to shape 2, is read back by this build
+    after opening the file. The base's read-back is the stored blob with its revision,
+    which is what that release's ``export`` returned.
+    """
+    import shutil  # noqa: PLC0415
+
+    from ai_assistant.memory import SqliteMemoryStore  # noqa: PLC0415
+    from ai_assistant.models import HashingEmbedder  # noqa: PLC0415
+    from ai_assistant.testing import FakeTraceSink  # noqa: PLC0415
+
+    legacy = Path(__file__).resolve().parents[1] / "memory" / "legacy"
+    path = tmp_path / "memory.db"
+    shutil.copyfile(legacy / "memory-before-adr-0328.db", path)
+    with sqlite3.connect(path) as conn:
+        base: Records = {
+            f"record/{record_id}": json.loads(data) | {"revision": revision}
+            for record_id, data, revision in conn.execute("SELECT id, data, revision FROM records")
+        }
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=8)
+    )
+    try:
+        head: Records = {
+            f"record/{record.id}": upgrade_stores.to_json(record)
+            for record in asyncio.run(store.export())
+        }
+    finally:
+        store.close()
+    (memory,) = [one for one in STORES if one.name == "memory"]
+
+    carried = memory.carries[1](base)
+
+    assert memory.shape == 2
+    assert set(carried) == set(head)
+    assert {
+        key: first_difference(value, head[key]) for key, value in carried.items()
+    } == dict.fromkeys(carried)
 
 
 def test_a_snapshot_format_the_head_does_not_know_fails_the_check() -> None:

@@ -6,8 +6,9 @@ Every ``MemoryPolicy`` implementation must pass this suite (CONTRIBUTING,
 
 The suite asserts only what is universal to the contract — that ``decide`` is
 total, deterministic, returns an internally coherent decision, never commits
-secret-tier data, and never commits an unconfirmed derived proposal whose warrant
-rests on recorded external content. It deliberately does **not** encode *which*
+secret-tier data, never stores a proposal tentatively (``STORE_TEMPORARY``, ADR-0328
+§10:3), and never commits an unconfirmed memory at inference that rests on outside
+content (ADR-0106 §6, read through ADR-0328 §12). It deliberately does **not** encode *which*
 ruling a given proposal earns: that is each policy's reasoning, and even the
 default's changes — ADR-0038 rewrote what it returns for a user-asserted
 proposal that meets a conflict, without touching a line here, which is the
@@ -33,8 +34,8 @@ conforms. Only the coherence common to both is asserted.
 
 Two things are intentionally left unasserted because ``MemoryDecision``'s own
 validator already makes them unrepresentable: that ``REINFORCE`` and
-``SUPERSEDE`` carry a ``target_id`` and that ``STORE_TEMPORARY`` carries a
-positive ``ttl``. Asserting them here would test pydantic. What the validator
+``SUPERSEDE`` carry a ``target_id``, and the shape of a ``STORE_TEMPORARY`` no policy
+rules. Asserting them here would test pydantic. What the validator
 *cannot* know — that ``target_id`` names one of the records actually supplied —
 is asserted below.
 
@@ -47,42 +48,40 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import product
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.protocols import MemoryPolicy
 from ai_assistant.core.types import (
-    Attestation,
-    BeliefBand,
     DataTier,
     EpisodicMemory,
+    Memory,
     MemoryDecision,
     MemoryDecisionKind,
     MemoryRecord,
     MemorySource,
+    MemoryStanding,
     MemoryUpdateProposal,
-    PreferenceMemory,
-    ProceduralMemory,
     Provenance,
     QuestionPart,
-    SemanticMemory,
+    SupportOrigin,
     UserConfirmation,
-    band_of,
+    origin_is_outside,
+    origin_standing,
 )
+from ai_assistant.testing.memories import memory, remembered_support, support_with_origin
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
-#: The top of the sweep for a belief in the DERIVED band, which may not claim the
-#: standing only the user's own word carries (ADR-0077 §7).
-_JUST_BELOW_FULL = 0.99
-
 # Decisions that result in the proposal reaching long-term storage. ASK_USER and
 # REJECT do not: one defers to a human, the other drops the proposal.
+# ``STORE_TEMPORARY`` is here because a ruling of it would ask for a write: no
+# policy rules it (ADR-0328 §10:3), which the suite asserts on every case.
 _COMMITTING = frozenset(
     {
         MemoryDecisionKind.ACCEPT,
@@ -96,119 +95,82 @@ _COMMITTING = frozenset(
 # target is asserted for either, but never which of the two a policy picks.
 _TARGET_CARRYING = frozenset({MemoryDecisionKind.REINFORCE, MemoryDecisionKind.SUPERSEDE})
 
+#: Every origin a memory's one support can take: the proposal axis. A policy is
+#: handed whatever a writer can build, and a suite sweeping one origin would certify
+#: a policy that crashes on the others.
+_ORIGINS = tuple(SupportOrigin)
 
-# Every concrete `MemoryRecord` variant. A policy is handed the union, so a
-# suite that only ever builds one variant would certify a policy that crashes on
-# the other three.
-_RECORD_KINDS = ("semantic", "episodic", "preference", "procedural")
+#: The origins ADR-0106 §6's ceiling is keyed on, read through ADR-0328 §12: a memory
+#: at inference (the ``DERIVED`` band) whose support is outside content. Derived from
+#: the origin table rather than spelled, so an origin added later is covered.
+_TAINTED_ORIGINS = tuple(
+    origin
+    for origin in SupportOrigin
+    if origin_standing(origin) is MemoryStanding.INFERENCE and origin_is_outside(origin)
+)
 
-# The two halves of the band partition ADR-0106 §6's ceiling is keyed on, derived
-# from `band_of` rather than spelled as source names, so a `MemorySource` added to
-# either band later is covered without an edit here.
-_DERIVED_SOURCES = tuple(s for s in MemorySource if band_of(s) is BeliefBand.DERIVED)
-_SOURCES_OUTSIDE_DERIVED = tuple(s for s in MemorySource if band_of(s) is not BeliefBand.DERIVED)
-
-#: What a derived proposal cites, so the taint cases below measure ADR-0106 §6's
-#: ceiling rather than ADR-0077 §5's rejection of a derived belief citing nothing.
-#: The two sit in the same admissibility floor with the evidence rule *ahead* of
-#: the taint rule, so a tainted case citing nothing would be answered by the wrong
-#: one and pass against a policy with no taint rule at all.
-_EPISODE = "episode-1"
+#: Pairs of origins ranking at one standing above inference, one outside and one not:
+#: the outside mark decides nothing there (ADR-0106 §2, ADR-0328 §7:6).
+_MARKED_PAIRS = (
+    (SupportOrigin.ASSISTANT_MESSAGE, SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE),
+    (SupportOrigin.EVIDENCE, SupportOrigin.EVIDENCE),
+    (SupportOrigin.USER_MESSAGE, SupportOrigin.USER_MESSAGE),
+)
 
 
-def _record(  # noqa: PLR0913 — one keyword per axis of the input space, all optional
-    record_id: str,
-    *,
-    source: MemorySource = MemorySource.OBSERVED,
-    confidence: float = 0.6,
-    record_kind: str = "semantic",
-    derived_from_external: bool = False,
-    evidence: tuple[str, ...] = (),
-) -> MemoryRecord:
-    # `Provenance` pins USER_ASSERTED to full confidence, and — since ADR-0077 §7
-    # — forbids the DERIVED band from claiming it at all. Either way the requested
-    # value is overridden rather than allowed to build a record the domain
-    # forbids. This clips the confidence sweep at both ends, by design: the suite
-    # exercises what a policy can actually be handed, and the top of the range for
-    # a derived belief is now just below 1.0 rather than 1.0.
-    if source is MemorySource.USER_ASSERTED:
-        confidence = 1.0
-    elif band_of(source) is BeliefBand.DERIVED and confidence == 1.0:
-        confidence = _JUST_BELOW_FULL
-    # And since ADR-0092 §1 the `ATTESTED` band must carry an attestation, on the
-    # same principle: the suite hands a policy what a producer can actually build,
-    # so the obligation is met from the band rather than by naming `EXTERNAL` — a
-    # source added into that band later is covered without an edit here.
-    attestation = (
-        Attestation(reported_by="source-instance", reported_at=_WHEN)
-        if band_of(source) is BeliefBand.ATTESTED
-        else None
-    )
-    provenance = Provenance(
-        source=source,
-        confidence=confidence,
-        last_updated=_WHEN,
-        attestation=attestation,
-        derived_from_external=derived_from_external,
-        evidence=evidence,
-    )
-    match record_kind:
-        case "episodic":
-            return EpisodicMemory(
-                id=record_id, content=record_id, provenance=provenance, occurred_at=_WHEN
-            )
-        case "preference":
-            return PreferenceMemory(
-                id=record_id, content=record_id, provenance=provenance, preference=record_id
-            )
-        case "procedural":
-            return ProceduralMemory(
-                id=record_id, content=record_id, provenance=provenance, situation=record_id
-            )
-        case _:
-            return SemanticMemory(
-                id=record_id, content=record_id, provenance=provenance, fact=record_id
-            )
+def _record(record_id: str, origin: SupportOrigin = SupportOrigin.REMEMBERED) -> Memory:
+    """A memory stating ``record_id`` on one support taking ``origin``."""
+    return memory(record_id, record_id, support_with_origin(origin))
+
+
+def _conflict(record_id: str, origin: SupportOrigin | None) -> MemoryRecord:
+    """A conflicting record: a memory resting on ``origin``, or an episode for ``None``.
+
+    An episode is a record the store holds beside memories, so a policy handed
+    conflicts must cope with one among them.
+    """
+    if origin is None:
+        return EpisodicMemory(
+            id=record_id,
+            content=record_id,
+            provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=_WHEN),
+            occurred_at=_WHEN,
+        )
+    return _record(record_id, origin)
 
 
 @dataclass(frozen=True)
 class _Case:
     """One point in the input space ``decide`` must handle."""
 
-    record_kind: str
-    source: MemorySource
-    confidence: float
+    origin: SupportOrigin
     sensitivity: DataTier
-    conflict_source: MemorySource | None
-    """The provenance of the conflicting record, or ``None`` for no conflict."""
+    conflict: SupportOrigin | Literal[False] | None
+    """The origin of the conflicting memory, ``None`` for an episode, ``False`` for none."""
 
     def __str__(self) -> str:
-        conflict = "clean" if self.conflict_source is None else f"vs-{self.conflict_source}"
-        return f"{self.record_kind}-{self.source}-{self.confidence}-{self.sensitivity}-{conflict}"
+        if self.conflict is False:
+            conflict = "clean"
+        elif self.conflict is None:
+            conflict = "vs-episode"
+        else:
+            conflict = f"vs-{self.conflict}"
+        return f"{self.origin}-{self.sensitivity}-{conflict}"
 
 
-# The full cross-product of everything a caller can vary. Bundled into one
-# parameter rather than stacked `parametrize` decorators, which would push the
-# test past the argument limit.
-#
-# The conflict axis carries a *source*, not just a yes/no: a policy branching on
-# whether the record it would overwrite was user-asserted is not hypothetical —
-# `DefaultMemoryPolicy` does exactly that — so a matrix whose conflicts are
-# always OBSERVED would leave that branch uncertified.
+# The full cross-product of everything a caller can vary. The conflict axis carries
+# an *origin*, not just a yes/no: a policy branching on whether the record it would
+# overwrite stands in the user's own band is not hypothetical — `DefaultMemoryPolicy`
+# does exactly that — so a matrix whose conflicts are always inferences would leave
+# that branch uncertified.
 _TOTALITY_CASES = [
-    _Case(record_kind, source, confidence, sensitivity, conflict_source)
-    for record_kind, source, confidence, sensitivity, conflict_source in product(
-        _RECORD_KINDS,
-        MemorySource,
-        [0.0, 0.5, 1.0],
-        DataTier,
-        [None, *MemorySource],
-    )
+    _Case(origin, sensitivity, conflict)
+    for origin, sensitivity, conflict in product(_ORIGINS, DataTier, [False, None, *SupportOrigin])
 ]
 
 
 def _proposal(
-    record: MemoryRecord | None = None,
+    record: Memory | None = None,
     *,
     sensitivity: DataTier = DataTier.PERSONAL,
     conflicts: Sequence[MemoryRecord] = (),
@@ -230,8 +192,7 @@ def _proposal(
     # Built in two steps because the authority binds to the *question*, and the
     # question's identity is a property of the proposal (ADR-0078 §7). A hand-picked
     # digest would be input no coordinator produces, and a policy checking the two
-    # agree — which the writer's `_confirmation_covers` does — would be failed by
-    # this suite for being right.
+    # agree would be failed by this suite for being right.
     return MemoryUpdateProposal(
         proposed=proposal.proposed,
         rationale=proposal.rationale,
@@ -248,20 +209,9 @@ def _proposal(
 
 def _inputs_for(case: _Case) -> tuple[MemoryUpdateProposal, list[MemoryRecord]]:
     """Build the ``(proposal, conflicts)`` pair one matrix case describes."""
-    conflicts = (
-        [_record("existing", source=case.conflict_source, record_kind=case.record_kind)]
-        if case.conflict_source is not None
-        else []
-    )
+    conflicts = [] if case.conflict is False else [_conflict("existing", case.conflict)]
     proposal = _proposal(
-        _record(
-            "new",
-            source=case.source,
-            confidence=case.confidence,
-            record_kind=case.record_kind,
-        ),
-        sensitivity=case.sensitivity,
-        conflicts=conflicts,
+        _record("new", case.origin), sensitivity=case.sensitivity, conflicts=conflicts
     )
     return proposal, conflicts
 
@@ -311,32 +261,28 @@ class MemoryPolicyContract:
         # and on the retry as much as the first call.
         if case.sensitivity is DataTier.SECRET:
             assert decision.kind not in _COMMITTING
+        # ADR-0328 §10:3: no policy stores a proposal tentatively.
+        assert decision.kind is not MemoryDecisionKind.STORE_TEMPORARY
 
-    @pytest.mark.parametrize("record_kind", _RECORD_KINDS)
-    @pytest.mark.parametrize("source", _DERIVED_SOURCES, ids=str)
+    @pytest.mark.parametrize("origin", _TAINTED_ORIGINS, ids=str)
     async def test_an_unconfirmed_tainted_derived_proposal_is_never_committed(
-        self, policy: MemoryPolicy, source: MemorySource, record_kind: str
+        self, policy: MemoryPolicy, origin: SupportOrigin
     ) -> None:
-        """ADR-0106 §6's ceiling, at the enforcement point ADR-0098 §5 could not site.
+        """ADR-0106 §6's ceiling, read through ADR-0328 §12 and §13:4.
 
-        A belief this system worked out from recorded external material is never
-        auto-accepted into durable memory — whatever the policy's other rules, and
-        however trusted the producer (ADR-0098 §4's fourth clause). ``ASK_USER``
-        and ``REJECT`` both conform; the suite pins neither, because a deployment
-        somewhere a user cannot be asked conforms by refusing.
+        A memory at inference that rests on outside content is never auto-accepted
+        into durable memory — whatever the policy's other rules, and however trusted
+        the producer (ADR-0098 §4's fourth clause). ``ASK_USER`` and ``REJECT`` both
+        conform; the suite pins neither, because a deployment somewhere a user cannot
+        be asked conforms by refusing.
 
         Asserted on the retry as well as the first call, for the reason the
         secret-tier obligation is: a policy that defers once and commits on the
         second attempt satisfies a one-call check while committing exactly what
         the ceiling forbids.
         """
-        record = _record(
-            "tainted",
-            source=source,
-            record_kind=record_kind,
-            derived_from_external=True,
-            evidence=(_EPISODE,),
-        )
+        record = _record("tainted", origin)
+        assert record.rests_on_outside_content
 
         decision = await policy.decide(_proposal(record), conflicts=[])
         again = await policy.decide(_proposal(record), conflicts=[])
@@ -344,9 +290,29 @@ class MemoryPolicyContract:
         assert decision.kind not in _COMMITTING
         assert again.kind not in _COMMITTING
 
-    @pytest.mark.parametrize("source", _DERIVED_SOURCES, ids=str)
+    async def test_a_memory_with_one_outside_support_among_others_is_tainted(
+        self, policy: MemoryPolicy
+    ) -> None:
+        """ADR-0328 §7:6: one outside support, counted or not, makes it rest on outside content.
+
+        A memory at inference with a plain remember call beside one over outside
+        content rests on outside content as a whole, so the ceiling holds for it too.
+        """
+        record = memory(
+            "mixed",
+            "mixed",
+            remembered_support(),
+            remembered_support(effect="effect-2", outside=True),
+        )
+        assert record.rests_on_outside_content
+
+        decision = await policy.decide(_proposal(record), conflicts=[])
+
+        assert decision.kind not in _COMMITTING
+
+    @pytest.mark.parametrize("origin", _TAINTED_ORIGINS, ids=str)
     async def test_the_ceiling_does_not_reach_the_confirmed_re_ingest(
-        self, policy: MemoryPolicy, source: MemorySource
+        self, policy: MemoryPolicy, origin: SupportOrigin
     ) -> None:
         """The confirmed answer is a *re-ingest*, and the ceiling stands down for it.
 
@@ -362,13 +328,8 @@ class MemoryPolicyContract:
         coherent ruling — over the one input the ceiling's carve-out creates. The
         deliberate silence is the point: no ``_COMMITTING`` assertion belongs here.
         """
-        record = _record(
-            "tainted",
-            source=source,
-            derived_from_external=True,
-            evidence=(_EPISODE,),
-        )
-        conflicts = [_record("existing")]
+        record = _record("tainted", origin)
+        conflicts: list[MemoryRecord] = [_record("existing")]
         proposal = _proposal(record, conflicts=conflicts, confirmed=True)
 
         decision = await policy.decide(proposal, conflicts=conflicts)
@@ -376,47 +337,45 @@ class MemoryPolicyContract:
 
         assert isinstance(decision, MemoryDecision)
         assert decision == again
+        assert decision.kind is not MemoryDecisionKind.STORE_TEMPORARY
         if decision.kind in _TARGET_CARRYING:
             assert decision.target_id in {c.id for c in conflicts}
 
-    @pytest.mark.parametrize("record_kind", _RECORD_KINDS)
-    @pytest.mark.parametrize("source", _SOURCES_OUTSIDE_DERIVED, ids=str)
+    @pytest.mark.parametrize(("plain", "marked"), _MARKED_PAIRS, ids=str)
     async def test_the_marker_decides_nothing_outside_the_derived_band(
-        self, policy: MemoryPolicy, source: MemorySource, record_kind: str
+        self, policy: MemoryPolicy, plain: SupportOrigin, marked: SupportOrigin
     ) -> None:
-        """ADR-0106 §2: the field carries no meaning outside the ``DERIVED`` band.
+        """ADR-0106 §2, read through ADR-0328 §7:6: outside content binds only at inference.
 
-        ADR-0106 §7 forbids a band-keyed validator on it, so
-        ``Provenance(source=USER_ASSERTED, derived_from_external=True, …)`` stays
-        constructible — and a policy reading the raw flag rather than the band
-        would defer a user's own assertion on the strength of a boolean that means
-        nothing there, which ADR-0098 §1 forbids in principle ("the user's own
-        utterance is not [external], however it was composed"). The same reading
-        would defer every calendar import in the ``ATTESTED`` band.
+        A memory in the ``ASSERTED`` band never rests on outside content, however
+        many outside supports it carries beside the user's word; one in the
+        ``ATTESTED`` band rests on it by its nature. A policy reading the raw
+        outside origins rather than the band would defer a user's own assertion, or
+        every source's report, on the strength of a mark that decides nothing there.
 
-        Stated as an **invariance** rather than as "still commits", which is what
-        ADR-0106 §10 names it by: the suite runs against a ``FakeMemoryPolicy``
-        configured to every ``MemoryDecisionKind`` including ``REJECT``, so an
-        assertion that these proposals earn a committing ruling would fail a double
-        that conforms — and the suite's own rule is that it does not encode which
-        ruling a proposal earns. Whether an attested proposal genuinely still
-        commits is pinned per-implementation, in ``test_policy.py``.
+        Stated as an **invariance** rather than as "still commits": the suite runs
+        against a ``FakeMemoryPolicy`` configured to every ruling, ``REJECT``
+        included, so an assertion that these proposals commit would fail a double
+        that conforms.
         """
-        marked = _record(
-            "marked", source=source, record_kind=record_kind, derived_from_external=True
+        with_marker = memory(
+            "marked",
+            "marked",
+            support_with_origin(marked),
+            remembered_support(effect="effect-2", outside=True),
         )
-        plain = _record("marked", source=source, record_kind=record_kind)
+        without_marker = _record("marked", plain)
 
-        with_marker = await policy.decide(_proposal(marked), conflicts=[])
-        without_marker = await policy.decide(_proposal(plain), conflicts=[])
+        ruled_with = await policy.decide(_proposal(with_marker), conflicts=[])
+        ruled_without = await policy.decide(_proposal(without_marker), conflicts=[])
 
-        assert with_marker.kind is without_marker.kind
+        assert ruled_with.kind is ruled_without.kind
 
     async def test_fold_targets_one_of_the_supplied_conflicts(self, policy: MemoryPolicy) -> None:
         # The sweep above only ever supplies one conflict. This is the case it
         # cannot cover: with several to choose from, `target_id` must still name
         # one the caller actually offered, not an id of the policy's own making.
-        conflicts = [_record("first"), _record("second")]
+        conflicts: list[MemoryRecord] = [_record("first"), _record("second")]
 
         decision = await policy.decide(_proposal(conflicts=conflicts), conflicts=conflicts)
 
@@ -441,7 +400,7 @@ class MemoryPolicyContract:
         # *Sequence* argument: a callee mutating a caller's container is the
         # reverse-direction question ADR-0065 §5 leaves open and ADR-0068 keeps
         # open (Consequences), so a conformance suite must not silently ratify it.
-        conflicts = [_record("existing")]
+        conflicts: list[MemoryRecord] = [_record("existing")]
         proposal = _proposal(conflicts=conflicts)
         before = proposal.model_copy(deep=True)
 

@@ -2644,7 +2644,18 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``ClaimedAuthor``), each message an input took in, dated, with a forward's
 #:     original sender (§4:10, §5:4). A peer at 108 refuses the new field as extra and
 #:     the new member as unknown (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 109
+#: 110: ADR-0328 §15:8 advances the version once for the memory record, on these
+#:     grounds: ``Belief`` and ``BeliefSummary``, carried by ``belief`` and ``beliefs``,
+#:     lose ``kind``, ``confidence``, ``last_updated``, the citation counts,
+#:     ``evidence_elided`` and ``attestation``, and gain the standing, the status and
+#:     the values ADR-0328 §7 computes, with ``Belief.supports`` (``SupportView``) in
+#:     place of ``Belief.evidence``; ``beliefs`` loses its ``kinds`` argument
+#:     (§11:2); ``MemoryKind`` loses ``preference`` and ``procedural`` and gains
+#:     ``memory``; and ``ActivationRecall``'s items on the wire-carried
+#:     ``EpisodicMemory.processing_record`` name the ``memory`` kind (§2:5). A peer at
+#:     109 refuses the new fields as extra and the new member as unknown (ADR-0124
+#:     §9:2).
+PROTOCOL_VERSION: Final[int] = 110
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

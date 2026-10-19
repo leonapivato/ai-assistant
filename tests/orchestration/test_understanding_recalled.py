@@ -14,8 +14,10 @@ from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
     ActivationRecall,
     Attestation,
+    BeliefBand,
     ChannelIdentity,
     EpisodicMemory,
+    Memory,
     MemoryKind,
     MemorySource,
     MemoryWrite,
@@ -25,10 +27,10 @@ from ai_assistant.core.types import (
     RecalledItem,
     RecallOutcome,
     RecallProvenance,
-    SemanticMemory,
     UnderstandingGround,
     UnderstandingReferent,
     band_of,
+    record_band,
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.understanding import (
@@ -37,6 +39,12 @@ from ai_assistant.orchestration.understanding import (
     UnderstandingStage,
 )
 from ai_assistant.testing import FakeMemoryStore, FakeModelProvider
+from ai_assistant.testing.memories import (
+    memory,
+    remembered_support,
+    said_support,
+    sourced_support,
+)
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import ActivationUnderstanding, MemoryRecord
@@ -57,14 +65,14 @@ def _fact(
     memory_id: str,
     fact: str = "The dentist is Dr Rao.",
     source: MemorySource = MemorySource.INFERRED,
-) -> SemanticMemory:
-    confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.9
-    return SemanticMemory(
-        id=memory_id,
-        content=fact,
-        fact=fact,
-        provenance=Provenance(source=source, confidence=confidence, last_updated=EARLIER),
+) -> Memory:
+    """A memory in the band ``source`` names (ADR-0328 §12), last changed ``EARLIER``."""
+    support = (
+        said_support(when=EARLIER, added_at=EARLIER)
+        if band_of(source) is BeliefBand.ASSERTED
+        else remembered_support(when=EARLIER, added_at=EARLIER)
     )
+    return memory(memory_id, fact, support)
 
 
 def _episode(episode_id: str, at: datetime = EARLIER) -> EpisodicMemory:
@@ -88,7 +96,7 @@ def _found(*records: RecalledRecord) -> _Recall:
             id=record.id,
             excerpt=record.content[:200],
             provenance=RecallProvenance.USER,
-            standing=band_of(record.provenance.source),
+            standing=record_band(record),
             rests_on_recorded_external_content=False,
             found_by=CUES,
         )
@@ -200,15 +208,13 @@ async def test_a_recalled_fact_is_attributed_by_its_band(
 
 
 async def test_an_attested_fact_is_attributed_to_its_source() -> None:
-    reported = SemanticMemory(
-        id="reported",
-        content="The dentist moved to Elm Street.",
-        fact="The dentist moved to Elm Street.",
-        provenance=Provenance(
-            source=MemorySource.EXTERNAL,
-            confidence=0.9,
-            last_updated=EARLIER,
-            attestation=Attestation(reported_by="calendar", reported_at=EARLIER),
+    reported = memory(
+        "reported",
+        "The dentist moved to Elm Street.",
+        sourced_support(
+            Attestation(reported_by="calendar", reported_at=EARLIER),
+            when=EARLIER,
+            added_at=EARLIER,
         ),
     )
     model = FakeModelProvider.scripted(_proposal())
@@ -283,7 +289,7 @@ async def test_m_labels_resolve_to_episode_and_memory_referents() -> None:
         UnderstandingReferent(
             kind="memory",
             id="  fact id ",
-            source="semantic memory",
+            source="memory",
             excerpt="The dentist is Dr Rao.",
         ),
     )

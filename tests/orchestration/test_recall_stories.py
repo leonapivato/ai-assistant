@@ -22,6 +22,7 @@ from ai_assistant.core.types import (
     ActivationRecall,
     BeliefBand,
     EpisodicMemory,
+    Memory,
     MemoryKind,
     MemorySource,
     Placement,
@@ -30,12 +31,12 @@ from ai_assistant.core.types import (
     RecalledItem,
     RecallOutcome,
     RecallProvenance,
-    SemanticMemory,
     StoryActor,
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.recall import Recalled, RecallStage
 from ai_assistant.testing import FakeStoryStore
+from ai_assistant.testing.memories import memory, said_support
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import MemoryRecord, StoryHeader, StoryMember
@@ -58,14 +59,8 @@ async def _story(stories: FakeStoryStore, *members: StoryMember) -> str:
     return story_id
 
 
-def _fact(memory_id: str) -> SemanticMemory:
-    return SemanticMemory(
-        id=memory_id,
-        content=TEXT,
-        fact=TEXT,
-        provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
-        placement=Placement(),
-    )
+def _fact(memory_id: str) -> Memory:
+    return memory(memory_id, TEXT, said_support(when=AT, added_at=AT), placement=Placement())
 
 
 class _Counting:
@@ -124,7 +119,7 @@ async def test_an_episode_in_no_story_carries_none() -> None:
     assert _by_id(recalled)[address("a-1")].stories == ()
 
 
-async def test_a_semantic_record_is_never_looked_up_and_carries_none() -> None:
+async def test_a_memory_is_never_looked_up_and_carries_none() -> None:
     stories = _stories()
     counting = _Counting(stories)
     recalled = await _recall(_stage(await _memory(_fact("fact-canoe")), stories))
@@ -170,7 +165,7 @@ async def test_a_story_store_failure_is_a_failed_decision_returned_not_raised() 
     assert isinstance(recalled.error, StoryStoreError)
 
 
-async def test_a_semantic_only_recall_reads_no_story_and_cannot_fail_on_one() -> None:
+async def test_a_memory_only_recall_reads_no_story_and_cannot_fail_on_one() -> None:
     stories = failing(_stories(), "stories_of")
     recalled = await _recall(_stage(await _memory(_fact("fact-canoe")), stories))
     assert recalled.result.outcome is RecallOutcome.FOUND

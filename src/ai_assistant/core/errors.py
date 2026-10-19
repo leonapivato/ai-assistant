@@ -432,9 +432,12 @@ class MemoryStoreStaleError(MemoryStoreError):
 
 
 class UnresolvedEvidenceError(MemoryStoreError):
-    """A ``DERIVED`` proposal cited a record the store does not hold (ADR-0077 §5).
+    """A support pointed at an episode the store does not hold (ADR-0328 §4:7).
 
-    Raised by ``MemoryWriter.ingest`` before any ruling is sought: nothing is
+    ADR-0077 §5's refusal, which ADR-0328 §4:7 widens to every support but a legacy
+    one, whatever the memory's band. Raised by ``MemoryWriter.ingest`` before any
+    ruling is sought, and by ``MemoryWriter.apply`` before anything is written:
+    nothing is
     written, and no decision is fabricated — a ruling is the policy's to make
     (ADR-0005 §3), so a writer inventing a ``REJECT`` would put a decision nobody
     made into the ingest result.
@@ -494,7 +497,7 @@ class SelfConsumingWriteError(MemoryStoreError):
     it resolves, to the record that replaced its referent.
 
     **This class is the arm where the destination was the producer's own choice**
-    — ``ACCEPT`` and ``STORE_TEMPORARY`` install at ``proposed.id``, which the
+    — ``ACCEPT`` installs at ``proposed.id``, which the
     producer minted and the producer cited. Nothing outside the producer chose
     either value, so a refusal here is the bug ADR-0081 §Context describes and
     remains one. :class:`FoldOntoCitedRecordError` is the other arm.

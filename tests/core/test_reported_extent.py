@@ -25,9 +25,9 @@ from pydantic import ValidationError
 from ai_assistant.core.types import (
     Attestation,
     MemorySource,
-    PreferenceMemory,
     Provenance,
     ReportedExtent,
+    SemanticMemory,
     Validity,
 )
 
@@ -129,10 +129,10 @@ def test_a_stored_attestation_without_the_field_still_parses() -> None:
 def test_a_stored_extent_round_trips_through_the_record() -> None:
     """It survives the whole envelope, which is what the writer's consumer reads."""
     extent = ReportedExtent(extends_from=_NOW, extends_until=_LATER)
-    record = PreferenceMemory(
+    record = SemanticMemory(
         id="meeting",
         content="a meeting",
-        preference="a meeting",
+        fact="a meeting",
         provenance=Provenance(
             source=MemorySource.EXTERNAL,
             confidence=0.9,
@@ -141,7 +141,7 @@ def test_a_stored_extent_round_trips_through_the_record() -> None:
         ),
     )
 
-    restored = PreferenceMemory.model_validate(record.model_dump(mode="json"))
+    restored = SemanticMemory.model_validate(record.model_dump(mode="json"))
 
     assert restored.provenance.attestation is not None
     assert restored.provenance.attestation.extent == extent
@@ -155,10 +155,10 @@ def test_the_extent_is_independent_of_the_records_envelope_window() -> None:
     live now and unbounded — so retrievable, enumerable and visible to the fold —
     while stating that its entry lies a month out.
     """
-    record = PreferenceMemory(
+    record = SemanticMemory(
         id="thursday",
         content="a meeting on Thursday",
-        preference="a meeting on Thursday",
+        fact="a meeting on Thursday",
         validity=Validity(),
         provenance=Provenance(
             source=MemorySource.EXTERNAL,

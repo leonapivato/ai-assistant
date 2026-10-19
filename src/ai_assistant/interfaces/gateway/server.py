@@ -192,11 +192,9 @@ from ai_assistant.core.types import (
     DeletedMessage,
     DeviceAccess,
     DevicesChangedChange,
-    Evidence,
     GrantableSource,
     GrantScope,
     HeldNotification,
-    MemoryKind,
     MessageAddedChange,
     MessageDeletedChange,
     MessageReceipt,
@@ -204,6 +202,7 @@ from ai_assistant.core.types import (
     NotificationReach,
     QuietWindow,
     SourceGrant,
+    SupportView,
     TranscriptMessage,
     TranscriptPage,
     UserMessage,
@@ -3561,7 +3560,10 @@ class Gateway:
     # --- ADR-0177 §5: the belief surface ----------------------------------
 
     async def _beliefs(self, request: Request) -> Response:
-        """List what is believed, band-scoped, as summaries (ADR-0073 §1, ADR-0077 §6).
+        """List the memories held, band-scoped, as summaries (ADR-0073 §1, ADR-0328 §15:1).
+
+        Memories only, never episodes: the engine's listing excludes them (ADR-0328
+        §11:2, #3143).
 
         **An absent filter and an empty one are different answers** and both cross:
         ``bands`` omitted selects every band, and ``bands: []`` selects nothing. The
@@ -3569,8 +3571,8 @@ class Gateway:
         question the browser did not ask.
 
         Args:
-            request: The admitted request, carrying optional ``bands``, ``kinds``,
-                ``limit`` and ``offset``.
+            request: The admitted request, carrying optional ``bands``, ``limit`` and
+                ``offset``.
 
         Returns:
             One summary per live belief the filters admit.
@@ -3580,7 +3582,6 @@ class Gateway:
             partial(
                 self._engine.beliefs,
                 bands=_members(payload, "bands", BeliefBand),
-                kinds=_members(payload, "kinds", MemoryKind),
                 limit=_page(payload, "limit", DEFAULT_PAGE_SIZE),
                 offset=_page(payload, "offset", 0),
             )
@@ -3588,7 +3589,7 @@ class Gateway:
         return _rendered({"beliefs": [_belief_summary_view(one) for one in held]})
 
     async def _belief(self, request: Request) -> Response:
-        """Read one belief with its citations resolved (ADR-0077 §6).
+        """Read one memory with its supports resolved (ADR-0328 §15:2).
 
         **This is the read ADR-0177 §5's ceremony rests on**, and the reason it is a
         separate path from the listing: §5's second clause requires the render "taken
@@ -4964,45 +4965,53 @@ def _grant_view(grant: SourceGrant) -> dict[str, Any]:
 
 
 def _belief_fields(belief: Belief | BeliefSummary) -> dict[str, Any]:
-    """What ADR-0073 §4 requires **both** belief views to convey.
+    """What ADR-0328 §15:1 has **both** memory views carry, as the record holds it.
 
-    The band, the confidence, the kind, the content, when it was last revised, the
-    end of its validity window where one is set, and the id. The three citation
-    counts travel too, because §4's floor for a ``DERIVED`` belief is that the
-    surface conveys "how many citations stand behind it" and must not "present a
-    derived belief as carrying a warrant it cannot show" — and ADR-0107 §5 owes the
-    elision ceiling beside any rendered count, which needs ``evidence_elided``.
+    The id, the wording, the standing and its band, the status, the validity end, as
+    of, learned, the evidence summary, the reading certainty, the track record's counts
+    and last use, and whether it is legacy, unbacked, rests on outside content, or has
+    lost every episode its supports point into (§15:7). **No confidence, presented
+    confidence or elision count crosses** (§15:3): a memory carries none.
 
-    **The confidence is the presented one**, already lowered for support that has
-    gone (ADR-0077 §6). Nothing here computes it, which is what stops two surfaces
-    quoting different figures for one belief.
-
-    ``unsupported`` is carried rather than left to the page to compute, so the one
-    definition ADR-0085 §4a states holds on both types and on this surface too.
-
-    **ADR-0189 §2's two fields cross too, and without them the browser cannot render
-    at all.** §9 obliges ``whyHeld`` to name the reporting source and state the instant
-    that source said the fact was current, and this function is the whole of the wire
-    to that page: a belief reaching the front end is what this dict says it is and
-    nothing more. The pair is carried on **both** belief views under one name, which is
-    ADR-0107 §3's ruling one field over — a listing row that answered less than the row
-    it links to is the same projection defective in one place.
+    Nothing here computes a value: each is the engine's projection's, so the page and
+    the CLI cannot quote different standings for one memory (ADR-0189 §1).
     """
+    evidence = belief.evidence
+    track = belief.track_record
     return {
         "id": belief.id,
         "band": belief.band.value,
-        "kind": belief.kind.value,
+        "standing": belief.standing.value,
+        "status": belief.status.value,
         "content": belief.content,
-        "confidence": belief.confidence,
-        "last_updated": belief.last_updated.isoformat(),
-        "valid_until": None if belief.valid_until is None else belief.valid_until.isoformat(),
-        "evidence_count": belief.evidence_count,
-        "lost_evidence": belief.lost_evidence,
-        "evidence_elided": belief.evidence_elided,
-        "unsupported": belief.unsupported,
-        "attestation": _attestation_view(belief.attestation),
-        "rests_on_recorded_external_content": belief.rests_on_recorded_external_content,
+        "valid_until": _instant(belief.valid_until),
+        "as_of": _instant(belief.as_of),
+        "learned": _instant(belief.learned),
+        "evidence": {
+            "supporting": evidence.supporting,
+            "against": evidence.against,
+            "episodes": evidence.episodes,
+            "latest": _instant(evidence.latest),
+        },
+        "reading_certainty": (
+            None if belief.reading_certainty is None else belief.reading_certainty.value
+        ),
+        "track_record": {
+            "relied_on": track.relied_on,
+            "held_up": track.held_up,
+            "let_down": track.let_down,
+            "last_used": _instant(track.last_used),
+        },
+        "legacy": belief.legacy,
+        "unbacked": belief.unbacked,
+        "rests_on_outside_content": belief.rests_on_outside_content,
+        "supports_gone": belief.supports_gone,
     }
+
+
+def _instant(instant: datetime | None) -> str | None:
+    """An instant as the wire carries one, or ``null`` where it is unknown."""
+    return None if instant is None else instant.isoformat()
 
 
 def _attestation_view(attestation: Attestation | None) -> dict[str, Any] | None:
@@ -5033,30 +5042,38 @@ def _attestation_view(attestation: Attestation | None) -> dict[str, Any] | None:
 
 
 def _belief_summary_view(summary: BeliefSummary) -> dict[str, Any]:
-    """One row of the listing, which ships counts and **not** citations.
+    """One row of the listing, which ships the computed values and **not** the supports.
 
     The split is the type's rather than this function's (ADR-0085 §4a): a
-    :class:`~ai_assistant.core.types.BeliefSummary` has nowhere to put a citation, so
-    a conforming listing cannot ship the corpus on every page and this view could not
-    render one if it tried.
+    :class:`~ai_assistant.core.types.BeliefSummary` has nowhere to put a support.
     """
     return _belief_fields(summary)
 
 
 def _belief_view(belief: Belief) -> dict[str, Any]:
-    """The single-belief view: the same fields, plus the resolved warrant.
+    """The single-memory view: the same fields, plus every support (ADR-0328 §15:2).
 
-    A citation that no longer resolves crosses as an entry whose ``content`` is
-    ``null`` — a **tombstone**, never a bare id and never a silent gap (ADR-0073 §4's
-    floor, ADR-0077 §6). :class:`~ai_assistant.core.types.Evidence` carries no id at
-    all, so no renderer downstream can pass one off as the warrant.
+    A support whose part no longer resolves crosses with ``content`` ``null`` — shown
+    as gone, never as evidence, and never as a bare id (§15:7, ADR-0073 §4's floor).
+    :class:`~ai_assistant.core.types.SupportView` carries no id at all.
     """
-    return _belief_fields(belief) | {"evidence": [_evidence_view(one) for one in belief.evidence]}
+    return _belief_fields(belief) | {"supports": [_support_view(one) for one in belief.supports]}
 
 
-def _evidence_view(evidence: Evidence) -> dict[str, Any]:
-    """One citation, resolved to what it says or tombstoned (ADR-0077 §6)."""
-    return {"content": evidence.content}
+def _support_view(support: SupportView) -> dict[str, Any]:
+    """One support: its part resolved or gone, and what the record holds of it."""
+    return {
+        "part": support.part,
+        "content": support.content,
+        "origin": support.origin.value,
+        "direction": support.direction.value,
+        "note": support.note,
+        "how_sure": None if support.how_sure is None else support.how_sure.value,
+        "when": _instant(support.when),
+        "about_when": _instant(support.about_when),
+        "source_details": _attestation_view(support.source_details),
+        "counts": support.counts,
+    }
 
 
 def _notification_view(record: HeldNotification, *, now: datetime) -> dict[str, Any]:

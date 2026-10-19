@@ -1,15 +1,22 @@
 """A first, deterministic :class:`~ai_assistant.core.protocols.MemoryPolicy`.
 
-This is the "dispose" half of the propose/dispose write path: the model emits a
-:class:`~ai_assistant.core.types.MemoryUpdateProposal`, and this policy rules on
-it with simple, explainable rules. It holds no state and performs no I/O — the
-conflicting records it reasons about are passed in, so it stays decoupled from
-the store and trivially testable.
+This is the "dispose" half of the propose/dispose write path: a producer builds a
+:class:`~ai_assistant.core.types.MemoryUpdateProposal`, and this policy rules on it
+with simple, explainable rules. It holds no state and performs no I/O — the
+conflicting records it reasons about are passed in, so it stays decoupled from the
+store and trivially testable.
+
+**It reads a memory through ADR-0328 §12** (§11:10, §13:4). Every rule below was
+written over a ``MemorySource`` or a confidence, and keeps what it decided read on
+the memory's band (§6:4): its asserted arms key on band ``ASSERTED`` (standing
+confirmed or said), its derived arms on ``DERIVED`` (inference), its attested arms on
+``ATTESTED`` (from a source), and its taint floor on a ``DERIVED`` proposal that
+rests on outside content (§7:6) and carries no confirmation. Rule 13 retired with the
+stored confidence it read (§10:3): no proposal is stored tentatively.
 """
 
 from __future__ import annotations
 
-from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.types import (
@@ -19,152 +26,62 @@ from ai_assistant.core.types import (
     MemoryDecision,
     MemoryDecisionKind,
     MemoryKind,
-    MemorySource,
-    band_of,
+    part_episode,
+    record_band,
 )
 from ai_assistant.memory._agreement import agrees
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from ai_assistant.core.types import MemoryRecord, MemoryUpdateProposal, UserConfirmation
+    from ai_assistant.core.types import (
+        Attestation,
+        Memory,
+        MemoryRecord,
+        MemoryUpdateProposal,
+        UserConfirmation,
+    )
 
-_DEFAULT_MIN_CONFIDENCE = 0.3
-_DEFAULT_TEMPORARY_TTL = timedelta(days=7)
+# The **retirement class**: bands a user assertion may retire (ADR-0038 §2, widened by
+# ADR-0092 §4, read through ADR-0328 §12). An allow-list rather than "not ASSERTED",
+# so a band added later is not silently enrolled in a destructive rule by omission
+# (ADR-0038 §2a). ``ATTESTED`` is in it because a connected source is an *input* and
+# not the truth (ADR-0092 §4). **It is not the writer's reinforce-safe class**, and the
+# two answer different questions (ADR-0092 §5).
+_RETIREMENT_CLASS = frozenset({BeliefBand.DERIVED, BeliefBand.ATTESTED})
 
-# The **retirement class**: sources a user assertion may retire (ADR-0038 §2,
-# widened by ADR-0092 §4). An allow-list rather than "not USER_ASSERTED", and that
-# property is the point ADR-0038 §2a's surviving argument makes: "a `MemorySource`
-# added later is not silently enrolled in a destructive rule by omission." ADR-0092
-# §4 changes one member, chosen; not the shape that makes the next member a
-# decision.
-#
-# `EXTERNAL` joins because the owner ruled that the external calendar is an *input*
-# and not the truth. ADR-0072 already granted the permission in the sentence
-# defining the band — an attested belief is "neither entitled to the standing the
-# supersession law protects nor re-derivable by observing harder" — and ADR-0092 §4
-# completes the second clause: an attested belief is not re-derivable *by us* and is
-# **re-reportable by its source**, on a schedule, which is a recovery path at least
-# as reliable as re-observation. So it sits on the recoverable side of ADR-0038 §2's
-# error calculus, and the case for retiring it is the case §2 already made for
-# inferences.
-#
-# **This is not the applier's reinforce-safe class**, which is `{OBSERVED,
-# INFERRED, USER_ASSERTED}` since ADR-0121 §5 (`memory/ingest.py`). ADR-0092 §5
-# splits the two because they answer different questions; the constant here only
-# ever answered this one, and ADR-0121 widened the *other* one while leaving this
-# untouched — `EXTERNAL` is retirable and not foldable-onto, `USER_ASSERTED` is
-# foldable-onto (by an agreeing restatement, and since ADR-0214 §3 by an agreeing
-# observation or inference) and not retirable.
-_RETIREMENT_CLASS = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED, MemorySource.EXTERNAL})
+# The target bands an **agreeing fold** may land on (ADR-0121 §3, ADR-0214 §2): a fold
+# that only adds supports to a memory the store already holds. ``ATTESTED`` is excluded
+# for ADR-0121 §3's reason, and the exclusion is not an oversight to tidy up later.
+_AGREEMENT_FOLDABLE = frozenset({BeliefBand.DERIVED, BeliefBand.ASSERTED})
 
-# The target source classes an **agreeing fold** may land on (ADR-0121 §3, ADR-0214
-# §2). The same three sources as the writer's reinforce-safe class, arrived at from
-# the same clause and held separately for the reason ADR-0038 §2a gives: the policy
-# *chooses* a ruling and the ingestor *performs* the write, so the safety property
-# has to hold at the boundary that writes rather than at the one that recommends.
-# This copy is the choice; `memory/ingest.py`'s is the floor.
-#
-# **Two arms read it as a target class, and that is one question asked twice rather
-# than one set answering two** (ADR-0214 §2). ADR-0121 §2's arm asks which member an
-# agreeing *assertion* may fold onto; ADR-0214 §1's asks it of an agreeing
-# *observation*. The question — "which target may an agreeing fold land on" — is the
-# same one source class over, and its answer is the same, so ADR-0214 declines to
-# mint a fourth allow-list and ADR-0092 §5's warning is not engaged.
-#
-# **ADR-0214 §1's arm also reads it on the *incoming* side, for its scope, and that
-# read is stated in ADR-0214 §8 rather than invented here**: under that arm's
-# `not is_asserted` guard, membership is exactly "OBSERVED or INFERRED", which is
-# §1's scope. An allow-list rather than `is not EXTERNAL`, for ADR-0038 §2a's reason
-# — a `MemorySource` added later is not enrolled in a fold rule by omission — and
-# §8 forbids a new constant for it. The coupling is real and is the intended one: a
-# source admitted here as a fold *target* is admitted as that arm's incoming source
-# too, which is the same judgement about the same three sources made once.
-#
-# **`EXTERNAL` is excluded, and the exclusion is not an oversight to tidy up later**
-# (ADR-0121 §3, ADR-0092 §5). A `REINFORCE` folds at the *target's* id, an imported
-# record's id is the integrating system's idempotency key, and the next routine sync
-# overwrites the fold. Identity of content does nothing to that argument — the sync
-# overwrites the record whether or not the user's words matched the import's. So an
-# `EXTERNAL` conflict is never named by *either* agreement arm, whether or not it
-# agrees — and an observation's identity of content does nothing more than a user's
-# did (ADR-0214 §2). The residue that leaves is stated rather than hidden: where an
-# observation agrees with both an import and an assertion, the arm folds onto the
-# best-ranked *foldable* agreeing member and the `EXTERNAL` one is left live, which
-# is the one-target limit ADR-0121 left and #871 files.
-_AGREEMENT_FOLDABLE = frozenset(
-    {MemorySource.OBSERVED, MemorySource.INFERRED, MemorySource.USER_ASSERTED}
-)
+# The target bands ADR-0159 §4's two exceptions may name — the derived band, and only
+# that one (ADR-0092 §5's reason, applied a third time). ADR-0161 §1's clause (ii) is
+# held in :func:`_re_reported` rather than by widening this set (ADR-0161 §3).
+_RELATION_TARGETS = frozenset({BeliefBand.DERIVED})
 
-# The target source classes ADR-0159 §4's two exceptions may name — the **derived**
-# sources, and only those. A third allow-list rather than a reuse of either above,
-# for ADR-0092 §5's reason applied a third time: a set that answers two questions
-# answers neither once the questions come apart.
-#
-# **`EXTERNAL` is in neither target class, and the reason is ADR-0121 §3's,
-# unchanged** (ADR-0159 §4). A `REINFORCE` folds at the *target's* id, an imported
-# record's id is the integrating system's idempotency key, and the next routine sync
-# overwrites the fold — futile whatever the incoming source is. A `SUPERSEDE` onto an
-# import is worse than futile: the sync restores the record, and a model-judged
-# contradiction is not a claim an observation is entitled to make against the system
-# that reported the fact.
-#
-# **`USER_ASSERTED` is absent because it is unreachable, not because it was
-# weighed.** ADR-0159 §4's arm runs only for a non-asserted proposal whose conflict
-# set holds no asserted member, so an asserted target cannot appear. Listing it would
-# state a permission this arm can never exercise.
-#
-# **The exclusion is from the target classes and from nothing else** (§4). An
-# `EXTERNAL` member still *counts* in both purity conditions exactly as any other
-# does: one labelled `CONTRADICTS` blocks the reinforce exception, and one labelled
-# `RESTATES` blocks the supersede exception. That asymmetry is the conservative
-# direction — the reason `EXTERNAL` may not be a *target* is about what a write at an
-# imported id would do, which is no reason to disregard what was said about the
-# record.
-#
-# **ADR-0161 §1 partially supersedes that exclusion, and this set is deliberately
-# not where it is repaired.** Clause (ii) admits an `EXTERNAL` target on a *third*
-# condition — the proposal is itself `EXTERNAL`, the two records name the same
-# reporting source, and they `agrees` — and it is held in
-# :func:`_re_reported` rather than by adding a member here. ADR-0161 §3 forbids the
-# widening in as many words, on ADR-0092 §5's twice-recorded ground: a frozenset that
-# answers two questions "answers neither once the questions come apart", and this one
-# answers "which member may a *label* name", which clause (ii) does not ask.
-_RELATION_TARGETS = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED})
+
+def _asserted(record: MemoryRecord) -> bool:
+    """Whether ``record`` is in the ``ASSERTED`` band (ADR-0328 §12's first row)."""
+    return record_band(record) is BeliefBand.ASSERTED
 
 
 def _rule_on_admissibility(proposal: MemoryUpdateProposal) -> MemoryDecision | None:
     """The three rulings that precede any conflict reasoning, or ``None``.
 
-    All three are properties of the proposal alone, so none needs to look at what
-    it contradicts — and none commits anything, so ADR-0004 §3 holds whichever
-    fires:
+    All three are properties of the proposal alone, so none needs to look at what it
+    contradicts — and none commits anything, so ADR-0004 §3 holds whichever fires:
 
     1. **Secret-tier data defers** (ADR-0004 §3). Tier 0 belongs in the OS keyring,
-       never the memory store, so it is never committed by any other rule below.
-    2. **A derived belief citing no evidence is rejected** (ADR-0077 §5). It sits
-       *after* the secret gate deliberately: both write nothing, and rule 1's
-       ``ASK_USER`` is the more informative outcome for a Tier-0 proposal, so the
-       new rule narrows the non-secret path rather than pre-empting a ratified one.
-       Placed before the conflict rules because it is an *admissibility* floor: a
-       belief with no warrant is not worth deferring to the user about, whatever it
-       happens to contradict.
-    3. **An unconfirmed derived belief whose warrant rests on recorded external
-       content defers** (ADR-0106 §6, ADR-0098 §4). Behind *both* of the rulings
-       above, and each ordering is load-bearing rather than incidental:
-
-       - A proposal that is both secret and tainted takes the **secret** path and
-         is not queued at all, because ADR-0078 §1 refuses to queue a secret
-         proposal; a taint rule ordered first would queue one.
-       - A tainted derived proposal citing **nothing** is a ``REJECT`` and not a
-         question. Ordered first, this rule would put an unwarranted belief in
-         front of the user as though answering could make it admissible, and
-         ADR-0077 §5 rejects it whatever the user says. ADR-0078 §5a could observe
-         that such a proposal "is rejected at its first ingest, so it is never
-         deferred and never confirmed"; a consolidator's *first* ingest is exactly
-         where a citation-less proposal arrives, so the case is live here rather
-         than unreachable, and "a floor that holds only while a coincidence holds
-         is not a floor".
+       never the memory store.
+    2. **A derived memory resting on no episode is rejected** (ADR-0077 §5, read
+       through ADR-0328 §12: "the evidence it cites" is the episodes its supports
+       point at). Behind the secret gate, so a Tier-0 proposal gets the more
+       informative ``ASK_USER``.
+    3. **An unconfirmed derived memory resting on outside content defers** (ADR-0106
+       §6, ADR-0328 §13:4). Behind both: a secret and tainted proposal takes the
+       secret path, and a tainted one resting on nothing is a ``REJECT`` rather than a
+       question no answer could make admissible.
     """
     if proposal.sensitivity is DataTier.SECRET:
         return MemoryDecision(
@@ -174,14 +91,14 @@ def _rule_on_admissibility(proposal: MemoryUpdateProposal) -> MemoryDecision | N
     if _cites_nothing_it_must_cite(proposal.proposed):
         return MemoryDecision(
             kind=MemoryDecisionKind.REJECT,
-            reason="a derived belief citing no evidence has no warrant (ADR-0077 §5)",
+            reason="a derived memory resting on no episode has no warrant (ADR-0077 §5)",
         )
-    if _rests_on_external_content_unconfirmed(proposal):
+    if _rests_on_outside_content_unconfirmed(proposal):
         return MemoryDecision(
             kind=MemoryDecisionKind.ASK_USER,
             reason=(
-                "this belief's warrant rests on recorded external content, so it is "
-                "not committed without your answer (ADR-0106 §6)"
+                "this memory rests on outside content, so it is not committed without "
+                "your answer (ADR-0106 §6)"
             ),
         )
     return None
@@ -191,28 +108,9 @@ def clears_admissibility_floor(proposal: MemoryUpdateProposal) -> bool:
     """Whether :func:`_rule_on_admissibility` leaves ``proposal`` admissible.
 
     ADR-0159 §2's invocation condition reads the floor **through this predicate**
-    rather than restating it, and the sharing is normative rather than tidy: "a
-    ruling later added to the floor excludes its population here too, without
-    amending this ADR". Both modules are ``memory``'s, so a duplicate that could
-    drift is avoidable and is not to be written.
-
-    **Why a reconciler sits behind the floor at all.** ADR-0078 §5a states that the
-    floor's rulings "precede any conflict reasoning", and a relation *is* conflict
-    reasoning — a statement about the proposal against a named member of the
-    conflict set. :func:`_rule_on_admissibility` runs *inside* ``decide``, which is
-    too late: for two of the floor's populations a reconciler ahead of it costs a
-    model request on a proposal about to be rejected or deferred, and for the third
-    it is not recoverable at all — a ``DataTier.SECRET`` proposal whose conflict set
-    holds no assertion would put tier-0 content into a model request before the gate
-    ADR-0004 §3 exists to enforce had run, and the ``ASK_USER`` that follows recalls
-    nothing.
-
-    **It is a property of the proposal alone**, which is what lets a caller read it
-    without holding this policy: it binds ``MemoryIngestor`` whatever
-    ``MemoryPolicy`` was injected, and an injected policy carrying no such floor
-    does not lift it. Stated over the whole floor rather than the secret rule alone
-    for ADR-0078 §5a's own reason — "a floor that holds only while a coincidence
-    holds is not a floor".
+    rather than restating it, so a ruling later added to the floor excludes its
+    population there too. It is a property of the proposal alone, so it binds
+    ``MemoryIngestor`` whatever ``MemoryPolicy`` was injected.
 
     Args:
         proposal: The proposal about to be ingested.
@@ -223,38 +121,13 @@ def clears_admissibility_floor(proposal: MemoryUpdateProposal) -> bool:
     return _rule_on_admissibility(proposal) is None
 
 
-def _rests_on_external_content_unconfirmed(proposal: MemoryUpdateProposal) -> bool:
-    """Whether ADR-0106 §6's ceiling fires on ``proposal``.
+def _rests_on_outside_content_unconfirmed(proposal: MemoryUpdateProposal) -> bool:
+    """Whether ADR-0106 §6's ceiling fires on ``proposal`` (ADR-0328 §13:4).
 
-    Three conditions, and each is exactly as wide as the clause makes it.
-
-    **Band-scoped, and deliberately not stated over
-    :func:`~ai_assistant.core.types.rests_on_recorded_external_content`.** The two
-    differ in both directions and each difference matters. An ``ATTESTED``
-    proposal satisfies that predicate by definition — a reader's import rests on
-    recorded external content, that being what a reader is — so a ceiling stated
-    over it would refuse every calendar occurrence leg 6 writes. ADR-0098 §4 drew
-    the same line: the distinction the rule needs is between "a **faithful
-    transcription** — a reader saying what its source says, at a band that already
-    caps its standing — and a **model-authored generalisation about the user** that
-    an attacker's sentence helped produce. Only the second is ruled here." The
-    ``DERIVED`` band is where the second lives.
-
-    **Keyed on the band and not on the raw field**, for the mirror reason. ADR-0106
-    §7 forbids a band-keyed validator, so a ``USER_ASSERTED`` provenance carrying
-    ``derived_from_external=True`` stays constructible; a rule reading the raw flag
-    would defer a user's own assertion on the strength of a boolean ADR-0106 §2
-    says means nothing in that band, and ADR-0098 §1 is explicit that the user's own
-    utterance is not external "however it was composed".
-
-    **A confirmation passes it** (ADR-0078 §5, ADR-0106 §6). The confirmed answer
-    is a *re-ingest*: the coordinator rebuilds the proposal with the user's
-    authority and calls the writer again, marker and all. Without the carve-out
-    this rule fires a second time and defers the answered question — "The user
-    answers, and is asked again" (ADR-0078 §3) — and a tainted consolidation could
-    never land, which would make the containment a refusal wearing a question's
-    clothes. Being reached by asking the user is not the *auto*-acceptance
-    ADR-0098 §4 forbids.
+    Band-scoped: an ``ATTESTED`` memory rests on outside content by its nature and
+    must still be allowed to commit — a faithful transcription at a band that already
+    caps its standing is not the model-authored generalisation the rule is about
+    (ADR-0098 §4). A confirmation passes it.
 
     Args:
         proposal: The proposal being ruled on.
@@ -262,45 +135,24 @@ def _rests_on_external_content_unconfirmed(proposal: MemoryUpdateProposal) -> bo
     Returns:
         Whether the proposal is a derived, tainted, unconfirmed one.
     """
-    provenance = proposal.proposed.provenance
+    memory = proposal.proposed
     return (
-        band_of(provenance.source) is BeliefBand.DERIVED
-        and provenance.derived_from_external
+        memory.band is BeliefBand.DERIVED
+        and memory.rests_on_outside_content
         and proposal.confirmation is None
     )
 
 
-def _cites_nothing_it_must_cite(record: MemoryRecord) -> bool:
-    """Whether ``record`` is a derived belief with no evidence at all (ADR-0077 §5).
+def _cites_nothing_it_must_cite(memory: Memory) -> bool:
+    """Whether ``memory`` is a derived memory none of whose supports points at an episode.
 
-    The gate's half of the evidence discipline, at the enforcement point ADR-0072 §3
-    named: "the enforcement point is the ``MemoryPolicy`` gate, not the type… a
-    policy can state the rule for the band it is judging without constraining
-    ``EXTERNAL`` or ``USER_ASSERTED`` records that legitimately cite nothing." A
-    derived belief is one the system worked out from evidence; one that cites none
-    cannot answer "why do you believe that?" at all.
-
-    Band-wide and minimal, because the gate serves every producer and cannot know
-    which epistemic step a record took. The *producer's* floor — an ``INFERRED``
-    belief needs two distinct episodes — is a different rule with a different owner
-    and does not live here.
-
-    **``EPISODIC`` records are exempt**, as ADR-0074 §4 binds this policy: an
-    episode's warrant is that it happened, and requiring it to cite something would
-    demand a regress. The exemption guards a path nothing takes today — capture does
-    not reach the gate (ADR-0075 §1) and ADR-0077 §2 forbids the observer to propose
-    an episode — and is written anyway, so the rule is not one refactor away from
-    making its own substrate unwritable.
-
-    Its counterpart is the *writer's* floor, resolvability (ADR-0077 §5). The two do
-    not overlap: an empty tuple names no record that fails to resolve, so it passes
-    the writer and is caught here; a populated tuple naming a record the store does
-    not hold passes any policy and is caught there.
+    ADR-0077 §5's gate half, read through ADR-0328 §12. A memory always carries a
+    support (§3:3), so the case that remains is a derived memory resting only on
+    records stored before ADR-0328 — which no producer proposes, and which this rule
+    keeps out if one ever does.
     """
-    return (
-        MemoryKind(record.kind) is not MemoryKind.EPISODIC
-        and band_of(record.provenance.source) is BeliefBand.DERIVED
-        and not record.provenance.evidence
+    return memory.band is BeliefBand.DERIVED and all(
+        part_episode(support.points_at) is None for support in memory.supports
     )
 
 
@@ -309,75 +161,17 @@ def _rule_on_confirmation(
 ) -> MemoryDecision | None:
     """Rule on a *confirmed* proposal, or ``None`` to fall through (ADR-0078 §5a).
 
-    The gate ADR-0045 §7 named and neither ADR-0045 nor ADR-0050 could build,
-    because until ADR-0078 there was nowhere for the question to wait. It runs
-    **ahead of every conflict rule and behind the admissibility floor**
-    (:func:`_rule_on_admissibility`), and the two halves of that placement are each
-    load-bearing:
+    Runs **ahead of every conflict rule and behind the admissibility floor**: ahead,
+    because the assertion arms would otherwise re-defer the answer to the question
+    they just asked; behind, because nothing a confirmation says makes a floor ruling
+    safe to skip. Three steps, in order:
 
-    * **Ahead of the conflict rules**, because the assertion arms would otherwise
-      re-defer the answer to the question they just asked, forever.
-    * **Behind the floor**, because every one of the floor's rulings is a property
-      of the proposal alone and none commits anything, so nothing a confirmation
-      says can make any of them safe to *skip*. Putting the confirmed rule first
-      let a ``DataTier.SECRET`` proposal carrying a confirmation reach step 2, rule
-      ``SUPERSEDE``, and land secret payload in the store — ADR-0004 §3's "never in
-      the memory database", defeated through the one path built to respect the
-      user's word. The combination is unconstructable anyway
-      (``MemoryUpdateProposal``'s own validator refuses it), so this is belt and
-      braces over something already impossible, which is the right amount of care
-      for a rule whose failure mode is a credential in a database.
-
-      The floor's third ruling (ADR-0106 §6) is the one a confirmation can settle,
-      and it settles it **in place** rather than by being reached first: that rule
-      reads ``proposal.confirmation`` itself and does not fire when one is present,
-      so the answered proposal falls through to here on the ordinary path. The
-      difference from the secret rule is principled — ADR-0078 §1 refuses to queue
-      a secret proposal at all, so there is no question to answer, whereas a
-      tainted proposal *is* queued and answering it is the entire point.
-
-    Three steps, in order:
-
-    1. **An asserted conflict outside the answer's authority → ``ASK_USER``.** If
-       the live conflict set holds a ``USER_ASSERTED`` record *not* named in
-       ``confirmation.retires``, the user was never shown it, so committing beside
-       it is the #245 gap reached by a new path and extending their answer to it
-       would forge consent. The answer becomes a **re-deferral** (ADR-0078 §9), not
-       a write, and a fresh question is minted over the new set — which ADR-0078
-       §7's dedup does not suppress, because a different conflict set is a
-       different ``question_key``. Nothing is retired on the way out: ADR-0079 §2's
-       ordering is that only a ``SUPERSEDE`` retires anything, so sweeping the
-       covered inferences while asking about the newly-surfaced assertion would
-       commit part of a correction the user has not confirmed.
-    2. **Otherwise ``SUPERSEDE`` the first *asserted* target in ``retires`` that is
-       live.** The qualifier is load-bearing in two directions. The confirmation
-       exists to authorise the one thing similarity may not do — retire a record
-       the user gave us — so an asserted conflict is what it is *for*; and without
-       it a set holding an ``EXTERNAL`` record and an assertion, both named, could
-       name the ``EXTERNAL`` one as the audited primary while the assertion the
-       user actually confirmed retiring rode in on the applier's widening, which
-       puts the *incidental* record in the ruling's ``target_id`` and the confirmed
-       one nowhere the audit trail names. Since ADR-0092 §4 that is a
-       mis-attribution rather than an unratified adoption — ``EXTERNAL``
-       supersession is now the shipped rule — but the qualifier stays, because the
-       thing a confirmation authorises is retiring an *assertion* and that is what
-       the ruling should say it did. An ``EXTERNAL`` id in ``retires`` is therefore
-       still not acted on here: ``retires`` is a ceiling, not an instruction, and
-       an ``EXTERNAL`` conflict needs no authority from the user to be retired
-       anyway.
-    3. **Otherwise fall through** (``None``) to the policy's ordinary rules,
-       unchanged. Reading this as "otherwise ``ACCEPT``" quietly disables the
-       ordinary supersession law for every confirmed proposal: freeze a question
-       over an assertion and an inference, let the assertion be retired before the
-       answer arrives, and a bare ``ACCEPT`` lands the correction *beside* the
-       stale inference the user just corrected — left live by the confirmed path
-       where the unconfirmed one would have retired it. The confirmed path exists
-       to override the arms that would *re-defer an answered question*, not the
-       arms ADR-0038 entitles an assertion to overturn without asking.
-
-    Every confirmed *asserted* conflict is retired, not only the named one: the
-    named target is the primary the ruling audits, and the rest ride the applier's
-    widening under ADR-0078 §5b's narrowing of ADR-0050 §1's hold-out.
+    1. **An asserted conflict outside the answer's authority → ``ASK_USER``.** A live
+       conflict in the ``ASSERTED`` band not named in ``confirmation.retires`` was
+       never shown to the user, so extending their answer to it would forge consent.
+    2. **Otherwise ``SUPERSEDE`` the first asserted target in ``retires`` that is
+       live.** ``retires`` is a ceiling, not an instruction.
+    3. **Otherwise fall through** (``None``) to the ordinary rules.
 
     Args:
         confirmation: The authority the user's answer carries.
@@ -390,8 +184,7 @@ def _rule_on_confirmation(
         (
             conflict
             for conflict in conflicts
-            if conflict.provenance.source is MemorySource.USER_ASSERTED
-            and conflict.id not in confirmation.retires
+            if _asserted(conflict) and conflict.id not in confirmation.retires
         ),
         None,
     )
@@ -403,11 +196,7 @@ def _rule_on_confirmation(
                 "defer to the user again (ADR-0078 §5a)"
             ),
         )
-    live_asserted = {
-        conflict.id
-        for conflict in conflicts
-        if conflict.provenance.source is MemorySource.USER_ASSERTED
-    }
+    live_asserted = {conflict.id for conflict in conflicts if _asserted(conflict)}
     target = next(
         (record_id for record_id in confirmation.retires if record_id in live_asserted), None
     )
@@ -420,81 +209,43 @@ def _rule_on_confirmation(
     )
 
 
-def _rule_on_agreement(
-    record: MemoryRecord, conflicts: Sequence[MemoryRecord]
-) -> MemoryDecision | None:
-    """Rule ``REINFORCE`` on an agreeing restatement, or ``None`` (ADR-0121 §2).
+def _foldable_agreeing(memory: Memory, conflicts: Sequence[MemoryRecord]) -> MemoryRecord | None:
+    """The best-ranked conflict an agreeing fold may land on, or ``None`` (ADR-0121 §2).
 
-    The **agreeing set** is the members of the conflict set that agree with the
-    proposal under ADR-0121 §1 (:func:`~ai_assistant.memory._agreement.agrees`); the
-    **foldable agreeing set** is those of them whose source is in
-    :data:`_AGREEMENT_FOLDABLE`. This rules ``REINFORCE`` at the best-ranked member
-    of the foldable agreeing set exactly when **both** hold: that set is non-empty,
-    and every ``USER_ASSERTED`` member of the conflict set is in the agreeing set.
-
-    **The second condition is what keeps issue #245 closed, and it is not
-    optional.** Without it a user who said "window seats", then "aisle seats", then
-    "window seats" again would reinforce the first record and leave the second live
-    — two live contradictory assertions, which is the honesty defect ADR-0050 §2
-    exists to prevent, reached by a new path. It is stated over the *asserted*
-    members only because they are the ones ADR-0050 §2 protects: a disagreeing
-    ``OBSERVED`` or ``INFERRED`` member is not evidence of a contradiction (it is a
-    similarity hit), and the supersession arm below is what deals with it.
-
-    **An agreement retires nothing.** ``REINFORCE`` has no retirement set (ADR-0045
-    §4), so conflict-set members outside the agreeing set are left live. That is the
-    honest outcome: the proposal added no information, so it warrants no retirement,
-    and retiring a record on the strength of a *restatement* would be retiring it on
-    similarity alone. The first time the user asserted this belief the supersession
-    arm ran and retired what it was warranted to retire; a second telling does not
-    buy a second retirement.
-
-    **Its position is the decision, not a tie-break** (ADR-0121 §2). It must precede
-    the prior-assertion deferral, which is unconditional over asserted conflicts and
-    would otherwise consume every self-restatement; and it must precede the
-    supersession arm, which would otherwise retire an agreeing ``OBSERVED`` belief.
-    Placed anywhere else it is unreachable, in exactly the way ADR-0120 §6's
-    ``decisions_reinforce`` numerator was unreachable before this rule existed.
-
-    **It reads no score.** The conflict set supplies the *candidates* — a topical
-    similarity ranking at ``conflict_threshold``, which is not a contradiction
-    signal and is not an agreement signal either (ADR-0045 §5) — and ADR-0121 §1's
-    predicate decides. Reading agreement off the score instead inverts on the case
-    that matters: the strings scoring highest against "I prefer window seats"
-    include "I prefer aisle seats", so a threshold-keyed agreement folds a
-    correction into the belief it corrects, at that belief's id.
-
-    Args:
-        record: The proposed record, whose source the caller has already
-            established is ``USER_ASSERTED``.
-        conflicts: The conflict set, best-ranked first.
-
-    Returns:
-        The ``REINFORCE`` ruling, or ``None`` to fall through to the arms below
-        exactly as they stand.
+    A scan rather than ``conflicts[0]``: rank is the tie-break, never the ruling.
     """
-    # The best-ranked member of the foldable agreeing set, by a scan rather than by
-    # `conflicts[0]` — the same shape the supersession arm's scan has, and for the
-    # same reason: taking the first conflict would name a member outside the class
-    # (an agreeing `EXTERNAL` record, §3), and the writer refuses that fold, so an
-    # agreement would surface as a `MemoryStoreError` instead of a ruling.
-    foldable = next(
+    return next(
         (
             conflict
             for conflict in conflicts
-            if conflict.provenance.source in _AGREEMENT_FOLDABLE and agrees(conflict, record)
+            if record_band(conflict) in _AGREEMENT_FOLDABLE and agrees(conflict, memory)
         ),
         None,
     )
-    if foldable is None:
-        return None
-    # §2's second condition, stated over the records rather than over a set of ids:
-    # membership in the agreeing set is a property of what a record *says*, and
-    # collecting ids first would make it a property of a store's identifiers.
-    if any(
-        conflict.provenance.source is MemorySource.USER_ASSERTED and not agrees(conflict, record)
-        for conflict in conflicts
-    ):
+
+
+def _an_assertion_disagrees(memory: Memory, conflicts: Sequence[MemoryRecord]) -> bool:
+    """Whether an ``ASSERTED`` member of the set does not agree with ``memory`` (ADR-0121 §2)."""
+    return any(_asserted(conflict) and not agrees(conflict, memory) for conflict in conflicts)
+
+
+def _rule_on_agreement(memory: Memory, conflicts: Sequence[MemoryRecord]) -> MemoryDecision | None:
+    """Rule ``REINFORCE`` on an agreeing restatement, or ``None`` (ADR-0121 §2).
+
+    The best-ranked member of the foldable agreeing set, exactly when that set is
+    non-empty and every ``ASSERTED`` member of the conflict set agrees — the second
+    condition keeps #245 closed. It reads no score, and it retires nothing: a
+    ``REINFORCE`` only adds the proposal's supports to the target (ADR-0328 §11:6).
+
+    Args:
+        memory: The proposed memory, in the ``ASSERTED`` band.
+        conflicts: The conflict set, best-ranked first.
+
+    Returns:
+        The ``REINFORCE`` ruling, or ``None``.
+    """
+    foldable = _foldable_agreeing(memory, conflicts)
+    if foldable is None or _an_assertion_disagrees(memory, conflicts):
         return None
     return MemoryDecision(
         kind=MemoryDecisionKind.REINFORCE,
@@ -504,103 +255,26 @@ def _rule_on_agreement(
 
 
 def _rule_on_agreeing_observation(
-    record: MemoryRecord, conflicts: Sequence[MemoryRecord]
+    memory: Memory, conflicts: Sequence[MemoryRecord]
 ) -> MemoryDecision | None:
-    """Rule ``REINFORCE`` on an observation agreeing with an assertion, or ``None``.
+    """Rule ``REINFORCE`` on a derived memory agreeing with an assertion, or ``None``.
 
-    ADR-0214 §1's arm, and the sibling of :func:`_rule_on_agreement` on the other
-    side of the ``is_asserted`` branch. The **agreeing set** is the members of the
-    conflict set that agree with the proposal under ADR-0121 §1
-    (:func:`~ai_assistant.memory._agreement.agrees`); the **foldable agreeing set**
-    is those of them whose source is in :data:`_AGREEMENT_FOLDABLE`. This rules
-    ``REINFORCE`` at the best-ranked member of that set exactly when every
-    ``USER_ASSERTED`` member of the conflict set is in the agreeing set.
-
-    **Its scope is the prior-assertion deferral's own population, and the confinement
-    is the decision** (ADR-0214 §1). The caller evaluates this arm only for a
-    proposal whose source is ``OBSERVED`` or ``INFERRED`` and a conflict set holding
-    an assertion; stated over *every* non-asserted proposal it would fire ahead of
-    ADR-0159 §4's two exceptions on a population they rule today, dropping their
-    purity condition ("**no** member is labelled ``CONTRADICTS``") and widening their
-    target class as a side effect. Fixing #869 does not license relitigating #1188's
-    decision, so where the set holds no assertion this arm is not consulted at all
-    and ADR-0159 §4 rules exactly what it ruled.
-
-    **What the fold does is why it is permitted.** The target is the best-ranked
-    member of the foldable agreeing set, and which record that is selects which arm
-    of ``MemoryIngestor._merge`` runs (ADR-0214 §4). Where an agreeing ``OBSERVED``
-    or ``INFERRED`` member outranks every agreeing assertion the fold takes the
-    ordinary arm and the assertion is left exactly as it was — the record named is
-    the one ADR-0159 §4(a) would itself have named, so the presence of an agreeing
-    assertion no longer changes which record an observation folds onto. Where the
-    best-ranked agreeing member *is* the assertion, the corroboration arm runs and
-    the survivor is the assertion with its content, source, confidence, attestation
-    and window unchanged, gaining the observation's evidence and its confirming
-    instant. That is the fold ADR-0038 §2a's second half — "from a non-asserted
-    proposal it also downgrades the record's provenance out of the profile" — does
-    not reach, and it is the whole of why the writer floor admits it (ADR-0214 §3).
-
-    **The one condition is what preserves ADR-0038 §3's asymmetry, and its work here
-    is larger than in the sibling arm.** The fold creates no new record, so two live
-    contradictory assertions cannot be *left* by it — but suppose the store already
-    holds two, reached by a route ADR-0121 §2 does not close. An observation agreeing
-    with one of them, folded without the condition, refreshes that one's currency and
-    leaves the other to age; currency drives what a later read surfaces, so the
-    system would have adjudicated a contradiction between two things the user said on
-    the strength of having watched them. "An inference may **never** displace an
-    assertion, silently or otherwise" reached by the softest available route, and the
-    condition is what forbids it.
-
-    **A disagreeing non-asserted member blocks nothing**, exactly as in ADR-0121 §2's
-    arm and exactly as ADR-0159 §4 rules for an unlabelled member: it is a similarity
-    hit, not evidence of a contradiction, and letting it block would downgrade a
-    *certain* agreement to a question on the strength of the 0.75 score this line of
-    decisions exists to stop reading.
-
-    **It reads no score**, for the reason :func:`_rule_on_agreement` gives: the
-    conflict set supplies the candidates and ADR-0121 §1's predicate decides.
+    ADR-0214 §1's arm, evaluated only for a ``DERIVED`` proposal whose conflict set
+    holds an ``ASSERTED`` member, and firing exactly when every asserted member
+    agrees. The fold adds the proposal's supports to the target and changes nothing
+    else about it (ADR-0328 §11:6), which is why the writer admits it onto an
+    assertion (ADR-0214 §3).
 
     Args:
-        record: The proposed record, whose source the caller has already established
-            is **not** ``USER_ASSERTED`` — so the ``_AGREEMENT_FOLDABLE`` test below
-            admits exactly ``OBSERVED`` and ``INFERRED``, which is ADR-0214 §1's
-            scope and the reason no fourth constant is introduced for it.
-        conflicts: The conflict set, best-ranked first, which the caller has
-            established holds at least one ``USER_ASSERTED`` member.
+        memory: The proposed memory, not in the ``ASSERTED`` band.
+        conflicts: The conflict set, best-ranked first, holding an asserted member.
 
     Returns:
-        The ``REINFORCE`` ruling, or ``None`` to fall through to the prior-assertion
-        deferral exactly as it stands.
+        The ``REINFORCE`` ruling, or ``None`` to fall through to the deferral.
     """
-    # ADR-0214 §1's scope, on the incoming side. Read off `_AGREEMENT_FOLDABLE`
-    # rather than a set of its own: under the caller's `not is_asserted` guard the
-    # membership test is exactly "OBSERVED or INFERRED", and an `EXTERNAL` proposal
-    # — which that guard admits — is excluded here rather than at the branch, because
-    # widening the branch would rule `REINFORCE` on a fold §3 does not permit and
-    # `_refuse_unsafe_fold` would turn the deferral into a `MemoryStoreError`.
-    if record.provenance.source not in _AGREEMENT_FOLDABLE:
+    if memory.band not in _AGREEMENT_FOLDABLE or _an_assertion_disagrees(memory, conflicts):
         return None
-    # The one condition, stated over the records rather than over a set of ids, for
-    # the reason `_rule_on_agreement` states it that way: membership of the agreeing
-    # set is a property of what a record *says*.
-    if any(
-        conflict.provenance.source is MemorySource.USER_ASSERTED and not agrees(conflict, record)
-        for conflict in conflicts
-    ):
-        return None
-    # The best-ranked member of the foldable agreeing set, by a scan rather than by
-    # `conflicts[0]`: rank is the tie-break and not the ruling (ADR-0214 §1). It is
-    # non-empty whenever the condition above held — the caller's scope guarantees an
-    # asserted member, `USER_ASSERTED` is in the class, and every asserted member
-    # agrees — so `None` here is the defensive answer to a caller outside that scope.
-    foldable = next(
-        (
-            conflict
-            for conflict in conflicts
-            if conflict.provenance.source in _AGREEMENT_FOLDABLE and agrees(conflict, record)
-        ),
-        None,
-    )
+    foldable = _foldable_agreeing(memory, conflicts)
     if foldable is None:
         return None
     return MemoryDecision(
@@ -611,47 +285,29 @@ def _rule_on_agreeing_observation(
 
 
 def _effective_relations(
-    record: MemoryRecord,
+    memory: Memory,
     conflicts: Sequence[MemoryRecord],
     relations: Mapping[str, ConflictRelation] | None,
 ) -> dict[str, ConflictRelation]:
-    """The relations this arm rules on: the certain rung, then what it was handed.
+    """The relations ADR-0159 §4's arm rules on: the certain rung, then what it was handed.
 
-    Two sources, and the order between them is ADR-0159 §3's first clause read from
-    the policy's end: a pair that ``agrees`` under ADR-0121 §1 **is** ``RESTATES``,
-    always, and a reconciler reaching a different answer on such a pair "is not
-    conforming". So the certain predicate is computed here and wins, which costs
-    nothing where a conforming reconciler ran and is what makes the arm's ruling
-    independent of one that did not.
-
-    **It is also how ADR-0159 §6's floor is reached.** With no reconciler injected
-    ``relations`` is ``None``, and §6 ratifies that this arm still rules
-    ``REINFORCE`` onto a member that agrees and otherwise falls to the confidence
-    arm. That is the decided behaviour of the degraded case, not a fallback outside
-    it: it folds where the two strings are identical and duplicates where they are
-    not, where the rule this ADR replaces folded on similarity alone.
-
-    **Entries keyed on a non-member are ignored** (ADR-0159 §8), structurally: the
-    mapping is read *through* ``conflicts`` rather than iterated, so an id the
-    caller invented names nothing this arm can act on.
-
-    **Nothing here reads a score, a rank or a threshold** (§4). ``agrees`` reads
-    ``kind`` and normalised ``content``; the mapping is a determination already made
-    about a named record. The conflict set supplies candidates and nothing else.
+    A pair that ``agrees`` under ADR-0121 §1 **is** ``RESTATES``, always (ADR-0159 §3),
+    so the certain predicate is computed here and wins; with no reconciler this is
+    ADR-0159 §6's floor. Entries keyed on a non-member are ignored structurally
+    (ADR-0159 §8), since the mapping is read through ``conflicts``.
 
     Args:
-        record: The proposed record.
+        memory: The proposed memory.
         conflicts: The conflict set, best-ranked first.
         relations: What the caller determined, or ``None`` where nothing did.
 
     Returns:
-        A relation per member one is held for. Members absent from it are
-        unlabelled, which supplies ground for nothing.
+        A relation per member one is held for.
     """
     supplied = relations if relations is not None else {}
     effective: dict[str, ConflictRelation] = {}
     for conflict in conflicts:
-        if agrees(conflict, record):
+        if agrees(conflict, memory):
             effective[conflict.id] = ConflictRelation.RESTATES
             continue
         given = supplied.get(conflict.id)
@@ -660,181 +316,66 @@ def _effective_relations(
     return effective
 
 
-def _re_reported(conflict: MemoryRecord, record: MemoryRecord) -> bool:
+def _reported_by(record: MemoryRecord) -> str | None:
+    """The source a record's attestation names, read through ADR-0328 §12, or ``None``."""
+    attestation: Attestation | None = (
+        record.standing_attestation if record.kind == MemoryKind.MEMORY.value else None
+    )
+    return None if attestation is None else attestation.reported_by
+
+
+def _re_reported(conflict: MemoryRecord, memory: Memory) -> bool:
     """Whether ``conflict`` is eligible under ADR-0161 §1's clause (ii).
 
-    Four conditions, all of them facts about the two records and none of them a
-    score, a rank, a threshold or anything a model said: the proposed record's
-    source is ``EXTERNAL``, the conflict's is, their
-    ``provenance.attestation.reported_by`` are equal, and they **agree** under
-    ADR-0121 §1.
-
-    **This is a scheduled reader re-reporting an entry it already reported**, and
-    the fold is what makes ADR-0110 §4's presence rule work. §4 defines a record as
-    present in a reading "exactly when `R`'s ingest left it live at its own id", and
-    puts the unchanged entry on ``REINFORCE`` "which folds at the target's id and
-    marks it present". Without this clause the arm finds no ``OBSERVED`` or
-    ``INFERRED`` member, falls to ADR-0159 §4(c), and installs at the proposal's own
-    freshly minted id — so the predecessor is *absent* from a reading that in fact
-    reported it, and the coverage close retires it. Every scheduled read then retires
-    its entire previous set and re-installs it at new ids (#1198).
-
-    **Why the exclusion it narrows does not reach this pairing** (ADR-0161 §2).
-    ADR-0159 §4 excluded ``EXTERNAL`` on ADR-0121 §3's argument, whose premise is
-    that "an imported record's id is the integrating system's idempotency key". That
-    premise is false here by ratified rule: ADR-0092 §6 forbids a producer to use the
-    source's own key, "whether directly or namespaced", so the next routine sync
-    cannot address the id the fold landed at and the futility never arises.
-    ADR-0121 §3's own ruling — stated over a ``USER_ASSERTED`` restatement — is
-    untouched, and :data:`_AGREEMENT_FOLDABLE` gains no member.
-
-    **Keyed on ``agrees`` and never on a ``RESTATES`` label** (ADR-0161 §1, §4).
-    Two reasons, and the second is the load-bearing one. A model-judged restatement
-    is not a claim an observation is entitled to make against the system that
-    reported the fact — the surviving half of ADR-0121 §3, read in the agreement
-    direction — so the model rung may not reach an ``EXTERNAL`` target at all. And a
-    label exists only where a reconciler ran, so keying on one would make the
-    presence rule depend on a provider being reachable, silently losing it in
-    exactly the deployment ADR-0159 §6 ratifies.
-
-    **Keyed on the same ``reported_by``, so two integrations do not fold into one**
-    (ADR-0161 §1). It is "the only durable handle the record keeps on where it came
-    from", the comparison is total where this clause reaches (an attestation is
-    present exactly when the band is ``ATTESTED``, and both records are ``EXTERNAL``),
-    and it is the same handle ADR-0110 §3's condition 1 selects *absence* candidates
-    by — so one reading's coverage and one reading's folds are judged against one
-    identity rather than two. Whether that should ever be lifted is #1204's.
+    The proposed memory and the conflict are both ``ATTESTED``, their source details
+    name the same reporting source, and they **agree** under ADR-0121 §1: a scheduled
+    reader re-reporting an entry it already reported (read through ADR-0328 §12).
 
     Args:
         conflict: A member of the conflict set.
-        record: The proposed record.
+        memory: The proposed memory.
 
     Returns:
-        Whether this member is the proposal's own prior import, unchanged.
+        Whether this member is the proposal's own prior report, unchanged.
     """
-    incoming = record.provenance
-    stored = conflict.provenance
-    if incoming.source is not MemorySource.EXTERNAL:
+    if memory.band is not BeliefBand.ATTESTED or record_band(conflict) is not BeliefBand.ATTESTED:
         return False
-    if stored.source is not MemorySource.EXTERNAL:
-        return False
-    # Both are `ATTESTED`, so ADR-0092 §1's iff validator has already guaranteed an
-    # attestation on each. Read defensively anyway rather than asserted: this is a
-    # gate on a *write*, and a gate that raised on a shape the type system says is
-    # unreachable would turn an invariant violation into a failed ingest.
-    if incoming.attestation is None or stored.attestation is None:
-        return False
-    return stored.attestation.reported_by == incoming.attestation.reported_by and agrees(
-        conflict, record
-    )
+    source = _reported_by(memory)
+    return source is not None and _reported_by(conflict) == source and agrees(conflict, memory)
 
 
 def _rule_on_relations(
-    record: MemoryRecord,
+    memory: Memory,
     conflicts: Sequence[MemoryRecord],
     relations: Mapping[str, ConflictRelation] | None,
 ) -> MemoryDecision | None:
-    """ADR-0159 §4's two exceptions, or ``None`` to fall to the confidence arm.
+    """ADR-0159 §4's two exceptions (as ADR-0161 §1 replaced the first), or ``None``.
 
-    ``ACCEPT`` is the default and **each write is the exception**, which is the
-    whole substance of ADR-0159. Before it, a non-empty conflict set was
-    *sufficient* for a fold — the pilot measured 385 of 765 proposals folded, and
-    the folds were routinely distinct facts scoring 0.77 to 0.80 against each other.
-    Now a fold requires an affirmative, record-specific statement that the two say
-    the same thing, and a retirement requires an affirmative statement that they
-    cannot both be true. Everything else lands as its own belief, which destroys
-    nothing and is what the store is for.
+    ``ACCEPT`` is the default and **each write is the exception**:
 
-    In order:
+    - **(a) ``REINFORCE``** at the best-ranked eligible member: clause (ii), the
+      proposal's own prior report unchanged (:func:`_re_reported`), named ahead of
+      anything; or clause (i), a ``DERIVED`` member labelled ``RESTATES`` while **no**
+      member is labelled ``CONTRADICTS``.
+    - **(b) ``SUPERSEDE``** at the best-ranked ``DERIVED`` member labelled
+      ``CONTRADICTS``, while **no** member is labelled ``RESTATES``.
 
-    **(a) ``REINFORCE``** at the best-ranked **eligible** member. A member is
-    eligible under either of two clauses (ADR-0161 §1, replacing ADR-0159 §4(a)):
-
-    - **(ii)** it is the proposal's own prior import, unchanged —
-      :func:`_re_reported`. Named **ahead of** any member eligible only under (i),
-      and named whatever any other member is labelled.
-    - **(i)** it is labelled ``RESTATES`` and its source is in
-      :data:`_RELATION_TARGETS`, and **no** member is labelled ``CONTRADICTS``.
-
-    The purity condition binds (i) alone. ADR-0161 §1 lifts it from (ii) because on
-    that pairing it costs and buys nothing: the fold retires nothing and lands
-    byte-identical content on a record that already carries it, so the contradicting
-    member stays live either way — while *refusing* additionally installs a third
-    record saying what the target says and, under a covered reading, leaves the
-    target absent for ADR-0110 §5's close to retire.
-
-    **(b) ``SUPERSEDE``** at the best-ranked member labelled ``CONTRADICTS`` whose
-    source is in :data:`_RELATION_TARGETS`, exactly when such a member exists *and*
-    **no** member is labelled ``RESTATES``. This is the observed path's first
-    supersession arm: a belief the assistant held and later found false can now be
-    corrected without the user saying anything.
-
-    **The purity conditions are ADR-0121 §2's second condition, read one source
-    class over.** ADR-0121 refuses to reinforce onto an agreeing record while a
-    *disagreeing* assertion sits live in the same set, because that leaves two live
-    contradictory records. The same hazard is here in both directions: a set holding
-    both a ``RESTATES`` and a ``CONTRADICTS`` member is a set in which the *stored
-    records disagree with each other*, and no ruling on this proposal resolves that
-    — reinforcing one leaves the contradiction live, superseding the other leaves
-    the reinforced record's own contradiction live. So neither exception fires, the
-    proposal lands beside them, and nothing is destroyed on the strength of a
-    conflict the proposal did not create. It is deliberately **not** ``ASK_USER``:
-    an observation is not something the user should be interrogated about (#869),
-    and the question would be about two records neither of which they wrote.
-
-    **Unlabelled members block nothing, and this is the right sign** (§4). An
-    unlabelled member could be anything, a contradiction included. Letting it block
-    would mean one reconciler failure downgrades a *certain* ``agrees`` restatement
-    to a duplicate — a regression against ADR-0121 for no gain. Letting it pass
-    means a ``RESTATES`` fold may occur while an unexamined member contradicts,
-    which is strictly better than the rule this replaces, where every member folded
-    unexamined. The asymmetry is the destroy-nothing rule applied twice: an
-    unlabelled member neither authorises a write nor withdraws one a certain answer
-    authorised.
-
-    **Rank is read only to break a tie the clauses already selected** (ADR-0159 §4,
-    ADR-0161 §1). ``conflicts[0]`` is never the target by position; the scans below
-    run over the members the labels and clause (ii) chose, in the order the set
-    arrived.
-
-    **What the arm reads.** Relations and the members' ``provenance.source``
-    throughout, extended for clause (ii) alone by ``kind`` and ``content`` — through
-    ADR-0121 §1's predicate — and by ``provenance.attestation.reported_by``
-    (ADR-0161 §1). Still no retrieval score, no threshold, and no rank beyond
-    ordering members already selected.
-
-    **The degraded path rules the same way** (ADR-0161 §4). With no reconciler every
-    member is unlabelled, so limb (i)'s label condition is read as the predicate that
-    would have produced the label — :func:`_effective_relations` computes ``agrees``
-    itself — and limb (ii), which names no label at all, is read exactly as stated.
-    Parity is the decision: no ruling here turns on whether a provider was reachable,
-    because a presence rule that held only where one was configured would fail
-    silently in the direction ADR-0117 §1 names.
+    Unlabelled members block nothing, and rank only breaks a tie the clauses already
+    selected.
 
     Args:
-        record: The proposed record — non-asserted, its caller having established
-            that, and its conflict set holding no assertion either.
+        memory: The proposed memory — not asserted, and its conflict set holding no
+            assertion either.
         conflicts: The conflict set, best-ranked first.
         relations: What the caller determined about members of that set.
 
     Returns:
-        The ruling, or ``None`` for ADR-0159 §4(c) — the confidence arm.
+        The ruling, or ``None`` for ADR-0159 §4(c).
     """
-    effective = _effective_relations(record, conflicts, relations)
+    effective = _effective_relations(memory, conflicts, relations)
     restating = [c for c in conflicts if effective.get(c.id) is ConflictRelation.RESTATES]
     contradicting = [c for c in conflicts if effective.get(c.id) is ConflictRelation.CONTRADICTS]
-
-    # (a) clause (ii) — ADR-0161 §1, and **ahead of clause (i)**. The precedence is
-    # the decision and not a tie-break: without it a set holding both the proposal's
-    # own identical predecessor and a better-ranked `OBSERVED` member labelled
-    # `RESTATES` would fold onto the observation, leave the predecessor absent, and
-    # close it — #1198's failure reached by retrieval order instead of by source
-    # class. No purity condition binds here, on ADR-0161 §1's own ground: refusing
-    # this fold leaves the contradicting member exactly as live as performing it
-    # does, *and* installs a third record saying what the target says, *and* leaves
-    # the target absent under a covered reading. An honesty condition that makes the
-    # store less honest is not being applied, it is being copied.
-    re_reported = next((c for c in conflicts if _re_reported(c, record)), None)
+    re_reported = next((c for c in conflicts if _re_reported(c, memory)), None)
     if re_reported is not None:
         return MemoryDecision(
             kind=MemoryDecisionKind.REINFORCE,
@@ -844,63 +385,40 @@ def _rule_on_relations(
                 "it already reported (ADR-0161 §1)"
             ),
         )
-
-    # (a) clause (i) — ADR-0159 §4(a) as ratified, purity condition and all.
     if restating and not contradicting:
-        target = next((c for c in restating if c.provenance.source in _RELATION_TARGETS), None)
+        target = next((c for c in restating if record_band(c) in _RELATION_TARGETS), None)
         if target is not None:
             return MemoryDecision(
                 kind=MemoryDecisionKind.REINFORCE,
                 target_id=target.id,
-                reason="this restates a belief already held; recorded as agreement (ADR-0159 §4)",
+                reason="this restates a memory already held; recorded as agreement (ADR-0159 §4)",
             )
     if contradicting and not restating:
-        target = next((c for c in contradicting if c.provenance.source in _RELATION_TARGETS), None)
+        target = next((c for c in contradicting if record_band(c) in _RELATION_TARGETS), None)
         if target is not None:
             return MemoryDecision(
                 kind=MemoryDecisionKind.SUPERSEDE,
                 target_id=target.id,
-                reason="this contradicts a belief already held, which it corrects (ADR-0159 §4)",
+                reason="this contradicts a memory already held, which it corrects (ADR-0159 §4)",
             )
     return None
 
 
-def _rule_on_a_prior_assertion(
-    record: MemoryRecord, conflicts: Sequence[MemoryRecord]
-) -> MemoryDecision:
+def _rule_on_a_prior_assertion(memory: Memory, conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
     """Rule on a **non-asserted** proposal whose conflict set holds an assertion.
 
-    Two arms, and the second is what the first was placed ahead of:
-
-    0. **An agreeing observation → ``REINFORCE`` (ADR-0214 §1).** The proposal is
-       ``OBSERVED`` or ``INFERRED``, every ``USER_ASSERTED`` member of the set
-       agrees with it under ADR-0121 §1, and the ruling names the best-ranked member
-       of the foldable agreeing set (:func:`_rule_on_agreeing_observation`).
-
-    1. **Otherwise → ``ASK_USER`` (ADR-0038 §3, ADR-0050).** The proposal is a
-       belief this system worked out, the set holds an assertion it does *not* agree
-       with, and a topical-similarity score cannot tell us whether the two
-       contradict. Deferring is ADR-0038 §3's ruling and ADR-0214 does not touch
-       it: what changed is that it is now reached by a determination about content
-       rather than by the mere presence of an assertion in a ranked list.
-
-    **This population is the whole of ADR-0214 §1's scope**, which is why the two
-    arms live together here rather than the first being lifted ahead of the branch.
-    Stated over every non-asserted proposal, arm 0 would fire ahead of ADR-0159 §4's
-    two exceptions on sets holding no assertion at all — a population §4 rules today
-    with a purity condition arm 0 does not carry and a target class it does not use.
-    Fixing #869 does not license relitigating #1188's decision.
+    An agreeing derived memory folds (ADR-0214 §1, :func:`_rule_on_agreeing_observation`);
+    otherwise the proposal defers (ADR-0038 §3, ADR-0050): an inference never silently
+    overrides an assertion.
 
     Args:
-        record: The proposed record, whose source the caller has already established
-            is not ``USER_ASSERTED``.
-        conflicts: The conflict set, best-ranked first, which the caller has
-            established holds at least one ``USER_ASSERTED`` member.
+        memory: The proposed memory, not in the ``ASSERTED`` band.
+        conflicts: The conflict set, holding at least one asserted member.
 
     Returns:
         The ruling.
     """
-    agreeing = _rule_on_agreeing_observation(record, conflicts)
+    agreeing = _rule_on_agreeing_observation(memory, conflicts)
     if agreeing is not None:
         return agreeing
     return MemoryDecision(
@@ -909,263 +427,77 @@ def _rule_on_a_prior_assertion(
     )
 
 
-def _rule_on_assertion(record: MemoryRecord, conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
-    """Rule on a user-asserted proposal: agree, defer, supersede stale beliefs, or accept.
+def _rule_on_assertion(memory: Memory, conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
+    """Rule on an asserted proposal: agree, defer, supersede stale memories, or accept.
 
-    Four arms, in order:
-
-    0. **An agreeing restatement → ``REINFORCE`` (ADR-0121 §2).** Ahead of both
-       conflict arms, because both would otherwise consume it:
-       :func:`_rule_on_agreement`.
-
-    1. **A contradictory prior assertion → ``ASK_USER`` (ADR-0050 §2, #245).** If
-       *any* conflict is itself ``USER_ASSERTED``, the user is contradicting
-       something they earlier told us — which is now what the word *contradictory*
-       says, because arm 0 has already taken the sets whose asserted members all
-       agree (ADR-0121 §9 records that as a partial supersession of ADR-0050 §2,
-       narrow and in that scope alone). Committing the new assertion — even by
-       superseding an inference alongside it — would leave two live, contradictory
-       profile records, the honesty gap issue #245 reports. We may not silently
-       destroy either (topical similarity is not a contradiction signal, ADR-0045 §5
-       / clause 1), and we may not silently keep both, so we defer to the one
-       authority that can resolve it: the user. This is the "explicit user
-       confirmation" gate ADR-0045 §7 named as the acceptable way to resolve
-       assertion-versus-assertion, and it supersedes ADR-0038 §5's "accept beside"
-       — the validity window now makes the *outcome* of that confirmation
-       non-destructive (the earlier assertion is retained in ``export``), which flips
-       the cost/benefit ADR-0038 §5 weighed. The check comes first because it must
-       win even when an inference is also in the set: superseding the inference would
-       still commit the contradicting assertion.
-
-    2. **A retirable conflict → ``SUPERSEDE`` (ADR-0038, ADR-0092 §4, #244).** With
-       no asserted conflict, supersession targets the best-ranked conflict whose
-       source is in :data:`_RETIREMENT_CLASS` — an allow-list of the two *derived*
-       sources and ``EXTERNAL``, not "anything that is not an assertion", so a
-       ``MemorySource`` added later is not enrolled by omission. The scan (rather
-       than taking ``conflicts[0]``) is what reaches a retirable conflict past a
-       ``USER_ASSERTED`` one instead of abandoning supersession — it no longer has
-       an ``EXTERNAL`` hold-out to step over, since ADR-0092 §4 adopted that
-       supersession: the user outranks the calendar, and the import is an input
-       rather than the truth. The named target is the **primary**; the applier
-       retires the *full* retirement set it leads (:func:`_retirement_set`, #244),
-       so a second and third stale belief on the same topic do not survive.
-
-    3. **Nothing retirable → ``ACCEPT``.** Reachable only when the conflict set is
-       **empty**: with ``EXTERNAL`` in the class, every non-asserted conflict is
-       now retirable, and an asserted one was already ruled on by arm 1. The
-       ADR-0045 §7 shape where an assertion landed live beside a contradicting
-       import is what ADR-0092 §4 exists to end. Arm 0 does not widen this: it
-       fires only on a non-empty conflict set, so it takes cases from arms 1 and 2
-       and never from here.
+    0. **An agreeing restatement → ``REINFORCE``** (ADR-0121 §2).
+    1. **A contradictory prior assertion → ``ASK_USER``** (ADR-0050 §2, #245): two
+       things the user said cannot both stay live, and neither may be destroyed on a
+       topical-similarity signal.
+    2. **A retirable conflict → ``SUPERSEDE``** the best-ranked conflict in the
+       retirement class; the writer retires the whole retirement set it leads (#244).
+    3. **Nothing retirable → ``ACCEPT``.**
 
     Args:
-        record: The proposed record — read by arm 0 alone, which is the only arm
-            that compares the proposal against what it conflicts with rather than
-            reading the conflict set's sources.
+        memory: The proposed memory, in the ``ASSERTED`` band.
         conflicts: The conflict set, best-ranked first.
 
     Returns:
         The ruling.
     """
-    agreed = _rule_on_agreement(record, conflicts)
+    agreed = _rule_on_agreement(memory, conflicts)
     if agreed is not None:
         return agreed
-    if any(c.provenance.source is MemorySource.USER_ASSERTED for c in conflicts):
+    if any(_asserted(conflict) for conflict in conflicts):
         return MemoryDecision(
             kind=MemoryDecisionKind.ASK_USER,
             reason="contradicts a prior user assertion; defer to the user (ADR-0050)",
         )
-    superseded = next(
-        (c for c in conflicts if c.provenance.source in _RETIREMENT_CLASS),
-        None,
-    )
+    superseded = next((c for c in conflicts if record_band(c) in _RETIREMENT_CLASS), None)
     if superseded is None:
         return MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="user-asserted")
     return MemoryDecision(
         kind=MemoryDecisionKind.SUPERSEDE,
         target_id=superseded.id,
-        reason="user assertion supersedes the conflicting beliefs",
+        reason="user assertion supersedes the conflicting memories",
     )
 
 
 class DefaultMemoryPolicy:
-    """A conservative default policy for memory writes.
+    """A conservative default policy for memory writes (ADR-0328 §13:4).
 
-    Structurally implements
-    :class:`~ai_assistant.core.protocols.MemoryPolicy`. The rules, in order:
+    Structurally implements :class:`~ai_assistant.core.protocols.MemoryPolicy`, its
+    rules read through ADR-0328 §12. In order:
 
     1. Secret-tier proposals always defer to the user.
-    2. A proposal in the ``DERIVED`` band citing **no** evidence is rejected: a
-       belief we worked out from evidence, with no evidence, has no warrant
-       (ADR-0077 §5). ``EPISODIC`` records are exempt (ADR-0074 §4), and
-       ``ASSERTED``/``ATTESTED`` proposals are untouched — they legitimately cite
-       nothing (:func:`_cites_nothing_it_must_cite`).
-    3. An **unconfirmed** proposal in the ``DERIVED`` band whose provenance carries
-       ``derived_from_external`` defers to the user (ADR-0106 §6): a belief this
-       system worked out from recorded external material is never committed on the
-       strength of a producer's say-so, however trusted that producer. The ruling
-       is ``ASK_USER`` rather than ``REJECT`` — the contract admits both, and this
-       policy takes the question, because a silent refusal on a scheduler's path
-       destroys the belief, tells nobody, and leaves the user unable to keep a
-       summary they would have wanted (ADR-0098 §4, #668). Last of the
-       admissibility floor, for the reasons in :func:`_rule_on_admissibility`.
-    4. A proposal carrying a :class:`~ai_assistant.core.types.UserConfirmation` —
-       the user's answer to a question this policy earlier deferred — is judged by
-       :func:`_rule_on_confirmation`: it re-defers when the live set holds an
-       assertion the user was never shown, supersedes the confirmed assertion when
-       one is live, and otherwise **falls through** to the rules below. Behind
-       rules 1 to 3 and ahead of every rule after it; the placement is argued in
-       that function.
-    5. A **non-asserted** proposal agreeing with every assertion in its conflict
-       set rules ``REINFORCE``, ahead of the deferral below (ADR-0214 §1). It is
-       evaluated only where the proposal is ``OBSERVED``/``INFERRED`` *and* the
-       conflict set holds a ``USER_ASSERTED`` member — the deferral's own
-       population and no wider — and it fires exactly when every asserted member
-       of that set agrees under ADR-0121 §1. The target is the best-ranked member
-       of the foldable agreeing set, which may be an agreeing observation ranked
-       above the assertion; where it is the assertion, the fold **corroborates**
-       and the assertion keeps its content, source, confidence, attestation and
-       window while gaining the observation's evidence and its confirming instant
-       (ADR-0214 §4). So an observation restating what the owner already told us
-       stops producing a question the owner should never have been asked
-       (:func:`_rule_on_agreeing_observation`, #869), and a belief the user goes
-       on living out ages more slowly than one they merely once stated.
+    2. A ``DERIVED`` memory resting on no episode is rejected (ADR-0077 §5).
+    3. An **unconfirmed** ``DERIVED`` memory resting on outside content defers to the
+       user (ADR-0106 §6).
+    4. A confirmed proposal is judged by :func:`_rule_on_confirmation`: it re-defers
+       where the live set holds an assertion the user was never shown, supersedes the
+       confirmed assertion where one is live, and otherwise falls through.
+    5. A ``DERIVED`` proposal agreeing with every assertion in its conflict set
+       rules ``REINFORCE`` (ADR-0214 §1), evaluated only where the set holds an
+       assertion.
+    6. Otherwise a non-asserted proposal whose set holds an assertion defers.
+    7. An asserted proposal agreeing with what it conflicts with rules ``REINFORCE``
+       (ADR-0121 §2).
+    8. An asserted proposal contradicting a prior assertion defers (ADR-0050 §2).
+    9. An asserted proposal supersedes the best-ranked ``DERIVED`` or ``ATTESTED``
+       conflict (ADR-0038, ADR-0092 §4, #244).
+    10. An asserted proposal with nothing to supersede is accepted.
+    11. A non-asserted proposal rules ``REINFORCE`` at an eligible member
+        (ADR-0159 §4a as ADR-0161 §1 replaced it).
+    12. Otherwise a member labelled ``CONTRADICTS``, and none ``RESTATES``, is
+        superseded (ADR-0159 §4b).
+    13. Retired: a proposal is never stored tentatively (ADR-0328 §10:3). This policy
+        rules ``STORE_TEMPORARY`` on nothing.
+    14. Otherwise the proposal is accepted, with a ``reason`` telling "no conflict"
+        from "conflicts, none restating and none contradicting" (ADR-0159 §4).
 
-       **It reaches no rule of ADR-0159 §4.** Where the conflict set holds no
-       assertion this arm is not consulted at all, so rules 11 and 12 rule exactly
-       what they ruled. The confinement is the decision rather than a convenience:
-       an arm stated over *every* non-asserted proposal would fire ahead of them
-       on a population they rule today, dropping their purity condition and
-       widening their target class as a side effect (ADR-0214 §1).
-    6. An inference never silently overrides a user-asserted memory — defer.
-       **Narrowed by rule 5**, which takes every set whose asserted members all
-       agree, so this deferral now fires because an assertion in the set does
-       *not* agree — a statement about content — rather than because a ranked
-       list happened to hold one (ADR-0214 §1, partially superseding ADR-0159
-       §4's fourth clause in that scope and no wider).
-    7. A user-asserted proposal that **agrees** with what it conflicts with rules
-       ``REINFORCE``, ahead of both conflict arms (ADR-0121 §2). Agreement is
-       ADR-0121 §1's syntactic predicate over ``kind`` and ``content`` — never a
-       retrieval score — and the arm fires only when some agreeing conflict is
-       ``OBSERVED``/``INFERRED``/``USER_ASSERTED`` *and* every asserted conflict
-       agrees, so a user repeating themselves is recorded as agreement while a
-       user contradicting themselves still reaches rule 8. It retires nothing
-       (:func:`_rule_on_agreement`).
-
-       **It stays behind rule 4**, which ADR-0121 §2 does not disturb: §2 places
-       the arm ahead of "the prior-assertion deferral and the supersession arm",
-       which are rules 8 and 9, and says nothing about a confirmed proposal. The
-       one case where the order shows is a confirmation whose ``retires`` names a
-       conflict the re-ingested proposal now *agrees* with — reachable only from a
-       question queued before this rule existed, because a question about a
-       restatement is exactly what rule 7 stops being asked. There the user's own
-       answer authorised the retirement, and ADR-0045 §7 names that answer as an
-       acceptable gate where similarity is not one, so honouring it is the
-       conservative reading rather than an oversight.
-    8. A user-asserted proposal that contradicts a *prior assertion* defers to
-       the user (``ASK_USER``): two things the user said cannot both stay live,
-       yet neither may be destroyed on a topical-similarity signal, so the user
-       resolves it (ADR-0050 §2, #245, narrowed by rule 7).
-    9. A user-asserted proposal *supersedes* the conflicting beliefs: it rules
-       ``SUPERSEDE`` naming the best-ranked ``OBSERVED``/``INFERRED``/``EXTERNAL``
-       conflict, and the applier retires the *whole* retirement set it leads —
-       which is now the whole set retrieval surfaced, since the writer refuses
-       rather than truncating above its ceiling (ADR-0079 §1) — so a second and
-       third stale belief on the topic do not survive the correction (ADR-0038,
-       ADR-0040, ADR-0050 §1, ADR-0092 §4, #244). ``EXTERNAL`` is in that class
-       since ADR-0092 §4: a connected source is an *input*, so the user's
-       correction retires the import rather than sitting live beside it.
-    10. A user-asserted proposal with nothing to supersede is trusted and
-        accepted — which, since rule 9 took ``EXTERNAL``, means nothing conflicted
-        with it at all.
-    11. A non-asserted proposal rules ``REINFORCE`` at the best-ranked **eligible**
-        member of its conflict set (ADR-0159 §4a, replaced by ADR-0161 §1). A
-        member is eligible under either of two clauses, and the first takes
-        precedence:
-
-        - **(ii)** an ``EXTERNAL`` member that a scheduled reader is re-reporting
-          unchanged — the proposal is itself ``EXTERNAL``, the two carry the same
-          ``provenance.attestation.reported_by``, and they **agree** under ADR-0121
-          §1. Named whatever any other member is labelled, because refusing the
-          fold leaves a contradicting member exactly as live while duplicating a
-          fact and letting a covered reading retire the target (ADR-0161 §1).
-        - **(i)** a member labelled ``RESTATES`` whose source is
-          ``OBSERVED``/``INFERRED``, and only when **no** member is labelled
-          ``CONTRADICTS``.
-
-        A *relation* or a *certain predicate*, never the conflict set being
-        non-empty: ``conflicts[0]`` is no longer a target by position.
-    12. Otherwise, a member labelled ``CONTRADICTS`` — and **no** member labelled
-        ``RESTATES`` — rules ``SUPERSEDE`` at the best-ranked such member of the
-        same two sources (ADR-0159 §4b). This is the observed path's first
-        supersession: a belief we held and later found false is corrected without
-        the user saying anything.
-    13. Weak evidence (below ``min_confidence``) is stored temporarily, with an
-        expiry, rather than committed.
-    14. Otherwise the proposal is accepted — with a ``reason`` distinguishing "no
-        conflict" from "conflicts, none restating and none contradicting", so the
-        two are legible apart in the trace stream (ADR-0159 §4).
-
-    Rules 6 and 9 are the same asymmetry read in both directions: an assertion
-    outranks an inference, and never the reverse. Rule 4 is the one ratified way
-    through it — the user's own answer (ADR-0045 §7, ADR-0078 §5) — and it is the
-    way through rule 3 as well. Rule 7 is not a third way through: it does not
-    resolve a conflict in the user's favour, it determines that there was no
-    conflict to resolve, which is the third thing ADR-0045 §7 did not enumerate
-    (ADR-0121 §1). **Neither is rule 5**, which is that same determination read
-    from the other side: the observation does not override the assertion, it
-    re-derives it, and what it writes is the assertion's own record (ADR-0214 §4).
-    An inference still may never displace an assertion — which is why rule 5
-    carries the one condition, and refuses to fold while an assertion in the set
-    disagrees rather than adjudicating between two things the user said by
-    refreshing one's currency (ADR-0038 §3, ADR-0214 §1).
-
-    **Rules 11 and 12 are what ADR-0159 replaced rule 5 of ADR-0040 §4 with**, and
-    the inversion is the substance of it: ``ACCEPT`` is the default and each write
-    is the exception. The rule they replace folded a proposal into ``conflicts[0]``
-    whenever the set was non-empty — a *similarity* ranking, chosen without reading
-    the proposal at all — and the pilot measured it folding half of everything the
-    observer proposed, at scores where the pairs were routinely two different true
-    facts about one person. ADR-0040 §4 labelled that ruling honestly and disowned
-    it in the same breath ("calling the ruling ``REINFORCE`` asserts they agree, and
-    sometimes they will not"), and filed the question these two rules answer.
-
-    **With no relations at all the two rules still hold ADR-0121 §1's floor**
-    (ADR-0159 §6, ADR-0161 §4): rule 11 fires on a member that ``agrees``, which
-    this policy computes for itself and which no reconciler can overturn, and
-    everything else falls to rule 14. The degraded path names exactly the members
-    the reconciled one does — clause (ii) never mentioned a label, and clause (i)'s
-    is read as the predicate that would have produced it — so no ruling turns on
-    whether a provider was reachable. There is no configuration of this system in
-    which the rule ADR-0159 replaced is the better one.
+    It takes no construction-time knob: ``min_confidence`` and ``temporary_ttl``
+    retired with rule 13 (ADR-0328 §10:3).
     """
-
-    def __init__(
-        self,
-        *,
-        min_confidence: float = _DEFAULT_MIN_CONFIDENCE,
-        temporary_ttl: timedelta = _DEFAULT_TEMPORARY_TTL,
-    ) -> None:
-        """Initialise the policy.
-
-        Args:
-            min_confidence: Confidence below which a non-conflicting proposal is
-                stored temporarily instead of committed.
-            temporary_ttl: Retention window attached to temporary stores; must be
-                positive, since a non-positive window would produce an
-                already-expired record.
-
-        Raises:
-            ValueError: If ``temporary_ttl`` is not positive. ``MemoryDecision``
-                rejects such a window anyway, so without this guard the policy
-                constructs fine and then raises from ``decide`` — and only for
-                low-confidence proposals, far from the mistake.
-        """
-        if temporary_ttl <= timedelta(0):
-            msg = f"temporary_ttl must be positive, got {temporary_ttl}"
-            raise ValueError(msg)
-        self._min_confidence = min_confidence
-        self._temporary_ttl = temporary_ttl
 
     async def decide(
         self,
@@ -1174,92 +506,42 @@ class DefaultMemoryPolicy:
         conflicts: Sequence[MemoryRecord],
         relations: Mapping[str, ConflictRelation] | None = None,
     ) -> MemoryDecision:
-        """Rule on a proposed memory update. See the class docstring for rules.
+        """Rule on a proposed memory. See the class docstring for rules.
 
-        A total function of its three arguments and this policy's two
-        construction-time knobs — no store, no clock, no model, no network
-        (ADR-0159 §2). ``relations`` is read by rules 11 and 12 alone and is never
-        mutated; the caller hands over a read-only view (ADR-0159 §8), and this
-        policy would have no reason to write to it if it did not.
+        A total function of its three arguments — no store, no clock, no model, no
+        network (ADR-0159 §2). ``relations`` is read by rules 11 and 12 alone and is
+        never mutated.
         """
-        # Rules 1 to 3: properties of the proposal alone, ruled on before any
-        # conflict is read (:func:`_rule_on_admissibility`).
         inadmissible = _rule_on_admissibility(proposal)
         if inadmissible is not None:
             return inadmissible
-
-        # Rule 4: a *confirmed* proposal, judged only after the floor above and
-        # ahead of every conflict rule below (:func:`_rule_on_confirmation`,
-        # ADR-0078 §5a). `None` falls through to the ordinary rules — deliberately,
-        # because the confirmed path overrides the arms that would re-defer an
-        # answered question and *not* the arms an assertion is entitled to override
-        # without asking (ADR-0038).
         if proposal.confirmation is not None:
             confirmed = _rule_on_confirmation(proposal.confirmation, conflicts)
             if confirmed is not None:
                 return confirmed
-
         return self._rule_on_conflicts(proposal, conflicts, relations)
 
+    @staticmethod
     def _rule_on_conflicts(
-        self,
         proposal: MemoryUpdateProposal,
         conflicts: Sequence[MemoryRecord],
         relations: Mapping[str, ConflictRelation] | None,
     ) -> MemoryDecision:
-        """Rules 5 to 14: the ordinary conflict and confidence rules.
-
-        The ruling a proposal gets when the admissibility floor let it through and
-        no confirmation settled it — which is *every* proposal today except a
-        re-submitted answer, and a confirmed one whose authority no longer names a
-        live assertion (:func:`_rule_on_confirmation` step 3). A separate method so
-        the confirmed path has something to fall *through to* by name rather than by
-        control flow.
-        """
-        record = proposal.proposed
-        is_asserted = record.provenance.source is MemorySource.USER_ASSERTED
-        asserted_conflict = any(
-            c.provenance.source is MemorySource.USER_ASSERTED for c in conflicts
-        )
-        # Rules 5 and 6, in that order and only in this population
-        # (:func:`_rule_on_a_prior_assertion`). Placing the pair here rather than
-        # ahead of the branch is ADR-0214 §1's scope clause: no rule of ADR-0159 §4
-        # is reached differently, and a set holding no assertion rules as it did.
-        if not is_asserted and asserted_conflict:
-            return _rule_on_a_prior_assertion(record, conflicts)
-
+        """Rules 5 to 14: the ordinary conflict rules."""
+        memory = proposal.proposed
+        is_asserted = memory.band is BeliefBand.ASSERTED
+        if not is_asserted and any(_asserted(conflict) for conflict in conflicts):
+            return _rule_on_a_prior_assertion(memory, conflicts)
         if is_asserted:
-            return _rule_on_assertion(record, conflicts)
-
-        # Rules 11 and 12: ADR-0159 §4's two exceptions, each resting on an
-        # affirmative statement about a *named* record rather than on the conflict
-        # set being non-empty. `None` falls through to the confidence arm, which is
-        # §4(c) and is now reachable with a non-empty set.
-        related = _rule_on_relations(record, conflicts, relations)
+            return _rule_on_assertion(memory, conflicts)
+        related = _rule_on_relations(memory, conflicts, relations)
         if related is not None:
             return related
-
-        if record.provenance.confidence < self._min_confidence:
-            return MemoryDecision(
-                kind=MemoryDecisionKind.STORE_TEMPORARY,
-                ttl=self._temporary_ttl,
-                reason="low-confidence evidence, stored tentatively",
-            )
-
-        # ADR-0159 §4's second clause: the two ways to reach `ACCEPT` are legible
-        # apart in the trace stream, because "no conflict" and "conflicts, none
-        # restating and none contradicting" are different facts about the store and
-        # only one of them is recoverable from the ruling afterwards.
         if conflicts:
             return MemoryDecision(
                 kind=MemoryDecisionKind.ACCEPT,
                 reason=(
-                    "sufficient confidence; similar beliefs exist but none restates "
-                    "or contradicts this one (ADR-0159 §4)"
+                    "similar memories exist but none restates or contradicts this one (ADR-0159 §4)"
                 ),
             )
-
-        return MemoryDecision(
-            kind=MemoryDecisionKind.ACCEPT,
-            reason="sufficient confidence and no conflict",
-        )
+        return MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="no conflict")

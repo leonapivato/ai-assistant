@@ -120,7 +120,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         EgressBinding,
         FrozenJson,
-        MemoryRecord,
         SpendAdmissionHandle,
         ToolCall,
     )
@@ -1426,7 +1425,7 @@ class WebSearchEgress:
         ``search_max_results`` records exist, so a response whose first result is over
         the content bound still yields the count the operator configured where the
         provider supplied enough usable ones. That reading is §10's "at most
-        ``search_max_results`` ``MemoryRecord``s, one per result the provider returned,
+        ``search_max_results`` ``SemanticMemory``s, one per result the provider returned,
         in the order it returned them" — the bound is on the **records** and the order
         is on the walk. The alternative, capping the results considered and then
         dropping, satisfies the same sentence and returns fewer records than the
@@ -1441,7 +1440,7 @@ class WebSearchEgress:
             The outcome: the records, or ``NO_RESULT`` where the response carried none
             and where §10 dropped every one it did.
         """
-        minted: list[MemoryRecord] = []
+        minted: list[SemanticMemory] = []
         for result in results:
             if len(minted) == self._max_results:
                 break
@@ -1452,7 +1451,7 @@ class WebSearchEgress:
             return _refused(SearchRefusal.NO_RESULT)
         return SearchOutcome(reported_at=reported_at, records=tuple(minted))
 
-    def _record(self, content: str, reported_at: datetime) -> MemoryRecord:
+    def _record(self, content: str, reported_at: datetime) -> SemanticMemory:
         """One ``SEMANTIC``, ``EXTERNAL``-sourced record carrying ``content``.
 
         **No model is on this path** (ADR-0231 §10): nothing summarises, abridges,

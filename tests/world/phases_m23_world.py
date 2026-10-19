@@ -9,8 +9,8 @@ conversation, taken in by the chat's reader, and run through understanding, reca
 planning, authorizing and acting (ADR-0306 §4, ADR-0309 §3).
 
 **What is the same as** :mod:`m23_harness`, and imported from it: the planted ``.ics``
-read by the real ``CalendarReader`` into the real ``InMemoryMemoryStore`` through the
-real ``MemoryIngestor`` (:class:`~m23_harness.PriorIngestion`), the real
+read by the real ``CalendarReader`` into the real ``InMemoryMemoryStore`` as the source memories
+it would have left there (:class:`~m23_harness.PriorIngestion`), the real
 ``send_email`` declaration and implementation over the canonical transport fake armed
 to refuse (:class:`~m23_harness.Connector`), the real ``EgressBindingSeam`` and, by
 default, the real ``ThresholdActionPolicy``.
@@ -289,7 +289,7 @@ def build_phases_world(
     source = tmp_path / "calendar.ics"
     plant(source, cycle=0, records=2, hostile=False)
     reader = CalendarReader(source, now=lambda: NOW, window_past=WINDOW, window_future=WINDOW)
-    ingestion = PriorIngestion(reader=reader, writer=writer)
+    ingestion = PriorIngestion(reader=reader, store=store)
 
     connector = Connector()
     integration = build_send_email_integration(

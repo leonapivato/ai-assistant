@@ -11,7 +11,7 @@ tests and a trap in use.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
@@ -19,54 +19,36 @@ from memory_policy_contract import MemoryPolicyContract
 from pydantic import ValidationError
 
 from ai_assistant.core.types import (
-    Attestation,
-    BeliefBand,
     DataTier,
+    Memory,
     MemoryDecisionKind,
-    MemorySource,
+    MemoryStanding,
     MemoryUpdateProposal,
-    Provenance,
     QuestionPart,
-    SemanticMemory,
+    SupportOrigin,
     UserConfirmation,
-    band_of,
+    origin_standing,
 )
 from ai_assistant.testing import FakeMemoryPolicy
+from ai_assistant.testing.memories import memory, remembered_support, support_with_origin
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import MemoryPolicy
-    from ai_assistant.core.types import MemoryRecord
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def _record(record_id: str = "r") -> MemoryRecord:
-    return SemanticMemory(
-        id=record_id,
-        content=record_id,
-        fact=record_id,
-        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN),
-    )
+def _record(record_id: str = "r") -> Memory:
+    return memory(record_id, record_id, remembered_support())
 
 
-def _tainted_record(record_id: str = "consolidated") -> MemoryRecord:
-    """A derived belief whose warrant rests on recorded external content."""
-    return SemanticMemory(
-        id=record_id,
-        content=record_id,
-        fact=record_id,
-        provenance=Provenance(
-            source=MemorySource.OBSERVED,
-            confidence=0.6,
-            last_updated=_WHEN,
-            evidence=("episode-1",),
-            derived_from_external=True,
-        ),
-    )
+def _tainted_record(record_id: str = "consolidated") -> Memory:
+    """A memory at inference resting on outside content (ADR-0328 §7:6)."""
+    return memory(record_id, record_id, remembered_support(outside=True))
 
 
 def _proposal(
-    *, sensitivity: DataTier = DataTier.PERSONAL, record: MemoryRecord | None = None
+    *, sensitivity: DataTier = DataTier.PERSONAL, record: Memory | None = None
 ) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(
         proposed=record if record is not None else _record("proposed"),
@@ -141,7 +123,7 @@ async def test_a_tainted_derived_proposal_overrides_the_configured_kind(
     decision = await FakeMemoryPolicy(kind).decide(_proposal(record=tainted), conflicts=[])
 
     assert decision.kind is MemoryDecisionKind.ASK_USER
-    assert "external" in decision.reason
+    assert "outside content" in decision.reason
 
 
 async def test_a_confirmed_tainted_proposal_returns_the_configured_kind() -> None:
@@ -170,32 +152,21 @@ async def test_a_confirmed_tainted_proposal_returns_the_configured_kind() -> Non
 
 
 @pytest.mark.parametrize(
-    "source", [s for s in MemorySource if band_of(s) is not BeliefBand.DERIVED], ids=str
+    "origin",
+    [o for o in SupportOrigin if origin_standing(o) is not MemoryStanding.INFERENCE],
+    ids=str,
 )
 async def test_a_stray_marker_outside_the_derived_band_overrides_nothing(
-    source: MemorySource,
+    origin: SupportOrigin,
 ) -> None:
-    """ADR-0106 §2: the field means nothing outside the ``DERIVED`` band.
+    """ADR-0106 §2, read through ADR-0328 §7:6: outside content binds only at inference.
 
-    ADR-0106 §7 leaves the combination constructible, so a fake reading the raw
-    flag would defer a user's own assertion and every calendar import — refusing
-    far more than the contract asks and making the double useless to leg 6.
+    A memory standing above inference with an outside support beside it is not
+    deferred: a fake reading the raw outside origins would defer a user's own
+    assertion and every source's report.
     """
-    record = SemanticMemory(
-        id="r",
-        content="r",
-        fact="r",
-        provenance=Provenance(
-            source=source,
-            confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.9,
-            last_updated=_WHEN,
-            attestation=(
-                Attestation(reported_by="calendar:work", reported_at=_WHEN)
-                if band_of(source) is BeliefBand.ATTESTED
-                else None
-            ),
-            derived_from_external=True,
-        ),
+    record = memory(
+        "r", "r", support_with_origin(origin), remembered_support(effect="e-2", outside=True)
     )
 
     decision = await FakeMemoryPolicy(MemoryDecisionKind.ACCEPT).decide(
@@ -205,19 +176,14 @@ async def test_a_stray_marker_outside_the_derived_band_overrides_nothing(
     assert decision.kind is MemoryDecisionKind.ACCEPT
 
 
-async def test_store_temporary_uses_the_configured_ttl() -> None:
-    ttl = timedelta(hours=3)
-    policy = FakeMemoryPolicy(MemoryDecisionKind.STORE_TEMPORARY, ttl=ttl)
+async def test_a_configured_store_temporary_is_answered_with_accept() -> None:
+    """ADR-0328 §10:3: nothing is stored tentatively, so the fake never rules it."""
+    decision = await FakeMemoryPolicy(MemoryDecisionKind.STORE_TEMPORARY).decide(
+        _proposal(), conflicts=[]
+    )
 
-    decision = await policy.decide(_proposal(), conflicts=[])
-
-    assert decision.ttl == ttl
-
-
-@pytest.mark.parametrize("ttl", [timedelta(0), timedelta(seconds=-1)])
-def test_non_positive_ttl_is_rejected_at_construction(ttl: timedelta) -> None:
-    with pytest.raises(ValueError, match="ttl must be positive"):
-        FakeMemoryPolicy(ttl=ttl)
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+    assert "tentatively" in decision.reason
 
 
 async def test_records_every_call_in_order() -> None:

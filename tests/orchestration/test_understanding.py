@@ -38,7 +38,6 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedChannelTrigger,
     RecordedTextInput,
-    SemanticMemory,
     TranscriptMessage,
     UnderstandingGround,
     UnderstandingOmission,
@@ -61,6 +60,8 @@ from ai_assistant.orchestration.understanding import (
 )
 from ai_assistant.testing import FakeMemoryStore, FakeModelProvider
 from ai_assistant.testing.activation import ended_pass
+from ai_assistant.testing.memories import memory as memory_record
+from ai_assistant.testing.memories import remembered_support
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -738,12 +739,7 @@ async def test_recent_episodes_is_recency_across_channels_and_blind_to_status() 
         _episode(f"e-{n}", at=AT - timedelta(minutes=n), completed=n % 2 == 0) for n in range(6)
     ]
     records.append(_episode("event", at=AT - timedelta(minutes=2), channel=EVENTS))
-    belief = SemanticMemory(
-        id="belief",
-        content="Likes camping.",
-        fact="Likes camping.",
-        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
-    )
+    belief = memory_record("belief", "Likes camping.", remembered_support(when=AT, added_at=AT))
     memory = await _store(*records, belief)
     selected = await RecentEpisodes(memory=memory, limit=4)(frozenset({"e-1"}))
     assert [record.id for record in selected] == ["e-0", "e-1", "event", "e-2", "e-3"]

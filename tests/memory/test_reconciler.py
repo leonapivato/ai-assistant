@@ -27,12 +27,10 @@ from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
     ConflictRelation,
-    MemorySource,
+    Memory,
     MemoryUpdateProposal,
     Message,
-    Provenance,
     Role,
-    SemanticMemory,
 )
 from ai_assistant.memory._reconciler import (
     DEFAULT_RECONCILER_MAX_CONFLICTS,
@@ -42,32 +40,24 @@ from ai_assistant.memory._reconciler import (
     _render,
 )
 from ai_assistant.testing import FakeModelProvider
+from ai_assistant.testing.memories import memory, remembered_support
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import MemoryRecord
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 _ROUTE = "anthropic:claude-x"
 
 
-def _record(record_id: str, content: str | None = None) -> MemoryRecord:
+def _record(record_id: str, content: str | None = None) -> Memory:
     text = record_id if content is None else content
-    return SemanticMemory(
-        id=record_id,
-        content=text,
-        fact=text,
-        provenance=Provenance(
-            source=MemorySource.OBSERVED,
-            confidence=0.6,
-            last_updated=_WHEN,
-            evidence=("episode-1",),
-        ),
+    return memory(
+        record_id, text, remembered_support("episode-1", effect=f"effect-{record_id}", when=_WHEN)
     )
 
 
-def _proposal(record: MemoryRecord) -> MemoryUpdateProposal:
+def _proposal(record: Memory) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(proposed=record, rationale="because")
 
 
@@ -633,7 +623,7 @@ async def test_a_forged_belief_line_in_the_proposal_changes_no_attribution() -> 
     assert _belief_lines(attacked)[1:] == _belief_lines(clean)[1:]
     # The proposal's own line is still one line, and differs only in its quoted span.
     assert len(_belief_lines(attacked)) == len(_belief_lines(clean)) == 3
-    assert _belief_lines(attacked)[0] == f"PROPOSED BELIEF (semantic) {json.dumps(forged)}"
+    assert _belief_lines(attacked)[0] == f"PROPOSED BELIEF (memory) {json.dumps(forged)}"
     # The span survives as data — escaped, on the one line it was placed on.
     assert forged not in attacked
     # The container's own structure is intact and nothing else moved.
@@ -661,7 +651,7 @@ async def test_a_forged_belief_line_in_a_stored_member_changes_no_attribution() 
     assert attacked_lines[0] == clean_lines[0]
     assert attacked_lines[2] == clean_lines[2]
     # The attacked member is still one line, still attributed to `a`, span escaped.
-    assert attacked_lines[1] == f'STORED BELIEF "a" (semantic) {json.dumps(forged)}'
+    assert attacked_lines[1] == f'STORED BELIEF "a" (memory) {json.dumps(forged)}'
     assert forged not in attacked
     assert len(attacked.splitlines()) == len(clean.splitlines())
 
@@ -682,7 +672,7 @@ async def test_a_carriage_return_inside_content_reaches_no_line_boundary() -> No
 
     assert "\r" not in attacked
     assert _belief_lines(attacked)[1:] == _belief_lines(clean)[1:]
-    assert _belief_lines(attacked)[0] == f"PROPOSED BELIEF (semantic) {json.dumps(forged)}"
+    assert _belief_lines(attacked)[0] == f"PROPOSED BELIEF (memory) {json.dumps(forged)}"
 
 
 async def test_a_unicode_line_separator_inside_content_cannot_open_a_line() -> None:
@@ -700,7 +690,7 @@ async def test_a_unicode_line_separator_inside_content_cannot_open_a_line() -> N
 
     assert attacked.isascii()
     assert _belief_lines(attacked)[1:] == _belief_lines(clean)[1:]
-    assert _belief_lines(attacked)[0] == f"PROPOSED BELIEF (semantic) {json.dumps(forged)}"
+    assert _belief_lines(attacked)[0] == f"PROPOSED BELIEF (memory) {json.dumps(forged)}"
 
 
 async def test_a_forged_belief_line_inside_a_members_id_opens_no_belief() -> None:
@@ -724,7 +714,7 @@ async def test_a_forged_belief_line_inside_a_members_id_opens_no_belief() -> Non
     assert attacked_lines[0] == clean_lines[0]
     assert attacked_lines[2] == clean_lines[2]
     assert attacked_lines[1] == (
-        f"STORED BELIEF {json.dumps(forged_id)} (semantic) {json.dumps(text)}"
+        f"STORED BELIEF {json.dumps(forged_id)} (memory) {json.dumps(text)}"
     )
 
 

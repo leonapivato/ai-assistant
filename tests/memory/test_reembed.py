@@ -41,12 +41,11 @@ from ai_assistant.core.types import (
     MemoryRecord,
     MemorySource,
     Provenance,
-    SemanticMemory,
     Validity,
 )
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.memory import reembed as reembed_module
-from ai_assistant.memory._episode_format import EPISODE_RECORD_FORMAT
+from ai_assistant.memory._episode_format import MEMORY_RECORD_FORMAT
 from ai_assistant.memory.reembed import (
     BACKUP_SUFFIX,
     WORK_SUFFIX,
@@ -55,6 +54,7 @@ from ai_assistant.memory.reembed import (
 )
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.testing import FakeTraceSink
+from ai_assistant.testing.memories import memory
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -86,11 +86,9 @@ def _record(
     validity: Validity | None = None,
     about_person: str | None = None,
 ) -> MemoryRecord:
-    return SemanticMemory(
-        id=record_id,
-        content=content,
-        fact=content,
-        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN),
+    return memory(
+        record_id,
+        content,
         expires_at=expires_at,
         validity=validity or Validity(),
         about_person=about_person,
@@ -1259,7 +1257,7 @@ async def test_reembedding_preserves_processing_record_marker_and_digest(tmp_pat
     assert before is not None
     outcome = await Reembedder(store=path, embedder=HashingEmbedder(dimensions=_NEW)).run()
     assert outcome.swapped
-    assert _read(path, "SELECT version FROM episode_record_format") == [(EPISODE_RECORD_FORMAT,)]
+    assert _read(path, "SELECT version FROM episode_record_format") == [(MEMORY_RECORD_FORMAT,)]
     opened = SqliteMemoryStore(
         traces_sink=FakeTraceSink(), path=path, embedder=HashingEmbedder(dimensions=_NEW)
     )

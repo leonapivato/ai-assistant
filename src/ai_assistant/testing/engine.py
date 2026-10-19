@@ -72,11 +72,17 @@ from ai_assistant.core.types import (
     EpisodeCaptureReport,
     EpisodeChunk,
     EpisodePage,
+    EvidenceItemPart,
     GrantableSource,
     GrantScope,
     InformationalEventResult,
-    MemoryKind,
-    MemorySource,
+    InputPart,
+    LegacyPart,
+    Memory,
+    MemoryOperation,
+    MemoryOperationKind,
+    MemorySupport,
+    MemoryWriterName,
     MessageAuthor,
     NewMessage,
     NotificationDelivery,
@@ -85,8 +91,8 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     ProcessingStatus,
-    Provenance,
     RecordedInvocation,
+    RememberCallPart,
     SendOutcome,
     SourceGrant,
     SpendTotal,
@@ -100,8 +106,12 @@ from ai_assistant.core.types import (
     StoryNoteAuthor,
     StoryNoteId,
     StoryOutcome,
+    SupportDirection,
+    SupportOrigin,
+    SupportPart,
     TextChannelPayload,
     WholeTextReply,
+    belief_view,
     chat_conversation_ids,
     check_chat_cursor,
     check_chat_position,
@@ -109,7 +119,6 @@ from ai_assistant.core.types import (
     checked_chat_devices,
     describe_untrusted,
     encodable_text,
-    rests_on_recorded_external_content,
     secret_value,
     story_members,
     story_move_members,
@@ -998,39 +1007,35 @@ class FakeAssistantEngine:
         self,
         *,
         bands: Sequence[BeliefBand] | None = None,
-        kinds: Sequence[MemoryKind] | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
     ) -> tuple[BeliefSummary, ...]:
-        """List what is held, as summaries that carry counts and no citations."""
+        """List the memories held, as summaries that carry no supports."""
         # Materialised before the first await, so a caller that mutates the sequence
         # it passed cannot change which page it gets (ADR-0085 §3d). This engine
         # never suspends, which is one of the three ways ADR-0065 permits the clause
         # to be discharged; snapshotting anyway is what makes the property a
         # property of the code rather than of the fact that it happens not to await.
         selected_bands = None if bands is None else tuple(bands)
-        selected_kinds = None if kinds is None else tuple(kinds)
         page_argument(limit, name="limit")
         page_argument(offset, name="offset")
         check_arguments(
             "beliefs",
             max_bytes=self._max_payload_bytes,
             bands=selected_bands,
-            kinds=selected_kinds,
             limit=limit,
             offset=offset,
         )
-        self.calls.append(("beliefs", {"bands": selected_bands, "kinds": selected_kinds}))
+        self.calls.append(("beliefs", {"bands": selected_bands}))
         matching = [
             _summary_of(belief)
             for belief in self.beliefs_held.values()
-            if (selected_bands is None or belief.band in selected_bands)
-            and (selected_kinds is None or belief.kind in selected_kinds)
+            if selected_bands is None or belief.band in selected_bands
         ]
         return self._checked(tuple(matching[offset : offset + limit]), "beliefs")
 
     async def belief(self, record_id: Identifier) -> Belief | None:
-        """Read one belief with its citations, or ``None`` where none is held."""
+        """Read one memory with its supports, or ``None`` where none is held."""
         named = identifier(record_id, name="record_id")
         check_arguments("belief", max_bytes=self._max_payload_bytes, record_id=named)
         self.calls.append(("belief", {"record_id": named}))
@@ -2165,93 +2170,61 @@ class FakeAssistantEngine:
 
     # --- setting one up ----------------------------------------------------
 
-    def hold(  # noqa: PLR0913 — a content, a kind, a band, an elision count and ADR-0189 §2's two origin facts; each is one thing a caller decides on its own
+    def hold(  # noqa: PLR0913 — a wording, a band and the facts ADR-0328 §15 projects; each is one thing a caller decides on its own
         self,
         record_id: str,
         *,
         content: str,
-        kind: MemoryKind = MemoryKind.SEMANTIC,
         band: BeliefBand = BeliefBand.ASSERTED,
-        evidence_elided: int = 0,
         attestation: Attestation | None = None,
-        derived_from_external: bool = False,
+        rests_on_outside_content: bool = False,
+        legacy: bool = False,
         placement: Placement | None = None,
     ) -> Belief:
-        """Put one belief in memory, and return it.
+        """Put one memory in memory, and return its single-memory view.
 
-        The confidence is fixed and unadjusted: nothing here loses evidence, so
-        there is no lost support for a presented value to have fallen with.
-
-        ``evidence_elided`` is a knob because :func:`_summary_of` has to carry it
-        (ADR-0107 §8 item 5) and a state no caller can script is a guarantee nobody
-        can check. It is deliberately **not** derived from anything: it counts
-        citations the belief no longer carries, on any band, and is independent of
-        the confidence this fake fixes.
-
-        **``attestation`` and ``derived_from_external`` are ADR-0189 §2's two facts,
-        and only one of them is a knob** (#1523). The attestation is scripted, because
-        a surface that names the reporting source and the instant it spoke cannot be
-        tested without one. ``rests_on_recorded_external_content`` is **not**: ADR-0189
-        §2 rules it "the value of
-        :func:`~ai_assistant.core.types.rests_on_recorded_external_content` (ADR-0106
-        §2) applied to the projected record's :class:`~ai_assistant.core.types.Provenance`",
-        and that "no producer supplies it". So this builds the provenance the arguments
-        describe and asks that function — the real projection's own derivation rather
-        than a second spelling of it, which is what stops this fake representing a
-        state no real projection can produce.
-
-        **``Provenance``'s validator is doing work here rather than decorating.** It
-        holds this fake to ADR-0092 §1's *if and only if*: an ``ATTESTED`` belief with
-        no attestation, and an attestation on any other band, are both refused here
-        exactly as the store refuses them — so the state ADR-0189 §2 declines to guard
-        with a validator on :class:`~ai_assistant.core.types.Belief` is unscriptable
-        anyway.
-
-        ``derived_from_external`` is spelled as the ``Provenance`` field it is rather
-        than as the answer it feeds, because it means nothing outside the ``DERIVED``
-        band (ADR-0106 §2) and the band guard belongs to the predicate.
+        It rests on one support whose origin ranks at ``band`` (:func:`_held_support`),
+        and is projected by ``core``'s own projection
+        (:func:`~ai_assistant.core.types.belief_view`), so this fake represents no state
+        the real projection cannot produce: its standing, whether it rests on outside
+        content and whether it is legacy are computed from that support, never set.
 
         Args:
-            record_id: The belief's id.
-            content: What the belief says.
-            kind: Which of the four typed memories it is.
-            band: The standing it is held with.
-            evidence_elided: How many citations this record's history displaced.
-            attestation: What reported it and when that source said so. Required on
-                the ``ATTESTED`` band and refused on the other two.
-            derived_from_external: Whether a ``DERIVED`` belief's warrant traces to
-                recorded external content.
-            placement: Who may receive this record (ADR-0217 §1). A knob because
-                nothing on this surface writes one but the owner's own act: ADR-0204
-                §2's derivation runs inside a turn and ADR-0217 §4's proposal is a
-                producer's, so the two placements a consumer most needs to test an act
-                against — a ``DERIVED`` narrowing and a model's ``PROPOSED`` one —
-                cannot be reached by calling the fake. ``None`` leaves the record
-                carrying §6's default, which is what a fresh belief has.
+            record_id: The memory's id.
+            content: Its wording.
+            band: The band its one support's origin ranks it in.
+            attestation: The source details of an ``ATTESTED`` memory's support.
+            rests_on_outside_content: Whether a ``DERIVED`` memory's support is outside.
+            legacy: Whether it rests on a record stored before ADR-0328 instead.
+            placement: Who may receive it (ADR-0217 §1); ``None`` leaves the default.
 
         Returns:
-            The belief now held.
+            The memory now held, as the single-memory view projects it.
         """
-        provenance = _provenance_for(
-            band, attestation=attestation, derived_from_external=derived_from_external
+        support = _held_support(
+            band,
+            attestation=attestation,
+            outside=rests_on_outside_content,
+            legacy=legacy,
+            record_id=record_id,
         )
-        held = Belief(
+        memory = Memory(
             id=record_id,
-            band=band,
-            kind=kind,
             content=content,
-            confidence=1.0 if band is BeliefBand.ASSERTED else _CONFIDENCE,
-            last_updated=_AT,
-            evidence_elided=evidence_elided,
-            attestation=provenance.attestation,
-            rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
+            supports=(support,),
+            operations=(
+                MemoryOperation(
+                    kind=MemoryOperationKind.CREATE,
+                    cites=support.points_at,
+                    at=_AT,
+                    by=support.added_by,
+                ),
+            ),
         )
+        held = belief_view(memory, now=_AT, contents={support.points_at: content})
         self.beliefs_held[record_id] = held
         # The placement follows the belief it belongs to, so seeding over an id this
         # engine already holds **replaces** it rather than inheriting the last one's.
-        # A conditional write here would let `hold(id, placement=DERIVED)` followed by a
-        # plain `hold(id)` leave a fresh, default-placed belief that `unguard` refuses —
-        # a state no producer can reach and one the argument's own default denies.
         self.placements.pop(record_id, None)
         if placement is not None:
             self.placements[record_id] = placement
@@ -2457,90 +2430,62 @@ def _ordered_invocations(rows: Sequence[RecordedInvocation]) -> tuple[RecordedIn
     return tuple(sorted(by_id, key=lambda row: row.invocation.recorded_at, reverse=True))
 
 
-def _provenance_for(
+#: The episode a held memory's support points at: a fake one, which the fake never
+#: resolves, so a held memory's support content is its own wording (``hold``).
+_HELD_EPISODE = "fake:held"
+
+
+def _held_support(
     band: BeliefBand,
     *,
     attestation: Attestation | None,
-    derived_from_external: bool,
-) -> Provenance:
-    """The provenance a belief in this band, with these facts, would have been stored with.
+    outside: bool,
+    legacy: bool,
+    record_id: str,
+) -> MemorySupport:
+    """The one support a held memory rests on, its origin chosen for ``band`` (ADR-0328 §4).
 
-    **Built so that one function answers ADR-0189 §2's predicate here and in the real
-    engine.** §2 rules ``rests_on_recorded_external_content`` to be
-    :func:`~ai_assistant.core.types.rests_on_recorded_external_content` applied to the
-    projected record's ``Provenance``, and that "no producer supplies it, no surface
-    recomputes it from ``band``". A fake that mapped band to answer directly would be
-    the second spelling ADR-0106 §2 exists to make unwritable — so this reconstructs
-    the input that function takes and lets it decide.
-
-    The band is inverted to a :class:`~ai_assistant.core.types.MemorySource` rather
-    than carried, because ``Provenance`` is keyed on the source and ``band_of`` is the
-    projection (ADR-0072 §4). ``DERIVED`` has two pre-images and ``INFERRED`` is the
-    one chosen: ``OBSERVED`` reaches the same band and the same predicate, so nothing
-    downstream can tell them apart, and picking the other would change no answer.
-
-    Args:
-        band: The standing the record is held with.
-        attestation: What reported it, where the band is ``ATTESTED``.
-        derived_from_external: Whether a ``DERIVED`` warrant traces to recorded
-            external content.
-
-    Returns:
-        A provenance carrying exactly those facts.
-
-    Raises:
-        ValidationError: Where the band and the attestation disagree — ADR-0092 §1's
-            *if and only if*, enforced by ``Provenance`` itself rather than restated
-            here.
+    ``ASSERTED`` is the user saying it, ``ATTESTED`` an evidence item (outside, with
+    ``attestation`` as its source details), and ``DERIVED`` a remember call, outside
+    where ``outside`` says so; ``legacy`` a record stored before ADR-0328.
     """
+    if legacy:
+        return MemorySupport(
+            points_at=LegacyPart(record=record_id),
+            origin=SupportOrigin.LEGACY_OUTSIDE if outside else SupportOrigin.LEGACY,
+            direction=SupportDirection.FOR,
+            backs_as_worded=True,
+            added_at=_AT,
+            added_by=MemoryWriterName.MIGRATION,
+            carries={"id": record_id},
+        )
     match band:
         case BeliefBand.ASSERTED:
-            source = MemorySource.USER_ASSERTED
-        case BeliefBand.DERIVED:
-            source = MemorySource.INFERRED
+            part: SupportPart = InputPart(episode=_HELD_EPISODE)
+            origin = SupportOrigin.USER_MESSAGE
         case BeliefBand.ATTESTED:
-            source = MemorySource.EXTERNAL
+            part = EvidenceItemPart(episode=_HELD_EPISODE, digest=0, item=0)
+            origin = SupportOrigin.EVIDENCE
+        case BeliefBand.DERIVED:
+            part = RememberCallPart(episode=_HELD_EPISODE, effect="fake-effect")
+            origin = SupportOrigin.REMEMBERED_OVER_OUTSIDE if outside else SupportOrigin.REMEMBERED
         case _:  # pragma: no cover - exhaustive
             assert_never(band)
-    return Provenance(
-        source=source,
-        confidence=1.0 if band is BeliefBand.ASSERTED else _CONFIDENCE,
-        last_updated=_AT,
-        attestation=attestation,
-        derived_from_external=derived_from_external,
+    return MemorySupport(
+        points_at=part,
+        origin=origin,
+        direction=SupportDirection.FOR,
+        backs_as_worded=True,
+        when=_AT,
+        source_details=attestation,
+        added_at=_AT,
+        added_by=MemoryWriterName.REMEMBER,
     )
 
 
 def _summary_of(belief: Belief) -> BeliefSummary:
-    """Project one held belief into the listing's summary (ADR-0085 §4a).
-
-    ``evidence_elided`` is carried through as held, on every band, so the fake and
-    the real projection agree about it (ADR-0107 §8 item 5). A fake that dropped it
-    would let a conformance suite pass against a listing that discloses less than
-    the detail view it was drilled into.
-
-    **ADR-0189 §2's two fields are carried for exactly that argument, one field over**
-    (#1523). ADR-0107 §3 refused both "put the field on ``BeliefSummary`` only" and
-    "put it on ``Belief`` only" and required both DTOs to carry it under one name,
-    because "a listing row that answered less than the row it links to is the same
-    projection defective in one place" — and a fake that dropped the attestation here
-    would let a listing render the generic attested line while every single-belief
-    test passed, which is #1517's second finding exactly.
-    """
-    return BeliefSummary(
-        id=belief.id,
-        band=belief.band,
-        kind=belief.kind,
-        content=belief.content,
-        confidence=belief.confidence,
-        last_updated=belief.last_updated,
-        evidence_count=belief.evidence_count,
-        lost_evidence=belief.lost_evidence,
-        valid_until=belief.valid_until,
-        evidence_elided=belief.evidence_elided,
-        attestation=belief.attestation,
-        rests_on_recorded_external_content=belief.rests_on_recorded_external_content,
-    )
+    """The listing's summary of one held memory: its fields, its supports left out."""
+    return BeliefSummary.model_validate(belief.model_dump(exclude={"supports"}))
 
 
 def _pseudo_audio(text: str, media_type: SpokenAudioFormat) -> str:

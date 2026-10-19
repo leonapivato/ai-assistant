@@ -62,7 +62,7 @@ import sqlite_vec
 
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import MemoryStoreError
-from ai_assistant.core.types import BeliefBand, MemoryKind, band_of, describe_untrusted
+from ai_assistant.core.types import BeliefBand, MemoryKind, describe_untrusted, record_band
 from ai_assistant.memory.sqlite_store import _ADAPTER, _VEC_KNN_MAX_K
 
 if TYPE_CHECKING:
@@ -323,9 +323,10 @@ class Census:
 class BandFill:
     """§3's band fill for one :class:`~ai_assistant.core.types.BeliefBand`.
 
-    Taken as ``band_of`` of the record's ``provenance.source``, which is `core`'s
-    own total function over the single classifier ADR-0072 §4 keeps — so the
-    census and the store cannot disagree about which band a record is in.
+    Taken as :func:`~ai_assistant.core.types.record_band`, `core`'s own total
+    function — a memory's band computed from its supports (ADR-0328 §6:4), an
+    episode's from its provenance's source — so the census and the store cannot
+    disagree about which band a record is in.
 
     Attributes:
         band: The band.
@@ -586,7 +587,7 @@ def _age_lines(closure_age: Spread) -> list[str]:
 def _band_lines(bands: Sequence[BandFill]) -> list[str]:
     """The band fill, one line per band."""
     return [
-        "band fill — the census population by the band its provenance source places it in",
+        "band fill — the census population by its band",
         *(f"  {band.band.value:<30} live {band.live} / not live {band.not_live}" for band in bands),
     ]
 
@@ -780,7 +781,7 @@ def _decode(data: object, rowid: object) -> MemoryRecord:
     The blob is the truth and the derived columns beside it are an index
     (``SqliteMemoryStore._migrate_records``), so every classification here is made
     from the decoded model — ``Validity.live_at`` at ``T``, ``expires_at``, and
-    ``band_of`` the provenance source. That is one predicate with one owner rather
+    ``record_band``. That is one predicate with one owner rather
     than a second SQL transcription of it that could drift from `core`'s.
 
     Args:
@@ -911,7 +912,7 @@ class _Tally:
         counts = self.kinds[record.kind]
         for index, flag in enumerate((True, live, retired, not_yet, expired)):
             counts[index] += flag
-        band = self.bands[band_of(record.provenance.source)]
+        band = self.bands[record_band(record)]
         band[0 if live else 1] += 1
         if retired and validity.valid_until is not None:
             self.ages.append((self._at - validity.valid_until).total_seconds())

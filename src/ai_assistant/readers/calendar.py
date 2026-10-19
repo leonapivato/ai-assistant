@@ -217,11 +217,11 @@ from ai_assistant.core.types import (
     CalendarFacet,
     DataTier,
     MemorySource,
-    MemoryUpdateProposal,
     Provenance,
     ReadCoverage,
     ReportedExtent,
     SemanticMemory,
+    SourceProposal,
     SourceReading,
 )
 from ai_assistant.readers._guards import type_name_of
@@ -657,7 +657,7 @@ class CalendarReader:
 
     def _propose(
         self, occurrences: Sequence[Occurrence], read_at: datetime
-    ) -> tuple[tuple[MemoryUpdateProposal, ...], bool]:
+    ) -> tuple[tuple[SourceProposal, ...], bool]:
         """Turn in-window occurrences into attested proposals, within the budget.
 
         Returns:
@@ -672,7 +672,7 @@ class CalendarReader:
         """
         spent = 0
         proposed_all = True
-        proposals: list[MemoryUpdateProposal] = []
+        proposals: list[SourceProposal] = []
         for occurrence in occurrences:
             if occurrence.reported_at is None:
                 # Skipped, not raised, and it has already been counted against the
@@ -699,7 +699,7 @@ class CalendarReader:
 
     def _proposal(
         self, occurrence: Occurrence, reported_at: datetime, read_at: datetime
-    ) -> MemoryUpdateProposal:
+    ) -> SourceProposal:
         """One attested belief about one occurrence.
 
         **``reported_at`` lands in two fields for two different reasons**
@@ -720,7 +720,7 @@ class CalendarReader:
             read_at: Our own clock, at acquisition.
         """
         content = _render(occurrence)
-        return MemoryUpdateProposal(
+        return SourceProposal(
             proposed=SemanticMemory(
                 id=_mint(self._id_factory),
                 content=content,
@@ -756,7 +756,7 @@ class CalendarReader:
                 ),
             ),
             rationale=f"the {self.name} source reported this entry",
-            # Stated, never defaulted. `MemoryUpdateProposal.sensitivity` defaults
+            # Stated, never defaulted. `SourceProposal.sensitivity` defaults
             # to `PERSONAL`, which is correct for a calendar and must not be
             # *assumed* correct for the next source; a producer that defaults its
             # way past this classification is the failure ADR-0004 §1's tiering

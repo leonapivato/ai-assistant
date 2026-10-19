@@ -28,17 +28,15 @@ from ai_assistant.core.types import (
     DiagnosticKind,
     DiagnosticSource,
     InputOrigin,
-    MemorySource,
+    Memory,
     Message,
     OfferedTool,
     Placement,
     PlanningLabel,
     PlanningRound,
-    Provenance,
     RecallCue,
     Role,
     RoundResponse,
-    SemanticMemory,
 )
 from ai_assistant.orchestration.digesting import ActivationLabels, DigestingStage
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
@@ -53,6 +51,8 @@ from ai_assistant.testing import (
     FakeStoryStore,
     FakeToolCallingCompleter,
 )
+from ai_assistant.testing.memories import memory as memory_record
+from ai_assistant.testing.memories import said_support
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -73,13 +73,9 @@ def _body(entry: Any) -> Any:
     return entry.model_dump(mode="json")["body"]
 
 
-def _fact(memory_id: str, fact: str) -> SemanticMemory:
-    return SemanticMemory(
-        id=memory_id,
-        content=fact,
-        fact=fact,
-        provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AT),
-        placement=Placement(),
+def _fact(memory_id: str, fact: str) -> Memory:
+    return memory_record(
+        memory_id, fact, said_support(when=_AT, added_at=_AT), placement=Placement()
     )
 
 

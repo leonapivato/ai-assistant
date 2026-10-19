@@ -85,7 +85,7 @@ if TYPE_CHECKING:
         SourceGrants,
         SourceReadRecorder,
     )
-    from ai_assistant.core.types import MemoryUpdateProposal, ReportedExtent, SourceReading
+    from ai_assistant.core.types import ReportedExtent, SourceProposal, SourceReading
 
 #: The producer's declared name (ADR-0130 §2, on ADR-0093 §7's rule for a reader's
 #: identity): a stable Tier 2 constant, never derived from the source's location or
@@ -146,7 +146,7 @@ def _produced_by(reading: SourceReading) -> int:
     return len(reading.proposals) + (0 if reading.facet is None else 1)
 
 
-def _extent_of(proposal: MemoryUpdateProposal) -> ReportedExtent | None:
+def _extent_of(proposal: SourceProposal) -> ReportedExtent | None:
     """The occurrence's span as the proposal's attestation carries it (§3).
 
     ``None`` where the proposal states no position for what it read — no
@@ -509,7 +509,7 @@ class UpcomingEventStage:
         )
 
     def _candidate(
-        self, proposal: MemoryUpdateProposal, read_at: datetime
+        self, proposal: SourceProposal, read_at: datetime
     ) -> NotificationCandidate | None:
         """One upcoming occurrence as a candidate, or ``None`` if it is not one.
 

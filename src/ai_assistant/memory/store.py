@@ -40,11 +40,13 @@ from ai_assistant.core.types import (
     EpisodeCursor,
     EpisodePage,
     EpisodicMemory,
+    MemoryKind,
     MemorySearchResult,
     MemoryWriteMode,
     ProcessingStatus,
     RecordChunk,
-    band_of,
+    record_band,
+    record_transaction_time,
 )
 from ai_assistant.memory._channel_reads import channel_of, check_channel_page
 from ai_assistant.memory._episode_guard import is_open, refuse_episode_change
@@ -62,7 +64,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
         BeliefBand,
-        MemoryKind,
         MemoryRecord,
         MemoryWrite,
         WalkPosition,
@@ -94,14 +95,14 @@ def _check_page_bounds(limit: int, offset: int) -> None:
 
 
 def _newest_revision_first(records: list[MemoryRecord]) -> list[MemoryRecord]:
-    """ADR-0073 §2's total order: ``last_updated`` descending, ``id`` ascending.
+    """ADR-0073 §2's total order: transaction time descending, ``id`` ascending.
 
     Two passes over a stable sort rather than one composite key, because the two
     halves run in opposite directions and ``datetime`` has no negation — the idiom
     ``FakeAuditTrail._ordered`` already uses for the same shape.
     """
     by_id = sorted(records, key=lambda record: record.id)
-    return sorted(by_id, key=lambda record: record.provenance.last_updated, reverse=True)
+    return sorted(by_id, key=record_transaction_time, reverse=True)
 
 
 def _selects_nothing(*axes: frozenset[object] | None) -> bool:
@@ -495,7 +496,7 @@ class InMemoryMemoryStore:
             if self._is_readable(record, now)
             and not is_open(record)
             and (wanted is None or record.kind in wanted)
-            and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
+            and (wanted_bands is None or record_band(record) in wanted_bands)
             and (score := _relevance(query_terms, record.content)) > 0.0
         ]
         scored.sort(key=lambda record: record.score or 0.0, reverse=True)
@@ -689,7 +690,8 @@ class InMemoryMemoryStore:
 
         Args:
             bands: Belief bands to include; ``None`` is every band, ``()`` none.
-            kinds: Memory kinds to include; ``None`` is every kind, ``()`` none.
+            kinds: Kinds to include; ``None`` is the memory kind alone, so episodes
+                are excluded by default (ADR-0328 §11:2), and ``()`` is none.
             limit: Page size; ``0`` returns an empty page.
             offset: How many ordered, filtered records to skip.
 
@@ -701,11 +703,11 @@ class InMemoryMemoryStore:
             MemoryStoreError: If the injected clock's reading is not conforming.
         """
         wanted_bands = None if bands is None else frozenset(bands)
-        wanted_kinds = None if kinds is None else frozenset(str(kind) for kind in kinds)
-        _check_page_bounds(limit, offset)
-        selects_nothing = (wanted_bands is not None and not wanted_bands) or (
-            wanted_kinds is not None and not wanted_kinds
+        wanted_kinds = frozenset(
+            str(kind) for kind in ((MemoryKind.MEMORY,) if kinds is None else kinds)
         )
+        _check_page_bounds(limit, offset)
+        selects_nothing = (wanted_bands is not None and not wanted_bands) or not wanted_kinds
         if limit == 0 or selects_nothing:
             return []
 
@@ -714,8 +716,8 @@ class InMemoryMemoryStore:
             record
             for record in self._records.values()
             if self._is_readable(record, now)
-            and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
-            and (wanted_kinds is None or record.kind in wanted_kinds)
+            and (wanted_bands is None or record_band(record) in wanted_bands)
+            and record.kind in wanted_kinds
         ]
         page = _newest_revision_first(matched)[offset : offset + limit]
         # ``score`` is cleared rather than left as stored: a record re-added after a

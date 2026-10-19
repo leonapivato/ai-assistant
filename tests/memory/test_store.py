@@ -12,17 +12,17 @@ from pydantic import ValidationError
 from ai_assistant.core.errors import MemoryStoreError, MemoryStoreStaleError
 from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.core.types import (
+    EpisodicMemory,
     MemoryKind,
     MemoryRecord,
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
-    PreferenceMemory,
     Provenance,
-    SemanticMemory,
 )
 from ai_assistant.memory import InMemoryMemoryStore
 from ai_assistant.memory._walk import mint_position
+from ai_assistant.testing.memories import memory, remembered_support
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -40,18 +40,17 @@ def _provenance() -> Provenance:
 
 
 def _semantic(record_id: str, content: str, *, expires_at: datetime | None = None) -> MemoryRecord:
-    return SemanticMemory(
-        id=record_id,
-        content=content,
-        fact=content,
-        provenance=_provenance(),
+    return memory(
+        record_id,
+        content,
+        remembered_support(when=_WHEN, added_at=_WHEN),
         expires_at=expires_at,
     )
 
 
-def _preference(record_id: str, content: str) -> MemoryRecord:
-    return PreferenceMemory(
-        id=record_id, content=content, preference=content, provenance=_provenance()
+def _episode(record_id: str, content: str) -> MemoryRecord:
+    return EpisodicMemory(
+        id=record_id, content=content, provenance=_provenance(), occurred_at=_WHEN
     )
 
 
@@ -105,12 +104,12 @@ async def test_search_orders_by_relevance_and_scores() -> None:
 async def test_search_filters_by_kind() -> None:
     store = InMemoryMemoryStore()
     await store.add(_semantic("s", "shared coffee keyword"))
-    await store.add(_preference("p", "shared coffee keyword"))
+    await store.add(_episode("e", "shared coffee keyword"))
 
-    results = (await store.search("coffee", kinds=[MemoryKind.PREFERENCE])).records
+    results = (await store.search("coffee", kinds=[MemoryKind.EPISODIC])).records
 
-    assert [r.id for r in results] == ["p"]
-    assert results[0].kind == "preference"
+    assert [r.id for r in results] == ["e"]
+    assert results[0].kind == "episodic"
 
 
 async def test_search_respects_limit() -> None:

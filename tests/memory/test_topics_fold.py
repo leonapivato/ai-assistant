@@ -32,20 +32,21 @@ import pytest
 from ai_assistant.core.types import (
     MAX_TOPICS_PER_RECORD,
     Attestation,
+    BeliefBand,
     EpisodicMemory,
+    Memory,
     MemoryDecisionKind,
     MemorySource,
     MemoryUpdateProposal,
-    PreferenceMemory,
     Provenance,
 )
 from ai_assistant.memory import InMemoryMemoryStore, MemoryIngestor
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryWriter, FakeTraceSink
+from ai_assistant.testing.memories import memory, memory_in_band, remembered_support
 
 if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, MemoryWriter
-    from ai_assistant.core.types import MemoryRecord
 
 _CLOCK: Final = datetime(2026, 6, 1, tzinfo=UTC)
 _WHEN: Final = datetime(2026, 1, 1, tzinfo=UTC)
@@ -53,17 +54,18 @@ _CONTENT: Final = "prefers concise emails"
 _EPISODE: Final = "episode-1"
 _CORRECTION: Final = "corrected"
 
+#: The band each arm's target stands in, and therefore the discriminator that says
+#: which arm a case actually took. Since ADR-0328 there is one fold — the proposal's
+#: supports added to the target (§11:6) — so the arms are kept for what ADR-0213 §8
+#: says over every fold: whatever the target's band, its labels survive.
 _ORDINARY: Final = "ordinary"
 _ATTESTED: Final = "attested"
 _ASSERTED: Final = "asserted"
 
-#: The source each arm's target carries, and therefore the discriminator that says
-#: which arm a case actually took: every arm leaves a record at the target's id, so
-#: a corroboration case that silently ran the ordinary one would check half of §8.
 _ARM_TARGET: Final = {
-    _ORDINARY: MemorySource.OBSERVED,
-    _ATTESTED: MemorySource.EXTERNAL,
-    _ASSERTED: MemorySource.USER_ASSERTED,
+    _ORDINARY: BeliefBand.DERIVED,
+    _ATTESTED: BeliefBand.ATTESTED,
+    _ASSERTED: BeliefBand.ASSERTED,
 }
 
 #: A full set of labels at the bound, for the overflow cases. Zero-padded so code
@@ -101,46 +103,31 @@ def make_writer(request: pytest.FixtureRequest) -> WriterFactory:
     return factory
 
 
-def _target(*, topics: tuple[str, ...], arm: str, content: str = _CONTENT) -> MemoryRecord:
-    """The stored record the ruling folds into, on whichever arm the case wants."""
-    source = _ARM_TARGET[arm]
-    return PreferenceMemory(
-        id="target",
-        content=content,
-        preference=content,
+def _target(*, topics: tuple[str, ...], arm: str, content: str = _CONTENT) -> Memory:
+    """The stored memory the ruling folds into, in the band the case's arm names."""
+    return memory_in_band(
+        "target",
+        content,
+        _ARM_TARGET[arm],
+        attestation=Attestation(reported_by="calendar:work", reported_at=_WHEN),
+        episode=_EPISODE,
         topics=topics,
-        provenance=Provenance(
-            source=source,
-            confidence=1.0 if arm == _ASSERTED else 0.6,
-            last_updated=_WHEN,
-            attestation=(
-                Attestation(reported_by="calendar:work", reported_at=_WHEN)
-                if arm == _ATTESTED
-                else None
-            ),
-        ),
     )
 
 
 def _incoming(
-    *, topics: tuple[str, ...], record_id: str = "incoming", preference: str = _CONTENT
-) -> MemoryRecord:
-    """The proposed record. Always ``DERIVED``, so either arm is reachable."""
-    return PreferenceMemory(
-        id=record_id,
-        content=_CONTENT,
-        preference=preference,
+    *, topics: tuple[str, ...], record_id: str = "incoming", content: str = _CONTENT
+) -> Memory:
+    """The proposed memory: always ``DERIVED``, on its own remember call."""
+    return memory(
+        record_id,
+        content,
+        remembered_support(_EPISODE, effect=f"effect-{record_id}"),
         topics=topics,
-        provenance=Provenance(
-            source=MemorySource.OBSERVED,
-            confidence=0.6,
-            evidence=(_EPISODE,),
-            last_updated=_WHEN,
-        ),
     )
 
 
-async def _seeded(target: MemoryRecord) -> InMemoryMemoryStore:
+async def _seeded(target: Memory) -> InMemoryMemoryStore:
     """A store holding the cited episode and ``target``."""
     store = InMemoryMemoryStore(now=_fixed_now)
     await store.add(
@@ -161,7 +148,7 @@ async def _fold(
     target_topics: tuple[str, ...],
     incoming_topics: tuple[str, ...],
     arm: str,
-) -> MemoryRecord:
+) -> Memory:
     """Drive one ``REINFORCE`` end to end and return the survivor.
 
     End to end rather than through ``_merge``: §8's clause is about what is
@@ -179,8 +166,8 @@ async def _fold(
 
     assert result.decision.kind is MemoryDecisionKind.REINFORCE
     survivor = await store.get("target")
-    assert survivor is not None
-    assert survivor.provenance.source is _ARM_TARGET[arm]
+    assert isinstance(survivor, Memory)
+    assert survivor.band is _ARM_TARGET[arm]
     return survivor
 
 
@@ -290,9 +277,7 @@ async def test_an_overflow_moves_no_other_field_and_is_counted_nowhere(
 ) -> None:
     """§12.27: no field records what an overflow did not admit, here or on ``core``.
 
-    ADR-0086 §4's ``evidence_elided`` is deliberately not copied (§1): ``evidence``
-    claims a warrant whose size ADR-0073 §4 obliges a surface to convey, while §7
-    rules that a topic set is never a claim to completeness. So the assertion is
+    §7 rules that a topic set is never a claim to completeness, so the assertion is
     that the survivor is otherwise **identical** to the one the same fold produces
     under a bound it does not reach — which is what a new counter would break.
     """
@@ -301,7 +286,6 @@ async def test_an_overflow_moves_no_other_field_and_is_counted_nowhere(
     )
     within = await _fold(make_writer, target_topics=_AT_BOUND, incoming_topics=(), arm=_ORDINARY)
 
-    assert overflowed.provenance.evidence_elided == 0
     assert overflowed.model_dump() == within.model_dump()
 
 
@@ -351,9 +335,7 @@ async def test_a_retire_carries_an_over_bound_targets_labels_whole(
 
     await writer.ingest(
         MemoryUpdateProposal(
-            proposed=_incoming(
-                topics=("sleep",), record_id="new", preference="prefers detailed emails"
-            ),
+            proposed=_incoming(topics=("sleep",), record_id="new"),
             rationale="because",
         )
     )
@@ -370,10 +352,9 @@ async def test_a_retire_carries_an_over_bound_targets_labels_whole(
     "kind",
     [
         MemoryDecisionKind.ACCEPT,
-        MemoryDecisionKind.STORE_TEMPORARY,
         MemoryDecisionKind.SUPERSEDE,
     ],
-    ids=["accept", "store-temporary", "supersede-correction"],
+    ids=["accept", "supersede-correction"],
 )
 async def test_every_non_fold_install_over_the_bound_stores_the_bounded_subset(
     make_writer: WriterFactory, kind: MemoryDecisionKind
@@ -386,12 +367,12 @@ async def test_every_non_fold_install_over_the_bound_stores_the_bounded_subset(
     at an id". §13.6 says the same thing from the seam's side — the bound is applied
     to **every install**.
 
-    So one ruling is not the case. ``_installed`` is called at four sites, and a
-    regression that dropped it from the ``STORE_TEMPORARY`` arm or from the
-    ``SUPERSEDE`` correction would persist an over-bound record while a suite
-    covering only ``ACCEPT`` and the fold stayed green — which is what makes the
-    bound a property of the *seam* rather than of one ruling, and therefore what has
-    to be asserted per ruling rather than per implementation.
+    So one ruling is not the case. ``_installed`` is called at several sites, and a
+    regression that dropped it from the ``SUPERSEDE`` correction would persist an
+    over-bound record while a suite covering only ``ACCEPT`` and the fold stayed
+    green — which is what makes the bound a property of the *seam* rather than of
+    one ruling, and therefore what has to be asserted per ruling rather than per
+    implementation.
 
     The owner act §8 also names is **not** here: it is §9's, deferred with its
     surface to its own ADR and lane (§13's marked clause).
@@ -399,8 +380,8 @@ async def test_every_non_fold_install_over_the_bound_stores_the_bounded_subset(
     over_bound = (*_AT_BOUND, "zzz beyond the bound")
     # A target that the correction can genuinely overturn, so the `SUPERSEDE` arm
     # reaches its own install rather than being refused as a restatement (ADR-0121
-    # §1, ADR-0159 §5). The other two arms ignore it and take the seeded episode,
-    # which their proposal's evidence has to resolve against (ADR-0077 §5).
+    # §1, ADR-0159 §5). The `ACCEPT` arm ignores it and takes the seeded episode,
+    # which its proposal's support has to resolve against (ADR-0328 §4:7).
     store = await _seeded(
         _target(topics=(), arm=_ORDINARY, content="prefers concise emails, an older note")
     )
@@ -408,9 +389,7 @@ async def test_every_non_fold_install_over_the_bound_stores_the_bounded_subset(
 
     result = await writer.ingest(
         MemoryUpdateProposal(
-            proposed=_incoming(
-                topics=over_bound, record_id="fresh", preference="prefers detailed emails"
-            ),
+            proposed=_incoming(topics=over_bound, record_id="fresh"),
             rationale="because",
         )
     )
@@ -418,7 +397,7 @@ async def test_every_non_fold_install_over_the_bound_stores_the_bounded_subset(
     assert result.decision.kind is kind
     assert result.record_id is not None
     stored = await store.get(result.record_id)
-    assert stored is not None
+    assert isinstance(stored, Memory)
     assert stored.topics == _AT_BOUND, "the record installed carries the bounded subset"
     assert "zzz beyond the bound" not in stored.topics
 
@@ -446,9 +425,7 @@ async def test_a_supersession_writes_its_own_topics_beside_a_retained_target(
 
     result = await writer.ingest(
         MemoryUpdateProposal(
-            proposed=_incoming(
-                topics=("sleep",), record_id="new", preference="prefers detailed emails"
-            ),
+            proposed=_incoming(topics=("sleep",), record_id="new"),
             rationale="because",
         )
     )

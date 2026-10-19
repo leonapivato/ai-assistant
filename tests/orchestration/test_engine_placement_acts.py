@@ -26,17 +26,16 @@ from test_engine import AT, Harness
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
-    MemorySource,
+    Memory,
     MemoryWrite,
     MemoryWriteMode,
     Placement,
     PlacementReach,
     PlacementSetter,
-    Provenance,
-    SemanticMemory,
     Validity,
 )
 from ai_assistant.testing import FakeMemoryStore
+from ai_assistant.testing.memories import memory, said_support
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -59,14 +58,13 @@ _DERIVED = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED,
 _PROPOSED = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.PROPOSED, set_at=AT)
 
 
-def _record(placement: Placement) -> SemanticMemory:
-    """One stored belief carrying ``placement``."""
-    return SemanticMemory(
-        id=_RECORD,
-        content=_CONTENT,
-        fact=_CONTENT,
+def _record(placement: Placement) -> Memory:
+    """One stored memory carrying ``placement``."""
+    return memory(
+        _RECORD,
+        _CONTENT,
+        said_support(when=AT, added_at=AT),
         validity=Validity(),
-        provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
         placement=placement,
     )
 

@@ -82,6 +82,7 @@ from ai_assistant.core.types import (
     InformationalEventResult,
     InputOrigin,
     LabelKind,
+    Memory,
     MemoryKind,
     MemorySource,
     MessageAuthor,
@@ -95,7 +96,6 @@ from ai_assistant.core.types import (
     ProcessingReason,
     ProcessingStatus,
     ProposedCall,
-    Provenance,
     RecallCue,
     RecalledItem,
     RecallOutcome,
@@ -103,7 +103,6 @@ from ai_assistant.core.types import (
     Reversibility,
     RiskLevel,
     RoundResponse,
-    SemanticMemory,
     StageOutcome,
     StoryActor,
     StoryChange,
@@ -119,6 +118,8 @@ from ai_assistant.core.types import (
     ToolOutcome,
     TranscriptMessage,
     UserMessage,
+    band_of,
+    part_episode,
 )
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.authorizer import AuthorizingStage, Verdict
@@ -171,6 +172,12 @@ from ai_assistant.testing import (
     FakeStoryStore,
     FakeToolCallingCompleter,
     FakeWebSearcher,
+)
+from ai_assistant.testing.memories import memory as memory_record
+from ai_assistant.testing.memories import (
+    remembered_support,
+    said_support,
+    sourced_support,
 )
 from ai_assistant.testing.searching import DEFAULT_SEARCH_ORIGIN
 
@@ -717,9 +724,11 @@ async def test_a_remember_is_written_once_through_the_assistants_own_records() -
     (remembered,) = [one for one in effects if one.capability == "remember"]
     assert remembered.outcome is ToolOutcome.SUCCEEDED
     written = await harness.memory.get(remembered_record_id(remembered.id))
-    assert written is not None
+    assert isinstance(written, Memory)
     assert written.content == "The user likes green tea."
-    assert written.provenance.evidence == (episode.id,)
+    assert [part_episode(one.points_at) for one in written.supports] == [episode.id]
+    # ADR-0328 §13:2: dated at the episode's `occurred_at`.
+    assert [one.when for one in written.supports] == [episode.occurred_at]
     # Done with nothing brought back: a second round, shown it done, and then the end.
     assert episode.processing_record is not None
     assert len(episode.processing_record.rounds) == 2
@@ -1069,22 +1078,22 @@ class _DownForTheReading(FakeMemoryStore):
         return await super().search(query, **kwargs)
 
 
-def _remembered(memory_id: str, source: MemorySource, fact: str) -> SemanticMemory:
-    return SemanticMemory(
-        id=memory_id,
-        content=fact,
-        fact=fact,
-        provenance=Provenance(
-            source=source,
-            confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.8,
-            last_updated=AT,
-            attestation=(
-                Attestation(reported_by="mail", reported_at=AT)
-                if source is MemorySource.EXTERNAL
-                else None
-            ),
-        ),
-    )
+def _remembered(memory_id: str, source: MemorySource, fact: str) -> Memory:
+    """A memory in the band ``source`` names (ADR-0328 §12), dated ``AT``.
+
+    ``EXTERNAL`` is a source support from the mail reader, which rests on outside
+    content; ``USER_ASSERTED`` the user's own message; anything else a remember call.
+    """
+    match band_of(source):
+        case BeliefBand.ASSERTED:
+            support = said_support(when=AT, added_at=AT)
+        case BeliefBand.ATTESTED:
+            support = sourced_support(
+                Attestation(reported_by="mail", reported_at=AT), when=AT, added_at=AT
+            )
+        case BeliefBand.DERIVED:
+            support = remembered_support(when=AT, added_at=AT)
+    return memory_record(memory_id, fact, support)
 
 
 #: A digest that found nothing answering its question: an answer, with no evidence.
@@ -1096,7 +1105,7 @@ async def _recalling_harness(
     memory: FakeMemoryStore | None = None,
     *,
     digests: FakeModelProvider | None = None,
-    extra: Sequence[SemanticMemory] = (),
+    extra: Sequence[Memory] = (),
 ) -> tuple[Harness, FakeModelProvider]:
     """A test hub with recall wired, its store holding what the second run finds.
 
@@ -1110,7 +1119,7 @@ async def _recalling_harness(
     past = _past_episode("activation:past", rounds=(noted,)).model_copy(
         update={"content": f"{_DENTIST} booked for Friday"}
     )
-    records: tuple[EpisodicMemory | SemanticMemory, ...] = (
+    records: tuple[EpisodicMemory | Memory, ...] = (
         past,
         _remembered("said", MemorySource.USER_ASSERTED, f"{_DENTIST} with Dr Rao"),
         _remembered("reported", MemorySource.EXTERNAL, f"{_DENTIST} moved to 3pm"),
@@ -2916,7 +2925,7 @@ _UNBOUNDED: Final = UnboundedAudienceSupply(speakable_attested_sources=frozenset
 
 async def _searching_harness(
     completer: FakeToolCallingCompleter,
-    *records: SemanticMemory,
+    *records: Memory,
     digests: FakeModelProvider | None = None,
 ) -> Harness:
     """A test hub offering the look-ups, its memory holding ``records``."""

@@ -40,7 +40,6 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     Idempotency,
     LabelKind,
-    MemorySource,
     MemoryUpdateProposal,
     PermissionDecision,
     PermissionOutcome,
@@ -48,12 +47,10 @@ from ai_assistant.core.types import (
     PlanningLabel,
     PlanningRound,
     ProposedAnswer,
-    Provenance,
     QuestionPart,
     Reversibility,
     RiskLevel,
     RoundResponse,
-    SemanticMemory,
     SpanCoverage,
     ToolCost,
     ToolDefinition,
@@ -62,6 +59,7 @@ from ai_assistant.core.types import (
     label_prefix,
 )
 from ai_assistant.testing import with_phase_declaration
+from ai_assistant.testing.memories import memory, remembered_support
 
 _AT: Final = datetime(2026, 10, 15, 14, 15, tzinfo=UTC)
 _RECIPIENT: Final = "sam@example.com"
@@ -501,12 +499,7 @@ def test_the_claim_answers_already_used_as_its_own_member() -> None:
 def test_a_confirmation_names_the_question_part_it_answers() -> None:
     """§9: ``deferral_id`` gives way to the question it answers, its message and part."""
     proposal = MemoryUpdateProposal(
-        proposed=SemanticMemory(
-            id="m-new",
-            content="Sam prefers email",
-            fact="Sam prefers email",
-            provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.4, last_updated=_AT),
-        ),
+        proposed=memory("m-new", "Sam prefers email", remembered_support()),
         rationale="the user said so",
     )
     confirmation = UserConfirmation(

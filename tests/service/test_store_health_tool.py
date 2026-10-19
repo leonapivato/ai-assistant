@@ -26,20 +26,14 @@ from ai_assistant.app import (
 )
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError
-from ai_assistant.core.types import (
-    MemorySource,
-    MemoryWrite,
-    MemoryWriteMode,
-    Provenance,
-    SemanticMemory,
-    Validity,
-)
+from ai_assistant.core.types import BeliefBand, MemoryWrite, MemoryWriteMode
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.service import store_health
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.testing import FakeTraceSink
+from ai_assistant.testing.memories import memory_in_band
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -83,16 +77,8 @@ def _seed(data_dir: Path, count: int) -> None:
             await store.write_atomic(
                 [
                     MemoryWrite(
-                        record=SemanticMemory(
-                            id=f"r{index}",
-                            content=f"a stored belief {index}",
-                            fact=f"a stored belief {index}",
-                            validity=Validity(),
-                            provenance=Provenance(
-                                source=MemorySource.OBSERVED,
-                                confidence=0.6,
-                                last_updated=_WHEN,
-                            ),
+                        record=memory_in_band(
+                            f"r{index}", f"a stored belief {index}", BeliefBand.DERIVED
                         ),
                         mode=MemoryWriteMode.INSERT_IF_ABSENT,
                     )

@@ -57,6 +57,7 @@ from ai_assistant.core.types import (
     BeliefBand,
     ClassReach,
     DataTier,
+    EpisodicMemory,
     GrantScope,
     MemoryKind,
     MemorySearchResult,
@@ -68,7 +69,6 @@ from ai_assistant.core.types import (
     Provenance,
     Reversibility,
     RiskLevel,
-    SemanticMemory,
     StoryMember,
     StoryMemberKind,
     StoryRefusalReason,
@@ -100,6 +100,7 @@ from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.readers import CALENDAR_READER_NAME
 from ai_assistant.secret_store import backend as secret_store_module
 from ai_assistant.testing import FakeMemoryStore, FakeTraceSink, evaluation_trace
+from ai_assistant.testing.memories import HELD_EPISODE, memory
 from ai_assistant.tools import InMemoryToolRegistry
 from ai_assistant.tools.egress import SmtpEgressTransport, StreamOutboundTransport
 from ai_assistant.tools.egress_binder import EgressBindingSeam
@@ -2453,19 +2454,23 @@ async def test_the_conflict_probe_asks_the_store_for_the_reported_figure() -> No
         conflict_limit=composition_module.CONFLICT_LIMIT,
     )
 
+    # The episode the proposal's support points into, which the writer holds it to
+    # (ADR-0328 §4:7).
+    await store.add(
+        EpisodicMemory(
+            id=HELD_EPISODE,
+            content="the user said they drink oat milk",
+            provenance=Provenance(
+                source=MemorySource.OBSERVED,
+                confidence=0.9,
+                last_updated=datetime(2026, 8, 9, tzinfo=UTC),
+            ),
+            occurred_at=datetime(2026, 8, 9, tzinfo=UTC),
+        )
+    )
     await writer.ingest(
         MemoryUpdateProposal(
-            proposed=SemanticMemory(
-                id="record-1",
-                content="the user drinks oat milk",
-                fact="the user drinks oat milk",
-                provenance=Provenance(
-                    source=MemorySource.USER_ASSERTED,
-                    confidence=1.0,
-                    last_updated=datetime(2026, 8, 9, tzinfo=UTC),
-                ),
-            ),
-            rationale="because",
+            proposed=memory("record-1", "the user drinks oat milk"), rationale="because"
         )
     )
 

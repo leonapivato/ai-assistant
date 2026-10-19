@@ -10,13 +10,12 @@ script in ``pyproject.toml``.
 
 ``beliefs`` and ``forget`` are the belief-inspection surface (ADR-0073 §7): they
 render what the engine already computed and destroy what the user names. The
-*band* on each row arrives on the DTO — :meth:`~ai_assistant.orchestration.Belief`
-is projected in the engine so ADR-0072 §1's classification never lands here — and
-this module reads no clock for them and re-filters nothing. The same holds for
-ADR-0077 §6's evidence: citations arrive already resolved to readable content or
-to a tombstone, and the confidence on the DTO is already the presented one, so
-nothing here resolves a citation, computes an adjustment, or ever sees an id it
-could pass off as a warrant.
+standing, the band and every value ADR-0328 §7 computes arrive on the DTO —
+:class:`~ai_assistant.core.types.Belief` is projected in ``core`` so no standing is
+computed here — and this module reads no clock for them and re-filters nothing. The
+same holds for the supports (ADR-0328 §15:2, §15:7): each arrives already resolved
+to readable content or shown as gone, so nothing here resolves a part or ever sees
+an id it could pass off as a warrant.
 
 ``conversations`` and ``forget-conversation`` are the conversation surface
 (ADR-0074 §2, §8, §10), and ``chat --conversation`` is how one is continued
@@ -272,7 +271,8 @@ from ai_assistant.core.types import (
     DiscloserProvenance,
     EgressBinding,
     GrantScope,
-    MemoryKind,
+    MemoryStanding,
+    MemoryStatus,
     MessageAddedChange,
     MessageAuthor,
     MessageDeletedChange,
@@ -286,6 +286,7 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     ProvisioningState,
     QuietWindow,
+    ReadingCertainty,
     ReadOutcome,
     RecordedInvocation,
     SecretScope,
@@ -296,6 +297,8 @@ from ai_assistant.core.types import (
     SpendTotal,
     StoryMember,
     StoryMemberKind,
+    SupportDirection,
+    SupportOrigin,
     ToolOutcome,
     TranscriptMessage,
     UserMessage,
@@ -421,28 +424,6 @@ _BELIEFS_BAND_OPTION = typer.Option(
     None,
     "--band",
     help="Only show beliefs in this band (repeatable). Default: every band.",
-)
-_BELIEFS_KIND_OPTION = typer.Option(
-    None,
-    "--kind",
-    help=(
-        "Only show beliefs of this memory kind (repeatable). Default: every kind "
-        "except 'episodic' — pass --kind episodic to see captured conversation turns."
-    ),
-)
-
-#: What ``assistant beliefs`` selects when the user names no ``--kind`` (ADR-0074
-#: §6). Every kind **except** ``EPISODIC``: the command answers "what do you
-#: believe about me", and an episode is not a belief — it is the evidence a belief
-#: is made of, so a kind-blind listing would print a transcript through the surface
-#: leg 1 built to be readable. ``--kind episodic`` still lists them, and the store
-#: contract is untouched: ADR-0073 §1's "``None`` means every value" is a *store*
-#: semantic, and ADR-0073 never pinned this command's default.
-#:
-#: Derived rather than spelled out, so a fifth ``MemoryKind`` is listed by default
-#: rather than silently omitted by a list nobody updated.
-_DEFAULT_BELIEF_KINDS: tuple[MemoryKind, ...] = tuple(
-    kind for kind in MemoryKind if kind is not MemoryKind.EPISODIC
 )
 
 
@@ -2954,7 +2935,6 @@ def _confirm_delete_conversation() -> bool:
 @app.command()
 def beliefs(
     band: list[BeliefBand] | None = _BELIEFS_BAND_OPTION,
-    kind: list[MemoryKind] | None = _BELIEFS_KIND_OPTION,
     limit: int = typer.Option(
         50,
         "--limit",
@@ -2981,18 +2961,9 @@ def beliefs(
     # An absent repeatable flag arrives as an empty list, which the façade would read
     # as "select nothing" — the deliberate meaning of an *explicitly* empty filter
     # (ADR-0073 §1). A CLI has no way to say that and no reason to, so absent and
-    # empty both become "every band" for --band. For --kind they become every kind
-    # *except* episodic (ADR-0074 §6): this command answers "what do you believe
-    # about me", and a kind-blind listing would print a transcript once capture is
-    # writing turns. `--kind episodic` still lists them.
-    code = asyncio.run(
-        _list_beliefs(
-            bands=band or None,
-            kinds=list(kind) if kind else list(_DEFAULT_BELIEF_KINDS),
-            limit=limit,
-            offset=offset,
-        )
-    )
+    # empty both become "every band". The listing holds memories and never episodes
+    # (ADR-0328 §11:2), so there is no kind to choose.
+    code = asyncio.run(_list_beliefs(bands=band or None, limit=limit, offset=offset))
     raise typer.Exit(code)
 
 
@@ -4352,7 +4323,6 @@ async def _forget_conversation(conversation_id: str, *, assume_yes: bool) -> int
 async def _list_beliefs(
     *,
     bands: list[BeliefBand] | None,
-    kinds: list[MemoryKind] | None,
     limit: int,
     offset: int,
 ) -> int:
@@ -4372,7 +4342,7 @@ async def _list_beliefs(
         _render_error(exc)
         return _EXIT_ERROR
 
-    return await _drive_beliefs(engine, bands=bands, kinds=kinds, limit=limit, offset=offset)
+    return await _drive_beliefs(engine, bands=bands, limit=limit, offset=offset)
 
 
 async def _list_sources() -> int:
@@ -4956,7 +4926,6 @@ async def _drive_beliefs(
     engine: AssistantEngine,
     *,
     bands: list[BeliefBand] | None,
-    kinds: list[MemoryKind] | None,
     limit: int,
     offset: int,
 ) -> int:
@@ -4968,7 +4937,7 @@ async def _drive_beliefs(
     in the engine (ADR-0072 §7, ADR-0073 §7).
     """
     try:
-        page = await engine.beliefs(bands=bands, kinds=kinds, limit=limit, offset=offset)
+        page = await engine.beliefs(bands=bands, limit=limit, offset=offset)
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
@@ -6524,355 +6493,113 @@ def _decided_at(instant: datetime) -> str:
     return instant.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S.%f UTC")
 
 
-def _elision_ceiling(elided: int) -> str:
-    """The ceiling ADR-0107 §5 owes beside a rendered citation count, or nothing.
+#: A memory's standing in plain words, as this surface says it (ADR-0328 §6:1, §15:4).
+_STANDING_WORDS: Final[dict[MemoryStanding, str]] = {
+    MemoryStanding.CONFIRMED: "you confirmed this wording",
+    MemoryStanding.SAID: "you said it",
+    MemoryStanding.SOURCE: "from a source",
+    MemoryStanding.INFERENCE: "my inference",
+}
 
-    Empty where nothing was displaced, which is every belief in a deployment that
-    has never hit ADR-0086 §1's bound — so this adds a clause exactly when there is
-    a fact to add and is silent otherwise.
+#: Where a support came from, in plain words (ADR-0328 §4's origin table).
+_ORIGIN_WORDS: Final[dict[SupportOrigin, str]] = {
+    SupportOrigin.USER_MESSAGE: "your message",
+    SupportOrigin.OUTSIDE_INPUT: "a report from outside",
+    SupportOrigin.CONFIRMATION: "your yes to my question",
+    SupportOrigin.EVIDENCE: "a connected source",
+    SupportOrigin.ASSISTANT_MESSAGE: "my own message",
+    SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE: "my own message, over outside content",
+    SupportOrigin.REMEMBERED: "something I chose to remember",
+    SupportOrigin.REMEMBERED_OVER_OUTSIDE: "something I chose to remember, over outside content",
+    SupportOrigin.LEGACY: "a record kept before memories had supports",
+    SupportOrigin.LEGACY_OUTSIDE: (
+        "a record kept before memories had supports, resting on outside content"
+    ),
+}
 
-    **The shape is ADR-0086 §4's, and both halves of it are obligatory.** The count
-    is an *upper bound* over the record's whole history and not a total, so it is
-    rendered as "up to" and never as a figure to be added to the one beside it. And
-    an elision is **not a tombstone**: the episode may be perfectly intact, and the
-    line says the reference was dropped rather than that the data was lost. Getting
-    that half wrong tells a user their data is gone when it is not — the failure
-    ADR-0091 §1's second clause exists to prevent, and the reason
-    :func:`_render_evidence` must never grow an entry for this.
+
+def _standing_line(belief: Belief | BeliefSummary) -> str:
+    """The row's head: its standing in plain words, its band, and its status (§15:4).
+
+    The band leads as it always has (ADR-0073 §4: never omitted, never implied by
+    position alone), and the standing beside it says which of the band's standings it
+    is. A memory that ended or was marked wrong is never listed (the listing is live),
+    but the single view says so if one ever reaches it.
     """
-    if elided <= 0:
-        return ""
-    return (
-        f" Up to {elided} more piece(s) stood behind it that I no longer keep a "
-        "reference to — those may still exist; I stopped carrying them, they were "
-        "not lost."
-    )
+    head = f"\n  [bold cyan]{belief.band.value}[/] · {_STANDING_WORDS[belief.standing]}"
+    match belief.status:
+        case MemoryStatus.CURRENT:
+            return head
+        case MemoryStatus.ENDED:
+            return f"{head} · [yellow]no longer holds[/]"
+        case MemoryStatus.WRONG:
+            return f"{head} · [yellow]marked wrong[/]"
+        case _:  # pragma: no cover - exhaustive
+            assert_never(belief.status)
+
+
+def _evidence_words(belief: Belief | BeliefSummary) -> str:
+    """The evidence summary, said where the standing is inference (ADR-0328 §15:4)."""
+    evidence = belief.evidence
+    against = f", {evidence.against} against it" if evidence.against else ""
+    # A legacy support points at no exchange (ADR-0328 §16:4), so a count of none is
+    # left unsaid rather than rendered as "across 0 exchange(s)".
+    across = f" across {evidence.episodes} exchange(s)" if evidence.episodes else ""
+    return f"I worked it out from {evidence.supporting} piece(s) of support{across}{against}."
 
 
 def _outside_warrant(belief: Belief | BeliefSummary) -> str:
-    """That a **derived** row's origin came from outside, or nothing (ADR-0189 §4).
+    """That some of its warrant came from outside, or nothing (ADR-0189 §4, ADR-0328 §12).
 
-    §4's third clause: a surface conveys that a warrant came from outside where the
-    band is ``DERIVED`` and the externality answer is ``True``, read from
-    ``rests_on_recorded_external_content`` beside ``band``. This is the sentence that
-    discharges it, and its two silences are as ruled as its text.
-
-    **Two arms, because the clause reaches a record whose warrant is not a
-    derivation** (ADR-0223 §5). A captured episode is projected into this listing
-    like anything else — ``assistant beliefs --kind episodic`` is documented as the
-    way to see captured turns — and ADR-0223 §1 stamps
-    ``Provenance.derived_from_external`` on one, so the predicate is now ``True`` of
-    a record the belief sentence is false of in every clause: this system did not
-    work an episode out, there is nothing it worked it out *from* (ADR-0074 §4 makes
-    ``evidence`` empty by decision), and an episode's warrant is that it happened,
-    which is entirely this system's own. §5 rules the fix as a **distinct arm**
-    rather than a suppression: the clause is not narrowed, the projections stay
-    kind-blind, and what changes is only the wording this surface may use.
-
-    The episodic wording satisfies §5's three conditions. It does not attribute the
-    episode's content, or any part of it, to a source outside this system; it does
-    not state that the episode was worked out from an external report; and it does
-    state the fact the mark actually records — that the exchange this record renders
-    was conducted over material that included a record resting on recorded external
-    content. It says *traces back to* rather than *came from* because the mark is a
-    disjunction over :func:`~ai_assistant.core.types.rests_on_recorded_external_content`
-    and not over the band: the material may be this system's own derived sentence
-    whose warrant reaches a source, and a phrase claiming the words themselves were a
-    source's would overclaim on exactly the second-order case ADR-0223 §10's second
-    test exists for.
-
-    **The arm reaches the belief listing alone**, and that is scope rather than
-    oversight. §5 binds "every surface that renders the belief listing"; a
-    ``Question``, until the old path retired it (ADR-0309 §5), carried a *proposal*
-    and no proposal is ever episodic — an observer "distils
-    evidence, it does not manufacture it" (ADR-0077 §2) — and no episode reached a
-    deferral at all, because capture writes through ``write_atomic`` and never through
-    ``MemoryWriter.ingest``, so ADR-0106 §6's gate is not on its path (ADR-0223 §8).
-    A lane that ever routes capture through the writer inherits this arm's question
-    with the rest of that section's obligations.
-
-    **Everything else in the row is untouched**, which is the byte-identity §10's
-    eighth test asks for: an unstamped episode renders what it rendered before, the
-    head sentence :func:`_why_derived` computes is not rewritten for either kind, and
-    a kind this enum gains later takes the belief arm rather than a fifth state
-    nobody wrote (the derivation :data:`_DEFAULT_BELIEF_KINDS` makes one seam over).
-
-    **It says nothing about the record's own content, and that prohibition is the
-    clause itself.** §4 is explicit that a surface "does **not** present the record's
-    own content as third-party text on that ground: the content is a sentence this
-    system's model wrote, and ADR-0098 §1 decides externality by the recorded origin
-    of the text." ADR-0098 §7's own round-6 mistake was exactly this reach, so each
-    arm names the origin of the *occasion* or the *warrant* and affirms the words are
-    mine in the same breath.
-
-    **And it is silent on ``False`` rather than negative, on both arms.** A ``False``
-    is *nothing external is recorded in this warrant*, never *nothing external
-    influenced it* (ADR-0098 §5, ADR-0106 §1, ADR-0223 §5's last clause): the link is
-    unrecoverable once a model's output is recorded truthfully, so a surface printing
-    "nothing outside reached this" would assert what no field on the record holds.
-    The silence is taken **before** the kind is looked at, so neither arm can render a
-    ``False`` as an assurance and a third arm could not either.
-
-    Args:
-        belief: The projected row being explained. Both of its fields are read as the
-            engine computed them — the predicate is never recomputed here from
-            ``band``, which ADR-0189 §2 forbids and which would drop the disjunction's
-            second half anyway, and ``kind`` is the projection's own tag rather than
-            anything inferred from the content.
-
-    Returns:
-        The clause, or the empty string where there is nothing that can honestly be
-        said.
+    Read off ``rests_on_outside_content`` as the engine computed it, never recomputed
+    here. Silent on ``False`` rather than negative: a ``False`` is *nothing outside is
+    recorded in this warrant*, never *nothing outside influenced it* (ADR-0328 §7:7). It
+    says nothing about the memory's own wording, which is this system's sentence
+    (ADR-0098 §1).
     """
-    if not belief.rests_on_recorded_external_content:
+    if not belief.rests_on_outside_content:
         return ""
-    if belief.kind is MemoryKind.EPISODIC:
-        return (
-            " Some of the material I had in front of me during this exchange traces "
-            "back to a connected source rather than to you — the record above is "
-            "still my own account of what was said."
-        )
     return (
-        " Some of what I worked it out from came from a connected source rather than "
-        "from you — the belief above is still my own sentence, but its warrant is not "
-        "entirely mine."
+        " Some of what it rests on came from outside rather than from you — the wording "
+        "is still my own sentence, but its warrant is not entirely mine."
     )
 
 
-def _why_derived(belief: Belief | BeliefSummary) -> str:
-    """Why a **derived** belief is held: the count, what is gone, the ceiling, the origin.
-
-    Split out of :func:`_why` so the ceiling is appended **once, on every path**
-    rather than per branch. That is the structural point: ADR-0107 §5 owes the
-    ceiling wherever this surface renders a citation count, and this branch renders
-    one in all four of its states — including the state that renders it as *none*.
-    A per-branch append would let a fifth state be added later with the clause
-    forgotten, and the belief that elided nine hundred citations is exactly the one
-    that would go unmentioned.
-
-    **ADR-0189 §4's outside-warrant clause rides on the same argument and the same
-    append** (:func:`_outside_warrant`). §4 binds it to the band rather than to any
-    of the four count states, so a per-branch append would be four chances to forget
-    it — and the belief whose warrant came from a connected source is exactly the one
-    a user needs told about, on every one of them.
-
-    **Two of the four states say something that stops being true once anything has
-    been displaced, and both are repaired here rather than qualified.**
-
-    * "no supporting evidence was recorded" claims nothing was ever there. For a
-      belief whose history displaced citations that is false — evidence *was*
-      recorded and the reference to it was dropped — and it is the statement
-      ADR-0107 §7 prohibits on every band.
-    * "nothing supports it any more" is the sentence ADR-0107 §7 names by name.
-      Every citation the belief still carries has gone, which the line keeps
-      saying; but the elided episodes may be intact and still supporting it, so
-      the flat claim is false in the direction ADR-0073 §4 forgives least. The
-      ceiling replaces it with what can honestly be said — that more stood behind
-      it and this surface cannot report their fate.
-
-    **The predicate itself is untouched** (ADR-0107 §7): ``unsupported`` keeps
-    ADR-0085 §4a's one definition on both types. Adding ``and evidence_elided == 0``
-    to it would answer "does anything support this" with a confident ``False``,
-    which is no better founded than the confident ``True`` — nothing on the record
-    says whether an elided citation still resolves. "We cannot say" is expressible
-    in a sentence and not in a boolean, so the repair is here.
-    """
-    ceiling = _elision_ceiling(belief.evidence_elided)
-    if belief.evidence_count == 0:
-        head = (
-            "I worked it out, and I carry no evidence for it now."
-            if ceiling
-            else "I worked it out, and no supporting evidence was recorded."
-        )
-    elif belief.unsupported:
-        head = (
-            f"I worked it out from {belief.evidence_count} piece(s) of evidence, "
-            "none of which still exists. I still hold it — I have not unlearnt it "
-            "because the evidence went"
-        ) + ("." if ceiling else " — but nothing supports it any more.")
-    elif belief.lost_evidence:
-        head = (
-            f"I worked it out from {belief.evidence_count} piece(s) of evidence, "
-            f"{belief.lost_evidence} of which no longer exists. The confidence "
-            "below reflects what is left."
-        )
-    else:
-        head = f"I worked it out from {belief.evidence_count} piece(s) of evidence."
-    return head + ceiling + _outside_warrant(belief)
-
-
-def _why_episodic(belief: Belief | BeliefSummary) -> str:
-    """Why a captured **episode** is held: because it happened (#1891, ADR-0075 §2).
-
-    An episode reaches this listing through the documented ``assistant beliefs --kind
-    episodic``, and its provenance is ``OBSERVED``, so ``band_of`` files it in the
-    ``DERIVED`` band and it used to be explained by :func:`_why_derived`: *"I worked it
-    out, and no supporting evidence was recorded."* Every clause of that is false of a
-    recorded turn. Nothing worked it out; there is nothing it was worked out *from*,
-    because ADR-0074 §4 leaves an episode's ``evidence`` empty **by decision** rather
-    than by accident; and "no supporting evidence was recorded" reads as a deficiency
-    where there is none to report. ADR-0075 §2 is the doctrine the old line
-    contradicts: recording that an exchange happened "is true because it happened, a
-    policy has nothing to weigh".
-
-    **The header above the line is deliberately not changed, and that is this lane's
-    answer to #1891's open display question.** ADR-0073 §4 requires *every* row to
-    convey its band — "never omitted, never implied by position alone" — and its
-    confidence, with no exemption for a kind; ADR-0072 §6 says the same of anything
-    rendered as a belief. The sibling page goes further: its rows are what the user's
-    own band checkboxes selected, so a row that stopped naming its band would stop
-    saying which box it arrived under. So the band and the confidence stay, and this
-    line says what they are — a filing, and a standing figure (ADR-0074 §4 sets it at
-    capture and documents it as "standing rather than certainty") — rather than
-    letting the row imply that the system is 90% sure the conversation took place.
-
-    **The externality sentence is appended here exactly as it is appended to a
-    belief**, through the same :func:`_outside_warrant`, so ADR-0223 §5's arm survives
-    this rewording unaltered: its first clause is that the fact is never omitted for an
-    episode, its second fixes the wording, and neither is touched by giving the head
-    sentence in front of it an honest voice. Appended once, at the single exit, for the
-    reason :func:`_why_derived` appends it once — a second exit is a second chance to
-    forget it.
-
-    **And it is reached only from the ``DERIVED`` band**, which keeps ADR-0189 §4's
-    clause exactly where that ADR put it: the externality sentence is owed "where the
-    projected record's band is ``DERIVED``", so routing on the kind *inside* the band
-    match cannot render it on a band the clause does not reach. No episode is written
-    into another band today — capture stamps ``OBSERVED`` — and if one ever were, the
-    band's own sentence is what it would get, which is the same conservative direction
-    :func:`_why` takes everywhere else.
-
-    Args:
-        belief: The projected row being explained.
-
-    Returns:
-        The reason, with ADR-0223 §5's clause where the mark is set.
-    """
-    return (
-        "this records an exchange that happened — I captured it at the time, so "
-        "there was nothing to work out and nothing to weigh. The line above files it "
-        "among my beliefs because that is where a captured turn sits, and the "
-        "confidence there is a standing figure rather than a measure of doubt that "
-        "it happened."
-    ) + _outside_warrant(belief)
-
-
 def _why(belief: Belief | BeliefSummary) -> str:
-    """Why this belief is held — band-dependent (ADR-0073 §4).
+    """Why this memory is held: its standing, said in plain words (ADR-0328 §15:4).
 
-    Total over :class:`~ai_assistant.core.types.BeliefBand` and mechanically so: the
-    wildcard does nothing but ``assert_never``, so a band added to ``core`` without a
-    line here fails the gate rather than rendering an empty reason. The same shape
-    ``band_of`` itself uses.
-
-    The answer is complete for one band and owed for two, and the wording keeps
-    ADR-0073 §4's two floors:
-
-    * **Derived** — :func:`_why_derived`, which counts the citations, counts the
-      ones that no longer resolve **separately and out loud** (ADR-0077 §6), and
-      states the elision ceiling ADR-0107 §5 owes beside any rendered count. They
-      are never rendered as ids; the ids are not even carried to this module
-      (:class:`~ai_assistant.orchestration.Belief` holds resolved content or a
-      tombstone), so no renderer here can pass one off as the warrant. A belief whose
-      support is *entirely* gone says so, and says that it is still held — because it
-      is not retired, and a line implying otherwise would misdescribe what the user
-      can still do with it.
-    * **Derived, and a captured episode** — :func:`_why_episodic`, because an
-      episode is not a derivation and the derived line is false of it in every clause
-      (#1891, ADR-0075 §2). The kind is asked **inside** the band's arm rather than
-      before the match, so ADR-0189 §4's externality clause stays bound to the
-      ``DERIVED`` band where that ADR put it.
-    * **Attested** — the reporting source is **named**, the instant that source said
-      the fact was current is stated on *its* clock, and the line still says outright
-      that ``Last revised`` is the assistant's clock rather than the source's
-      (ADR-0189 §4, ADR-0073 §4).
-
-    **The asserted and attested lines are unchanged by ADR-0107, and that is its §2
-    applied rather than an omission.** §2 scopes the elision disclosure to
-    ``DERIVED`` because that is the band ADR-0073 §4 put the citation-count floor
-    in: an assertion's warrant is the user's own word and an attestation's is the
-    source's report, so neither line renders a citation count and neither owes a
-    ceiling beside one (ADR-0107 §5 requires nothing of a surface that renders no
-    count). Both still carry the number on their DTO (§3) — the silence is about
-    rendering, and only about rendering. Whether either band's line *should* render
-    a count at all is ADR-0073 §4's own ``ATTESTED`` gate, left to the lane holding
-    leg 6's first ``EXTERNAL`` producer (ADR-0107 §10).
-
-    **This line used to state a limit of the surface, and ADR-0189 removed the
-    limit** (**#1276**). Which source spoke, and when, were always *held* — a
-    :class:`~ai_assistant.core.types.Provenance` makes an
-    :class:`~ai_assistant.core.types.Attestation` mandatory exactly on this band
-    (ADR-0092 §1) — and what dropped them was the projection: neither
-    :class:`~ai_assistant.core.types.Belief` nor
-    :class:`~ai_assistant.core.types.BeliefSummary` had anywhere to put one. ADR-0189
-    §2 gave both of them one, so this branch now names the source and states the
-    instant instead of explaining that it cannot, which is ADR-0098 §8's second tier
-    reached and ADR-0073 §4's ``ATTESTED`` gate met at the surface.
-
-    **Two floors survive the change and one of them is new.** ``Last revised`` is
-    still declared to be this system's clock, because ADR-0073 §4 forbids offering it
-    as the source's and the new line puts a *second* instant on the screen beside it —
-    which is precisely the error ADR-0189's Consequences names as newly available to a
-    surface that renders one of the two facts. And the source is named at **source
-    granularity and no finer** (ADR-0189 §4, ADR-0098 §8's third clause): the value is
-    apposed to "a connected source" so it cannot be read as a person, because
-    ADR-0093 §7 forbids deriving a reader's identity from what the source contains, so
-    the organiser of an invite and the sender of a mail are not on the record and
-    cannot be.
-
-    **Where no label is configured the identity is what renders**, which is ADR-0093
-    §7's own fallback adopted unchanged by ADR-0189 §5 — and no label is configured
-    anywhere yet, because ADR-0189 §8 leaves the mechanism to the registry lane.
-
-    **The attestation-less attested belief is off-contract and still gets a sentence.**
-    ADR-0189 §2 adds no cross-field validator to these two DTOs, deliberately, so the
-    type admits a state the store cannot produce. Rendering the old "I recorded which
-    source" line there would claim something this projection does not show; claiming
-    nothing was recorded would err in the direction ADR-0073 §4 forgives least. What is
-    true either way is that what reached *this surface* does not carry it, so that is
-    what it says.
+    Total over :class:`~ai_assistant.core.types.MemoryStanding`, mechanically so: the
+    wildcard does nothing but ``assert_never``. An inference says its evidence summary,
+    and whether any of it came from outside (ADR-0189 §4's clause, on the ``DERIVED``
+    band where that ADR put it).
     """
-    match belief.band:
-        case BeliefBand.ASSERTED:
+    match belief.standing:
+        case MemoryStanding.CONFIRMED:
+            return "you confirmed this wording when I asked you."
+        case MemoryStanding.SAID:
             return "you told me, and your own word is the whole of it."
-        case BeliefBand.DERIVED:
-            if belief.kind is MemoryKind.EPISODIC:
-                return _why_episodic(belief)
-            return _why_derived(belief)
-        case BeliefBand.ATTESTED:
-            if belief.attestation is None:
-                return (
-                    "a source you connected reported it — neither your word nor my "
-                    "inference. What reached me here does not name that source or say "
-                    "when it spoke, so 'Last revised' below is when I changed my mind "
-                    "and not when the source spoke."
-                )
-            return (
-                f"a connected source reported it — {_safe(belief.attestation.reported_by)}, "
-                f"neither your word nor my inference. That source said this was current "
-                f"as of {_when(belief.attestation.reported_at)}, on its own clock; "
-                f"'Last revised' below is when I changed my mind and not when the "
-                f"source spoke."
-            )
+        case MemoryStanding.SOURCE:
+            return "a source you connected reported it — neither your word nor my inference."
+        case MemoryStanding.INFERENCE:
+            return _evidence_words(belief) + _outside_warrant(belief)
         case _:  # pragma: no cover - exhaustive
-            assert_never(belief.band)
+            assert_never(belief.standing)
 
 
 def _forget_warning(band: BeliefBand) -> str:
-    """What forgetting a belief in this band costs (ADR-0073 §5).
+    """What forgetting a memory in this band costs (ADR-0073 §5).
 
     The ceremony is uniform in mechanism and asymmetric in message, because the
     consequence is: an assertion is not re-derivable and losing one is unrecoverable
-    (ADR-0072 §1, ADR-0038 §2), while a derived or attested belief loses the belief
-    and not its origin. The obligation is to represent a deletion as neither more
-    final than it is nor less. Total over the bands, like :func:`_why`.
+    (ADR-0072 §1, ADR-0038 §2), while a derived or attested memory loses the memory
+    and not its origin. Total over the bands, like :func:`_why`.
     """
     match band:
         case BeliefBand.ASSERTED:
             return "You told me this. Forgetting it is permanent — nothing can work it out again."
         case BeliefBand.DERIVED:
             return (
-                "I worked this out. Forgetting it destroys the belief but not what I "
+                "I worked this out. Forgetting it destroys the memory but not what I "
                 "worked it out from, so I may reach it again."
             )
         case BeliefBand.ATTESTED:
@@ -6957,89 +6684,100 @@ def _render_content(content: str) -> None:
 
 
 def _render_belief_summary(summary: BeliefSummary) -> None:
-    """Render one row of the **listing** (ADR-0077 §6, ADR-0085 §4a).
+    """Render one row of the **listing** (ADR-0328 §15:1, ADR-0085 §4a).
 
-    The listing "resolves *existence* and renders the count, the lost count, and the
-    adjusted confidence"; the citations themselves belong to the single-belief view.
-    The split used to be a ``evidence=False`` argument this module chose to pass —
-    now it is the *type*: a :class:`~ai_assistant.core.types.BeliefSummary` carries
-    no citations, so this renderer could not print one if it tried, and the engine
-    could not have shipped one for it to print.
+    A :class:`~ai_assistant.core.types.BeliefSummary` carries no support, so this
+    renderer could not print one if it tried; the supports belong to the single view.
     """
     _render_belief_fields(summary)
 
 
 def _render_belief(belief: Belief) -> None:
-    """Render the **single-belief** view: the same fields, plus the warrant.
-
-    Printing every citation for a fifty-belief page would bury the listing it is
-    part of; printing none of them where the user is about to destroy the belief
-    would hide the warrant they are judging.
-    """
+    """Render the **single-memory** view: the same fields, plus every support (§15:2)."""
     _render_belief_fields(belief)
-    _render_evidence(belief)
+    _render_supports(belief)
 
 
 def _render_belief_fields(belief: Belief | BeliefSummary) -> None:
-    """Render what ADR-0073 §4 requires **both** views to convey.
+    """Render what ADR-0328 §15:4 requires a surface showing a memory to show.
 
-    The band leads the row and is never left to be implied by position; confidence,
-    kind, the canonical content, why it is held, when the assistant last revised it
-    and the id are all shown, as is the end of its validity window where one is set.
-    Every listed belief is live, so an *open* window carries no information and is
-    not rendered as though it did.
+    At least: its standing in plain words, its age, its evidence summary where its
+    standing is inference, its reading certainty where that is not ``sure``, every
+    let-down, and the legacy mark. Beside them, as before: the band, the wording,
+    the end of its validity window where one is set, and the id ``forget`` takes. Its
+    age is when it was learned and as of when it was last confirmed, each said as
+    unknown where nothing dates it, which is neither fresh nor stale (§7:3).
 
-    **The confidence shown is the presented one**, already lowered for support that
-    has gone (ADR-0077 §6). This module does not compute it and could not: the stored
-    number is not carried here at all, which is what stops two surfaces quoting
-    different figures for one belief.
+    **No confidence is shown**, and none is carried (§15:3).
 
-    The ``Why`` line reads only the counts and the kind, which both types carry —
-    which is why the two views share this renderer rather than one of them needing
-    its own.
-
-    **The content is printed as a block whose every line carries the row's indent**
-    (:func:`_render_content`), because an episode's content is legitimately two lines
-    and this row used to render the break between them as ``\ufffd`` (#1890).
-
-    Engine-supplied text — the content and the id — is neutralised for this
-    terminal like any other (``_safe``, ADR-0042 §4). The band and kind are this
-    system's own closed vocabularies, not carried data.
+    Engine-supplied text — the wording, the id, a source's name — is neutralised for
+    this terminal like any other (``_safe``, ADR-0042 §4). The band, the standing and
+    the status are this system's own closed vocabularies, not carried data.
     """
-    _print(
-        f"\n  [bold cyan]{belief.band.value}[/] · {belief.kind.value} · "
-        f"confidence {belief.confidence:.2f}"
-    )
+    _print(_standing_line(belief))
     _render_content(belief.content)
     _print(f"  [dim]Why:[/] {_why(belief)}")
-    _print(f"  [dim]Last revised:[/] {_when(belief.last_updated)}")
+    _print(f"  [dim]Learned:[/] {_when_or_unknown(belief.learned)}")
+    _print(f"  [dim]As of:[/] {_when_or_unknown(belief.as_of)}")
+    certainty = belief.reading_certainty
+    if certainty is not ReadingCertainty.SURE:
+        reading = "not judged" if certainty is None else certainty.value
+        _print(f"  [dim]How sure the reading was:[/] {reading}")
+    track = belief.track_record
+    if track.let_down:
+        _print(
+            f"  [yellow]Let you down {track.let_down} time(s)[/] of the "
+            f"{track.relied_on} I relied on it."
+        )
+    if belief.legacy:
+        _print(
+            "  [dim]Legacy:[/] kept before memories had supports; what it rested on then "
+            "is shown as it was recorded."
+        )
+    if belief.unbacked:
+        _print("  [yellow]Nothing that counts backs this wording now.[/]")
+    if belief.supports_gone:
+        _print(
+            "  [yellow]Everything it rested on is gone.[/] I still hold it — I have "
+            "not unlearnt it because the evidence went."
+        )
     if belief.valid_until is not None:
         _print(f"  [dim]Believed until:[/] {_when(belief.valid_until)}")
     _print(f"  [dim]id:[/] {_safe(belief.id)}")
 
 
-def _render_evidence(belief: Belief) -> None:
-    """Render the citations behind one belief, tombstoning what is gone (ADR-0077 §6).
+def _when_or_unknown(instant: datetime | None) -> str:
+    """:func:`_when`, or that nothing dates it (ADR-0328 §7:3-§7:4)."""
+    return "unknown" if instant is None else _when(instant)
 
-    A citation that no longer resolves is **an explicit tombstone** — never a bare id,
-    never a silent gap (ADR-0073 §4's floor). The tombstone says an evidence item
-    stood here and is gone, and deliberately does not say what it was; it also does
-    not distinguish *deleted* from *expired*, because the read cannot tell them apart
-    and the user's question — "is there still something behind this?" — is answered
-    by absence either way.
+
+def _render_supports(belief: Belief) -> None:
+    """Render each support behind one memory, a gone one as gone (ADR-0328 §15:2, §15:7).
+
+    A support whose part no longer resolves is **an explicit tombstone** — never a
+    bare id, never a silent gap, and never shown as evidence (ADR-0073 §4's floor). It
+    still counts, which is why it is listed. One that was stopped from counting says so.
     """
-    if not belief.evidence:
-        return
-    _print("  [dim]Because:[/]")
-    for item in belief.evidence:
-        if item.content is None:
-            _print("    [yellow]—[/] [dim]an item of evidence stood here and is gone.[/]")
+    _print("  [dim]Rests on:[/]")
+    for support in belief.supports:
+        against = (
+            " · [yellow]against it[/]" if support.direction is SupportDirection.AGAINST else ""
+        )
+        stopped = " · [dim]no longer counted[/]" if not support.counts else ""
+        when = "" if support.when is None else f" · {_when(support.when)}"
+        source = support.source_details
+        named = "" if source is None else f" · {_safe(source.reported_by)}"
+        _print(f"    - {_ORIGIN_WORDS[support.origin]}{named}{when}{against}{stopped}")
+        if support.content is None:
+            _print("      [yellow]—[/] [dim]what it pointed at is gone.[/]")
         else:
-            _print(f"    - {_safe(item.content)}")
+            _print(f"      {_safe(support.content)}")
+        if support.note:
+            _print(f"      [dim]{_safe(support.note)}[/]")
 
 
 def _render_beliefs(page: tuple[BeliefSummary, ...], *, limit: int, offset: int) -> None:
-    """Render one page of beliefs (ADR-0073 §7).
+    """Render one page of memories (ADR-0073 §7).
 
     **No total is shown**, and none is available to show: "is there more" is answered
     by asking for the next page, so a full page says so and names the offset that
@@ -7061,14 +6799,13 @@ def _render_forget_prompt(belief: Belief) -> None:
     Three things, in this order, because a person cannot consent to destroying
     something they were not shown (ADR-0042 §4, ADR-0052 §4):
 
-    1. the belief itself, in full;
+    1. the memory itself, in full;
     2. the band-appropriate warning — what is lost, and what is not;
-    3. what the confirmation actually covers. It is consent to forget **the belief
+    3. what the confirmation actually covers. It is consent to forget **the memory
        that id names**, not a guarantee that what is destroyed is byte-for-byte what
        was just rendered: the show and the delete are two calls and the window
        between them is named rather than closed (ADR-0073 §5). And it destroys rather
-       than retires, which is the contrast — kept versus destroyed — that a surface
-       offering both a correction and a deletion owes (ADR-0073 §6).
+       than retires (ADR-0073 §6).
     """
     _print("\n[bold yellow]About to forget this belief[/]")
     _render_belief(belief)

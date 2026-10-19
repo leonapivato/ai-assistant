@@ -35,26 +35,29 @@ from ai_assistant.core.protocols import (
 )
 from ai_assistant.core.types import (
     Attestation,
+    Belief,
     BeliefBand,
     BeliefSummary,
     CostBasis,
     DataTier,
     EpisodicMemory,
-    Evidence,
     Idempotency,
+    Memory,
     MemoryKind,
     MemorySource,
+    MemoryStanding,
+    MemoryStatus,
+    MemorySupport,
     Provenance,
     ProvisioningState,
     Reversibility,
     RiskLevel,
-    SemanticMemory,
     ToolCost,
     ToolDefinition,
     TraceOutcome,
     Validity,
-    band_of,
-    rests_on_recorded_external_content,
+    belief_summary,
+    belief_view,
     secret_value,
 )
 from ai_assistant.orchestration import (
@@ -63,9 +66,6 @@ from ai_assistant.orchestration import (
     Engine,
     GrantOperations,
     HeldSource,
-    belief_from_record,
-    belief_summary_from_record,
-    presented_confidence,
 )
 from ai_assistant.orchestration import engine as engine_module
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, DrainPhase
@@ -88,6 +88,14 @@ from ai_assistant.testing import (
     FakeTraceSink,
     evaluation_trace,
     with_phase_declaration,
+)
+from ai_assistant.testing.memories import (
+    legacy_support,
+    memory,
+    message_support,
+    remembered_support,
+    said_support,
+    sourced_support,
 )
 
 if TYPE_CHECKING:
@@ -872,362 +880,168 @@ async def test_aclose_sweeps_remaining_closers_when_one_is_cancelled() -> None:
     assert closed == ["a", "b"]  # b released despite a's cancellation
 
 
-# --- the belief inspection surface (ADR-0073 §4, §5, §7) ----------------
+# --- the belief inspection surface (ADR-0073 §5, §7; ADR-0328 §15) --------
 
 
-def _record(  # noqa: PLR0913 — one knob per field a Belief carries; that is the point
+def _memory(
     record_id: str,
-    *,
-    source: MemorySource = MemorySource.USER_ASSERTED,
-    confidence: float = 1.0,
-    evidence: tuple[str, ...] = (),
-    last_updated: datetime = AT,
-    valid_until: datetime | None = None,
+    *supports: MemorySupport,
     content: str = "the office is in Boston",
-    score: float | None = None,
-    evidence_elided: int = 0,
-    derived_from_external: bool = False,
-) -> SemanticMemory:
-    """A stored semantic record, with every field the projection reads addressable.
-
-    The attestation is still *not* a knob, and since ADR-0189 §2 the reason has
-    changed rather than gone: the projection now reads it, but the `ATTESTED` band is
-    unconstructable without one (ADR-0092 §1) and no case here needs a *different*
-    one, so it is supplied from the band rather than from a keyword nobody would
-    vary. Keyed on `band_of` so a `MemorySource` added into that band later needs no
-    edit here.
-
-    ``derived_from_external`` **is** a knob, because it is the one input the origin
-    predicate has that the band does not decide (ADR-0106 §2) — and because a record
-    carrying it outside the `DERIVED` band is exactly what tells a projection reading
-    the field apart from one calling the function.
-    """
-    return SemanticMemory(
-        id=record_id,
-        content=content,
-        fact=content,
-        score=score,
+    valid_until: datetime | None = None,
+) -> Memory:
+    """A stored memory on ``supports`` (one said support where none is given)."""
+    return memory(
+        record_id,
+        content,
+        *(supports or (said_support("ep-1", when=AT, added_at=AT),)),
         validity=Validity(valid_until=valid_until),
-        provenance=Provenance(
-            source=source,
-            confidence=confidence,
-            evidence=evidence,
-            evidence_elided=evidence_elided,
-            last_updated=last_updated,
-            derived_from_external=derived_from_external,
-            attestation=(
-                Attestation(reported_by="calendar:work", reported_at=AT)
-                if band_of(source) is BeliefBand.ATTESTED
-                else None
-            ),
-        ),
     )
 
 
+def _in_band(record_id: str, band: BeliefBand, *, outside: bool = False) -> Memory:
+    """A memory standing in ``band``: said, sourced from the work calendar, or remembered."""
+    match band:
+        case BeliefBand.ASSERTED:
+            support = said_support("ep-1", when=AT, added_at=AT)
+        case BeliefBand.ATTESTED:
+            support = sourced_support(_CALENDAR, episode="ep-1", when=AT, added_at=AT)
+        case BeliefBand.DERIVED:
+            support = remembered_support("ep-1", outside=outside, when=AT, added_at=AT)
+    return _memory(record_id, support)
+
+
+#: The source details an attested memory's support carries.
+_CALENDAR: Final = Attestation(reported_by="calendar:work", reported_at=AT)
+
+
 @pytest.mark.parametrize(
-    ("source", "band"),
+    ("band", "standing"),
     [
-        (MemorySource.USER_ASSERTED, BeliefBand.ASSERTED),
-        (MemorySource.OBSERVED, BeliefBand.DERIVED),
-        (MemorySource.INFERRED, BeliefBand.DERIVED),
-        (MemorySource.EXTERNAL, BeliefBand.ATTESTED),
+        (BeliefBand.ASSERTED, MemoryStanding.SAID),
+        (BeliefBand.ATTESTED, MemoryStanding.SOURCE),
+        (BeliefBand.DERIVED, MemoryStanding.INFERENCE),
     ],
 )
-def test_from_record_applies_the_band_projection_in_the_engine(
-    source: MemorySource, band: BeliefBand
+def test_both_projections_carry_the_standing_and_its_band(
+    band: BeliefBand, standing: MemoryStanding
 ) -> None:
-    """Every source is classified here, once, so no adapter ever has to (ADR-0073 §7)."""
-    confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.4
-    belief = belief_from_record(_record("rec-1", source=source, confidence=confidence))
-    assert belief.band is band
-    assert belief.confidence == confidence
+    """ADR-0328 §6, §15:1: the standing and its band are computed once, in ``core``."""
+    record = _in_band("rec-1", band)
+    summary = belief_summary(record, now=AT, supports_gone=False)
+    belief = belief_view(record, now=AT, contents={})
+    assert (summary.standing, summary.band) == (standing, band)
+    assert (belief.standing, belief.band) == (standing, band)
 
 
-def test_from_record_carries_exactly_what_the_surface_must_convey() -> None:
-    """The DTO carries ADR-0073 §4's fields: id, band, kind, content, confidence, times."""
+def test_a_projection_carries_exactly_what_adr_0328_15_1_names() -> None:
+    """The id, the wording, the status, the validity end, as of, learned, the evidence
+    summary, and no confidence and no elision count (§15:1, §15:3)."""
     until = datetime(2026, 8, 1, tzinfo=UTC)
-    belief = belief_from_record(
-        _record(
-            "rec-1",
-            source=MemorySource.INFERRED,
-            confidence=0.62,
-            evidence=("episode-1", "episode-2"),
-            valid_until=until,
-        )
+    record = _memory(
+        "rec-1",
+        remembered_support("ep-1", when=AT - timedelta(days=2), added_at=AT),
+        remembered_support("ep-2", effect="effect-2", when=AT, added_at=AT),
+        valid_until=until,
     )
-    assert belief.id == "rec-1"
-    assert belief.kind is MemoryKind.SEMANTIC
-    assert belief.content == "the office is in Boston"
-    assert belief.last_updated == AT
-    assert belief.valid_until == until
+    summary = belief_summary(record, now=AT, supports_gone=False)
+    assert summary.id == "rec-1"
+    assert summary.content == "the office is in Boston"
+    assert summary.status is MemoryStatus.CURRENT
+    assert summary.valid_until == until
+    assert summary.learned == AT - timedelta(days=2)
+    assert summary.as_of == AT
+    assert (summary.evidence.supporting, summary.evidence.episodes) == (2, 2)
+    for absent in ("confidence", "evidence_elided", "kind", "attestation"):
+        assert absent not in BeliefSummary.model_fields
+        assert absent not in Belief.model_fields
 
 
-def test_from_record_carries_resolved_evidence_and_never_ids() -> None:
-    """ADR-0073 §4's derived floor, made structural: the citations do not leave here.
-
-    A citation the surface cannot render as evidence is never rendered *as* evidence
-    — "not as a reassuring id, not silently dropped". ADR-0077 §6 discharged the gate
-    on *resolving* them, so what the DTO now carries is readable content or an
-    explicit tombstone; what it still never carries is an id, which is what stops an
-    adapter passing one off as the warrant.
-    """
-    belief = belief_from_record(
-        _record("rec-1", source=MemorySource.INFERRED, confidence=0.5, evidence=("ep-1", "ep-2")),
-        (Evidence(content="they said so"), Evidence()),
+def test_the_single_view_resolves_each_support_and_never_carries_an_id() -> None:
+    """ADR-0328 §15:2, ADR-0073 §4's floor: content or gone, never an episode id."""
+    record = _memory(
+        "rec-1",
+        remembered_support("ep-1", when=AT, added_at=AT),
+        remembered_support("ep-2", effect="effect-2", when=AT, added_at=AT),
     )
-    assert belief.evidence_count == 2
-    assert belief.lost_evidence == 1
-    assert "ep-1" not in str(belief)  # no citation id is reachable from the DTO at all
+    first, second = (support.points_at for support in record.supports)
+    belief = belief_view(record, now=AT, contents={first: "they said so", second: None})
+    assert [support.content for support in belief.supports] == ["they said so", None]
+    assert belief.supports[1].gone is True
+    assert "ep-1" not in str(belief)
 
 
 @pytest.mark.parametrize(
-    ("source", "band"),
+    ("band", "outside", "rests"),
     [
-        (MemorySource.USER_ASSERTED, BeliefBand.ASSERTED),
-        (MemorySource.INFERRED, BeliefBand.DERIVED),
-        (MemorySource.EXTERNAL, BeliefBand.ATTESTED),
+        (BeliefBand.ASSERTED, False, False),
+        (BeliefBand.DERIVED, False, False),
+        (BeliefBand.DERIVED, True, True),
+        (BeliefBand.ATTESTED, False, True),
     ],
 )
-def test_both_projections_carry_the_stored_elision_on_every_band(
-    source: MemorySource, band: BeliefBand
+def test_both_projections_carry_rests_on_outside_content(
+    band: BeliefBand, outside: bool, rests: bool
 ) -> None:
-    """ADR-0107 §3: the field is carried on **every** band, at both sites.
-
-    Parameterised over all three bands rather than over the one whose *rendering*
-    ADR-0107 §2 discusses, and §8 item 6 says why in as many words: naming only the
-    discussed bands "would leave the third free to be projected as ``0`` by an
-    implementation that wrongly coupled the field to §2's rendering scope, with
-    every other test here still passing". §2 scopes a disclosure obligation; §3
-    scopes the field, and it scopes it to everything. "A projection never zeroes,
-    clamps or omits it by band" is a checked claim here rather than a stated one.
-
-    The value is non-default at every assertion, per §8 item 6's governing rule: at
-    the default ``0`` this would pass whether the number is carried or silently
-    dropped, which is a test that cannot fail and therefore is not one.
-    """
-    confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.5
-    record = _record(
-        "rec-1", source=source, confidence=confidence, evidence=("ep-1",), evidence_elided=900
-    )
-
-    belief = belief_from_record(record, (Evidence(content="they said so"),))
-    assert belief.band is band
-    assert belief.evidence_elided == 900
-
-    summary = belief_summary_from_record(record, cited=1, resolved=1)
-    assert summary.band is band
-    assert summary.evidence_elided == 900
+    """ADR-0328 §7:6, §12: the computed value, on both projections, read and not re-derived."""
+    record = _in_band("rec-1", band, outside=outside)
+    assert record.rests_on_outside_content is rests
+    assert belief_view(record, now=AT, contents={}).rests_on_outside_content is rests
+    assert belief_summary(record, now=AT, supports_gone=False).rests_on_outside_content is rests
 
 
-def test_neither_projection_clamps_the_elision_to_the_citations_it_kept() -> None:
-    """ADR-0107 §8 item 2: no rounding, no clamping, no recomputation.
-
-    The two shapes a clamp would "fix" are both legitimate, and both are asserted
-    here: an elision far above the retained count, and a non-zero elision over an
-    empty tuple. ``evidence_elided`` counts displacements over the record's whole
-    history and is an upper bound over a *different population* than the retained
-    citations (ADR-0086 §4), so neither shape is a contradiction — and a projection
-    clamping to ``evidence_count`` would resolve ADR-0086 §4's deliberate
-    imprecision, in the wrong direction, on the one screen that exists to answer
-    "why do you believe that?".
-    """
-    many = _record(
+def test_a_user_s_own_word_never_rests_on_outside_content_whatever_else_it_rests_on() -> None:
+    """ADR-0328 §7:6: only a memory not in band ``ASSERTED`` rests on outside content."""
+    record = _memory(
         "rec-1",
-        source=MemorySource.INFERRED,
-        confidence=0.5,
-        evidence=("ep-1",),
-        evidence_elided=900,
+        said_support("ep-1", when=AT, added_at=AT),
+        remembered_support("ep-2", outside=True, when=AT, added_at=AT),
     )
-    belief = belief_from_record(many, (Evidence(content="they said so"),))
-    assert belief.evidence_count == 1
-    assert belief.evidence_elided == 900  # not clamped to 1, and not zeroed
-    assert belief_summary_from_record(many, cited=1, resolved=1).evidence_elided == 900
-
-    # Nothing carried, something displaced: the belief cites nothing *now*, and how
-    # much it stopped carrying is still the honest answer rather than an anomaly.
-    empty = _record("rec-2", source=MemorySource.INFERRED, confidence=0.5, evidence_elided=7)
-    projected = belief_from_record(empty)
-    assert projected.evidence_count == 0
-    assert projected.evidence_elided == 7
-    assert belief_summary_from_record(empty, cited=0, resolved=0).evidence_elided == 7
+    assert record.band is BeliefBand.ASSERTED
+    assert belief_view(record, now=AT, contents={}).rests_on_outside_content is False
 
 
-def test_the_elision_is_not_fed_into_the_presented_confidence() -> None:
-    """ADR-0107 §8 item 3, on ADR-0086 §4's ground: it would invert the signal.
-
-    Feeding elisions into :func:`presented_confidence` "would lower a belief's
-    presented confidence because the system worked". Two records identical but for
-    the elision must present one confidence — and the elided one must still report
-    its exact count, or this passes by the field having been dropped rather than by
-    it having been kept out of the arithmetic.
-    """
-    citations = (Evidence(content="they said so"), Evidence())
-    plain = _record("rec-1", source=MemorySource.INFERRED, confidence=0.8, evidence=("a", "b"))
-    elided = _record(
-        "rec-2",
-        source=MemorySource.INFERRED,
-        confidence=0.8,
-        evidence=("a", "b"),
-        evidence_elided=900,
-    )
-
-    assert belief_from_record(elided, citations).confidence == pytest.approx(
-        belief_from_record(plain, citations).confidence
-    )
-    assert belief_from_record(elided, citations).evidence_elided == 900
-    assert belief_summary_from_record(elided, cited=2, resolved=1).confidence == pytest.approx(
-        belief_summary_from_record(plain, cited=2, resolved=1).confidence
-    )
-    assert belief_summary_from_record(elided, cited=2, resolved=1).evidence_elided == 900
+def test_a_source_support_carries_its_source_details_whole() -> None:
+    """ADR-0328 §15:2, ADR-0189 §2: the attestation as stored, on the support it is."""
+    belief = belief_view(_in_band("rec-1", BeliefBand.ATTESTED), now=AT, contents={})
+    assert belief.supports[0].source_details == _CALENDAR
+    said = belief_view(_in_band("rec-2", BeliefBand.ASSERTED), now=AT, contents={})
+    assert said.supports[0].source_details is None
 
 
-def test_from_record_drops_the_relevance_score() -> None:
-    """Nothing was ranked on this path, so no score is carried (ADR-0073 §2, §7)."""
-    belief = belief_from_record(_record("rec-1", score=0.93))
-    assert not hasattr(belief, "score")
-
-
-# --- the origin of what a projection shows (ADR-0189 §1, §2) ------------
-
-
-@pytest.mark.parametrize(
-    ("source", "derived_from_external", "rests"),
-    [
-        (MemorySource.USER_ASSERTED, False, False),
-        (MemorySource.OBSERVED, False, False),
-        (MemorySource.INFERRED, False, False),
-        (MemorySource.OBSERVED, True, True),
-        (MemorySource.INFERRED, True, True),
-        (MemorySource.EXTERNAL, False, True),
-    ],
-)
-def test_both_projections_carry_the_predicate_s_own_answer(
-    source: MemorySource, derived_from_external: bool, rests: bool
-) -> None:
-    """ADR-0189 §2: the value is `rests_on_recorded_external_content`'s, computed here.
-
-    Every arm of ADR-0106 §2's two-part predicate, on both projections: `ATTESTED`
-    is true by the band alone, `ASSERTED` is false by ADR-0098 §1 whatever the field
-    says, and `DERIVED` is the one case the flag decides — which is the case the
-    field exists for (#746).
-
-    Asserted against the function rather than against a transcribed truth table, so
-    that a projection and the predicate cannot drift apart in a later edit without
-    this failing.
-    """
-    confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.4
-    record = _record(
-        "rec-1",
-        source=source,
-        confidence=confidence,
-        derived_from_external=derived_from_external,
-    )
-
-    assert rests_on_recorded_external_content(record.provenance) is rests
-    assert belief_from_record(record).rests_on_recorded_external_content is rests
-    summary = belief_summary_from_record(record, cited=0, resolved=0)
-    assert summary.rests_on_recorded_external_content is rests
-
-
-def test_a_user_s_own_assertion_never_rests_on_external_content_however_the_record_is_flagged() -> (
-    None
-):
-    """The one case that tells the function apart from the field (ADR-0106 §2, §7).
-
-    ADR-0106 §7 forbids a band-keyed validator on `derived_from_external`, so a
-    `USER_ASSERTED` provenance carrying `True` stays constructible — malformed rather
-    than adversarial. The predicate is band-guarded and answers `False`; a projection
-    that read the field directly would report the user's own utterance as resting on
-    recorded external content, which ADR-0098 §1 forbids in principle "however it was
-    composed".
-
-    This is the assertion that fails the day someone writes
-    ``provenance.derived_from_external`` at either site, and nothing else here does.
-    """
-    flagged = _record("rec-1", source=MemorySource.USER_ASSERTED, derived_from_external=True)
-
-    assert flagged.provenance.derived_from_external is True, "the record really carries it"
-    assert belief_from_record(flagged).rests_on_recorded_external_content is False
-    assert (
-        belief_summary_from_record(flagged, cited=0, resolved=0).rests_on_recorded_external_content
-        is False
-    )
-
-
-def test_both_projections_carry_the_attestation_whole() -> None:
-    """ADR-0189 §2: the `Attestation` as stored, not two scalars beside it.
-
-    Both halves ADR-0073 §4's gate asks for — what reported it and when that source
-    said so — reach the surface as one object, so the half-states ADR-0092 §2 made
-    unconstructable on the record's side of the seam stay unconstructable on the
-    surface's. Identity is asserted rather than field equality: a projection that
-    rebuilt an `Attestation` from two scalars would pass a field-by-field check while
-    dropping `extent`, which ADR-0189 §2 rules rides along.
-    """
-    attested = _record("rec-1", source=MemorySource.EXTERNAL, confidence=0.7)
-    stored = attested.provenance.attestation
-    assert stored is not None
-
-    belief = belief_from_record(attested)
-    summary = belief_summary_from_record(attested, cited=0, resolved=0)
-
-    assert belief.attestation is stored
-    assert summary.attestation is stored
-    assert belief.attestation.reported_by == "calendar:work"
-    assert belief.attestation.reported_at == AT
-
-
-def test_an_unattested_belief_carries_no_attestation_on_either_projection() -> None:
-    """Present exactly where the band is `ATTESTED`, which the record already decides.
-
-    ADR-0189 §2 adds no cross-field validator to either projection and does not need
-    one: `Provenance` carries an attestation exactly in that band (ADR-0092 §1), so
-    the projection carrying it as stored inherits the invariant. What would break it
-    is a projection *manufacturing* one, so the absence is pinned rather than assumed.
-    """
-    for source in (MemorySource.USER_ASSERTED, MemorySource.OBSERVED, MemorySource.INFERRED):
-        confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.4
-        record = _record("rec-1", source=source, confidence=confidence)
-        assert belief_from_record(record).attestation is None
-        assert belief_summary_from_record(record, cited=0, resolved=0).attestation is None
-
-
-def test_the_listing_and_the_detail_view_agree_about_the_origin() -> None:
-    """The listing discloses a belief's origin exactly as the detail view does.
-
-    ADR-0085 §4a's split is about *citations* — the listing carries counts where the
-    detail carries content — and provenance is on neither side of it. This is ADR-0107
-    §8 item 5's argument one field pair over: a listing that disclosed less than the
-    view it is drilled into would make two reads of one record disagree about a fact
-    neither of them computes.
-    """
-    attested = _record("rec-1", source=MemorySource.EXTERNAL, confidence=0.7)
-    tainted = _record(
-        "rec-2", source=MemorySource.INFERRED, confidence=0.5, derived_from_external=True
-    )
-
-    for record in (attested, tainted):
-        belief = belief_from_record(record)
-        summary = belief_summary_from_record(record, cited=0, resolved=0)
-        assert summary.attestation == belief.attestation
-        assert (
-            summary.rests_on_recorded_external_content is belief.rests_on_recorded_external_content
-        )
+def test_the_listing_and_the_detail_view_agree_about_every_computed_value() -> None:
+    """ADR-0085 §4a's split is about supports alone: every other value is the same."""
+    for record in (
+        _in_band("rec-1", BeliefBand.ATTESTED),
+        _in_band("rec-2", BeliefBand.DERIVED, outside=True),
+    ):
+        belief = belief_view(record, now=AT, contents={})
+        summary = belief_summary(record, now=AT, supports_gone=belief.supports_gone)
+        assert summary == BeliefSummary.model_validate(belief.model_dump(exclude={"supports"}))
 
 
 async def test_beliefs_lists_what_memory_holds_in_the_store_s_own_order() -> None:
-    """The façade relays the enumeration and projects each record (ADR-0073 §1, §7)."""
+    """The façade relays the enumeration and projects each memory (ADR-0073 §1, §7)."""
     harness = Harness()
-    await harness.memory.add(_record("older", last_updated=AT - timedelta(days=1)))
-    await harness.memory.add(_record("newer", last_updated=AT))
+    await harness.memory.add(
+        _memory("older", said_support("ep-1", added_at=AT - timedelta(days=1)))
+    )
+    await harness.memory.add(_memory("newer", said_support("ep-1", added_at=AT)))
 
     page = await harness.engine.beliefs()
     assert [summary.id for summary in page] == ["newer", "older"]  # the store's order, unchanged
-    # The listing ships summaries, not beliefs (ADR-0085 §4a): a `BeliefSummary` has
-    # no field a citation's content could occupy, so no page can carry the corpus.
+    # The listing ships summaries, not single views (ADR-0085 §4a): a `BeliefSummary`
+    # has no field a support's content could occupy.
     assert all(isinstance(summary, BeliefSummary) for summary in page)
-    assert all(not hasattr(summary, "evidence") for summary in page)
+    assert all(not hasattr(summary, "supports") for summary in page)
     assert page[0].band is BeliefBand.ASSERTED
+
+
+async def test_beliefs_lists_memories_and_never_an_episode() -> None:
+    """ADR-0328 §11:2 (#3143): the listing excludes episodes by default."""
+    harness = Harness()
+    await harness.memory.add(_episode_record("ep-1", "they asked for metric units"))
+    await harness.memory.add(_memory("rec-1"))
+    assert [summary.id for summary in await harness.engine.beliefs()] == ["rec-1"]
 
 
 async def test_beliefs_returns_an_empty_page_when_nothing_matches() -> None:
@@ -1236,21 +1050,20 @@ async def test_beliefs_returns_an_empty_page_when_nothing_matches() -> None:
     assert await harness.engine.beliefs() == ()
 
 
-async def test_beliefs_relays_every_filter_and_the_bounded_default_page() -> None:
-    """Filters and paging reach the store verbatim; the default limit is stated (§2)."""
+async def test_beliefs_relays_the_band_filter_and_the_bounded_default_page() -> None:
+    """The filter and paging reach the store verbatim; no kind is asked (§2, ADR-0328 §11:2)."""
     harness = Harness(memory=RecordingBeliefStore(now=lambda: AT))
     store = harness.memory
     assert isinstance(store, RecordingBeliefStore)
 
     await harness.engine.beliefs()
-    await harness.engine.beliefs(
-        bands=[BeliefBand.DERIVED], kinds=[MemoryKind.SEMANTIC], limit=2, offset=7
-    )
+    await harness.engine.beliefs(bands=[BeliefBand.DERIVED], limit=2, offset=7)
     assert store.calls == [
-        # No filters, and the bounded default page starting from the beginning (§2).
+        # No filter, and the bounded default page starting from the beginning (§2).
         (None, None, 50, 0),
-        # Every filter and both paging arguments, relayed exactly as given.
-        ((BeliefBand.DERIVED,), (MemoryKind.SEMANTIC,), 2, 7),
+        # The filter and both paging arguments, relayed exactly as given; the kinds
+        # are the store's default, which is memories alone.
+        ((BeliefBand.DERIVED,), None, 2, 7),
     ]
 
 
@@ -1259,8 +1072,8 @@ async def test_beliefs_selects_nothing_for_an_explicitly_empty_filter() -> None:
     harness = Harness(memory=RecordingBeliefStore(now=lambda: AT))
     store = harness.memory
     assert isinstance(store, RecordingBeliefStore)
-    await harness.engine.beliefs(bands=[], kinds=[])
-    assert store.calls[-1] == ((), (), 50, 0)
+    await harness.engine.beliefs(bands=[])
+    assert store.calls[-1] == ((), None, 50, 0)
 
 
 async def test_beliefs_snapshots_its_filters_so_a_caller_cannot_change_the_page() -> None:
@@ -1338,7 +1151,7 @@ async def test_beliefs_relays_an_out_of_range_page_refusal() -> None:
 async def test_belief_reads_the_one_a_deletion_is_about_to_destroy() -> None:
     """The single read show-then-confirm needs, projected like any other (§5, §7)."""
     harness = Harness()
-    await harness.memory.add(_record("rec-1", source=MemorySource.EXTERNAL, confidence=0.8))
+    await harness.memory.add(_in_band("rec-1", BeliefBand.ATTESTED))
     belief = await harness.engine.belief("rec-1")
     assert belief is not None
     assert belief.id == "rec-1"
@@ -1349,15 +1162,22 @@ async def test_belief_is_none_for_an_id_no_live_record_has() -> None:
     """Unknown, and — because ``get`` is live-only — retired, both read as None (§5)."""
     harness = Harness()
     assert await harness.engine.belief("nothing") is None
-    retired = _record("retired", valid_until=AT - timedelta(days=1))
+    retired = _memory("retired", valid_until=AT - timedelta(days=1))
     await harness.memory.add(retired)
     assert await harness.engine.belief("retired") is None
+
+
+async def test_belief_is_none_for_an_episode() -> None:
+    """ADR-0328 §2:1: an episode is not a memory, so the single-memory read declines it."""
+    harness = Harness()
+    await harness.memory.add(_episode_record("ep-1", "they asked for metric units"))
+    assert await harness.engine.belief("ep-1") is None
 
 
 async def test_forget_destroys_the_record_and_reports_that_it_did() -> None:
     """``forget`` is ``MemoryStore.delete``, relayed (ADR-0073 §5)."""
     harness = Harness()
-    await harness.memory.add(_record("rec-1"))
+    await harness.memory.add(_memory("rec-1"))
     assert await harness.engine.forget("rec-1") is True
     assert await harness.engine.belief("rec-1") is None
     assert await harness.engine.beliefs() == ()
@@ -1378,14 +1198,8 @@ async def test_forget_refuses_no_band(band: BeliefBand) -> None:
     between the bands lives in what the user is told before answering, not in what
     the deletion will do.
     """
-    source = {
-        BeliefBand.ASSERTED: MemorySource.USER_ASSERTED,
-        BeliefBand.DERIVED: MemorySource.INFERRED,
-        BeliefBand.ATTESTED: MemorySource.EXTERNAL,
-    }[band]
-    confidence = 1.0 if band is BeliefBand.ASSERTED else 0.5
     harness = Harness()
-    await harness.memory.add(_record("rec-1", source=source, confidence=confidence))
+    await harness.memory.add(_in_band("rec-1", band))
     shown = await harness.engine.belief("rec-1")
     assert shown is not None
     assert shown.band is band
@@ -1395,7 +1209,7 @@ async def test_forget_refuses_no_band(band: BeliefBand) -> None:
 async def test_forget_leaves_nothing_behind_not_even_in_an_export() -> None:
     """Forgetting destroys; a correction would have retired and kept it (ADR-0073 §6)."""
     harness = Harness()
-    await harness.memory.add(_record("rec-1"))
+    await harness.memory.add(_memory("rec-1"))
     await harness.engine.forget("rec-1")
     assert await harness.memory.export() == []
 
@@ -1476,23 +1290,18 @@ async def test_engine_start_consumes_the_stamped_enumeration(
     assert calls == [None], "start-up walked the tombstones exactly once, from the beginning"
 
 
-# --- lost evidence: tombstones and presented confidence (ADR-0077 §6) ----
-
-
-#: A derived belief's stored confidence, comfortably above the presentation floor.
-_STORED = 0.6
+# --- supports whose episode is gone (ADR-0328 §15:7, ADR-0077 §6) --------
 
 
 async def _derived_with_two_episodes(harness: Harness) -> None:
-    """Store a derived belief citing two episodes that both resolve."""
+    """Store a derived memory resting on two episodes that both resolve."""
     await harness.memory.add(_episode_record("ep-1", "they asked for metric units"))
     await harness.memory.add(_episode_record("ep-2", "they asked again in metric"))
     await harness.memory.add(
-        _record(
+        _memory(
             "rec-1",
-            source=MemorySource.INFERRED,
-            confidence=_STORED,
-            evidence=("ep-1", "ep-2"),
+            remembered_support("ep-1", when=AT, added_at=AT),
+            remembered_support("ep-2", effect="effect-2", when=AT, added_at=AT),
             content="the user prefers metric units",
         )
     )
@@ -1511,30 +1320,27 @@ def _episode_record(
     )
 
 
-async def test_a_belief_whose_evidence_all_resolves_shows_the_stored_confidence() -> None:
-    """Nothing lost, nothing adjusted — the baseline the degradation is measured from."""
+async def test_a_memory_whose_supports_all_resolve_shows_each_one() -> None:
+    """Nothing gone — the baseline the marks are measured from."""
     harness = Harness()
     await _derived_with_two_episodes(harness)
 
     belief = await harness.engine.belief("rec-1")
 
     assert belief is not None
-    assert belief.confidence == _STORED
-    assert belief.evidence_count == 2
-    assert belief.lost_evidence == 0
-    assert belief.unsupported is False
-    assert [item.content for item in belief.evidence] == [
+    assert belief.supports_gone is False
+    assert belief.evidence.supporting == 2
+    assert [support.content for support in belief.supports] == [
         "they asked for metric units",
         "they asked again in metric",
     ]
 
 
-async def test_a_deleted_citation_becomes_a_tombstone_without_touching_the_record() -> None:
-    """The rendering changes; the stored record does not (ADR-0077 §6).
+async def test_a_deleted_episode_shows_its_support_as_gone_without_touching_the_memory() -> None:
+    """The rendering changes; the stored memory does not (ADR-0328 §15:7, ADR-0077 §6).
 
-    The byte-identity assertion is what catches an implementation that "fixed" the
-    record instead of the rendering — the record graph is frozen (ADR-0068), and
-    losing evidence is not the producer changing its mind.
+    The support still counts — it is shown as gone, never as evidence — and the byte
+    identity catches an implementation that "fixed" the memory instead of the view.
     """
     harness = Harness()
     await _derived_with_two_episodes(harness)
@@ -1545,51 +1351,39 @@ async def test_a_deleted_citation_becomes_a_tombstone_without_touching_the_recor
     belief = await harness.engine.belief("rec-1")
 
     assert belief is not None
-    assert belief.lost_evidence == 1
-    assert belief.evidence[0].lost is True
-    assert belief.evidence[0].content is None  # never the id, never a silent gap
-    assert belief.evidence[1].content == "they asked again in metric"
-    assert belief.confidence < _STORED  # presented, and strictly lower
-    # The record is untouched, and an export still carries the citation as written.
+    assert belief.supports[0].gone is True
+    assert belief.supports[0].content is None  # never the id, never a silent gap
+    assert belief.supports[0].counts is True
+    assert belief.supports[1].content == "they asked again in metric"
+    assert belief.supports_gone is False
+    assert belief.evidence.supporting == 2
     assert await harness.memory.get("rec-1") == before
-    exported = {record.id: record for record in await harness.memory.export()}
-    assert exported["rec-1"].provenance.evidence == ("ep-1", "ep-2")
-    assert exported["rec-1"].provenance.confidence == _STORED
 
 
-async def test_an_expired_citation_renders_exactly_as_a_deleted_one() -> None:
-    """Expiry is the *commoner* loss and has no event to hook (ADR-0077 §6).
-
-    Pinned deliberately: an implementation that hooked deletion only would pass every
-    deletion test above and silently leave every expired citation dangling, which is
-    §6's decisive argument against eager rewriting.
-    """
+async def test_an_expired_episode_renders_exactly_as_a_deleted_one() -> None:
+    """Expiry is the *commoner* loss and has no event to hook (ADR-0077 §6)."""
     harness = Harness()
     await harness.memory.add(
         _episode_record("ep-1", "they asked for metric units", expires_at=AT - timedelta(days=1))
     )
     await harness.memory.add(_episode_record("ep-2", "they asked again in metric"))
     await harness.memory.add(
-        _record(
-            "rec-1", source=MemorySource.INFERRED, confidence=_STORED, evidence=("ep-1", "ep-2")
+        _memory(
+            "rec-1",
+            remembered_support("ep-1", when=AT, added_at=AT),
+            remembered_support("ep-2", effect="effect-2", when=AT, added_at=AT),
         )
     )
 
     belief = await harness.engine.belief("rec-1")
 
     assert belief is not None
-    assert belief.lost_evidence == 1
-    assert belief.evidence[0].content is None
-    assert belief.confidence < _STORED
+    assert belief.supports[0].content is None
+    assert belief.supports[1].content == "they asked again in metric"
 
 
-async def test_a_belief_whose_evidence_is_all_gone_is_held_at_its_effective_floor() -> None:
-    """Marked, answerable, still live — **not** retired (ADR-0077 §6).
-
-    Auto-retiring would be the cascade under a softer name: it destroys a belief that
-    may be perfectly true, and makes deleting an old conversation silently undo an
-    accumulation the user never asked to lose.
-    """
+async def test_a_memory_none_of_whose_episodes_resolves_is_held_and_marked() -> None:
+    """Marked, answerable, still live — **not** retired (ADR-0328 §15:7, ADR-0077 §6)."""
     harness = Harness()
     await _derived_with_two_episodes(harness)
     await harness.memory.delete("ep-1")
@@ -1598,82 +1392,42 @@ async def test_a_belief_whose_evidence_is_all_gone_is_held_at_its_effective_floo
     belief = await harness.engine.belief("rec-1")
 
     assert belief is not None
-    assert belief.unsupported is True
-    assert belief.lost_evidence == 2
-    assert belief.confidence == pytest.approx(0.1)  # the effective floor, not zero
-    # Still live, still listed, and still deletable by the user.
-    assert [one.id for one in await harness.engine.beliefs()] == ["rec-1"]
+    assert belief.supports_gone is True
+    assert belief.unbacked is False  # gone supports still count
+    # Still live, still listed with the mark, and still deletable by the user.
+    listed = await harness.engine.beliefs()
+    assert [(one.id, one.supports_gone) for one in listed] == [("rec-1", True)]
     assert await harness.engine.forget("rec-1") is True
 
 
-async def test_a_belief_stored_below_the_floor_is_left_where_it_is() -> None:
-    """``min(stored, floor)``, not the floor itself — the whole of the edge case (§6).
-
-    ``Provenance.confidence`` permits ``0.0`` and only the observer is bound to a
-    positive ladder, so a belief can be stored beneath the floor — where an absolute
-    floor and "never above stored" have no value between them at all. The pair with
-    the case above is what pins ``min(stored, floor)`` rather than either half of it.
-    """
-    harness = Harness()
-    await harness.memory.add(_episode_record("ep-1", "a thin signal"))
-    await harness.memory.add(
-        _record("thin", source=MemorySource.INFERRED, confidence=0.05, evidence=("ep-1",))
+async def test_a_legacy_support_reads_as_the_record_it_carries() -> None:
+    """ADR-0328 §16:4: a legacy support points at no episode, and shows its record."""
+    store = CountingStore(now=lambda: AT)
+    harness = Harness(memory=store)
+    carried = legacy_support(
+        {"id": "old-1", "kind": "semantic", "content": "the office is in Boston"}
     )
-    await harness.memory.delete("ep-1")
+    await harness.memory.add(_memory("old-1", carried))
+    store.batches.clear()
 
-    belief = await harness.engine.belief("thin")
+    belief = await harness.engine.belief("old-1")
 
     assert belief is not None
-    assert belief.unsupported is True
-    assert belief.confidence == 0.05  # unchanged: both bounds collapsed onto the stored value
+    assert belief.legacy is True
+    assert belief.supports[0].content == "the office is in Boston"
+    assert belief.supports_gone is False
+    assert store.batches == [], "no episode to read, so no batch"
 
 
-async def test_the_presented_confidence_falls_strictly_with_each_further_loss() -> None:
-    """Monotone above the floor, and bounded by the stored value (ADR-0077 §6).
-
-    Asserted on the function rather than through the store, because the property is
-    about the *function*: a pure map from the stored value and how much support
-    survives, with no clock and nothing read.
-    """
-    full = presented_confidence(_STORED, cited=3, resolved=3)
-    one_lost = presented_confidence(_STORED, cited=3, resolved=2)
-    two_lost = presented_confidence(_STORED, cited=3, resolved=1)
-    none_left = presented_confidence(_STORED, cited=3, resolved=0)
-
-    assert full == _STORED
-    assert _STORED > one_lost > two_lost > none_left
-    assert none_left == pytest.approx(0.1)
-    # An assertion cites nothing, and nothing about that is a loss.
-    assert presented_confidence(1.0, cited=0, resolved=0) == 1.0
-
-
-async def test_the_listing_and_the_single_belief_view_agree_on_the_number() -> None:
-    """Every surface that states a confidence states the adjusted one (ADR-0077 §6).
-
-    Two surfaces quoting different numbers for one belief would make the disclosure
-    rule meaningless, so the adjustment lives in the projection both go through.
-    """
-    harness = Harness()
-    await _derived_with_two_episodes(harness)
-    await harness.memory.delete("ep-1")
-
-    listed = await harness.engine.beliefs()
-    single = await harness.engine.belief("rec-1")
-
-    assert single is not None
-    assert [one.confidence for one in listed if one.id == "rec-1"] == [single.confidence]
-    assert single.confidence < _STORED
-
-
-# --- citations resolve in one batch read (ADR-0086 §6, §8 item 6) --------
+# --- supports resolve in one batch read (ADR-0086 §6) ---------------------
 
 
 class CountingStore(FakeMemoryStore):
     """A store that records which read shape each call took, and with what ids.
 
-    Both counters matter separately. ``_belief`` reads the belief itself through
-    ``get`` and §6 is explicit that ``get_many`` "does not replace ``get``", so a
-    case that merely counted total reads could not tell the one legitimate single
+    Both counters matter separately. ``_belief`` reads the memory itself through
+    ``get`` and ADR-0086 §6 is explicit that ``get_many`` "does not replace ``get``",
+    so a case that merely counted total reads could not tell the one legitimate single
     from *n* illegitimate ones.
     """
 
@@ -1694,16 +1448,10 @@ class CountingStore(FakeMemoryStore):
 class SteppingClock:
     """A clock that advances on every reading **once armed**, so *when* is visible.
 
-    This is what makes §6's snapshot testable from the consumer's side without
-    counting calls: a loop of singles reads the clock once per citation and a batch
-    reads it once for the record, so a citation whose expiry falls between two steps
-    resolves under one and not the other.
-
-    Arming is what makes the case deterministic rather than merely suggestive. A
-    clock that stepped from construction would also step for every ``add`` in the
-    fixture, so how far it had moved by the read under test would depend on how many
-    setup writes happened to precede it — and the case would pass or fail on that
-    accident instead of on the batch.
+    A loop of singles reads the clock once per episode and a batch reads it once, so
+    an episode whose expiry falls between two steps resolves under one and not the
+    other. Armed rather than stepping from construction, so the fixture's own writes do
+    not move it.
     """
 
     def __init__(self, *, step: timedelta) -> None:
@@ -1722,8 +1470,8 @@ class SteppingClock:
         return now
 
 
-async def test_a_beliefs_citations_are_resolved_in_one_batch_read() -> None:
-    """§8 item 6: one ``get_many`` per record, not one ``get`` per citation."""
+async def test_a_memory_s_supports_are_resolved_in_one_batch_read() -> None:
+    """One ``get_many`` for the memory's episodes, not one ``get`` per support."""
     store = CountingStore(now=lambda: AT)
     harness = Harness(memory=store)
     await _derived_with_two_episodes(harness)
@@ -1733,68 +1481,60 @@ async def test_a_beliefs_citations_are_resolved_in_one_batch_read() -> None:
     belief = await harness.engine.belief("rec-1")
 
     assert belief is not None
-    assert store.batches == [("ep-1", "ep-2")], "the citations went in one call, in order"
+    assert store.batches == [("ep-1", "ep-2")], "the episodes went in one call, in order"
     assert store.singles == ["rec-1"], (
-        "the only single read left is the belief's own id — §6 does not replace `get`"
+        "the only single read left is the memory's own id — §6 does not replace `get`"
     )
 
 
-async def test_a_listing_page_batches_once_per_belief_not_once_per_citation() -> None:
-    """The listing is the call site §8 item 6's arithmetic is actually about.
-
-    ADR-0085 §4a removed the listing's evidence *payload* and none of its reads, so
-    a lane that migrated the single-belief wrapper alone would leave the 50-by-64 path
-    on singles while every single-belief test passed. One batch **per belief**, not
-    one per page: the beliefs are independent presentations and §8 item 6 says per
-    belief.
-    """
+async def test_a_listing_page_resolves_every_support_in_one_batch() -> None:
+    """The listing reads through ``list_beliefs``, then resolves the page in one read."""
     store = CountingStore(now=lambda: AT)
     harness = Harness(memory=store)
     await _derived_with_two_episodes(harness)
     await harness.memory.add(_episode_record("ep-3", "they wrote 20 °C"))
-    await harness.memory.add(
-        _record("rec-2", source=MemorySource.INFERRED, confidence=_STORED, evidence=("ep-3",))
-    )
+    await harness.memory.add(_memory("rec-2", remembered_support("ep-3", added_at=AT)))
     store.singles.clear()
     store.batches.clear()
 
     listed = await harness.engine.beliefs()
 
     assert {"rec-1", "rec-2"} <= {one.id for one in listed}
-    assert len(store.batches) == len(listed), "one batch per listed belief, page-wide"
-    assert sorted(one for one in store.batches if one) == [("ep-1", "ep-2"), ("ep-3",)]
-    assert store.singles == [], "the listing reads through `list_beliefs`, then batches"
+    assert len(store.batches) == 1, "one batch for the page"
+    assert sorted(store.batches[0]) == ["ep-1", "ep-2", "ep-3"]
+    assert store.singles == []
 
 
-async def test_a_belief_citing_nothing_asks_the_store_for_nothing() -> None:
-    """§6: an empty argument is a question with an answer, and no round trip.
-
-    Relied on rather than branched around, so this pins that the reliance is real.
-    """
-    store = CountingStore(now=lambda: AT)
-    harness = Harness(memory=store)
-    await harness.memory.add(_record("rec-1", evidence=()))
-    store.singles.clear()
-    store.batches.clear()
+async def test_two_supports_in_one_episode_ask_for_it_once_and_both_show_it() -> None:
+    """Each support keeps a position of its own; the episode is read once."""
+    harness_store = CountingStore(now=lambda: AT)
+    harness = Harness(memory=harness_store)
+    await harness.memory.add(_episode_record("ep-1", "they asked for metric units"))
+    await harness.memory.add(
+        _memory(
+            "rec-1",
+            said_support("ep-1", when=AT, added_at=AT),
+            message_support("ep-1", when=AT, added_at=AT),
+        )
+    )
+    harness_store.batches.clear()
 
     belief = await harness.engine.belief("rec-1")
 
     assert belief is not None
-    assert belief.evidence == ()
-    assert store.batches == [()]
+    assert harness_store.batches == [("ep-1",)]
+    assert [support.content for support in belief.supports] == [
+        "they asked for metric units",
+        "they asked for metric units",
+    ]
 
 
-async def test_every_citation_of_a_belief_is_judged_at_one_instant() -> None:
-    """§6's snapshot, observed from the consumer: one clock reading for the record.
+async def test_every_support_of_a_memory_is_judged_at_one_instant() -> None:
+    """ADR-0086 §6's snapshot, observed from the consumer: one clock reading.
 
-    Pins the *mechanism* and not the values. Armed, the clock steps an hour per read:
-    the belief's own ``get`` takes ``AT``, and the citations are read next. ``ep-2``
-    expires 90 minutes in, so a loop of singles reads ``ep-1`` at ``AT + 1h`` and
-    ``ep-2`` at ``AT + 2h`` and renders a tombstone the record never lost — the
-    "belief's rendered count disagrees with its own tombstones" failure §6 names. One
-    batch judges both against the single instant the batch was taken, and nothing is
-    lost. No call is counted here, deliberately: this is the case that fails if the
-    batch is replaced by a loop that returns identical values.
+    Armed, the clock steps an hour per read: the memory's own ``get`` takes ``AT``,
+    and the episodes are read next. ``ep-2`` expires 90 minutes in, so a loop of
+    singles would show it gone; one batch judges both against one instant.
     """
     clock = SteppingClock(step=timedelta(hours=1))
     store = FakeMemoryStore(now=clock)
@@ -1804,8 +1544,10 @@ async def test_every_citation_of_a_belief_is_judged_at_one_instant() -> None:
         _episode_record("ep-2", "they asked again in metric", expires_at=AT + timedelta(minutes=90))
     )
     await store.add(
-        _record(
-            "rec-1", source=MemorySource.INFERRED, confidence=_STORED, evidence=("ep-1", "ep-2")
+        _memory(
+            "rec-1",
+            remembered_support("ep-1", when=AT, added_at=AT),
+            remembered_support("ep-2", effect="effect-2", when=AT, added_at=AT),
         )
     )
     clock.arm()
@@ -1813,48 +1555,16 @@ async def test_every_citation_of_a_belief_is_judged_at_one_instant() -> None:
     belief = await harness.engine.belief("rec-1")
 
     assert belief is not None
-    assert belief.lost_evidence == 0, (
-        "both citations were judged against the batch's one instant, not against one "
-        "instant each — a citation cannot expire partway through its own presentation"
-    )
-    assert [item.content for item in belief.evidence] == [
+    assert [support.content for support in belief.supports] == [
         "they asked for metric units",
         "they asked again in metric",
     ]
 
 
-async def test_a_repeated_citation_keeps_a_position_of_its_own() -> None:
-    """§6: duplicates collapse in the mapping; the rendering must not lose them.
+async def test_the_batch_shows_gone_where_the_singles_would() -> None:
+    """``get_many`` never disagrees with ``get``, on any of the three outcomes.
 
-    The answer is assembled by walking ``provenance.evidence``, so a tuple citing an
-    id twice renders two positions. An implementation that iterated the mapping would
-    render one, and would be silently short for every belief a fold cited twice.
-    """
-    harness = Harness()
-    await harness.memory.add(_episode_record("ep-1", "they asked for metric units"))
-    await harness.memory.add(
-        _record(
-            "rec-1", source=MemorySource.INFERRED, confidence=_STORED, evidence=("ep-1", "ep-1")
-        )
-    )
-
-    belief = await harness.engine.belief("rec-1")
-
-    assert belief is not None
-    assert [item.content for item in belief.evidence] == [
-        "they asked for metric units",
-        "they asked for metric units",
-    ]
-    assert belief.evidence_count == 2
-    assert belief.lost_evidence == 0
-
-
-async def test_the_batch_renders_tombstones_where_the_singles_did() -> None:
-    """§6: ``get_many`` never disagrees with ``get``, on any of the three outcomes.
-
-    Absent, expired and not-yet-live in one record, each in a known position, so a
-    batch that honoured only some of the read-time axes — or that returned a ``None``
-    value where §6 requires an omission — is caught at the position it broke.
+    Absent, expired and not-yet-live in one memory, each in a known position.
     """
     harness = Harness()
     await harness.memory.add(_episode_record("ep-live", "they asked for metric units"))
@@ -1871,66 +1581,47 @@ async def test_the_batch_renders_tombstones_where_the_singles_did() -> None:
         )
     )
     await harness.memory.add(
-        _record(
+        _memory(
             "rec-1",
-            source=MemorySource.INFERRED,
-            confidence=_STORED,
-            evidence=("ep-live", "ep-expired", "ep-absent", "ep-future"),
+            *(
+                remembered_support(episode, effect=f"effect-{n}", when=AT, added_at=AT)
+                for n, episode in enumerate(("ep-live", "ep-expired", "ep-absent", "ep-future"))
+            ),
         )
     )
 
     belief = await harness.engine.belief("rec-1")
 
     assert belief is not None
-    assert [item.lost for item in belief.evidence] == [False, True, True, True]
-    assert belief.evidence[0].content == "they asked for metric units"
-    assert belief.lost_evidence == 3
+    assert [support.gone for support in belief.supports] == [False, True, True, True]
+    assert belief.supports[0].content == "they asked for metric units"
 
 
-# --- a refused citation read is an error, never a tombstone (#585) -------
+# --- a refused support read is an error, never "gone" (#585) --------------
 
 
 class RefusingCitationStore(FakeMemoryStore):
-    """A store that answers everything but the citation batch, **once armed**.
+    """A store that answers everything but the support batch, **once armed**."""
 
-    Armed rather than refusing from construction, because the fixture's own writes
-    reach the same store: a store that refused every ``get_many`` would risk failing
-    during setup, and the case would be about the harness instead of about the
-    projection. ``refuse_after`` then chooses *which* batch refuses, which is what
-    lets a listing case put the refusal on a belief that is not the first one.
-    """
-
-    def __init__(self, *, now: Callable[[], datetime], refuse_after: int = 0) -> None:
+    def __init__(self, *, now: Callable[[], datetime]) -> None:
         super().__init__(now=now)
-        self._refuse_after = refuse_after
         self._armed = False
         self.batches = 0
 
     def arm(self) -> None:
-        """Start refusing, from the batch after ``refuse_after`` on."""
+        """Start refusing every batch from here on."""
         self._armed = True
 
     async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
         if not self._armed:
             return await super().get_many(record_ids)
         self.batches += 1
-        if self.batches > self._refuse_after:
-            msg = "the citation batch cannot be read"
-            raise MemoryStoreError(msg)
-        return await super().get_many(record_ids)
+        msg = "the support batch cannot be read"
+        raise MemoryStoreError(msg)
 
 
-async def test_belief_propagates_a_store_that_refuses_the_citation_read() -> None:
-    """The ``MemoryStoreError`` the docstring declares actually escapes ``belief``.
-
-    What this pins is not the raise but the *alternative*: a projection that caught
-    the refusal and rendered the unread citations as tombstones would return a
-    perfectly well-formed :class:`~ai_assistant.core.types.Belief`, and a caller
-    cannot tell that apart from genuinely lost evidence. A tombstone asserts "this
-    evidence is gone" (ADR-0077 §6); a read that failed asserts nothing of the kind,
-    and the record graph is frozen (ADR-0068) precisely so that losing evidence stays
-    a statement about the world rather than about the store's mood.
-    """
+async def test_belief_propagates_a_store_that_refuses_the_support_read() -> None:
+    """A read that failed asserts nothing about the episodes, so it is never shown as gone."""
     store = RefusingCitationStore(now=lambda: AT)
     harness = Harness(memory=store)
     await _derived_with_two_episodes(harness)
@@ -1941,29 +1632,16 @@ async def test_belief_propagates_a_store_that_refuses_the_citation_read() -> Non
 
 
 async def test_beliefs_propagates_rather_than_returning_a_page_it_could_not_resolve() -> None:
-    """A page has one chance to swallow the refusal per belief, and takes none of them.
-
-    The refusal is placed on the **second** belief's batch deliberately: a listing
-    that resolved each summary independently and kept the ones that succeeded would
-    return a one-element page here, which reads to a caller as "that is all the
-    beliefs there are" — the same indistinguishability as the tombstone above, one
-    level up. Pinned on ``beliefs`` rather than inferred from ``belief`` because
-    ``Engine._beliefs`` walks the page itself, so nothing about the single-belief
-    path constrains what a partial page would do.
-    """
-    store = RefusingCitationStore(now=lambda: AT, refuse_after=1)
+    """A page whose supports could not be read is no page, never a partial one."""
+    store = RefusingCitationStore(now=lambda: AT)
     harness = Harness(memory=store)
     await _derived_with_two_episodes(harness)
-    await harness.memory.add(_episode_record("ep-3", "they wrote 20 °C"))
-    await harness.memory.add(
-        _record("rec-2", source=MemorySource.INFERRED, confidence=_STORED, evidence=("ep-3",))
-    )
     store.arm()
 
     with pytest.raises(MemoryStoreError):
         await harness.engine.beliefs()
 
-    assert store.batches > 1, "the refusal landed after a belief had already resolved"
+    assert store.batches == 1
 
 
 # --- ADR-0119 §8: one OPERATION trace per call, at one wiring point -----
