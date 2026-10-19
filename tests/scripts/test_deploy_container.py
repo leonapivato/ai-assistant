@@ -512,7 +512,7 @@ def test_deploy_not_ready_but_contained_is_left_to_its_unit() -> None:
         deployment(box).run()
 
     message = str(caught.value)
-    assert "so the unit keeps the new image as its supervisor rules" in message
+    assert "so the unit keeps the image it started as its supervisor rules" in message
     assert box.active == "active"
     assert [argv[:2] for argv in box.ran].count(["systemctl", "stop"]) == 1
 
@@ -548,22 +548,48 @@ def test_deploy_recovery_start_is_held_to_the_same_checks() -> None:
     assert not box.enabled
 
 
+def test_deploy_recovery_door_that_does_not_refuse_is_stopped() -> None:
+    box = served_box(backup="refused", enabled=True, door="200")
+
+    with pytest.raises(dc.DeployError) as caught:
+        deployment(box).run()
+
+    message = str(caught.value)
+    assert "could NOT be started again on its earlier image, checked" in message
+    assert "answered 200, not refused with 403" in message
+    assert "is stopped and disabled" in message
+    assert box.active == "inactive"
+    assert not box.enabled
+
+
 def test_deploy_first_install_interrupted_after_its_record_is_undone_whole() -> None:
-    box = FakeBox(files=person_files(served=False))
-
-    def interrupted_rename(argv: list[str], data: bytes) -> tuple[int, str, str]:
-        box.files[argv[-1]] = box.files.pop(argv[-2])
-        raise KeyboardInterrupt
-
-    box.cmd_mv = interrupted_rename  # type: ignore[assignment]
+    box = FakeBox(files=person_files(served=False), interrupt_after_rename=True)
 
     with pytest.raises(KeyboardInterrupt):
         deployment(box, port=8501).run()
 
+    assert ["systemctl", "enable", PERSON.unit] in box.ran
+    created = [argv[-1] for argv in box.ran if argv[:3] == [dc.DOCKER, "volume", "create"]]
+    assert created == [PERSON.data_volume, PERSON.keyring_volume]
+    assert verbs(box)[-1] == "unit.env", "interrupted on unit.env's rename, and nothing after"
     assert str(PERSON.unit_env) not in box.files
     assert box.volumes == set()
     assert not box.enabled
     assert str(PERSON.lock) not in box.files
+
+    box.interrupt_after_rename = False
+    deployment(box, port=8501).run()
+
+    assert box.volumes == {PERSON.data_volume, PERSON.keyring_volume}
+    assert box.active == "active"
+    assert box.enabled  # last: mypy reads the earlier `not box.enabled` as still holding
+
+
+def test_deploy_refuses_a_raw_chain_that_may_accept_before_dockers_drop() -> None:
+    box = served_box(
+        raw_rules=f"-P PREROUTING ACCEPT\n-A PREROUTING -i eth0 -j ACCEPT\n{DOCKER_DROP}"
+    )
+    _refused_untouched(box, "-i eth0 -j ACCEPT', which may accept")
 
 
 def test_deploy_refuses_docker_before_28() -> None:
@@ -860,6 +886,8 @@ def test_unit_env_round_trips() -> None:
         (DOCKER_DROP.replace("8423", "8424"), "has no `-d 172.17.0.2/32"),
         (f"-A PREROUTING -j CT --notrack\n{DOCKER_DROP}", None),
         (f"-A PREROUTING -i eth0 -j ACCEPT\n{DOCKER_DROP}", "may accept"),
+        (f"{DOCKER_DROP}\n-A PREROUTING -i eth0 -j ACCEPT", "may accept"),
+        (f"-A PREROUTING -i eth0 -g MYCHAIN\n{DOCKER_DROP}", "may accept"),
         (f"-A PREROUTING -j MYCHAIN\n{DOCKER_DROP}", "may accept"),
         ("-P PREROUTING ACCEPT\n", "has no `-d 172.17.0.2/32"),
         (DOCKER_DROP.replace("br-0123456789ab", "docker0"), "has no"),

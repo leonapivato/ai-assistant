@@ -572,13 +572,37 @@ def route_localnet_problems(out: str) -> list[str]:
     return problems
 
 
+def accepting_rule(rules: str) -> str | None:
+    """Find a rule in the raw table's ``PREROUTING`` chain that may accept a packet.
+
+    Docker appends its drops to the chain, so a rule that may accept and is already there
+    comes before every drop Docker writes, and lets past it what the drop would stop. Any
+    such rule is refused, wherever it stands: none is needed on a box that runs hubs.
+
+    Args:
+        rules: ``iptables -t raw -S PREROUTING``.
+
+    Returns:
+        The first rule whose target is not one that never accepts, or ``None``.
+    """
+    for line in rules.splitlines():
+        words = line.split()
+        if not words or words[0] != "-A":
+            continue
+        target = words[words.index("-j") + 1] if "-j" in words[:-1] else None
+        if target not in _NON_ACCEPTING_TARGETS:
+            return line.strip()
+    return None
+
+
 def raw_rule_problem(rules: str, address: str, bridge: str) -> str | None:
     """Find the drop that keeps other machines off the hosted listener's bridge address.
 
-    Docker Engine 28 writes it per published port, as
-    ``-d <address>/32 ! -i <bridge> -p tcp -m tcp --dport 8423 -j DROP``; a drop of the
-    whole address is accepted too. The hosted listener is the one thing listening on the
-    container's address, so a drop of its port is a drop of the door.
+    Docker Engine 28.0 and 28.1 write it per published port, as
+    ``-d <address>/32 ! -i <bridge> -p tcp -m tcp --dport 8423 -j DROP``; 28.2 and later
+    drop the whole address, as ``-d <address>/32 ! -i <bridge> -j DROP``. Either is
+    accepted. The hosted listener is the one thing listening on the container's address,
+    so a drop of its port is a drop of the door.
 
     Args:
         rules: ``iptables -t raw -S PREROUTING``.
@@ -587,26 +611,22 @@ def raw_rule_problem(rules: str, address: str, bridge: str) -> str | None:
 
     Returns:
         ``None`` when the chain drops what arrives for the listener on any other
-        interface before anything can accept it, or why it cannot be shown to.
+        interface and nothing in it may accept, or why it cannot be shown to.
     """
+    accepting = accepting_rule(rules)
+    if accepting is not None:
+        return (
+            f"the raw table's PREROUTING chain has {accepting!r}, which may accept a packet\n"
+            "for the container from elsewhere before Docker's drop"
+        )
     whole = ["-A", "PREROUTING", "-d", f"{address}/32", "!", "-i", bridge]
     port = [*whole, "-p", "tcp", "-m", "tcp", "--dport", str(HOSTED_PORT)]
     wanted = ([*whole, "-j", "DROP"], [*port, "-j", "DROP"])
-    for line in rules.splitlines():
-        words = line.split()
-        if not words or words[0] != "-A":
-            continue
-        if words in wanted:
-            return None
-        target = words[words.index("-j") + 1] if "-j" in words[:-1] else None
-        if target is None or target not in _NON_ACCEPTING_TARGETS:
-            return (
-                f"the raw table's PREROUTING chain has {line.strip()!r} before any drop for\n"
-                f"{address}, and it may accept a packet for the container from elsewhere"
-            )
+    if any(line.split() in wanted for line in rules.splitlines()):
+        return None
     return (
-        f"the raw table's PREROUTING chain has no `{' '.join(port[2:])} -j DROP`.\n"
-        "Docker Engine 28 and later write it for each published port, on the iptables\n"
+        f"the raw table's PREROUTING chain has no `{' '.join(whole[2:])} -j DROP`.\n"
+        "Docker Engine 28 and later write it for each container, on the iptables\n"
         "firewall backend; without it another machine may route to the container"
     )
 
@@ -693,8 +713,6 @@ class Deployment:
     clock: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
     stage_context: Callable[[Path, Path], str] | None = None
-    #: What the last reachability check established, for the report.
-    established: str = ""
 
     # -- small helpers --------------------------------------------------------
 
@@ -997,13 +1015,23 @@ class Deployment:
             "reading route_localnet",
         )
         problems = route_localnet_problems(localnet)
+        rules = self._ok(["iptables", "-t", "raw", "-S", "PREROUTING"], "reading the raw table")
+        # Docker appends a container's drop while connecting it to its network, before its
+        # process starts. A rule already here that may accept would stand before that drop,
+        # so it is refused now, and the drop is in force when the gateway binds.
+        accepting = accepting_rule(rules)
+        if accepting is not None:
+            problems.append(
+                f"the raw table's PREROUTING chain has {accepting!r}, which may accept a\n"
+                "packet, and Docker appends the drop that keeps other machines off a\n"
+                "container after it"
+            )
         if problems:
             raise DeployError(
                 "ADR-0327 §5:2 cannot be established on this box:\n"
                 + "\n".join(problems)
                 + f"\n{_UNTOUCHED}"
             )
-        self._ok(["iptables", "-t", "raw", "-S", "PREROUTING"], "reading the raw table")
 
     # -- the image and the unit -----------------------------------------------
 
@@ -1234,20 +1262,15 @@ class Deployment:
                 "stopped and disabled. Write the earlier image back into it and enable it,\n"
                 "or deploy again."
             )
+        # The earlier image is held to the same checks, and the same outcomes, as a new
+        # one: a box that lost its isolation since it last ran is no reason to serve.
         try:
-            self._start()
-            self.await_ready(earlier.image)
-            self._door()
-        except (DeployError, KeyboardInterrupt) as exc:
-            # The earlier image is held to the same checks as a new one: a box that lost
-            # its isolation since it last ran is no reason to serve unchecked.
-            return (
-                f"The hub could NOT be started again on its earlier image, checked:\n"
-                f"{_reason(exc)}\n{self._contain()}"
-            )
+            _door, established = self.serve(earlier.image)
+        except DeployError as exc:
+            return f"The hub could NOT be started again on its earlier image, checked:\n{exc}"
         return (
             f"The hub was started again on its earlier image, {earlier.image}, healthy, its\n"
-            f"door refusing, and {self.established}."
+            f"door refusing, and {established}."
         )
 
     # -- 3 and 4. the cutover and its verification ----------------------------
@@ -1255,6 +1278,35 @@ class Deployment:
     def _start(self) -> None:
         self.box.run(["systemctl", "reset-failed", self.person.unit])
         self._ok(["systemctl", "start", self.person.unit], f"starting {self.person.unit}")
+
+    def serve(self, image_id: str) -> tuple[str, str]:
+        """Start the unit on the image ``unit.env`` names, and verify it serves.
+
+        The one path every start takes, the new image's and the earlier one's alike.
+
+        Args:
+            image_id: The image ``unit.env`` names, which the container must run.
+
+        Returns:
+            What the door answered, and what reachability established.
+
+        Raises:
+            DeployError: If it does not verify, saying what was left running: a start
+                that is not ready is kept only if no other machine reaches it, and a
+                door or reachability that fails is stopped and disabled.
+        """
+        say(f"starting {self.person.unit} on {image_id}")
+        try:
+            self._start()
+            self.await_ready(image_id)
+        except (DeployError, KeyboardInterrupt) as exc:
+            raise DeployError(f"{_reason(exc)}\n{self._contain()}") from exc
+        try:
+            established = self.reachability()
+            door = self._door()
+        except (DeployError, KeyboardInterrupt) as exc:
+            raise DeployError(f"{_reason(exc)}\n{self.stop_new()}") from exc
+        return door, established
 
     def name_new_image(self, image: Image, *, first: bool) -> None:
         """Enable the unit and name the new image in ``unit.env``, starting nothing.
@@ -1319,7 +1371,7 @@ class Deployment:
                 # which is a new address and new rules.
                 address = container_address(fields, self.person.network)
                 if address != checked:
-                    self.established = self.reachability()
+                    self.reachability()
                     checked = address
                 if fields.get("health") == "healthy":
                     return
@@ -1409,8 +1461,8 @@ class Deployment:
         except DeployError as exc:
             return f"{exc}\n{self.stop_new()}"
         return (
-            f"{established}; so the unit keeps the new image as its supervisor rules, and the\n"
-            "earlier one is not started again on data the new one has served (ADR-0326 §5:4)."
+            f"{established}; so the unit keeps the image it started as its supervisor rules,\n"
+            "and no other image is started on data that one has served (ADR-0326 §5:4)."
         )
 
     def _bridge_interface(self, network: str, problems: list[str]) -> str:
@@ -1516,20 +1568,9 @@ class Deployment:
                 f"{_backup_line(artifact)}"
             ) from exc
         try:
-            say(f"starting {self.person.unit} on {image.name}")
-            self._start()
-            self.await_ready(image.id)
-        except (DeployError, KeyboardInterrupt) as exc:
-            raise DeployError(
-                f"{_reason(exc)}\n{self._contain()}\n{_backup_line(artifact)}"
-            ) from exc
-        try:
-            reachability = self.reachability()
-            door = self._door()
-        except (DeployError, KeyboardInterrupt) as exc:
-            raise DeployError(
-                f"{_reason(exc)}\n{self.stop_new()}\n{_backup_line(artifact)}"
-            ) from exc
+            door, reachability = self.serve(image.id)
+        except DeployError as exc:
+            raise DeployError(f"{exc}\n{_backup_line(artifact)}") from exc
         verified = [
             f"door: 127.0.0.1:{self.port} answers {door} without the edge's assertion",
             reachability,

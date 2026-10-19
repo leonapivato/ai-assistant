@@ -171,14 +171,17 @@ runs: the next deploy backs up with it.
 Before it stops anything, the deploy also checks what ADR-0327 §5:2 asks of the box,
 that no other machine reaches the hosted listener. It checks that `route_localnet` is
 `0` for every interface but the loopback and Docker's own, so nothing routes a packet
-for the loopback port in from another machine. As soon as the container runs, before
-its health check passes, and again on every start the deploy makes, it checks that
-the container is on its own bridge network, publishes `8423` to `127.0.0.1` alone and
-has no IPv6 address, and that the raw table's `PREROUTING` chain drops what arrives for
-the container's bridge address, at the hosted port, on any other interface. Docker
-Engine 28 and later write that rule for each published port, on the iptables backend.
-A box where it cannot establish one of these is refused, or its container stopped, with
-the reason. What it cannot see is a firewall
+for the loopback port in from another machine. It refuses a rule in the raw table's
+`PREROUTING` chain that may accept a packet: Docker appends its drop to that chain, so
+such a rule would stand before it. As soon as the container runs, before its health
+check passes, and again on every start the deploy makes, it checks that the container
+is on its own bridge network, publishes `8423` to `127.0.0.1` alone and has no IPv6
+address, and that the raw table's `PREROUTING` chain drops what arrives for the
+container's bridge address on any other interface. Docker Engine 28 and later write
+that rule on the iptables backend while connecting the container to its network,
+before the container's process starts, so the check verifies a drop that is already in
+force. A box where it cannot establish one of these is refused, or its container
+stopped and disabled, with the reason. What it cannot see is a firewall
 other than iptables, the network beyond the box, and a process on the box that forwards
 the port itself.
 
