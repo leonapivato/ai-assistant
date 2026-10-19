@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import zlib
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from typing import TYPE_CHECKING, Any
 
@@ -16,19 +17,21 @@ from ai_assistant.core.types import (
     ConflictRelation,
     DataTier,
     EpisodicMemory,
+    InputPart,
+    Memory,
     MemoryDecision,
     MemoryDecisionKind,
     MemoryRecord,
     MemorySearchResult,
     MemorySource,
+    MemoryStanding,
     MemoryUpdateProposal,
     MemoryWrite,
     MemoryWriteMode,
-    PreferenceMemory,
     Provenance,
-    SemanticMemory,
     Validity,
     band_of,
+    part_episode,
 )
 from ai_assistant.memory import (
     DefaultMemoryPolicy,
@@ -40,13 +43,20 @@ from ai_assistant.memory import (
 from ai_assistant.memory._reconciler import ReconcilerOutcome, ReconcilerReport
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.testing import FakeMemoryPolicy, FakeModelProvider, FakeTraceSink
+from ai_assistant.testing.memories import (
+    legacy_support,
+    memory,
+    remembered_support,
+    said_support,
+    sourced_support,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
-    from ai_assistant.core.types import MemoryIngestResult, MemoryKind
+    from ai_assistant.core.types import MemoryIngestResult, MemoryKind, MemorySupport
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -55,123 +65,122 @@ def _fixed_now() -> datetime:
     return datetime(2026, 6, 1, tzinfo=UTC)
 
 
-#: What the `ATTESTED` band must carry since ADR-0092 §1. Attached by `_prov` from
-#: the band rather than passed per case: none of the rules below turns on its
-#: *contents*, so spelling it out at every `EXTERNAL` site would put noise in front
-#: of the rule each case is about. The fold case that *does* care passes its own.
+#: The source details every ``ATTESTED`` memory below carries (ADR-0092 §1). None of
+#: the rules below turns on its contents, so it is attached by :func:`_support`.
 _ATTESTED_BY = Attestation(reported_by="calendar:work", reported_at=_WHEN)
 
 
-def _prov(
-    confidence: float,
-    evidence: tuple[str, ...] = (),
-    *,
-    source: MemorySource = MemorySource.OBSERVED,
-    attestation: Attestation | None = None,
-    last_updated: datetime = _WHEN,
-) -> Provenance:
-    return Provenance(
-        source=source,
-        confidence=confidence,
-        last_updated=last_updated,
-        evidence=evidence,
-        # Keyed on the band, so a `MemorySource` added into `ATTESTED` later needs
-        # no edit here, and so a case that supplies its own is not overridden.
-        attestation=(
-            attestation
-            if attestation is not None or band_of(source) is not BeliefBand.ATTESTED
-            else _ATTESTED_BY
-        ),
-    )
+def _prov() -> Provenance:
+    """An episode's provenance: episodes keep theirs (ADR-0328 §2:2)."""
+    return Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN)
 
 
-#: The episode a well-formed derived proposal cites. Two ratified rules make it
-#: necessary rather than decorative, and they are different rules with different
-#: owners (ADR-0077 §5): ``DefaultMemoryPolicy`` **rejects** a ``DERIVED`` proposal
-#: citing nothing, and ``MemoryIngestor`` **refuses** one citing a record the store
-#: does not hold. So a derived proposal that means to exercise anything else has to
-#: cite an episode, and the store has to be holding it (:func:`_plant_episodes`).
+#: The episode a memory rests on where a case names none. ADR-0328 §4:7 refuses a
+#: proposal whose support points at an episode the store does not hold, whatever its
+#: band, so every case plants it (:func:`_plant_episodes`).
 _EPISODE = "episode-1"
 
 
 async def _plant_episodes(store: MemoryStore, *episode_ids: str) -> None:
-    """Store the episodes the proposals below cite, so their citations resolve.
+    """Store :data:`_EPISODE` and ``episode_ids``, so the supports below resolve.
 
-    ``EPISODIC``, so kind-scoped conflict detection never returns one as a conflict
-    for the semantic and preference proposals these tests drive.
+    ``EPISODIC``, so conflict detection — which reads memories only — never returns
+    one as a conflict.
     """
-    for episode_id in episode_ids:
+    for episode_id in dict.fromkeys((_EPISODE, *episode_ids)):
         await store.add(
             EpisodicMemory(
                 id=episode_id,
                 content=f"the exchange {episode_id} records",
                 occurred_at=_WHEN,
-                provenance=_prov(0.6),
+                provenance=_prov(),
             )
         )
 
 
-def _semantic(
+async def _memories(store: MemoryStore) -> dict[str, Memory]:
+    """Every memory ``export`` returns, by id: the planted episodes left out."""
+    return {record.id: record for record in await store.export() if isinstance(record, Memory)}
+
+
+def _episodes(record: MemoryRecord | None) -> set[str]:
+    """The episodes ``record``'s supports point into: what used to be its evidence."""
+    assert isinstance(record, Memory)
+    return {episode for one in record.supports if (episode := part_episode(one.points_at))}
+
+
+def _support(source: MemorySource, episode: str, *, owner: str, index: int) -> MemorySupport:
+    """One support pointing into ``episode``, in the band ``source`` names (ADR-0328 §12).
+
+    ``USER_ASSERTED`` is the user's message, ``EXTERNAL`` a source's evidence item
+    carrying :data:`_ATTESTED_BY`, and ``OBSERVED`` or ``INFERRED`` a remember call.
+    The part is keyed on ``owner`` (the memory's id) and ``index``, so two memories in
+    one case rest on different parts of one episode: a supersession ends its target
+    citing the correction's first support, which the target must not carry already
+    (ADR-0328 §11:7).
+    """
+    position = zlib.crc32(owner.encode()) % 100_000 + index * 100_000
+    match band_of(source):
+        case BeliefBand.ASSERTED:
+            return said_support(episode, when=_WHEN, added_at=_WHEN).model_copy(
+                update={"points_at": InputPart(episode=episode, message=position)}
+            )
+        case BeliefBand.ATTESTED:
+            return sourced_support(
+                _ATTESTED_BY, episode=episode, item=position, when=_WHEN, added_at=_WHEN
+            )
+        case BeliefBand.DERIVED:
+            return remembered_support(
+                episode, effect=f"effect-{owner}-{index}", when=_WHEN, added_at=_WHEN
+            )
+        case _:  # pragma: no cover - exhaustive
+            raise AssertionError(source)
+
+
+def _preference(  # noqa: PLR0913 — one keyword per memory field a case may vary
     record_id: str,
     content: str,
     *,
-    confidence: float = 0.6,
-    evidence: tuple[str, ...] = (),
-) -> MemoryRecord:
-    return SemanticMemory(
-        id=record_id, content=content, fact=content, provenance=_prov(confidence, evidence)
-    )
-
-
-def _preference(  # noqa: PLR0913 — one keyword per record field a case may need to vary
-    record_id: str,
-    content: str,
-    *,
-    confidence: float = 0.6,
     evidence: tuple[str, ...] = (),
     source: MemorySource = MemorySource.OBSERVED,
     validity: Validity | None = None,
     expires_at: datetime | None = None,
-    last_updated: datetime = _WHEN,
-) -> MemoryRecord:
-    # The three lifecycle fields are optional and default to what every case that
-    # does not care about them already had — an open window, no expiry, `_WHEN` —
-    # so only the fold cases that assert on them have to spell them out.
-    return PreferenceMemory(
-        id=record_id,
-        content=content,
-        preference=content,
-        validity=validity if validity is not None else Validity(),
-        expires_at=expires_at,
-        provenance=_prov(confidence, evidence, source=source, last_updated=last_updated),
+) -> Memory:
+    """A memory in ``source``'s band, one support per episode of ``evidence``.
+
+    Where ``evidence`` names none it rests on :data:`_EPISODE`. The two lifecycle
+    fields default to an open window and no expiry, so only the cases that assert on
+    them spell them out.
+    """
+    supports = tuple(
+        _support(source, episode, owner=record_id, index=index)
+        for index, episode in enumerate(evidence or (_EPISODE,))
     )
-
-
-def _semantic_from(source: MemorySource, record_id: str, content: str) -> MemoryRecord:
-    """A semantic record from ``source``, at the confidence that source permits."""
-    confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.6
-    return SemanticMemory(
-        id=record_id,
-        content=content,
-        fact=content,
-        provenance=_prov(confidence, source=source),
-    )
-
-
-def _asserted(record_id: str, content: str, *, evidence: tuple[str, ...] = ()) -> MemoryRecord:
-    """A user-asserted preference — the shape an explicit correction arrives in."""
-    return _preference(
+    return memory(
         record_id,
         content,
-        confidence=1.0,
-        evidence=evidence,
-        source=MemorySource.USER_ASSERTED,
+        *supports,
+        validity=validity if validity is not None else Validity(),
+        expires_at=expires_at,
     )
 
 
-def _proposal(
-    record: MemoryRecord, *, sensitivity: DataTier = DataTier.PERSONAL
-) -> MemoryUpdateProposal:
+def _semantic(record_id: str, content: str, *, evidence: tuple[str, ...] = ()) -> Memory:
+    """An inference: since ADR-0328 there is one kind of memory (§2:1)."""
+    return _preference(record_id, content, evidence=evidence)
+
+
+def _semantic_from(source: MemorySource, record_id: str, content: str) -> Memory:
+    """A memory in ``source``'s band."""
+    return _preference(record_id, content, source=source)
+
+
+def _asserted(record_id: str, content: str, *, evidence: tuple[str, ...] = ()) -> Memory:
+    """A memory the user said — the shape an explicit correction arrives in."""
+    return _preference(record_id, content, evidence=evidence, source=MemorySource.USER_ASSERTED)
+
+
+def _proposal(record: Memory, *, sensitivity: DataTier = DataTier.PERSONAL) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(proposed=record, rationale="because", sensitivity=sensitivity)
 
 
@@ -184,8 +193,8 @@ def _ingestor(store: MemoryStore) -> MemoryIngestor:
 def _folding(store: MemoryStore) -> MemoryIngestor:
     """An ingestor whose injected policy reinforces at ``conflicts[0]``, unconditionally.
 
-    The three ADR-0103 §6 cases below are about **the applier's** fold semantics —
-    which content, confidence, source, window and expiry survive — and they used to
+    The two fold cases below are about **the applier's** fold semantics — which
+    wording, standing, window and expiry survive — and they used to
     reach that arm through ``DefaultMemoryPolicy``'s rule 5, which folded whenever
     the conflict set was non-empty. ADR-0159 §4 replaced that rule, and §12 records
     the consequence for exactly these cases by name: "§4 excludes ``EXTERNAL`` from
@@ -212,7 +221,7 @@ async def test_accepts_and_stores_a_novel_memory() -> None:
     await _plant_episodes(store, _EPISODE)
 
     result = await _ingestor(store).ingest(
-        _proposal(_semantic("1", "unique gardening fact", confidence=0.9, evidence=(_EPISODE,)))
+        _proposal(_semantic("1", "unique gardening fact", evidence=(_EPISODE,)))
     )
 
     assert result.decision.kind is MemoryDecisionKind.ACCEPT
@@ -222,9 +231,10 @@ async def test_accepts_and_stores_a_novel_memory() -> None:
 
 async def test_secret_proposal_is_deferred_and_not_stored() -> None:
     store = InMemoryMemoryStore()
+    await _plant_episodes(store)
 
     result = await _ingestor(store).ingest(
-        _proposal(_semantic("1", "a secret", confidence=0.9), sensitivity=DataTier.SECRET)
+        _proposal(_semantic("1", "a secret"), sensitivity=DataTier.SECRET)
     )
 
     assert result.decision.kind is MemoryDecisionKind.ASK_USER
@@ -235,42 +245,33 @@ async def test_secret_proposal_is_deferred_and_not_stored() -> None:
 async def test_conflicting_proposal_merges_into_existing() -> None:
     store = InMemoryMemoryStore()
     await _plant_episodes(store, "ev1", "ev2")
-    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+    await store.add(_preference("e", "prefers concise emails", evidence=("ev1",)))
 
     result = await _ingestor(store).ingest(
-        _proposal(_preference("new", "prefers concise emails", confidence=0.7, evidence=("ev2",)))
+        _proposal(_preference("new", "prefers concise emails", evidence=("ev2",)))
     )
 
     assert result.decision.kind is MemoryDecisionKind.REINFORCE
     assert result.record_id == "e"
     merged = await store.get("e")
     assert merged is not None
-    assert merged.provenance.confidence == 0.7  # max of the two
-    assert set(merged.provenance.evidence) == {"ev1", "ev2"}
+    assert _episodes(merged) == {"ev1", "ev2"}
     assert await store.get("new") is None  # merged in place, not duplicated
 
 
-#: A target the ``ATTESTED`` band admits at full confidence (ADR-0038 §2a) whose
-#: content is a superset of :data:`_CORROBORATED`'s terms, so the derived proposal
-#: below is detected as a conflict and *which* content survived is visible.
+#: An attested target whose content is a superset of :data:`_CORROBORATED`'s terms,
+#: so the derived proposal below is detected as a conflict and *which* wording
+#: survived is visible.
 _IMPORTED = "prefers window seats, as the airline has it"
 _CORROBORATED = "prefers window seats"
 
-#: The lifecycle fields the two fold cases below give their records **distinctly**,
-#: so which record each one came from is asserted rather than defaulted. Both arms
-#: keep somebody's window and expiry, so a case where the two agree passes whichever
-#: record the fold took them from — which is the gap #745 reports.
-#:
-#: **Both ends of each window differ**, not only `valid_from`: the assertions compare
-#: whole `Validity` values, and with a shared `valid_until` a fold that took the
-#: target's start and the incoming record's end would compare equal and pass while
-#: moving when the surviving belief stops being live.
-#:
-#: Every instant is chosen against `_fixed_now` (2026-06-01), which those two cases
-#: make the store's clock as well as the ingestor's: the windows open before it and
-#: both close and expire after it, so both records are readable throughout and a
-#: missing survivor means the fold got the rule wrong rather than that the clock
-#: retired it.
+#: The lifecycle fields the two fold cases below give their memories **distinctly**,
+#: so which memory each one came from is asserted rather than defaulted (#745).
+#: **Both ends of each window differ**, so a fold that took one side's start and the
+#: other's end could not compare equal. Every instant is chosen against
+#: `_fixed_now` (2026-06-01), which those two cases make the store's clock too: the
+#: windows open before it and close and expire after it, so a missing survivor means
+#: the fold got the rule wrong rather than that the clock retired it.
 _TARGET_WINDOW = Validity(
     valid_from=datetime(2026, 2, 1, tzinfo=UTC), valid_until=datetime(2027, 6, 1, tzinfo=UTC)
 )
@@ -279,18 +280,11 @@ _INCOMING_WINDOW = Validity(
     valid_from=datetime(2026, 3, 1, tzinfo=UTC), valid_until=datetime(2027, 3, 1, tzinfo=UTC)
 )
 _INCOMING_EXPIRES_AT = datetime(2027, 5, 1, tzinfo=UTC)
-#: The incoming record's transaction stamp, distinct from the target's `_WHEN`.
-_INCOMING_WHEN = datetime(2026, 5, 1, tzinfo=UTC)
 
-#: The **open** lifetime — both `Validity` ends unset and no expiry — run opposite a
-#: bounded one on the *surviving* side of each arm below. Two bounded lifetimes
-#: establish that the fold picks the right record; they cannot establish that it
-#: *picks* at all, because a fold coalescing the two (`target.expires_at or
-#: incoming.expires_at`) is indistinguishable from one selecting while both sides
-#: are truthy. That distinction is not academic on this side of the fold: the
-#: survivor is the record whose lifetime is meant to stand, so coalescing would hand
-#: an open-ended belief the other record's expiry and retire it on a date nothing
-#: ever set for it.
+#: The **open** lifetime, run opposite a bounded one on the surviving side of each
+#: case below: two bounded lifetimes establish that the fold keeps the right
+#: memory's, but not that it does not coalesce the two (`target.expires_at or
+#: incoming.expires_at`), which would hand an open-ended belief the other's expiry.
 _OPEN_LIFETIME = (Validity(), None)
 
 
@@ -299,117 +293,57 @@ _OPEN_LIFETIME = (Validity(), None)
     [(_TARGET_WINDOW, _TARGET_EXPIRES_AT), _OPEN_LIFETIME],
     ids=["bounded-target", "open-target"],
 )
-async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it(
+async def test_a_derived_reinforcement_of_an_attested_memory_corroborates_it(
     target_window: Validity, target_expiry: datetime | None
 ) -> None:
     """#646: the fold that used to raise out of ``core`` and write nothing.
 
-    An ``EXTERNAL`` target at 1.0 — legitimate under ADR-0038 §2a — reinforced by
-    an ``OBSERVED`` proposal took ``source`` from the proposal and ``confidence``
-    as the maximum, producing ``source=OBSERVED, confidence=1.0``, which
-    ``Provenance._derived_is_never_certain`` refuses (ADR-0077 §7). The fold raised
-    a ``ValidationError`` and the ingest wrote nothing at all.
-
-    ADR-0103 §6 rules the pairing: the incoming record contributes its ``evidence``
-    and nothing else, so the attested record survives whole. Asserted end to end
-    because "nothing was written" was the defect — a unit call on the fold would
-    have shown the exception and not the empty store.
-
-    **"Whole" includes the lifecycle fields**, which is why the two records carry
-    distinct ones here (#745). ``validity`` and ``expires_at`` are properties of
-    the belief, so §6's two contributions do not include them and the target's
-    survive; ``last_updated`` is transaction time (ADR-0045 §3) rather than a
-    belief property, so it comes from the incoming record and is not a third
-    contribution.
+    ADR-0103 §6 rules the pairing: the incoming memory contributes its support and
+    nothing else, and since ADR-0328 that is every reinforcement (§11:6). So the
+    attested memory survives whole — its wording, its standing from a source, the
+    source details ADR-0073 §4 makes a disclosure obligation, and its own window and
+    expiry, which are properties of the belief (#745). Asserted end to end, because
+    "nothing was written" was the defect.
 
     Run at a bounded target lifetime and at an open one (:data:`_OPEN_LIFETIME`),
-    against a bounded incoming record either way, so the case says the survivor's
-    lifetime is *selected* rather than merely non-empty.
+    against a bounded incoming memory either way, so the case says the survivor's
+    lifetime is *kept* rather than merely non-empty.
     """
     store = InMemoryMemoryStore(now=_fixed_now)
-    await _plant_episodes(store, _EPISODE)
+    await _plant_episodes(store)
     await store.add(
         _preference(
             "imported",
             _IMPORTED,
-            confidence=1.0,
             source=MemorySource.EXTERNAL,
             validity=target_window,
             expires_at=target_expiry,
-            last_updated=_WHEN,
         )
+    )
+    incoming = _preference(
+        "observed",
+        _CORROBORATED,
+        validity=_INCOMING_WINDOW,
+        expires_at=_INCOMING_EXPIRES_AT,
     )
 
-    result = await _folding(store).ingest(
-        _proposal(
-            _preference(
-                "observed",
-                _CORROBORATED,
-                confidence=0.6,
-                evidence=(_EPISODE,),
-                validity=_INCOMING_WINDOW,
-                expires_at=_INCOMING_EXPIRES_AT,
-                last_updated=_INCOMING_WHEN,
-            )
-        )
-    )
+    result = await _folding(store).ingest(_proposal(incoming))
 
     assert result.decision.kind is MemoryDecisionKind.REINFORCE
     assert result.record_id == "imported"
     survivor = await store.get("imported")
-    assert survivor is not None
-    # The attested record survives whole: its band, its warrant, its text, and the
-    # attestation ADR-0073 §4 makes a disclosure obligation.
-    assert survivor.provenance.source is MemorySource.EXTERNAL
-    assert survivor.provenance.confidence == 1.0
-    assert survivor.provenance.attestation == _ATTESTED_BY
+    assert isinstance(survivor, Memory)
+    assert survivor.standing is MemoryStanding.SOURCE
+    assert survivor.standing_attestation == _ATTESTED_BY
     assert survivor.content == _IMPORTED
-    # Its window and its expiry too. These are the belief's own properties, so
-    # ADR-0103 §6 leaves the incoming record's behind with its confidence and its
-    # text — a fold that carried them across would give the surviving attested
-    # belief a lifetime the attested source never stated. At the open parameter
-    # this is the stronger claim that nothing was filled in from the other side.
     assert survivor.validity == target_window
     assert survivor.expires_at == target_expiry
-    # The one thing the derived observation contributes: its evidence, unioned.
-    # This is where the corroboration is recorded — the episode it stands on is
-    # retained, which is what a currency rule reads from later (ADR-0103 §9).
-    assert set(survivor.provenance.evidence) == {_EPISODE}
-    # ...and the stamp saying we revised the record, which is not a second one.
-    # `last_updated` is transaction time (ADR-0045 §3) and the store has just
-    # changed its mind: the survivor's evidence is not the evidence the target was
-    # stored with, so keeping the target's `_WHEN` would claim a write that just
-    # happened never did.
-    assert survivor.provenance.last_updated == _INCOMING_WHEN
+    # The one thing the derived observation contributes: its support, added by one
+    # operation at the writer's instant — which is also the survivor's transaction
+    # time now (ADR-0328 §7:8), the store having just changed its mind.
+    assert survivor.support_at(incoming.supports[0].points_at) is not None
+    assert survivor.transaction_time == _fixed_now()
     assert await store.get("observed") is None  # folded in place, not duplicated
-
-
-async def test_a_derived_reinforcement_never_raises_an_attested_records_confidence() -> None:
-    """The trade ADR-0103 §6 names, at a target the old ``max`` would not have crashed on.
-
-    The rule is keyed on the two *bands* and not on the arithmetic, so it governs
-    an ``EXTERNAL`` target at 0.7 exactly as it governs one at 1.0 — where the
-    old fold would have raised the survivor to the derived record's 0.9 and this
-    one does not. A derived observation's strength is not a warrant the attested
-    record acquired by being agreed with; nothing is destroyed, because the
-    observation's episode is retained and can propose the derived belief on its
-    own terms.
-    """
-    store = InMemoryMemoryStore()
-    await _plant_episodes(store, _EPISODE)
-    await store.add(
-        _preference("imported", _IMPORTED, confidence=0.7, source=MemorySource.EXTERNAL)
-    )
-
-    result = await _folding(store).ingest(
-        _proposal(_preference("observed", _CORROBORATED, confidence=0.9, evidence=(_EPISODE,)))
-    )
-
-    assert result.decision.kind is MemoryDecisionKind.REINFORCE
-    survivor = await store.get("imported")
-    assert survivor is not None
-    assert survivor.provenance.confidence == 0.7
-    assert survivor.provenance.source is MemorySource.EXTERNAL
 
 
 @pytest.mark.parametrize(
@@ -417,40 +351,26 @@ async def test_a_derived_reinforcement_never_raises_an_attested_records_confiden
     [(_INCOMING_WINDOW, _INCOMING_EXPIRES_AT), _OPEN_LIFETIME],
     ids=["bounded-incoming", "open-incoming"],
 )
-async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_did(
+async def test_an_attested_reinforcement_of_a_derived_memory_raises_its_standing(
     incoming_window: Validity, incoming_expiry: datetime | None
 ) -> None:
-    """The reverse pairing is untouched, deliberately (ADR-0103 §6, #733).
+    """The reverse pairing, which ADR-0328 changes deliberately (#733).
 
-    A ``DERIVED`` target reinforced by an ``EXTERNAL`` record still folds to
-    ``EXTERNAL`` at the maximum. That survivor carries a strength the surviving
-    source's own record never supplied — filed as #733 — but it is a *valid*
-    ``Provenance``: the ``ATTESTED`` band admits any value up to 1.0 (ADR-0038
-    §2a), so ADR-0103 §6's first clause admits it and its second clause, keyed on
-    an ``ATTESTED`` target, does not reach it. Pinned so that fixing #646 cannot
-    quietly decide #733 too.
-
-    It carries the lifecycle half of that boundary as well (#745), and that is what
-    makes the corroboration case's opposite assertion mean anything: this arm keeps
-    the *incoming* record's window and expiry, so "the target's survive" is a rule
-    about the arm ADR-0103 §6 rules rather than about the fold. ``last_updated`` is
-    the one field the two arms agree on — transaction time on both (ADR-0045 §3).
-
-    Parametrized on the same axis as the corroboration case and for the same
-    reason, moved to the side that survives *here*: an open incoming record must
-    leave the survivor open rather than let the target's bounded lifetime stand in.
+    Before it this arm took the incoming record's content, window and expiry, and
+    folded to ``EXTERNAL`` at the maximum confidence — the strength the surviving
+    source's own record never supplied that #733 reports. A reinforcement now only
+    adds the proposal's supports (§11:6): the derived memory keeps its wording
+    (§3:2) and its own lifetime, and its standing rises to "from a source" because a
+    source's support now backs it (§6:2) — computed, never set.
     """
     store = InMemoryMemoryStore(now=_fixed_now)
-    await _plant_episodes(store, _EPISODE)
+    await _plant_episodes(store)
     await store.add(
         _preference(
             "observed",
             _IMPORTED,
-            confidence=0.9,
-            evidence=(_EPISODE,),
             validity=_TARGET_WINDOW,
             expires_at=_TARGET_EXPIRES_AT,
-            last_updated=_WHEN,
         )
     )
 
@@ -459,11 +379,9 @@ async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_
             _preference(
                 "imported",
                 _CORROBORATED,
-                confidence=0.5,
                 source=MemorySource.EXTERNAL,
                 validity=incoming_window,
                 expires_at=incoming_expiry,
-                last_updated=_INCOMING_WHEN,
             )
         )
     )
@@ -471,13 +389,11 @@ async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_
     assert result.decision.kind is MemoryDecisionKind.REINFORCE
     assert result.record_id == "observed"
     survivor = await store.get("observed")
-    assert survivor is not None
-    assert survivor.provenance.source is MemorySource.EXTERNAL
-    assert survivor.provenance.confidence == 0.9
-    assert survivor.content == _CORROBORATED  # newer content still wins here
-    assert survivor.validity == incoming_window  # and so does its window
-    assert survivor.expires_at == incoming_expiry  # and its expiry
-    assert survivor.provenance.last_updated == _INCOMING_WHEN  # as on the other arm
+    assert isinstance(survivor, Memory)
+    assert survivor.standing is MemoryStanding.SOURCE
+    assert survivor.content == _IMPORTED
+    assert survivor.validity == _TARGET_WINDOW
+    assert survivor.expires_at == _TARGET_EXPIRES_AT
 
 
 async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
@@ -487,9 +403,8 @@ async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
     # inference is retained on disk, not overwritten. Asserted end to end because
     # "the wrong memory is still retrievable" is a property of the store.
     store = InMemoryMemoryStore()
-    await store.add(
-        _preference("stale", "user prefers morning meetings", confidence=0.6, evidence=("ev1",))
-    )
+    await _plant_episodes(store, "ev1", "ev2")
+    await store.add(_preference("stale", "user prefers morning meetings", evidence=("ev1",)))
 
     result = await _ingestor(store).ingest(
         _proposal(_asserted("correction", "user prefers afternoon meetings", evidence=("ev2",)))
@@ -504,19 +419,17 @@ async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
     # The stale inference is retired: off the read path (get), still on disk.
     assert await store.get("stale") is None
     correction = await store.get(new_id)
-    assert correction is not None
+    assert isinstance(correction, Memory)
     assert correction.content == "user prefers afternoon meetings"
-    assert correction.provenance.source is MemorySource.USER_ASSERTED
-    assert correction.provenance.confidence == 1.0
-    # ADR-0038 §1a: the overturned belief's evidence must NOT follow it across.
+    assert correction.band is BeliefBand.ASSERTED
+    # ADR-0038 §1a: the overturned belief's supports must NOT follow it across.
     # `ev1` is what made us think "morning"; presenting it as support for
-    # "afternoon" would be a fabricated warrant in the field ADR-0005 §2 defines
-    # as references *supporting* the record. A user's assertion is its own warrant.
-    assert set(correction.provenance.evidence) == {"ev2"}
+    # "afternoon" would be a fabricated warrant. A user's assertion is its own.
+    assert _episodes(correction) == {"ev2"}
     # The proposal's own id is discarded, not written at.
     assert await store.get("correction") is None
     # Both records are retained: the retired inference and the live correction.
-    exported = {record.id: record for record in await store.export()}
+    exported = await _memories(store)
     assert set(exported) == {"stale", new_id}
     # The retired target carries a closed window (present in export, hidden from get).
     assert exported["stale"].validity.valid_until is not None
@@ -529,12 +442,12 @@ async def test_a_correction_retires_every_conflicting_inference_not_only_the_bes
     # the exact leak issue #244 reports. Asserted end to end: which windows closed is
     # a property of the store.
     store = InMemoryMemoryStore()
+    await _plant_episodes(store)
     for stale_id in ("morning", "early", "dawn"):
         await store.add(
             _preference(
                 stale_id,
                 "user prefers morning meetings",
-                confidence=0.6,
                 source=MemorySource.INFERRED,
             )
         )
@@ -544,9 +457,7 @@ async def test_a_correction_retires_every_conflicting_inference_not_only_the_bes
     # *input*, so the user's correction retires it rather than leaving it live
     # beside them.
     await store.add(
-        _preference(
-            "imported", "user prefers noon meetings", confidence=1.0, source=MemorySource.EXTERNAL
-        )
+        _preference("imported", "user prefers noon meetings", source=MemorySource.EXTERNAL)
     )
     # A low threshold so all four near-duplicates are detected (they score at the
     # default 0.75 boundary; the headroom keeps the test off the knife-edge).
@@ -572,7 +483,7 @@ async def test_a_correction_retires_every_conflicting_inference_not_only_the_bes
         assert await store.get(retired_id) is None
     # The correction is live; the whole retained set is the four originals plus it.
     assert await store.get("corrected") is not None
-    exported = {record.id: record for record in await store.export()}
+    exported = await _memories(store)
     assert set(exported) == {*retired_ids, "corrected"}
     for retired_id in retired_ids:
         assert exported[retired_id].validity.valid_until is not None
@@ -605,18 +516,18 @@ async def test_a_multi_target_supersede_that_cannot_mint_leaves_every_target_liv
             embedder=HashingEmbedder(dimensions=32),
         )
     try:
+        await _plant_episodes(store)
         for stale_id in ("morning", "early", "dawn"):
             await store.add(
                 _preference(
                     stale_id,
                     "user prefers morning meetings",
-                    confidence=0.6,
                     source=MemorySource.INFERRED,
                 )
             )
         # An unrelated record occupying the id the factory always mints, so every
         # INSERT_IF_ABSENT collides and the correction can never land.
-        await store.add(_semantic("wall", "an unrelated fact", confidence=0.9))
+        await store.add(_semantic("wall", "an unrelated fact"))
         ingestor = MemoryIngestor(
             traces_sink=FakeTraceSink(),
             store=store,
@@ -653,13 +564,13 @@ async def test_a_correction_above_the_conflict_ceiling_refuses_and_writes_nothin
     # conflict and defers, ADR-0050 §2) and because the same truncation could hide an
     # asserted conflict from the policy's own gates.
     store = InMemoryMemoryStore()
+    await _plant_episodes(store)
     stale_ids = ("s1", "s2", "s3")  # three matching inferences, ceiling set to two below
     for stale_id in stale_ids:
         await store.add(
             _preference(
                 stale_id,
                 "user prefers morning meetings",
-                confidence=0.6,
                 source=MemorySource.INFERRED,
             )
         )
@@ -683,7 +594,7 @@ async def test_a_correction_above_the_conflict_ceiling_refuses_and_writes_nothin
         assert record is not None
         assert record.validity.valid_until is None
     assert await store.get("corrected") is None
-    assert {record.id for record in await store.export()} == set(stale_ids)
+    assert set(await _memories(store)) == set(stale_ids)
 
 
 async def test_a_correction_that_contradicts_an_assertion_defers_and_writes_nothing() -> None:
@@ -692,6 +603,7 @@ async def test_a_correction_that_contradicts_an_assertion_defers_and_writes_noth
     # signal (ADR-0045 §5 / clause 1), and the new one is not silently committed
     # beside the old — so the profile never holds two live contradictory assertions.
     store = InMemoryMemoryStore()
+    await _plant_episodes(store)
     await store.add(_asserted("earlier", "user works from the Berlin office"))
 
     result = await _ingestor(store).ingest(
@@ -707,7 +619,7 @@ async def test_a_correction_that_contradicts_an_assertion_defers_and_writes_noth
     assert earlier is not None
     assert earlier.validity.valid_until is None
     assert await store.get("later") is None
-    assert {record.id for record in await store.export()} == {"earlier"}
+    assert set(await _memories(store)) == {"earlier"}
 
 
 @pytest.mark.parametrize("backend", ["in-memory", "sqlite"])
@@ -741,12 +653,13 @@ async def test_a_superseded_targets_hiding_is_read_time_relative(
             now=lambda: read_at[0],
         )
     try:
+        await _plant_episodes(store)
         # Open-window target, so it is a live conflict at any read clock. Content a
         # single token away from the correction, so both the lexical and the vector
         # detector find it and the ruling is still a `SUPERSEDE`: since ADR-0121 §2
         # a *verbatim* restatement is an agreement and rules `REINFORCE`, which
         # closes no window and would leave this case measuring nothing.
-        await store.add(_preference("stale", "user prefers morning meetings", confidence=0.6))
+        await store.add(_preference("stale", "user prefers morning meetings"))
 
         # The ingestor's clock (`_fixed_now`, 2026-06-01) is the close instant.
         result = await _ingestor(store).ingest(
@@ -773,7 +686,7 @@ async def test_a_superseded_targets_hiding_is_read_time_relative(
 
         # `export` keeps the retired target regardless of its validity window (at
         # either read clock); both records here are non-expired, so both appear.
-        assert {r.id for r in await store.export()} == {"stale", new_id}
+        assert set(await _memories(store)) == {"stale", new_id}
     finally:
         if isinstance(store, SqliteMemoryStore):
             store.close()
@@ -791,13 +704,13 @@ async def test_superseding_a_target_never_extends_its_existing_window() -> None:
     # because it pins no writer clock (ADR-0080 §7).
     already_closes = datetime(2026, 3, 1, tzinfo=UTC)  # before the ingestor's 2026-06-01 clock
     store = InMemoryMemoryStore(now=lambda: datetime(2026, 2, 1, tzinfo=UTC))
+    await _plant_episodes(store)
     await store.add(
-        PreferenceMemory(
-            id="stale",
-            content="user prefers morning meetings",
-            preference="morning",
+        _preference(
+            "stale",
+            "user prefers morning meetings",
+            source=MemorySource.INFERRED,
             validity=Validity(valid_until=already_closes),
-            provenance=_prov(0.6, source=MemorySource.INFERRED),
         )
     )
 
@@ -835,13 +748,13 @@ async def test_superseding_a_future_dated_target_refuses_without_corrupting(
             now=lambda: datetime(2026, 10, 1, tzinfo=UTC),
         )
     try:
+        await _plant_episodes(store)
         await store.add(
-            PreferenceMemory(
-                id="future",
-                content="user prefers morning meetings",
-                preference="morning",
+            _preference(
+                "future",
+                "user prefers morning meetings",
+                source=MemorySource.INFERRED,
                 validity=Validity(valid_from=datetime(2026, 9, 1, tzinfo=UTC)),
-                provenance=_prov(0.6, source=MemorySource.INFERRED),
             )
         )
 
@@ -855,7 +768,7 @@ async def test_superseding_a_future_dated_target_refuses_without_corrupting(
         survivor = await store.get("future")
         assert survivor is not None
         assert survivor.validity.valid_until is None
-        assert [record.id for record in await store.export()] == ["future"]
+        assert list(await _memories(store)) == ["future"]
     finally:
         if isinstance(store, SqliteMemoryStore):
             store.close()
@@ -888,31 +801,30 @@ async def test_superseding_a_target_whose_window_opens_at_the_close_refuses(
             now=lambda: datetime(2026, 7, 1, tzinfo=UTC),
         )
     try:
+        await _plant_episodes(store)
         await store.add(
-            PreferenceMemory(
-                id="opens-at-close",
-                content="user prefers morning meetings",
-                preference="morning",
+            _preference(
+                "opens-at-close",
+                "user prefers morning meetings",
+                source=MemorySource.INFERRED,
                 validity=Validity(valid_from=close),  # live at the store's clock
-                provenance=_prov(0.6, source=MemorySource.INFERRED),
             )
         )
         await store.add(
             _preference(
                 "sibling",
                 "user prefers morning meetings",
-                confidence=0.6,
                 source=MemorySource.INFERRED,
             )
         )
-        before = {record.id: record for record in await store.export()}
+        before = await _memories(store)
 
         with pytest.raises(MemoryStoreError, match="valid_from"):
             await _ingestor(store).ingest(
                 _proposal(_asserted("correction", "user prefers afternoon meetings"))
             )
 
-        assert {record.id: record for record in await store.export()} == before
+        assert await _memories(store) == before
     finally:
         if isinstance(store, SqliteMemoryStore):
             store.close()
@@ -944,12 +856,12 @@ async def test_a_multi_target_supersede_reads_its_close_instant_exactly_once() -
     # would let one atomic batch record two different close times for one ruling,
     # so a reader could not say when the correction took effect.
     store = InMemoryMemoryStore()
+    await _plant_episodes(store)
     for stale_id in ("morning", "early", "dawn"):
         await store.add(
             _preference(
                 stale_id,
                 "user prefers morning meetings",
-                confidence=0.6,
                 source=MemorySource.INFERRED,
             )
         )
@@ -969,7 +881,7 @@ async def test_a_multi_target_supersede_reads_its_close_instant_exactly_once() -
 
     assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
     assert len(clock.readings) == 1
-    exported = {record.id: record for record in await store.export()}
+    exported = await _memories(store)
     ends = {exported[stale_id].validity.valid_until for stale_id in ("morning", "early", "dawn")}
     assert ends == {clock.readings[0]}
 
@@ -991,6 +903,7 @@ async def test_a_correction_retires_the_import_and_survives_the_next_re_sync() -
     #            retired record and erase the retirement — which is the narrow,
     #            honest thing §6 buys, and the only thing asserted below.
     store = InMemoryMemoryStore()
+    await _plant_episodes(store)
     ingestor = MemoryIngestor(
         traces_sink=FakeTraceSink(),
         store=store,
@@ -1002,7 +915,6 @@ async def test_a_correction_retires_the_import_and_survives_the_next_re_sync() -
         _preference(
             "m1",
             "user works from the london office",
-            confidence=1.0,
             source=MemorySource.EXTERNAL,
         )
     )
@@ -1015,7 +927,6 @@ async def test_a_correction_retires_the_import_and_survives_the_next_re_sync() -
             _preference(
                 "m3",  # minted afresh this sync, never `m1` (§6)
                 "user works from the london office",
-                confidence=1.0,
                 source=MemorySource.EXTERNAL,
             )
         )
@@ -1025,9 +936,9 @@ async def test_a_correction_retires_the_import_and_survives_the_next_re_sync() -
     assert corrected.decision.kind is MemoryDecisionKind.SUPERSEDE
     assert corrected.decision.target_id == "m1"
     correction = await store.get("m2")
-    assert correction is not None
+    assert isinstance(correction, Memory)
     assert correction.content == "user works from the berlin office"
-    assert correction.provenance.source is MemorySource.USER_ASSERTED
+    assert correction.band is BeliefBand.ASSERTED
 
     # The retirement itself survives the re-sync. This is the assertion that
     # matters: under the source's key as the store's id, the re-sync's blind
@@ -1035,7 +946,7 @@ async def test_a_correction_retires_the_import_and_survives_the_next_re_sync() -
     # was closed with one whose window is open by default — erasing the only
     # on-disk evidence that the user's correction ever took effect, which ADR-0045
     # §6 guaranteed `export` would keep.
-    exported = {record.id: record for record in await store.export()}
+    exported = await _memories(store)
     assert exported["m1"].validity.valid_until is not None, "the retirement was erased"
     assert exported["m1"].content == "user works from the london office"
     assert await store.get("m1") is None  # retired, retained, off the read path
@@ -1107,11 +1018,11 @@ async def test_the_ingestor_refuses_to_fold_an_assertion_onto_an_external_record
     # to a reinforcing merge, which would lose the correction just as thoroughly
     # while reporting success.
     store = InMemoryMemoryStore()
+    await _plant_episodes(store)
     await store.add(
         _preference(
             "calendar:1",
             "user works from the london office",
-            confidence=1.0,
             source=MemorySource.EXTERNAL,
         )
     )
@@ -1124,9 +1035,9 @@ async def test_the_ingestor_refuses_to_fold_an_assertion_onto_an_external_record
 
     # Fail-closed: the imported record is untouched and nothing was written.
     imported = await store.get("calendar:1")
-    assert imported is not None
+    assert isinstance(imported, Memory)
     assert imported.content == "user works from the london office"
-    assert imported.provenance.source is MemorySource.EXTERNAL
+    assert imported.band is BeliefBand.ATTESTED
     assert await store.get("new") is None
 
 
@@ -1138,6 +1049,7 @@ async def test_the_ingestor_refuses_to_fold_an_assertion_onto_another_assertion(
     # no conflict heuristic is confident enough to choose between two things the
     # user said.
     store = InMemoryMemoryStore()
+    await _plant_episodes(store)
     await store.add(_asserted("said-before", "user prefers morning meetings"))
     ingestor = MemoryIngestor(
         traces_sink=FakeTraceSink(), store=store, policy=_MergeEverythingPolicy(), now=_fixed_now
@@ -1164,6 +1076,7 @@ async def test_the_ingestor_refuses_to_fold_a_non_assertion_onto_an_assertion(
     # policy — a reinforcing merge would replace the assertion's content *and*
     # downgrade its provenance out of the profile.
     store = InMemoryMemoryStore()
+    await _plant_episodes(store)
     await store.add(_asserted("their-words", "user prefers morning meetings"))
     ingestor = MemoryIngestor(
         traces_sink=FakeTraceSink(), store=store, policy=_MergeEverythingPolicy(), now=_fixed_now
@@ -1175,9 +1088,9 @@ async def test_the_ingestor_refuses_to_fold_a_non_assertion_onto_an_assertion(
         )
 
     theirs = await store.get("their-words")
-    assert theirs is not None
+    assert isinstance(theirs, Memory)
     assert theirs.content == "user prefers morning meetings"
-    assert theirs.provenance.source is MemorySource.USER_ASSERTED
+    assert theirs.band is BeliefBand.ASSERTED
     assert await store.get("guess") is None
 
 
@@ -1188,11 +1101,11 @@ async def test_a_reinforce_of_an_assertion_onto_a_derived_record_keeps_its_evide
     # not verify. Now the ruling names the relation: a policy that means
     # reinforcement says REINFORCE, and the target's evidence survives the fold.
     store = InMemoryMemoryStore()
+    await _plant_episodes(store, "ev2")
     await store.add(
         _preference(
             "derived",
             "user prefers morning meetings",
-            confidence=0.6,
             evidence=("obs1",),
             source=MemorySource.INFERRED,
         )
@@ -1211,9 +1124,9 @@ async def test_a_reinforce_of_an_assertion_onto_a_derived_record_keeps_its_evide
     assert result.record_id == "derived"
     reinforced = await store.get("derived")
     assert reinforced is not None
-    # Both records' evidence is retained (ADR-0040 §5a) — the derived record's
-    # audit trail is no longer thrown away.
-    assert set(reinforced.provenance.evidence) == {"obs1", "ev2"}
+    # Both memories' supports are retained (ADR-0040 §5a, ADR-0328 §11:6) — the
+    # derived memory's audit trail is not thrown away.
+    assert _episodes(reinforced) == {"obs1", "ev2"}
     assert await store.get("correction") is None
 
 
@@ -1242,6 +1155,7 @@ async def test_proposal_itself_does_not_consume_a_conflict_slot() -> None:
     the policy seeing no conflict at all — while a genuine one sat just below it.
     """
     store = InMemoryMemoryStore()
+    await _plant_episodes(store)
     # Added self-first so the equally-scoring pair ranks it above the rival: the
     # exact order in which the old code discarded the only slot it fetched.
     await store.add(_preference("self", "prefers concise emails"))
@@ -1264,6 +1178,7 @@ async def test_the_whole_detected_conflict_set_reaches_the_policy_at_the_ceiling
     set, not on the rows retrieval was asked for.
     """
     store = InMemoryMemoryStore()
+    await _plant_episodes(store)
     for index in range(3):
         await store.add(_preference(f"existing-{index}", "prefers concise emails"))
     policy = _RecordingPolicy()
@@ -1286,6 +1201,7 @@ async def test_a_conflict_set_above_the_ceiling_is_refused_before_the_policy_is_
     reports.
     """
     store = InMemoryMemoryStore()
+    await _plant_episodes(store)
     for index in range(4):
         await store.add(_preference(f"existing-{index}", "prefers concise emails"))
     before = await store.export()
@@ -1318,6 +1234,7 @@ class _MergeToAbsentTargetPolicy:
 
 async def test_merge_into_absent_target_raises_and_stores_nothing() -> None:
     store = InMemoryMemoryStore()
+    await _plant_episodes(store)
     ingestor = MemoryIngestor(
         traces_sink=FakeTraceSink(),
         store=store,
@@ -1326,53 +1243,9 @@ async def test_merge_into_absent_target_raises_and_stores_nothing() -> None:
     )
 
     with pytest.raises(MemoryStoreError, match="not among the conflicts"):
-        await ingestor.ingest(_proposal(_semantic("1", "some fact", confidence=0.9)))
+        await ingestor.ingest(_proposal(_semantic("1", "some fact")))
 
     assert await store.get("1") is None  # nothing was silently stored as new
-
-
-class _MaxTtlPolicy:
-    """A policy whose STORE_TEMPORARY ttl overflows the representable date range."""
-
-    async def decide(
-        self,
-        proposal: MemoryUpdateProposal,
-        *,
-        conflicts: Sequence[MemoryRecord],
-        relations: Mapping[str, ConflictRelation] | None = None,
-    ) -> MemoryDecision:
-        return MemoryDecision(
-            kind=MemoryDecisionKind.STORE_TEMPORARY, ttl=timedelta.max, reason="test overflow"
-        )
-
-
-async def test_overflowing_temporary_ttl_raises_and_stores_nothing() -> None:
-    store = InMemoryMemoryStore()
-    ingestor = MemoryIngestor(
-        traces_sink=FakeTraceSink(), store=store, policy=_MaxTtlPolicy(), now=_fixed_now
-    )
-
-    with pytest.raises(MemoryStoreError, match="overflows"):
-        await ingestor.ingest(_proposal(_semantic("1", "some fact", confidence=0.9)))
-
-    assert await store.get("1") is None
-
-
-async def test_low_confidence_is_stored_temporarily_with_expiry() -> None:
-    # The store shares the ingestor's fixed clock, so the just-stamped expiry
-    # (a week out) is still in the future and the record remains retrievable.
-    store = InMemoryMemoryStore(now=_fixed_now)
-    await _plant_episodes(store, _EPISODE)
-
-    result = await _ingestor(store).ingest(
-        _proposal(_semantic("1", "weak signal", confidence=0.1, evidence=(_EPISODE,)))
-    )
-
-    assert result.decision.kind is MemoryDecisionKind.STORE_TEMPORARY
-    stored = await store.get("1")
-    assert stored is not None
-    # _fixed_now (2026-06-01) + the policy's 7-day TTL.
-    assert stored.expires_at == datetime(2026, 6, 8, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(
@@ -1422,9 +1295,7 @@ async def test_tuning_accepts_the_boundary_values(threshold: float, limit: int) 
         now=_fixed_now,
     )
 
-    result = await ingestor.ingest(
-        _proposal(_semantic("1", "unique fact", confidence=0.9, evidence=(_EPISODE,)))
-    )
+    result = await ingestor.ingest(_proposal(_semantic("1", "unique fact", evidence=(_EPISODE,))))
 
     assert result.record_id == "1"
 
@@ -1464,57 +1335,69 @@ def test_tuning_refuses_a_boolean_threshold(threshold: bool) -> None:
         )
 
 
-async def test_a_naive_clock_cannot_leak_a_naive_expiry() -> None:
-    """``_expiry`` installs ``expires_at`` through ``model_copy``, which skips
-    validators — so the clock is the only place this can be caught.
+async def _clocked(now: Callable[[], datetime]) -> tuple[InMemoryMemoryStore, MemoryIngestor]:
+    """A store holding one memory to reinforce, and an ingestor reading ``now``.
+
+    Since ADR-0328 the instant a write stamps is an operation's ``at`` and an added
+    support's ``added_at`` (§5:1), and a reinforcement stamps both — so these cases
+    drive one (ADR-0040 §3's injected ruling) where they used to drive
+    ``STORE_TEMPORARY``'s expiry, which is refused now (§11:7).
+    """
+    store = InMemoryMemoryStore(now=_fixed_now)
+    await _plant_episodes(store)
+    await store.add(_preference("e", "weak signal"))
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(),
+        store=store,
+        policy=FakeMemoryPolicy(MemoryDecisionKind.REINFORCE),
+        now=now,
+    )
+    return store, ingestor
+
+
+async def _unwritten(store: InMemoryMemoryStore) -> bool:
+    """Whether the planted memory is as it was stored: one support, one create."""
+    stored = await store.get("e")
+    return isinstance(stored, Memory) and len(stored.operations) == 1
+
+
+async def test_a_naive_clock_cannot_stamp_a_naive_instant() -> None:
+    """An operation's instant skips validators, so the clock is the only place to catch it.
 
     Inverted by ADR-0026: the ADR-0023 §6 shim that stood here attributed UTC to
     a naive reading. ``checked_clock`` refuses it instead, which is the trade
     ADR-0023 §3 takes at the producer — a silent fabrication becomes a loud
     failure naming the seam.
     """
-    store = InMemoryMemoryStore(now=_fixed_now)
-    await _plant_episodes(store, _EPISODE)
-    naive_clock = MemoryIngestor(
-        traces_sink=FakeTraceSink(),
-        store=store,
-        policy=DefaultMemoryPolicy(),
-        now=lambda: datetime(2026, 6, 1),  # noqa: DTZ001 — the naive clock is the subject
+    store, naive_clock = await _clocked(
+        lambda: datetime(2026, 6, 1)  # noqa: DTZ001 — the naive clock is the subject
     )
 
     with pytest.raises(MemoryStoreError, match="MemoryIngestor"):
-        await naive_clock.ingest(
-            _proposal(_semantic("1", "weak signal", confidence=0.1, evidence=(_EPISODE,)))
-        )
+        await naive_clock.ingest(_proposal(_semantic("1", "weak signal")))
 
-    assert await store.get("1") is None
+    assert await _unwritten(store)
 
 
 async def test_a_non_utc_clock_is_converted_not_merely_accepted() -> None:
-    """The write skips the validator, so §2's UTC storage has to happen here.
+    """The write skips the validator, so ADR-0023 §2's UTC storage has to happen here.
 
     Asserted on ``tzinfo``, not only on the instant: an equality check alone
     passes for a ``+02:00`` value, which is exactly the state ADR-0023 §2's
-    "no field opting out" forbids — and which
-    ``SqliteMemoryStore._add_sync``'s expiry index would then be computed from.
+    "no field opting out" forbids.
     """
-    store = InMemoryMemoryStore(now=_fixed_now)
-    await _plant_episodes(store, _EPISODE)
-    berlin_clock = MemoryIngestor(
-        traces_sink=FakeTraceSink(),
-        store=store,
-        policy=DefaultMemoryPolicy(),
-        now=lambda: datetime(2026, 6, 1, 2, tzinfo=timezone(timedelta(hours=2))),
+    store, berlin_clock = await _clocked(
+        lambda: datetime(2026, 6, 1, 2, tzinfo=timezone(timedelta(hours=2)))
     )
 
-    await berlin_clock.ingest(
-        _proposal(_semantic("1", "weak signal", confidence=0.1, evidence=(_EPISODE,)))
-    )
+    await berlin_clock.ingest(_proposal(_semantic("1", "weak signal")))
 
-    stored = await store.get("1")
-    assert stored is not None
-    assert stored.expires_at == datetime(2026, 6, 8, tzinfo=UTC)
-    assert stored.expires_at.tzinfo is UTC
+    stored = await store.get("e")
+    assert isinstance(stored, Memory)
+    added = stored.operations[-1]
+    assert added.at == datetime(2026, 6, 1, tzinfo=UTC)
+    assert added.at.tzinfo is UTC
+    assert stored.supports[-1].added_at.tzinfo is UTC
 
 
 class _NoOffset(tzinfo):
@@ -1572,28 +1455,19 @@ class _UnreprableOffset(tzinfo):
     ids=["indeterminate", "raising", "unreprable"],
 )
 async def test_an_unusable_clock_reading_is_the_subsystems_error(zone: tzinfo) -> None:
-    """Translated at this boundary, as ``_expiry`` already does for overflow.
+    """Translated at this boundary, naming the seam.
 
     Unguarded, such a reading reaches ``.timestamp()`` inside the SQLite store
     and surfaces as a raw ``TypeError`` from several layers down, naming neither
     the clock nor the record. The ``unreprable`` case additionally checks that
     *describing* the reading cannot itself escape the translation.
     """
-    store = InMemoryMemoryStore(now=_fixed_now)
-    await _plant_episodes(store, _EPISODE)
-    broken = MemoryIngestor(
-        traces_sink=FakeTraceSink(),
-        store=store,
-        policy=DefaultMemoryPolicy(),
-        now=lambda: datetime(2026, 6, 1, tzinfo=zone),
-    )
+    store, broken = await _clocked(lambda: datetime(2026, 6, 1, tzinfo=zone))
 
     with pytest.raises(MemoryStoreError, match="MemoryIngestor"):
-        await broken.ingest(
-            _proposal(_semantic("1", "weak signal", confidence=0.1, evidence=(_EPISODE,)))
-        )
+        await broken.ingest(_proposal(_semantic("1", "weak signal")))
 
-    assert await store.get("1") is None
+    assert await _unwritten(store)
 
 
 class _LyingConversion(datetime):
@@ -1603,29 +1477,20 @@ class _LyingConversion(datetime):
         return datetime(2026, 6, 1)  # noqa: DTZ001 — returning a naive value is the subject
 
 
-async def test_a_clock_whose_conversion_lies_cannot_install_a_naive_expiry() -> None:
-    """`_expiry` writes through ``model_copy``, so `UtcInstant` never sees this.
+async def test_a_clock_whose_conversion_lies_cannot_stamp_a_naive_instant() -> None:
+    """An operation's instant is built past `UtcInstant`'s reach, so the guard is here.
 
     A clock returning a ``datetime`` subclass with a valid ``utcoffset()`` but an
-    overridden ``astimezone`` would otherwise put a naive ``expires_at`` straight
-    into the store — raising ``TypeError`` at the first expiry comparison, or
-    persisting JSON that no longer decodes.
+    overridden ``astimezone`` would otherwise put a naive instant straight into the
+    store — raising ``TypeError`` at the first comparison, or persisting JSON that no
+    longer decodes.
     """
-    store = InMemoryMemoryStore(now=_fixed_now)
-    await _plant_episodes(store, _EPISODE)
-    lying = MemoryIngestor(
-        traces_sink=FakeTraceSink(),
-        store=store,
-        policy=DefaultMemoryPolicy(),
-        now=lambda: _LyingConversion(2026, 6, 1, tzinfo=UTC),
-    )
+    store, lying = await _clocked(lambda: _LyingConversion(2026, 6, 1, tzinfo=UTC))
 
     with pytest.raises(MemoryStoreError, match="did not convert to UTC"):
-        await lying.ingest(
-            _proposal(_semantic("1", "weak signal", confidence=0.1, evidence=(_EPISODE,)))
-        )
+        await lying.ingest(_proposal(_semantic("1", "weak signal")))
 
-    assert await store.get("1") is None
+    assert await _unwritten(store)
 
 
 class _FlipOnConvert(datetime):
@@ -1646,28 +1511,19 @@ async def test_a_clock_that_flips_its_offset_during_conversion_is_refused() -> N
 
     Same shape ``UtcInstant`` refuses: the reading reports UTC when checked,
     changes offset inside ``astimezone``, and returns itself still carrying
-    ``tzinfo is UTC``. Copying its components then would stamp an expiry two
+    ``tzinfo is UTC``. Copying its components then would stamp an instant two
     hours late, past a validator this write never reaches.
     """
-    store = InMemoryMemoryStore(now=_fixed_now)
-    await _plant_episodes(store, _EPISODE)
     _FlipOnConvert.lie = timedelta(0)
-    flipping = MemoryIngestor(
-        traces_sink=FakeTraceSink(),
-        store=store,
-        policy=DefaultMemoryPolicy(),
-        now=lambda: _FlipOnConvert(2026, 6, 1, tzinfo=UTC),
-    )
+    store, flipping = await _clocked(lambda: _FlipOnConvert(2026, 6, 1, tzinfo=UTC))
 
     try:
         with pytest.raises(MemoryStoreError, match="did not convert to UTC"):
-            await flipping.ingest(
-                _proposal(_semantic("1", "weak signal", confidence=0.1, evidence=(_EPISODE,)))
-            )
+            await flipping.ingest(_proposal(_semantic("1", "weak signal")))
     finally:
         _FlipOnConvert.lie = timedelta(0)
 
-    assert await store.get("1") is None
+    assert await _unwritten(store)
 
 
 class _PauseOnFirstSearch(InMemoryMemoryStore):
@@ -1718,27 +1574,26 @@ async def test_concurrent_merges_into_one_target_do_not_lose_a_write() -> None:
     stale snapshot, and the second ``add`` overwrites the first — while both
     callers are handed a healthy ``MemoryIngestResult`` naming the same id. The
     dropped write may be a user correction (ADR-0038), so the assertion is that
-    *nothing* is lost: the surviving record must carry both proposals' evidence
-    and the higher of the two confidences.
+    *nothing* is lost: the surviving memory must carry both proposals' supports.
     """
     resume = asyncio.Event()
     store = _PauseOnFirstSearch(resume=resume)
     # Planted before the harness arms: the evidence resolution both ingests do is a
     # `get`, not a `search`, so it neither trips nor is tripped by the pause.
     await _plant_episodes(store, "ev1", "evA", "evB")
-    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+    await store.add(_preference("e", "prefers concise emails", evidence=("ev1",)))
     ingestor = _ingestor(store)
 
     async def first() -> MemoryIngestResult:
         return await ingestor.ingest(
-            _proposal(_preference("a", "prefers concise emails", confidence=0.7, evidence=("evA",)))
+            _proposal(_preference("a", "prefers concise emails", evidence=("evA",)))
         )
 
     async def second() -> MemoryIngestResult:
         # Released outside `ingest`, so serialising `ingest` cannot withhold it.
         resume.set()
         return await ingestor.ingest(
-            _proposal(_preference("b", "prefers concise emails", confidence=0.8, evidence=("evB",)))
+            _proposal(_preference("b", "prefers concise emails", evidence=("evB",)))
         )
 
     result_a, result_b = await asyncio.gather(first(), second())
@@ -1748,8 +1603,7 @@ async def test_concurrent_merges_into_one_target_do_not_lose_a_write() -> None:
     assert result_a.record_id == result_b.record_id == "e"
     merged = await store.get("e")
     assert merged is not None
-    assert set(merged.provenance.evidence) == {"ev1", "evA", "evB"}
-    assert merged.provenance.confidence == 0.8
+    assert _episodes(merged) == {"ev1", "evA", "evB"}
 
 
 # --- ADR-0219 §5: the fold is conditional, and a refusal re-runs the cycle ---
@@ -1939,12 +1793,12 @@ async def test_a_reinforce_folds_conditionally_on_the_revision_it_read() -> None
     """
     store = _RecordingStore()
     await _plant_episodes(store, "ev1", "ev2")
-    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+    await store.add(_preference("e", "prefers concise emails", evidence=("ev1",)))
     target = await store.get("e")
     assert target is not None
 
     result = await _ingestor(store).ingest(
-        _proposal(_preference("new", "prefers concise emails", confidence=0.7, evidence=("ev2",)))
+        _proposal(_preference("new", "prefers concise emails", evidence=("ev2",)))
     )
 
     assert result.decision.kind is MemoryDecisionKind.REINFORCE
@@ -1972,16 +1826,16 @@ async def test_a_supersede_closes_every_window_conditionally_and_installs_uncond
     two kinds of element those sections describe.
     """
     store = _RecordingStore()
+    await _plant_episodes(store)
     for stale_id in ("morning", "early", "dawn"):
         await store.add(
             _preference(
                 stale_id,
                 "user prefers morning meetings",
-                confidence=0.6,
                 source=MemorySource.INFERRED,
             )
         )
-    stored = {record.id: record for record in await store.export()}
+    stored = await _memories(store)
     revisions = {stale_id: stored[stale_id].revision for stale_id in ("morning", "early", "dawn")}
     # Three rows, three stamps: ADR-0219 §1's "two records carry equal revisions
     # only where they are the same stored row", which is what makes the pairing
@@ -2021,26 +1875,24 @@ async def test_two_ingestors_folding_into_one_target_do_not_lose_a_write() -> No
     ``MemoryIngestResult``.
 
     The assertion is that *nothing* is lost — the survivor carries both proposals'
-    evidence and the higher confidence — and that it was **earned**: three write
+    supports — and that it was **earned**: three write
     attempts for two ingests is the refusal and the re-run, so a store that had
     silently accepted the stale fold would fail the count as well as the content.
     """
     store = _ParksTheFirstSearch()
     await _plant_episodes(store, "ev1", "evA", "evB")
-    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+    await store.add(_preference("e", "prefers concise emails", evidence=("ev1",)))
     first = _ingestor(store)
     second = _ingestor(store)
 
     parked = asyncio.create_task(
-        first.ingest(
-            _proposal(_preference("a", "prefers concise emails", confidence=0.7, evidence=("evA",)))
-        )
+        first.ingest(_proposal(_preference("a", "prefers concise emails", evidence=("evA",))))
     )
     # Ordered by the harness and not by the scheduler: the window is open before
     # the second ingestor runs, and stays open until its write has landed.
     await store.parked.wait()
     result_b = await second.ingest(
-        _proposal(_preference("b", "prefers concise emails", confidence=0.8, evidence=("evB",)))
+        _proposal(_preference("b", "prefers concise emails", evidence=("evB",)))
     )
     store.released.set()
     result_a = await parked
@@ -2051,8 +1903,7 @@ async def test_two_ingestors_folding_into_one_target_do_not_lose_a_write() -> No
     assert len(store.batches) == 3
     merged = await store.get("e")
     assert merged is not None
-    assert set(merged.provenance.evidence) == {"ev1", "evA", "evB"}
-    assert merged.provenance.confidence == 0.8
+    assert _episodes(merged) == {"ev1", "evA", "evB"}
 
 
 class _ParksTheFirstDurableSearch(SqliteMemoryStore):
@@ -2111,22 +1962,16 @@ async def test_two_ingestors_folding_into_one_durable_store_do_not_lose_a_write(
     store = _ParksTheFirstDurableSearch(path=tmp_path / "memory.db")
     try:
         await _plant_episodes(store, "ev1", "evA", "evB")
-        await store.add(
-            _preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",))
-        )
+        await store.add(_preference("e", "prefers concise emails", evidence=("ev1",)))
         first = _ingestor(store)
         second = _ingestor(store)
 
         parked = asyncio.create_task(
-            first.ingest(
-                _proposal(
-                    _preference("a", "prefers concise emails", confidence=0.7, evidence=("evA",))
-                )
-            )
+            first.ingest(_proposal(_preference("a", "prefers concise emails", evidence=("evA",))))
         )
         await store.parked.wait()
         result_b = await second.ingest(
-            _proposal(_preference("b", "prefers concise emails", confidence=0.8, evidence=("evB",)))
+            _proposal(_preference("b", "prefers concise emails", evidence=("evB",)))
         )
         store.released.set()
         result_a = await parked
@@ -2137,8 +1982,7 @@ async def test_two_ingestors_folding_into_one_durable_store_do_not_lose_a_write(
         assert store.writes == 3  # the second's, the first's refusal, the re-run
         merged = await store.get("e")
         assert merged is not None
-        assert set(merged.provenance.evidence) == {"ev1", "evA", "evB"}
-        assert merged.provenance.confidence == 0.8
+        assert _episodes(merged) == {"ev1", "evA", "evB"}
     finally:
         store.close()
 
@@ -2160,20 +2004,20 @@ async def test_the_re_run_re_derives_the_fold_and_never_re_applies_the_rejected_
     """
 
     def competitor() -> MemoryRecord:
-        # What a second writer's own fold would have left: the target's evidence
-        # plus its own, at its own higher confidence.
-        return _preference("e", "prefers concise emails", confidence=0.9, evidence=("ev1", "evX"))
+        # What a second writer's own fold would have left: the target's support
+        # plus its own.
+        return _preference("e", "prefers concise emails", evidence=("ev1", "evX"))
 
     store = _MovesTheTargetBeforeAWrite(competitor=competitor, limit=1)
     await _plant_episodes(store, "ev1", "ev2", "evX")
-    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+    await store.add(_preference("e", "prefers concise emails", evidence=("ev1",)))
     policy = _CountingPolicy()
     ingestor = MemoryIngestor(
         traces_sink=FakeTraceSink(), store=store, policy=policy, now=_fixed_now
     )
 
     result = await ingestor.ingest(
-        _proposal(_preference("new", "prefers concise emails", confidence=0.7, evidence=("ev2",)))
+        _proposal(_preference("new", "prefers concise emails", evidence=("ev2",)))
     )
 
     assert result.decision.kind is MemoryDecisionKind.REINFORCE
@@ -2183,8 +2027,7 @@ async def test_the_re_run_re_derives_the_fold_and_never_re_applies_the_rejected_
     merged = await store.get("e")
     assert merged is not None
     # `evX` is the competing writer's; it survives only under a re-run.
-    assert set(merged.provenance.evidence) == {"ev1", "ev2", "evX"}
-    assert merged.provenance.confidence == 0.9  # the competitor's, the higher
+    assert _episodes(merged) == {"ev1", "ev2", "evX"}
 
 
 async def test_a_second_stale_refusal_propagates_and_is_not_a_healthy_result() -> None:
@@ -2201,17 +2044,15 @@ async def test_a_second_stale_refusal_propagates_and_is_not_a_healthy_result() -
     """
 
     def competitor() -> MemoryRecord:
-        return _preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",))
+        return _preference("e", "prefers concise emails", evidence=("ev1",))
 
     store = _MovesTheTargetBeforeAWrite(competitor=competitor, limit=99)
     await _plant_episodes(store, "ev1", "ev2")
-    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+    await store.add(_preference("e", "prefers concise emails", evidence=("ev1",)))
 
     with pytest.raises(MemoryStoreStaleError) as refusal:
         await _ingestor(store).ingest(
-            _proposal(
-                _preference("new", "prefers concise emails", confidence=0.7, evidence=("ev2",))
-            )
+            _proposal(_preference("new", "prefers concise emails", evidence=("ev2",)))
         )
 
     assert isinstance(refusal.value, MemoryStoreError)
@@ -2220,7 +2061,7 @@ async def test_a_second_stale_refusal_propagates_and_is_not_a_healthy_result() -
     # the target nor the proposal beside it (ADR-0219 §3's all-or-nothing).
     survivor = await store.get("e")
     assert survivor is not None
-    assert set(survivor.provenance.evidence) == {"ev1"}
+    assert _episodes(survivor) == {"ev1"}
     assert await store.get("new") is None
 
 
@@ -2236,19 +2077,20 @@ async def test_a_stale_supersede_re_runs_and_retires_the_target_it_re_read() -> 
     """
 
     def competitor() -> MemoryRecord:
+        # The target as a competing writer left it: one support more, at `ev-c`.
         return _preference(
             "morning",
             "user prefers morning meetings",
-            confidence=0.7,
+            evidence=(_EPISODE, "ev-c"),
             source=MemorySource.INFERRED,
         )
 
     store = _MovesTheTargetBeforeAWrite(competitor=competitor, limit=1)
+    await _plant_episodes(store, "ev-c")
     await store.add(
         _preference(
             "morning",
             "user prefers morning meetings",
-            confidence=0.6,
             source=MemorySource.INFERRED,
         )
     )
@@ -2271,9 +2113,9 @@ async def test_a_stale_supersede_re_runs_and_retires_the_target_it_re_read() -> 
     # The re-run's close was computed from the record the competitor left, and
     # landed on it: the target is retained and off the read path.
     assert await store.get("morning") is None
-    retired = {record.id: record for record in await store.export()}["morning"]
+    retired = (await _memories(store))["morning"]
     assert retired.validity.valid_until == _fixed_now()
-    assert retired.provenance.confidence == 0.7  # the competitor's record, retired
+    assert "ev-c" in _episodes(retired)  # the competitor's memory, retired
     assert await store.get("corrected") is not None
 
 
@@ -2300,7 +2142,7 @@ async def test_a_fold_whose_target_was_deleted_re_rules_instead_of_re_folding() 
     """
     store = _DeletesTheTargetBeforeAWrite(target_id="e")
     await _plant_episodes(store, "ev1", "ev2")
-    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+    await store.add(_preference("e", "prefers concise emails", evidence=("ev1",)))
     target = await store.get("e")
     assert target is not None
     policy = _CountingPolicy()
@@ -2309,7 +2151,7 @@ async def test_a_fold_whose_target_was_deleted_re_rules_instead_of_re_folding() 
     )
 
     result = await ingestor.ingest(
-        _proposal(_preference("new", "prefers concise emails", confidence=0.7, evidence=("ev2",)))
+        _proposal(_preference("new", "prefers concise emails", evidence=("ev2",)))
     )
 
     # The ruling *changed* across the re-run — the property no other arm can assert.
@@ -2330,7 +2172,7 @@ async def test_a_fold_whose_target_was_deleted_re_rules_instead_of_re_folding() 
     assert await store.get("e") is None  # destroyed, and not resurrected by the fold
     installed = await store.get("new")
     assert installed is not None
-    assert set(installed.provenance.evidence) == {"ev2"}  # the proposal's own, unfolded
+    assert _episodes(installed) == {"ev2"}  # the proposal's own, unfolded
 
 
 async def test_only_a_stale_refusal_earns_the_re_run() -> None:
@@ -2343,13 +2185,11 @@ async def test_only_a_stale_refusal_earns_the_re_run() -> None:
     """
     store = _RefusesEveryWrite()
     await _plant_episodes(store, "ev1", "ev2")
-    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+    await store.add(_preference("e", "prefers concise emails", evidence=("ev1",)))
 
     with pytest.raises(MemoryStoreError, match="the store is broken"):
         await _ingestor(store).ingest(
-            _proposal(
-                _preference("new", "prefers concise emails", confidence=0.7, evidence=("ev2",))
-            )
+            _proposal(_preference("new", "prefers concise emails", evidence=("ev2",)))
         )
 
     assert len(store.batches) == 1
@@ -2368,12 +2208,12 @@ async def test_one_ingestors_concurrent_folds_never_reach_the_retry_path() -> No
     """
     store = _ParksTheFirstSearch()
     await _plant_episodes(store, "ev1", "evA", "evB")
-    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+    await store.add(_preference("e", "prefers concise emails", evidence=("ev1",)))
     ingestor = _ingestor(store)
 
     async def first() -> MemoryIngestResult:
         return await ingestor.ingest(
-            _proposal(_preference("a", "prefers concise emails", confidence=0.7, evidence=("evA",)))
+            _proposal(_preference("a", "prefers concise emails", evidence=("evA",)))
         )
 
     async def second() -> MemoryIngestResult:
@@ -2383,7 +2223,7 @@ async def test_one_ingestors_concurrent_folds_never_reach_the_retry_path() -> No
         # lock does, which is the whole assertion.
         store.released.set()
         return await ingestor.ingest(
-            _proposal(_preference("b", "prefers concise emails", confidence=0.8, evidence=("evB",)))
+            _proposal(_preference("b", "prefers concise emails", evidence=("evB",)))
         )
 
     result_a, result_b = await asyncio.gather(first(), second())
@@ -2393,7 +2233,7 @@ async def test_one_ingestors_concurrent_folds_never_reach_the_retry_path() -> No
     assert len(store.batches) == 2  # one write per ingest, no re-run
     merged = await store.get("e")
     assert merged is not None
-    assert set(merged.provenance.evidence) == {"ev1", "evA", "evB"}
+    assert _episodes(merged) == {"ev1", "evA", "evB"}
 
 
 # --- ADR-0121: an agreeing restatement, end to end --------------------------
@@ -2426,20 +2266,19 @@ async def test_a_verbatim_restatement_folds_into_the_users_own_record() -> None:
     # duplication #862 observed and ADR-0092 §7 names as a residue to shrink.
     assert result.record_id == "their-words"
     assert await store.get("again") is None
-    assert {record.id for record in await store.export()} == {"before", "now", "their-words"}
+    assert set(await _memories(store)) == {"their-words"}
 
     survivor = await store.get("their-words")
-    assert survivor is not None
+    assert isinstance(survivor, Memory)
     # ADR-0121 §4's second clause: the user's own bytes, at the user's own id.
     assert survivor.content == "the user prefers window seats"
-    assert survivor.provenance.source is MemorySource.USER_ASSERTED
-    assert survivor.provenance.confidence == 1.0
+    assert survivor.band is BeliefBand.ASSERTED
     # Nothing retired and no window closed: a REINFORCE has no retirement set
     # (ADR-0045 §4), and an agreement warrants none anyway (ADR-0121 §2).
     assert survivor.validity.valid_until is None
-    # What the restatement does contribute — its evidence, and the fact that the
-    # belief still holds (ADR-0103 §3, ADR-0103 §6's rule applied to this pairing).
-    assert set(survivor.provenance.evidence) == {"before", "now"}
+    # What the restatement does contribute — its support, and so the fact that the
+    # belief still holds (ADR-0103 §3, ADR-0328 §11:6).
+    assert _episodes(survivor) == {"before", "now"}
 
 
 async def test_a_one_token_correction_still_defers_end_to_end() -> None:
@@ -2469,7 +2308,7 @@ async def test_a_one_token_correction_still_defers_end_to_end() -> None:
     survivor = await store.get("their-words")
     assert survivor is not None
     assert survivor.content == "the user prefers window seats"
-    assert set(survivor.provenance.evidence) == {"before"}
+    assert _episodes(survivor) == {"before"}
 
 
 # --- ADR-0159: the reconciler's two boundaries, counted rather than inferred ---
@@ -2483,15 +2322,15 @@ async def test_a_one_token_correction_still_defers_end_to_end() -> None:
 _ROUTE = "anthropic:claude-x"
 
 
-def _observed(record_id: str, content: str, *, confidence: float = 0.6) -> MemoryRecord:
-    """A *warranted* observed preference — the shape every proposal below needs.
+def _observed(record_id: str, content: str) -> Memory:
+    """A *warranted* inference — the shape every proposal below needs.
 
-    ``OBSERVED`` is in the ``DERIVED`` band, so a proposal citing nothing is
-    rejected by the admissibility floor before any of these boundaries is reached
-    (ADR-0077 §5) — which would make each case below measure the wrong rule. Every
-    case plants :data:`_EPISODE` so the citation resolves.
+    A derived memory resting on no episode is rejected by the admissibility floor
+    before any of these boundaries is reached (ADR-0077 §5 read through ADR-0328
+    §12) — which would make each case below measure the wrong rule. Every case
+    plants :data:`_EPISODE` so its support resolves.
     """
-    return _preference(record_id, content, confidence=confidence, evidence=(_EPISODE,))
+    return _preference(record_id, content, evidence=(_EPISODE,))
 
 
 class _CountingReconciler:
@@ -2572,7 +2411,7 @@ async def test_an_asserted_proposal_reaches_no_reconciler_and_no_provider() -> N
     """
     store = InMemoryMemoryStore()
     await _plant_episodes(store, _EPISODE)
-    await store.add(_preference("stale", "user prefers morning meetings", confidence=0.6))
+    await store.add(_preference("stale", "user prefers morning meetings"))
     reconciler = _CountingReconciler()
 
     await _reconciling(store, reconciler).ingest(
@@ -2591,7 +2430,7 @@ async def test_an_asserted_conflict_reaches_no_reconciler_and_no_provider() -> N
     reconciler = _CountingReconciler()
 
     result = await _reconciling(store, reconciler).ingest(
-        _proposal(_observed("observed", "user prefers afternoon meetings", confidence=0.6))
+        _proposal(_observed("observed", "user prefers afternoon meetings"))
     )
 
     assert result.decision.kind is MemoryDecisionKind.ASK_USER
@@ -2636,9 +2475,14 @@ async def test_a_derived_belief_citing_nothing_reaches_no_reconciler() -> None:
     await store.add(_preference("neighbour", "user prefers morning meetings"))
     reconciler = _CountingReconciler()
 
-    result = await _reconciling(store, reconciler).ingest(
-        _proposal(_preference("unwarranted", "user prefers morning meetings", evidence=()))
+    # A derived memory resting only on a record stored before ADR-0328: the one shape
+    # §12 leaves for "citing nothing", which no producer proposes (ADR-0328 §16:4).
+    unwarranted = memory(
+        "unwarranted",
+        "user prefers morning meetings",
+        legacy_support({"id": "legacy-unwarranted"}),
     )
+    result = await _reconciling(store, reconciler).ingest(_proposal(unwarranted))
 
     assert result.decision.kind is MemoryDecisionKind.REJECT
     assert reconciler.calls == 0
@@ -2650,17 +2494,10 @@ async def test_an_unconfirmed_externally_derived_belief_reaches_no_reconciler() 
     store = InMemoryMemoryStore()
     await _plant_episodes(store, _EPISODE)
     await store.add(_preference("neighbour", "user prefers morning meetings"))
-    tainted = PreferenceMemory(
-        id="tainted",
-        content="user prefers morning meetings, per the newsletter",
-        preference="user prefers morning meetings, per the newsletter",
-        provenance=Provenance(
-            source=MemorySource.INFERRED,
-            confidence=0.6,
-            last_updated=_WHEN,
-            evidence=(_EPISODE,),
-            derived_from_external=True,
-        ),
+    tainted = memory(
+        "tainted",
+        "user prefers morning meetings, per the newsletter",
+        remembered_support(_EPISODE, effect="effect-tainted", outside=True),
     )
     reconciler = _CountingReconciler()
 
@@ -2679,7 +2516,7 @@ async def test_an_unsettled_multi_member_set_spends_exactly_one_request() -> Non
         ("a", "user prefers morning meetings on mondays"),
         ("b", "user prefers morning meetings with the design team"),
     ):
-        await store.add(_preference(stale_id, text, confidence=0.6))
+        await store.add(_preference(stale_id, text))
     reconciler = _CountingReconciler()
 
     await _reconciling(store, reconciler).ingest(
@@ -2696,7 +2533,7 @@ async def test_a_set_the_agrees_rung_settles_entirely_spends_nothing() -> None:
     await _plant_episodes(store, _EPISODE)
     same = "user prefers morning meetings"
     for stale_id in ("a", "b"):
-        await store.add(_preference(stale_id, same, confidence=0.6))
+        await store.add(_preference(stale_id, same))
     reconciler = _CountingReconciler()
 
     result = await _reconciling(store, reconciler).ingest(_proposal(_observed("new", same)))
@@ -2718,7 +2555,7 @@ async def test_a_volunteered_beyond_bound_label_changes_no_ruling() -> None:
     await _plant_episodes(store, _EPISODE)
     same = "user prefers morning meetings"
     for stale_id in ("a", "b", "c", "beyond"):
-        await store.add(_preference(stale_id, f"{same} {stale_id}", confidence=0.6))
+        await store.add(_preference(stale_id, f"{same} {stale_id}"))
     reply = json.dumps(
         {
             "relations": [
@@ -2745,8 +2582,8 @@ async def test_an_unavailable_reconciler_reproduces_the_ratified_floor() -> None
     """
     store = InMemoryMemoryStore()
     await _plant_episodes(store, _EPISODE)
-    await store.add(_preference("identical", "user prefers window seats", confidence=0.6))
-    await store.add(_preference("similar", "user prefers aisle seats", confidence=0.6))
+    await store.add(_preference("identical", "user prefers window seats"))
+    await store.add(_preference("similar", "user prefers aisle seats"))
 
     folded = await _reconciling(store, None).ingest(
         _proposal(_observed("restated", "user prefers window seats"))
@@ -2774,22 +2611,22 @@ async def test_a_supersede_on_a_labelled_contradiction_leaves_an_adds_sibling_li
     store = InMemoryMemoryStore()
     await _plant_episodes(store, _EPISODE)
     await store.add(
-        _preference("stale", "user prefers morning meetings", confidence=0.6),
+        _preference("stale", "user prefers morning meetings"),
     )
     await store.add(
-        _preference("distinct", "user prefers morning meetings on fridays", confidence=0.6),
+        _preference("distinct", "user prefers morning meetings on fridays"),
     )
     reconciler = _StubReconciler(
         {"stale": ConflictRelation.CONTRADICTS, "distinct": ConflictRelation.ADDS}
     )
 
     result = await _reconciling(store, reconciler).ingest(
-        _proposal(_observed("new", "user prefers afternoon meetings", confidence=0.7))
+        _proposal(_observed("new", "user prefers afternoon meetings"))
     )
 
     assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
     assert result.decision.target_id == "stale"
-    exported = {record.id: record for record in await store.export()}
+    exported = await _memories(store)
     assert exported["stale"].validity.valid_until is not None  # retired
     assert exported["distinct"].validity.valid_until is None  # still live
 
@@ -2836,7 +2673,7 @@ async def test_a_supersede_naming_a_related_conflict_is_refused(
     """
     store = InMemoryMemoryStore()
     await _plant_episodes(store, _EPISODE)
-    await store.add(_preference("kept", "user prefers morning meetings", confidence=0.6))
+    await store.add(_preference("kept", "user prefers morning meetings"))
     ingestor = _reconciling(
         store,
         _StubReconciler({"kept": relation}),
@@ -2844,9 +2681,7 @@ async def test_a_supersede_naming_a_related_conflict_is_refused(
     )
 
     with pytest.raises(MemoryStoreError, match="never retired"):
-        await ingestor.ingest(
-            _proposal(_observed("new", "user prefers afternoon meetings", confidence=0.7))
-        )
+        await ingestor.ingest(_proposal(_observed("new", "user prefers afternoon meetings")))
 
     survivor = await store.get("kept")
     assert survivor is not None
@@ -2902,10 +2737,8 @@ async def test_a_policy_that_narrows_and_writes_cannot_reach_the_retirement_set(
     """
     store = InMemoryMemoryStore()
     await _plant_episodes(store, _EPISODE)
-    await store.add(_preference("stale", "user prefers morning meetings", confidence=0.6))
-    await store.add(
-        _preference("distinct", "user prefers morning meetings on fridays", confidence=0.6)
-    )
+    await store.add(_preference("stale", "user prefers morning meetings"))
+    await store.add(_preference("distinct", "user prefers morning meetings on fridays"))
     policy = _MutatingPolicy("stale", "distinct")
     ingestor = _reconciling(
         store,
@@ -2913,14 +2746,12 @@ async def test_a_policy_that_narrows_and_writes_cannot_reach_the_retirement_set(
         policy=policy,
     )
 
-    result = await ingestor.ingest(
-        _proposal(_observed("new", "user prefers afternoon meetings", confidence=0.7))
-    )
+    result = await ingestor.ingest(_proposal(_observed("new", "user prefers afternoon meetings")))
 
     assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
     # The narrowing must have failed outright: `MappingProxyType` is not a `dict`.
     assert policy.attempted is False
-    exported = {record.id: record for record in await store.export()}
+    exported = await _memories(store)
     assert exported["distinct"].validity.valid_until is None
 
 
@@ -2951,7 +2782,7 @@ async def test_a_reconciler_returning_something_unusable_refuses_no_ingest(
 
     store = InMemoryMemoryStore()
     await _plant_episodes(store, _EPISODE)
-    await store.add(_preference("identical", "user prefers window seats", confidence=0.6))
+    await store.add(_preference("identical", "user prefers window seats"))
     ingestor = MemoryIngestor(
         traces_sink=FakeTraceSink(),
         store=store,
@@ -2990,7 +2821,7 @@ async def test_a_reconciler_whose_mapping_raises_on_lookup_refuses_no_ingest() -
 
     store = InMemoryMemoryStore()
     await _plant_episodes(store, _EPISODE)
-    await store.add(_preference("identical", "user prefers window seats", confidence=0.6))
+    await store.add(_preference("identical", "user prefers window seats"))
     ingestor = MemoryIngestor(
         traces_sink=FakeTraceSink(),
         store=store,
@@ -3023,7 +2854,7 @@ async def test_a_reconciler_that_raises_refuses_no_ingest() -> None:
 
     store = InMemoryMemoryStore()
     await _plant_episodes(store, _EPISODE)
-    await store.add(_preference("identical", "user prefers window seats", confidence=0.6))
+    await store.add(_preference("identical", "user prefers window seats"))
 
     result = await _reconciling(store, None).ingest(
         _proposal(_observed("restated", "user prefers window seats"))

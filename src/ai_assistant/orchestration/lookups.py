@@ -86,17 +86,16 @@ from ai_assistant.core.types import (
     DataTier,
     Idempotency,
     LabelKind,
+    Memory,
     MemoryKind,
     Reversibility,
     RiskLevel,
-    SemanticMemory,
     ToolCost,
     ToolDefinition,
     ToolFailure,
     ToolFailureKind,
     ToolOutcome,
     ToolResult,
-    rests_on_recorded_external_content,
 )
 from ai_assistant.orchestration.acting import HeldByIds, NamedResult
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
@@ -451,21 +450,13 @@ class LookUps:
         except MemoryStoreError:
             _log.warning("look_up_not_done", stage="acting", reason="search_failed")
             return _not_done(ToolFailureKind.UNAVAILABLE, "memory could not be searched")
-        shown = [
-            record.id
-            for record in admitted
-            if not rests_on_recorded_external_content(record.provenance)
-        ]
-        outside = tuple(
-            record.id
-            for record in admitted
-            if rests_on_recorded_external_content(record.provenance)
-        )
+        shown = [record.id for record in admitted if not record.rests_on_outside_content]
+        outside = tuple(record.id for record in admitted if record.rests_on_outside_content)
         _log.info("look_up_searched", stage="acting", shown=len(shown), held=len(outside))
         output: dict[str, FrozenJson] = {RECORDS_KEY: list(shown)}
         return HeldByIds(output=output, outside=outside)
 
-    async def _banded(self, query: str, audience: TurnSupply) -> list[SemanticMemory]:
+    async def _banded(self, query: str, audience: TurnSupply) -> list[Memory]:
         """The facts kept: each band searched on its own, kept in precedence order.
 
         ADR-0072 §5: a band-neutral top-k lets a flood of derived beliefs displace an
@@ -478,19 +469,19 @@ class LookUps:
         Raises:
             MemoryStoreError: If the store cannot be searched.
         """
-        kept: dict[str, SemanticMemory] = {}
+        kept: dict[str, Memory] = {}
         for band in _BANDS:
             if len(kept) >= self._search_limit:
                 break
             found = await self._memory.search(
-                query, limit=self._search_limit, kinds=(MemoryKind.SEMANTIC,), bands=(band,)
+                query, limit=self._search_limit, kinds=(MemoryKind.MEMORY,), bands=(band,)
             )
             for record in admitted_to_understanding(audience, found.records):
                 if len(kept) >= self._search_limit:
                     break
                 # A record rewritten into a later band between the searches is kept
                 # once, where it was first admitted.
-                if isinstance(record, SemanticMemory) and record.id not in kept:
+                if isinstance(record, Memory) and record.id not in kept:
                     kept[record.id] = record
         return list(kept.values())
 

@@ -1092,33 +1092,19 @@ def rests_on_recorded_external_content(provenance: Provenance) -> bool:
 
 
 class MemoryKind(StrEnum):
-    """The category of a memory record (the discriminated-union tag)."""
+    """The category of a record (the discriminated-union tag).
+
+    Closed, **added to and never renamed**. The memory store holds two kinds, the
+    episode and the memory (ADR-0328 §2:1). ``SEMANTIC`` stays for the two values
+    that still name it and neither of which the store holds: a record minted as one
+    activation's supply (§2:4), and a recall item an episode stored before ADR-0328
+    (§2:5). The preference and procedural kinds left with it (§2:3, §10:5): after
+    §16's upgrade no stored record names either.
+    """
 
     EPISODIC = "episodic"
     SEMANTIC = "semantic"
-    PREFERENCE = "preference"
-    PROCEDURAL = "procedural"
-
-
-MAX_EVIDENCE_CITATIONS = 64
-"""How many citations a :class:`MemoryRecord` this system **installs** may carry.
-
-A fixed constant and deliberately **not** a ``Settings`` field (ADR-0086 §1): a
-bound a deployment can raise is not a bound, and ``export`` crosses deployments,
-so a record written under one ceiling and imported under a lower one would be a
-record the receiving system's own contract refuses for a reason its user cannot
-see and did not cause.
-
-**It is enforced at the ``MemoryWriter`` seam and nowhere on this type** — see
-:attr:`Provenance.evidence` for why a ``max_length`` here would be the wrong
-mechanism, and :meth:`~ai_assistant.core.protocols.MemoryWriter.ingest` for the
-obligation itself. The scope is a ``MemoryRecord`` *install*.
-
-64 was set comfortably above the observation batch's default of 20, a setting
-ADR-0285 §5 has since removed — more than three whole batches, so accumulation
-was real before the bound bit — and is small enough to keep the
-contract-mandated resolution cost of a listing page legible (ADR-0086 §1).
-"""
+    MEMORY = "memory"
 
 
 MAX_TOPIC_LABEL_LENGTH: Final[int] = 64
@@ -1126,8 +1112,8 @@ MAX_TOPIC_LABEL_LENGTH: Final[int] = 64
 
 A label is a filing word the owner reads in a listing, not a sentence: 64 is
 generous for the longest ordinary compound and short enough that a producer
-writing prose into the field is refused rather than accommodated. It is the same
-figure :data:`MAX_EVIDENCE_CITATIONS` takes for the adjacent kind of bound.
+writing prose into the field is refused rather than accommodated. It was the figure
+the retired evidence-citation bound took for the adjacent kind of bound.
 
 A fixed constant and deliberately **not** a ``Settings`` field (§4): the axis's
 whole value is that a record's topic set is small enough for the owner to read,
@@ -1151,8 +1137,8 @@ never truncated to the bound and never repaired (§4).
 MAX_TOPICS_PER_RECORD: Final[int] = 16
 """How many labels a :class:`MemoryBase` this system **installs** may carry (ADR-0213 §1).
 
-**It is enforced at the ``MemoryWriter`` seam and nowhere on this type**, which is
-:data:`MAX_EVIDENCE_CITATIONS`'s placement and is taken for that bound's reasons
+**It is enforced at the ``MemoryWriter`` seam and nowhere on this type**, which was
+the retired evidence-citation bound's placement, taken for that bound's reasons
 plus one of this field's own. ADR-0086 §2's test — "does it refuse something that
 already worked" — is answered *no* here, so a ``max_length`` on
 :attr:`MemoryBase.topics` would be available; what rules it out is the direction
@@ -1481,11 +1467,14 @@ class Attestation(BaseModel):
 
 
 class Provenance(BaseModel):
-    """Where a memory came from and how much it should be trusted.
+    """Where an episode or a minted record came from (ADR-0005 §2, ADR-0328 §2).
 
-    Attaching this to every record is what distinguishes user-asserted facts
-    (the profile) from inferred beliefs (the user model), and what stops one
-    unusual interaction from hardening into a permanent, wrong "preference".
+    **A memory carries none** (ADR-0328 §3:1, §10:1): its supports are its
+    provenance, its standing is computed from them (§6), and every field below that
+    a memory once carried is replaced as ADR-0328 §10's table says. What carries a
+    ``Provenance`` now is an episode, which keeps its envelope unchanged (§2:2), and
+    a record minted as one activation's supply, which keeps exactly what it carried
+    (§2:4). The paragraphs below describe the fields as those two carry them.
 
     **An ``attestation`` is present exactly when the band is ``ATTESTED``**
     (ADR-0092 §1), and the ``if and only if`` is deliberate in both directions.
@@ -1513,15 +1502,14 @@ class Provenance(BaseModel):
     ``max_length``** (ADR-0086 §2, §3). The order is what lets a fold displace by
     age; the absence of a length bound is the decision, not an omission. A
     validator runs on *deserialisation* as well as on construction, so a
-    ``max_length`` would take a belief a running deployment already holds above
-    :data:`MAX_EVIDENCE_CITATIONS` — perfectly encodable, perfectly readable,
-    merely large — and make ``get``, ``list_beliefs`` and ``export`` fail on it:
-    a strictly new failure invented on the read path, which is exactly what the
-    bound exists to make unreachable. The test is not "is it a validator on a
-    ``core`` type" but "does it refuse something that already worked":
-    :data:`EncodableText` does not, because a string with no UTF-8 encoding never
-    round-tripped, and a cardinality bound would. So the bound lives at the
-    ``MemoryWriter`` seam, on *installs*, and this type admits a longer tuple.
+    ``max_length`` would take a record a running deployment already holds above
+    the bound — perfectly encodable, perfectly readable, merely large — and make
+    ``get`` and ``export`` fail on it: a strictly new failure invented on the read
+    path. The test is not "is it a validator on a ``core`` type" but "does it refuse
+    something that already worked": :data:`EncodableText` does not, because a
+    string with no UTF-8 encoding never round-tripped, and a cardinality bound
+    would. The citation bound that once applied at the ``MemoryWriter`` seam bound a
+    memory's citations, and bounds nothing now (ADR-0328 §10:4).
 
     **``evidence_elided`` is an elision, not a tombstone, and the two are
     different facts** (ADR-0086 §4). ADR-0077 §6's tombstone says a cited episode
@@ -2232,8 +2220,14 @@ def _meet(sides: Sequence[Placement]) -> Placement:
     return Placement(reach=reach, set_by=setter, set_at=set_at)
 
 
-class MemoryBase(BaseModel):
-    """Fields shared by every memory record, regardless of kind.
+class RecordEnvelope(BaseModel):
+    """Fields shared by every record the memory store holds, regardless of kind.
+
+    The episode and the memory (ADR-0328 §2:1) both sit on this envelope. What a
+    record rests on is the one thing it does not carry: an episode and a record
+    minted as one activation's supply carry a :class:`Provenance`
+    (:class:`MemoryBase`), and a memory carries supports in its place (ADR-0328
+    §3:1).
 
     **``about_person`` is the subject axis** (ADR-0100): whom the belief is
     *about*, which ADR-0099 §2 rules orthogonal to whose hub this is. It is on the
@@ -2373,7 +2367,6 @@ class MemoryBase(BaseModel):
 
     id: EncodableText
     content: EncodableText = Field(description="Canonical text rendering, used for retrieval.")
-    provenance: Provenance
     score: float | None = Field(
         default=None,
         description="Relevance score, populated by retrieval; None when stored.",
@@ -2477,6 +2470,17 @@ class MemoryBase(BaseModel):
             **data,
             "placement": Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED),
         }
+
+
+class MemoryBase(RecordEnvelope):
+    """The envelope with a :class:`Provenance`: an episode, or a minted record.
+
+    An episode keeps every field it had (ADR-0328 §2:2), and a record minted as one
+    activation's supply keeps exactly what it carried (§2:4); both carry where they
+    came from as a :class:`Provenance`. A memory does not (§3:1).
+    """
+
+    provenance: Provenance
 
 
 # --- memory: how an episode's turn was captured (ADR-0221) --------------------
@@ -3909,8 +3913,10 @@ class RecallProvenance(StrEnum):
 #: record without a change to this type.
 RECALLED_ITEMS_MAX: Final[int] = 16
 
+#: ADR-0328 §2:5: a recall item names the memory kind, and one stored naming ``semantic``
+#: keeps meaning a record recalled before that decision.
 _RECALLABLE_KINDS: Final[frozenset[MemoryKind]] = frozenset(
-    {MemoryKind.EPISODIC, MemoryKind.SEMANTIC}
+    {MemoryKind.EPISODIC, MemoryKind.SEMANTIC, MemoryKind.MEMORY}
 )
 
 
@@ -3925,9 +3931,14 @@ class RecalledItem(BaseModel):
     ADR-0189 §1 requires of a projection shown to the owner.
 
     ``stories`` are the stories the item's episode belongs to directly, in the order
-    the story store returned them (ADR-0300 §7:2). A semantic item carries none,
-    enforced here. It defaults to empty, so a record written before it validates
-    unchanged (§12:1).
+    the story store returned them (ADR-0300 §7:2). An item that is not an episode
+    carries none, enforced here. It defaults to empty, so a record written before it
+    validates unchanged (§12:1).
+
+    For a recalled memory (ADR-0328 §2:5, §2:6) ``kind`` is ``memory``, ``standing``
+    its band, ``rests_on_recorded_external_content`` whether it rests on outside
+    content, and ``attestation`` :attr:`Memory.standing_attestation`. An item an
+    episode stored naming ``semantic`` stays as stored. The item gains no field.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3944,15 +3955,15 @@ class RecalledItem(BaseModel):
     @model_validator(mode="after")
     def _recallable_kind(self) -> Self:
         if self.kind not in _RECALLABLE_KINDS:
-            msg = "recall keeps episodic and semantic records only"
+            msg = "recall keeps episodes and memories only"
             raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
-    def _no_stories_on_a_semantic_item(self) -> Self:
+    def _no_stories_on_a_memory(self) -> Self:
         # ADR-0300 §7:2: only an episode belongs to a story.
-        if self.kind is MemoryKind.SEMANTIC and self.stories:
-            msg = "a semantic item carries no stories"
+        if self.kind is not MemoryKind.EPISODIC and self.stories:
+            msg = "only an episode's item carries stories"
             raise ValueError(msg)
         return self
 
@@ -4728,8 +4739,892 @@ class EpisodeProjection(BaseModel):
         return self.status is not None
 
 
+# --- memory: a statement resting on supports (ADR-0328 §§3-9) -----------------
+#
+# The memory record and everything it carries: its supports (§4), its operations
+# log (§5), its track record (§8) and its open questions (§9). Every value §7 names
+# is computed here, from the stored record, by a method or a property, so the three
+# stores, the writer and every surface compute one rule in one place (ADR-0016 §2);
+# none of them is a field, so none is ever stored as a judgment (§7:1).
+
+
+class SupportOrigin(StrEnum):
+    """What a support points at, as code classifies it (ADR-0328 §4:2).
+
+    Closed, **added to and never renamed** (§5:9's rule for a writer, applied to the
+    origin vocabulary for the same reason): a later decision admitting a further part
+    adds an origin beside these. Set by code from the part a support points at and the
+    episode's record, stored on the support, and never set or changed by a model's
+    output (§4:2). Each origin ranks at one standing and is or is not outside content
+    (§4's origin table, :func:`origin_standing`, :func:`origin_is_outside`).
+    """
+
+    USER_MESSAGE = "user_message"
+    """The input or one of its messages, from the user, not forwarded."""
+    OUTSIDE_INPUT = "outside_input"
+    """The input where its origin is outside, or a message carrying ``forwarded_from``."""
+    CONFIRMATION = "confirmation"
+    """A yes to a question part that showed the statement (§4:5, §4:6)."""
+    EVIDENCE = "evidence"
+    """An evidence item of one of the activation's digests."""
+    ASSISTANT_MESSAGE = "assistant_message"
+    """A round's message, the activation not having read outside content."""
+    ASSISTANT_MESSAGE_OVER_OUTSIDE = "assistant_message_over_outside"
+    """A round's message, the activation having read outside content."""
+    REMEMBERED = "remembered"
+    """A remember call, its activation not having read outside content (§13:2)."""
+    REMEMBERED_OVER_OUTSIDE = "remembered_over_outside"
+    """A remember call, its activation having read outside content (§13:2)."""
+    LEGACY = "legacy"
+    """A record stored before ADR-0328 that did not rest on recorded external content."""
+    LEGACY_OUTSIDE = "legacy_outside"
+    """A record stored before ADR-0328 that did (§16:4)."""
+
+
+class MemoryStanding(StrEnum):
+    """A memory's standing, highest first (ADR-0328 §6:1).
+
+    Computed by code from the stored supports, a lookup and a maximum, and never set
+    (§6:3). :class:`BeliefBand` groups them (§6:4): ``ASSERTED`` is confirmed and
+    said, ``ATTESTED`` is source, ``DERIVED`` is inference.
+    """
+
+    CONFIRMED = "confirmed"
+    """You confirmed this wording."""
+    SAID = "said"
+    """You said it."""
+    SOURCE = "source"
+    """From a source."""
+    INFERENCE = "inference"
+    """Inference."""
+
+
+#: §6:1's order, as ranks: higher is higher standing.
+_STANDING_RANK: Final[dict[MemoryStanding, int]] = {
+    MemoryStanding.CONFIRMED: 3,
+    MemoryStanding.SAID: 2,
+    MemoryStanding.SOURCE: 1,
+    MemoryStanding.INFERENCE: 0,
+}
+
+#: §4's origin table: the standing each origin ranks at.
+_ORIGIN_STANDING: Final[dict[SupportOrigin, MemoryStanding]] = {
+    SupportOrigin.USER_MESSAGE: MemoryStanding.SAID,
+    SupportOrigin.OUTSIDE_INPUT: MemoryStanding.SOURCE,
+    SupportOrigin.CONFIRMATION: MemoryStanding.CONFIRMED,
+    SupportOrigin.EVIDENCE: MemoryStanding.SOURCE,
+    SupportOrigin.ASSISTANT_MESSAGE: MemoryStanding.SOURCE,
+    SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE: MemoryStanding.SOURCE,
+    SupportOrigin.REMEMBERED: MemoryStanding.INFERENCE,
+    SupportOrigin.REMEMBERED_OVER_OUTSIDE: MemoryStanding.INFERENCE,
+    SupportOrigin.LEGACY: MemoryStanding.INFERENCE,
+    SupportOrigin.LEGACY_OUTSIDE: MemoryStanding.INFERENCE,
+}
+
+#: §4's origin table: the origins that are outside content.
+_OUTSIDE_ORIGINS: Final[frozenset[SupportOrigin]] = frozenset(
+    {
+        SupportOrigin.OUTSIDE_INPUT,
+        SupportOrigin.EVIDENCE,
+        SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE,
+        SupportOrigin.REMEMBERED_OVER_OUTSIDE,
+        SupportOrigin.LEGACY_OUTSIDE,
+    }
+)
+
+#: §4:13: the origins that may carry source details.
+_SOURCE_DETAIL_ORIGINS: Final[frozenset[SupportOrigin]] = frozenset(
+    {SupportOrigin.OUTSIDE_INPUT, SupportOrigin.EVIDENCE, SupportOrigin.LEGACY_OUTSIDE}
+)
+
+#: §4:11: the origins code leaves not judged.
+_UNJUDGED_ORIGINS: Final[frozenset[SupportOrigin]] = frozenset(
+    {
+        SupportOrigin.REMEMBERED,
+        SupportOrigin.REMEMBERED_OVER_OUTSIDE,
+        SupportOrigin.LEGACY,
+        SupportOrigin.LEGACY_OUTSIDE,
+    }
+)
+
+
+def origin_standing(origin: SupportOrigin) -> MemoryStanding:
+    """The standing ADR-0328 §4's origin table ranks ``origin`` at.
+
+    Args:
+        origin: A support's origin.
+
+    Returns:
+        Its standing.
+    """
+    return _ORIGIN_STANDING[origin]
+
+
+def origin_is_outside(origin: SupportOrigin) -> bool:
+    """Whether ADR-0328 §4's origin table marks ``origin`` as outside content.
+
+    Args:
+        origin: A support's origin.
+
+    Returns:
+        ``True`` exactly for the outside origins.
+    """
+    return origin in _OUTSIDE_ORIGINS
+
+
+def standing_rank(standing: MemoryStanding) -> int:
+    """``standing``'s place in ADR-0328 §6:1's order: higher ranks higher.
+
+    Compared, never shown: what a surface shows is the standing in plain words
+    (§15:4). A writer compares two ranks to refuse a lower standing overriding a
+    higher one (§6:5).
+
+    Args:
+        standing: A standing.
+
+    Returns:
+        Its rank.
+    """
+    return _STANDING_RANK[standing]
+
+
+def standing_band(standing: MemoryStanding) -> BeliefBand:
+    """The band ``standing`` is grouped in (ADR-0328 §6:4).
+
+    Args:
+        standing: A memory's standing.
+
+    Returns:
+        ``ASSERTED`` for confirmed and said, ``ATTESTED`` for source, ``DERIVED`` for
+        inference.
+    """
+    match standing:
+        case MemoryStanding.CONFIRMED | MemoryStanding.SAID:
+            return BeliefBand.ASSERTED
+        case MemoryStanding.SOURCE:
+            return BeliefBand.ATTESTED
+        case MemoryStanding.INFERENCE:
+            return BeliefBand.DERIVED
+        case _:  # pragma: no cover - exhaustive
+            assert_never(standing)
+
+
+class SupportDirection(StrEnum):
+    """Whether a support is for the memory or against it (ADR-0328 §4)."""
+
+    FOR = "for"
+    AGAINST = "against"
+
+
+class ReadingCertainty(StrEnum):
+    """How sure whoever read a part is of the reading, surest first (ADR-0328 §4).
+
+    Not judged is no member: a support that carries none carries ``None``.
+    """
+
+    SURE = "sure"
+    LIKELY = "likely"
+    UNSURE = "unsure"
+
+
+_CERTAINTY_RANK: Final[dict[ReadingCertainty, int]] = {
+    ReadingCertainty.SURE: 2,
+    ReadingCertainty.LIKELY: 1,
+    ReadingCertainty.UNSURE: 0,
+}
+
+
+class MemoryWriterName(StrEnum):
+    """The writer that added a support, wrote an operation or recorded an entry.
+
+    A closed set, **added to and never renamed** (ADR-0328 §5:9). The observer's
+    decision adds its own.
+    """
+
+    REMEMBER = "remember"
+    """The remember capability, in ADR-0328 §13's interim."""
+    MIGRATION = "migration"
+    """§16's upgrade of a record stored before ADR-0328."""
+
+
+class MemoryStatus(StrEnum):
+    """Whether a memory holds, ended, or was wrong (ADR-0328 §3:4, §5:7)."""
+
+    CURRENT = "current"
+    """Created, and neither ended nor marked wrong."""
+    ENDED = "ended"
+    """It was true, and is no longer: an end or a replace."""
+    WRONG = "wrong"
+    """It was never true: a mark wrong. Kept for audit."""
+
+
+_PART_POSITION_BOUND: Final = 2**31
+
+
+class InputPart(BaseModel):
+    """The input of an episode, or one of its trigger's recorded messages (ADR-0328 §4).
+
+    ``message`` is the position of one recorded message among the trigger's, or
+    ``None`` for the input as a whole.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    part: Literal["input"] = "input"
+    episode: EncodableText
+    message: int | None = Field(default=None, strict=True, ge=0, lt=_PART_POSITION_BOUND)
+
+
+class RoundMessagePart(BaseModel):
+    """The message one planning round of an episode wrote (ADR-0328 §4)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    part: Literal["round_message"] = "round_message"
+    episode: EncodableText
+    round: Identifier
+
+
+class EvidenceItemPart(BaseModel):
+    """One evidence item of one of an episode's digests, by positions (ADR-0328 §4)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    part: Literal["evidence_item"] = "evidence_item"
+    episode: EncodableText
+    digest: int = Field(strict=True, ge=0, lt=_PART_POSITION_BOUND)
+    item: int = Field(strict=True, ge=0, lt=_PART_POSITION_BOUND)
+
+
+class ConfirmationPart(BaseModel):
+    """A yes, and the question part it approved (ADR-0328 §4, §4:5).
+
+    ``episode`` is the yes's episode; ``asking_activation`` the activation that asked;
+    ``question`` the round whose message asked and the part approved.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    part: Literal["confirmation"] = "confirmation"
+    episode: EncodableText
+    asking_activation: Identifier
+    question: QuestionPart
+
+
+class RememberCallPart(BaseModel):
+    """A remember call, by its episode and its effect record (ADR-0328 §4, §13:2).
+
+    ``effect`` is the id of the effect record the call is claimed under (ADR-0306
+    §5:3). Only the remember capability points here.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    part: Literal["remember_call"] = "remember_call"
+    episode: EncodableText
+    effect: Identifier
+
+
+class LegacyPart(BaseModel):
+    """A record stored before ADR-0328, by its own id (ADR-0328 §4, §16:4)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    part: Literal["legacy"] = "legacy"
+    record: EncodableText
+
+
+SupportPart = Annotated[
+    InputPart
+    | RoundMessagePart
+    | EvidenceItemPart
+    | ConfirmationPart
+    | RememberCallPart
+    | LegacyPart,
+    Field(discriminator="part"),
+]
+"""The part one support points at (ADR-0328 §4's part table), tagged by ``part``.
+
+A frozen value, compared and hashed by its fields: a support is unique by its memory
+and the part it points at (§4:8), and an operation names the support it cites by
+that part (§5:1).
+"""
+
+#: §4's two tables joined: the origins a support pointing at each part may take.
+_PART_ORIGINS: Final[dict[str, frozenset[SupportOrigin]]] = {
+    "input": frozenset({SupportOrigin.USER_MESSAGE, SupportOrigin.OUTSIDE_INPUT}),
+    "round_message": frozenset(
+        {SupportOrigin.ASSISTANT_MESSAGE, SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE}
+    ),
+    "evidence_item": frozenset({SupportOrigin.EVIDENCE}),
+    "confirmation": frozenset({SupportOrigin.CONFIRMATION}),
+    "remember_call": frozenset({SupportOrigin.REMEMBERED, SupportOrigin.REMEMBERED_OVER_OUTSIDE}),
+    "legacy": frozenset({SupportOrigin.LEGACY, SupportOrigin.LEGACY_OUTSIDE}),
+}
+
+
+def part_episode(part: SupportPart) -> str | None:
+    """The episode ``part`` points into, or ``None`` for a legacy record (ADR-0328 §4).
+
+    Args:
+        part: A support's part.
+
+    Returns:
+        The episode's id exactly as held, or ``None``.
+    """
+    return None if isinstance(part, LegacyPart) else part.episode
+
+
+def _support_origin_fault(support: MemorySupport) -> str | None:
+    """Which of §4's rules on the origin and the reading ``support`` breaks, if any."""
+    origin = support.origin
+    if origin not in _PART_ORIGINS[support.points_at.part]:
+        return f"a support pointing at a {support.points_at.part} part cannot take {origin}"
+    if origin is SupportOrigin.CONFIRMATION and support.how_sure is not ReadingCertainty.SURE:
+        return "a confirmation support is sure (ADR-0328 §4:11)"
+    if origin in _UNJUDGED_ORIGINS and support.how_sure is not None:
+        return f"a {origin} support is not judged (ADR-0328 §4:11)"
+    if support.source_details is not None and origin not in _SOURCE_DETAIL_ORIGINS:
+        return f"a {origin} support carries no source details (ADR-0328 §4:13)"
+    return None
+
+
+class MemorySupport(BaseModel):
+    """One piece of evidence about a memory, kept on the memory (ADR-0328 §4).
+
+    It points at one part of one episode, or at a record stored before ADR-0328, and
+    copies nothing of it (§4:1); the one exception is a legacy support, which carries
+    the record it points at whole, as stored (§16:4), because nothing else holds it.
+
+    Attributes:
+        points_at: The part (§4's part table).
+        origin: Set by code from the part and the episode's record (§4:2).
+        direction: ``for`` or ``against``.
+        note: In words, how the part relates to the claim. No relation categories.
+        backs_as_worded: Whether the part backs the claim as the wording states it.
+            Never true of an ``against`` support (§4:10).
+        how_sure: How sure whoever read the part is of the reading, or ``None`` where
+            it was not judged (§4:11).
+        when: When the part happened, on this system's clock, from the episode's
+            record (§4:12), or ``None`` where that is unknown.
+        about_when: The time the part refers to, where it refers to one.
+        source_details: For a source, which source and when it said so (§4:13).
+        added_at: When this support was added.
+        added_by: Which writer added it (§5:9).
+        carries: A legacy support's record, whole, as it was stored (§16:4); ``None``
+            on every other support.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    points_at: SupportPart
+    origin: SupportOrigin
+    direction: SupportDirection
+    note: EncodableText = Field(default="", validate_default=True)
+    backs_as_worded: bool
+    how_sure: ReadingCertainty | None = None
+    when: UtcInstant | None = None
+    about_when: UtcInstant | None = None
+    source_details: Attestation | None = None
+    added_at: UtcInstant
+    added_by: MemoryWriterName
+    carries: FrozenJsonMapping | None = None
+
+    @model_validator(mode="after")
+    def _well_formed(self) -> Self:
+        fault = _support_origin_fault(self)
+        if fault is not None:
+            raise ValueError(fault)
+        if self.direction is SupportDirection.AGAINST and self.backs_as_worded:
+            msg = "an against support never backs the claim as worded (ADR-0328 §4:10)"
+            raise ValueError(msg)
+        if (self.carries is not None) != isinstance(self.points_at, LegacyPart):
+            msg = "a support carries a record exactly when it is a legacy support (ADR-0328 §16:4)"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def outside(self) -> bool:
+        """Whether its origin is outside content (§4's origin table)."""
+        return origin_is_outside(self.origin)
+
+    @property
+    def confirming_instant(self) -> datetime | None:
+        """Its confirming instant: its source details' ``reported_at``, else its ``when`` (§7:3)."""
+        if self.source_details is not None:
+            return self.source_details.reported_at
+        return self.when
+
+
+class MemoryOperationKind(StrEnum):
+    """One kind of change to a memory (ADR-0328 §5's table).
+
+    Closed, **added to and never renamed**.
+    """
+
+    CREATE = "create"
+    ADD_SUPPORT = "add_support"
+    END = "end"
+    MARK_WRONG = "mark_wrong"
+    REPLACE = "replace"
+    STOP_COUNTING = "stop_counting"
+    RAISE_QUESTION = "raise_question"
+    RESOLVE_QUESTION = "resolve_question"
+
+
+#: The operations that retire a memory, closing its validity (§5).
+RETIRING_OPERATIONS: Final[frozenset[MemoryOperationKind]] = frozenset(
+    {MemoryOperationKind.END, MemoryOperationKind.MARK_WRONG, MemoryOperationKind.REPLACE}
+)
+
+
+def _operation_fault(operation: MemoryOperation) -> str | None:
+    """Which of §5's per-kind field rules ``operation`` breaks, if any."""
+    kind = operation.kind
+    questioning = kind in {MemoryOperationKind.RAISE_QUESTION, MemoryOperationKind.RESOLVE_QUESTION}
+    clauses: tuple[tuple[bool, str], ...] = (
+        (
+            bool(operation.replaces) and kind is not MemoryOperationKind.CREATE,
+            "only a create names the memories it replaces",
+        ),
+        (
+            operation.successor is not None and kind not in RETIRING_OPERATIONS,
+            "only an end, a mark wrong or a replace names a successor",
+        ),
+        (
+            kind is MemoryOperationKind.REPLACE and operation.successor is None,
+            "a replace names the narrower memory that replaces it",
+        ),
+        (
+            (operation.stops is not None) != (kind is MemoryOperationKind.STOP_COUNTING),
+            "a stop counting, and only it, names the support it stops",
+        ),
+        (
+            (operation.question is not None) != questioning,
+            "a raise question or a resolve question, and only they, name a question",
+        ),
+        (
+            operation.stops is not None and operation.stops == operation.cites,
+            "a stop counting cites the support that explains another away, never that one",
+        ),
+    )
+    return next((fault for broken, fault in clauses if broken), None)
+
+
+class MemoryOperation(BaseModel):
+    """One change to a memory, as its log records it (ADR-0328 §5:1).
+
+    Attributes:
+        kind: Which change.
+        cites: The part of the support that caused it, which the memory carries once
+            the operation is applied (§5:3).
+        note: In words, why.
+        at: The instant it was written.
+        by: The writer that wrote it (§5:9).
+        replaces: A create's memories it replaces (§5:6); empty on every other kind.
+        successor: The memory that succeeds this one, on an end or a mark wrong that
+            names one, and on every replace (§5).
+        stops: A stop counting's support, by its part (§5:8).
+        question: A raise question's or a resolve question's question, by its id.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: MemoryOperationKind
+    cites: SupportPart
+    note: EncodableText = Field(default="", validate_default=True)
+    at: UtcInstant
+    by: MemoryWriterName
+    replaces: tuple[EncodableText, ...] = ()
+    successor: EncodableText | None = None
+    stops: SupportPart | None = None
+    question: Identifier | None = None
+
+    @model_validator(mode="after")
+    def _fields_follow_the_kind(self) -> Self:
+        fault = _operation_fault(self)
+        if fault is not None:
+            msg = f"{fault} (ADR-0328 §5)"
+            raise ValueError(msg)
+        return self
+
+
+class OpenQuestionKind(StrEnum):
+    """What an open question is about (ADR-0328 §9:1). Closed, added to, never renamed."""
+
+    CONFLICT = "conflict"
+    POLICY_ASK = "policy_ask"
+    RECHECK = "recheck"
+
+
+class OpenQuestion(BaseModel):
+    """A question about a memory, living on it (ADR-0328 §9:1).
+
+    Raised and resolved only by an operation (§9:2), and kept once resolved.
+
+    Attributes:
+        id: The question's id, unique on its memory.
+        kind: What it is about.
+        asks: What it asks, in words.
+        rests_on: The memory's supports it rests on, by their parts (at least one).
+        raised_at: When it was raised.
+        raised_by: Which writer raised it.
+        resolved_at: When it was resolved, or ``None`` while it is open.
+        resolved_by: The support that resolved it, by its part.
+        resolution: A note on the resolution.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: Identifier
+    kind: OpenQuestionKind
+    asks: NonBlankEncodableText
+    rests_on: tuple[SupportPart, ...] = Field(min_length=1)
+    raised_at: UtcInstant
+    raised_by: MemoryWriterName
+    resolved_at: UtcInstant | None = None
+    resolved_by: SupportPart | None = None
+    resolution: EncodableText | None = None
+
+    @model_validator(mode="after")
+    def _resolved_whole(self) -> Self:
+        parts = (self.resolved_at, self.resolved_by, self.resolution)
+        if any(one is None for one in parts) and any(one is not None for one in parts):
+            msg = "a resolved question carries when, the support that resolved it, and a note"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def resolved(self) -> bool:
+        """Whether the question has been resolved."""
+        return self.resolved_at is not None
+
+
+class TrackRecordEntry(BaseModel):
+    """One use of a memory that shaped something the user acted on (ADR-0328 §8:1).
+
+    Unique on its memory by its episode (§8:3). Who records one is the observer's
+    decision's, and nothing records one before it (§8:5).
+
+    Attributes:
+        episode: The episode of the activation that relied on the memory.
+        relied_at: When it relied on it.
+        held_up: Whether the reliance held up (``True``) or let the user down.
+        note: In words.
+        recorded_at: When the entry was recorded.
+        recorded_by: Which writer recorded it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    episode: EncodableText
+    relied_at: UtcInstant
+    held_up: bool
+    note: EncodableText = Field(default="", validate_default=True)
+    recorded_at: UtcInstant
+    recorded_by: MemoryWriterName
+
+
+class EvidenceSummary(BaseModel):
+    """A memory's evidence summary (ADR-0328 §7:2).
+
+    Attributes:
+        supporting: The number of counted ``for`` supports.
+        against: The number of counted ``against`` supports.
+        episodes: The number of distinct episodes those supports point at.
+        latest: The latest ``when`` among them, or ``None`` where none carries one.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    supporting: int = Field(strict=True, ge=0)
+    against: int = Field(strict=True, ge=0)
+    episodes: int = Field(strict=True, ge=0)
+    latest: UtcInstant | None = None
+
+
+class TrackRecordSummary(BaseModel):
+    """A memory's track record, counted (ADR-0328 §15:1).
+
+    Attributes:
+        relied_on: How many entries it holds.
+        held_up: How many held up.
+        let_down: How many let the user down.
+        last_used: The latest ``relied_at``, or ``None`` where it holds none.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    relied_on: int = Field(strict=True, ge=0)
+    held_up: int = Field(strict=True, ge=0)
+    let_down: int = Field(strict=True, ge=0)
+    last_used: UtcInstant | None = None
+
+
+def _status_after(log: Sequence[MemoryOperation]) -> MemoryStatus:
+    """The status ADR-0328 §5:7 gives a memory whose log is ``log``.
+
+    Raises:
+        ValueError: If the log makes a transition §5:7 does not allow.
+    """
+    status = MemoryStatus.CURRENT
+    for operation in log[1:]:
+        if operation.kind in {MemoryOperationKind.END, MemoryOperationKind.REPLACE}:
+            if status is not MemoryStatus.CURRENT:
+                msg = "only a current memory is ended or replaced (ADR-0328 §5:7)"
+                raise ValueError(msg)
+            status = MemoryStatus.ENDED
+        elif operation.kind is MemoryOperationKind.MARK_WRONG:
+            if status is MemoryStatus.WRONG:
+                msg = "a memory already wrong is not marked wrong again (ADR-0328 §5:7)"
+                raise ValueError(msg)
+            status = MemoryStatus.WRONG
+    return status
+
+
+class Memory(RecordEnvelope):
+    """One statement in fixed wording, resting on supports (ADR-0328 §3).
+
+    ``content`` is the wording, the field the store embeds and searches (§3's table);
+    no operation changes it (§3:2), so a different wording is a different memory. It
+    carries no :class:`Provenance` (§3:1): its supports are its provenance, and every
+    value about it — its standing, its band, its evidence summary, as of, learned, its
+    reading certainty, whether it rests on outside content, its transaction time,
+    whether it is legacy and whether it is unbacked — is computed from the stored
+    record by a method or a property here and never stored (§7:1).
+
+    The validators hold what ADR-0328 makes a memory's shape: at least one support,
+    each unique by its part (§3:3, §4:8); a log beginning with exactly one create that
+    cites a ``for`` support backing it as worded (§3:3); every operation citing a
+    support the memory carries (§5:3); no support stopped twice (§5:8); a status
+    following from the log and a closed window where it is not ``current`` (§3:4,
+    §5:7); a track record unique by episode (§8:3); and open questions raised and
+    resolved only by operations (§9:2).
+    """
+
+    kind: Literal["memory"] = "memory"
+    supports: tuple[MemorySupport, ...] = Field(min_length=1)
+    operations: tuple[MemoryOperation, ...] = Field(min_length=1)
+    track_record: tuple[TrackRecordEntry, ...] = ()
+    open_questions: tuple[OpenQuestion, ...] = ()
+    status: MemoryStatus = MemoryStatus.CURRENT
+
+    @model_validator(mode="after")
+    def _supports_and_log_agree(self) -> Self:
+        carried = [support.points_at for support in self.supports]
+        if len(set(carried)) != len(carried):
+            msg = "a memory carries one support per part (ADR-0328 §4:8)"
+            raise ValueError(msg)
+        held = set(carried)
+        first, *rest = self.operations
+        if first.kind is not MemoryOperationKind.CREATE or any(
+            operation.kind is MemoryOperationKind.CREATE for operation in rest
+        ):
+            msg = "a memory's log begins with exactly one create (ADR-0328 §3:3)"
+            raise ValueError(msg)
+        created = self.support_at(first.cites)
+        if (
+            created is None
+            or created.direction is not SupportDirection.FOR
+            or not created.backs_as_worded
+        ):
+            msg = "a create cites a for support that backs the memory as worded (ADR-0328 §3:3)"
+            raise ValueError(msg)
+        stopped = [op.stops for op in self.operations if op.stops is not None]
+        if any(op.cites not in held for op in self.operations) or not held.issuperset(stopped):
+            msg = "every operation cites a support the memory carries (ADR-0328 §5:3)"
+            raise ValueError(msg)
+        if len(set(stopped)) != len(stopped):
+            msg = "a support is never stopped from counting twice (ADR-0328 §5:8)"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _status_follows_the_log(self) -> Self:
+        if _status_after(self.operations) is not self.status:
+            msg = "a memory's status follows from its operations (ADR-0328 §3:4, §5:7)"
+            raise ValueError(msg)
+        if self.status is not MemoryStatus.CURRENT and self.validity.valid_until is None:
+            msg = "a memory that is not current has a set validity end (ADR-0328 §3:4)"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _record_and_questions_agree(self) -> Self:
+        episodes = [entry.episode for entry in self.track_record]
+        if len(set(episodes)) != len(episodes):
+            msg = "a track-record entry is unique by its episode (ADR-0328 §8:3)"
+            raise ValueError(msg)
+        ids = [question.id for question in self.open_questions]
+        if len(set(ids)) != len(ids):
+            msg = "an open question's id is unique on its memory (ADR-0328 §9:1)"
+            raise ValueError(msg)
+        held = {support.points_at for support in self.supports}
+        raised = {
+            op.question for op in self.operations if op.kind is MemoryOperationKind.RAISE_QUESTION
+        }
+        resolved = {
+            op.question for op in self.operations if op.kind is MemoryOperationKind.RESOLVE_QUESTION
+        }
+        for question in self.open_questions:
+            if not held.issuperset(question.rests_on) or question.id not in raised:
+                msg = "an open question is raised by an operation, on supports carried (§9:1)"
+                raise ValueError(msg)
+            if question.resolved != (question.id in resolved) or (
+                question.resolved_by is not None and question.resolved_by not in held
+            ):
+                msg = "an open question is resolved only by an operation (ADR-0328 §9:2)"
+                raise ValueError(msg)
+        if not set(ids).issuperset(raised | resolved):
+            msg = "an operation names a question the memory carries (ADR-0328 §9:2)"
+            raise ValueError(msg)
+        return self
+
+    def support_at(self, part: SupportPart) -> MemorySupport | None:
+        """The support the memory carries at ``part``, or ``None`` (§4:8).
+
+        Args:
+            part: A part.
+
+        Returns:
+            The support, or ``None`` where the memory carries none there.
+        """
+        return next((support for support in self.supports if support.points_at == part), None)
+
+    @property
+    def stopped(self) -> frozenset[SupportPart]:
+        """The parts of the supports stopped from counting (§5:8)."""
+        return frozenset(op.stops for op in self.operations if op.stops is not None)
+
+    @property
+    def counted_supports(self) -> tuple[MemorySupport, ...]:
+        """The supports that count: every one not stopped (§5:8)."""
+        stopped = self.stopped
+        return tuple(support for support in self.supports if support.points_at not in stopped)
+
+    @property
+    def backing_supports(self) -> tuple[MemorySupport, ...]:
+        """The counted ``for`` supports that back the memory as worded (§6:2, §7:5)."""
+        return tuple(
+            support
+            for support in self.counted_supports
+            if support.direction is SupportDirection.FOR and support.backs_as_worded
+        )
+
+    @property
+    def standing(self) -> MemoryStanding:
+        """The memory's standing: a lookup and a maximum (§6:2, §6:3)."""
+        return max(
+            (origin_standing(support.origin) for support in self.backing_supports),
+            key=standing_rank,
+            default=MemoryStanding.INFERENCE,
+        )
+
+    @property
+    def band(self) -> BeliefBand:
+        """The band its standing is grouped in (§6:4)."""
+        return standing_band(self.standing)
+
+    @property
+    def evidence_summary(self) -> EvidenceSummary:
+        """Its evidence summary (§7:2)."""
+        counted = self.counted_supports
+        whens = [support.when for support in counted if support.when is not None]
+        episodes = {part_episode(support.points_at) for support in counted} - {None}
+        return EvidenceSummary(
+            supporting=sum(1 for one in counted if one.direction is SupportDirection.FOR),
+            against=sum(1 for one in counted if one.direction is SupportDirection.AGAINST),
+            episodes=len(episodes),
+            latest=max(whens, default=None),
+        )
+
+    def as_of(self, now: datetime) -> datetime | None:
+        """The latest usable confirming instant among the counted ``for`` supports (§7:3).
+
+        An instant is usable where it is set and not in the reader's future (ADR-0103
+        §6); where none is usable, as of is unknown, which is neither fresh nor stale.
+
+        Args:
+            now: The reader's instant.
+
+        Returns:
+            The instant, or ``None`` for unknown.
+        """
+        usable = [
+            instant
+            for support in self.counted_supports
+            if support.direction is SupportDirection.FOR
+            and (instant := support.confirming_instant) is not None
+            and instant <= now
+        ]
+        return max(usable, default=None)
+
+    @property
+    def learned(self) -> datetime | None:
+        """The earliest ``when`` among all its supports, or ``None`` (§7:4)."""
+        return min((one.when for one in self.supports if one.when is not None), default=None)
+
+    @property
+    def reading_certainty(self) -> ReadingCertainty | None:
+        """The best how sure among its backing supports, or ``None`` (§7:5)."""
+        judged = [one.how_sure for one in self.backing_supports if one.how_sure is not None]
+        return max(judged, key=_CERTAINTY_RANK.__getitem__, default=None)
+
+    @property
+    def rests_on_outside_content(self) -> bool:
+        """Whether its band is not ``ASSERTED`` and any support, counted or not, is outside (§7:6).
+
+        What was recorded, and never that the memory was uninfluenced by outside
+        content (§7:7).
+        """
+        return self.band is not BeliefBand.ASSERTED and any(one.outside for one in self.supports)
+
+    @property
+    def transaction_time(self) -> datetime:
+        """The latest instant among its operations (§7:8, ADR-0045 §3)."""
+        return max(operation.at for operation in self.operations)
+
+    @property
+    def is_legacy(self) -> bool:
+        """Whether every support is a legacy one (§7:9)."""
+        return all(
+            one.origin in {SupportOrigin.LEGACY, SupportOrigin.LEGACY_OUTSIDE}
+            for one in self.supports
+        )
+
+    @property
+    def is_unbacked(self) -> bool:
+        """Whether no counted ``for`` support backs it as worded (§7:10)."""
+        return not self.backing_supports
+
+    @property
+    def standing_attestation(self) -> Attestation | None:
+        """The source details a recalled memory's standing rests on (§2:6).
+
+        Those of its latest backing support whose origin ranks at source, where its
+        standing is from a source, and ``None`` otherwise. Latest by ``when``, an unknown
+        ``when`` earliest, and by position among equals.
+        """
+        if self.standing is not MemoryStanding.SOURCE:
+            return None
+        sourced = [
+            one
+            for one in self.backing_supports
+            if origin_standing(one.origin) is MemoryStanding.SOURCE and one.source_details
+        ]
+        if not sourced:
+            return None
+        floor = datetime.min.replace(tzinfo=UTC)
+        latest = max(enumerate(sourced), key=lambda pair: (pair[1].when or floor, pair[0]))
+        return latest[1].source_details
+
+    @property
+    def track_summary(self) -> TrackRecordSummary:
+        """Its track record's counts and last use (§15:1)."""
+        held = sum(1 for entry in self.track_record if entry.held_up)
+        return TrackRecordSummary(
+            relied_on=len(self.track_record),
+            held_up=held,
+            let_down=len(self.track_record) - held,
+            last_used=max((entry.relied_at for entry in self.track_record), default=None),
+        )
+
+
 class SemanticMemory(MemoryBase):
-    """A durable fact about the user or their world."""
+    """A fact minted as one activation's supply, never stored (ADR-0328 §2:4).
+
+    What a search, a forecast, a fetch or a reader mints: ``EXTERNAL``-sourced, with an
+    :class:`Attestation`. It keeps exactly the fields it carried before ADR-0328, and no
+    store holds one.
+    """
 
     kind: Literal["semantic"] = "semantic"
     fact: EncodableText
@@ -4739,28 +5634,82 @@ class SemanticMemory(MemoryBase):
     )
 
 
-class PreferenceMemory(MemoryBase):
-    """A user preference, optionally scoped to a context."""
+MemoryRecord = Annotated[EpisodicMemory | Memory, Field(discriminator="kind")]
+"""A record the memory store holds: an episode or a memory, tagged by ``kind`` (ADR-0328 §2:1)."""
 
-    kind: Literal["preference"] = "preference"
-    preference: EncodableText
-    context: EncodableText | None = None
-    strength: float = Field(default=0.5, ge=0.0, le=1.0)
+SuppliedRecord = EpisodicMemory | Memory | SemanticMemory
+"""A record an activation may hold: one the store holds, or one minted as its supply.
 
-
-class ProceduralMemory(MemoryBase):
-    """A learned workflow: how the user likes a situation handled."""
-
-    kind: Literal["procedural"] = "procedural"
-    situation: EncodableText
-    steps: tuple[EncodableText, ...] = Field(default=())
+ADR-0328 §2:4 keeps the two apart, and ADR-0204 §2's placement is read over both: a
+minted record by its ``EXTERNAL`` provenance, a memory by its band (§12).
+"""
 
 
-MemoryRecord = Annotated[
-    EpisodicMemory | SemanticMemory | PreferenceMemory | ProceduralMemory,
-    Field(discriminator="kind"),
-]
-"""A unit of long-term memory: one of the four typed kinds, tagged by ``kind``."""
+def record_band(record: SuppliedRecord) -> BeliefBand:
+    """The band a record is in: a memory's (ADR-0328 §6:4), any other record's by its source.
+
+    One rule, in ``core``, so that every store filters on the band identically
+    (ADR-0328 §11:2, ADR-0016 §2).
+
+    Args:
+        record: A stored or minted record.
+
+    Returns:
+        Its band.
+    """
+    if isinstance(record, Memory):
+        return record.band
+    return band_of(record.provenance.source)
+
+
+def record_transaction_time(record: MemoryRecord) -> datetime:
+    """When the store last revised a record (ADR-0045 §3).
+
+    A memory's transaction time is its latest operation's instant (ADR-0328 §7:8); an
+    episode's is its provenance's ``last_updated``.
+
+    Args:
+        record: A stored record.
+
+    Returns:
+        The instant.
+    """
+    if isinstance(record, Memory):
+        return record.transaction_time
+    return record.provenance.last_updated
+
+
+def record_rests_on_outside_content(record: SuppliedRecord) -> bool:
+    """Whether a stored record rests on recorded outside content (ADR-0328 §7:6, §12).
+
+    A memory's computed value; an episode's
+    :func:`rests_on_recorded_external_content`.
+
+    Args:
+        record: A stored or minted record.
+
+    Returns:
+        The value.
+    """
+    if isinstance(record, Memory):
+        return record.rests_on_outside_content
+    return rests_on_recorded_external_content(record.provenance)
+
+
+def record_attestation(record: SuppliedRecord) -> Attestation | None:
+    """The source details a stored record's band rests on (ADR-0328 §2:6, §12).
+
+    A memory's :attr:`Memory.standing_attestation`; an episode's provenance attestation.
+
+    Args:
+        record: A stored or minted record.
+
+    Returns:
+        The source details, or ``None`` where there are none.
+    """
+    if isinstance(record, Memory):
+        return record.standing_attestation
+    return record.provenance.attestation
 
 
 # --- memory: a channel's episodes, in number order (ADR-0283 §1, §3) ---------
@@ -5124,24 +6073,24 @@ class DataTier(StrEnum):
 # the target record, never the write that relation causes (ADR-0040 §1).
 
 
-#: The record fields ADR-0078 §7 excludes from the proposal fingerprint: each is
-#: bookkeeping *about* the record rather than part of the belief it states, and
-#: including any of them would make a question's identity change without the
-#: question changing. ``provenance.last_updated`` is the third and is removed one
-#: level in, inside the nested projection.
-_FINGERPRINT_EXCLUDED_RECORD_FIELDS: frozenset[str] = frozenset({"id", "score", "topics"})
+#: The memory fields ADR-0078 §7 excludes from the proposal fingerprint, as ADR-0328
+#: §11:11 keeps its criterion over a memory: each is bookkeeping *about* the memory
+#: rather than part of what it states, and including any of them would make a
+#: question's identity change without the question changing. Every support's
+#: ``added_at`` and every operation's ``at`` are the rest, removed one level in.
+_FINGERPRINT_EXCLUDED_RECORD_FIELDS: frozenset[str] = frozenset(
+    {"id", "score", "topics", "revision"}
+)
 
-#: The serializer the proposal fingerprint's projection is taken by, resolved
-#: once on the **declared** :data:`MemoryRecord` union and never reached through
-#: ``self.proposed.model_dump``. That method is an ordinary attribute: a subclass
-#: can override it and an instance can shadow it through ``__dict__``, and either
-#: can return a valid-but-false mapping for the record it is asked about.
-#: ``ai_assistant.permissions._detachment`` states that rule about that method
-#: on a single class, resolving its ``__pydantic_serializer__``; a discriminated
-#: union has no class to resolve it on, and this adapter is what stands in its
-#: place — the union's own serializer, which reads the instance's field values and
-#: consults no instance attribute.
-_MEMORY_RECORD_PROJECTION: Final[TypeAdapter[MemoryRecord]] = TypeAdapter(MemoryRecord)
+#: The serializer the proposal fingerprint's projection is taken by, resolved once
+#: on the **declared** :class:`Memory` and never reached through
+#: ``self.proposed.model_dump``. That method is an ordinary attribute: a subclass can
+#: override it and an instance can shadow it through ``__dict__``, and either can
+#: return a valid-but-false mapping for the record it is asked about. The adapter is
+#: the declared type's own serializer, which reads the instance's field values,
+#: consults no instance attribute, and takes the declared field set rather than a
+#: subclass's.
+_MEMORY_PROJECTION: Final[TypeAdapter[Memory]] = TypeAdapter(Memory)
 
 
 def _canonical_members(values: Sequence[str]) -> list[str]:
@@ -5211,15 +6160,18 @@ class UserConfirmation(BaseModel):
 
 
 class MemoryUpdateProposal(BaseModel):
-    """A proposed change to memory, awaiting a policy decision.
+    """A proposed memory, awaiting a policy decision (ADR-0028, ADR-0328 §11:4).
 
-    The model never writes memory directly: it emits a proposal that a
+    The model never writes memory directly: a producer builds a proposal that a
     deterministic :class:`~ai_assistant.core.protocols.MemoryPolicy` disposes of.
+    ``proposed`` is a :class:`Memory` whose supports and create its producer built
+    (ADR-0328 §11:4); the writer installs it, adds its supports to a target, or writes
+    nothing, as the ruling says.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    proposed: MemoryRecord
+    proposed: Memory
     rationale: EncodableText = Field(description="Why this memory is being proposed.")
     sensitivity: DataTier = Field(
         default=DataTier.PERSONAL,
@@ -5232,8 +6184,8 @@ class MemoryUpdateProposal(BaseModel):
     confirmation: UserConfirmation | None = Field(
         default=None,
         description=(
-            "The authority a user's answer to a deferred question carries, when this "
-            "proposal is one being re-submitted under it (ADR-0078 §2, §5); None otherwise."
+            "The authority a user's answer to a question carries, when this proposal is "
+            "one written under it (ADR-0078 §2, §5, ADR-0321 §5:2); None otherwise."
         ),
     )
 
@@ -5241,16 +6193,10 @@ class MemoryUpdateProposal(BaseModel):
     def _secret_data_carries_no_confirmation(self) -> MemoryUpdateProposal:
         """Refuse a confirmation on a ``DataTier.SECRET`` proposal (ADR-0078 §1, §5a).
 
-        A confirmation is the user's answer to a question about the proposal — and a
-        secret-tier proposal is **never put to the user**: ADR-0004 §3 puts Tier 0
-        content in the OS keyring and forbids it a committed file, so it was never
-        queued as a question even while questions were queued. Since the deferral
-        store retired nothing is queued at all (ADR-0319 §5:1), and no production
-        module constructs a confirmation (§6:1); either way there is no answer to
-        such a proposal. The pairing is a *contradiction*, not a case the
-        applier should be left to rule on, so it is unconstructable rather than
-        merely refused downstream — the one half of ADR-0078's belt-and-braces
-        that a bypass cannot get past.
+        A confirmation is the user's answer to a question about the proposal, and a
+        secret-tier proposal is never put to the user: ADR-0004 §3 puts Tier 0 content
+        in the OS keyring and forbids it a committed file. The pairing is a
+        contradiction, so it is unconstructable rather than merely refused downstream.
         """
         if self.confirmation is not None and self.sensitivity is DataTier.SECRET:
             msg = (
@@ -5262,66 +6208,26 @@ class MemoryUpdateProposal(BaseModel):
 
     @property
     def proposal_fingerprint(self) -> Sha256Hex:
-        """A stable digest of *what is being proposed* (ADR-0078 §7).
+        """A stable digest of *what is being proposed* (ADR-0078 §7, ADR-0328 §11:11).
 
-        SHA-256 over :func:`_canonical_bytes`' ADR-0021 §1 encoding of a
-        **canonical projection** of :attr:`proposed`, plus :attr:`sensitivity`.
-        A property on the model that owns the data rather than a field each caller
-        filled in, for the reason :attr:`ActionRequest.parameters_digest` is one:
-        two callers' canonicalisations that disagreed would produce a false
-        mismatch, and here the symptom is that **no asserted conflict is ever
-        confirmable** — the coordinator digests at admission and the writer
-        recomputes at answer time, so a digest that can come apart from itself
-        refuses every honest answer.
+        SHA-256 over :func:`_canonical_bytes`' ADR-0021 §1 encoding of a **canonical
+        projection** of :attr:`proposed`, plus :attr:`sensitivity`. A property on the
+        model that owns the data rather than a field each caller fills in, so that the
+        key a question is asked under and the key the writer recomputes when the
+        answer comes back cannot come apart.
 
-        **The projection is the whole record minus the fields that are
-        bookkeeping about the record rather than the belief it states**, and the
-        criterion decides the next one rather than an inventory having to be
-        extended by whoever adds it — ``topics`` is the field it has since decided
-        (ADR-0213 §10), which is the clause working rather than being amended:
-
-        * ``id`` — identity, minted per proposal, so including it makes the key
-          match nothing at all.
-        * ``score`` — populated only by retrieval (ADR-0005 §1); it says how a
-          search ranked something, not what is believed.
-        * ``provenance.last_updated`` — **transaction time** (ADR-0045 §3): when
-          the record was written, not what it says. Two identical observations a
-          minute apart would otherwise be two questions, and the user would be
-          nagged by the mechanism whose job is to stop that.
-        * ``topics`` — how the record is **filed**, not what is believed
-          (ADR-0213 §10). The owner asked to accept "you dislike early meetings" is
-          being asked about the proposition, and whether the proposer filed it
-          under ``"work"`` or ``"routine"`` is not part of the offer. The
-          operational reason is ``last_updated``'s: a model-proposed label is not a
-          deterministic function of the material, so re-observing it can yield
-          ``("health",)`` on one pass and ``("health", "sleep")`` on the next, and
-          including the field would mint a fresh question for a proposal the user
-          has already answered, on a difference they were never shown. Excluding it
-          is also what makes ADR-0213 §8's union reachable: if two labellings of one
-          belief were two questions they would rarely reach a fold at all.
-
-        Everything else stays in, including ``validity`` (a belief expiring
-        tomorrow and an open-ended one are different things to be asked to accept),
-        ``confidence`` (weakly and strongly offered are different offers,
-        ADR-0072 §6) and ``provenance.source``. :attr:`rationale` is out because
-        the projection is over the record and the tier; :attr:`confirmation` is out
-        because it is authority rather than content, which is also what lets the
-        writer recompute the key of a proposal it has just attached one to.
-
-        **Collections that are *sets in meaning* are sorted and deduplicated;
-        every other order is preserved.** The criterion is whether reordering the
-        members changes what the record says. ``Provenance.evidence`` is a bag of
-        references — "references (e.g. episode ids) supporting this record" — where
-        membership is the content, and conflict detection ranks by score, so two
-        equal-scored gatherings come back in either order; digesting the raw
-        sequence would mint two keys for one question. ``ProceduralMemory.steps``
-        is the opposite: a workflow *is* its order, and "back up the database, then
-        delete it" must never suppress "delete the database, then back it up". For
-        a genuinely ambiguous field ADR-0078 §7 decides the tie explicitly —
-        **preserve the order** — because the cost of preserving it is a duplicate
-        question the user can dismiss, and the cost of normalising it wrongly is a
-        question they never see. ``EpisodicMemory.participants`` is that case and
-        keeps its order.
+        **The projection is the whole memory minus what is bookkeeping about it**
+        (ADR-0328 §11:11, keeping ADR-0078 §7's criterion): the id, the revision, the
+        score, the topics (ADR-0213 §10), every support's ``added_at`` and every
+        operation's ``at`` are excluded, and everything else is in — the wording, each
+        support's part, origin, direction, note, reading and dates, the validity, the
+        placement. **The supports are taken as a set keyed by the part each points
+        at**, so two gatherings of one set of supports in either order are one
+        question; the operations keep their order, since a log *is* its order.
+        :attr:`rationale` is out because the projection is over the memory and the
+        tier; :attr:`confirmation` is out because it is authority rather than content,
+        which is what lets the writer recompute the key of a proposal it has just been
+        handed with one attached.
         """
         return sha256(_canonical_bytes(self._fingerprint_projection())).hexdigest()
 
@@ -5329,18 +6235,11 @@ class MemoryUpdateProposal(BaseModel):
     def question_key(self) -> Sha256Hex:
         """A stable digest of *what is being proposed, against what* (ADR-0078 §7).
 
-        ``digest(proposal_fingerprint, canonical conflict ids)`` — the outer of the
-        two layers, and the one a :class:`UserConfirmation` binds to (the retired
-        deferral queue deduplicated on it too). A question is not merely a proposal: it
-        is a proposal shown **against a particular conflict set**, so two questions
-        can share a fingerprint exactly and still be different questions. The
-        conflict ids are canonicalised the way ``evidence`` is — sorted and
-        deduplicated — because membership is the content there too, and a repeated
-        or reordered id would otherwise admit a second question for a set the user
-        has already been asked about.
-
-        A property, not a field, so the question's identity is a function of the
-        proposal that holds it and the two cannot disagree.
+        ``digest(proposal_fingerprint, canonical conflict ids)``: the key a
+        :class:`UserConfirmation` binds to. A question is a proposal shown against a
+        particular conflict set, so two questions can share a fingerprint and still be
+        different questions. The conflict ids are a set in meaning, sorted and
+        deduplicated.
         """
         payload = {
             "proposal_fingerprint": self.proposal_fingerprint,
@@ -5351,57 +6250,93 @@ class MemoryUpdateProposal(BaseModel):
     def _fingerprint_projection(self) -> dict[str, object]:
         """The canonical projection :attr:`proposal_fingerprint` digests.
 
-        Built in JSON mode rather than from the live objects, so a record
-        reconstructed field-by-field from a serialised form projects identically
-        to the one it was serialised from (ADR-0078 §10's parity clause) — the
-        failure that clause guards is not a mismatch on some input but a mismatch
-        on *every* input.
-
-        **Serialised by :data:`_MEMORY_RECORD_PROJECTION`, the declared union's
-        own serializer, never through ``self.proposed.model_dump``.** That method
-        is an ordinary attribute, so an instance can shadow it through
-        ``__dict__`` and a subclass can override it, and a record that nominates
-        its own dump nominates its own fingerprint — which is a record able to
-        collide with a question the user has already answered, or to escape one
-        they have not. The projection is also taken under the *declared* type's
-        field set rather than ``type(self.proposed)``'s, for the reason
-        :func:`_detached_tool` rebuilds as a :class:`ToolDefinition` and not as
-        ``type(value)``: a subclass's extra fields would otherwise be silently
-        inside the digest's schema, so two records equal in everything
-        :data:`MemoryRecord` declares would fingerprint apart. ``warnings=False``
-        because serialising a subclass through the union's schema warns, and the
-        warning is noise here.
+        Built in JSON mode rather than from the live objects, so a memory reconstructed
+        field by field from a serialised form projects identically to the one it was
+        serialised from (ADR-0078 §10's parity clause), and serialised by
+        :data:`_MEMORY_PROJECTION`, the declared type's own serializer, never through
+        ``self.proposed.model_dump``.
         """
-        record: dict[str, Any] = _MEMORY_RECORD_PROJECTION.dump_python(
+        record: dict[str, Any] = _MEMORY_PROJECTION.dump_python(
             self.proposed, mode="json", warnings=False
         )
         for excluded in _FINGERPRINT_EXCLUDED_RECORD_FIELDS:
             record.pop(excluded, None)
-        provenance: dict[str, Any] = dict(record["provenance"])
-        provenance.pop("last_updated", None)
-        provenance["evidence"] = _canonical_members(provenance.get("evidence") or ())
-        record["provenance"] = provenance
+        supports: list[dict[str, Any]] = [
+            {key: value for key, value in support.items() if key != "added_at"}
+            for support in record.get("supports") or ()
+        ]
+        record["supports"] = sorted(
+            supports, key=lambda support: _canonical_bytes(support["points_at"])
+        )
+        record["operations"] = [
+            {key: value for key, value in operation.items() if key != "at"}
+            for operation in record.get("operations") or ()
+        ]
         return {"proposed": record, "sensitivity": self.sensitivity.value}
+
+
+class SourceProposal(BaseModel):
+    """A record a reader minted from a source, as a reading carries it (ADR-0328 §2:4).
+
+    What a :class:`SourceReading` carries among its ``proposals``: a record minted as
+    one activation's supply, which is not a memory and is never stored (ADR-0328 §2:4;
+    readers no longer ingest, ADR-0294). It keeps exactly the fields such a proposal
+    carried before ADR-0328 separated it from the writer's
+    :class:`MemoryUpdateProposal`: a reader mints a :class:`SemanticMemory`, which keeps
+    its ``EXTERNAL`` :class:`Provenance` and its :class:`Attestation`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    proposed: SemanticMemory
+    rationale: EncodableText = Field(description="Why this record is being proposed.")
+    sensitivity: DataTier = Field(
+        default=DataTier.PERSONAL,
+        description="How sensitive the proposed record is.",
+    )
+    conflicts: tuple[EncodableText, ...] = Field(
+        default=(),
+        description="Ids of existing records this proposal contradicts (from the conflict check).",
+    )
+    confirmation: UserConfirmation | None = Field(
+        default=None,
+        description="Carried as the field was before ADR-0328; no reader sets one.",
+    )
+
+    @model_validator(mode="after")
+    def _secret_data_carries_no_confirmation(self) -> SourceProposal:
+        """Refuse a confirmation on a ``DataTier.SECRET`` proposal (ADR-0078 §1).
+
+        The rule the field carried before ADR-0328 separated the two proposals.
+        """
+        if self.confirmation is not None and self.sensitivity is DataTier.SECRET:
+            msg = (
+                "a DataTier.SECRET proposal cannot carry a confirmation: secret-tier data is "
+                "never queued as a question, so no answer to one can exist (ADR-0078 §1)"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class MemoryDecisionKind(StrEnum):
     """The possible rulings a memory policy can make on a proposal.
 
-    ``REINFORCE`` and ``SUPERSEDE`` each name the *relation* between the incoming
-    record and the target it names, never the write that relation causes
-    (ADR-0040 §1):
+    ``REINFORCE`` and ``SUPERSEDE`` each name the *relation* between the proposed
+    memory and the target it names, never the write that relation causes
+    (ADR-0040 §1), and ADR-0328 §11 says what each write is:
 
-    - ``REINFORCE`` — the incoming record agrees with the target and strengthens
-      it. The applier folds the two, and the surviving record carries **both**
-      records' ``evidence`` — up to :data:`MAX_EVIDENCE_CITATIONS`, beyond which
-      the oldest are displaced and counted (ADR-0086 §3, partially superseding
-      ADR-0040 §1's unqualified "both").
-    - ``SUPERSEDE`` — the incoming record overturns the belief the target holds.
-      The applier retires what the target held and carries **nothing** of it
-      across.
-
-    Both carry a target id and both commit. How content and confidence combine
-    is the applier's semantics, not this ruling's (ADR-0028 §8, ADR-0040 §5a).
+    - ``ACCEPT`` — the writer installs the proposed memory (§11:5).
+    - ``REINFORCE`` — the proposed memory agrees with the target. The writer adds the
+      proposal's supports to the target, one add support each, and leaves the
+      target's wording as it is (§11:6).
+    - ``SUPERSEDE`` — the proposed memory overturns the target. The writer installs
+      it at a fresh id and ends each memory the ruling retires, citing the new
+      memory's first support (§11:7).
+    - ``REJECT`` and ``ASK_USER`` — nothing is written (§11:8).
+    - ``STORE_TEMPORARY`` — **ruled on nothing** (ADR-0328 §10:3): no policy stores a
+      proposal tentatively, and a writer handed this ruling refuses it with nothing
+      written. The member stays because stored trace metrics name it (ADR-0326
+      §2:3, ADR-0328 §10:5).
     """
 
     ACCEPT = "accept"
@@ -5438,15 +6373,15 @@ class ConflictRelation(StrEnum):
     starts changing rulings — which ADR-0159 §6 forbids.
 
     **A relation is a property of the two records' ``kind`` and ``content`` and of
-    nothing else** (§1). Never a retrieval score, a rank, a :class:`Provenance`
-    field, a band, a validity window or an embedding distance. A relation derived
+    nothing else** (§1). Never a retrieval score, a rank, a support, a standing, a
+    band, a validity window or an embedding distance. A relation derived
     from any of those is not one, whatever it is called.
 
     **This is not a :class:`MemoryDecisionKind` and does not become one** (§1).
     ADR-0040 §1 fixed that a ruling "names the relation the policy asserts, never
     the write it causes"; this vocabulary sits one layer below that — a statement
     about a *pair of records*, made before any ruling exists. Two proposals with
-    identical relations may still be ruled differently, by confidence, by the taint
+    identical relations may still be ruled differently, by band, by the taint
     ceiling or by the secret gate, so collapsing the two would lose the distinction
     between what is true of the records and what we have decided to do.
     """
@@ -5540,6 +6475,218 @@ class MemoryIngestResult(BaseModel):
             "against, on every ruling (ADR-0078 §4). Empty when nothing conflicted."
         ),
     )
+
+
+# --- memory: one operation on one stored memory (ADR-0328 §5, §11:3) ----------
+
+
+def _refuse_lower_standing(
+    memory: Memory, operation: MemoryOperation, cited: MemorySupport
+) -> None:
+    """ADR-0328 §6:5: a lower standing never silently overrides a higher one.
+
+    Raises:
+        ValueError: If ``operation`` retires the memory on a support whose origin ranks
+            below the memory's standing, or stops a support on one whose origin ranks
+            below the stopped support's.
+    """
+    rank = standing_rank(origin_standing(cited.origin))
+    if operation.kind in RETIRING_OPERATIONS and rank < standing_rank(memory.standing):
+        msg = (
+            f"a {operation.kind} citing a {cited.origin} support ranks below the memory's "
+            f"standing, {memory.standing}; the open question it needs is raised instead "
+            f"(ADR-0328 §6:5)"
+        )
+        raise ValueError(msg)
+    stopped = None if operation.stops is None else memory.support_at(operation.stops)
+    if stopped is not None and rank < standing_rank(origin_standing(stopped.origin)):
+        msg = (
+            f"a stop counting citing a {cited.origin} support ranks below the {stopped.origin} "
+            f"support it would stop (ADR-0328 §6:5)"
+        )
+        raise ValueError(msg)
+
+
+def _closed_window(memory: Memory, operation: MemoryOperation, cited: MemorySupport) -> Validity:
+    """The window a retiring operation leaves (ADR-0328 §5:10, §5:11).
+
+    An end closes at its cited support's about-when where it carries one, and at the
+    operation's instant otherwise; a mark wrong and a replace close at the operation's
+    instant. The close clamps and never resurrects (ADR-0080 §1).
+
+    Raises:
+        ValueError: If an end's about-when lies after its instant, or no
+            representable close exists (ADR-0080 §3).
+    """
+    close = operation.at
+    if operation.kind is MemoryOperationKind.END and cited.about_when is not None:
+        if cited.about_when > operation.at:
+            msg = (
+                "an end whose about-when lies after its instant is refused: a claim that "
+                "holds until a later time is worded so (ADR-0328 §5:10)"
+            )
+            raise ValueError(msg)
+        close = cited.about_when
+    window = memory.validity
+    end = close if window.valid_until is None else min(close, window.valid_until)
+    if window.valid_from is not None and end <= window.valid_from:
+        msg = (
+            f"cannot close {memory.id!r} at {end.isoformat()}, at or before its valid_from "
+            f"{window.valid_from.isoformat()} (ADR-0328 §5:11, ADR-0080 §3)"
+        )
+        raise ValueError(msg)
+    return window.model_copy(update={"valid_until": end})
+
+
+def _resolved_questions(
+    memory: Memory, operation: MemoryOperation, question: OpenQuestion | None
+) -> tuple[OpenQuestion, ...]:
+    """The open questions after a raise or a resolve (ADR-0328 §9:2).
+
+    Raises:
+        ValueError: If a raise carries no question or a different one, or a resolve
+            names a question the memory does not carry open.
+    """
+    if operation.kind is MemoryOperationKind.RAISE_QUESTION:
+        if question is None or question.id != operation.question or question.resolved:
+            msg = "a raise question carries the open question it raises (ADR-0328 §9:2)"
+            raise ValueError(msg)
+        return (*memory.open_questions, question)
+    if operation.kind is not MemoryOperationKind.RESOLVE_QUESTION:
+        return memory.open_questions
+    named = [one for one in memory.open_questions if one.id == operation.question]
+    if not named or named[0].resolved:
+        msg = "a resolve question names a question the memory carries open (ADR-0328 §9:2)"
+        raise ValueError(msg)
+    resolved = named[0].model_copy(
+        update={
+            "resolved_at": operation.at,
+            "resolved_by": operation.cites,
+            "resolution": operation.note,
+        }
+    )
+    return tuple(resolved if one.id == resolved.id else one for one in memory.open_questions)
+
+
+_STATUS_AFTER: Final[dict[MemoryOperationKind, MemoryStatus]] = {
+    MemoryOperationKind.END: MemoryStatus.ENDED,
+    MemoryOperationKind.REPLACE: MemoryStatus.ENDED,
+    MemoryOperationKind.MARK_WRONG: MemoryStatus.WRONG,
+}
+
+
+def applied_operation(
+    memory: Memory,
+    operation: MemoryOperation,
+    *,
+    support: MemorySupport | None = None,
+    question: OpenQuestion | None = None,
+) -> Memory:
+    """The memory one operation yields (ADR-0328 §5), or the refusal §4, §5 or §6:5 makes.
+
+    A pure function of its arguments, in ``core`` so that every ``MemoryWriter`` —
+    the production writer and the canonical fake — computes the same record and
+    refuses the same writes (ADR-0016 §2). It reads no store: whether a support's
+    episode is held (§4:7) and whether the stored revision is the one read (§5:4) are
+    the writer's to check.
+
+    - ``support``, where given, is the support the operation cites, added in the same
+      write (§5:3). One whose part the memory already carries is not added, and the one
+      already there keeps its fields (§4:8); an add support citing it then changes
+      nothing, and the memory is returned unchanged.
+    - A retiring operation closes the validity as §5:10 and §5:11 say and sets the
+      status §5:7 gives; a stop counting stops the support it names (§5:8); a raise
+      question adds ``question``, and a resolve question records its resolution (§9:2).
+    - Nothing is removed: no support, operation, entry or question (§5:5).
+
+    Args:
+        memory: The memory as read.
+        operation: The operation.
+        support: The support it cites, where the memory does not carry it yet.
+        question: The question a raise question raises.
+
+    Returns:
+        The memory it yields, validated whole, its revision the one read.
+
+    Raises:
+        ValueError: If the operation is a create, its support is not the one it cites,
+            it cites a support the memory does not carry once applied, or any rule of
+            §4, §5, §6:5 or §9 refuses it.
+    """
+    if operation.kind is MemoryOperationKind.CREATE:
+        msg = "a create starts a memory and is never applied to one (ADR-0328 §11:4)"
+        raise ValueError(msg)
+    if support is not None and support.points_at != operation.cites:
+        msg = "the support an operation adds is the one it cites (ADR-0328 §5:3)"
+        raise ValueError(msg)
+    carried = memory.support_at(operation.cites)
+    if carried is not None and operation.kind is MemoryOperationKind.ADD_SUPPORT:
+        return memory
+    cited = carried if carried is not None else support
+    if cited is None:
+        msg = "an operation cites a support the memory carries once it is applied (§5:3)"
+        raise ValueError(msg)
+    _refuse_lower_standing(memory, operation, cited)
+    supports = memory.supports if carried is not None else (*memory.supports, cited)
+    update: dict[str, object] = {
+        "supports": supports,
+        "operations": (*memory.operations, operation),
+        "open_questions": _resolved_questions(memory, operation, question),
+    }
+    if operation.kind in RETIRING_OPERATIONS:
+        update["validity"] = _closed_window(memory, operation, cited)
+        update["status"] = _STATUS_AFTER[operation.kind]
+    dumped = memory.model_dump()
+    dumped.update(update)
+    return Memory.model_validate(dumped)
+
+
+class MemoryChange(BaseModel):
+    """One operation on one stored memory, as a writer applies it (ADR-0328 §11:3).
+
+    The memory is the one the caller read, revision and all: the writer computes the
+    record the operation yields from it (:func:`applied_operation`) and writes that
+    record only where the stored revision is still this one (§5:4, ADR-0219 §2), so a
+    memory another writer moved in between is refused rather than overwritten. An end,
+    a mark wrong or a replace that names a successor carries the successor, whose
+    create names the retired memory among those it replaces, and the two are written
+    in one atomic write (§5:6).
+
+    Attributes:
+        memory: The stored memory, as read.
+        operation: The operation to apply.
+        support: The support the operation cites, where the memory does not carry it
+            yet (§5:3).
+        question: The open question a raise question raises.
+        successor: The successor an end, a mark wrong or a replace names, created in
+            the same write.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    memory: Memory
+    operation: MemoryOperation
+    support: MemorySupport | None = None
+    question: OpenQuestion | None = None
+    successor: Memory | None = None
+
+    @model_validator(mode="after")
+    def _a_change_to_a_stored_memory(self) -> Self:
+        if self.memory.revision < 1:
+            msg = "a change is applied to a memory a store returned, carrying its revision"
+            raise ValueError(msg)
+        named = self.operation.successor
+        if (self.successor is None) != (named is None) or (
+            self.successor is not None and self.successor.id != named
+        ):
+            msg = "a change carries exactly the successor its operation names (ADR-0328 §5:6)"
+            raise ValueError(msg)
+        if (
+            self.successor is not None
+            and self.memory.id not in self.successor.operations[0].replaces
+        ):
+            msg = "a successor's create names the memory it replaces (ADR-0328 §5:6)"
+            raise ValueError(msg)
+        return self
 
 
 # --- context facets: a source's situational "right now" (ADR-0096) -----------
@@ -6098,7 +7245,7 @@ class SourceReading(BaseModel):
             "where it declares none. Never our clock and never the file's mtime."
         ),
     )
-    proposals: tuple[MemoryUpdateProposal, ...] = Field(
+    proposals: tuple[SourceProposal, ...] = Field(
         default=(),
         description=(
             "The beliefs the source reported, in the reader's order. Empty is a "
@@ -6403,7 +7550,7 @@ class FetchOutcome(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    record: MemoryRecord | None = Field(
+    record: SemanticMemory | None = Field(
         default=None,
         description=(
             "The one record a successful fetch minted — ``SEMANTIC``, "
@@ -6609,7 +7756,7 @@ class SearchRefusal(StrEnum):
     here where they take the last result with them."""
 
 
-def _check_minted_by_a_search(record: MemoryRecord, *, reported_at: datetime | None) -> None:
+def _check_minted_by_a_search(record: SemanticMemory, *, reported_at: datetime | None) -> None:
     """Refuse a record ADR-0231 §10's minting clause would not have produced.
 
     Written out here rather than inside :class:`SearchOutcome`'s validator so that
@@ -6621,12 +7768,10 @@ def _check_minted_by_a_search(record: MemoryRecord, *, reported_at: datetime | N
         reported_at: The outcome's own report instant.
 
     Raises:
-        ValueError: If the record is not ``SEMANTIC``, is not ``EXTERNAL``-sourced,
-            carries evidence, or is attested to another instant.
+        ValueError: If the record is not ``EXTERNAL``-sourced, carries evidence, or
+            is attested to another instant. That it is ``SEMANTIC`` is the field's
+            type (ADR-0328 §2:4).
     """
-    if record.kind != "semantic":
-        msg = f"a search mints SEMANTIC records; got a {record.kind!r} one"
-        raise ValueError(msg)
     provenance = record.provenance
     if provenance.source is not MemorySource.EXTERNAL:
         msg = f"a search mints EXTERNAL-sourced records; got {provenance.source}"
@@ -6685,7 +7830,7 @@ class SearchOutcome(BaseModel):
             "search was refused."
         ),
     )
-    records: tuple[MemoryRecord, ...] = Field(
+    records: tuple[SemanticMemory, ...] = Field(
         default=(),
         description=(
             "The records this search minted, in the order the provider returned "
@@ -6852,7 +7997,7 @@ class ForecastRefusal(StrEnum):
 
 
 def _check_minted_by_a_forecast(
-    record: MemoryRecord, *, reported_at: datetime | None, reported_by: str
+    record: SemanticMemory, *, reported_at: datetime | None, reported_by: str
 ) -> None:
     """Refuse a record ADR-0260 §5's minting clause would not have produced.
 
@@ -6876,14 +8021,12 @@ def _check_minted_by_a_forecast(
             forecaster (ADR-0260 §4).
 
     Raises:
-        ValueError: If the record is not ``SEMANTIC``, is not ``EXTERNAL``-sourced,
-            carries evidence, carries topics, carries an ``about_person``, carries a
-            validity window that is not fully open, is attested to another instant,
-            is attested to another source, or declares no bounded extent.
+        ValueError: If the record is not ``EXTERNAL``-sourced, carries evidence,
+            carries topics, carries an ``about_person``, carries a validity window
+            that is not fully open, is attested to another instant, is attested to
+            another source, or declares no bounded extent. That it is ``SEMANTIC`` is
+            the field's type (ADR-0328 §2:4).
     """
-    if record.kind != "semantic":
-        msg = f"a forecast read mints SEMANTIC records; got a {record.kind!r} one"
-        raise ValueError(msg)
     provenance = record.provenance
     if provenance.source is not MemorySource.EXTERNAL:
         msg = f"a forecast read mints EXTERNAL-sourced records; got {provenance.source}"
@@ -6982,7 +8125,7 @@ class ForecastOutcome(BaseModel):
             "read was refused."
         ),
     )
-    records: tuple[MemoryRecord, ...] = Field(
+    records: tuple[SemanticMemory, ...] = Field(
         default=(),
         description=(
             "One record per day the provider's answer covered and §5 kept, in the "
@@ -13959,325 +15102,190 @@ class SpendTotal(BaseModel):
         return self
 
 
-class Evidence(BaseModel):
-    """One citation behind a belief, as a person reads it (ADR-0077 §6).
+class SupportView(BaseModel):
+    """One support of a memory, as the single-memory projection carries it (ADR-0328 §15:2).
 
-    **It carries no id, deliberately.** ADR-0073 §4's floor is that "a citation the
-    surface cannot render as evidence is never rendered *as* evidence — not as a
-    reassuring id, not silently dropped", and an adapter that never receives the id
-    cannot render one as though it were the warrant.
+    **It carries no id, deliberately**: the part it points at is resolved to readable
+    content, or shown as gone (``content`` is ``None``), and an adapter that never
+    receives the id cannot render one as though it were the warrant (ADR-0073 §4's
+    floor, which ADR-0328 §15:7 keeps). A support whose episode no longer resolves
+    still counts, and is shown as gone and never as evidence (§15:7).
 
     Attributes:
-        content: The cited record's own canonical text, or ``None`` where the
-            citation no longer resolves — a **tombstone**. The tombstone says an
-            evidence item stood here and is gone, and deliberately does not say
-            what it was, nor whether it was *deleted* or merely *expired*: the read
-            cannot tell those apart, and the user's question — "is there still
-            something behind this?" — is answered by absence either way.
+        part: Which kind of part it points at (§4's part table).
+        content: The part resolved to readable content, or ``None`` where it is gone.
+        origin: Its origin.
+        direction: ``for`` or ``against``.
+        note: In words, how the part relates to the claim.
+        how_sure: How sure the reading was, or ``None`` where not judged.
+        when: When the part happened, or ``None`` where unknown.
+        about_when: The time the part refers to, where it refers to one.
+        source_details: Which source said so and when, for a source.
+        counts: Whether it counts: ``False`` exactly when it was stopped (§5:8).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    content: EncodableText | None = Field(
-        default=None, description="The cited record's text, or ``None`` for a tombstone."
-    )
+    part: Literal[
+        "input", "round_message", "evidence_item", "confirmation", "remember_call", "legacy"
+    ]
+    content: EncodableText | None = None
+    origin: SupportOrigin
+    direction: SupportDirection
+    note: EncodableText = Field(default="", validate_default=True)
+    how_sure: ReadingCertainty | None = None
+    when: UtcInstant | None = None
+    about_when: UtcInstant | None = None
+    source_details: Attestation | None = None
+    counts: bool = True
 
     @property
-    def lost(self) -> bool:
-        """Whether this citation no longer resolves."""
+    def gone(self) -> bool:
+        """Whether the part it points at no longer resolves."""
         return self.content is None
 
 
 class BeliefSummary(BaseModel):
-    """One live belief on the **listing**, which ships counts and not citations.
+    """One live memory on the **listing** (ADR-0328 §15:1, ADR-0189 §1:3).
 
-    ADR-0077 §6 divides the inspection surface in as many words — the listing
-    "resolves *existence* and renders the count, the lost count, and the adjusted
-    confidence", the single-belief view "renders the surviving citations as
-    readable evidence and the lost ones as tombstones" — and this is the type that
-    makes the split expressible (ADR-0085 §4a).
-
-    **The wrong behaviour is unrepresentable here rather than merely detectable.**
-    :class:`Evidence` carries ``content: str | None`` and a lost citation is one
-    whose content is ``None``, so a listing that derived its counts from an
-    evidence tuple would have to ship every cited episode's full text on every page
-    or misreport every citation as a tombstone. This type has nowhere to put a
-    content, so a conforming listing cannot over-deliver — which is also what
-    removes the ``beliefs * citations * content`` term from the frame arithmetic
-    ADR-0085 §8f works through.
-
-    **ADR-0073 §4's floor becomes a static guarantee rather than a convention**: a
-    client holding one of these cannot render a citation as evidence, because it
-    holds no citations. What it holds is how many it *carries*, how many of those
-    are gone, and — since ADR-0107 §3 — an upper bound on how many further ones
-    stood behind the belief and are no longer carried. **§4's question is answered
-    by the pair** ``evidence_count`` and ``evidence_elided``, never by
-    ``evidence_count`` alone (ADR-0107 §6): before ADR-0086 §1's bound the two
-    numbers could not differ, and after it they can.
+    Every value §15:1 names, as structured fields and as the record holds them, so no
+    surface computes one: the standing and its band, the status and the validity end,
+    as of, learned, the evidence summary, the reading certainty, the track record's
+    counts and last use, and whether the memory is legacy, unbacked, or rests on
+    outside content. **No confidence, presented confidence or elision count**
+    (§15:3): a memory carries none. ``supports_gone`` is §15:7's mark: the memory is
+    held and answerable, and every one of its supports' episodes is gone.
 
     Attributes:
-        id: The record's id, opaque, and what ``forget`` names.
-        band: The standing the belief is held with (ADR-0072 §2), projected from
-            its provenance source. Never omitted, and never left to be implied by
-            position.
-        kind: Which of the four typed memories this is.
-        content: The canonical text rendering of the belief.
-        confidence: How strongly it is held, in ``[0, 1]`` — **the presented
-            value**, already adjusted for lost support (ADR-0077 §6).
-        last_updated: The transaction stamp — when *the assistant* last revised
-            this belief (ADR-0045 §3) — which is also the enumeration's sort key.
-            It is **our** clock and not a source's.
-        evidence_count: How many citations the belief **carries**, resolved or not.
-            A **field** here rather than a property, because this type carries no
-            evidence to derive it from. Not on its own the answer to "how many
-            stand behind it" — read it with ``evidence_elided`` (ADR-0107 §6).
-        lost_evidence: How many of those citations no longer resolve. A field for
-            the same reason.
-        valid_until: The end of the belief's validity window, where one is set;
-            ``None`` where the window is open. Every listed belief is live by
-            construction, so an open window carries no information and a set end
-            does.
-        evidence_elided: :attr:`Provenance.evidence_elided` **as stored** — an
-            upper bound on how many further citations stood behind the belief and
-            are no longer carried. Carried on **every** band, never zeroed or
-            clamped by band, because the DTO reports what the record holds
-            (ADR-0107 §3); whether a *rendering* is owed is a separate question
-            §2 scopes to ``DERIVED``.
-        attestation: The record's :attr:`Provenance.attestation` as stored,
-            projected whole (ADR-0189 §2) — what reported the belief and when that
-            source said so — or ``None`` outside the ``ATTESTED`` band. **The
-            listing carries it as well as the single-belief view**, and ADR-0107 §3
-            is the precedent for that being one decision rather than two: it refused
-            both "put the field on ``BeliefSummary`` only" and "put it on ``Belief``
-            only" and required both DTOs to carry it under one name, because a
-            listing row that answered less than the row it links to is the same
-            projection defective in one place.
-        rests_on_recorded_external_content: The value of
-            :func:`rests_on_recorded_external_content` (ADR-0106 §2) applied to the
-            record's :class:`Provenance`, computed by the engine at projection time.
-            Never recomputed by a surface from ``band``, and never read off
-            :attr:`Provenance.derived_from_external` in its place.
+        id: The memory's id, opaque, and what ``forget`` names.
+        content: Its wording.
+        standing: Its standing (§6).
+        band: The band its standing is grouped in (§6:4). ADR-0189 §1 calls this the
+            standing; ADR-0328 §15 carries both.
+        status: ``current``, ``ended`` or ``wrong``.
+        valid_until: The end of its validity window, where one is set.
+        as_of: As of (§7:3), at the moment of projection, or ``None`` for unknown.
+        learned: Learned (§7:4), or ``None`` for unknown.
+        evidence: The evidence summary (§7:2).
+        reading_certainty: The reading certainty (§7:5), or ``None`` where not judged.
+        track_record: The track record's counts and last use (§8).
+        legacy: Whether every support is a legacy one (§7:9).
+        unbacked: Whether no counted ``for`` support backs it as worded (§7:10).
+        rests_on_outside_content: Whether it rests on outside content (§7:6).
+        supports_gone: Whether no support's episode resolves (§15:7).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    id: Identifier = Field(description="The record's id, opaque, and what ``forget`` names.")
-    band: BeliefBand = Field(description="The standing the belief is held with.")
-    kind: MemoryKind = Field(description="Which of the four typed memories this is.")
-    content: EncodableText = Field(description="The canonical text rendering of the belief.")
-    confidence: float = Field(
-        ge=0.0, le=1.0, description="The presented confidence, adjusted for lost support."
-    )
-    last_updated: UtcInstant = Field(
-        description="When the assistant last revised this belief (ADR-0045 §3)."
-    )
-    evidence_count: int = Field(
-        default=0, ge=0, description="How many citations the belief carries, resolved or not."
-    )
-    lost_evidence: int = Field(
-        default=0, ge=0, description="How many of those citations no longer resolve."
-    )
-    valid_until: UtcInstant | None = Field(
-        default=None, description="The end of the belief's validity window, where one is set."
-    )
-    evidence_elided: int = Field(
-        default=0,
-        ge=0,
-        description=(
-            "An upper bound on how many further citations stood behind it and are "
-            "no longer carried, as stored (ADR-0107 §3)."
-        ),
-    )
-    attestation: Attestation | None = Field(
-        default=None,
-        description=(
-            "What reported this belief and when that source said so, as stored; "
-            "``None`` outside the ``ATTESTED`` band (ADR-0189 §2)."
-        ),
-    )
-    rests_on_recorded_external_content: bool = Field(
-        default=False,
-        description=(
-            "Whether this belief's warrant rests on recorded external content — "
-            "``rests_on_recorded_external_content(provenance)`` as the engine "
-            "computed it (ADR-0106 §2, ADR-0189 §2)."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def _lost_within_cited(self) -> BeliefSummary:
-        """More citations cannot be gone than were ever made (ADR-0085 §4b).
-
-        **The price of counts-as-fields.** On :class:`Belief` the two counts cannot
-        disagree with the evidence because they are computed from it; moving them
-        to fields buys the listing its shape at the cost of the one constraint the
-        model must now assert for itself.
-
-        **``evidence_elided`` is deliberately outside this rule, and no validator
-        relates it to either count** (ADR-0107 §4). There is no true relation to
-        assert: it counts displacements over the record's whole history, over a
-        different population than the retained tuple and double-counting in the two
-        cases ADR-0086 §4 names, so it may exceed ``evidence_count`` and may be
-        non-zero while ``evidence_count`` is zero. Asserting one anyway would invent
-        a *read-path* failure — the same argument :class:`Provenance` makes for
-        refusing a ``max_length`` on ``evidence`` — turning a legitimately-held
-        belief into an unconstructable DTO. This invariant is safe precisely because
-        both of its counts are taken over one tuple at one instant.
-        """
-        if self.lost_evidence > self.evidence_count:
-            msg = (
-                f"lost_evidence ({self.lost_evidence}) exceeds evidence_count "
-                f"({self.evidence_count}): more citations cannot be gone than were made"
-            )
-            raise ValueError(msg)
-        return self
-
-    @property
-    def unsupported(self) -> bool:
-        """Whether every citation behind it has gone (ADR-0077 §6).
-
-        A belief in this state is **held, marked and answerable — not
-        auto-retired**: retiring it would be the cascade under a softer name, and
-        it may be perfectly true.
-
-        ``False`` for a belief that cites nothing at all: an assertion is not
-        unsupported, it is supported by the user's own word (ADR-0038 §1a). Derived
-        rather than stored, because the two count fields already determine it — a
-        third field would be a second source of truth for a fact a client can
-        compute exactly, and two implementations could then measure the same call
-        at two sizes.
-        """
-        return self.evidence_count > 0 and self.lost_evidence == self.evidence_count
+    id: Identifier = Field(description="The memory's id, opaque, and what ``forget`` names.")
+    content: EncodableText = Field(description="The memory's wording.")
+    standing: MemoryStanding
+    band: BeliefBand
+    status: MemoryStatus
+    valid_until: UtcInstant | None = None
+    as_of: UtcInstant | None = None
+    learned: UtcInstant | None = None
+    evidence: EvidenceSummary
+    reading_certainty: ReadingCertainty | None = None
+    track_record: TrackRecordSummary
+    legacy: bool = False
+    unbacked: bool = False
+    rests_on_outside_content: bool = False
+    supports_gone: bool = False
 
 
-class Belief(BaseModel):
-    """One live belief on the **single-belief view**, with its citations resolved.
+class Belief(BeliefSummary):
+    """One live memory on the **single-memory view**, its supports resolved (ADR-0328 §15:2).
 
-    The other half of ADR-0077 §6's split (:class:`BeliefSummary` is the listing).
-    Deliberately **not** a raw :class:`MemoryRecord`: :func:`band_of` is applied
-    once, by the engine, because an adapter doing it would put ADR-0072 §1's
-    projection into `interfaces/`. It also flattens the four-member discriminated
-    union an adapter would otherwise branch over, and drops ``score``, which is
-    meaningless on a path where nothing was ranked.
-
-    **The evidence citations are carried as resolved values and never as ids**,
-    which is ADR-0073 §4's floor made structural.
+    The listing's fields, and every support: its origin, direction, note, how sure,
+    ``when``, about when, source details, whether it counts, and the part it points at
+    resolved to readable content or shown as gone. Deliberately **not** a raw
+    :class:`Memory`: the engine computes every value once, so no adapter computes a
+    standing, and drops what a surface has no use for.
 
     Attributes:
-        id: The record's id, opaque, and what ``forget`` names.
-        band: The standing the belief is held with (ADR-0072 §2).
-        kind: Which of the four typed memories this is.
-        content: The canonical text rendering of the belief.
-        confidence: How strongly it is held, in ``[0, 1]`` — **the presented
-            value**, already adjusted for lost support (ADR-0077 §6). The stored
-            number is not carried, and that is the point: a DTO offering both would
-            let two surfaces quote different numbers for one belief.
-        evidence: One entry per citation, in the order the record wrote them —
-            resolved to readable content, or a tombstone where it no longer
-            resolves. Empty for an assertion, whose warrant is the user's own word
-            (ADR-0038 §1a) and needs no citation.
-        last_updated: The transaction stamp (ADR-0045 §3), our clock and not a
-            source's.
-        valid_until: The end of the belief's validity window, where one is set.
-        evidence_elided: :attr:`Provenance.evidence_elided` **as stored** — an
-            upper bound on how many further citations stood behind the belief and
-            are no longer carried. **A field and not a property**, unlike the two
-            counts below: an elision counts citations ``evidence`` no longer
-            contains, so no function of that tuple yields it (ADR-0107 §3). Carried
-            on **every** band, never zeroed or clamped by band.
-        attestation: The record's :attr:`Provenance.attestation` as stored,
-            projected whole (ADR-0189 §2) — what reported the belief and when that
-            source said so — or ``None`` outside the ``ATTESTED`` band. **Both
-            halves or neither**: ADR-0073 §4's gate asks for the reporting source's
-            identity *and* its report time, and ADR-0092 §2 made the half-answers
-            unconstructable by carrying them as one value object, so splitting them
-            here would reintroduce on the surface's side of the seam exactly the
-            states that section closed on the record's.
-
-            ``Attestation.extent`` rides along and nothing renders it, deliberately
-            (ADR-0189 §2): splitting the object to leave one bounded optional value
-            behind would mint a second, near-identical spelling of
-            :class:`Attestation`.
-        rests_on_recorded_external_content: The value of
-            :func:`rests_on_recorded_external_content` (ADR-0106 §2) applied to the
-            record's :class:`Provenance`, computed by the engine at projection time.
-            The one fact nothing else on this projection supplies for a ``DERIVED``
-            belief, and what #746 exists for: a structured marker a client can
-            style, filter and order on, where before it could only pass through a
-            sentence. Never recomputed by a surface from ``band``, and never read
-            off :attr:`Provenance.derived_from_external` in its place.
+        supports: One entry per support, in the order the memory carries them.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    supports: tuple[SupportView, ...] = Field(min_length=1)
 
-    id: Identifier = Field(description="The record's id, opaque, and what ``forget`` names.")
-    band: BeliefBand = Field(description="The standing the belief is held with.")
-    kind: MemoryKind = Field(description="Which of the four typed memories this is.")
-    content: EncodableText = Field(description="The canonical text rendering of the belief.")
-    confidence: float = Field(
-        ge=0.0, le=1.0, description="The presented confidence, adjusted for lost support."
-    )
-    last_updated: UtcInstant = Field(
-        description="When the assistant last revised this belief (ADR-0045 §3)."
-    )
-    evidence: tuple[Evidence, ...] = Field(
-        default=(), description="One entry per citation, resolved or a tombstone."
-    )
-    valid_until: UtcInstant | None = Field(
-        default=None, description="The end of the belief's validity window, where one is set."
-    )
-    evidence_elided: int = Field(
-        default=0,
-        ge=0,
-        description=(
-            "An upper bound on how many further citations stood behind it and are "
-            "no longer carried, as stored (ADR-0107 §3)."
-        ),
-    )
-    attestation: Attestation | None = Field(
-        default=None,
-        description=(
-            "What reported this belief and when that source said so, as stored; "
-            "``None`` outside the ``ATTESTED`` band (ADR-0189 §2)."
-        ),
-    )
-    rests_on_recorded_external_content: bool = Field(
-        default=False,
-        description=(
-            "Whether this belief's warrant rests on recorded external content — "
-            "``rests_on_recorded_external_content(provenance)`` as the engine "
-            "computed it (ADR-0106 §2, ADR-0189 §2)."
-        ),
+
+def _summary_fields(memory: Memory, *, now: datetime, supports_gone: bool) -> dict[str, object]:
+    """The listing's fields, as ADR-0328 §15:1 has the record hold them."""
+    return {
+        "id": memory.id,
+        "content": memory.content,
+        "standing": memory.standing,
+        "band": memory.band,
+        "status": memory.status,
+        "valid_until": memory.validity.valid_until,
+        "as_of": memory.as_of(now),
+        "learned": memory.learned,
+        "evidence": memory.evidence_summary,
+        "reading_certainty": memory.reading_certainty,
+        "track_record": memory.track_summary,
+        "legacy": memory.is_legacy,
+        "unbacked": memory.is_unbacked,
+        "rests_on_outside_content": memory.rests_on_outside_content,
+        "supports_gone": supports_gone,
+    }
+
+
+def belief_summary(memory: Memory, *, now: datetime, supports_gone: bool) -> BeliefSummary:
+    """Project ``memory`` onto the listing (ADR-0328 §15:1).
+
+    One projection in ``core``, so the engine and its fake carry the same values for
+    the same record (ADR-0016 §2). Every value is computed from the record here and
+    never by a surface.
+
+    Args:
+        memory: The memory, as the store returned it.
+        now: The reader's instant, against which as of is judged (§7:3).
+        supports_gone: Whether no support's episode resolves (§15:7), which the caller
+            resolved.
+
+    Returns:
+        The summary.
+    """
+    return BeliefSummary.model_validate(
+        _summary_fields(memory, now=now, supports_gone=supports_gone)
     )
 
-    @property
-    def evidence_count(self) -> int:
-        """How many citations it **carries**, resolved or not.
 
-        Its value is unchanged and every consumer of it is correct — the presented
-        confidence is a function of how many *carried* citations resolved
-        (ADR-0077 §6). What it is not is the whole of ADR-0073 §4's "how many stand
-        behind it": after a displacement more stand behind the belief than it
-        carries, and the pair with :attr:`evidence_elided` is what answers the floor
-        (ADR-0107 §6).
-        """
-        return len(self.evidence)
+def belief_view(
+    memory: Memory, *, now: datetime, contents: Mapping[SupportPart, str | None]
+) -> Belief:
+    """Project ``memory`` onto the single-memory view (ADR-0328 §15:2).
 
-    @property
-    def lost_evidence(self) -> int:
-        """How many of its citations no longer resolve."""
-        return sum(1 for item in self.evidence if item.lost)
+    Args:
+        memory: The memory, as the store returned it.
+        now: The reader's instant, against which as of is judged (§7:3).
+        contents: Each support's part resolved to readable content, or ``None`` where
+            it is gone; a part absent from the mapping is shown as gone.
 
-    @property
-    def unsupported(self) -> bool:
-        """Whether every citation behind it has gone (ADR-0077 §6).
-
-        One definition everywhere, and it reads identically on
-        :class:`BeliefSummary`: ``evidence_count > 0 and lost_evidence ==
-        evidence_count``. A belief citing nothing at all is not "unsupported", it
-        is supported by the user's own word (ADR-0038 §1a).
-        """
-        return self.evidence_count > 0 and self.lost_evidence == self.evidence_count
+    Returns:
+        The single-memory view, its supports in the order the memory carries them.
+    """
+    stopped = memory.stopped
+    supports = tuple(
+        SupportView(
+            part=support.points_at.part,
+            content=contents.get(support.points_at),
+            origin=support.origin,
+            direction=support.direction,
+            note=support.note,
+            how_sure=support.how_sure,
+            when=support.when,
+            about_when=support.about_when,
+            source_details=support.source_details,
+            counts=support.points_at not in stopped,
+        )
+        for support in memory.supports
+    )
+    gone = all(view.gone for view in supports)
+    return Belief.model_validate(
+        _summary_fields(memory, now=now, supports_gone=gone) | {"supports": supports}
+    )
 
 
 class ConversationSummary(BaseModel):

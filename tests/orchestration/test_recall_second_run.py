@@ -19,15 +19,11 @@ from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     RECALLED_ITEMS_MAX,
     BeliefBand,
+    Memory,
     MemoryKind,
     MemorySearchResult,
-    MemorySource,
-    Placement,
-    Provenance,
     RecallCue,
     RecallOutcome,
-    SemanticMemory,
-    band_of,
 )
 from ai_assistant.orchestration.disclosure import (
     BoundedAudienceSupply,
@@ -35,6 +31,7 @@ from ai_assistant.orchestration.disclosure import (
 )
 from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
+from ai_assistant.testing.memories import memory_in_band
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -50,22 +47,12 @@ PHRASE_A: Final = "my dentist"
 PHRASE_B: Final = "the appointment"
 
 
-def _fact(memory_id: str, source: MemorySource = MemorySource.USER_ASSERTED) -> SemanticMemory:
-    return SemanticMemory(
-        id=memory_id,
-        content=memory_id,
-        fact=memory_id,
-        provenance=Provenance(
-            source=source,
-            confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.9,
-            last_updated=AT,
-        ),
-        placement=Placement(),
-    )
+def _fact(memory_id: str, band: BeliefBand = BeliefBand.ASSERTED) -> Memory:
+    return memory_in_band(memory_id, memory_id, band)
 
 
-ASSERTED: Final = MemorySource.USER_ASSERTED
-DERIVED: Final = MemorySource.INFERRED
+ASSERTED: Final = BeliefBand.ASSERTED
+DERIVED: Final = BeliefBand.DERIVED
 
 
 @dataclass(frozen=True)
@@ -80,7 +67,7 @@ class _Search:
 class _Scripted(FakeMemoryStore):
     """Each query answers with its scripted records of the band asked, scored as set."""
 
-    answers: dict[str, list[tuple[SemanticMemory, float]]] = field(default_factory=dict)
+    answers: dict[str, list[tuple[Memory, float]]] = field(default_factory=dict)
     searches: list[_Search] = field(default_factory=list)
     fail_on: str | None = None
     slow: bool = False
@@ -109,7 +96,7 @@ class _Scripted(FakeMemoryStore):
         records = tuple(
             record.model_copy(update={"score": score})
             for record, score in self.answers.get(query, [])
-            if band_of(record.provenance.source) is band
+            if record.band is band
         )
         return MemorySearchResult(records=records[:limit], capped=False)
 
@@ -262,13 +249,13 @@ async def test_a_cap_outside_the_types_ceiling_is_refused(cap: int) -> None:
 async def test_an_unbounded_audience_searches_semantic_records_alone() -> None:
     memory = _Scripted()
     await _again(_stage(memory), audience=UNBOUNDED)
-    assert {one.kinds for one in memory.searches} == {(MemoryKind.SEMANTIC,)}
+    assert {one.kinds for one in memory.searches} == {(MemoryKind.MEMORY,)}
 
 
 async def test_a_bounded_audience_searches_episodes_and_semantic_records() -> None:
     memory = _Scripted()
     await _again(_stage(memory))
-    assert {one.kinds for one in memory.searches} == {(MemoryKind.EPISODIC, MemoryKind.SEMANTIC)}
+    assert {one.kinds for one in memory.searches} == {(MemoryKind.EPISODIC, MemoryKind.MEMORY)}
 
 
 # --- §2:7: failure-tolerant under recall's budget ---------------------------------------------

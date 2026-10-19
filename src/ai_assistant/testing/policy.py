@@ -19,7 +19,6 @@ what its subject actually proposed. Only the behaviour pinned by the shared
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.types import (
@@ -27,15 +26,12 @@ from ai_assistant.core.types import (
     DataTier,
     MemoryDecision,
     MemoryDecisionKind,
-    band_of,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.types import ConflictRelation, MemoryRecord, MemoryUpdateProposal
-
-_DEFAULT_TTL = timedelta(days=1)
 
 #: The two rulings that name a target record to fold the proposal against.
 _FOLD_KINDS = frozenset({MemoryDecisionKind.REINFORCE, MemoryDecisionKind.SUPERSEDE})
@@ -71,7 +67,7 @@ class FakeMemoryPolicy:
     :attr:`calls` and answered with :attr:`kind`, so a test picks the branch it
     wants to exercise instead of constructing a proposal that provokes it.
 
-    Three contract obligations override the configured kind, because a fake that
+    Four contract obligations override the configured kind, because a fake that
     could be configured into violating its own conformance suite would be a trap:
 
     * **Secret-tier proposals are never committed** (ADR-0004 §3) — they return
@@ -84,49 +80,29 @@ class FakeMemoryPolicy:
     * **A fold needs a target.** ``REINFORCE`` and ``SUPERSEDE`` both name a
       target record; with no conflicts to fold into there is no representable
       fold decision, so either falls back to ``ACCEPT``.
+    * **Nothing is stored tentatively** (ADR-0328 §10:3): a configured
+      ``STORE_TEMPORARY`` is answered with ``ACCEPT``.
 
-    All three are visible in the returned :attr:`~MemoryDecision.reason`, so a
+    All four are visible in the returned :attr:`~MemoryDecision.reason`, so a
     surprised test can see what happened rather than silently passing.
 
-    The taint override is **as narrow as the contract clause and no narrower**.
-    It is keyed on the band rather than on the raw field, because ADR-0106 §7
-    leaves a stray flag outside the ``DERIVED`` band constructible and ADR-0106 §2
-    says it means nothing there; and it stands down for a proposal carrying a
+    The taint override is **as narrow as the contract clause and no narrower**:
+    a ``DERIVED`` memory resting on outside content (ADR-0328 §7:6, §13:4), and it
+    stands down for a proposal carrying a
     :class:`~ai_assistant.core.types.UserConfirmation`, because ADR-0078 §5's
     confirmed answer is a re-ingest of the same marked proposal — a fake that
     deferred it again would make the confirmed path untestable through this
     double, which is the one path the containment depends on.
     """
 
-    def __init__(
-        self,
-        kind: MemoryDecisionKind = MemoryDecisionKind.ACCEPT,
-        *,
-        ttl: timedelta = _DEFAULT_TTL,
-    ) -> None:
+    def __init__(self, kind: MemoryDecisionKind = MemoryDecisionKind.ACCEPT) -> None:
         """Create the fake policy.
 
         Args:
-            kind: The ruling to return for every proposal, subject to the two
-                overrides in the class docstring.
-            ttl: The retention window attached to ``STORE_TEMPORARY`` decisions;
-                must be positive, since a non-positive window would produce an
-                already-expired record.
-
-        Raises:
-            ValueError: If ``ttl`` is not positive — the ``MemoryDecision``
-                validator would reject it later, so a fake configured this way
-                could only fail at ``decide`` time, far from the mistake.
-                Checked whatever ``kind`` is, including kinds that carry no ttl:
-                :attr:`kind` is public and reassignable, so a ttl validated only
-                when it looked relevant would go unchecked the moment a test
-                flipped the fake to ``STORE_TEMPORARY``.
+            kind: The ruling to return for every proposal, subject to the overrides
+                in the class docstring.
         """
-        if ttl <= timedelta(0):
-            msg = f"ttl must be positive, got {ttl}"
-            raise ValueError(msg)
         self.kind = kind
-        self._ttl = ttl
         self.calls: list[PolicyCall] = []
 
     async def decide(
@@ -159,21 +135,26 @@ class FakeMemoryPolicy:
                 reason="fake: secret-tier data is never committed",
             )
 
-        provenance = proposal.proposed.provenance
+        memory = proposal.proposed
         if (
-            band_of(provenance.source) is BeliefBand.DERIVED
-            and provenance.derived_from_external
+            memory.band is BeliefBand.DERIVED
+            and memory.rests_on_outside_content
             and proposal.confirmation is None
         ):
             return MemoryDecision(
                 kind=MemoryDecisionKind.ASK_USER,
                 reason=(
-                    "fake: a derived belief resting on recorded external content is "
-                    "never committed unconfirmed (ADR-0106 §6)"
+                    "fake: a derived memory resting on outside content is never "
+                    "committed unconfirmed (ADR-0106 §6)"
                 ),
             )
 
         kind = self.kind
+        if kind is MemoryDecisionKind.STORE_TEMPORARY:
+            return MemoryDecision(
+                kind=MemoryDecisionKind.ACCEPT,
+                reason="fake: nothing is stored tentatively, accepted instead (ADR-0328 §10:3)",
+            )
         if kind in _FOLD_KINDS and not conflicts:
             return MemoryDecision(
                 kind=MemoryDecisionKind.ACCEPT,
@@ -186,9 +167,6 @@ class FakeMemoryPolicy:
                 target_id=conflicts[0].id,
                 reason="fake: configured decision",
             )
-
-        if kind is MemoryDecisionKind.STORE_TEMPORARY:
-            return MemoryDecision(kind=kind, ttl=self._ttl, reason="fake: configured decision")
 
         return MemoryDecision(kind=kind, reason="fake: configured decision")
 

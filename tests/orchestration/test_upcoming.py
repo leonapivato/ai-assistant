@@ -58,9 +58,9 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import NotificationWriter, Reader, SourceGrants
     from ai_assistant.core.types import (
-        MemoryUpdateProposal,
         NotificationCandidate,
         SourceGrant,
+        SourceProposal,
     )
 
 #: The instant every reading in this module claims it acquired its bytes.
@@ -159,7 +159,7 @@ def _occurrence(
     lasts: timedelta = timedelta(hours=1),
     summary: str = "Calendar entry",
     record_id: str | None = None,
-) -> MemoryUpdateProposal:
+) -> SourceProposal:
     """One per-occurrence proposal of the shape a calendar reading carries.
 
     ``starts_in`` is measured from :data:`_READ_AT`, which is what every clause of
@@ -179,7 +179,7 @@ class Harness:
 
     def __init__(
         self,
-        proposals: Sequence[MemoryUpdateProposal] = (),
+        proposals: Sequence[SourceProposal] = (),
         *,
         reader: Reader | None = None,
         grants: SourceGrants | None = None,
@@ -515,7 +515,7 @@ async def test_the_same_entry_moved_to_another_hour_is_another_candidate() -> No
     the behaviour, not a defect to fix here.
     """
 
-    def entry(starts_in: timedelta, ends_in: timedelta) -> MemoryUpdateProposal:
+    def entry(starts_in: timedelta, ends_in: timedelta) -> SourceProposal:
         # **The sentence is held byte-identical while the span moves**, which the
         # ordinary fixture cannot do: a real rendering names the time, so a moved
         # entry differs in both halves of the projection at once and a key holding

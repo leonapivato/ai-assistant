@@ -19,15 +19,17 @@ activation's episode, and ``rests_on_outside_content``, whether that activation'
 says it has read outside content (ADR-0306 §4:5). Authorizing fills both before the
 candidate fit test, and the decision's parameters digest binds them.
 
-**The written belief's provenance is set by rule** (ADR-0106 §1), never by the model.
-The statement is planning's own wording, so it is a belief this system worked out:
-``INFERRED``, in the ``DERIVED`` band, at :data:`REMEMBERED_CONFIDENCE`, citing the
-activation's episode as its evidence, and carrying ``derived_from_external`` exactly
-where the activation had read outside content. It is never ``USER_ASSERTED``: a model's
-paraphrase claiming the user's own standing is the laundering ADR-0098 §4 forbids. A
-tainted derived proposal is then never committed unconfirmed (ADR-0106 §6), so in an
-activation that read outside content ``MemoryPolicy`` asks or rejects, and authorizing
-turns that into *needs you* or *not done* (ADR-0306 §4:3, §4:8 to §4:9).
+**The written memory's support is set by rule** (ADR-0328 §13:2, ADR-0106 §1), never
+by the model. The statement is planning's own wording, so it is a memory this system
+worked out: one support pointing at the remember call, with the origin ``remembered``,
+or ``remembered_over_outside`` exactly where the activation had read outside content,
+``for``, backing it as worded, its reading not judged, its ``when`` the episode's
+``occurred_at``, added by ``remember``; and a create citing it. It stands at
+inference, in the ``DERIVED`` band, never at "you said it": a model's paraphrase
+claiming the user's own standing is the laundering ADR-0098 §4 forbids. A derived
+proposal resting on outside content is then never committed unconfirmed (ADR-0106 §6),
+so in an activation that read outside content ``MemoryPolicy`` asks or rejects, and
+authorizing turns that into *needs you* or *not done* (ADR-0306 §4:3, §4:8 to §4:9).
 
 **The written belief's placement is set by rule too** (ADR-0217 §3:12, ADR-0204 §2,
 §5:2). The statement is produced by planning over what the activation had been given
@@ -63,8 +65,10 @@ paraphrase claiming their standing (ADR-0098 §4).
   ``question_key`` is the proposal's key over them, so the confirmation binds what is
   written against what was shown (ADR-0078 §5, §7). An assertion the question did not
   show is not retired on that yes: the policy asks again, and the call needs you again.
-- The provenance is the one set by rule above, written unchanged: a confirmed memory
-  keeps its source. The decision naming the approval is authorizing's.
+- The memory rests instead on one support with the origin ``confirmation``, pointing at
+  the yes's episode and the approved question part, ``sure``, its ``when`` the
+  approval's ``given.at`` (ADR-0328 §13:3), so it stands at "you confirmed this
+  wording". The decision naming the approval is authorizing's.
 - A confirmation is built only where the decision names an approval whose approved part
   is the asked call's, and the asked call is a remember stating exactly the call's
   statement. Otherwise none is, and the writer rules as it would on any call.
@@ -83,21 +87,29 @@ import structlog
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
+    BeliefBand,
     CapabilityEffect,
     CapabilityResult,
+    ConfirmationPart,
     CostBasis,
     DataTier,
     Idempotency,
+    Memory,
     MemoryDecisionKind,
-    MemorySource,
+    MemoryOperation,
+    MemoryOperationKind,
+    MemorySupport,
     MemoryUpdateProposal,
+    MemoryWriterName,
     Placement,
     PlacementReach,
     PlacementSetter,
-    Provenance,
+    ReadingCertainty,
+    RememberCallPart,
     Reversibility,
     RiskLevel,
-    SemanticMemory,
+    SupportDirection,
+    SupportOrigin,
     ToolCost,
     ToolDefinition,
     ToolFailure,
@@ -105,8 +117,10 @@ from ai_assistant.core.types import (
     ToolOutcome,
     ToolResult,
     UserConfirmation,
+    record_band,
 )
 from ai_assistant.orchestration.activation_state import active_state
+from ai_assistant.orchestration.stories import episode_address
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -118,7 +132,6 @@ __all__ = [
     "EPISODE_ARGUMENT",
     "OUTSIDE_CONTENT_ARGUMENT",
     "REMEMBER",
-    "REMEMBERED_CONFIDENCE",
     "REMEMBER_CAPABILITY",
     "STATEMENT_ARGUMENT",
     "STATEMENT_MAX_CHARS",
@@ -145,12 +158,10 @@ OUTSIDE_CONTENT_ARGUMENT: Final = "rests_on_outside_content"
 #: The longest statement a call may carry.
 STATEMENT_MAX_CHARS: Final = 2000
 
-#: The confidence a remembered statement is written at. Below 1.0, because a derived
-#: belief is never certain (ADR-0072 §3), and above every default floor below which a
-#: policy stores a belief only tentatively.
-REMEMBERED_CONFIDENCE: Final = 0.8
-
 _RATIONALE: Final = "planning remembered this statement during an activation"
+
+#: What a remembered memory's id is its effect record's id prefixed with.
+_RECORD_PREFIX: Final = "remembered:"
 
 _PARAMETERS_SCHEMA: Final[dict[str, FrozenJson]] = {
     "type": "object",
@@ -222,7 +233,7 @@ def remembered_record_id(effect_id: str, /) -> str:
     Returns:
         The belief's id.
     """
-    return f"remembered:{effect_id}"
+    return f"{_RECORD_PREFIX}{effect_id}"
 
 
 def remembered_proposal(
@@ -233,19 +244,22 @@ def remembered_proposal(
     at: datetime,
     placement: Placement | None = None,
 ) -> MemoryUpdateProposal:
-    """The proposal one remember call makes, with its provenance set by rule.
+    """The proposal one remember call makes, its support set by rule (ADR-0328 §13:2).
 
     Args:
         parameters: The call's arguments, the hub-filled ones included.
-        record_id: The id the belief is written at (:func:`remembered_record_id`).
-        at: Transaction time: when the belief is proposed (ADR-0045 §3).
-        placement: Who may receive the belief, as the runner sets it by rule
+        record_id: The id the memory is written at (:func:`remembered_record_id`),
+            whose effect record the support points at.
+        at: Transaction time: when the memory is proposed (ADR-0045 §3).
+        placement: Who may receive the memory, as the runner sets it by rule
             (ADR-0217 §3:12); the default where ``None``.
 
     Returns:
-        The proposal: one ``SemanticMemory`` stating ``statement``, ``INFERRED`` at
-        :data:`REMEMBERED_CONFIDENCE`, citing the episode, marked where the activation
-        had read outside content.
+        The proposal: one memory stating ``statement``, resting on one support that
+        points at the call, ``remembered_over_outside`` where the activation had read
+        outside content and ``remembered`` otherwise, its ``when`` the episode's
+        ``occurred_at`` where the current activation's capture holds it, and unknown
+        where it does not.
 
     Raises:
         ValueError: If an argument is missing, of the wrong type or blank.
@@ -262,34 +276,70 @@ def remembered_proposal(
     if not isinstance(outside, bool):
         msg = "a remember call says whether its activation read outside content"
         raise ValueError(msg)
-    provenance = Provenance(
-        source=MemorySource.INFERRED,
-        confidence=REMEMBERED_CONFIDENCE,
-        evidence=(episode,),
-        last_updated=at,
-        derived_from_external=outside,
+    support = MemorySupport(
+        points_at=RememberCallPart(episode=episode, effect=_effect_of(record_id)),
+        origin=SupportOrigin.REMEMBERED_OVER_OUTSIDE if outside else SupportOrigin.REMEMBERED,
+        direction=SupportDirection.FOR,
+        backs_as_worded=True,
+        when=_occurred_at(episode),
+        added_at=at,
+        added_by=MemoryWriterName.REMEMBER,
     )
-    record = SemanticMemory(
+    record = _resting_on(record_id, statement, support, placement=placement)
+    return MemoryUpdateProposal(proposed=record, rationale=_RATIONALE)
+
+
+def _resting_on(
+    record_id: str, statement: str, support: MemorySupport, *, placement: Placement | None
+) -> Memory:
+    """A memory stating ``statement`` on ``support`` alone, created citing it by ``remember``."""
+    return Memory(
         id=record_id,
         content=statement,
-        fact=statement,
-        provenance=provenance,
+        supports=(support,),
+        operations=(
+            MemoryOperation(
+                kind=MemoryOperationKind.CREATE,
+                cites=support.points_at,
+                at=support.added_at,
+                by=MemoryWriterName.REMEMBER,
+            ),
+        ),
         placement=Placement() if placement is None else placement,
     )
-    return MemoryUpdateProposal(proposed=record, rationale=_RATIONALE)
+
+
+def _effect_of(record_id: str) -> str:
+    """The effect record id a remembered memory's id was derived from."""
+    return record_id.removeprefix(_RECORD_PREFIX)
+
+
+def _occurred_at(episode: str) -> datetime | None:
+    """The episode's ``occurred_at``, where the current activation's capture holds it.
+
+    The admission write's one capture timestamp is the episode's ``occurred_at``
+    (ADR-0286 §2:2), held on the activation's state; a call run where no activation is
+    current, or whose episode is not the current capture's, has none to read, and the
+    support's ``when`` is then unknown (ADR-0328 §4).
+    """
+    state = active_state()
+    capture = None if state is None else state.capture
+    if capture is None or capture.address != episode:
+        return None
+    return capture.captured_at
 
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-#: The writer's rulings that write the belief, at once or tentatively.
+#: The writer's rulings that write the memory. ``STORE_TEMPORARY`` rules on nothing
+#: since ADR-0328 §10, and a writer refuses it.
 _WRITTEN: Final = frozenset(
     {
         MemoryDecisionKind.ACCEPT,
         MemoryDecisionKind.REINFORCE,
         MemoryDecisionKind.SUPERSEDE,
-        MemoryDecisionKind.STORE_TEMPORARY,
     }
 )
 
@@ -313,7 +363,7 @@ class NeedsYou:
             what a yes retires, and nothing else. Empty where it replaces none.
     """
 
-    replaces: tuple[SemanticMemory, ...] = ()
+    replaces: tuple[Memory, ...] = ()
 
 
 def _not_done(kind: ToolFailureKind, message: str) -> ToolResult:
@@ -348,7 +398,9 @@ def _confirmed(
     otherwise ``proposal`` is returned as it is, and the writer rules on it as on any
     call. ``retires`` and the frozen ``conflicts`` are exactly ``asked.replaces``, the
     assertions the question showed (§5:5), and ``question_key`` is the key of the
-    proposal over them (ADR-0078 §7). The provenance is untouched (§5:3).
+    proposal over them (ADR-0078 §7). The memory rests on the yes instead of the call
+    (ADR-0328 §13:3): one ``confirmation`` support pointing at the yes's episode and the
+    approved part, ``sure``, its ``when`` the approval's ``given.at``.
     """
     decision = call.decision
     approval = decision.approval
@@ -363,8 +415,26 @@ def _confirmed(
         _log.info("remember_unconfirmed", stage="acting", reason="not_the_call_approved")
         return proposal
     shown = tuple(str(record_id) for record_id in asked.replaces)
+    remembered = proposal.proposed
+    support = MemorySupport(
+        points_at=ConfirmationPart(
+            episode=episode_address(approval.given.activation_id),
+            asking_activation=approval.how.activation_id,
+            question=part,
+        ),
+        origin=SupportOrigin.CONFIRMATION,
+        direction=SupportDirection.FOR,
+        backs_as_worded=True,
+        how_sure=ReadingCertainty.SURE,
+        when=approval.given.at,
+        added_at=remembered.supports[0].added_at,
+        added_by=MemoryWriterName.REMEMBER,
+    )
+    confirmed = _resting_on(
+        remembered.id, remembered.content, support, placement=remembered.placement
+    )
     asked_against = MemoryUpdateProposal(
-        proposed=proposal.proposed,
+        proposed=confirmed,
         rationale=proposal.rationale,
         sensitivity=proposal.sensitivity,
         conflicts=shown,
@@ -376,7 +446,7 @@ def _confirmed(
         retires=shown,
     )
     return MemoryUpdateProposal(
-        proposed=proposal.proposed,
+        proposed=confirmed,
         rationale=proposal.rationale,
         sensitivity=proposal.sensitivity,
         conflicts=shown,
@@ -490,7 +560,7 @@ class RememberCalls:
         _log.info("remember_needs_you", stage="acting", reason="ask_user")
         return NeedsYou(replaces=replaced)
 
-    async def _replaced(self, conflicts: Sequence[str]) -> tuple[SemanticMemory, ...] | None:
+    async def _replaced(self, conflicts: Sequence[str]) -> tuple[Memory, ...] | None:
         """The assertions among ``conflicts`` a question shows replaced, as stored (§5:5).
 
         Every conflict the writer ruled against is read, and those the user asserted
@@ -507,14 +577,17 @@ class RememberCalls:
             found = await self._memory.get_many(ids)
         except MemoryStoreError:
             return None
-        replaced: list[SemanticMemory] = []
+        replaced: list[Memory] = []
         for record_id in ids:
             record = found.get(record_id)
             if record is None:
                 return None
-            if record.provenance.source is not MemorySource.USER_ASSERTED:
+            if not isinstance(record, Memory):
+                # An episode is never an assertion, and never shown replaced.
+                if record_band(record) is BeliefBand.ASSERTED:
+                    return None
                 continue
-            if not isinstance(record, SemanticMemory):
-                return None
+            if record.band is not BeliefBand.ASSERTED:
+                continue
             replaced.append(record)
         return tuple(replaced)

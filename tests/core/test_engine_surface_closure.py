@@ -325,7 +325,7 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "SpendPeriod",
         "ToolInvocation",
         "RecordedInvocation",
-        "Evidence",
+        "SupportView",
         "BeliefSummary",
         "Belief",
         "ConversationSummary",
@@ -1751,6 +1751,13 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     as extra or unknown (ADR-0124 §9:2). **The method set does not move and stays at
     58.**
 
+    **110 is ADR-0328 §15:8, on wire-carried core types.** ``Belief`` and
+    ``BeliefSummary`` reshape to the memory record's projection (the standing, the
+    status, the computed values, and ``Belief.supports`` in place of
+    ``Belief.evidence``), ``MemoryKind`` loses two members and gains ``memory``, and
+    ``beliefs`` loses its ``kinds`` argument. A peer at 109 refuses each as extra or
+    unknown (ADR-0124 §9:2). **The method set does not move and stays at 58.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1759,7 +1766,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (58, 109), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (58, 110), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
@@ -1767,18 +1774,17 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
 
 
 #: ADR-0085 §6b's derived predicates, less the five ADR-0285 §2 removed with the two
-#: observation types and the two ADR-0293 §11 removed with ``learn``'s summaries.
+#: observation types, the two ADR-0293 §11 removed with ``learn``'s summaries, and
+#: the citation counts ADR-0328 §15:3 removed with ``Evidence`` (a memory's values are
+#: fields its projection computes once in ``core``; ``SupportView.gone`` is the one
+#: derived predicate left).
 #: **The list is normative there** — "a
 #: triad implementation that carried a subset would leave the CLI reading an
 #: attribute that is not there" — so it is spelled out rather than derived, which
 #: is the one place in this module an enumeration is the right shape.
 DERIVED_PREDICATES: Final[frozenset[tuple[str, str]]] = frozenset(
     {
-        ("Evidence", "lost"),
-        ("Belief", "evidence_count"),
-        ("Belief", "lost_evidence"),
-        ("Belief", "unsupported"),
-        ("BeliefSummary", "unsupported"),
+        ("SupportView", "gone"),
     }
 )
 

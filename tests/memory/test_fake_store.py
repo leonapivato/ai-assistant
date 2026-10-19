@@ -18,14 +18,14 @@ from pydantic import ValidationError
 from ai_assistant.core.errors import MemoryStoreError, MemoryStoreStaleError
 from ai_assistant.core.types import (
     ChannelIdentity,
-    MemorySource,
+    Memory,
+    MemoryRecord,
     MemoryWrite,
     MemoryWriteMode,
-    Provenance,
-    SemanticMemory,
 )
 from ai_assistant.testing import FakeMemoryStore
 from ai_assistant.testing.cancellation import SuspendedMidWrite
+from ai_assistant.testing.memories import memory, remembered_support
 from ai_assistant.testing.memory import _mint_position
 
 if TYPE_CHECKING:
@@ -39,15 +39,14 @@ def _fixed_now() -> datetime:
     return datetime(2026, 6, 1, tzinfo=UTC)
 
 
-def _semantic(record_id: str, content: str) -> SemanticMemory:
-    return SemanticMemory(
-        id=record_id,
-        content=content,
-        fact=content,
-        provenance=Provenance(
-            source=MemorySource.OBSERVED, confidence=0.6, last_updated=_fixed_now()
-        ),
-    )
+def _semantic(record_id: str, content: str) -> Memory:
+    return memory(record_id, content, remembered_support(when=_fixed_now(), added_at=_fixed_now()))
+
+
+def _memory_of(record: MemoryRecord | None) -> Memory:
+    """``record``, which a case here stored as a memory."""
+    assert isinstance(record, Memory)
+    return record
 
 
 async def test_an_absent_rows_refusal_says_no_record_is_stored_under_that_id() -> None:
@@ -198,13 +197,13 @@ async def test_returned_records_cannot_be_mutated_to_reach_stored_state() -> Non
     with pytest.raises(ValidationError):
         got.content = "mutated on egress"  # egress: top-level field
     with pytest.raises(ValidationError):
-        got.provenance.confidence = 0.1  # egress: nested model is frozen too
-    assert isinstance(got.provenance.evidence, tuple)  # egress: nested collection is immutable
+        _memory_of(got).supports[0].note = "rewritten"  # egress: nested model is frozen too
+    assert isinstance(_memory_of(got).supports, tuple)  # egress: nested collection is immutable
 
     fresh = await store.get("1")
     assert fresh is not None
     assert fresh.content == "original content"  # stored state untouched
-    assert fresh.provenance.evidence == ()
+    assert len(_memory_of(fresh).supports) == 1
 
 
 async def test_search_results_cannot_be_mutated_to_reach_stored_state() -> None:
@@ -214,12 +213,12 @@ async def test_search_results_cannot_be_mutated_to_reach_stored_state() -> None:
     results = (await store.search("coffee")).records
     assert results
     with pytest.raises(ValidationError):
-        results[0].provenance.confidence = 0.1  # nested model of a result is frozen
-    assert isinstance(results[0].provenance.evidence, tuple)
+        _memory_of(results[0]).supports[0].note = "rewritten"  # nested model of a result is frozen
+    assert isinstance(_memory_of(results[0]).supports, tuple)
 
     fresh = await store.get("1")
     assert fresh is not None
-    assert fresh.provenance.evidence == ()
+    assert len(_memory_of(fresh).supports) == 1
 
 
 async def test_exported_records_cannot_be_mutated_to_reach_stored_state() -> None:
@@ -231,13 +230,13 @@ async def test_exported_records_cannot_be_mutated_to_reach_stored_state() -> Non
     with pytest.raises(ValidationError):
         exported[0].content = "mutated"
     with pytest.raises(ValidationError):
-        exported[0].provenance.confidence = 0.1
-    assert isinstance(exported[0].provenance.evidence, tuple)
+        _memory_of(exported[0]).supports[0].note = "rewritten"
+    assert isinstance(_memory_of(exported[0]).supports, tuple)
 
     fresh = await store.get("1")
     assert fresh is not None
     assert fresh.content == "coffee note"
-    assert fresh.provenance.evidence == ()
+    assert len(_memory_of(fresh).supports) == 1
 
 
 # --------------------------------------------------------------------------- #

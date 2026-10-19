@@ -30,10 +30,11 @@ import sys
 import time
 from datetime import UTC, datetime
 
-from ai_assistant.core.types import MemorySource, Provenance, SemanticMemory, Validity
+from ai_assistant.core.types import Memory, Validity
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.testing import FakeTraceSink
+from ai_assistant.testing.memories import memory, remembered_support
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 #: How long the child holds the window open once it has announced itself. A
@@ -50,12 +51,11 @@ _INSIDE = "inside"
 _WINDOW_NEVER_REACHED = 43
 
 
-def _semantic(record_id: str, content: str) -> SemanticMemory:
-    return SemanticMemory(
-        id=record_id,
-        content=content,
-        fact=content,
-        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN),
+def _semantic(record_id: str, content: str) -> Memory:
+    return memory(
+        record_id,
+        content,
+        remembered_support(when=_WHEN, added_at=_WHEN),
         validity=Validity(),
     )
 

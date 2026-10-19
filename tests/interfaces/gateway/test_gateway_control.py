@@ -18,7 +18,7 @@ would be one more place for the two to drift apart.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from test_gateway_streams import _harness
@@ -28,15 +28,15 @@ from ai_assistant.core.types import (
     Attestation,
     Belief,
     BeliefBand,
-    Evidence,
     GrantScope,
-    MemoryKind,
     ReportedExtent,
+    belief_view,
 )
 from ai_assistant.interfaces.gateway.http import Request
 from ai_assistant.interfaces.gateway.records import RequestClass
 from ai_assistant.interfaces.gateway.server import _ASSISTANT_PATHS
 from ai_assistant.testing import FakeAssistantEngine
+from ai_assistant.testing.memories import memory, remembered_support
 from ai_assistant.wire.errors import HubUnavailableError
 
 if TYPE_CHECKING:
@@ -386,24 +386,33 @@ async def test_a_lost_hub_and_a_hub_refusal_are_two_conditions_on_a_grant_act() 
 # --- ADR-0177 §5: the belief surface -----------------------------------------
 
 
-async def test_a_listing_carries_every_field_the_floor_requires_and_no_citation() -> None:
-    """ADR-0073 §4's per-belief fields, and ADR-0085 §4a's split.
+#: Every member ADR-0328 §15:1 has both memory views carry, and no other: no
+#: confidence, no presented confidence and no elision count (§15:3).
+_LISTED: Final = {
+    "id",
+    "band",
+    "standing",
+    "status",
+    "content",
+    "valid_until",
+    "as_of",
+    "learned",
+    "evidence",
+    "reading_certainty",
+    "track_record",
+    "legacy",
+    "unbacked",
+    "rests_on_outside_content",
+    "supports_gone",
+}
 
-    The band, the confidence, the kind, the content, when it was last revised, the
-    validity window's end and the id — plus the three citation counts, because §4's
-    floor for a derived belief is that the surface conveys "how many citations stand
-    behind it" and ADR-0107 §5 owes the elision ceiling beside any rendered count.
 
-    A summary carries **no** citations: the type has nowhere to put one, so a
-    conforming listing cannot ship the corpus on every page.
+async def test_a_listing_carries_every_field_the_floor_requires_and_no_support() -> None:
+    """ADR-0328 §15:1's fields, and ADR-0085 §4a's split.
 
-    **ADR-0189 §2's two fields cross as well, and on this view as much as on the
-    single-belief one.** ADR-0107 §3 refused both "put the field on ``BeliefSummary``
-    only" and "put it on ``Belief`` only", because a listing row that answered less
-    than the row it links to is the same projection defective in one place — and #1517
-    records the concrete failure the exact key set below is what catches: an attested
-    listing row rendering the old generic explanation while every single-belief test
-    passes.
+    A summary carries **no** supports: the type has nowhere to put one, so a conforming
+    listing cannot ship an episode's text on every page. The key set is exact, so a
+    field one view carries and the other drops (#1517's failure) is caught here.
     """
     engine = FakeAssistantEngine()
     engine.hold("rec-1", content="the owner runs on Tuesdays", band=BeliefBand.DERIVED)
@@ -412,44 +421,47 @@ async def test_a_listing_carries_every_field_the_floor_requires_and_no_citation(
 
         assert status == 200
         held = body["beliefs"][0]
-        assert set(held) == {
-            "id",
-            "band",
-            "kind",
+        assert set(held) == _LISTED
+        assert (held["band"], held["standing"], held["status"]) == (
+            "derived",
+            "inference",
+            "current",
+        )
+        assert set(held["evidence"]) == {"supporting", "against", "episodes", "latest"}
+        assert set(held["track_record"]) == {"relied_on", "held_up", "let_down", "last_used"}
+        assert "supports" not in held
+
+
+async def test_the_single_view_carries_the_listings_fields_and_every_support() -> None:
+    """ADR-0328 §15:2: the same fields under the same names, plus each support."""
+    engine = FakeAssistantEngine()
+    engine.hold("rec-1", content="the office is in Boston")
+    async with _harness(engine) as one:
+        _, single = await one.whole("POST", "/belief", {"record_id": "rec-1"})
+
+        belief = single["belief"]
+        assert set(belief) == _LISTED | {"supports"}
+        assert set(belief["supports"][0]) == {
+            "part",
             "content",
-            "confidence",
-            "last_updated",
-            "valid_until",
-            "evidence_count",
-            "lost_evidence",
-            "evidence_elided",
-            "unsupported",
-            "attestation",
-            "rests_on_recorded_external_content",
+            "origin",
+            "direction",
+            "note",
+            "how_sure",
+            "when",
+            "about_when",
+            "source_details",
+            "counts",
         }
-        assert held["band"] == "derived"
-        assert "evidence" not in held
+        assert belief["supports"][0]["origin"] == "user_message"
 
 
-# --- ADR-0189 §2's fields on the wire the browser reads ----------------------
-#
-# The page has no other source for them: `_belief_fields` is what a belief *is* by
-# the time `app.js` sees one, so a field that
-# does not cross here cannot be rendered there however §9 words the obligation.
+async def test_a_sourced_supports_details_cross_whole_on_the_single_view() -> None:
+    """ADR-0328 §15:2 on the shape ADR-0092 §2 requires: one object, never two members.
 
-
-async def test_both_belief_views_carry_the_attestation_whole_and_under_one_name() -> None:
-    """ADR-0189 §2 on both belief DTOs, ADR-0092 §2 on the shape it crosses in.
-
-    **Whole rather than as two members**: two independent nullable members admit four
-    states, of which two are half-answers — a source with no instant renders "your
-    calendar had this as of …" with a blank, and an instant with no source attributes
-    it to nobody. One optional object with two required members makes both
-    unconstructable on this wire exactly as they are on the record.
-
-    **On the listing as well as the single-belief view, under one name**, which is
-    ADR-0107 §3's ruling and #1517's second finding: the row and the row it links to
-    answer the same question, or the projection is defective in one place.
+    Two independent nullable members admit two half-answers — a source with no instant,
+    and an instant with no source — and one optional object with two required members
+    makes both unconstructable on this wire exactly as they are on the record.
     """
     engine = FakeAssistantEngine()
     engine.hold(
@@ -462,22 +474,20 @@ async def test_both_belief_views_carry_the_attestation_whole_and_under_one_name(
         _, listing = await one.whole("POST", "/beliefs", {})
         _, single = await one.whole("POST", "/belief", {"record_id": "rec-1"})
 
-        for view in (listing["beliefs"][0], single["belief"]):
-            assert view["attestation"] == {
-                "reported_by": "work-calendar",
-                "reported_at": _INSTANT.isoformat(),
-            }
-            assert view["rests_on_recorded_external_content"] is True
+        assert listing["beliefs"][0]["standing"] == "source"
+        assert listing["beliefs"][0]["rests_on_outside_content"] is True
+        assert single["belief"]["supports"][0]["source_details"] == {
+            "reported_by": "work-calendar",
+            "reported_at": _INSTANT.isoformat(),
+        }
 
 
-async def test_a_belief_that_nothing_reported_crosses_with_no_attestation() -> None:
-    """The absence is a value and is emitted as one (ADR-0189 §2).
+async def test_an_absent_value_crosses_as_null_rather_than_being_omitted() -> None:
+    """ADR-0184's ruling: an absence carrying meaning is a value rather than a gap.
 
-    An ``Attestation`` is present exactly when the band is ``ATTESTED`` (ADR-0092 §1),
-    so an asserted belief has none — and the member still crosses, as ``null``, rather
-    than being omitted. A page cannot tell an absent key from a key it forgot to read,
-    and ADR-0184 is the corpus's ruling that an absence carrying meaning is a value
-    rather than a gap.
+    A memory nothing dates has an unknown as of (ADR-0328 §7:3) and a reading nobody
+    judged has no certainty (§7:5); both cross as ``null``, because a page cannot tell
+    an absent key from a key it forgot to read.
     """
     engine = FakeAssistantEngine()
     engine.hold("rec-1", content="the office is in Boston", band=BeliefBand.ASSERTED)
@@ -485,49 +495,38 @@ async def test_a_belief_that_nothing_reported_crosses_with_no_attestation() -> N
         _, listing = await one.whole("POST", "/beliefs", {})
 
         held = listing["beliefs"][0]
-        assert held["attestation"] is None
-        assert held["rests_on_recorded_external_content"] is False
+        assert held["reading_certainty"] is None
+        assert held["valid_until"] is None
+        assert held["rests_on_outside_content"] is False
 
 
-async def test_a_derived_belief_carries_the_predicates_answer_and_not_the_flag() -> None:
-    """ADR-0189 §2's fifth clause, which names what may not happen here.
+async def test_a_derived_memory_carries_the_computed_answer_and_not_a_flag() -> None:
+    """ADR-0328 §7:6, read through §12 as ADR-0189 §2's fifth clause.
 
-    ``rests_on_recorded_external_content`` "is the value of
-    ``core.types.rests_on_recorded_external_content`` (ADR-0106 §2) applied to the
-    projected record's ``Provenance``, computed by the engine at projection time. No
-    producer supplies it, no surface recomputes it from ``band`` and no component reads
-    ``Provenance.derived_from_external`` in its place."
-
-    The ``DERIVED`` band is the only one where the two answers can differ, which is why
-    it is the one worth crossing: on ``ATTESTED`` and ``ASSERTED`` the band determines
-    the answer and a client could derive it, and on this band nothing else on the
-    projection supplies it (#746).
+    Rests-on-outside-content is computed from the supports by ``core`` at projection
+    time: no producer supplies it and no surface recomputes it from ``band``. The
+    ``DERIVED`` band is the one where the two answers can differ.
     """
     engine = FakeAssistantEngine()
     engine.hold(
         "outside",
         content="they commute on Tuesdays",
         band=BeliefBand.DERIVED,
-        derived_from_external=True,
+        rests_on_outside_content=True,
     )
     engine.hold("inside", content="they prefer mornings", band=BeliefBand.DERIVED)
     async with _harness(engine) as one:
         _, listing = await one.whole("POST", "/beliefs", {})
 
-        answers = {
-            row["id"]: row["rests_on_recorded_external_content"] for row in listing["beliefs"]
-        }
+        answers = {row["id"]: row["rests_on_outside_content"] for row in listing["beliefs"]}
         assert answers == {"outside": True, "inside": False}
 
 
 async def test_the_extent_rides_on_the_record_and_crosses_to_no_browser() -> None:
-    """ADR-0189 §2 carries it, §10 leaves its rendering to ADR-0117, so it stops here.
+    """ADR-0189 §10 leaves the extent's rendering to ADR-0117, so it stops here.
 
-    "``Attestation.extent`` rides along and nothing renders it, deliberately" —
-    ADR-0117 §2 made the field optional and meaningful in its absence, and no surface
-    has a rendering rule for it. A value on this wire with no consumer is surface
-    (ADR-0045 §1), so the two members a surface *is* ruled to render are the two that
-    cross.
+    A value on this wire with no consumer is surface (ADR-0045 §1), so the two members
+    a surface *is* ruled to render are the two that cross.
     """
     engine = FakeAssistantEngine()
     engine.hold(
@@ -543,7 +542,8 @@ async def test_the_extent_rides_on_the_record_and_crosses_to_no_browser() -> Non
     async with _harness(engine) as one:
         _, single = await one.whole("POST", "/belief", {"record_id": "rec-1"})
 
-        assert set(single["belief"]["attestation"]) == {"reported_by", "reported_at"}
+        details = single["belief"]["supports"][0]["source_details"]
+        assert set(details) == {"reported_by", "reported_at"}
 
 
 async def test_an_absent_band_filter_and_an_empty_one_are_different_questions() -> None:
@@ -565,6 +565,21 @@ async def test_an_absent_band_filter_and_an_empty_one_are_different_questions() 
         assert [arguments["bands"] for _, arguments in engine.calls] == [None, ()]
 
 
+async def test_the_listing_relays_no_kind_so_episodes_never_reach_the_panel() -> None:
+    """ADR-0328 §11:2, and #3143: the listing holds memories, never episodes.
+
+    The page asks with no filter, and the gateway relays only the bands: there is no
+    kind to relay, so the engine's own listing — memories only — is what the panel
+    shows.
+    """
+    engine = FakeAssistantEngine()
+    engine.hold("rec-1", content="held")
+    async with _harness(engine) as one:
+        await one.whole("POST", "/beliefs", {"kinds": ["episodic"]})
+
+        assert engine.calls == [("beliefs", {"bands": None})]
+
+
 async def test_a_band_of_no_vocabulary_is_refused_rather_than_dropped() -> None:
     """Dropping it would answer a narrower question than the browser asked and say
     nothing about having done so, which is the quiet half of the case above."""
@@ -576,21 +591,23 @@ async def test_a_band_of_no_vocabulary_is_refused_rather_than_dropped() -> None:
         assert one.engine.calls == []
 
 
-async def test_the_single_belief_read_resolves_its_citations_and_tombstones_what_is_gone() -> None:
-    """ADR-0077 §6's other half, and ADR-0073 §4's floor.
+async def test_the_single_read_resolves_its_supports_and_shows_the_gone_one_as_gone() -> None:
+    """ADR-0328 §15:7, and ADR-0073 §4's floor.
 
-    "A citation the surface cannot render as evidence is never rendered *as* evidence
-    — not as a reassuring id, not silently dropped." An unresolved citation crosses as
-    an entry whose content is absent, and :class:`Evidence` carries no id at all, so
-    nothing downstream can pass one off as the warrant.
+    A support whose episode no longer resolves still counts, and is shown as gone and
+    never as evidence — not as a reassuring id, not silently dropped. It crosses with
+    ``content`` ``null``, and a support carries no id at all.
     """
     engine = _WithEvidence()
     async with _harness(engine) as one:
         status, body = await one.whole("POST", "/belief", {"record_id": "rec-1"})
 
         assert status == 200
-        assert body["belief"]["evidence"] == [{"content": "a run on Tuesday"}, {"content": None}]
-        assert body["belief"]["lost_evidence"] == 1
+        supports = body["belief"]["supports"]
+        assert [one["content"] for one in supports] == ["a run on Tuesday", None]
+        assert all(one["counts"] for one in supports), "a gone support still counts"
+        assert body["belief"]["supports_gone"] is False
+        assert all("id" not in one and "episode" not in one for one in supports)
 
 
 async def test_a_belief_read_that_names_nothing_live_is_its_own_condition() -> None:
@@ -724,7 +741,6 @@ async def test_a_blank_identifier_is_the_promoted_surfaces_refusal_and_not_a_sec
     ("path", "payload"),
     [
         ("/beliefs", {"bands": [{}]}),
-        ("/beliefs", {"kinds": [[]]}),
         ("/grant", {"source": "calendar", "scope": [{"facet": True}]}),
     ],
 )
@@ -819,22 +835,21 @@ class _CorruptStore(FakeAssistantEngine):
 
 
 class _WithEvidence(FakeAssistantEngine):
-    """An engine holding one belief whose citations are half gone.
+    """An engine holding one memory whose supports are half gone.
 
-    Scripted here rather than through :meth:`FakeAssistantEngine.hold`, which fixes
-    the confidence and holds no citations — the tombstone is the state ADR-0073 §4's
-    floor is about, and a state no test can reach is a floor nobody checks.
+    Scripted here rather than through :meth:`FakeAssistantEngine.hold`, which holds one
+    resolved support: the gone support is the state ADR-0328 §15:7 is about, and a
+    state no test can reach is a floor nobody checks.
     """
 
     async def belief(self, record_id: Identifier) -> Belief:
-        """Answer one belief carrying a resolved citation and a tombstone."""
+        """Answer one memory carrying a resolved support and a gone one."""
         self.calls.append(("belief", {"record_id": record_id}))
-        return Belief(
-            id=record_id,
-            band=BeliefBand.DERIVED,
-            kind=MemoryKind.SEMANTIC,
-            content="the owner runs on Tuesdays",
-            confidence=0.4,
-            last_updated=_INSTANT,
-            evidence=(Evidence(content="a run on Tuesday"), Evidence()),
+        held = memory(
+            record_id,
+            "the owner runs on Tuesdays",
+            remembered_support("activation:kept"),
+            remembered_support("activation:lost", effect="effect-2"),
         )
+        kept, lost = (support.points_at for support in held.supports)
+        return belief_view(held, now=_INSTANT, contents={kept: "a run on Tuesday", lost: None})

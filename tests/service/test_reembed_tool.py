@@ -24,13 +24,14 @@ import pytest
 
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError
-from ai_assistant.core.types import MemorySource, Provenance, SemanticMemory
+from ai_assistant.core.types import BeliefBand
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.service import datadir, reembed
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.testing import FakeTraceSink
+from ai_assistant.testing.memories import memory_in_band
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -69,16 +70,7 @@ async def _seed(data_dir: Path, count: int = 2) -> None:
     )
     try:
         for index in range(count):
-            await store.add(
-                SemanticMemory(
-                    id=str(index),
-                    content=f"memory {index}",
-                    fact=f"memory {index}",
-                    provenance=Provenance(
-                        source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN
-                    ),
-                )
-            )
+            await store.add(memory_in_band(str(index), f"memory {index}", BeliefBand.DERIVED))
     finally:
         store.close()
 

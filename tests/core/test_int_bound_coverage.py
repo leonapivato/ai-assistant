@@ -1,8 +1,9 @@
 """No `core` integer field may be silently unbounded below (issue #755).
 
 ADR-0107 §3 makes ``ge=0`` part of the binding DTO contract — ``BeliefSummary``
-and ``Belief`` "each gain a field ``evidence_elided: int = 0`` with ``ge=0``" —
-and both types carry it today. What nothing asserted is that they *enforce* it:
+and ``Belief`` "each gain a field ``evidence_elided: int = 0`` with ``ge=0``" — and
+both carried it until ADR-0328 §15:3 took it off every projection of a memory;
+``Provenance`` still does. What nothing asserted is that they *enforce* it:
 the only negative-value case in the tree was ``Provenance``'s, so dropping the
 constraint from either belief DTO in a refactor left the gate green.
 
@@ -87,12 +88,8 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 import ai_assistant.core
 from ai_assistant.core.types import (
-    Belief,
-    BeliefBand,
-    BeliefSummary,
     FrozenJson,
     FrozenJsonMapping,
-    MemoryKind,
     MemorySource,
     Provenance,
     TraceMetrics,
@@ -657,18 +654,6 @@ def test_an_admissible_nested_default_is_not_flagged() -> None:
 # It is the same validation path — ADR-0085 §4b's invariants and ``extra="forbid"``
 # both still run.
 
-#: The fields both belief DTOs need beyond ``evidence_elided``, which are the same
-#: six: ADR-0085 §4a's "same three names read identically on both types" extends to
-#: everything the listing and the detail view share.
-_BELIEF_FIELDS: dict[str, object] = {
-    "id": "rec-1",
-    "band": BeliefBand.DERIVED,
-    "kind": MemoryKind.SEMANTIC,
-    "content": "the office is in Boston",
-    "confidence": 0.5,
-    "last_updated": AT,
-}
-
 
 def _provenance(**overrides: int) -> Provenance:
     """The record's own copy of the count (ADR-0086 §4)."""
@@ -682,20 +667,14 @@ def _provenance(**overrides: int) -> Provenance:
     )
 
 
-def _belief(**overrides: int) -> Belief:
-    """The single-belief view — the fuller answer, per ADR-0077 §6."""
-    return Belief.model_validate(_BELIEF_FIELDS | overrides)
-
-
-def _summary(**overrides: int) -> BeliefSummary:
-    """The listing row, which has no evidence to derive a count from (ADR-0085 §4a)."""
-    return BeliefSummary.model_validate(_BELIEF_FIELDS | overrides)
-
-
 #: What one of the anchor builders returns: a type carrying ``evidence_elided``.
-ElisionCarrier = Provenance | Belief | BeliefSummary
+ElisionCarrier = Provenance
 
 #: Every type in ``core`` carrying ``evidence_elided``, by name.
+#:
+#: ``Belief`` and ``BeliefSummary`` carried it until ADR-0328 §15:3 took the elision
+#: count off every projection of a memory; an episode's and a minted record's
+#: ``Provenance`` still carry it.
 #:
 #: ``Provenance`` is here despite ``test_types.py`` already refusing a negative
 #: value on it: the overlap is what buys the completeness assertion below, which
@@ -704,8 +683,6 @@ ElisionCarrier = Provenance | Belief | BeliefSummary
 #: carriers are three.
 ELISION_CARRIERS: dict[str, Callable[..., ElisionCarrier]] = {
     "Provenance": _provenance,
-    "Belief": _belief,
-    "BeliefSummary": _summary,
 }
 
 

@@ -30,15 +30,13 @@ from ai_assistant.core.types import (
     CostBasis,
     DataTier,
     Idempotency,
-    MemorySource,
+    Memory,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
-    Provenance,
     QuestionPart,
     Reversibility,
     RiskLevel,
-    SemanticMemory,
     ToolCall,
     ToolCost,
     ToolDefinition,
@@ -64,6 +62,7 @@ from ai_assistant.orchestration.acting import (
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
 from ai_assistant.orchestration.remembering import NeedsYou
 from ai_assistant.testing import FakePlanStore
+from ai_assistant.testing.memories import memory, said_support
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1047,14 +1046,9 @@ async def test_a_deliberate_retry_under_an_approval_passes_an_unknown_outcome() 
 # --- ADR-0321 §5:5, #2845: a call that needs you, and §5:2: the asked call it rides with --
 
 
-def _assertion() -> SemanticMemory:
+def _assertion() -> Memory:
     """An assertion a remember's question shows it replacing."""
-    return SemanticMemory(
-        id="assertion:1",
-        content="never drinks coffee",
-        fact="never drinks coffee",
-        provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AT),
-    )
+    return memory("assertion:1", "never drinks coffee", said_support(when=_AT, added_at=_AT))
 
 
 def _asked(part: int = 1) -> AskedCall:

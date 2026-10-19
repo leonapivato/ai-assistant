@@ -12,9 +12,6 @@ from ai_assistant.core.types import (
     DigestOutcome,
     EpisodicMemory,
     InputOrigin,
-    MemorySource,
-    Provenance,
-    SemanticMemory,
 )
 from ai_assistant.orchestration.outside_content import (
     carries_evidence,
@@ -22,6 +19,7 @@ from ai_assistant.orchestration.outside_content import (
     is_outside_episode,
     rests_on_outside_content,
 )
+from ai_assistant.testing.memories import memory, said_support
 
 _AT: Final = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
 
@@ -62,10 +60,5 @@ def test_only_an_outside_origin_is_from_outside() -> None:
 
 
 def test_a_memory_record_carries_no_evidence() -> None:
-    fact = SemanticMemory(
-        id="fact",
-        content="The 9:10 runs.",
-        fact="The 9:10 runs.",
-        provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AT),
-    )
+    fact = memory("fact", "The 9:10 runs.", said_support(when=_AT, added_at=_AT))
     assert not carries_evidence(fact)

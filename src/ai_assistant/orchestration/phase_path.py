@@ -212,6 +212,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     InputOrigin,
     LabelKind,
+    Memory,
     MemoryKind,
     MessageAuthor,
     Modality,
@@ -220,7 +221,6 @@ from ai_assistant.core.types import (
     ProposedCall,
     QuestionPart,
     RecallOutcome,
-    SemanticMemory,
     SendOutcome,
     StageOutcome,
     StoryMember,
@@ -230,7 +230,6 @@ from ai_assistant.core.types import (
     ToolFailureKind,
     ToolOutcome,
     ToolResult,
-    rests_on_recorded_external_content,
 )
 from ai_assistant.orchestration.acting import (
     ActedOutcome,
@@ -1345,7 +1344,7 @@ class PhaseWorking:
         # What planning looked up for itself (ADR-0307 §6:6), by the result's id: a
         # memory search's records whose source is not outside, as fetched by id before
         # the next round (ADR-0282 §2:4), and a story's full view, as its call read it.
-        self.searched: dict[str, tuple[SemanticMemory, ...]] = {}
+        self.searched: dict[str, tuple[Memory, ...]] = {}
         self.search_fetches: list[Fetched] = []
         self.pages: dict[str, PlanningStory] = {}
         self._rounds: list[_Round] = []
@@ -1983,7 +1982,7 @@ def _fetched_outside(fetched: Fetched | None) -> tuple[str, ...]:
         if (
             rests_on_outside_content(one)
             if isinstance(one, EpisodicMemory)
-            else rests_on_recorded_external_content(one.provenance)
+            else one.rests_on_outside_content
         )
     )
 
@@ -2042,8 +2041,8 @@ def _recalled_stories(*decisions: Recalled | None) -> dict[str, tuple[str, ...]]
 def _kept_outside(*decisions: Recalled | None) -> tuple[str, ...]:
     """The memory records the runs kept whose source is outside, once each, in order.
 
-    Read off each kept item's recorded origin (ADR-0306 §5:16, ADR-0281 §6): a semantic
-    record resting on recorded external content. A found episode is never digested,
+    Read off each kept item's recorded origin (ADR-0306 §5:16, ADR-0281 §6): a memory
+    resting on recorded outside content (ADR-0328 §2:5-§2:6). A found episode is never digested,
     and is shown by its records instead (ADR-0308 §3:1).
     """
     return tuple(
@@ -2052,7 +2051,7 @@ def _kept_outside(*decisions: Recalled | None) -> tuple[str, ...]:
             for decision in decisions
             if decision is not None
             for item in decision.result.items
-            if item.kind is MemoryKind.SEMANTIC and item.rests_on_recorded_external_content
+            if item.kind is MemoryKind.MEMORY and item.rests_on_recorded_external_content
         )
     )
 
@@ -2882,7 +2881,7 @@ class PhasePath:
             fetched=len(fetched.fetched),
             missing=len(fetched.missing),
         )
-        by_id = {one.id: one for one in fetched.recalled if isinstance(one, SemanticMemory)}
+        by_id = {one.id: one for one in fetched.recalled if isinstance(one, Memory)}
         for result_id, kept in unfetched.items():
             working.searched[result_id] = tuple(by_id[one] for one in kept if one in by_id)
 
@@ -2977,7 +2976,7 @@ class PhasePath:
             raise RuntimeError(msg)
         ids = working.recall_outside
 
-        async def fetch() -> tuple[SemanticMemory, ...]:
+        async def fetch() -> tuple[Memory, ...]:
             fetched = await fetch_held(
                 self._memory, episode_ids=None, recalled_ids=ids, audience=given.supply
             )
@@ -2994,8 +2993,7 @@ class PhasePath:
             return tuple(
                 one
                 for one in fetched.recalled
-                if isinstance(one, SemanticMemory)
-                and rests_on_recorded_external_content(one.provenance)
+                if isinstance(one, Memory) and one.rests_on_outside_content
             )
 
         try:
@@ -3261,7 +3259,7 @@ class PhasePath:
             )
         else:
 
-            async def fetch() -> tuple[SemanticMemory, ...]:
+            async def fetch() -> tuple[Memory, ...]:
                 fetched = await fetch_held(
                     self._memory, episode_ids=None, recalled_ids=records, audience=audience
                 )
@@ -3273,7 +3271,7 @@ class PhasePath:
                     fetched=len(fetched.fetched),
                     missing=len(fetched.missing),
                 )
-                return tuple(one for one in fetched.recalled if isinstance(one, SemanticMemory))
+                return tuple(one for one in fetched.recalled if isinstance(one, Memory))
 
             digested = await self._digesting.digest_records(
                 fetch,

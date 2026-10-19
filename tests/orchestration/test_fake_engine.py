@@ -92,7 +92,7 @@ from ai_assistant.core.types import (
     EgressSpan,
     EpisodicMemory,
     GrantScope,
-    MemoryKind,
+    MemoryStanding,
     MemoryWrite,
     MessageAuthor,
     MessageReceipt,
@@ -468,39 +468,40 @@ async def test_a_held_belief_is_listed_and_readable() -> None:
     assert detail.content == "the office is in Boston"
 
 
-async def test_the_fake_s_listing_discloses_the_same_elision_as_its_detail_view() -> None:
-    """ADR-0107 §8 item 5: the canonical fake and the real projection agree.
+async def test_the_fake_projects_what_core_s_projection_computes() -> None:
+    """ADR-0328 §15:1: the fake's views are ``core``'s, so they agree with the engine's.
 
-    ``_summary_of`` is the fake's counterpart to
-    :func:`~ai_assistant.orchestration.engine.belief_summary_from_record`, and a fake
-    that dropped the field would let a consumer's suite pass against a listing that
-    discloses **less** than the detail view it was drilled into — exactly the
-    inversion of ADR-0077 §6's split that ADR-0107 §3 refused when it declined to put
-    the field on ``BeliefSummary`` alone.
-
-    Asserted at a non-default value on both surfaces, per §8 item 6: at ``0`` the two
-    would agree whether the field were carried or silently dropped.
+    A held memory rests on one support whose origin ranks at the band asked for, and
+    every computed value is read off it rather than set: the standing, whether it
+    rests on outside content, and the legacy mark.
     """
     engine = FakeAssistantEngine()
-    engine.hold("rec-1", content="the office is in Boston", evidence_elided=900)
+    engine.hold("rec-said", content="a")
+    engine.hold("rec-sourced", content="b", band=BeliefBand.ATTESTED)
+    engine.hold("rec-outside", content="c", band=BeliefBand.DERIVED, rests_on_outside_content=True)
+    engine.hold("rec-old", content="d", legacy=True)
 
-    page = await engine.beliefs()
-    assert [summary.evidence_elided for summary in page] == [900]
+    listed = {summary.id: summary for summary in await engine.beliefs()}
+    assert listed["rec-said"].standing is MemoryStanding.SAID
+    assert listed["rec-sourced"].standing is MemoryStanding.SOURCE
+    assert listed["rec-sourced"].rests_on_outside_content is True
+    assert listed["rec-outside"].standing is MemoryStanding.INFERENCE
+    assert listed["rec-outside"].rests_on_outside_content is True
+    assert listed["rec-old"].legacy is True
+    for record_id, summary in listed.items():
+        detail = await engine.belief(record_id)
+        assert detail is not None
+        assert summary == BeliefSummary.model_validate(detail.model_dump(exclude={"supports"}))
 
-    detail = await engine.belief("rec-1")
-    assert detail is not None
-    assert detail.evidence_elided == 900
-    assert page[0].evidence_elided == detail.evidence_elided
 
-
-async def test_the_filters_compose_by_conjunction() -> None:
-    """A belief is listed when its band is selected *and* its kind is (ADR-0073 §2)."""
+async def test_the_band_filter_selects_by_band() -> None:
+    """A memory is listed when its band is selected (ADR-0073 §2)."""
     engine = FakeAssistantEngine()
-    engine.hold("rec-1", content="a", kind=MemoryKind.SEMANTIC, band=BeliefBand.ASSERTED)
-    engine.hold("rec-2", content="b", kind=MemoryKind.PREFERENCE, band=BeliefBand.DERIVED)
-    listed = await engine.beliefs(bands=[BeliefBand.ASSERTED], kinds=[MemoryKind.PREFERENCE])
+    engine.hold("rec-1", content="a", band=BeliefBand.ASSERTED)
+    engine.hold("rec-2", content="b", band=BeliefBand.DERIVED)
+    listed = await engine.beliefs(bands=[BeliefBand.ATTESTED])
     assert listed == ()
-    listed = await engine.beliefs(bands=[BeliefBand.DERIVED], kinds=[MemoryKind.PREFERENCE])
+    listed = await engine.beliefs(bands=[BeliefBand.DERIVED])
     assert [summary.id for summary in listed] == ["rec-2"]
 
 
@@ -518,13 +519,12 @@ class _LazyFilterEngine(FakeAssistantEngine):
         self,
         *,
         bands: Sequence[BeliefBand] | None = None,
-        kinds: Sequence[MemoryKind] | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
     ) -> tuple[BeliefSummary, ...]:
         """Suspend first, then read ``bands`` — so a mid-call mutation is visible."""
         await asyncio.sleep(0)
-        return await super().beliefs(bands=bands, kinds=kinds, limit=limit, offset=offset)
+        return await super().beliefs(bands=bands, limit=limit, offset=offset)
 
 
 async def test_the_materialisation_clause_catches_a_lazy_filter() -> None:

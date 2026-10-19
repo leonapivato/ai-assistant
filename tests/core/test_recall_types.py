@@ -41,7 +41,7 @@ _LATER = _NOW + timedelta(seconds=1)
 
 def _item(**overrides: object) -> RecalledItem:
     fields: dict[str, object] = {
-        "kind": MemoryKind.SEMANTIC,
+        "kind": MemoryKind.MEMORY,
         "id": "memory-1",
         "excerpt": "The dentist is Dr Rao on Elm Street.",
         "provenance": RecallProvenance.USER,
@@ -161,10 +161,22 @@ def test_an_episode_is_recallable() -> None:
     assert _item(kind=MemoryKind.EPISODIC).kind is MemoryKind.EPISODIC
 
 
-@pytest.mark.parametrize("kind", [MemoryKind.PREFERENCE, MemoryKind.PROCEDURAL])
-def test_only_episodic_and_semantic_records_are_recallable(kind: MemoryKind) -> None:
-    with pytest.raises(ValidationError, match="episodic and semantic"):
-        _item(kind=kind)
+def test_a_memory_is_recallable() -> None:
+    """ADR-0328 §2:5: an item that recalls a memory names the memory kind."""
+    assert _item(kind=MemoryKind.MEMORY).kind is MemoryKind.MEMORY
+
+
+def test_an_item_stored_naming_semantic_still_validates() -> None:
+    """ADR-0328 §2:5, §16:7: an item stored before the memory record stays as stored."""
+    stored = _item(kind=MemoryKind.MEMORY).model_dump(mode="json") | {"kind": "semantic"}
+    assert RecalledItem.model_validate(stored).kind is MemoryKind.SEMANTIC
+
+
+def test_only_episodes_semantic_records_and_memories_are_recallable() -> None:
+    """The recallable kinds are every member ``MemoryKind`` now has (ADR-0328 §10:5)."""
+    assert set(MemoryKind) == {MemoryKind.EPISODIC, MemoryKind.SEMANTIC, MemoryKind.MEMORY}
+    with pytest.raises(ValidationError):
+        RecalledItem.model_validate(_item().model_dump(mode="json") | {"kind": "preference"})
 
 
 def test_an_item_keeps_a_stored_id_exactly_as_stored() -> None:
@@ -197,10 +209,11 @@ def test_an_episode_item_carries_its_stories_in_the_order_given() -> None:
     assert item.stories == ("story:b", "story:a")
 
 
-def test_a_semantic_item_carries_no_stories() -> None:
-    """ADR-0300 §7:2: "A semantic item carries none, enforced by validator"."""
-    with pytest.raises(ValidationError, match="a semantic item carries no stories"):
-        _item(kind=MemoryKind.SEMANTIC, stories=("story:a",))
+@pytest.mark.parametrize("kind", [MemoryKind.SEMANTIC, MemoryKind.MEMORY])
+def test_a_memory_item_carries_no_stories(kind: MemoryKind) -> None:
+    """ADR-0300 §7:2: "A semantic item carries none, enforced by validator"; a memory neither."""
+    with pytest.raises(ValidationError, match="only an episode's item carries stories"):
+        _item(kind=kind, stories=("story:a",))
 
 
 def test_a_story_id_is_never_blank() -> None:

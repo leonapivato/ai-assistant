@@ -28,14 +28,13 @@ composition root builds, and a client that could call ``aclose()`` could shut do
 the hub from a spoke. A Protocol constrains what an implementation must have, not
 what it may not, so the class stays substitutable with both.
 
-The façade carries the **belief inspection surface** (ADR-0073 §7): ``beliefs``
-enumerates what the assistant holds as ``BeliefSummary`` — counts, never citation
-contents (ADR-0085 §4a) — ``belief`` reads the one a deletion is about to destroy
-as a ``Belief`` with its citations resolved, and ``forget`` destroys it. Both
-projections apply ``band_of`` here, once, before any adapter sees a record
-(``belief_from_record``, ``belief_summary_from_record``), and both state the
-confidence lost support has already lowered (``presented_confidence``) rather than
-the stored number, which nothing on this path ever writes (ADR-0077 §6).
+The façade carries the **belief inspection surface** (ADR-0073 §7, ADR-0328 §15):
+``beliefs`` enumerates the memories the assistant holds as ``BeliefSummary`` — the
+values ADR-0328 §7 computes, never a support's content (ADR-0085 §4a) — ``belief``
+reads the one a deletion is about to destroy as a ``Belief`` with each support's part
+resolved to readable content or shown as gone, and ``forget`` destroys it. Both
+projections are ``core``'s (``belief_summary``, ``belief_view``), so a fake projects
+exactly what the engine does; the part resolution, a store read, is the engine's.
 
 ``payloads`` holds the surface's payload rules: ADR-0087's canonical encoding, and
 the contract limit ADR-0084 §4 makes every implementation enforce.
@@ -85,10 +84,7 @@ from ai_assistant.orchestration.connections import ConnectionOperations
 from ai_assistant.orchestration.conversations import ConversationLifecycle
 from ai_assistant.orchestration.engine import (
     Engine,
-    belief_from_record,
-    belief_summary_from_record,
     conversation_summary,
-    presented_confidence,
 )
 from ai_assistant.orchestration.grants import GrantOperations, HeldSource
 from ai_assistant.orchestration.notifications import NotificationWriteStage, hand_off
@@ -114,10 +110,7 @@ __all__ = [
     "NotificationWriteStage",
     "UpcomingEventStage",
     "WriteOutcome",
-    "belief_from_record",
-    "belief_summary_from_record",
     "canonical_payload",
     "conversation_summary",
     "hand_off",
-    "presented_confidence",
 ]

@@ -23,11 +23,11 @@ from ai_assistant.core.types import (
     Attestation,
     EpisodicMemory,
     MemorySource,
-    MemoryUpdateProposal,
     Provenance,
     ReadCoverage,
     ReportedExtent,
     SemanticMemory,
+    SourceProposal,
 )
 from ai_assistant.testing import DEFAULT_READER_NAME, FakeReader, attested_proposal
 
@@ -509,30 +509,33 @@ def test_the_declared_half_of_the_fakes_own_identity_is_its_own_declared_name() 
     assert declared_name_of(FakeReader(discriminator=_DISCRIMINATOR).name) == DEFAULT_READER_NAME
 
 
-def test_an_episodic_proposal_is_refused_at_construction() -> None:
-    """ADR-0093 §4's refusal, caught where the script was written."""
-    episode = MemoryUpdateProposal(
-        proposed=EpisodicMemory(
-            id="e-1",
-            content="the standup happened",
-            occurred_at=_WHEN,
-            provenance=Provenance(
-                source=MemorySource.EXTERNAL,
-                confidence=0.9,
-                last_updated=_LATER,
-                attestation=Attestation(reported_by="calendar", reported_at=_WHEN),
-            ),
+def test_an_episodic_proposal_is_unconstructable() -> None:
+    """ADR-0093 §4's refusal, which ADR-0328 §2:4 moved into the type itself.
+
+    A reader's proposal is a :class:`SourceProposal`, whose ``proposed`` is a minted
+    ``SemanticMemory``: an episode cannot be put into one, so no script can carry it.
+    """
+    episode = EpisodicMemory(
+        id="e-1",
+        content="the standup happened",
+        occurred_at=_WHEN,
+        provenance=Provenance(
+            source=MemorySource.EXTERNAL,
+            confidence=0.9,
+            last_updated=_LATER,
+            attestation=Attestation(reported_by="calendar", reported_at=_WHEN),
         ),
-        rationale="calendar reported it",
     )
 
-    with pytest.raises(ValueError, match=r"(?i)episodic"):
-        FakeReader([episode], name="calendar")
+    with pytest.raises(ValueError, match=r"(?i)semantic"):
+        SourceProposal.model_validate(
+            {"proposed": episode.model_dump(), "rationale": "calendar reported it"}
+        )
 
 
 def test_a_proposal_outside_the_attested_band_is_refused_at_construction() -> None:
     """What a reader reports is a third party's claim, never our own inference."""
-    inferred = MemoryUpdateProposal(
+    inferred = SourceProposal(
         proposed=SemanticMemory(
             id="s-1",
             content="the user prefers mornings",
@@ -563,7 +566,7 @@ def test_a_proposal_attested_to_another_source_is_refused_at_construction() -> N
 
 def test_a_proposal_with_no_rationale_is_refused_at_construction() -> None:
     """The decidable half of ADR-0093 §4; *naming* the source stays the producer's."""
-    silent = MemoryUpdateProposal(
+    silent = SourceProposal(
         proposed=SemanticMemory(
             id="s-2",
             content="a standup at 10:00",

@@ -11,7 +11,7 @@ them in the same pass (ADR-0282 §4, §5).
 **One cue, per band** (§3). The activation's input text, exactly as the pass holds it,
 is the query of one :meth:`~ai_assistant.core.protocols.MemoryStore.search` per band —
 ``ASSERTED``, ``ATTESTED``, ``DERIVED``, in that order, ADR-0072 §5's precedence — each
-over episodic and semantic records, requesting **no eligibility**. From each band's
+over episodes and memories, requesting **no eligibility**. From each band's
 results, in the store's order, a record is kept only when its ``score`` is at or above
 the threshold and the audience predicate admits it, until the limit is filled. A record
 returned with no ``score`` is not kept, and ``capped`` is not acted on.
@@ -24,14 +24,14 @@ passes over cannot crowd the band out.
 
 **Audience** (§4). ``admitted_to_understanding`` — the predicate of the understanding
 stage's two windows — filters what the searches returned before anything is kept, and
-on a pass whose audience posture is unbounded the searches ask for semantic records
+on a pass whose audience posture is unbounded the searches ask for memories
 alone, so no episode reaches the pass through recall. The posture is read off the
 pass's :data:`~ai_assistant.orchestration.disclosure.TurnSupply` and nothing else.
 
 **The stories of what it keeps** (ADR-0300 §7). For each episode it keeps whose stored
 id is an activation's episode, recall reads ``StoryStore.stories_of`` for that
 activation — a lookup by identity, never a search — and the item carries those stories
-in the order the store returned them. A semantic record belongs to no story. The
+in the order the store returned them. A memory belongs to no story. The
 understanding phase hands them to the candidate stories, the item with the higher
 search score first (§6:1, :meth:`Recalled.stories`).
 
@@ -85,17 +85,18 @@ from ai_assistant.core.types import (
     DiagnosticSource,
     EpisodicMemory,
     InputOrigin,
+    Memory,
     MemoryKind,
     RecallCue,
     RecalledItem,
     RecallOutcome,
     RecallProvenance,
     RecordedTextInput,
-    SemanticMemory,
     StoryMember,
     StoryMemberKind,
-    band_of,
-    rests_on_recorded_external_content,
+    record_attestation,
+    record_band,
+    record_rests_on_outside_content,
 )
 from ai_assistant.orchestration.disclosure import (
     UnboundedAudienceSupply,
@@ -125,7 +126,7 @@ _CUES: Final = (RecallCue.ACTIVATION_INPUT,)
 #: The second run's kinds of cue, in the order ``found_by`` names them (ADR-0308 §2:2).
 _SECOND_RUN_CUES: Final = (RecallCue.UNDERSTOOD_MEANING, RecallCue.UNDERSTOOD_PHRASE)
 
-type RecalledRecord = EpisodicMemory | SemanticMemory
+type RecalledRecord = EpisodicMemory | Memory
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,7 +237,7 @@ class RecallStage:
         Args:
             text: The activation's input, exactly as the pass holds it — the one cue.
             audience: The pass's audience posture: its predicate filters what the
-                searches return, and an unbounded one searches semantic records alone.
+                searches return, and an unbounded one searches memories alone.
             deadline: The pass's deadline on the running loop's clock, which caps
                 recall's budget.
             shown: The stored ids the pass's windows hold, none of which is kept
@@ -442,9 +443,9 @@ class RecallStage:
         """
         limit = self._limit + len(shown)
         kinds = (
-            (MemoryKind.SEMANTIC,)
+            (MemoryKind.MEMORY,)
             if isinstance(audience, UnboundedAudienceSupply)
-            else (MemoryKind.EPISODIC, MemoryKind.SEMANTIC)
+            else (MemoryKind.EPISODIC, MemoryKind.MEMORY)
         )
         kept: dict[str, tuple[RecalledRecord, BeliefBand, float]] = {}
         for band in _BANDS:
@@ -452,8 +453,6 @@ class RecallStage:
             admitted = admitted_to_understanding(audience, found.records)
             finds.note(text, band, found.records, admitted)
             for record in admitted:
-                if not isinstance(record, EpisodicMemory | SemanticMemory):
-                    continue
                 if record.id in shown:
                     continue
                 # Affirmatively at or above: a NaN score is not, and no score is not.
@@ -474,7 +473,7 @@ class RecallStage:
 
         ADR-0300 §7:1: read only for an episode whose stored id is its activation's
         episode — the activation read off its processing record and its address
-        compared with the id, never parsed out of it. A semantic record, and an
+        compared with the id, never parsed out of it. A memory, and an
         episode recording no activation or stored at another address, belong to no story,
         so nothing is read for them.
         """
@@ -585,15 +584,16 @@ def _item(
     record: RecalledRecord, stories: tuple[str, ...], *, found_by: tuple[RecallCue, ...] = _CUES
 ) -> RecalledItem:
     """One kept record as the processing record carries it (§6, ADR-0300 §7:2)."""
-    provenance = record.provenance
+    # ADR-0328 §2:5-§2:6: a memory's item names the memory kind and carries its band,
+    # its computed rests-on-outside-content and its standing's source details.
     return RecalledItem(
         kind=MemoryKind(record.kind),
         id=record.id,
         excerpt=_excerpt_of(record)[:UNDERSTANDING_REFERENT_EXCERPT_CHARS],
         provenance=_provenance_of(record),
-        standing=band_of(provenance.source),
-        rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
-        attestation=provenance.attestation,
+        standing=record_band(record),
+        rests_on_recorded_external_content=record_rests_on_outside_content(record),
+        attestation=record_attestation(record),
         found_by=found_by,
         stories=stories,
     )
@@ -610,8 +610,8 @@ def _provenance_of(record: RecalledRecord) -> RecallProvenance:
     and an episode with no processing record no trigger, and both are ``user``, as
     ADR-0281 §4:4 labelled them.
     """
-    if isinstance(record, SemanticMemory):
-        outside = rests_on_recorded_external_content(record.provenance)
+    if isinstance(record, Memory):
+        outside = record.rests_on_outside_content
     else:
         processing = record.processing_record
         outside = processing is not None and processing.trigger.origin is not InputOrigin.USER
@@ -628,8 +628,8 @@ def _excerpt_of(record: RecalledRecord) -> str:
     ``origin`` is ``user``; an input whose origin is not recorded is not taken for
     the user's, and gives what an outside one does.
     """
-    if isinstance(record, SemanticMemory):
-        return record.fact
+    if isinstance(record, Memory):
+        return record.content
     processing = record.processing_record
     if processing is None:
         return record.content

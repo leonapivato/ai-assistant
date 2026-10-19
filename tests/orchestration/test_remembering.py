@@ -19,14 +19,20 @@ from ai_assistant.core.types import (
     AskedCall,
     CapabilityEffect,
     CapabilityResult,
+    ConfirmationPart,
     ConflictRelation,
     EpisodicMemory,
+    Memory,
+    MemoryChange,
     MemoryDecision,
     MemoryDecisionKind,
     MemoryIngestResult,
+    MemoryOperationKind,
     MemoryRecord,
     MemorySource,
+    MemoryStanding,
     MemoryUpdateProposal,
+    MemoryWriterName,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
@@ -35,7 +41,10 @@ from ai_assistant.core.types import (
     PlacementSetter,
     Provenance,
     QuestionPart,
-    SemanticMemory,
+    ReadingCertainty,
+    RememberCallPart,
+    SupportDirection,
+    SupportOrigin,
     ToolCall,
     ToolFailureKind,
     ToolOutcome,
@@ -45,13 +54,16 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import DefaultMemoryPolicy
 from ai_assistant.orchestration.acting import OwnRecordsByCapability
-from ai_assistant.orchestration.activation_state import CURRENT_ACTIVATION, ActivationScope
+from ai_assistant.orchestration.activation_state import (
+    CURRENT_ACTIVATION,
+    ActivationScope,
+    EpisodeProgress,
+)
 from ai_assistant.orchestration.planning import DELIBERATE_REPEAT, offered_tools
 from ai_assistant.orchestration.remembering import (
     EPISODE_ARGUMENT,
     OUTSIDE_CONTENT_ARGUMENT,
     REMEMBER,
-    REMEMBERED_CONFIDENCE,
     STATEMENT_ARGUMENT,
     NeedsYou,
     RememberCalls,
@@ -59,6 +71,7 @@ from ai_assistant.orchestration.remembering import (
     remembered_record_id,
 )
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore, FakeMemoryWriter
+from ai_assistant.testing.memories import memory, remembered_support, said_support
 
 _AT: Final = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
 _EPISODE: Final = "activation:act-1"
@@ -116,22 +129,59 @@ def test_planning_is_offered_the_statement_and_the_mark_and_never_what_the_hub_f
 # --- the proposal ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("outside", [False, True])
-def test_the_proposal_is_a_derived_belief_citing_the_episode(*, outside: bool) -> None:
-    """ADR-0106 §1: provenance by rule, never by the model, and never the user's word."""
+@pytest.mark.parametrize(
+    ("outside", "origin"),
+    [(False, SupportOrigin.REMEMBERED), (True, SupportOrigin.REMEMBERED_OVER_OUTSIDE)],
+)
+def test_the_proposal_is_an_inference_resting_on_the_remember_call(
+    *, outside: bool, origin: SupportOrigin
+) -> None:
+    """ADR-0328 §13:2: one support on the call, set by rule, never the user's word."""
     proposal = remembered_proposal(
         _arguments(outside=outside), record_id="remembered:effect:1", at=_AT
     )
 
     record = proposal.proposed
-    assert isinstance(record, SemanticMemory)
     assert record.id == "remembered:effect:1"
-    assert record.fact == "likes green tea"
-    assert record.provenance.source is MemorySource.INFERRED
-    assert record.provenance.confidence == REMEMBERED_CONFIDENCE
-    assert record.provenance.evidence == (_EPISODE,)
-    assert record.provenance.derived_from_external is outside
-    assert record.provenance.last_updated == _AT
+    assert record.content == "likes green tea"
+    (support,) = record.supports
+    assert support.points_at == RememberCallPart(episode=_EPISODE, effect="effect:1")
+    assert support.origin is origin
+    assert support.direction is SupportDirection.FOR
+    assert support.backs_as_worded is True
+    assert support.how_sure is None
+    assert support.added_at == _AT
+    assert support.added_by is MemoryWriterName.REMEMBER
+    # No activation is current, so the episode's `occurred_at` is not to hand.
+    assert support.when is None
+    (create,) = record.operations
+    assert (create.kind, create.cites, create.by) == (
+        MemoryOperationKind.CREATE,
+        support.points_at,
+        MemoryWriterName.REMEMBER,
+    )
+    assert record.standing is MemoryStanding.INFERENCE
+    assert record.rests_on_outside_content is outside
+
+
+def test_the_support_is_dated_at_the_episode_s_occurred_at() -> None:
+    """ADR-0328 §13:2: its ``when`` is the episode's ``occurred_at``, the capture's instant."""
+    state = _admitted()
+    occurred = datetime(2026, 10, 11, 11, 59, tzinfo=UTC)
+    state.capture = EpisodeProgress(address=_EPISODE, captured_at=occurred)
+    token = CURRENT_ACTIVATION.set(ActivationScope(state))
+    try:
+        proposal = remembered_proposal(_arguments(), record_id="remembered:effect:1", at=_AT)
+        elsewhere = remembered_proposal(
+            {**_arguments(), EPISODE_ARGUMENT: "activation:other"},
+            record_id="remembered:effect:1",
+            at=_AT,
+        )
+    finally:
+        CURRENT_ACTIVATION.reset(token)
+
+    assert proposal.proposed.supports[0].when == occurred
+    assert elsewhere.proposed.supports[0].when is None
 
 
 @pytest.mark.parametrize(
@@ -177,8 +227,8 @@ async def test_a_remember_call_writes_its_belief_at_the_derived_id() -> None:
     assert result.outcome is ToolOutcome.SUCCEEDED
     assert result.output is None
     written = await store.get(remembered_record_id("effect:1"))
-    assert isinstance(written, SemanticMemory)
-    assert written.fact == "likes green tea"
+    assert isinstance(written, Memory)
+    assert written.content == "likes green tea"
 
 
 @pytest.mark.parametrize(
@@ -289,6 +339,11 @@ class _FailingWriter:
         msg = "the store is gone"
         raise MemoryStoreError(msg)
 
+    async def apply(self, change: MemoryChange) -> None:
+        del change
+        msg = "the store is gone"
+        raise MemoryStoreError(msg)
+
 
 async def test_a_write_that_fails_is_not_done() -> None:
     """§3:3: the outcome is what the store answered, and never unknown."""
@@ -373,22 +428,17 @@ _YES_AT: Final = datetime(2026, 10, 12, 14, 15, tzinfo=UTC)
 _QUESTION: Final = QuestionPart(round="round:asked", part=1)
 
 
-def _assertion(
-    record_id: str = _ASSERTED, *, source: MemorySource = MemorySource.USER_ASSERTED
-) -> SemanticMemory:
-    """A stored belief the statement contradicts, which the writer finds as a conflict."""
-    content = f"never {_STATEMENT}"
-    return SemanticMemory(
-        id=record_id,
-        content=content,
-        fact=content,
-        provenance=Provenance(
-            source=source,
-            confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.7,
-            evidence=(_EPISODE,),
-            last_updated=_AT,
-        ),
+def _assertion(record_id: str = _ASSERTED, *, said: bool = True) -> Memory:
+    """A stored memory the statement contradicts, which the writer finds as a conflict.
+
+    The user's own word where ``said``, and a remembered inference otherwise.
+    """
+    support = (
+        said_support(_EPISODE, when=_AT, added_at=_AT)
+        if said
+        else remembered_support(_EPISODE, effect=f"effect:{record_id}", when=_AT, added_at=_AT)
     )
+    return memory(record_id, f"never {_STATEMENT}", support)
 
 
 def _approval(part: int = 1) -> Approval:
@@ -446,7 +496,7 @@ class _Recording:
 
 
 async def _over(
-    *stored: SemanticMemory, wired: bool = True
+    *stored: Memory, wired: bool = True
 ) -> tuple[RememberCalls, FakeMemoryStore, _Recording]:
     """The runner over the built policy, a store holding ``stored``, and its read wired."""
     _, store = await _runner()
@@ -463,13 +513,13 @@ async def _live(store: FakeMemoryStore, record_id: str) -> bool:
     return record.validity.valid_until is None
 
 
-async def _written(store: FakeMemoryStore) -> list[SemanticMemory]:
-    """The live beliefs stating the statement."""
+async def _written(store: FakeMemoryStore) -> list[Memory]:
+    """The live memories stating the statement."""
     return [
         record
         for record in await store.export()
-        if isinstance(record, SemanticMemory)
-        and record.fact == _STATEMENT
+        if isinstance(record, Memory)
+        and record.content == _STATEMENT
         and record.validity.valid_until is None
     ]
 
@@ -481,14 +531,16 @@ async def test_a_conflict_found_at_write_time_needs_you_showing_what_it_replaces
     result = await runner.run(_call(_arguments(_STATEMENT)))
 
     assert isinstance(result, NeedsYou)
-    assert [(one.id, one.fact) for one in result.replaces] == [(_ASSERTED, f"never {_STATEMENT}")]
+    assert [(one.id, one.content) for one in result.replaces] == [
+        (_ASSERTED, f"never {_STATEMENT}")
+    ]
     assert await _written(store) == []
     assert await _live(store, _ASSERTED)
 
 
 async def test_only_the_assertions_among_the_conflicts_are_shown_replaced() -> None:
     """§5:5: the question shows the assertions a yes retires, not every conflict found."""
-    inferred = _assertion("inferred:1", source=MemorySource.INFERRED)
+    inferred = _assertion("inferred:1", said=False)
     runner, _, _ = await _over(_assertion(), inferred)
 
     result = await runner.run(_call(_arguments(_STATEMENT)))
@@ -549,8 +601,13 @@ async def test_an_assertion_the_question_did_not_show_is_not_retired_on_that_yes
     assert await _live(store, "assertion:2")
 
 
-async def test_a_confirmed_memory_keeps_its_source() -> None:
-    """§5:3: a tainted statement is saved on the yes, its provenance written unchanged."""
+async def test_a_confirmed_memory_rests_on_the_yes() -> None:
+    """ADR-0328 §13:3: a statement saved on a yes stands at "you confirmed this wording".
+
+    It rests on one ``confirmation`` support pointing at the yes's episode and the
+    approved part, ``sure``, dated at the approval's ``given.at`` — even where the
+    activation that asked had read outside content.
+    """
     runner, store, _ = await _over()
     tainted = _arguments(_STATEMENT, outside=True)
 
@@ -559,11 +616,16 @@ async def test_a_confirmed_memory_keeps_its_source() -> None:
     assert isinstance(result, ToolResult)
     assert result.outcome is ToolOutcome.SUCCEEDED
     written = await store.get(remembered_record_id("effect:1"))
-    assert isinstance(written, SemanticMemory)
-    assert written.provenance.source is MemorySource.INFERRED
-    assert written.provenance.confidence == REMEMBERED_CONFIDENCE
-    assert written.provenance.evidence == (_EPISODE,)
-    assert written.provenance.derived_from_external is True
+    assert isinstance(written, Memory)
+    (support,) = written.supports
+    assert support.points_at == ConfirmationPart(
+        episode="activation:act-1", asking_activation="act-0", question=_QUESTION
+    )
+    assert support.origin is SupportOrigin.CONFIRMATION
+    assert support.how_sure is ReadingCertainty.SURE
+    assert support.when == _YES_AT
+    assert written.standing is MemoryStanding.CONFIRMED
+    assert written.rests_on_outside_content is False
 
 
 @pytest.mark.parametrize(

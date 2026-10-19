@@ -51,13 +51,15 @@ from ai_assistant.core.types import (
     MemorySource,
     PlacementReach,
     band_of,
+    record_attestation,
+    record_band,
 )
 from ai_assistant.orchestration.upcoming import NOTIFICATION_CLASS, PRODUCER
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import MemoryRecord, NotificationCandidate
+    from ai_assistant.core.types import NotificationCandidate, SuppliedRecord
 
 __all__ = [
     "BoundedAudienceSupply",
@@ -77,6 +79,13 @@ __all__ = [
 #: source, and a member this set does not name is withheld.
 _PLACED_SOURCES: Final[frozenset[MemorySource]] = frozenset(
     {MemorySource.USER_ASSERTED, MemorySource.OBSERVED, MemorySource.INFERRED}
+)
+
+#: The bands :data:`_PLACED_SOURCES` names, which is how a memory is placed: ADR-0328
+#: §12 reads ``USER_ASSERTED`` as band ``ASSERTED`` and ``OBSERVED`` and ``INFERRED``
+#: as band ``DERIVED``.
+_PLACED_BANDS: Final[frozenset[BeliefBand]] = frozenset(
+    band_of(source) for source in _PLACED_SOURCES
 )
 
 
@@ -136,7 +145,7 @@ class BoundedAudienceSupply:
 type TurnSupply = UnboundedAudienceSupply | BoundedAudienceSupply
 
 
-def admitted_to_understanding[R: MemoryRecord](
+def admitted_to_understanding[R: SuppliedRecord](
     supply: TurnSupply, records: Sequence[R]
 ) -> tuple[R, ...]:
     """The stored records of the understanding stage's two windows this audience admits.
@@ -196,7 +205,7 @@ def admits_owner_placed(supply: TurnSupply) -> bool:
     return isinstance(supply, BoundedAudienceSupply)
 
 
-def _speakable(record: MemoryRecord, *, speakable_attested_sources: frozenset[str]) -> bool:
+def _speakable(record: SuppliedRecord, *, speakable_attested_sources: frozenset[str]) -> bool:
     """Whether ADR-0199 §3 places this record as speakable on an unbounded channel.
 
     Three field reads and no content, in the order §3 states them.
@@ -248,11 +257,13 @@ def _speakable(record: MemoryRecord, *, speakable_attested_sources: frozenset[st
         return False
     if record.placement.reach is not PlacementReach.ANYONE:
         return False
-    provenance = record.provenance
-    if provenance.source in _PLACED_SOURCES:
+    # Read through ADR-0328 §12: a source names its band, and an attestation is the
+    # source details the record's band rests on.
+    band = record_band(record)
+    if band in _PLACED_BANDS:
         return True
-    attestation = provenance.attestation
-    if band_of(provenance.source) is not BeliefBand.ATTESTED or attestation is None:
+    attestation = record_attestation(record)
+    if band is not BeliefBand.ATTESTED or attestation is None:
         return False
     return attestation.reported_by in speakable_attested_sources
 

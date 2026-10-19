@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
     from pathlib import Path
 
-    from ai_assistant.core.types import BeliefBand, BeliefSummary, MemoryKind
+    from ai_assistant.core.types import BeliefBand, BeliefSummary
 
 _PATIENT: Final = timedelta(seconds=5)
 _FRAME: Final = 1 << 20
@@ -138,14 +138,13 @@ class _GatedEngine(FakeAssistantEngine):
         self,
         *,
         bands: Sequence[BeliefBand] | None = None,
-        kinds: Sequence[MemoryKind] | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[BeliefSummary, ...]:
         """Announce arrival, wait to be released, then answer as the fake would."""
         self.entered.set()
         await self.release.wait()
-        return await super().beliefs(bands=bands, kinds=kinds, limit=limit, offset=offset)
+        return await super().beliefs(bands=bands, limit=limit, offset=offset)
 
 
 @dataclass

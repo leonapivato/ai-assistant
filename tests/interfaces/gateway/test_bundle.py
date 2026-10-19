@@ -26,15 +26,18 @@ from ai_assistant.core.types import (
     BeliefBand,
     BeliefSummary,
     GrantScope,
-    MemoryKind,
+    MemoryStanding,
     NotificationCondition,
     NotificationReach,
+    SupportOrigin,
+    belief_view,
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.interfaces.gateway.records import RefusalCondition
 from ai_assistant.interfaces.gateway.server import (
     packaged_bundle,
 )
+from ai_assistant.testing.memories import memory_in_band
 from ai_assistant.wire import GRANTABLE_SCOPES
 
 _ROOT = Path(__file__).resolve().parents[3] / "src" / "ai_assistant" / "interfaces" / "gateway"
@@ -145,23 +148,6 @@ def _joined(block: str) -> str:
     read, which is every piece of the two sentences this is used on.
     """
     return "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', block))
-
-
-def _arm(function: str, opening: str) -> str:
-    """One arm of a two-armed renderer: the ``return`` its guard opens.
-
-    Sliced rather than searched so that "this arm says X" is decided over *that*
-    arm — a sentence counted anywhere in the function would be satisfied by the other
-    one.
-    """
-    body = function[function.index(opening) + len(opening) :]
-    return body[: body.index("\n  }") if "\n  }" in body else len(body)]
-
-
-#: The guard the page's episodic arm opens with, built from ``core``'s own vocabulary
-#: rather than spelled out: a kind renamed there fails this file instead of leaving a
-#: dead branch behind a literal nothing on the wire ever equals again.
-_EPISODIC_GUARD: Final = f'if (belief.kind === "{MemoryKind.EPISODIC.value}") {{'
 
 
 @pytest.mark.integration
@@ -2831,9 +2817,7 @@ def test_the_page_reads_the_belief_again_immediately_before_it_forgets_one() -> 
 
     "The render that ceremony rests on is taken from a ``belief`` read issued
     immediately before the confirmation is offered, and never from an entry of a
-    ``beliefs`` listing the page rendered earlier. A page holds its listing until it
-    is navigated away from […] and a browser is the first surface where the
-    difference is unbounded."
+    ``beliefs`` listing the page rendered earlier."
 
     The band-appropriate warning and the statement of what the consent covers are
     ADR-0073 §5's other two obligations, and they are in the same prompt.
@@ -2845,309 +2829,140 @@ def test_the_page_reads_the_belief_again_immediately_before_it_forgets_one() -> 
     assert forgetting.index("window.confirm(") < forgetting.index('"/belief/forget"')
     assert "forgetWarning(belief.band)" in forgetting
     assert "which may have changed since it was shown" in forgetting
-    # Every field §4 requires, the validity window's end included where one is set. A
-    # confirmation showing less than the listing the user came from is the opposite of
-    # what a ceremony is for.
-    for field in ("belief.band", "belief.kind", "belief.confidence", "belief.content"):
+    # Every field ADR-0328 §15:4 requires, through the one list the row renders too, and
+    # every support from the read just taken (§15:2). A confirmation showing less than
+    # the listing the user came from is the opposite of what a ceremony is for.
+    for field in (
+        "beliefHeading(belief)",
+        "belief.content",
+        "beliefLines(belief)",
+        "belief.supports.map(supportLine)",
+    ):
         assert field in forgetting, field
-    assert "belief.valid_until === null" in forgetting
-    assert "belief.last_updated" in forgetting
-    assert "belief.id" in forgetting
+    assert "confidence" not in forgetting, "a memory carries none (ADR-0328 §15:3)"
 
 
 def test_the_forget_warning_is_band_appropriate_and_total_over_the_bands() -> None:
-    """ADR-0073 §5: the ceremony "is uniform in mechanism and asymmetric in message",
-    and "the surface must not represent a deletion as more final than it is, nor as
-    less final".
+    """ADR-0073 §5: the ceremony "is uniform in mechanism and asymmetric in message".
 
-    Destroying an assertion is permanent; destroying a derived or attested belief
-    removes the belief and not its origin. Read against ``core``'s own vocabulary, so
-    a band added to the enum fails here rather than falling through to a wrong
-    warning.
+    Destroying an assertion is permanent; destroying a derived or attested memory
+    removes the memory and not its origin. Read against ``core``'s own vocabulary.
     """
     script = _code("app.js")
     warning = _functions(script)["forgetWarning"]
 
     for band in BeliefBand:
         # `DERIVED` is the fall-through branch and is named in the prose rather than
-        # in a comparison, which is what makes the function total: a band added to
-        # the enum lands there and gets a wrong warning, so it is named here too.
+        # in a comparison, which is what makes the function total.
         assert f'"{band.value}"' in warning or band is BeliefBand.DERIVED, band.value
     assert "Forgetting it is permanent" in warning
     assert "destroys my copy but not the " in warning
     assert "destroys the belief but not what I worked it " in warning
 
 
-# --- ADR-0189 §9: the origin reaches the three browser render paths ---------
+# --- ADR-0328 §15:4: what the panel shows of a memory ------------------------------
 #
-# **Read off the shipped script rather than executed, and the file says why it has
-# to be.** This repository has no JavaScript runtime in its gate: every `app.js`
-# check in this module asserts over the extracted function body, and adding a
-# runtime would be a dependency decision well outside a surface lane's fence. So
-# what is pinned here is that each path *builds* the output §4 obliges — the exact
-# interpolations, the branch each arm takes, and the element structure that makes
-# the attribution unforgeable — and the *rendered* output is recorded in the pull
-# request from the page driven at both viewports, which is the observation §9 is
-# ultimately about.
+# **Read off the shipped script rather than executed**: this repository has no
+# JavaScript runtime in its gate, so what is pinned is that each path *builds* the
+# output §15:4 obliges, and the *rendered* output is recorded in the pull request from
+# the page driven at both viewports.
 
 
-def test_the_browsers_attested_line_names_the_source_and_when_that_source_spoke() -> None:
-    """ADR-0189 §9's first surface clause, on ``whyHeld``.
+def test_the_panel_says_every_standing_in_the_terminals_words() -> None:
+    """ADR-0328 §15:4: the standing in plain words, the same on both surfaces.
 
-    Both halves, because ADR-0073 §4's gate is explicitly both and §9 names
-    ``reported_at`` as "the one an implementing lane will drop, because the
-    source-naming half is the one everybody is talking about".
-
-    The sentence #1276 tracked is asserted **gone** as well. A negative is worth its
-    line here for the reason the CLI's own pin records: nothing else in this module
-    would notice the old wording returning under a reworded neighbour, and that wording
-    now states a limit this projection does not have.
+    Total over ``core``'s :class:`MemoryStanding` and read against the CLI's own table,
+    so a standing added in ``core`` or reworded on one surface fails here.
     """
-    why = _functions(_code("app.js"))["whyHeld"]
+    words = _functions(_code("app.js"))["standingWords"]
 
-    assert "${belief.attestation.reported_by}" in why, "the reporting source is named"
-    assert "${belief.attestation.reported_at}" in why, "and the instant it spoke"
-    assert "cannot show them here" not in why, "#1276's limitation is gone"
+    for standing in MemoryStanding:
+        assert f'if (standing === "{standing.value}") {{' in words, standing.value
+        assert f'return "{cli._STANDING_WORDS[standing]}";' in words, standing.value
 
 
-def test_the_browser_never_offers_its_own_clock_as_the_sources() -> None:
-    """ADR-0073 §4's floor, which ADR-0189 §4 restates and the new line makes riskier.
+def test_the_panel_names_every_origin_in_the_terminals_words() -> None:
+    """ADR-0328 §15:2's support lines: each origin in plain words, as the CLI says it."""
+    script = _code("app.js")
+    table = script[script.index("const ORIGIN_WORDS = {") :]
+    table = table[: table.index("};")]
 
-    §4: a surface "renders ``reported_at`` as the **source's** clock and never as this
-    system's, and it does not offer ``last_updated`` in its place". ADR-0189's
-    Consequences names the newly-available error in as many words — "naming the source
-    while still showing our clock as the source's" — so the two instants stay two, and
-    the one this system owns stays labelled as ours.
+    for origin in SupportOrigin:
+        assert f'{origin.value}: "{cli._ORIGIN_WORDS[origin]}"' in table, origin.value
+
+
+def test_the_panel_shows_what_adr_0328_s15_4_requires() -> None:
+    """Its age, its evidence summary where it is an inference, its reading certainty
+    where that is not ``sure``, every let-down, and the legacy mark (§15:4); and the two
+    marks §7:10 and §15:7 add. One list, which the row and the confirmation share.
     """
     functions = _functions(_code("app.js"))
+    lines = functions["beliefLines"]
 
-    assert "on its own clock" in functions["whyHeld"], "the source's instant is the source's"
-    assert "not when the source spoke" in functions["whyHeld"], "and ours is declared ours"
-    assert "last_updated" not in functions["whyHeld"], "this line does not reach for our clock"
-    assert "Last revised: ${belief.last_updated}" in functions["renderBeliefFields"], (
-        "which is rendered on its own line, as its own fact"
+    assert '`Learned: ${belief.learned === null ? "unknown" : belief.learned}`' in lines
+    assert '`As of: ${belief.as_of === null ? "unknown" : belief.as_of}`' in lines
+    assert 'if (belief.reading_certainty !== "sure") {' in lines
+    assert "if (track.let_down > 0) {" in lines
+    assert "if (belief.legacy) {" in lines
+    assert "if (belief.unbacked) {" in lines
+    assert "if (belief.supports_gone) {" in lines
+    assert "`id: ${belief.id}`" in lines
+    why = functions["whyHeld"]
+    assert "${evidence.supporting} piece(s) of support${across}${against}." in why, (
+        "an inference says its evidence summary"
     )
+    for name in ("beliefLines", "whyHeld", "renderBeliefFields", "beliefHeading"):
+        assert "confidence" not in functions[name], f"{name} shows no confidence (§15:3)"
 
 
-def test_the_browser_reads_the_source_as_a_source_and_never_as_a_person() -> None:
-    """ADR-0189 §4's second clause, ADR-0098 §8's third adopted unchanged.
+def test_a_gone_support_is_shown_as_gone_and_never_by_an_id() -> None:
+    """ADR-0328 §15:7: a support whose part no longer resolves is a tombstone.
 
-    A surface renders the source "at **source granularity and no finer**", and "a
-    surface that rendered ``reported_by`` as though it named a person would assert what
-    this system does not hold". ADR-0093 §7 forbids deriving a reader's identity from
-    the source's location or contents, so the organiser of an invite and the sender of
-    a mail are not on the record and cannot be.
-
-    Pinned on the apposition, because that is the mechanism: there is no list of
-    person-words to check a value against, and what makes it unreadable as a person is
-    that this file introduces it as a connected source.
+    The view carries no id for a support at all, so the line is built from its origin,
+    source, instant and content, and a ``null`` content says it is gone.
     """
-    why = _functions(_code("app.js"))["whyHeld"]
+    support = _functions(_code("app.js"))["supportLine"]
 
-    assert "A connected source reported it — ${belief.attestation.reported_by}" in why
-
-
-def test_the_browser_says_a_derived_warrant_came_from_outside_on_every_count_state() -> None:
-    """#1517's first finding, on ``whyHeld`` — and on all four of its count states.
-
-    §9's own matrix has no arm for the derived clause, so a renderer could show
-    ``reported_by`` and ``reported_at`` correctly everywhere, omit the marker for every
-    ``DERIVED`` record with the predicate ``True``, and pass all eight required tests
-    while breaching §4.
-
-    **Appended once rather than per branch**, which is ADR-0107 §5's structural
-    argument about the elision ceiling reaching a second clause: §4 binds this to the
-    band and not to any of the four count states, so a per-branch append would be four
-    chances to forget it. Asserted by counting the appends — one construction, four
-    returns — because a marker missing from one branch is exactly what a
-    presence-anywhere check would pass.
-    """
-    derived = _functions(_code("app.js"))["whyDerived"]
-
-    assert "outsideWarrant(belief)" in derived
-    assert derived.count("const outside =") == 1, "constructed once"
-    returns = derived.split("return ")[1:]
-    assert len(returns) == 4, "the four states a derived line renders a count in"
-    assert all("outside" in one for one in returns), "and the clause reaches every one"
+    assert '"what it pointed at is gone"' in support
+    assert "support.content === null" in support
+    assert "points_at" not in support
+    assert "id" not in re.findall(r"support\.(\w+)", support)
 
 
-def test_the_browser_says_nothing_about_the_outside_when_the_predicate_is_false() -> None:
-    """The silence is ruled, not an omission (ADR-0098 §5, ADR-0106 §1).
+def test_the_browser_says_a_warrant_from_outside_in_the_terminals_sentence() -> None:
+    """ADR-0189 §4's clause, read through ADR-0328 §12, the same on both surfaces.
 
-    A ``False`` is *nothing external is recorded in this warrant*, never *nothing
-    external influenced it*: text whose recorded origin is not external can still have
-    reached a belief, and no field on the record says so. A page printing the negative
-    would assert what this system does not hold.
-
-    And the answer is **read**, never recomputed: ADR-0189 §2 forbids a surface
-    deriving it from ``band``, and ADR-0106 §2 gives the reason — the hand-rolled
-    version "is short enough that every consumer will write it and one of them will
-    write only the second half".
+    Read off ``rests_on_outside_content`` and never recomputed from the band (ADR-0189
+    §2), silent on false rather than negative (ADR-0328 §7:7), and character for
+    character the terminal's sentence: "a fact stated on one surface and not on its
+    sibling is a fact a user learns to distrust on both".
     """
     functions = _functions(_code("app.js"))
     outside = functions["outsideWarrant"]
 
-    assert 'if (!belief.rests_on_recorded_external_content) {\n    return "";' in outside
-    assert outside.index('return "";') < outside.index(_EPISODIC_GUARD), (
-        "the silence is taken before the kind, so no arm can render a false as an "
-        "assurance and a third arm could not either (ADR-0223 §5's last clause)"
-    )
+    assert 'if (!belief.rests_on_outside_content) {\n    return "";' in outside
     assert "band" not in outside, "the answer is read, never recomputed from the band"
+    assert "outsideWarrant(belief)" in functions["whyHeld"]
+    stamped = BeliefSummary.model_validate(
+        belief_view(
+            memory_in_band("rec-1", "the user likes jazz", BeliefBand.DERIVED, outside=True),
+            now=datetime(2026, 3, 2, 8, 30, tzinfo=UTC),
+            contents={},
+        ).model_dump(exclude={"supports"})
+    )
+    returned = outside[outside.index('return "";') + len('return "";') :]
+    assert _joined(returned) == cli._outside_warrant(stamped)
     assert "derived_from_external" not in _code("app.js"), (
         "and no client reads the raw field in the predicate's place (ADR-0106 §2)"
     )
 
 
-def _row(*, kind: MemoryKind, stamped: bool) -> BeliefSummary:
-    """One listing row, as either surface is handed it."""
-    return BeliefSummary(
-        id="rec-1",
-        band=BeliefBand.DERIVED,
-        kind=kind,
-        content="you asked where the office is; I answered Boston",
-        confidence=0.5,
-        evidence_count=0,
-        lost_evidence=0,
-        last_updated=datetime(2026, 3, 2, 8, 30, tzinfo=UTC),
-        rests_on_recorded_external_content=stamped,
-    )
-
-
-def test_the_browser_gives_a_stamped_episode_an_arm_of_its_own() -> None:
-    """ADR-0223 §5's second clause, on the browser half of §10's eighth test.
-
-    This page lists beliefs without a kind filter, so a captured episode is one of the
-    rows it renders — and once ADR-0223 §1 stamps the mark on one, the predicate is
-    true of a record the belief sentence is false of in every clause: nothing worked
-    the episode out, there is nothing it was worked out *from* (ADR-0074 §4 leaves its
-    evidence empty by decision), and its warrant is that it happened.
-
-    Asserted in both directions and per arm, because the failure this pins is the
-    belief sentence surviving on a row it is false of — which a check for the presence
-    of the episodic sentence anywhere in the function would pass.
-    """
-    outside = _functions(_code("app.js"))["outsideWarrant"]
-    episodic = _arm(outside, _EPISODIC_GUARD)
-
-    assert "traces back to a connected source" in _joined(episodic)
-    assert "I worked it out from" not in _joined(episodic), (
-        "an episode was not worked out from anything (ADR-0223 §5's second condition)"
-    )
-    assert "warrant" not in _joined(episodic), "and it has no derivation to predicate"
-    assert "my own account of what was said" in _joined(episodic), (
-        "the content is not re-attributed to the source (§5's first condition)"
-    )
-
-
-def test_the_two_surfaces_say_the_same_two_sentences() -> None:
-    """ADR-0223 §5's third clause: both surfaces render the arm, or neither does.
-
-    "A fact stated on one surface and not on its sibling is a fact a user learns to
-    distrust on both" — so this asserts the stronger thing the clause makes available:
-    not merely that each surface says *something*, but that the browser's sentence is
-    the terminal's sentence, character for character, on both arms.
-
-    It is the one check that fails when a lane repairs one renderer and forgets the
-    other, which is the failure mode §5 was written against and the one neither file's
-    own tests can see.
-    """
-    outside = _functions(_code("app.js"))["outsideWarrant"]
-    episodic = _arm(outside, _EPISODIC_GUARD)
-    belief = outside[outside.index("\n  return (") :]
-
-    assert _joined(episodic) == cli._outside_warrant(_row(kind=MemoryKind.EPISODIC, stamped=True))
-    assert _joined(belief) == cli._outside_warrant(_row(kind=MemoryKind.SEMANTIC, stamped=True))
-
-
-def test_the_browser_explains_an_episode_as_a_record_and_never_as_a_derivation() -> None:
-    """#1891 on this surface: an episode's ``Why`` is that it happened (ADR-0075 §2).
-
-    This page lists beliefs with no kind filter, so a captured turn is one of the rows
-    it renders — and ``whyHeld`` used to hand it to ``whyDerived``, whose line is false
-    of it in every clause: nothing worked it out, and there is nothing it was worked out
-    *from* because ADR-0074 §4 leaves an episode's evidence empty by decision.
-
-    Asserted over ``whyEpisodic``'s own body rather than over the file, because a
-    sentence counted anywhere in the script would be satisfied by the terminal's copy
-    of it landing in some other function.
-    """
-    functions = _functions(_code("app.js"))
-    held = functions["whyHeld"]
-    episodic = _joined(functions["whyEpisodic"])
-
-    assert _EPISODIC_GUARD in held, "the kind is asked before the derived line is reached"
-    assert held.index(_EPISODIC_GUARD) < held.index("return whyDerived(belief);")
-    assert "This records an exchange that happened" in episodic
-    assert "I worked it out" not in episodic
-    assert "no supporting evidence was recorded" not in episodic
-
-
-def test_the_browser_heads_an_episodes_row_with_a_filing_and_not_a_claim() -> None:
-    """#1891's display question, answered where this surface makes it sharpest.
-
-    ``bandWords`` renders a band as a first-person sentence — it is what the page shows
-    and what its three filter checkboxes are labelled with. On an episode "I worked it
-    out" is not a label but a claim, and a false one (ADR-0075 §2), asserted one line
-    above a ``Why`` that denies it. So an episode's row leads with the band's own words
-    quoted **as a filing**.
-
-    Both halves are pinned. The band's words stay inside the phrase, because ADR-0073
-    §4 requires the band conveyed — "never omitted, never implied by position alone" —
-    and because the heading is how a user reads a row back to the box that selected it.
-    The confidence is still rendered beside it, for the same section's other clause and
-    ADR-0072 §6's; what the figure *means* for an episode is said in the ``Why`` line,
-    where there is room to say it.
-
-    And every other kind is left on the bare band, which is the arm the three kinds
-    that really are beliefs take.
-    """
-    functions = _functions(_code("app.js"))
-    heading = functions["beliefHeading"]
-    fields = functions["renderBeliefFields"]
-
-    assert "${beliefHeading(belief)} · ${belief.kind}" in fields
-    assert "confidence ${belief.confidence.toFixed(2)}" in fields, "ADR-0073 §4's other clause"
-    assert _EPISODIC_GUARD in heading
-    assert "Filed under '${bandWords(belief.band)}'" in heading, (
-        "the band's own words survive inside the phrase (ADR-0073 §4)"
-    )
-    assert heading.count("return bandWords(belief.band);") == 1, (
-        "and every other kind leads with the band bare"
-    )
-    assert "a standing figure rather than a measure of doubt" in _joined(functions["whyEpisodic"])
-
-
-def test_the_two_surfaces_explain_an_episode_in_the_same_words() -> None:
-    """ADR-0223 §5's third clause held to over the head sentence too.
-
-    "A fact stated on one surface and not on its sibling is a fact a user learns to
-    distrust on both" — and the reason a captured turn is not a derivation is such a
-    fact. So the browser's sentence is the terminal's, character for character, save
-    the leading capital: this page capitalises every ``Why:`` line (its asserted arm
-    reads "You told me…") and the terminal capitalises none of them (its reads "you
-    told me…"), which is a convention that predates this lane on both files.
-
-    Read with the mark **unset**, so the comparison is over the head sentence this lane
-    wrote and not over ADR-0223 §5's sentence, which its own case already pins.
-    """
-    browser = _joined(_functions(_code("app.js"))["whyEpisodic"])
-    terminal = cli._why_episodic(_row(kind=MemoryKind.EPISODIC, stamped=False))
-
-    assert terminal[0].islower(), "the terminal's Why line continues its label"
-    assert browser == terminal[0].upper() + terminal[1:]
-
-
 def test_the_browser_renders_a_records_own_line_breaks_in_its_content() -> None:
     """#1890's other surface, verified rather than assumed.
 
-    A captured episode's content is two lines — "The user asked: …" and "The
-    assistant's plan: …" — and the terminal was replacing the break between them with
-    ``\ufffd``. This page never had that fault, and the two facts that make it so are
-    both in the shipped bytes, so they are pinned here rather than restated as a drive
-    (ADR-0216 §2: "a property decidable by reading the shipped bytes is asserted in the
-    text layer"). The content is inserted as ``textContent``, which carries a newline
-    verbatim, into the one class whose rule keeps it — the same ``pre-wrap`` the
-    composed answer needs, for the same reason.
+    The content is inserted as ``textContent``, which carries a newline verbatim, into
+    the one class whose rule keeps it (ADR-0216 §2: a property decidable by reading the
+    shipped bytes is asserted in the text layer).
     """
     functions = _functions(_code("app.js"))
     fields = functions["renderBeliefFields"]
@@ -3157,34 +2972,12 @@ def test_the_browser_renders_a_records_own_line_breaks_in_its_content() -> None:
     assert "p.textContent = text;" in functions["line"], "inserted as text, never as markup"
     assert ".reply {\n  white-space: pre-wrap;" in styles
 
-    # And the terminal's hazard does not arrive here. A break kept in a line the
-    # adapter authored forges a second one (ADR-0042 §4), which is why the CLI puts a
-    # multi-line content behind a gutter. This page never shared the line: the content
-    # is a paragraph of its own in a class the row's own fields do not use, and the
-    # stylesheet gives that class its own size and colour — so a forged "Why:" inside
-    # the content renders in the content's type, not in a field's.
-    assert fields.count('"hint"') == 5, (
-        "the band, the why, last-revised, the window's end and the id are the fields"
-    )
+    # And the terminal's hazard does not arrive here: the content is a paragraph of its
+    # own in a class the row's own fields do not use, so a forged "Why:" inside it
+    # renders in the content's type, not in a field's.
+    assert fields.count('"hint"') == 2, "the heading, and every line of beliefLines"
     assert fields.count('"reply"') == 1, "and the content is the one line that is not a field"
     assert ".hint {\n  font-size: 0.85rem;\n  color: var(--muted);" in styles
-
-
-def test_the_browser_leaves_an_unstamped_episode_exactly_where_it_was() -> None:
-    """The byte-identity half of ADR-0223 §10's eighth test, on this surface.
-
-    The predicate is read before the kind, so an episode nothing external reached
-    renders what it rendered before this ADR — the pre-existing oddity of explaining an
-    episode through a belief renderer included, which §5 names and deliberately does
-    not repair.
-    """
-    outside = _functions(_code("app.js"))["outsideWarrant"]
-    silence = outside[: outside.index(_EPISODIC_GUARD)]
-
-    assert _joined(silence) == "", "the false arm contributes nothing at all"
-    assert MemoryKind.EPISODIC.value not in silence, (
-        "and it is reached without asking what kind the row is"
-    )
 
 
 def test_every_rendered_line_reaches_the_page_as_a_text_node() -> None:

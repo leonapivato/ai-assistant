@@ -109,7 +109,7 @@ from ai_assistant.testing.spend import countable
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from ai_assistant.core.types import FrozenJson, MemoryRecord
+    from ai_assistant.core.types import FrozenJson
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: The id this fake's declaration carries. Distinct from the production forecaster's,
@@ -1030,7 +1030,7 @@ class FakeForecaster:
                 return ForecastOutcome(refusal=ForecastRefusal.NO_RESULT)
             return ForecastOutcome(reported_at=self._reported_at, records=minted)
 
-    def _mint(self, day: ScriptedDay) -> MemoryRecord:
+    def _mint(self, day: ScriptedDay) -> SemanticMemory:
         """One ``SEMANTIC``, ``EXTERNAL``-sourced record carrying one day (ADR-0260 §5).
 
         Args:

@@ -62,16 +62,16 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from ai_assistant.core.types import (
     Attestation,
+    EpisodicMemory,
     MemoryKind,
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
-    PreferenceMemory,
     Provenance,
-    SemanticMemory,
     Validity,
 )
 from ai_assistant.memory.sqlite_store import _VEC_KNN_MAX_K
+from ai_assistant.testing.memories import memory, remembered_support, sourced_support
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -352,8 +352,8 @@ class AgedStoreSpec:
             store evenly; higher values model the case ADR-0112 §8 actually
             describes, where one *well-corrected* topic accumulates the retired
             revisions while the rest of the store does not.
-        preference_share: The share of records that are ``PREFERENCE`` rather
-            than ``SEMANTIC``, so a ``kinds``-filtered search has something to
+        preference_share: The share of records that are episodes rather than
+            memories, so a ``kinds``-filtered search has something to
             filter out.
         seed: Seeds the kind draw; the same seed plants the same store.
     """
@@ -669,23 +669,30 @@ def _provenance(*, source: MemorySource, when: datetime, reported_at: datetime) 
 
 
 def _materialise(draft: Draft) -> MemoryRecord:
-    """Turn a draft into the typed record its kind calls for."""
+    """Turn a draft into the typed record its kind calls for.
+
+    An ``EPISODIC`` draft is an episode carrying its provenance; a ``MEMORY`` draft is
+    a memory resting on one support in the band its provenance's source names
+    (ADR-0328 §12): an evidence item carrying the attestation for ``EXTERNAL``, a
+    remember call otherwise, added at the provenance's ``last_updated``.
+    """
     content = draft.content
-    if draft.kind is MemoryKind.PREFERENCE:
-        return PreferenceMemory(
+    provenance = draft.provenance
+    if draft.kind is MemoryKind.EPISODIC:
+        return EpisodicMemory(
             id=draft.record_id,
             content=content,
-            preference=content,
-            provenance=draft.provenance,
+            provenance=provenance,
+            occurred_at=provenance.last_updated,
             validity=draft.validity,
         )
-    return SemanticMemory(
-        id=draft.record_id,
-        content=content,
-        fact=content,
-        provenance=draft.provenance,
-        validity=draft.validity,
+    when = provenance.last_updated
+    support = (
+        sourced_support(provenance.attestation, when=when, added_at=when)
+        if provenance.source is MemorySource.EXTERNAL
+        else remembered_support(when=when, added_at=when)
     )
+    return memory(draft.record_id, content, support, validity=draft.validity)
 
 
 @dataclass(frozen=True)
@@ -713,7 +720,7 @@ class AgedStore:
             "closed_supersede": sum(1 for p in self.planted if p.closed_by is ClosedBy.SUPERSEDE),
             "closed_absence": sum(1 for p in self.planted if p.closed_by is ClosedBy.ABSENCE),
         }
-        for kind in (MemoryKind.SEMANTIC, MemoryKind.PREFERENCE):
+        for kind in (MemoryKind.MEMORY, MemoryKind.EPISODIC):
             counts[f"live_{kind.value}"] = sum(
                 1 for p in self.planted if p.closed_by is None and p.record.kind == kind.value
             )
@@ -825,7 +832,7 @@ def _live_drafts(spec: AgedStoreSpec, rng: Random, instants: Instants) -> list[D
                 topic=index % spec.topics,
                 position=index,
                 tail=f"u{index}",
-                kind=MemoryKind.PREFERENCE if preference else MemoryKind.SEMANTIC,
+                kind=MemoryKind.EPISODIC if preference else MemoryKind.MEMORY,
                 provenance=_provenance(
                     source=MemorySource.INFERRED if preference else MemorySource.OBSERVED,
                     when=instants.written,
@@ -890,9 +897,7 @@ def _closed_drafts(
     hot = [draft for draft in live if draft.topic == HOT_TOPIC] or list(live)
     drafts: list[Draft] = []
     for index in range(spec.closed):
-        kind = (
-            MemoryKind.PREFERENCE if rng.random() < spec.preference_share else MemoryKind.SEMANTIC
-        )
+        kind = MemoryKind.EPISODIC if rng.random() < spec.preference_share else MemoryKind.MEMORY
         concentrated = rng.random() < spec.closed_concentration
         if index < absences:
             topic = HOT_TOPIC if concentrated else index % spec.topics

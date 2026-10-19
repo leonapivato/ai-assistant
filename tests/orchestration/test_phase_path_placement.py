@@ -47,6 +47,7 @@ from ai_assistant.core.types import (
     ControllerStage,
     InputOrigin,
     LabelKind,
+    Memory,
     MemoryKind,
     MemorySource,
     Placement,
@@ -58,7 +59,6 @@ from ai_assistant.core.types import (
     RecallOutcome,
     RecallProvenance,
     RoundResponse,
-    SemanticMemory,
     StageOutcome,
     StoryActor,
 )
@@ -78,7 +78,7 @@ _STAMPED: Final = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.D
 _UNBOUNDED: Final = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
 
 
-def _stamped(record: SemanticMemory) -> SemanticMemory:
+def _stamped(record: Memory) -> Memory:
     """``record``, already stamped: ADR-0204 §2's second term, as ADR-0217 §1:3 carries it."""
     return record.model_copy(update={"placement": _STAMPED})
 
@@ -87,7 +87,7 @@ async def _frozen_with(
     *,
     supply: TurnSupply = _BOUNDED,
     windows: tuple[EpisodicMemory, ...] | None = None,
-    recalled: tuple[EpisodicMemory | SemanticMemory, ...] = (),
+    recalled: tuple[EpisodicMemory | Memory, ...] = (),
     candidates: Candidates | None = None,
 ) -> bool:
     """The value the freeze sets, over a pass whose stages before planning gave these.
@@ -183,7 +183,7 @@ async def test_a_recall_find_withheld_or_stamped_places_the_episode(
     record: MemoryRecord, supply: TurnSupply
 ) -> None:
     """ADR-0204 §2:2's two terms over what recall kept, on every pass."""
-    assert isinstance(record, SemanticMemory)
+    assert isinstance(record, Memory)
     assert await _frozen_with(supply=supply, recalled=(record,))
 
 
@@ -287,7 +287,7 @@ def _search_then_answer() -> FakeToolCallingCompleter:
     ],
 )
 async def test_a_memory_searchs_records_place_the_episode(
-    records: tuple[SemanticMemory, ...], placed: Placement
+    records: tuple[Memory, ...], placed: Placement
 ) -> None:
     """What a call returned, fetched for planning or read by a digest (§5:10)."""
     harness = await _searching_harness(_search_then_answer(), *records)

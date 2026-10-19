@@ -46,10 +46,10 @@ from ai_assistant.core.types import (
     BeliefSummary,
     ClassReach,
     DataTier,
-    Evidence,
+    EpisodicMemory,
     GrantScope,
     HeldNotification,
-    MemoryKind,
+    Memory,
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
@@ -60,7 +60,12 @@ from ai_assistant.core.types import (
     NotificationReach,
     Provenance,
     QuietWindow,
-    SemanticMemory,
+    ReadingCertainty,
+    SupportDirection,
+    SupportPart,
+    TrackRecordSummary,
+    Validity,
+    belief_view,
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.orchestration import (
@@ -83,6 +88,15 @@ from ai_assistant.testing import (
     FakeSourceReadTrail,
     FakeTraceRetention,
     FakeTraceSink,
+)
+from ai_assistant.testing.memories import (
+    confirmed_support,
+    legacy_support,
+    memory,
+    memory_in_band,
+    remembered_support,
+    said_support,
+    sourced_support,
 )
 from ai_assistant.wire import GRANTABLE_SCOPES, TransportError
 from ai_assistant.wire.address import sun_path_limit
@@ -806,106 +820,58 @@ def test_the_open_recorder_sees_the_client_an_accepted_invocation_builds(
 
 #: The instant a source says a fact was current — **its** clock, not ours, and
 #: deliberately nowhere near ``AT``. ADR-0073 §4's floor is that a surface must not
-#: offer our revision time as the source's, and two instants that could be mistaken
-#: for each other would let a renderer breach it and still pass (ADR-0092 §3: a
-#: ``reported_at`` earlier than ours is the normal case, not an anomaly).
+#: offer our clock as the source's (ADR-0092 §3: a ``reported_at`` earlier than ours is
+#: the normal case, not an anomaly).
 REPORTED_AT: Final = datetime(2026, 3, 2, 8, 30, tzinfo=UTC)
 
-#: What reported an attested record, as the store holds it (ADR-0092 §1).
+#: What reported an attested memory, as its support holds it (ADR-0328 §4:13).
 ATTESTED_BY: Final = Attestation(reported_by="work-calendar", reported_at=REPORTED_AT)
 
+#: When a held memory's support happened, as this module renders it.
+LEARNED: Final = datetime(2026, 7, 20, 18, 0, tzinfo=UTC)
 
-def _belief(  # noqa: PLR0913 — one knob per field a Belief carries; that is the point
+#: What a resolved support part reads as, in the single view.
+_SUPPORT_TEXT: Final = "The user said: the office is in Boston."
+
+
+def _held_memory(  # noqa: PLR0913 — one knob per fact a memory's projection shows; that is the point
     band: BeliefBand = BeliefBand.ASSERTED,
     *,
     belief_id: str = "rec-1",
     content: str = "the office is in Boston",
-    confidence: float = 1.0,
-    evidence: tuple[Evidence, ...] = (),
     valid_until: datetime | None = None,
-    evidence_elided: int = 0,
+    outside: bool = False,
     attestation: Attestation | None = None,
-    rests_on_recorded_external_content: bool = False,
-    kind: MemoryKind = MemoryKind.SEMANTIC,
-) -> Belief:
-    """One projected belief, as the façade hands it to the adapter.
-
-    ``confidence`` is the **presented** number: the engine has already adjusted it
-    for lost support (ADR-0077 §6), so a case scripting a tombstone also scripts the
-    lowered figure rather than expecting this module to compute one.
-
-    ``attestation`` and ``rests_on_recorded_external_content`` are ADR-0189 §2's two
-    fields, and both default to their additive defaults so every case written before
-    that ADR still builds the belief it did. They are **independent knobs rather than
-    derived from the band**, because §2 adds no cross-field validator to this type and
-    the surface must answer for the off-contract state as well as the ruled ones.
-
-    ``kind`` is a knob for the same reason ADR-0223 §5 needs one: a captured episode is
-    projected into this listing like anything else, and the row it renders is the one
-    that arm is about. It defaults to what every case before that ADR built.
-    """
-    return Belief(
-        id=belief_id,
-        band=band,
-        kind=kind,
-        content=content,
-        confidence=confidence,
-        evidence=evidence,
-        last_updated=AT,
-        valid_until=valid_until,
-        evidence_elided=evidence_elided,
+    when: datetime | None = LEARNED,
+) -> Memory:
+    """One memory standing in ``band``, its one support dated ``when`` (ADR-0328 §6:4)."""
+    return memory_in_band(
+        belief_id,
+        content,
+        band,
+        outside=outside,
         attestation=attestation,
-        rests_on_recorded_external_content=rests_on_recorded_external_content,
+        when=when,
+        validity=Validity(valid_until=valid_until),
     )
 
 
-def _summary(  # noqa: PLR0913 — one knob per field a BeliefSummary carries; that is the point
-    band: BeliefBand = BeliefBand.ASSERTED,
-    *,
-    belief_id: str = "rec-1",
-    content: str = "the office is in Boston",
-    confidence: float = 1.0,
-    evidence_count: int = 0,
-    lost_evidence: int = 0,
-    valid_until: datetime | None = None,
-    evidence_elided: int = 0,
-    attestation: Attestation | None = None,
-    rests_on_recorded_external_content: bool = False,
-    kind: MemoryKind = MemoryKind.SEMANTIC,
-) -> BeliefSummary:
-    """One listing row, as the façade hands it to the adapter (ADR-0085 §4a).
-
-    The counts are **fields** here rather than derived, because the listing type
-    carries no citations to derive them from — which is what makes it impossible
-    for a page to ship an episode's text.
-
-    It takes the same two ADR-0189 §2 knobs as :func:`_belief`, under the same names,
-    which is ADR-0107 §3's ruling made testable: the listing row and the row it links
-    to answer the same question or the projection is defective in one place.
-    """
-    return BeliefSummary(
-        id=belief_id,
-        band=band,
-        kind=kind,
-        content=content,
-        confidence=confidence,
-        evidence_count=evidence_count,
-        lost_evidence=lost_evidence,
-        last_updated=AT,
-        valid_until=valid_until,
-        evidence_elided=evidence_elided,
-        attestation=attestation,
-        rests_on_recorded_external_content=rests_on_recorded_external_content,
-    )
+def _view(held: Memory, *, gone: bool = False) -> Belief:
+    """``held`` on the single view, its supports resolved (or gone), as the engine projects."""
+    contents: dict[SupportPart, str | None] = {
+        support.points_at: None if gone else _SUPPORT_TEXT for support in held.supports
+    }
+    return belief_view(held, now=AT, contents=contents)
 
 
-def _cited(*contents: str) -> tuple[Evidence, ...]:
-    """Citations that still resolve, one per content given."""
-    return tuple(Evidence(content=content) for content in contents)
+def _belief(band: BeliefBand = BeliefBand.ASSERTED, **knobs: Any) -> Belief:
+    """One projected memory, as the façade hands it to the adapter (ADR-0328 §15:2)."""
+    return _view(_held_memory(band, **knobs))
 
 
-#: One citation that no longer resolves — a tombstone (ADR-0077 §6).
-_GONE = Evidence()
+def _summary(band: BeliefBand = BeliefBand.ASSERTED, **knobs: Any) -> BeliefSummary:
+    """The same memory on the listing (ADR-0328 §15:1): every field but the supports."""
+    return BeliefSummary.model_validate(_belief(band, **knobs).model_dump(exclude={"supports"}))
 
 
 def _flat(rendered: str) -> str:
@@ -917,7 +883,7 @@ def _flat(rendered: str) -> str:
     sentence, which is the failure this helper exists to prevent. It is not the ``│``
     :func:`_help_text` drops: that one is Typer's own panel border.
     """
-    return " ".join(rendered.replace("\u21b3", " ").split())
+    return " ".join(rendered.replace("↳", " ").split())
 
 
 class _RecordingBeliefEngine:
@@ -926,18 +892,17 @@ class _RecordingBeliefEngine:
     def __init__(self, page: tuple[Belief, ...] = (), *, one: Belief | None = None) -> None:
         self._page = page
         self._one = one
-        self.listed: list[tuple[object, object, int, int]] = []
+        self.listed: list[tuple[object, int, int]] = []
         self.forgotten: list[str] = []
 
     async def beliefs(
         self,
         *,
         bands: object = None,
-        kinds: object = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[Belief, ...]:
-        self.listed.append((bands, kinds, limit, offset))
+        self.listed.append((bands, limit, offset))
         return self._page
 
     async def belief(self, record_id: str) -> Belief | None:
@@ -955,802 +920,207 @@ class _RecordingBeliefEngine:
 
 
 def test_render_belief_conveys_everything_the_surface_owes(output: StringIO) -> None:
-    """Band, kind, confidence, content, why, revision time and id are all shown (§4)."""
+    """ADR-0328 §15:4's minimum, and ADR-0073 §4's band and id beside it.
+
+    The standing in plain words, its age (learned and as of), why it is held, and the
+    id ``forget`` takes. **No confidence**: a memory carries none (§15:3).
+    """
     cli._render_belief(_belief())
-    rendered = output.getvalue()
+    rendered = _flat(output.getvalue())
     assert "asserted" in rendered  # the band, stated and not implied by position
-    assert "semantic" in rendered
-    assert "1.00" in rendered
+    assert "you said it" in rendered  # the standing, in plain words
     assert "the office is in Boston" in rendered
     assert "you told me" in rendered  # why it is held
-    assert "2026-07-24 09:00 UTC" in rendered  # when it was last revised
-    assert "rec-1" in rendered  # the id ``forget`` takes
+    assert "Learned: 2026-07-20 18:00 UTC" in rendered
+    assert "As of: 2026-07-20 18:00 UTC" in rendered
+    assert "rec-1" in rendered
+    assert "confidence" not in rendered
+
+
+def test_an_age_nothing_dates_is_said_as_unknown(output: StringIO) -> None:
+    """ADR-0328 §7:3: unknown is neither fresh nor stale, and is said as such."""
+    cli._render_belief(_belief(when=None))
+    rendered = _flat(output.getvalue())
+    assert "Learned: unknown" in rendered
+    assert "As of: unknown" in rendered
 
 
 def test_render_belief_shows_a_window_end_only_when_one_is_set(output: StringIO) -> None:
-    """An open window carries no information; a set end does ("believed until…")."""
+    """Every listed memory is live, so an open window carries nothing to render."""
     cli._render_belief(_belief())
     assert "Believed until" not in output.getvalue()
 
     cli._render_belief(_belief(valid_until=datetime(2026, 8, 1, tzinfo=UTC)))
-    assert "Believed until" in output.getvalue()
-    assert "2026-08-01 00:00 UTC" in output.getvalue()
+    assert "Believed until: 2026-08-01 00:00 UTC" in output.getvalue()
 
 
 def test_render_belief_neutralises_engine_supplied_text(output: StringIO) -> None:
-    """Content and id carrying control bytes or markup are neutralised (ADR-0042 §4)."""
+    """A wording carrying terminal escapes or markup prints inert (ADR-0042 §4)."""
     cli._render_belief(_belief(content="wipe\x1b[2J and [red]shout[/red]"))
     rendered = output.getvalue()
-    assert "\x1b" not in rendered
-    assert "[red]" in rendered  # shown literally, not interpreted as colour
+    assert "\x1b[2J" not in rendered
+    assert "[red]shout[/red]" in rendered
 
 
-def test_why_reports_how_much_evidence_a_derived_belief_rests_on(output: StringIO) -> None:
-    """ADR-0073 §4's derived floor, now that ADR-0077 §6 has discharged its gate.
-
-    The citations are counted and — in the listing — reported as a count rather than
-    as ids. What has changed is that the surface no longer says it cannot show them:
-    it can, and the single-belief view does.
-    """
-    cli._render_belief(_belief(BeliefBand.DERIVED, confidence=0.62, evidence=_cited("a", "b", "c")))
-    rendered = _flat(output.getvalue())
-    assert "3 piece(s) of evidence" in rendered
-    assert "cannot show you" not in rendered
-
-
-def test_why_does_not_claim_evidence_a_derived_belief_does_not_have(output: StringIO) -> None:
-    """A derived belief with no recorded citation says so rather than implying one."""
-    cli._render_belief(_belief(BeliefBand.DERIVED, confidence=0.4))
-    rendered = _flat(output.getvalue())
-    assert "no supporting evidence was recorded" in rendered
-    assert "piece(s) of evidence" not in rendered
-
-
-def test_why_states_the_elision_ceiling_beside_the_count_it_kept(output: StringIO) -> None:
-    """ADR-0107 §5: a floor, a ceiling, and capacity rather than loss.
-
-    The shape is ADR-0086 §4's — "``len(evidence)`` citations shown, and *up to*
-    ``evidence_elided`` further episodes supported this belief and are no longer
-    carried" — and all three of its parts are pinned, because any one of them
-    missing is a different wrong answer:
-
-    * the **floor** is the retained count, still rendered;
-    * the **ceiling** reads as *up to*, never as a total, because the number
-      double-counts in the two cases ADR-0086 §4 names, and adding it to the floor
-      would state a figure no citation corresponds to;
-    * it reads as **capacity, not loss** — the episodes may be perfectly intact and
-      the line says the reference was dropped, which is ADR-0091 §1's second clause
-      and the whole difference between an elision and a tombstone.
-
-    Asserted against the exact number rather than merely against the words "up to",
-    per ADR-0107 §8 item 6.
-    """
-    cli._render_belief(
-        _belief(
-            BeliefBand.DERIVED,
-            confidence=0.62,
-            evidence=_cited("a", "b", "c"),
-            evidence_elided=900,
-        )
+def test_an_inference_says_its_evidence_summary(output: StringIO) -> None:
+    """ADR-0328 §15:4: the evidence summary, where the standing is inference."""
+    held = memory(
+        "rec-1",
+        "the user runs on Tuesdays",
+        remembered_support("activation:a", when=LEARNED),
+        remembered_support("activation:b", effect="effect-2", when=LEARNED),
+        said_support("activation:c", direction=SupportDirection.AGAINST),
     )
+    cli._render_belief(_view(held))
     rendered = _flat(output.getvalue())
-    assert "3 piece(s) of evidence" in rendered  # the floor
-    assert "Up to 900 more piece(s) stood behind it" in rendered  # the ceiling, exact
-    assert "those may still exist" in rendered  # capacity…
-    assert "they were not lost" in rendered  # …and not loss
+    assert "my inference" in rendered
+    assert "2 piece(s) of support across 3 exchange(s), 1 against it" in rendered
 
 
-def test_why_says_nothing_of_a_ceiling_when_nothing_was_displaced(output: StringIO) -> None:
-    """ADR-0107 §5 fires on ``evidence_elided > 0`` and is silent otherwise.
-
-    The counterpart to the case above, and what stops the clause being satisfied by
-    a line that always talks about elisions. Every belief in a deployment that has
-    never reached ADR-0086 §1's bound is this case, so a stray "up to 0 more" would
-    be the ordinary reading rather than the rare one.
-    """
-    cli._render_belief(_belief(BeliefBand.DERIVED, confidence=0.62, evidence=_cited("a", "b", "c")))
-    rendered = _flat(output.getvalue())
-    assert "3 piece(s) of evidence" in rendered
-    assert "stood behind it" not in rendered
-    assert "Up to" not in rendered
-
-
-def test_why_does_not_tell_an_elided_belief_that_nothing_supports_it(output: StringIO) -> None:
-    """ADR-0107 §7's repair, on the sentence it names by name.
-
-    "…but nothing supports it any more" is false for a belief that also elided nine
-    hundred citations: ADR-0086 §4 rules that "an elided citation is not unresolved,
-    and the belief did not lose support — the record lost the reference", so those
-    episodes may be intact and still supporting it. §7 requires the disclosure to
-    say **both** that every citation it still carries has gone **and** that up to
-    ``evidence_elided`` further ones stood behind it whose fate this surface cannot
-    report; all of that is asserted here.
-
-    **The predicate is untouched**, which is asserted directly rather than left to
-    the rendering to imply. ``unsupported`` is still ADR-0085 §4a's ``evidence_count
-    > 0 and lost_evidence == evidence_count`` on both types: §7 refused to add ``and
-    evidence_elided == 0`` to it, because that answers the question with a confident
-    ``False`` no better founded than the confident ``True``. The honest repair is at
-    the sentence, where "we cannot say" is expressible, and not at a boolean.
-    """
-    belief = _belief(
-        BeliefBand.DERIVED, confidence=0.1, evidence=(_GONE, _GONE), evidence_elided=900
-    )
-    assert belief.unsupported is True  # the ratified predicate, unchanged
-
-    cli._render_belief(belief)
-    rendered = _flat(output.getvalue())
-    assert "nothing supports it any more" not in rendered  # the false statement, gone
-    assert "none of which still exists" in rendered  # what *is* true is still said
-    assert "I still hold it" in rendered  # and it is still held, not retired
-    assert "Up to 900 more piece(s) stood behind it" in rendered
-    assert "those may still exist" in rendered
-
-
-def test_why_does_not_claim_no_evidence_was_recorded_when_some_was_displaced(
+def test_no_evidence_summary_is_owed_where_the_standing_is_not_inference(
     output: StringIO,
 ) -> None:
-    """The fourth derived state, which ADR-0107 §7's prohibition also reaches.
-
-    A derived belief carrying no citations *now* but having displaced some is not a
-    belief for which "no supporting evidence was recorded": evidence was recorded,
-    and the reference to it was dropped. That is the statement §7 forbids on every
-    band, in its most absolute form — so this branch is repaired rather than left as
-    the one derived state that renders its count and owes no ceiling.
-    """
-    cli._render_belief(_belief(BeliefBand.DERIVED, confidence=0.4, evidence_elided=12))
-    rendered = _flat(output.getvalue())
-    assert "no supporting evidence was recorded" not in rendered
-    assert "I carry no evidence for it now" in rendered
-    assert "Up to 12 more piece(s) stood behind it" in rendered
+    """§15:4 asks for it where the standing is inference, and the row stays short otherwise."""
+    cli._render_belief_summary(_summary())
+    assert "piece(s) of support" not in _flat(output.getvalue())
 
 
-def test_the_listing_row_states_the_same_ceiling_as_the_single_belief_view(
-    output: StringIO,
-) -> None:
-    """One name, one renderer, one line — on both types (ADR-0107 §3, ADR-0085 §4a).
-
-    ADR-0107 §3 put the field on ``Belief`` as well as ``BeliefSummary`` precisely so
-    drilling into a belief cannot *lose* information: ADR-0077 §6 makes the
-    single-belief view the fuller answer, and it is the view ``forget`` renders
-    before destroying a record. A field on one type only would fork ``_why`` and
-    invert that split, so the two lines are asserted to be the same line.
-    """
-    cli._render_belief_summary(
-        _summary(
-            BeliefBand.DERIVED,
-            confidence=0.35,
-            evidence_count=2,
-            lost_evidence=1,
-            evidence_elided=900,
-        )
+def test_a_reading_certainty_short_of_sure_is_said(output: StringIO) -> None:
+    """§15:4: its reading certainty where that is not ``sure``; silent where it is."""
+    likely = memory(
+        "rec-1",
+        "the standup is at 09:30",
+        sourced_support(ATTESTED_BY, how_sure=ReadingCertainty.LIKELY),
     )
-    rendered = _flat(output.getvalue())
-    assert "2 piece(s) of evidence" in rendered
-    assert "1 of which no longer exists" in rendered
-    assert "Up to 900 more piece(s) stood behind it" in rendered
-    assert "Because:" not in rendered, "the listing still ships no citations"
+    cli._render_belief(_view(likely))
+    assert "How sure the reading was: likely" in _flat(output.getvalue())
+
+    output.truncate(0)
+    output.seek(0)
+    sure = memory("rec-1", "the standup is at 09:30", sourced_support(ATTESTED_BY))
+    cli._render_belief(_view(sure))
+    assert "How sure the reading was" not in _flat(output.getvalue())
 
 
-def test_an_elision_is_never_rendered_among_the_citations(output: StringIO) -> None:
-    """ADR-0107 §8 item 4: ``_render_evidence`` is not touched, and this is why.
+def test_a_reading_nobody_judged_is_said_as_not_judged(output: StringIO) -> None:
+    """Not judged is not ``sure`` (ADR-0328 §7:5), so §15:4 shows it."""
+    cli._render_belief_summary(_summary())
+    assert "How sure the reading was: not judged" in _flat(output.getvalue())
 
-    ``Evidence`` has one nullable field, so a lost citation is one whose content is
-    ``None`` — meaning an entry standing for an elision would read as a **tombstone**
-    to every reader. That is the conflation ADR-0091 §1's second clause forbids and
-    ADR-0086 §4 calls "telling the user their data was lost when it was not". The
-    ceiling belongs on the ``Why`` line, so the tombstone count in the citation list
-    must not move with the elision.
-    """
-    cli._render_belief(
-        _belief(
-            BeliefBand.DERIVED,
-            confidence=0.35,
-            evidence=(_cited("they asked for metric units")[0], _GONE),
-            evidence_elided=900,
-        )
+
+def test_every_let_down_is_shown(output: StringIO) -> None:
+    """§15:4: every let-down — counted, beside how often it was relied on."""
+    summary = _summary(BeliefBand.DERIVED).model_copy(
+        update={"track_record": TrackRecordSummary(relied_on=3, held_up=1, let_down=2)}
     )
+    cli._render_belief_summary(summary)
+    assert "Let you down 2 time(s) of the 3 I relied on it." in _flat(output.getvalue())
+
+
+def test_a_legacy_memory_carries_the_legacy_mark(output: StringIO) -> None:
+    """§15:4 and §16:10: a memory kept before supports is marked legacy."""
+    held = memory(
+        "rec-1",
+        "the office is in Boston",
+        legacy_support({"id": "rec-1", "kind": "semantic", "content": "the office is in Boston"}),
+    )
+    cli._render_belief(_view(held))
     rendered = _flat(output.getvalue())
-    assert rendered.count("an item of evidence stood here and is gone") == 1
-    assert "Up to 900 more piece(s) stood behind it" in rendered
+    assert "Legacy: kept before memories had supports" in rendered
+    assert "my inference" in rendered  # a legacy memory stands at inference (§16:10)
+    assert "a record kept before memories had supports" in rendered  # its one support
+    assert "I worked it out from 1 piece(s) of support." in rendered  # no exchange to count
+    assert "exchange(s)" not in rendered
 
 
-@pytest.mark.parametrize(
-    ("band", "expected"),
-    [
-        (BeliefBand.ASSERTED, "you told me, and your own word is the whole of it."),
-        (
-            BeliefBand.ATTESTED,
-            "a connected source reported it — work-calendar, neither your word nor my "
-            "inference. That source said this was current as of 2026-03-02 08:30 UTC, "
-            "on its own clock; 'Last revised' below is when I changed my mind and not "
-            "when the source spoke.",
-        ),
-    ],
-)
-def test_why_is_unchanged_on_the_bands_that_render_no_count(
-    band: BeliefBand, expected: str
-) -> None:
-    """ADR-0107 §2's band scoping, pinned as a decision rather than an oversight.
-
-    §2 owes the disclosure to ``DERIVED`` alone, because that is the bullet ADR-0073
-    §4 put the citation-count floor in: an assertion's warrant is the user's own word
-    and "there is nothing further to cite", and the attested floor is about the band,
-    the reporting source and whose clock is shown, with no count in it at all. §5
-    then requires nothing of a surface that renders no count. So these two lines owe
-    no ceiling and gain none.
-
-    **Asserted as full equality against a non-zero elision**, which is what makes it
-    a pin: an implementation appending the ceiling unconditionally would still pass a
-    mere absence-of-loss-wording check. Together with the parameterised projection
-    test in ``tests/orchestration``, this is what stops a later reader "repairing"
-    §2's scoping — the field *is* carried on these bands (§3), and choosing not to
-    render it is the ruling.
-
-    **ADR-0189 §4 changed the attested line and changed nothing about this ruling.**
-    The line names the source and its clock now; it still renders no citation count,
-    so it still owes no ceiling, and the equality is what proves the ceiling did not
-    creep in beside the new sentence.
-    """
-    attestation = ATTESTED_BY if band is BeliefBand.ATTESTED else None
-    held = _belief(band, confidence=0.9, evidence_elided=900, attestation=attestation)
-    listed = _summary(band, confidence=0.9, evidence_elided=900, attestation=attestation)
-    assert cli._why(held) == expected
-    assert cli._why(listed) == expected
-
-
-def test_why_marks_an_attested_belief_as_a_source_s_report_not_ours(output: StringIO) -> None:
-    """ADR-0073 §4's attested floor: neither the user's word nor our inference.
-
-    And our revision time is not offered as the source's — the line says outright
-    that ``Last revised`` is when *we* changed our mind.
-    """
-    cli._render_belief(_belief(BeliefBand.ATTESTED, confidence=0.9, attestation=ATTESTED_BY))
+def test_a_memory_whose_supports_are_all_gone_is_held_and_says_so(output: StringIO) -> None:
+    """ADR-0328 §15:7: held, marked, answerable — and every gone part is a tombstone."""
+    cli._render_belief(_view(_held_memory(BeliefBand.DERIVED), gone=True))
     rendered = _flat(output.getvalue())
-    assert "a connected source reported it" in rendered
+    assert "Everything it rested on is gone. I still hold it" in rendered
+    assert "what it pointed at is gone" in rendered
+    assert _SUPPORT_TEXT not in rendered
+
+
+def test_the_single_view_shows_each_support_resolved(output: StringIO) -> None:
+    """§15:2: each support's origin, ``when`` and part resolved to readable content."""
+    cli._render_belief(_belief())
+    rendered = _flat(output.getvalue())
+    assert "Rests on:" in rendered
+    assert "your message · 2026-07-20 18:00 UTC" in rendered
+    assert _SUPPORT_TEXT in rendered
+
+
+def test_the_listing_shows_no_support(output: StringIO) -> None:
+    """ADR-0085 §4a's split: a listing row carries no support, so prints none."""
+    cli._render_belief_summary(_summary())
+    rendered = _flat(output.getvalue())
+    assert "Rests on:" not in rendered
+    assert _SUPPORT_TEXT not in rendered
+
+
+def test_a_confirmed_memory_says_the_user_confirmed_the_wording(output: StringIO) -> None:
+    """The highest standing, in its own words (ADR-0328 §6:1)."""
+    cli._render_belief(_view(memory("rec-1", "Sam prefers email", confirmed_support())))
+    rendered = _flat(output.getvalue())
+    assert "you confirmed this wording" in rendered
+    assert "your yes to my question" in rendered
+
+
+def test_a_sourced_memory_names_the_source_on_its_support(output: StringIO) -> None:
+    """ADR-0189 §4 on a memory: the source is named where its source details are (§15:2).
+
+    At source granularity and no finer, and apposed to "a connected source" so it cannot
+    be read as a person (ADR-0098 §8, ADR-0093 §7).
+    """
+    cli._render_belief(_belief(BeliefBand.ATTESTED, attestation=ATTESTED_BY))
+    rendered = _flat(output.getvalue())
+    assert "from a source" in rendered
     assert "neither your word nor my inference" in rendered
-    assert "not when the source spoke" in rendered
+    assert "a connected source · work-calendar" in rendered
 
 
-# --- ADR-0189 §9: the origin reaches the six rendered surfaces ---------------
-#
-# ``_why`` is the one of §9's six rendering paths left on this module — the question
-# renderers retired with ``assistant questions`` (ADR-0309 §5) — and it owes a test over
-# an **attested, resolved** subject asserting that *both* ``reported_by`` and
-# ``reported_at`` reach the rendered output. §9 says outright that a test asserting
-# only that a field is populated, or only that the source is named, does not satisfy
-# it, so every one of these reads the console's own bytes.
-
-
-@pytest.mark.parametrize(
-    "render",
-    [
-        pytest.param(cli._render_belief, id="belief"),
-        pytest.param(cli._render_belief_summary, id="summary"),
-    ],
-)
-def test_why_names_the_attesting_source_and_when_that_source_spoke(
-    render: Callable[[Any], None], output: StringIO
-) -> None:
-    """ADR-0189 §9's first surface clause, on ``_why``: the source **and** the instant.
-
-    #1276's limitation is gone. The line used to say the source and the report time
-    were recorded and could not be shown here — true while the projection dropped them
-    (ADR-0092 §1 makes an ``Attestation`` mandatory on this band, so the *store* always
-    held both), and ADR-0189 §2 gave both belief DTOs somewhere to put one.
-
-    **Both halves are asserted because ADR-0073 §4's gate is explicitly both**, and
-    ADR-0189 §9 names ``reported_at`` as "the one an implementing lane will drop,
-    because the source-naming half is the one everybody is talking about". A lane that
-    named the source and left ``Last revised`` as the only instant would satisfy
-    ADR-0098 §8's second clause and breach ADR-0073 §4's gate.
-
-    **Run over both DTOs, which is #1517's second finding.** ``_why`` accepts either,
-    so an attested ``Belief`` test alone satisfies every named belief path while an
-    attested *listing* row renders the old generic explanation — the failure ADR-0107
-    §3 already legislated against one field over when it refused both "put the field on
-    ``BeliefSummary`` only" and "put it on ``Belief`` only".
-    """
-    attested = (
-        _belief(BeliefBand.ATTESTED, confidence=0.9, attestation=ATTESTED_BY)
-        if render is cli._render_belief
-        else _summary(BeliefBand.ATTESTED, confidence=0.9, attestation=ATTESTED_BY)
-    )
-    render(attested)
-    rendered = _flat(output.getvalue())
-    assert "work-calendar" in rendered, "the reporting source is named"
-    assert "2026-03-02 08:30 UTC" in rendered, "and the instant it spoke"
-
-
-@pytest.mark.parametrize(
-    "render",
-    [
-        pytest.param(cli._render_belief, id="belief"),
-        pytest.param(cli._render_belief_summary, id="summary"),
-    ],
-)
-def test_the_attested_line_still_refuses_to_offer_our_clock_as_the_sources(
-    render: Callable[[Any], None], output: StringIO
-) -> None:
-    """ADR-0073 §4's floor, which ADR-0189 §4 restates and the new line makes riskier.
-
-    §4: a surface "renders ``reported_at`` as the **source's** clock and never as this
-    system's, and it does not offer ``last_updated`` in its place". ADR-0189's own
-    Consequences names the newly-available error — "naming the source while still
-    showing our clock as the source's" — so this asserts the two instants are both on
-    screen, are different, and are labelled for whose clock each is.
-    """
-    attested = (
-        _belief(BeliefBand.ATTESTED, confidence=0.9, attestation=ATTESTED_BY)
-        if render is cli._render_belief
-        else _summary(BeliefBand.ATTESTED, confidence=0.9, attestation=ATTESTED_BY)
-    )
-    render(attested)
-    rendered = _flat(output.getvalue())
-    assert "on its own clock" in rendered, "the source's instant is labelled as the source's"
-    assert "Last revised: 2026-07-24 09:00 UTC" in rendered, "ours is still shown"
-    assert "not when the source spoke" in rendered, "and is still declared to be ours"
-    assert "2026-03-02" in rendered, "beside a genuinely different instant"
-
-
-def test_why_reads_the_source_as_a_source_and_never_as_a_person(output: StringIO) -> None:
-    """ADR-0189 §4's second clause, ADR-0098 §8's third adopted unchanged.
-
-    A surface "renders the source at **source granularity and no finer** … a surface
-    that rendered ``reported_by`` as though it named a person would assert what this
-    system does not hold". ADR-0093 §7 forbids deriving a reader's identity from the
-    source's location or contents, so the organiser of an invite and the sender of a
-    mail are not on the record — and ADR-0098 §8 states the cost of pretending
-    otherwise: "a user who reads 'someone sent you' will read the name they are shown
-    as that someone".
-
-    Pinned on the apposition rather than on the absence of a name, because there is no
-    list of person-words to check against: what makes the value unreadable as a person
-    is that it is introduced as a connected source.
-    """
-    cli._render_belief(
-        _belief(
-            BeliefBand.ATTESTED,
-            confidence=0.9,
-            attestation=Attestation(reported_by="alice", reported_at=REPORTED_AT),
-        )
-    )
-    rendered = _flat(output.getvalue())
-    assert "a connected source reported it — alice" in rendered
-    assert "That source said this was current" in rendered
-
-
-def test_why_says_what_reached_it_when_an_attested_belief_carries_no_attestation(
+def test_an_inference_resting_on_outside_content_says_so_without_reattributing_the_words(
     output: StringIO,
 ) -> None:
-    """The off-contract arm, which ADR-0189 §2 leaves constructable on purpose.
+    """ADR-0189 §4's third clause, read through ADR-0328 §12 on rests-on-outside-content.
 
-    §2 adds **no** cross-field validator to ``Belief``, ``BeliefSummary`` or
-    ``Question`` — those are ratified types with construction sites in the tree, and
-    ADR-0086 §3's admissibility test refuses a validator that would refuse what already
-    works — so the type admits an attested belief with no attestation even though
-    ``Provenance``'s own validator means no store can produce one.
-
-    What the line must not do is either of the two available lies: claiming the
-    attestation was **not recorded**, which errs in the direction ADR-0073 §4 forgives
-    least on the one band whose whole purpose is provenance, or reviving #1276's
-    "cannot show them here", which would claim a limit this projection no longer has.
-    What is true either way is that this surface was not handed it.
+    It names the warrant and affirms the words are ours in one breath (ADR-0098 §1).
     """
-    cli._render_belief(_belief(BeliefBand.ATTESTED, confidence=0.9))
+    cli._render_belief_summary(_summary(BeliefBand.DERIVED, outside=True))
     rendered = _flat(output.getvalue())
-    assert "does not name that source or say when it spoke" in rendered
-    assert "not recorded" not in rendered
-    assert "cannot show them here" not in rendered
+    assert "came from outside rather than from you" in rendered
+    assert "the wording is still my own sentence" in rendered
 
 
-@pytest.mark.parametrize(
-    "render",
-    [
-        pytest.param(cli._render_belief, id="belief"),
-        pytest.param(cli._render_belief_summary, id="summary"),
-    ],
-)
-def test_why_says_a_derived_warrant_came_from_outside_without_reattributing_the_words(
-    render: Callable[[Any], None], output: StringIO
+def test_nothing_is_said_about_the_outside_where_nothing_outside_is_recorded(
+    output: StringIO,
 ) -> None:
-    """#1517's first finding, and ADR-0189 §4's third clause, on ``_why``.
-
-    §9's own matrix has no arm for this: it requires an attested-and-resolved test on
-    all six paths and a tombstone test on the two retirement paths, and **nothing that
-    exercises the derived arm**. So a renderer could show ``reported_by`` and
-    ``reported_at`` correctly everywhere, omit the marker for every ``DERIVED`` record
-    with the predicate ``True``, and pass all eight required tests while breaching §4.
-
-    **The second half is the harder one and is why this is one test rather than two.**
-    §4 forbids the reach as explicitly as it requires the marker: a surface "does
-    **not** present the record's own content as third-party text on that ground: the
-    content is a sentence this system's model wrote, and ADR-0098 §1 decides
-    externality by the recorded origin of the text". ADR-0098 §7's own round-6 draft
-    made exactly that reach and architecture review had to repair it, so the assertion
-    that the *words* stay ours is asserted beside the marker rather than trusted.
-    """
-    outside = (
-        _belief(
-            BeliefBand.DERIVED,
-            confidence=0.35,
-            evidence=_cited("their calendar said Lisbon"),
-            rests_on_recorded_external_content=True,
-        )
-        if render is cli._render_belief
-        else _summary(
-            BeliefBand.DERIVED,
-            confidence=0.35,
-            evidence_count=1,
-            rests_on_recorded_external_content=True,
-        )
-    )
-    render(outside)
+    """Silent on ``False`` rather than negative (ADR-0328 §7:7)."""
+    cli._render_belief_summary(_summary(BeliefBand.DERIVED))
     rendered = _flat(output.getvalue())
-    assert "came from a connected source rather than from you" in rendered
-    assert "still my own sentence" in rendered, "the words are not re-attributed"
-    assert "someone else's words" not in rendered
-
-
-@pytest.mark.parametrize(
-    "render",
-    [
-        pytest.param(cli._render_belief, id="belief"),
-        pytest.param(cli._render_belief_summary, id="summary"),
-    ],
-)
-def test_why_says_nothing_about_the_outside_when_the_predicate_is_false(
-    render: Callable[[Any], None], output: StringIO
-) -> None:
-    """The silence is ruled, not an omission (ADR-0098 §5, ADR-0106 §1).
-
-    A ``False`` is *nothing external is recorded in this warrant*, never *nothing
-    external influenced it*: text whose recorded origin is not external can still have
-    reached a belief — through a plan rationale our own model authored over an
-    attacker's sentence — and no field on the record says so. So a surface printing the
-    negative would assert what this system does not hold, which ADR-0098 §5 marks as a
-    limit and ADR-0106 §1's second clause binds every marker ADR-0189 projects to.
-    """
-    inside = (
-        _belief(BeliefBand.DERIVED, confidence=0.35, evidence=_cited("they said so twice"))
-        if render is cli._render_belief
-        else _summary(BeliefBand.DERIVED, confidence=0.35, evidence_count=1)
-    )
-    render(inside)
-    rendered = _flat(output.getvalue())
-    assert "connected source" not in rendered
     assert "outside" not in rendered
-    assert "1 piece(s) of evidence" in rendered, "the rest of the derived line is unchanged"
 
 
-#: The sentence a stamped **belief** gets, which ADR-0223 §5 forbids on an episode:
-#: every clause of it is false of a recorded exchange.
-_BELIEF_SENTENCE = "Some of what I worked it out from came from a connected source"
-
-#: The sentence a stamped **episode** gets instead (ADR-0223 §5's second clause).
-_EPISODIC_SENTENCE = (
-    "Some of the material I had in front of me during this exchange traces back to a "
-    "connected source"
-)
-
-
-@pytest.mark.parametrize(
-    "render",
-    [
-        pytest.param(cli._render_belief, id="belief"),
-        pytest.param(cli._render_belief_summary, id="summary"),
-    ],
-)
-def test_a_stamped_episode_gets_the_episodic_arm_and_never_the_belief_sentence(
-    render: Callable[[Any], None], output: StringIO
-) -> None:
-    """ADR-0223 §5's second clause, on the CLI half of §10's eighth test.
-
-    Once ADR-0223 §1 stamps the mark on a captured episode the predicate is ``True``
-    of a record the belief sentence is false of in every clause: "the system did not
-    work the episode out, there is nothing it worked it out *from* — ``evidence`` is
-    empty by ADR-0074 §4 — and the episode's warrant is that it happened, which is
-    entirely this system's own".
-
-    So the arm is asserted in both directions. The episodic sentence is present, and
-    the belief sentence is asserted **absent** — a listing that appended both, or that
-    kept the old one for a kind nobody thought about, is the failure §5 exists to
-    prevent and a presence-only check would pass it.
-
-    **And the content is not re-attributed**, which §5 carries over from ADR-0189 §4
-    unchanged: no part of the episode is presented as a source's words. The record
-    stays this system's own account of the exchange, which is what ADR-0074 §4 makes
-    it — "the terminal citation: the thing other records cite".
-    """
-    stamped = (
-        _belief(
-            BeliefBand.DERIVED,
-            kind=MemoryKind.EPISODIC,
-            content="you asked where the office is; I answered Boston",
-            rests_on_recorded_external_content=True,
-        )
-        if render is cli._render_belief
-        else _summary(
-            BeliefBand.DERIVED,
-            kind=MemoryKind.EPISODIC,
-            content="you asked where the office is; I answered Boston",
-            rests_on_recorded_external_content=True,
-        )
-    )
-    render(stamped)
-    rendered = _flat(output.getvalue())
-    assert _EPISODIC_SENTENCE in rendered
-    assert "the record above is still my own account of what was said" in rendered
-    assert _BELIEF_SENTENCE not in rendered, "the belief sentence is false of an episode"
-    assert "warrant" not in rendered, "an episode's warrant is not a derivation to describe"
-    assert "someone else's words" not in rendered
-
-
-@pytest.mark.parametrize(
-    "render",
-    [
-        pytest.param(cli._render_belief, id="belief"),
-        pytest.param(cli._render_belief_summary, id="summary"),
-    ],
-)
-def test_an_unstamped_episodes_row_is_the_episodic_line_and_nothing_more(
-    render: Callable[[Any], None], output: StringIO
-) -> None:
-    """The no-drift half of ADR-0223 §10's eighth test, re-pinned to a moved baseline.
-
-    §10's eighth test asked that "an unstamped episode's row is byte-identical to
-    today's", and this case is what asserted it. **That pin was the stamp lane's
-    no-drift guard, not a ratification of the sentence it happened to pin**, and this
-    case is re-pointed at the line #1891 gives the row rather than deleted:
-
-    * §10's numbered list is introduced as "the representative-input tests this
-      decision owes", and — unlike the three clauses above it in that section — carries
-      no ``> **Normative.**`` marker. It is the evidence ADR-0223 owes, and the
-      evidence it owed was that a lane adding an arm for *stamped* episodes left the
-      other arm where it found it.
-    * ADR-0223 §5 says in terms what it thought of the sentence it was pinning: the
-      belief line on an episode is "a pre-existing oddity of rendering an episode
-      through a belief renderer", which appending the external sentence would turn
-      "into a claim". §5 declines to repair the oddity — it does not bless it, and an
-      ADR that calls a line an oddity has not decided that line is correct.
-    * §10's third normative clause forbids discharging either arm "by suppressing the
-      fact". Nothing here suppresses it: the stamped row keeps ADR-0223 §5's sentence,
-      character for character, and the head sentence in front of it is the one thing
-      §5 left to the surface (ADR-0189 §4 "states what a surface conveys and leaves the
-      wording to it"; ADR-0072 §6 says the same).
-
-    So the property this case now holds is the same property, over the new baseline:
-    an episode nothing external reached says the episodic line **and only** the
-    episodic line, with no trace of the arm that belongs to a stamped row. Asserted as
-    the exact ``Why`` line rather than as an absence, for the reason it always was — an
-    arm that appended a sentence with the marker missing from it would pass every
-    absence check here.
-    """
-    unstamped = (
-        _belief(BeliefBand.DERIVED, kind=MemoryKind.EPISODIC)
-        if render is cli._render_belief
-        else _summary(BeliefBand.DERIVED, kind=MemoryKind.EPISODIC)
-    )
-    render(unstamped)
-    rendered = _flat(output.getvalue())
-    assert (
-        "Why: this records an exchange that happened — I captured it at the time, so "
-        "there was nothing to work out and nothing to weigh. The line above files it "
-        "among my beliefs because that is where a captured turn sits, and the "
-        "confidence there is a standing figure rather than a measure of doubt that it "
-        "happened. Last revised:"
-    ) in rendered
-    assert "connected source" not in rendered
-    assert "traces back" not in rendered, "and the silence is silence, not the episodic arm"
-    assert "I worked it out" not in rendered, "the derived line is false of a recorded turn"
-
-
-@pytest.mark.parametrize(
-    "render",
-    [
-        pytest.param(cli._render_belief, id="belief"),
-        pytest.param(cli._render_belief_summary, id="summary"),
-    ],
-)
-def test_an_episode_is_explained_as_a_record_and_never_as_a_derivation(
-    render: Callable[[Any], None], output: StringIO
-) -> None:
-    """#1891: an episode's ``Why`` is that it happened (ADR-0075 §2).
-
-    A captured turn carries ``OBSERVED`` provenance, so ``band_of`` files it in the
-    ``DERIVED`` band and it used to be explained by the derived line — "I worked it
-    out, and no supporting evidence was recorded". ADR-0075 §2 is what that
-    contradicts: recording an exchange "is true because it happened, a policy has
-    nothing to weigh". So the row says it was recorded, says nothing was worked out,
-    and does not offer the empty evidence list as a deficiency — ADR-0074 §4 leaves an
-    episode's ``evidence`` empty **by decision**.
-
-    Asserted in both directions, because a line that added an honest sentence and kept
-    the false one would pass a presence-only check.
-    """
-    render(
-        _belief(BeliefBand.DERIVED, kind=MemoryKind.EPISODIC)
-        if render is cli._render_belief
-        else _summary(BeliefBand.DERIVED, kind=MemoryKind.EPISODIC)
-    )
-    rendered = _flat(output.getvalue())
-
-    assert "this records an exchange that happened" in rendered
-    assert "I captured it at the time" in rendered
-    assert "I worked it out" not in rendered
-    assert "no supporting evidence was recorded" not in rendered, (
-        "an empty evidence list is ADR-0074 §4's decision, not a shortfall to report"
-    )
-
-
-@pytest.mark.parametrize(
-    "render",
-    [
-        pytest.param(cli._render_belief, id="belief"),
-        pytest.param(cli._render_belief_summary, id="summary"),
-    ],
-)
-def test_an_episodes_row_still_carries_its_band_and_confidence_and_says_what_they_are(
-    render: Callable[[Any], None], output: StringIO
-) -> None:
-    """#1891's open display question, answered: the heading stays and the line explains it.
-
-    ADR-0073 §4 requires **every** row to convey its band — "never omitted, never
-    implied by position alone" — and its confidence, and grants no kind an exemption;
-    ADR-0072 §6 rules the same of anything rendered as a belief. So the fix for the
-    belief vocabulary is not to drop the two fields but to stop the row implying that
-    the 0.90 is how sure this system is that the conversation took place: ADR-0074 §4
-    sets it at capture and documents it as standing rather than certainty.
-
-    Pinned as *both* halves. The header is asserted present because a later lane
-    reading only the ``Why`` line might take it for dead weight, and the sentence that
-    disarms it is asserted present because the header without it is exactly what #1891
-    reported.
-    """
-    render(
-        _belief(BeliefBand.DERIVED, kind=MemoryKind.EPISODIC, confidence=0.9)
-        if render is cli._render_belief
-        else _summary(BeliefBand.DERIVED, kind=MemoryKind.EPISODIC, confidence=0.9)
-    )
-    rendered = _flat(output.getvalue())
-
-    assert "derived · episodic · confidence 0.90" in rendered
-    assert "the confidence there is a standing figure rather than a measure of doubt" in (rendered)
-
-
-def test_a_derived_belief_of_another_kind_keeps_the_line_it_had(output: StringIO) -> None:
-    """The episodic arm is a branch off the derived one, never a replacement.
-
-    ADR-0073 §4's derived floor — the band, the citation count, and never a warrant
-    the surface cannot show — is untouched for the three kinds that are beliefs, and a
-    fifth ``MemoryKind`` added to ``core`` would take the belief line rather than
-    silently inheriting an episode's. Pinned on ``PROCEDURAL`` because the semantic
-    case is what every other case in this file renders.
-    """
-    cli._render_belief_summary(_summary(BeliefBand.DERIVED, kind=MemoryKind.PROCEDURAL))
-    rendered = _flat(output.getvalue())
-
-    assert "Why: I worked it out, and no supporting evidence was recorded." in rendered
-    assert "this records an exchange that happened" not in rendered
-
-
-def test_a_stamped_belief_of_another_kind_is_left_on_the_belief_sentence(
-    output: StringIO,
-) -> None:
-    """The arm is an addition, not a redirection (ADR-0223 §5, ADR-0189 §4 unnarrowed).
-
-    §5's first clause is explicit that ADR-0189 §4's third clause is "not narrowed,
-    exempted or conditioned" — so the three non-episodic kinds keep the sentence they
-    had, and a fifth ``MemoryKind`` added to ``core`` would take it too rather than
-    silently losing the disclosure. Pinned on ``PROCEDURAL`` because the semantic case
-    is the one every other test in this file already renders.
-    """
-    cli._render_belief_summary(
-        _summary(
-            BeliefBand.DERIVED,
-            kind=MemoryKind.PROCEDURAL,
-            evidence_count=1,
-            rests_on_recorded_external_content=True,
-        )
-    )
-    rendered = _flat(output.getvalue())
-    assert _BELIEF_SENTENCE in rendered
-    assert _EPISODIC_SENTENCE not in rendered
-
-
-async def test_beliefs_listed_by_episodic_kind_carry_the_episodic_arm(
-    output: StringIO,
-) -> None:
-    """ADR-0223 §10's eighth test, driven the way the documented command drives it.
-
-    ``assistant beliefs --kind episodic`` is documented in this module as the way to
-    "see captured conversation turns", and §5's chain runs from there: the façade
-    lists what it holds, ``_render_beliefs`` renders each row, and ``_why`` reaches
-    ``_why_derived`` because a captured episode's provenance is ``OBSERVED`` and
-    ``band_of`` puts that in the ``DERIVED`` band.
-
-    Both rows are listed in one call so the two sentences are asserted against **one**
-    rendering: an arm keyed on the kind is only worth anything if the row beside it is
-    unaffected, and a per-case assertion would not show that.
-
-    The stamped episode is constructed here rather than captured, which is what makes
-    this lane independent of the one landing ADR-0223 §1's stamp: the field exists on
-    ``Provenance`` today, the projection carries it kind-blind by §5's first clause,
-    and this surface has to answer for the row whether or not a producer writes one
-    yet.
-    """
-    engine = FakeAssistantEngine()
-    engine.beliefs_held["ep-1"] = _belief(
-        BeliefBand.DERIVED,
-        belief_id="ep-1",
-        kind=MemoryKind.EPISODIC,
-        content="you asked where the office is; I answered Boston",
-        rests_on_recorded_external_content=True,
-    )
-    engine.beliefs_held["ep-2"] = _belief(
-        BeliefBand.DERIVED,
-        belief_id="ep-2",
-        kind=MemoryKind.EPISODIC,
-        content="you asked what time it was; I answered half past two",
-    )
-
-    code = await cli._drive_beliefs(
-        engine, bands=None, kinds=[MemoryKind.EPISODIC], limit=50, offset=0
-    )
-
-    assert code == 0
-    rendered = _flat(output.getvalue())
-    assert rendered.count(_EPISODIC_SENTENCE) == 1, "the stamped row, and only it"
-    assert _BELIEF_SENTENCE not in rendered
-    assert "ep-2" in rendered, "and the unstamped episode is listed beside it, unchanged"
-
-
-def test_an_episodes_two_lines_are_two_lines(output: StringIO) -> None:
-    """#1890: the break inside a captured turn is a break, not ``\ufffd``.
-
-    ``_exchange_of`` writes an episode as "The user asked: …" and "The assistant's
-    plan: …" separated by a newline, and this row rendered that newline as the
-    replacement character — :func:`~ai_assistant.interfaces.cli._safe` replaces it by
-    default, which is #1336's fix reaching a value it was never aimed at. The content
-    is the one field of the row printed as a block of its own, which is the carve-out
-    :func:`~ai_assistant.interfaces.cli._safe_prose` exists for.
-
-    Read off the **raw** buffer rather than through ``_flat``, because the line
-    structure is the whole subject and flattening it would assert nothing.
-    """
-    cli._render_belief_summary(
-        _summary(
-            BeliefBand.DERIVED,
-            kind=MemoryKind.EPISODIC,
-            content="The user asked: where is the office?\nThe assistant's plan: answer directly.",
-        )
-    )
+def test_a_records_content_with_a_line_break_keeps_it(output: StringIO) -> None:
+    """#1890: a break inside a wording is a break, not ``�``."""
+    cli._render_belief_summary(_summary(content="first line\nsecond line"))
     rendered = output.getvalue()
 
-    assert "\ufffd" not in rendered
-    assert "  │ The user asked: where is the office?\n" in rendered
-    assert "  │ The assistant's plan: answer directly.\n" in rendered, (
-        "and both lines sit behind the gutter, so neither can be read as a field of the row"
-    )
+    assert "�" not in rendered
+    assert "  │ first line\n  │ second line\n" in rendered
 
 
-def test_a_break_in_a_records_content_cannot_forge_one_of_the_rows_own_fields(
+def test_a_forged_field_line_in_a_records_content_is_marked_as_content(
     output: StringIO,
 ) -> None:
     """ADR-0042 §4's threat, arriving without a control character.
 
     :data:`~ai_assistant.core.types.EncodableText` asks only that a value be writable,
-    so **any** kind's content may carry a newline — and printed as plain indented
-    lines, ``fact\nWhy: …\nid: …`` is three fields of this row in the reader's own
-    vocabulary, forged by a value the engine carried verbatim. It is the hole #1890's
-    fix would open if it merely stopped replacing the break, and adversarial review
-    found it on round 1.
-
-    The gutter is what closes it: every line of a multi-line content is behind a
-    marker no line this adapter writes ever carries, so a forged label arrives visibly
-    inside the record's text. Asserted in both directions — the bare field line is
-    **absent**, the marked one is present — because a check for the marker alone would
-    pass a renderer that printed the line twice.
+    so a wording may carry a newline — and printed as plain indented lines,
+    ``fact\nWhy: …\nid: …`` is three fields of this row in the reader's own vocabulary.
+    The gutter closes it: every line of a multi-line content is behind a marker no line
+    this adapter writes ever carries. Asserted in both directions.
     """
     cli._render_belief_summary(
         _summary(content="the office is in Boston\nWhy: you told me this\nid: rec-9")
@@ -1769,15 +1139,9 @@ def test_the_gutter_reaches_the_lines_the_console_wraps_for_itself(
 ) -> None:
     """The marker's promise is about display lines, not about logical ones.
 
-    Rich does not repeat a literal prefix on the continuations it wraps: handed one
-    long line it emits the gutter once and puts the remainder at the margin, so a
-    crafted ``… Why: forged`` becomes a second display line the marker never reached —
-    the whole defence, undone by a long enough content. Adversarial review, round 2,
-    ``blocker``.
-
-    Driven at a **40-column** console, because the default this file renders at hides
-    the case: nothing short enough to fit ever wraps, which is exactly how the first
-    round of cases missed it.
+    Rich does not repeat a literal prefix on the continuations it wraps, so a crafted
+    ``… Why: forged`` becomes a second display line the marker never reached unless the
+    wrapping is taken here. Driven at a **40-column** console.
     """
     buffer = StringIO()
     monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=40))
@@ -1798,13 +1162,7 @@ def test_the_gutter_reaches_the_lines_the_console_wraps_for_itself(
 
 
 def test_a_single_line_content_is_printed_exactly_as_it_always_was(output: StringIO) -> None:
-    """The marker is bought only by the value that creates the risk.
-
-    One line cannot forge a second, so a content with no break in it takes none of
-    this: it renders the row every other case in this file renders, unchanged. Pinned
-    because the alternative — marking every content on the surface — is a change to
-    every row this system has ever printed, made for a hazard that is not present.
-    """
+    """The marker is bought only by the value that creates the risk."""
     cli._render_belief_summary(_summary())
     rendered = output.getvalue()
 
@@ -1815,38 +1173,20 @@ def test_a_single_line_content_is_printed_exactly_as_it_always_was(output: Strin
 def test_a_carriage_return_in_a_records_content_is_a_break_and_not_a_scribble(
     output: StringIO,
 ) -> None:
-    """The ``\r`` half of the same fix, settled the way #1336 settled it.
-
-    A carriage return *is* a character this terminal acts on — it returns the cursor
-    to column zero, so what follows overwrites what came before, which is ADR-0042
-    §4's threat in its purest form. Replacing it would leave the half-fixed rendering
-    #1336 records; normalising ``\r\n`` and a lone ``\r`` to ``\n`` removes the
-    character that overwrites *and* yields the break the producer meant.
-    """
-    cli._render_belief_summary(
-        _summary(BeliefBand.DERIVED, kind=MemoryKind.EPISODIC, content="first\r\nsecond\rthird")
-    )
+    """A carriage return overwrites what came before, so it becomes the break it meant."""
+    cli._render_belief_summary(_summary(content="first\r\nsecond\rthird"))
     rendered = output.getvalue()
 
     assert "\r" not in rendered
-    assert "\ufffd" not in rendered
+    assert "�" not in rendered
     assert "  │ first\n  │ second\n  │ third\n" in rendered
 
 
 def test_markup_split_across_a_break_in_a_records_content_is_still_escaped(
     output: StringIO,
 ) -> None:
-    """The break is content; Rich markup is still neutralised (ADR-0042 §4).
-
-    Rich's tag pattern matches across a newline, so ``[red\nbold]`` survives per-line
-    escaping intact and is then consumed as markup — a value that reaches the screen
-    *emptied* of what it said. The escape is therefore taken over the whole value and
-    the split comes after it, which this case is what proves: both halves of the tag
-    are still on the screen and neither was interpreted.
-    """
-    cli._render_belief_summary(
-        _summary(BeliefBand.DERIVED, kind=MemoryKind.EPISODIC, content="[red\nbold] hello")
-    )
+    """Rich's tag pattern matches across a newline, so the escape is over the whole value."""
+    cli._render_belief_summary(_summary(content="[red\nbold] hello"))
     rendered = output.getvalue()
 
     assert "[red" in rendered
@@ -1887,8 +1227,7 @@ def test_forget_prompt_warns_by_band_because_the_consequence_differs(
     band: BeliefBand, expected: str, output: StringIO
 ) -> None:
     """A deletion is represented as neither more final than it is nor less (§5)."""
-    confidence = 1.0 if band is BeliefBand.ASSERTED else 0.5
-    cli._render_forget_prompt(_belief(band, confidence=confidence))
+    cli._render_forget_prompt(_belief(band, attestation=ATTESTED_BY))
     assert expected in _flat(output.getvalue())
 
 
@@ -1898,44 +1237,47 @@ def test_forget_prompt_shows_the_belief_and_scopes_the_consent(output: StringIO)
     rendered = _flat(output.getvalue())
     assert "the office is in Boston" in rendered  # shown before it can be destroyed
     assert "rec-1" in rendered
+    assert _SUPPORT_TEXT in rendered  # and the warrant being judged with it
     assert "not even in an export" in rendered  # destroyed, not retired (§6)
     assert "correct me in assistant chat" in rendered  # the route that keeps it instead
-    assert "when you answer" in rendered  # consent is to the id, not to these bytes
 
 
 async def _holding(content: str) -> FakeMemoryStore:
-    """A store holding one belief the user stated, as the engine reads beliefs from.
+    """A store holding one memory the user said, and one episode beside it.
 
-    Written into the store, because no call on the engine writes a belief since
-    ADR-0293 §11 retired ``learn``.
+    Written into the store, because no call on the engine writes a memory since
+    ADR-0293 §11 retired ``learn``. The episode is there so the listing's exclusion of
+    episodes (ADR-0328 §11:2, #3143) is exercised by every case that lists.
     """
-    memory = FakeMemoryStore(now=lambda: AT)
-    await memory.write_atomic(
+    store = FakeMemoryStore(now=lambda: AT)
+    episode = EpisodicMemory(
+        id="activation:held",
+        content="The user asked: where is the office?",
+        occurred_at=LEARNED,
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
+    )
+    await store.write_atomic(
         [
+            MemoryWrite(record=episode, mode=MemoryWriteMode.INSERT_IF_ABSENT),
             MemoryWrite(
-                record=SemanticMemory(
-                    id="rec-held",
-                    content=content,
-                    fact=content,
-                    provenance=Provenance(
-                        source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
-                    ),
-                ),
+                record=memory("rec-held", content, said_support(when=LEARNED, added_at=AT)),
                 mode=MemoryWriteMode.INSERT_IF_ABSENT,
-            )
+            ),
         ]
     )
-    return memory
+    return store
 
 
 async def test_drive_beliefs_lists_what_the_engine_holds(output: StringIO) -> None:
-    """Against a real engine over fakes, a stored belief is listed with its band."""
+    """Against a real engine over fakes, a stored memory is listed with its standing."""
     engine = _engine(memory=await _holding("the office is in Boston"))
-    code = await cli._drive_beliefs(engine, bands=None, kinds=None, limit=50, offset=0)
+    code = await cli._drive_beliefs(engine, bands=None, limit=50, offset=0)
     assert code == 0
-    rendered = output.getvalue()
+    rendered = _flat(output.getvalue())
     assert "the office is in Boston" in rendered
-    assert "asserted" in rendered  # what the user said lands in their own band
+    assert "asserted · you said it" in rendered  # what the user said lands in their band
+    assert "1 belief(s)" in rendered
+    assert "where is the office?" not in rendered  # the episode is never listed (§11:2)
     await engine.aclose()
 
 
@@ -1952,7 +1294,6 @@ async def test_drive_beliefs_surfaces_a_read_failure_with_a_nonzero_exit(
     code = await cli._drive_beliefs(
         _FailingEngine(),  # type: ignore[arg-type]  # the adapter needs only this call
         bands=None,
-        kinds=None,
         limit=50,
         offset=0,
     )
@@ -2020,77 +1361,56 @@ async def test_drive_forget_reports_a_belief_that_vanished_before_the_delete(
 
 
 async def test_drive_forget_end_to_end_against_a_real_engine(output: StringIO) -> None:
-    """A belief the engine holds is shown, agreed to, and gone from the listing (§5)."""
+    """A memory the engine holds is shown, agreed to, and gone from the listing (§5)."""
     engine = _engine(memory=await _holding("the office is in Boston"))
     page = await engine.beliefs()
     assert len(page) == 1
 
     code = await cli._drive_forget(engine, page[0].id, confirm=lambda _b: True)
     assert code == 0
-    assert "Forgotten" in output.getvalue()
+    rendered = _flat(output.getvalue())
+    assert "Forgotten" in rendered
+    assert "The user asked: where is the office?" in rendered  # its support, resolved
     assert await engine.beliefs() == ()
     await engine.aclose()
 
 
 def test_beliefs_command_relays_its_filters(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Repeated --band/--kind reach the façade; --limit/--offset are relayed as given."""
+    """Repeated --band reaches the façade; --limit/--offset are relayed as given."""
     engine = _RecordingBeliefEngine()
     _wire(monkeypatch, engine)
 
     result = CliRunner().invoke(
         cli.app,
-        [
-            "beliefs",
-            "--band",
-            "derived",
-            "--band",
-            "attested",
-            "--kind",
-            "semantic",
-            "--limit",
-            "5",
-            "--offset",
-            "10",
-        ],
+        ["beliefs", "--band", "derived", "--band", "attested", "--limit", "5", "--offset", "10"],
     )
     assert result.exit_code == 0
-    assert engine.listed == [
-        ([BeliefBand.DERIVED, BeliefBand.ATTESTED], [MemoryKind.SEMANTIC], 5, 10)
-    ]
+    assert engine.listed == [([BeliefBand.DERIVED, BeliefBand.ATTESTED], 5, 10)]
 
 
-def test_beliefs_command_asks_for_every_band_but_excludes_episodes_by_default(
+def test_beliefs_command_asks_for_every_band_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An absent ``--band`` means "every"; an absent ``--kind`` means "every belief".
-
-    Two different defaults, on purpose. ``--band`` absent is "every band", because
-    an empty filter would select nothing (ADR-0073 §1). ``--kind`` absent is every
-    kind **except** ``EPISODIC`` (ADR-0074 §6): this command answers "what do you
-    believe about me", and an episode is the evidence a belief is made of rather
-    than a belief — so left kind-blind it would print a transcript through the
-    surface leg 1 built to be readable, the moment capture started writing turns.
-    """
+    """An absent ``--band`` means "every", because an empty filter selects nothing."""
     engine = _RecordingBeliefEngine()
     _wire(monkeypatch, engine)
 
     result = CliRunner().invoke(cli.app, ["beliefs"])
     assert result.exit_code == 0
-    assert engine.listed == [
-        (None, [MemoryKind.SEMANTIC, MemoryKind.PREFERENCE, MemoryKind.PROCEDURAL], 50, 0)
-    ]
+    assert engine.listed == [(None, 50, 0)]
 
 
-def test_beliefs_command_still_lists_episodes_when_they_are_asked_for(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """ADR-0074 §6: the default narrows the listing; it does not remove the surface."""
-    engine = _RecordingBeliefEngine()
-    _wire(monkeypatch, engine)
+def test_beliefs_command_offers_no_kind_to_choose(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADR-0328 §11:2: the listing holds memories and never episodes, so ``--kind`` went.
+
+    A usage error before any engine is built, as every parse refusal here is (#1970).
+    """
+    opened = _wire_recording_opens(monkeypatch, FakeAssistantEngine())
 
     result = CliRunner().invoke(cli.app, ["beliefs", "--kind", "episodic"])
-    assert result.exit_code == 0
-    assert engine.listed == [(None, [MemoryKind.EPISODIC], 50, 0)]
+
+    assert result.exit_code == 2
+    assert opened == []
 
 
 @pytest.mark.parametrize("bad", ["-1", str(2**63)])
@@ -2102,9 +1422,7 @@ def test_beliefs_command_rejects_a_page_the_store_would_refuse(
     ``list_beliefs`` raises ``ValueError`` outside ``[0, 2**63)``, and a ``ValueError``
     is not an ``AssistantError``, so it would escape the command's error boundary as
     a traceback. The parse-time check turns it into exit code 2 before any engine is
-    built — and the recorded opens are what say the last four words are still true
-    (#1970), since the refusal the parse-time check replaced was raised by the store,
-    on the far side of a client.
+    built — and the recorded opens are what say so (#1970).
     """
     opened = _wire_recording_opens(monkeypatch, FakeAssistantEngine())
 
@@ -2116,12 +1434,7 @@ def test_beliefs_command_rejects_a_page_the_store_would_refuse(
 
 
 def test_beliefs_command_rejects_an_unknown_band(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A band outside the ratified vocabulary is a usage error, before any engine.
-
-    Typer resolves the enum during parsing, so nothing about this refusal needs a
-    hub — and the recorded opens say so rather than leaving it to be inferred
-    (#1970).
-    """
+    """A band outside the ratified vocabulary is a usage error, before any engine (#1970)."""
     opened = _wire_recording_opens(monkeypatch, FakeAssistantEngine())
 
     result = CliRunner().invoke(cli.app, ["beliefs", "--band", "guessed"])
@@ -2312,78 +1625,44 @@ def test_a_retired_command_is_gone_and_reaches_no_client(
     assert opened == []
 
 
-# --- lost evidence, rendered (ADR-0077 §6, §9.8) ------------------------
+# --- lost support, rendered (ADR-0077 §6, ADR-0328 §15:7) -----------------------
 
 
-def test_the_listing_reports_lost_support_as_a_count_and_a_lowered_confidence(
+def _half_gone() -> Belief:
+    """An inference on two supports, one whose episode resolves and one whose is gone."""
+    held = memory(
+        "rec-1",
+        "the user prefers metric units",
+        remembered_support("activation:kept", when=LEARNED),
+        remembered_support("activation:lost", effect="effect-2", when=LEARNED),
+    )
+    kept, lost = (support.points_at for support in held.supports)
+    return belief_view(held, now=AT, contents={kept: "they asked for metric units", lost: None})
+
+
+def test_the_single_view_shows_a_surviving_support_and_tombstones_the_gone_one(
     output: StringIO,
 ) -> None:
-    """The listing resolves *existence*: counts and the adjusted number (ADR-0077 §6).
+    """A gone support is an explicit tombstone — never an id, never a gap (§15:7).
 
-    Printing every citation for a fifty-belief page would bury the listing; what the
-    user needs there is that support has gone and that the confidence reflects it.
+    It still counts, and is shown as gone and never as evidence; it deliberately does not
+    say what it was, nor whether it was deleted or merely expired.
     """
-    cli._render_belief_summary(
-        _summary(BeliefBand.DERIVED, confidence=0.35, evidence_count=2, lost_evidence=1)
-    )
-    rendered = _flat(output.getvalue())
-    assert "2 piece(s) of evidence" in rendered
-    assert "1 of which no longer exists" in rendered
-    assert "confidence 0.35" in rendered
-    assert "Because:" not in rendered, "the listing does not print the citations themselves"
-
-
-def test_the_single_belief_view_shows_surviving_evidence_and_tombstones_the_rest(
-    output: StringIO,
-) -> None:
-    """A lost citation is an explicit tombstone — never an id, never a gap (§6).
-
-    ADR-0073 §4's floor, kept where the user is about to act on the belief: the
-    tombstone says an item stood here and is gone, and deliberately does not say what
-    it was, nor whether it was deleted or merely expired.
-    """
-    cli._render_belief(
-        _belief(
-            BeliefBand.DERIVED,
-            confidence=0.35,
-            evidence=(_cited("they asked for metric units")[0], _GONE),
-        )
-    )
+    cli._render_belief(_half_gone())
     rendered = _flat(output.getvalue())
     assert "they asked for metric units" in rendered
-    assert "an item of evidence stood here and is gone" in rendered
-    assert "ep-" not in rendered, "no citation id reaches the terminal"
-
-
-def test_a_belief_with_no_support_left_says_so_and_says_it_is_still_held(
-    output: StringIO,
-) -> None:
-    """The all-unsupported state is named, and named as *held* (ADR-0077 §6).
-
-    It is not auto-retired, so a line implying the assistant had dropped it would
-    misdescribe what the user can still do with it — assert it themselves, or forget
-    it.
-    """
-    cli._render_belief(_belief(BeliefBand.DERIVED, confidence=0.1, evidence=(_GONE, _GONE)))
-    rendered = _flat(output.getvalue())
-    assert "none of which still exists" in rendered
-    assert "I still hold it" in rendered
-    assert "nothing supports it any more" in rendered
+    assert "what it pointed at is gone" in rendered
+    assert "activation:" not in rendered, "no episode id reaches the terminal"
+    assert "Everything it rested on is gone" not in rendered, "one support still resolves"
 
 
 def test_the_forget_prompt_shows_the_warrant_the_user_is_judging(output: StringIO) -> None:
-    """Show-then-confirm includes the evidence, tombstones and all (ADR-0073 §5, §6)."""
-    cli._render_forget_prompt(
-        _belief(
-            BeliefBand.DERIVED,
-            confidence=0.35,
-            evidence=(_cited("they asked for metric units")[0], _GONE),
-        )
-    )
+    """Show-then-confirm includes the supports, tombstones and all (ADR-0073 §5, §6)."""
+    cli._render_forget_prompt(_half_gone())
     rendered = _flat(output.getvalue())
     assert "About to forget this belief" in rendered
     assert "they asked for metric units" in rendered
-    assert "an item of evidence stood here and is gone" in rendered
+    assert "what it pointed at is gone" in rendered
 
 
 # --- the grant surface (ADR-0102 §1, §6, §9) --------------------------------

@@ -36,6 +36,12 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.testing.activation import ended_pass
 from ai_assistant.testing.cancellation import held_at_its_first_await, settle
+from ai_assistant.testing.memories import (
+    memory,
+    remembered_support,
+    said_support,
+    sourced_support,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
@@ -45,7 +51,6 @@ if TYPE_CHECKING:
 
     StoreFactory = Callable[[Callable[[], datetime]], MemoryStore]
 from ai_assistant.core.types import (
-    MAX_EVIDENCE_CITATIONS,
     MAX_TOPICS_PER_RECORD,
     ActivationDigest,
     ActivationRecall,
@@ -63,9 +68,11 @@ from ai_assistant.core.types import (
     EvidenceItem,
     InputOrigin,
     LabelKind,
+    Memory,
     MemoryKind,
     MemoryRecord,
     MemorySource,
+    MemorySupport,
     MemoryWrite,
     MemoryWriteMode,
     Modality,
@@ -75,7 +82,6 @@ from ai_assistant.core.types import (
     PlacementSetter,
     PlanningLabel,
     PlanningRound,
-    PreferenceMemory,
     ProcessingReason,
     ProcessingStatus,
     ProposedCall,
@@ -86,7 +92,6 @@ from ai_assistant.core.types import (
     RecallProvenance,
     RecordedChannelTrigger,
     RecordedTextInput,
-    SemanticMemory,
     StageEntry,
     StageOutcome,
     StoryMember,
@@ -100,6 +105,7 @@ from ai_assistant.core.types import (
     WalkPosition,
     WholeTextReply,
     band_of,
+    record_transaction_time,
 )
 
 # Far in the past: expired (or window-closed) under any clock at or after 2000 —
@@ -229,6 +235,27 @@ def _provenance(
     )
 
 
+def _support(source: MemorySource, last_updated: datetime) -> MemorySupport:
+    """The one support a fixture memory rests on, in the band ``source`` names (ADR-0328 §12).
+
+    Dated and added at ``last_updated``, so the memory's transaction time — its create's
+    instant — is ``last_updated`` (§7:8).
+    """
+    match band_of(source):
+        case BeliefBand.ASSERTED:
+            return said_support(when=last_updated, added_at=last_updated)
+        case BeliefBand.ATTESTED:
+            return sourced_support(
+                Attestation(reported_by="source-instance", reported_at=_REVISED),
+                when=last_updated,
+                added_at=last_updated,
+            )
+        case BeliefBand.DERIVED:
+            return remembered_support(when=last_updated, added_at=last_updated)
+        case _:  # pragma: no cover - exhaustive
+            raise AssertionError(source)
+
+
 def _semantic(  # noqa: PLR0913 — one keyword per record axis a case may need to vary
     record_id: str,
     content: str,
@@ -240,11 +267,11 @@ def _semantic(  # noqa: PLR0913 — one keyword per record axis a case may need 
     topics: tuple[str, ...] = (),
     about_person: str | None = None,
 ) -> MemoryRecord:
-    return SemanticMemory(
-        id=record_id,
-        content=content,
-        fact=content,
-        provenance=_provenance(source=source, last_updated=last_updated),
+    """A memory in the band ``source`` names, resting on one support (ADR-0328 §3)."""
+    return memory(
+        record_id,
+        content,
+        _support(source, last_updated),
         expires_at=expires_at,
         validity=validity or Validity(),
         topics=topics,
@@ -276,12 +303,8 @@ def _preference(
     source: MemorySource = MemorySource.OBSERVED,
     last_updated: datetime = _REVISED,
 ) -> MemoryRecord:
-    return PreferenceMemory(
-        id=record_id,
-        content=content,
-        preference=content,
-        provenance=_provenance(source=source, last_updated=last_updated),
-    )
+    """A second memory, standing for what was a preference record (ADR-0328 §2:3)."""
+    return memory(record_id, content, _support(source, last_updated))
 
 
 def _episodic(record_id: str, content: str) -> EpisodicMemory:
@@ -714,12 +737,12 @@ class _ListBeliefsOp(_ReadOp):
     name = "list_beliefs"
 
     def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
-        """Enumerate the semantic beliefs — the call that is cancelled."""
-        return store.list_beliefs(kinds=[MemoryKind.SEMANTIC])
+        """Enumerate the memories — the call that is cancelled."""
+        return store.list_beliefs(kinds=[MemoryKind.MEMORY])
 
     def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
-        """Enumerate the preferences concurrently."""
-        return store.list_beliefs(kinds=[MemoryKind.PREFERENCE])
+        """Enumerate the episodes concurrently."""
+        return store.list_beliefs(kinds=[MemoryKind.EPISODIC])
 
 
 class _ExportOp(_ReadOp):
@@ -1124,11 +1147,11 @@ class MemoryStoreContract:
         failed = {f"failed-{i}" for i in range(15)}
         for kinds, expected in (
             (
-                [MemoryKind.EPISODIC, MemoryKind.PREFERENCE],
+                [MemoryKind.EPISODIC, MemoryKind.MEMORY],
                 failed | {"completed", "producer", "belief"},
             ),
             ([MemoryKind.EPISODIC], failed | {"completed", "producer"}),
-            ([MemoryKind.PREFERENCE], {"belief"}),
+            ([MemoryKind.MEMORY], {"belief"}),
         ):
             result = await store.search(_ANY, limit=18, kinds=kinds)
             assert {record.id for record in result.records} == expected
@@ -1267,7 +1290,7 @@ class MemoryStoreContract:
         got = await store.get("p1")
         assert got is not None
         assert got.id == "p1"
-        assert got.kind == "preference"  # the typed record survives the round trip
+        assert got.kind == "memory"  # the typed record survives the round trip
 
     async def test_get_missing_returns_none(self, store: MemoryStore) -> None:
         assert await store.get("nope") is None
@@ -1523,7 +1546,7 @@ class MemoryStoreContract:
                     stories=("story:b", "story:a"),
                 ),
                 RecalledItem(
-                    kind=MemoryKind.SEMANTIC,
+                    kind=MemoryKind.MEMORY,
                     id="fact",
                     excerpt="The campsite is booked.",
                     provenance=RecallProvenance.USER,
@@ -1648,7 +1671,7 @@ class MemoryStoreContract:
         assert _unstamped(got) == replacement
         assert got.expires_at is None  # the old deadline is gone, not merged
         assert got.validity.valid_until is None  # and so is the old window
-        assert got.provenance.last_updated == _LONG_AGO
+        assert record_transaction_time(got) == _LONG_AGO
 
     async def test_add_at_a_different_kind_is_refused_and_changes_nothing(
         self, store: MemoryStore
@@ -1665,7 +1688,7 @@ class MemoryStoreContract:
         await store.add(stored)
 
         with pytest.raises(MemoryStoreError) as excinfo:
-            await store.add(_preference("1", "prefers tea"))
+            await store.add(_episode("1", "prefers tea"))
         assert not isinstance(excinfo.value, MemoryStoreConflictError)
 
         assert _unstamped_or_none(await store.get("1")) == stored  # nothing was written
@@ -1684,7 +1707,7 @@ class MemoryStoreContract:
         assert await store.get("1") is None  # invisible to reads, still stored
 
         with pytest.raises(MemoryStoreError) as excinfo:
-            await store.add(_preference("1", "prefers tea"))
+            await store.add(_episode("1", "prefers tea"))
         assert not isinstance(excinfo.value, MemoryStoreConflictError)
 
         assert [_unstamped(r) for r in await store.export()] == [retired]  # unchanged
@@ -1708,7 +1731,7 @@ class MemoryStoreContract:
 
         with pytest.raises(MemoryStoreError) as excinfo:
             await store.write_atomic(
-                [MemoryWrite(record=_preference("1", "prefers tea"), mode=MemoryWriteMode.UPSERT)]
+                [MemoryWrite(record=_episode("1", "prefers tea"), mode=MemoryWriteMode.UPSERT)]
             )
         assert not isinstance(excinfo.value, MemoryStoreConflictError)
 
@@ -1729,7 +1752,7 @@ class MemoryStoreContract:
         # all, and an implementation that damaged it and *then* raised would pass
         # here. That is precisely why ADR-0108 §5(a) names the window-closed record
         # for the nothing-was-written half rather than offering a choice.
-        incoming = _preference("1", "prefers tea")
+        incoming = _episode("1", "prefers tea")
         await store.add(_semantic("1", "coffee", expires_at=_LONG_AGO))
         assert await store.get("1") is None
         write = (
@@ -1754,10 +1777,10 @@ class MemoryStoreContract:
         assert "c" in {r.id for r in results}
 
     async def test_search_filters_by_kind(self, store: MemoryStore) -> None:
-        await store.add(_semantic("s", "coffee fact"))
-        await store.add(_preference("p", "coffee preference"))
+        await store.add(_episode("e", "coffee episode"))
+        await store.add(_semantic("p", "coffee memory"))
 
-        results = (await store.search("coffee", kinds=[MemoryKind.PREFERENCE])).records
+        results = (await store.search("coffee", kinds=[MemoryKind.MEMORY])).records
 
         assert [r.id for r in results] == ["p"]
 
@@ -2155,52 +2178,11 @@ class MemoryStoreContract:
             "in one result disagree about when 'now' was"
         )
 
-    async def test_a_record_over_the_evidence_bound_stays_readable(
-        self, store: MemoryStore
-    ) -> None:
-        """ADR-0086 §2's residue, pinned on the read path where it would be broken.
-
-        The bound is a ``MemoryWriter`` obligation and deliberately **not** a
-        ``Provenance`` validator, and this is the property that placement buys: a
-        deployment that accumulated a belief above the bound before the rule landed
-        keeps it, readable, through **every** read. A store decoding through the
-        model — which the persistent one does on every read — would start failing
-        on exactly those records the day a ``max_length`` appeared, so this is the
-        case a validator-based implementation cannot pass however correctly its
-        writer truncates.
-
-        Every read is exercised, because they decode by different paths and a bound
-        on the type would break them one at a time.
-        """
-        over_bound = tuple(f"legacy-ev-{index:03d}" for index in range(MAX_EVIDENCE_CITATIONS + 16))
-        legacy = SemanticMemory(
-            id="legacy",
-            content="a belief accumulated before the bound landed",
-            fact="a belief accumulated before the bound landed",
-            provenance=Provenance(
-                source=MemorySource.OBSERVED,
-                confidence=0.6,
-                last_updated=_REVISED,
-                evidence=over_bound,
-                evidence_elided=3,
-            ),
-        )
-
-        await store.add(legacy)
-
-        got = await store.get("legacy")
-        assert got is not None
-        assert got.provenance.evidence == over_bound
-        assert got.provenance.evidence_elided == 3
-        assert set(await store.get_many(["legacy"])) == {"legacy"}
-        assert "legacy" in {record.id for record in await store.list_beliefs()}
-        assert "legacy" in {record.id for record in await store.export()}
-        assert "legacy" in {record.id for record in (await store.search("accumulated")).records}
-
     async def test_a_record_over_the_topic_bound_stays_readable(self, store: MemoryStore) -> None:
         """ADR-0213 §1's residue, pinned where a ``max_length`` would break it.
 
-        The evidence case above, one field along and for one further reason. §1 keeps
+        ADR-0086 §2's evidence residue, one field along, retired with the evidence it
+        bounded (ADR-0328 §10); this one stands for one further reason. §1 keeps
         :data:`MAX_TOPICS_PER_RECORD` off the type so that a later ADR *raising* it
         changes what this deployment writes and not what an older peer can read: a
         record written at a higher bound, or imported from a deployment holding one,
@@ -2245,7 +2227,7 @@ class MemoryStoreContract:
         "ineligible",
         [
             pytest.param(
-                lambda index: _preference(f"flood-{index}", "coffee"),
+                lambda index: _episode(f"flood-{index}", "coffee"),
                 id="kind",
             ),
             pytest.param(
@@ -2296,7 +2278,7 @@ class MemoryStoreContract:
         for index in range(3):
             await store.add(_semantic(f"mine-{index}", "coffee please"))
 
-        found = await store.search("coffee", limit=2, kinds=[MemoryKind.SEMANTIC])
+        found = await store.search("coffee", limit=2, kinds=[MemoryKind.MEMORY])
 
         assert found.records, (
             "a search returned none of the eligible records while every one of them "
@@ -2529,16 +2511,16 @@ class MemoryStoreContract:
         fixture whose two filters select the same records tests neither, and a store
         that unions the filters instead of intersecting them fails three of four.
         """
-        await store.add(_semantic("as", "coffee fact told", source=MemorySource.USER_ASSERTED))
-        await store.add(_preference("ap", "coffee pref told", source=MemorySource.USER_ASSERTED))
-        await store.add(_semantic("ds", "coffee fact inferred", source=MemorySource.INFERRED))
-        await store.add(_preference("dp", "coffee pref inferred", source=MemorySource.INFERRED))
+        await store.add(_episode("ae", "coffee told", source=MemorySource.USER_ASSERTED))
+        await store.add(_semantic("am", "coffee memory told", source=MemorySource.USER_ASSERTED))
+        await store.add(_episode("de", "coffee seen", source=MemorySource.OBSERVED))
+        await store.add(_semantic("dm", "coffee memory inferred", source=MemorySource.INFERRED))
 
         found = (
-            await store.search("coffee", bands=[BeliefBand.ASSERTED], kinds=[MemoryKind.PREFERENCE])
+            await store.search("coffee", bands=[BeliefBand.ASSERTED], kinds=[MemoryKind.MEMORY])
         ).records
 
-        assert [r.id for r in found] == ["ap"]
+        assert [r.id for r in found] == ["am"]
 
     async def test_search_binds_the_band_before_the_ranking_cut(self, store: MemoryStore) -> None:
         """ADR-0113 §2, the clause an implementation passes in name and fails in fact.
@@ -2641,12 +2623,15 @@ class MemoryStoreContract:
         assert [record.id for record in found] == ["a"]
         with pytest.raises(ValidationError):
             found[0].validity.valid_until = _LONG_AGO  # would retire the stored belief
+        held = found[0]
+        assert isinstance(held, Memory)
         with pytest.raises(ValidationError):
-            found[0].provenance.confidence = 0.1  # nested model is frozen too
+            held.supports[0].note = "rewritten"  # nested model is frozen too
 
         again = (await store.search("coffee", bands=[BeliefBand.ASSERTED])).records
         assert [record.id for record in again] == ["a"]
-        assert again[0].provenance.confidence == 1.0  # USER_ASSERTED is certain
+        assert isinstance(again[0], Memory)
+        assert again[0].supports[0].note == ""
 
     async def test_a_band_selected_with_a_blank_query_still_matches_nothing(
         self, store: MemoryStore
@@ -2682,14 +2667,16 @@ class MemoryStoreContract:
     # the locked read paths are tracked separately (#397).
 
     async def test_list_beliefs_returns_live_beliefs(self, store: MemoryStore) -> None:
-        # The baseline: an enumeration with no query, returning what is held.
+        # The baseline: an enumeration with no query, returning the memories held and
+        # never an episode, which is not a belief (ADR-0328 §11:2, #3143).
         await store.add(_semantic("s", "a stored fact"))
         await store.add(_preference("p", "a stored preference"))
+        await store.add(_episode("e", "an exchange that happened"))
 
         listed = await store.list_beliefs()
 
         assert {record.id for record in listed} == {"s", "p"}
-        assert {record.kind for record in listed} == {"semantic", "preference"}
+        assert {record.kind for record in listed} == {"memory"}
 
     async def test_list_beliefs_honours_both_read_time_axes_on_both_ends(
         self, store: MemoryStore
@@ -2813,30 +2800,30 @@ class MemoryStoreContract:
     async def test_list_beliefs_filters_by_kind(self, store: MemoryStore) -> None:
         # The same convention, stated rather than inferred from ``search``: an
         # empty ``kinds`` selects nothing, never "no filter" (ADR-0073 §1).
+        # ``None`` lists memories alone (ADR-0328 §11:2), and an episode is listed
+        # only where a caller names the episodic kind.
         await store.add(_semantic("s", "a fact"))
-        await store.add(_preference("p", "a preference"))
+        await store.add(_episode("e", "an exchange"))
 
-        assert {r.id for r in await store.list_beliefs()} == {"s", "p"}
-        assert {r.id for r in await store.list_beliefs(kinds=None)} == {"s", "p"}
+        assert {r.id for r in await store.list_beliefs()} == {"s"}
+        assert {r.id for r in await store.list_beliefs(kinds=None)} == {"s"}
         assert await store.list_beliefs(kinds=[]) == []
-        listed = await store.list_beliefs(kinds=[MemoryKind.PREFERENCE])
-        assert [r.id for r in listed] == ["p"]
+        assert [r.id for r in await store.list_beliefs(kinds=[MemoryKind.MEMORY])] == ["s"]
+        assert [r.id for r in await store.list_beliefs(kinds=[MemoryKind.EPISODIC])] == ["e"]
 
     async def test_list_beliefs_composes_the_two_filters_by_conjunction(
         self, store: MemoryStore
     ) -> None:
         # A record is listed when its band is selected *and* its kind is — the full
         # 2x2, so a store that unions the filters fails on three of the four.
-        await store.add(_semantic("as", "fact told", source=MemorySource.USER_ASSERTED))
-        await store.add(_preference("ap", "pref told", source=MemorySource.USER_ASSERTED))
-        await store.add(_semantic("ds", "fact inferred", source=MemorySource.INFERRED))
-        await store.add(_preference("dp", "pref inferred", source=MemorySource.INFERRED))
+        await store.add(_episode("ae", "told", source=MemorySource.USER_ASSERTED))
+        await store.add(_semantic("am", "memory told", source=MemorySource.USER_ASSERTED))
+        await store.add(_episode("de", "seen", source=MemorySource.OBSERVED))
+        await store.add(_semantic("dm", "memory inferred", source=MemorySource.INFERRED))
 
-        listed = await store.list_beliefs(
-            bands=[BeliefBand.ASSERTED], kinds=[MemoryKind.PREFERENCE]
-        )
+        listed = await store.list_beliefs(bands=[BeliefBand.ASSERTED], kinds=[MemoryKind.MEMORY])
 
-        assert [r.id for r in listed] == ["ap"]
+        assert [r.id for r in listed] == ["am"]
 
     async def test_list_beliefs_page_is_full_under_the_filters(self, store: MemoryStore) -> None:
         # Filtering must happen before the cut: an implementation that takes the
@@ -2845,11 +2832,11 @@ class MemoryStoreContract:
         for i in range(6):
             stamp = _REVISED - i * _ONE_HOUR
             if i % 2 == 0:  # the non-matching kind sorts ahead of each match
-                await store.add(_preference(f"r{i}", f"note {i}", last_updated=stamp))
+                await store.add(_episode(f"r{i}", f"note {i}", last_updated=stamp))
             else:
                 await store.add(_semantic(f"r{i}", f"note {i}", last_updated=stamp))
 
-        page = await store.list_beliefs(kinds=[MemoryKind.SEMANTIC], limit=2)
+        page = await store.list_beliefs(kinds=[MemoryKind.MEMORY], limit=2)
 
         assert [r.id for r in page] == ["r1", "r3"]
 
@@ -2945,12 +2932,15 @@ class MemoryStoreContract:
         assert [record.id for record in listed] == ["iso"]
         with pytest.raises(ValidationError):
             listed[0].validity.valid_until = _LONG_AGO  # would retire the stored belief
+        held = listed[0]
+        assert isinstance(held, Memory)
         with pytest.raises(ValidationError):
-            listed[0].provenance.confidence = 0.1  # nested model is frozen too
+            held.supports[0].note = "rewritten"  # nested model is frozen too
 
         again = await store.list_beliefs()
         assert [record.id for record in again] == ["iso"]
-        assert again[0].provenance.confidence == 0.6
+        assert isinstance(again[0], Memory)
+        assert again[0].supports[0].note == ""
 
     # --- Atomic multi-write obligations (ADR-0046) ----------------------------
 
@@ -3013,7 +3003,7 @@ class MemoryStoreContract:
                 [
                     MemoryWrite(record=innocent, mode=MemoryWriteMode.INSERT_IF_ABSENT),
                     MemoryWrite(
-                        record=_preference("collide", "prefers tea"),
+                        record=_episode("collide", "prefers tea"),
                         mode=MemoryWriteMode.UPSERT,
                     ),
                 ]
@@ -3038,7 +3028,7 @@ class MemoryStoreContract:
             await store.write_atomic(
                 [
                     MemoryWrite(
-                        record=_preference("1", "prefers tea"),
+                        record=_episode("1", "prefers tea"),
                         mode=MemoryWriteMode.INSERT_IF_ABSENT,
                     )
                 ]
@@ -3073,7 +3063,7 @@ class MemoryStoreContract:
         # A collision is rejected, not upserted: the stored record is untouched
         # and the colliding write is not applied (nothing from the batch commits).
         await store.add(_semantic("x", "original content"))
-        collide = _preference("x", "would clobber")
+        collide = _episode("x", "would clobber")
 
         with pytest.raises(MemoryStoreConflictError):
             await store.write_atomic(
@@ -3082,7 +3072,7 @@ class MemoryStoreContract:
 
         got = await store.get("x")
         assert got is not None
-        assert got.kind == "semantic"  # the original, not the rejected preference
+        assert got.kind == "memory"  # the original, not the rejected episode
         assert got.content == "original content"
 
     async def test_write_atomic_insert_if_absent_collides_on_a_window_closed_row(
@@ -3487,7 +3477,7 @@ class MemoryStoreContract:
             await store.write_atomic(
                 [
                     MemoryWrite(
-                        record=_preference("collide", "prefers tea"),
+                        record=_episode("collide", "prefers tea"),
                         mode=MemoryWriteMode.IF_UNCHANGED,
                         expected_revision=current.revision,
                     )
@@ -4144,13 +4134,13 @@ class MemoryStoreContract:
             arm,
         ):
             await subject.add(_semantic("obs-search-s", "gamma gamma gamma"))
-            await subject.add(_preference("obs-search-p", "gamma gamma gamma"))
-            kinds = [MemoryKind.SEMANTIC]
+            await subject.add(_episode("obs-search-p", "gamma gamma gamma"))
+            kinds = [MemoryKind.MEMORY]
             # Armed after the seeding writes, so the collaborator that stops the
             # read is not spent on a precondition.
             gate = None if arm is None else arm("search")
             async with held_at_its_first_await(gate, subject.search("gamma", kinds=kinds)) as call:
-                kinds.append(MemoryKind.PREFERENCE)  # grow the caller's own list mid-flight
+                kinds.append(MemoryKind.EPISODIC)  # grow the caller's own list mid-flight
             found = {record.id for record in (await call).records}
 
             assert found == {"obs-search-s"}, _LATE_FILTER
@@ -4205,16 +4195,16 @@ class MemoryStoreContract:
         ):
             await subject.add(_semantic("obs-list-kept", "epsilon"))
             # Excluded by ``kinds`` alone, and by ``bands`` alone, respectively.
-            await subject.add(_preference("obs-list-kind", "epsilon"))
+            await subject.add(_episode("obs-list-kind", "epsilon"))
             await subject.add(_semantic("obs-list-band", "epsilon", source=MemorySource.EXTERNAL))
             bands = [BeliefBand.DERIVED]
-            kinds = [MemoryKind.SEMANTIC]
+            kinds = [MemoryKind.MEMORY]
             gate = None if arm is None else arm("list_beliefs")
             async with held_at_its_first_await(
                 gate, subject.list_beliefs(bands=bands, kinds=kinds)
             ) as call:
                 bands.append(BeliefBand.ATTESTED)
-                kinds.append(MemoryKind.PREFERENCE)
+                kinds.append(MemoryKind.EPISODIC)
             listed = {record.id for record in await call}
 
             assert listed == {"obs-list-kept"}, _LATE_FILTER

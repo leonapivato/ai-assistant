@@ -64,12 +64,12 @@ from phases_m23_world import ask, build_phases_world, shown_rounds
 
 from ai_assistant.core.types import (
     BeliefBand,
-    MemorySource,
+    Memory,
     Message,
     PermissionOutcome,
     Role,
-    band_of,
-    rests_on_recorded_external_content,
+    SupportOrigin,
+    record_band,
 )
 from ai_assistant.testing import FakeModelProvider
 
@@ -155,9 +155,13 @@ def _remember_outcomes(world: PhasesWorld) -> list[str]:
     return outcomes
 
 
-def _reader_beliefs(records: list[MemoryRecord]) -> list[MemoryRecord]:
-    """The records a reader wrote, which are the ones ``EXTERNAL`` names."""
-    return [r for r in records if r.provenance.source is MemorySource.EXTERNAL]
+def _reader_beliefs(records: list[MemoryRecord]) -> list[Memory]:
+    """The memories a reader's reading left, which rest on a source support."""
+    return [
+        r
+        for r in records
+        if isinstance(r, Memory) and any(s.origin is SupportOrigin.EVIDENCE for s in r.supports)
+    ]
 
 
 # --- what the reader's own proposals may become -----------------------------
@@ -171,9 +175,12 @@ async def test_the_readers_own_belief_lands_attested_and_never_asserted(
     ADR-0093 §1 and ADR-0098 §4's first two clauses: what a reader read is a third
     party's report, so it lands ``ATTESTED``; and no producer raises the band of
     what it proposes by any means, "including by claiming a ``MemorySource`` it is
-    not". The hostile text is *supposed* to reach a belief — a reader that dropped
-    it would be a useless reader, and ADR-0098 §4 says so — what it may not do is
-    arrive as the user's own word.
+    not". Since ADR-0328 §2:4 the reader's proposal is minted supply and never stored,
+    so what lands is :class:`~m23_harness.PriorIngestion`'s stand-in for history: a
+    memory resting on a source support, which stands at "from a source". The hostile
+    text is *supposed* to reach a belief — a reader that dropped it would be a useless
+    reader, and ADR-0098 §4 says so — what it may not do is arrive as the user's own
+    word.
     """
     world = build_world(tmp_path, plan=plan_reply(to=ATTACKER))
     plant(world.source, cycle=0, records=2, hostile=True)
@@ -186,10 +193,10 @@ async def test_the_readers_own_belief_lands_attested_and_never_asserted(
         "the hostile SUMMARY never reached a belief, so nothing below is under test"
     )
     for record in stored:
-        assert record.provenance.source is not MemorySource.USER_ASSERTED
+        assert record_band(record) is not BeliefBand.ASSERTED
     for record in written:
-        assert band_of(record.provenance.source) is BeliefBand.ATTESTED
-        assert rests_on_recorded_external_content(record.provenance) is True
+        assert record.band is BeliefBand.ATTESTED
+        assert record.rests_on_outside_content is True
 
 
 # --- the figure -------------------------------------------------------------

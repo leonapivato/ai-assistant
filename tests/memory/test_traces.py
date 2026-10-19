@@ -34,13 +34,13 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     BeliefBand,
     ConflictRelation,
+    EpisodicMemory,
+    Memory,
     MemoryDecisionKind,
     MemoryKind,
     MemorySource,
     MemoryUpdateProposal,
-    PreferenceMemory,
     Provenance,
-    SemanticMemory,
     TraceKind,
     TraceLabel,
     TraceOutcome,
@@ -53,6 +53,7 @@ from ai_assistant.memory.ingest import _WRITE_DISPOSITIONS
 from ai_assistant.memory.sqlite_store import SqliteMemoryStore
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.testing import FakeMemoryPolicy, FakeTraceSink
+from ai_assistant.testing.memories import memory, memory_in_band, remembered_support, said_support
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -159,20 +160,25 @@ def _semantic(
     *,
     expires_at: datetime | None = None,
     validity: Validity | None = None,
-    source: MemorySource = MemorySource.INFERRED,
+    band: BeliefBand = BeliefBand.DERIVED,
 ) -> MemoryRecord:
-    """A searchable record carrying whichever read-time axis a case is about."""
-    return SemanticMemory(
-        id=record_id,
-        content=content,
-        fact=content,
+    """A searchable memory carrying whichever read-time axis a case is about."""
+    return memory_in_band(
+        record_id,
+        content,
+        band,
         expires_at=expires_at,
         validity=validity if validity is not None else Validity(),
-        provenance=Provenance(
-            source=source,
-            confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.6,
-            last_updated=_WHEN,
-        ),
+    )
+
+
+def _episode(record_id: str, content: str) -> EpisodicMemory:
+    """An episode: since ADR-0328 the one other kind the store holds (§2:1)."""
+    return EpisodicMemory(
+        id=record_id,
+        content=content,
+        occurred_at=_WHEN,
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN),
     )
 
 
@@ -231,7 +237,7 @@ async def test_a_completed_read_carries_every_count_section_8_names(
     [
         pytest.param(5, None, id="short-result"),
         pytest.param(1, None, id="full-page"),
-        pytest.param(5, [MemoryKind.SEMANTIC], id="kind-filtered"),
+        pytest.param(5, [MemoryKind.MEMORY], id="kind-filtered"),
     ],
 )
 async def test_the_counts_still_satisfy_the_offline_partition_rule(
@@ -266,14 +272,7 @@ async def test_the_counts_still_satisfy_the_offline_partition_rule(
             validity=Validity(valid_until=_NOW - timedelta(days=1)),
         )
     )
-    await store.add(
-        PreferenceMemory(
-            id="pref",
-            content="the weekly planning meeting",
-            preference="the weekly planning meeting",
-            provenance=Provenance(source=MemorySource.INFERRED, confidence=0.6, last_updated=_WHEN),
-        )
-    )
+    await store.add(_episode("pref", "the weekly planning meeting"))
 
     await store.search("weekly planning meeting", limit=limit, kinds=kinds)
 
@@ -300,21 +299,14 @@ async def test_the_kind_predicate_also_keeps_its_key_at_a_structural_zero(
     """The third of §8's countable predicates, isolated so it cannot borrow a total.
 
     It used to be the one count this fixture could make non-zero. ADR-0128 §1 binds
-    ``kinds`` before the cut like the rest, so the preference below is not a
+    ``kinds`` before the cut like the rest, so the episode below is not a
     candidate the read rejected — it is a row the read never fetched.
     """
     store = make_store()
     await store.add(_semantic("fact", "the weekly planning meeting"))
-    await store.add(
-        PreferenceMemory(
-            id="pref",
-            content="the weekly planning meeting",
-            preference="the weekly planning meeting",
-            provenance=Provenance(source=MemorySource.INFERRED, confidence=0.6, last_updated=_WHEN),
-        )
-    )
+    await store.add(_episode("pref", "the weekly planning meeting"))
 
-    await store.search("weekly planning meeting", limit=5, kinds=[MemoryKind.SEMANTIC])
+    await store.search("weekly planning meeting", limit=5, kinds=[MemoryKind.MEMORY])
 
     trace = _only(sink, TraceKind.RETRIEVAL)
     assert trace.metrics[traces.CANDIDATES] == 1, "the out-of-kind row was never a candidate"
@@ -342,9 +334,7 @@ async def test_a_band_scoped_read_reports_a_structurally_zero_band_exclusion(
     """
     store = make_store()
     await store.add(_semantic("inferred", "the weekly planning meeting"))
-    await store.add(
-        _semantic("asserted", "the weekly planning meeting", source=MemorySource.USER_ASSERTED)
-    )
+    await store.add(_semantic("asserted", "the weekly planning meeting", band=BeliefBand.ASSERTED))
 
     found = (
         await store.search("weekly planning meeting", limit=5, bands=[BeliefBand.ASSERTED])
@@ -413,9 +403,7 @@ async def test_the_trace_reports_the_band_selection_the_search_actually_used(
     embedder = _MutatingEmbedder(HashingEmbedder(dimensions=64))
     store = make_store(embedder=embedder)
     await store.add(_semantic("inferred", "the weekly planning meeting"))
-    await store.add(
-        _semantic("asserted", "the weekly planning meeting", source=MemorySource.USER_ASSERTED)
-    )
+    await store.add(_semantic("asserted", "the weekly planning meeting", band=BeliefBand.ASSERTED))
     # Armed after the seeding writes, so the mutation lands inside the read this
     # case is about rather than being spent on a precondition.
     embedder.armed = True
@@ -600,33 +588,29 @@ async def test_a_clock_that_will_not_read_costs_the_trace_and_never_the_read(
 # --- the write path -----------------------------------------------------------
 
 
-def _proposal(record: MemoryRecord) -> MemoryUpdateProposal:
+def _proposal(record: Memory) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(proposed=record, rationale="a producer proposed it")
 
 
-def _preference(
-    record_id: str, content: str, *, source: MemorySource = MemorySource.INFERRED
-) -> MemoryRecord:
-    return PreferenceMemory(
-        id=record_id,
-        content=content,
-        preference=content,
-        provenance=Provenance(
-            source=source,
-            confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.6,
-            last_updated=_WHEN,
-        ),
-    )
+#: The episode every memory on the write path rests on (ADR-0328 §4:7).
+_EPISODE = "episode-1"
 
 
-def _asserted(record_id: str, content: str) -> MemoryRecord:
-    """A user's own belief — the one band ``DefaultMemoryPolicy`` accepts unwarranted.
+async def _store() -> InMemoryMemoryStore:
+    """A store holding the episode every memory below rests on."""
+    store = InMemoryMemoryStore(now=_fixed_now)
+    await store.add(_episode(_EPISODE, "the exchange the memories rest on"))
+    return store
 
-    An ``INFERRED`` proposal is in the ``DERIVED`` band, where ADR-0072 §3 obliges
-    a citation and rule 2 rejects one that cites nothing; a case about the *trace*
-    should not have to carry a warrant to reach an ``ACCEPT``.
-    """
-    return _preference(record_id, content, source=MemorySource.USER_ASSERTED)
+
+def _preference(record_id: str, content: str) -> Memory:
+    """An inference, resting on a remember call of its own."""
+    return memory(record_id, content, remembered_support(_EPISODE, effect=f"effect-{record_id}"))
+
+
+def _asserted(record_id: str, content: str) -> Memory:
+    """A user's own belief, which ``DefaultMemoryPolicy`` accepts on its own say-so."""
+    return memory(record_id, content, said_support(_EPISODE))
 
 
 def _writer(
@@ -649,7 +633,7 @@ async def test_an_accepted_write_counts_every_kind_and_files_the_id_as_written(
     observation rule read straight: a completed ingest **observed** every kind,
     and an absent key would claim it observed none of them.
     """
-    store = InMemoryMemoryStore(now=_fixed_now)
+    store = await _store()
     writer = _writer(store, sink)
 
     result = await writer.ingest(_proposal(_asserted("new", "the office is on the third floor")))
@@ -673,7 +657,7 @@ async def test_a_reinforcement_is_filed_apart_from_a_write(sink: FakeTraceSink) 
     "So a correction measure can tell a retired id from a reinforced one without
     re-deriving it" — which a flat sequence of ids could not express at all.
     """
-    store = InMemoryMemoryStore(now=_fixed_now)
+    store = await _store()
     await store.add(_preference("standing", "the office is on the third floor"))
     writer = _writer(store, sink, policy=FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
 
@@ -696,7 +680,7 @@ async def test_a_supersede_files_the_correction_written_and_the_target_supersede
     ``target_id`` (ADR-0050 §1). Reporting only the named one would under-count
     exactly the event this trace exists to record.
     """
-    store = InMemoryMemoryStore(now=_fixed_now)
+    store = await _store()
     await store.add(_preference("stale", "the office is on the third floor"))
     writer = _writer(store, sink)
 
@@ -716,23 +700,15 @@ async def test_an_inadmissible_proposal_traces_as_a_refusal_and_not_a_fault(
 ) -> None:
     """§3's discriminator, by the exception's class and never its message.
 
-    ADR-0077 §5 refuses a ``DERIVED`` proposal whose warrant does not exist, and
+    ADR-0328 §4:7 refuses a proposal whose support points at no held episode, and
     that is an answer rather than a malfunction — the same reading ADR-0111 §9
     binds the scheduler's log record to, "so the two records about one event cannot
     disagree".
     """
-    store = InMemoryMemoryStore(now=_fixed_now)
+    store = await _store()
     writer = _writer(store, sink)
-    unwarranted = SemanticMemory(
-        id="derived",
-        content="a conclusion drawn from nothing",
-        fact="a conclusion drawn from nothing",
-        provenance=Provenance(
-            source=MemorySource.INFERRED,
-            confidence=0.6,
-            last_updated=_WHEN,
-            evidence=("missing",),
-        ),
+    unwarranted = memory(
+        "derived", "a conclusion drawn from nothing", remembered_support("missing")
     )
 
     with pytest.raises(UnresolvedEvidenceError):
@@ -749,7 +725,7 @@ async def test_a_write_serving_an_operation_carries_that_operations_correlation(
     sink: FakeTraceSink,
 ) -> None:
     """§4's join reaches the write path through the same ambient carrier."""
-    store = InMemoryMemoryStore(now=_fixed_now)
+    store = await _store()
     writer = _writer(store, sink)
 
     with correlated_operation() as correlation:
@@ -765,7 +741,7 @@ async def test_a_sink_that_raises_costs_the_trace_and_never_the_write() -> None:
     caller its write failed when it did not — the inversion §5 forbids, arriving
     through the instrument.
     """
-    store = InMemoryMemoryStore(now=_fixed_now)
+    store = await _store()
     writer = _writer(store, _RaisingSink())
 
     with structlog.testing.capture_logs() as captured:

@@ -46,7 +46,7 @@ from ai_assistant.orchestration.planning import (
 )
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import SemanticMemory, ToolDefinition
+    from ai_assistant.core.types import Memory, ToolDefinition
 
 _BOOK: Final = _tool("book")
 _SEARCH: Final = _tool("web_search")
@@ -599,7 +599,7 @@ async def test_no_character_breaks_an_exact_line(brk: str, where: str) -> None:
     """
     text = f"extra{brk}2. book — slot"
     earlier = _earlier(calls=(_call("c1", "remember", statement="x"),))
-    replaces: tuple[SemanticMemory, ...] = ()
+    replaces: tuple[Memory, ...] = ()
     if where == "name":
         values = {"slot": _SLOT, "client_reference": _FILLED, text: "20:00"}
         request = ActionRequest(tool=_BOOK, parameters=values)
@@ -797,8 +797,8 @@ def _remember_request(statement: str) -> ActionRequest:
 
 async def test_a_remember_is_asked_with_its_statement_and_what_it_replaces() -> None:
     earlier = _earlier(calls=(_call("c1", "remember", statement="I live in Rome"),))
-    old: SemanticMemory = _remembered("m-old", MemorySource.USER_ASSERTED, "I live in Milan")
-    also: SemanticMemory = _remembered("m-also", MemorySource.USER_ASSERTED, "Milan is home")
+    old: Memory = _remembered("m-old", MemorySource.USER_ASSERTED, "I live in Milan")
+    also: Memory = _remembered("m-also", MemorySource.USER_ASSERTED, "Milan is home")
     outcome = _needs_you(
         earlier.id, "c1", _remember_request("I live in Rome"), replaces=(old, also, old)
     )

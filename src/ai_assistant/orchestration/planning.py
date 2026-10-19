@@ -130,20 +130,20 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     InputOrigin,
     LabelKind,
+    MemoryStanding,
     Message,
     OfferedTool,
     PlanningLabel,
     PlanningRound,
     ProposedCall,
+    ReadingCertainty,
     RecordedTextInput,
     Role,
     StoryEffectState,
     StoryMemberKind,
     StoryNoteAuthor,
     StoryRelation,
-    band_of,
     label_prefix,
-    rests_on_recorded_external_content,
 )
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_calls import (
@@ -160,11 +160,11 @@ if TYPE_CHECKING:
         ActivationUnderstanding,
         EpisodeProjection,
         FrozenJsonValue,
+        Memory,
         ProjectedRound,
         ProjectedText,
         QuestionPart,
         RoundResponse,
-        SemanticMemory,
         StoryNote,
         StoryStanding,
         StoryStandingEpisode,
@@ -400,12 +400,12 @@ class CallOutcome:
     result_id: str | None = None
     result: FrozenJsonValue = None
     digested: bool = False
-    records: tuple[SemanticMemory, ...] | None = None
+    records: tuple[Memory, ...] | None = None
     story: PlanningStory | None = None
     request: ActionRequest | None = None
     deliberate_repeat: bool = False
     already_asked: QuestionPart | None = None
-    replaces: tuple[SemanticMemory, ...] = ()
+    replaces: tuple[Memory, ...] = ()
 
     def __post_init__(self) -> None:
         """A result is shown under its label, so it carries the id the label names."""
@@ -616,7 +616,7 @@ class PlanningInputs:
     understanding: ActivationUnderstanding | None = None
     trigger_origin: InputOrigin | None = None
     episodes: tuple[EpisodicMemory, ...] = ()
-    recalled: tuple[EpisodicMemory | SemanticMemory, ...] = ()
+    recalled: tuple[EpisodicMemory | Memory, ...] = ()
     recalled_stories: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     owner_records: bool = False
     rounds: tuple[PlanningRound, ...] = ()
@@ -1215,6 +1215,26 @@ _BAND_TEXT: Final = {
     BeliefBand.DERIVED: "a remembered fact: something the assistant worked out",
 }
 
+#: A memory's standing in plain words (ADR-0328 §6:1, §15:5).
+_STANDING_TEXT: Final = {
+    MemoryStanding.CONFIRMED: "the user confirmed this wording",
+    MemoryStanding.SAID: "the user said it",
+    MemoryStanding.SOURCE: "a connected source reported it",
+    MemoryStanding.INFERENCE: "the assistant inferred it",
+}
+
+#: A reading certainty no backing support carries (ADR-0328 §7:5).
+_NOT_JUDGED: Final = "not judged"
+
+#: An instant nothing dates (ADR-0328 §7:3-§7:4): unknown, neither fresh nor stale.
+_UNKNOWN_INSTANT: Final = "unknown"
+
+
+def _instant_or_unknown(instant: datetime | None) -> str:
+    """An instant as planning reads instants, or that it is unknown."""
+    return _UNKNOWN_INSTANT if instant is None else instant.isoformat()
+
+
 _AUTHOR_TEXT: Final = {
     PlaceAuthor.USER: "the user",
     PlaceAuthor.ASSISTANT: "the assistant",
@@ -1485,7 +1505,7 @@ class _Request:
                         self._book.label(LabelKind.STORY, story) for story in stories
                     ]
                 shown.append(episode)
-            elif not rests_on_recorded_external_content(record.provenance):
+            elif not record.rests_on_outside_content:
                 shown.append(self._memory(record))
         return shown
 
@@ -1660,19 +1680,45 @@ class _Request:
             self.shown.marked = True
         return shown
 
-    def _memory(self, record: SemanticMemory) -> dict[str, object]:
-        """A found memory record whose source is not outside: its fact, by its band."""
-        provenance = record.provenance
-        fact = record.fact
+    def _memory(self, record: Memory) -> dict[str, object]:
+        """A found memory not resting on outside content: its wording, by its standing.
+
+        ADR-0328 §15:5's label: its standing in plain words, its age (as of and learned,
+        each unknown where nothing dates it), its evidence summary where its standing is
+        inference, its reading certainty where that is not ``sure``, and its track record
+        where it has one.
+        """
+        fact = record.content
         bound = self._excerpt_chars
-        return {
+        shown: dict[str, object] = {
             "label": self._book.label(LabelKind.MEMORY, record.id),
-            "item": _BAND_TEXT[band_of(provenance.source)],
-            "last_updated": provenance.last_updated.isoformat(),
+            "item": _BAND_TEXT[record.band],
+            "standing": _STANDING_TEXT[record.standing],
+            "last_updated": record.transaction_time.isoformat(),
+            "as_of": _instant_or_unknown(record.as_of(self._now)),
+            "learned": _instant_or_unknown(record.learned),
             "fact": fact
             if len(fact) <= bound
             else f"{fact[:bound]}… (cut: {bound} of {len(fact)} chars)",
         }
+        if record.standing is MemoryStanding.INFERENCE:
+            evidence = record.evidence_summary
+            shown["evidence"] = {
+                "supporting": evidence.supporting,
+                "against": evidence.against,
+                "episodes": evidence.episodes,
+            }
+        certainty = record.reading_certainty
+        if certainty is not ReadingCertainty.SURE:
+            shown["reading_certainty"] = _NOT_JUDGED if certainty is None else str(certainty)
+        track = record.track_summary
+        if track.relied_on:
+            shown["track_record"] = {
+                "relied_on": track.relied_on,
+                "held_up": track.held_up,
+                "let_down": track.let_down,
+            }
+        return shown
 
     def _episode(
         self, label: str, projection: EpisodeProjection, record: EpisodicMemory
@@ -1826,7 +1872,7 @@ class _Request:
             shown["because"] = outcome.reason
         return shown
 
-    def _replacing(self, replaces: Sequence[SemanticMemory]) -> dict[str, object]:
+    def _replacing(self, replaces: Sequence[Memory]) -> dict[str, object]:
         """What a remember's question would show it replacing, as planning may see it.
 
         Each assertion whose source is not outside is shown by its fact under its M
@@ -1872,7 +1918,7 @@ class _Request:
         records = [
             self._memory(record)
             for record in outcome.records or ()
-            if not rests_on_recorded_external_content(record.provenance)
+            if not record.rests_on_outside_content
         ]
         shown: dict[str, object] = {"remembered": records or _NONE_FOUND}
         if outcome.digested:
@@ -2152,16 +2198,16 @@ def _binding_json(request: ActionRequest) -> str | None:
     return None if binding is None else _canonical(binding.model_dump(mode="json"))
 
 
-def _shown_replaced(replaces: Sequence[SemanticMemory]) -> tuple[SemanticMemory, ...]:
+def _shown_replaced(replaces: Sequence[Memory]) -> tuple[Memory, ...]:
     """The replaced assertions a question shows: each once, none resting on outside content.
 
     A question's text is the round's, replayed to every later round and, once written,
     in the place window, so an assertion resting on outside content is not shown in it
     (ADR-0307 §9:2), and so it is not retired on the yes (ADR-0321 §5:5).
     """
-    kept: dict[str, SemanticMemory] = {}
+    kept: dict[str, Memory] = {}
     for record in replaces:
-        if not rests_on_recorded_external_content(record.provenance):
+        if not record.rests_on_outside_content:
             kept.setdefault(record.id, record)
     return tuple(kept.values())
 
@@ -2203,7 +2249,7 @@ def _asked_calls(names: Sequence[str], askable: Mapping[str, CallOutcome]) -> tu
         chosen.append((request, outcome))
     asked: list[_Asked] = []
     for request, outcome in chosen:
-        replaced = {record.id: record.fact for record in _shown_replaced(outcome.replaces)}
+        replaced = {record.id: record.content for record in _shown_replaced(outcome.replaces)}
         try:
             call = AskedCall(
                 part=len(asked) + 1,

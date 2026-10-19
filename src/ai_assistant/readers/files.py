@@ -112,7 +112,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.types import MemoryRecord
 
 #: This fetcher type's **declared** identity (ADR-0189 §5, ADR-0190 §1). Tier 2,
 #: says what the producer *is* and never what its root holds: a fetcher "names
@@ -641,7 +640,7 @@ class LocalFileFetcher:
 
     # --- what a fetch mints (ADR-0230 §5) --------------------------------
 
-    def _mint_record(self, text: str, read_at: datetime) -> MemoryRecord:
+    def _mint_record(self, text: str, read_at: datetime) -> SemanticMemory:
         """One ``SEMANTIC``, ``EXTERNAL``-sourced record carrying the file's text.
 
         **Verbatim**: no model is on this path, and nothing summarises, abridges,

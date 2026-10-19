@@ -14,6 +14,7 @@ import pytest
 
 from ai_assistant.core.types import (
     Attestation,
+    BeliefBand,
     MemorySource,
     Placement,
     PlacementReach,
@@ -23,9 +24,10 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
 from ai_assistant.orchestration.supplied_records import SuppliedRecords
+from ai_assistant.testing.memories import memory_in_band
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import MemoryRecord
+    from ai_assistant.core.types import SuppliedRecord
     from ai_assistant.orchestration.disclosure import TurnSupply
 
 _AT: Final = datetime(2026, 10, 13, 12, 0, tzinfo=UTC)
@@ -71,6 +73,17 @@ _WITHHELD: Final = {
     "about someone else": _record(about_person="Sam"),
     "an unplaced attested source": _record(source=MemorySource.EXTERNAL, reported_by="mail"),
     "already stamped": _record(placement=_STAMPED),
+    # A memory is placed by its band (ADR-0328 §12): one from an unconfigured source,
+    # and one about someone else, are withheld as a minted record would be.
+    "a memory from an unplaced source": memory_in_band(
+        "mem-mail",
+        "the user's flight is at noon",
+        BeliefBand.ATTESTED,
+        attestation=Attestation(reported_by="mail", reported_at=_AT),
+    ),
+    "a memory about someone else": memory_in_band(
+        "mem-sam", "Sam is allergic to nuts", about_person="Sam"
+    ),
     "placed for the owner by the owner": _record(
         placement=Placement(
             reach=PlacementReach.OWNER, set_by=PlacementSetter.OWNER_ACT, set_at=_AT
@@ -84,6 +97,14 @@ _PLACED: Final = (
     _record("seen", source=MemorySource.OBSERVED),
     _record("worked out", source=MemorySource.INFERRED),
     _record("calendar", source=MemorySource.EXTERNAL, reported_by=_CALENDAR),
+    memory_in_band("mem-said", "the user likes green tea"),
+    memory_in_band("mem-inferred", "the user drinks tea daily", BeliefBand.DERIVED),
+    memory_in_band(
+        "mem-calendar",
+        "the dentist is on Tuesday",
+        BeliefBand.ATTESTED,
+        attestation=Attestation(reported_by=_CALENDAR, reported_at=_AT),
+    ),
 )
 
 
@@ -108,7 +129,7 @@ def test_records_every_one_of_them_placed_are_false(audience: TurnSupply) -> Non
 @pytest.mark.parametrize("record", _WITHHELD.values(), ids=_WITHHELD.keys())
 @pytest.mark.parametrize("audience", [_BOUNDED, _UNBOUNDED])
 def test_an_obtained_record_withheld_or_stamped_is_true(
-    record: MemoryRecord, audience: TurnSupply
+    record: SuppliedRecord, audience: TurnSupply
 ) -> None:
     """§2:2's two terms, over a record recall kept or a call returned, on every pass."""
     held = SuppliedRecords()
@@ -119,7 +140,7 @@ def test_an_obtained_record_withheld_or_stamped_is_true(
 
 @pytest.mark.parametrize("record", _WITHHELD.values(), ids=_WITHHELD.keys())
 def test_a_window_record_counts_on_a_bounded_pass_and_not_an_unbounded_one(
-    record: MemoryRecord,
+    record: SuppliedRecord,
 ) -> None:
     """ADR-0309 §5:10, ADR-0210 §1:1, §1:5: the windows are left out only when unbounded."""
     held = SuppliedRecords()
@@ -167,14 +188,14 @@ _CASES: Final = [
 ]
 
 
-def _any_withheld(records: tuple[MemoryRecord, ...]) -> bool:
+def _any_withheld(records: tuple[SuppliedRecord, ...]) -> bool:
     """Whether any of ``records`` is one of :data:`_WITHHELD`'s, by identity."""
     return any(one is withheld for one in records for withheld in _WITHHELD.values())
 
 
 @pytest.mark.parametrize("records", _CASES)
 def test_the_bounded_value_ranges_over_every_record_held(
-    records: tuple[MemoryRecord, ...],
+    records: tuple[SuppliedRecord, ...],
 ) -> None:
     """ADR-0210 §1:5: on a pass of bounded audience nothing is left out, windows included."""
     held = SuppliedRecords()
@@ -186,7 +207,7 @@ def test_the_bounded_value_ranges_over_every_record_held(
 
 @pytest.mark.parametrize("records", _CASES)
 def test_the_unbounded_value_leaves_the_windows_out(
-    records: tuple[MemoryRecord, ...],
+    records: tuple[SuppliedRecord, ...],
 ) -> None:
     """ADR-0210 §1:1: the windows set nothing, exactly as the conversation's tail does."""
     window, rest = records[:1], records[1:]

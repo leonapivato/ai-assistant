@@ -95,7 +95,7 @@ from ai_assistant.tools.registry import checked_timeout, revalidated_call
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from ai_assistant.core.types import EgressBinding, FrozenJson, MemoryRecord, ToolCall
+    from ai_assistant.core.types import EgressBinding, FrozenJson, ToolCall
     from ai_assistant.tools.egress import HttpsEgressTransport, HttpsResponse
 
 _log = structlog.get_logger(__name__)
@@ -1168,7 +1168,7 @@ class ForecastEgress:
             return None
         return _Day(named=named, extent=extent, content=content)
 
-    def _record(self, day: _Day, reported_at: datetime) -> MemoryRecord:
+    def _record(self, day: _Day, reported_at: datetime) -> SemanticMemory:
         """One ``SEMANTIC``, ``EXTERNAL``-sourced record carrying one day (§5).
 
         **No model is on this path**: nothing summarises, abridges, rewrites, re-ranks,

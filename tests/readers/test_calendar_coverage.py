@@ -38,7 +38,7 @@ from ai_assistant.readers._occurrences import UTC_MAX
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from ai_assistant.core.types import MemoryUpdateProposal, SourceReading
+    from ai_assistant.core.types import SourceProposal, SourceReading
 
 _LOWER = NOW - timedelta(hours=2)
 _UPPER = NOW + timedelta(hours=2)
@@ -57,7 +57,7 @@ async def _read(tmp_path: Path, *events: str, **overrides: object) -> SourceRead
     return await reader(source(tmp_path, calendar(*events)), **overrides).read()
 
 
-def _extent_of(proposal: MemoryUpdateProposal) -> ReportedExtent | None:
+def _extent_of(proposal: SourceProposal) -> ReportedExtent | None:
     attestation = proposal.proposed.provenance.attestation
     assert attestation is not None, "a reader's proposals are attested (ADR-0092 §1)"
     return attestation.extent

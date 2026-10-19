@@ -22,6 +22,7 @@ from ai_assistant.core.types import (
     EpisodeProcessingRecord,
     EpisodicMemory,
     InputOrigin,
+    Memory,
     MemoryKind,
     MemorySource,
     MemoryWrite,
@@ -39,13 +40,13 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     RecordedSpeechInput,
     RecordedTextInput,
-    SemanticMemory,
     SpokenAudioFormat,
     SpokenReply,
     UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
     WholeTextReply,
+    band_of,
 )
 from ai_assistant.orchestration.disclosure import (
     BoundedAudienceSupply,
@@ -54,6 +55,7 @@ from ai_assistant.orchestration.disclosure import (
 from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore
 from ai_assistant.testing.activation import ended_pass
+from ai_assistant.testing.memories import memory_in_band
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -83,20 +85,20 @@ def _provenance(source: MemorySource = MemorySource.USER_ASSERTED) -> Provenance
     )
 
 
-def _fact(  # noqa: PLR0913 — one knob per field a case varies
+def _fact(
     memory_id: str,
     content: str = "The dentist appointment is on Friday.",
     *,
     source: MemorySource = MemorySource.USER_ASSERTED,
-    fact: str | None = None,
     placement: Placement | None = None,
     about: str | None = None,
-) -> SemanticMemory:
-    return SemanticMemory(
-        id=memory_id,
-        content=content,
-        fact=content if fact is None else fact,
-        provenance=_provenance(source),
+) -> Memory:
+    """A memory in the band ``source`` names (ADR-0328 §12), from the calendar if attested."""
+    return memory_in_band(
+        memory_id,
+        content,
+        band_of(source),
+        attestation=_provenance(source).attestation,
         placement=Placement() if placement is None else placement,
         about_person=about,
     )
@@ -297,7 +299,7 @@ def _ids(recalled: Recalled) -> list[str]:
 async def test_it_searches_each_band_in_precedence_order_with_the_input_alone() -> None:
     memory = await _store()
     await _recall(_stage(memory), "the dentist, as before")
-    both = (MemoryKind.EPISODIC, MemoryKind.SEMANTIC)
+    both = (MemoryKind.EPISODIC, MemoryKind.MEMORY)
     assert memory.searches == [
         _Search("the dentist, as before", 3, both, (band,))
         for band in (BeliefBand.ASSERTED, BeliefBand.ATTESTED, BeliefBand.DERIVED)
@@ -402,7 +404,7 @@ async def test_an_unbounded_audience_searches_and_keeps_no_episode() -> None:
     memory = await _store(episode)
     spoken = await _recall(_stage(memory), audience=UNBOUNDED)
     assert spoken.result.outcome is RecallOutcome.NOTHING_FOUND
-    assert {search.kinds for search in memory.searches} == {(MemoryKind.SEMANTIC,)}
+    assert {search.kinds for search in memory.searches} == {(MemoryKind.MEMORY,)}
     bounded = await _recall(_stage(await _store(episode)))
     assert _ids(bounded) == ["episode"]
 
@@ -433,7 +435,7 @@ async def test_each_kept_record_carries_its_provenance_and_structured_origin() -
     assert reported.attestation == Attestation(reported_by="calendar", reported_at=AT)
     said = items["said"]
     assert (said.kind, said.standing, said.rests_on_recorded_external_content) == (
-        MemoryKind.SEMANTIC,
+        MemoryKind.MEMORY,
         BeliefBand.ASSERTED,
         False,
     )
@@ -512,9 +514,9 @@ async def test_another_episodes_excerpt_is_its_input_text_or_its_content() -> No
     }
 
 
-async def test_a_semantic_excerpt_is_its_fact_cut_to_the_referent_bound() -> None:
+async def test_a_memory_excerpt_is_its_wording_cut_to_the_referent_bound() -> None:
     long = "dentist appointment " + "x" * UNDERSTANDING_REFERENT_EXCERPT_CHARS
-    recalled = await _recall(_stage(await _store(_fact("long", "dentist appointment", fact=long))))
+    recalled = await _recall(_stage(await _store(_fact("long", long))))
     assert recalled.result.items[0].excerpt == long[:UNDERSTANDING_REFERENT_EXCERPT_CHARS]
 
 

@@ -52,20 +52,22 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.core.types import (
+    Attestation,
     BeliefBand,
     EpisodicMemory,
+    Memory,
     MemoryKind,
     MemoryRecord,
     MemorySource,
+    MemorySupport,
     MemoryWrite,
     MemoryWriteMode,
     Placement,
     PlacementReach,
     PlacementSetter,
-    PreferenceMemory,
     Provenance,
-    SemanticMemory,
     Validity,
+    band_of,
 )
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.memory._walk import mint_position
@@ -80,6 +82,12 @@ from ai_assistant.testing.cancellation import (
     SuspendedMidWrite,
     ThreadSuspension,
     worker_finished_before_the_first_check,
+)
+from ai_assistant.testing.memories import (
+    memory,
+    remembered_support,
+    said_support,
+    sourced_support,
 )
 
 if TYPE_CHECKING:
@@ -124,6 +132,23 @@ def _provenance(
     return Provenance(source=source, confidence=1.0 if certain else 0.6, last_updated=last_updated)
 
 
+def _support(source: MemorySource, last_updated: datetime) -> MemorySupport:
+    """One support in the band ``source`` names, added at ``last_updated`` (ADR-0328 §12)."""
+    match band_of(source):
+        case BeliefBand.ASSERTED:
+            return said_support(when=last_updated, added_at=last_updated)
+        case BeliefBand.ATTESTED:
+            return sourced_support(
+                Attestation(reported_by="source-instance", reported_at=last_updated),
+                when=last_updated,
+                added_at=last_updated,
+            )
+        case BeliefBand.DERIVED:
+            return remembered_support(when=last_updated, added_at=last_updated)
+        case _:  # pragma: no cover - exhaustive
+            raise AssertionError(source)
+
+
 def _semantic(  # noqa: PLR0913 — one keyword per record axis a case may need to vary
     record_id: str,
     content: str,
@@ -132,20 +157,23 @@ def _semantic(  # noqa: PLR0913 — one keyword per record axis a case may need 
     validity: Validity | None = None,
     source: MemorySource = MemorySource.OBSERVED,
     last_updated: datetime = _WHEN,
+    about_person: str | None = None,
 ) -> MemoryRecord:
-    return SemanticMemory(
-        id=record_id,
-        content=content,
-        fact=content,
-        provenance=_provenance(source=source, last_updated=last_updated),
+    """A memory in the band ``source`` names, resting on one support (ADR-0328 §3)."""
+    return memory(
+        record_id,
+        content,
+        _support(source, last_updated),
         expires_at=expires_at,
         validity=validity or Validity(),
+        about_person=about_person,
     )
 
 
-def _preference(record_id: str, content: str) -> MemoryRecord:
-    return PreferenceMemory(
-        id=record_id, content=content, preference=content, provenance=_provenance()
+def _episode(record_id: str, content: str) -> MemoryRecord:
+    """An episode, the store's other kind (ADR-0328 §2:1)."""
+    return EpisodicMemory(
+        id=record_id, content=content, provenance=_provenance(), occurred_at=_WHEN
     )
 
 
@@ -222,12 +250,13 @@ async def test_add_and_get_round_trips_typed_record(
 ) -> None:
     store = make_store()
 
-    await store.add(_preference("p1", "prefers concise replies"))
+    stored = _semantic("p1", "prefers concise replies")
+    await store.add(stored)
     got = await store.get("p1")
 
-    assert isinstance(got, PreferenceMemory)
+    assert isinstance(got, Memory)
     assert got.id == "p1"
-    assert got.preference == "prefers concise replies"
+    assert got.model_copy(update={"revision": 0}) == stored
 
 
 async def test_get_missing_returns_none(make_store: Callable[..., SqliteMemoryStore]) -> None:
@@ -418,11 +447,11 @@ async def test_add_overwrites_same_id(make_store: Callable[..., SqliteMemoryStor
 async def test_search_filters_by_kind(make_store: Callable[..., SqliteMemoryStore]) -> None:
     store = make_store()
     await store.add(_semantic("s", "coffee fact"))
-    await store.add(_preference("p", "coffee preference"))
+    await store.add(_episode("e", "coffee episode"))
 
-    results = (await store.search("coffee", kinds=[MemoryKind.PREFERENCE])).records
+    results = (await store.search("coffee", kinds=[MemoryKind.EPISODIC])).records
 
-    assert [r.id for r in results] == ["p"]
+    assert [r.id for r in results] == ["e"]
 
 
 async def test_a_band_scoped_search_reports_a_corrupt_row_as_a_store_error(
@@ -430,25 +459,16 @@ async def test_a_band_scoped_search_reports_a_corrupt_row_as_a_store_error(
 ) -> None:
     """A corrupt blob leaves the band-scoped read as ``MemoryStoreError``, not raw SQL.
 
-    The band restriction runs ``json_extract`` over every row's stored JSON, so a
-    malformed blob raises **inside the subquery** — before the decode path that
-    translates that same corruption on an unfiltered search. Unwrapped, that
-    surfaced as ``sqlite3.OperationalError("malformed JSON")``, which is not what
-    ``core/protocols.py`` documents for a read and, more to the point, not what
-    ``LoopEngine._retrieve`` catches: it filters on ``MemoryStoreError``, so a
-    single corrupt row aborted the turn instead of degrading retrieval.
+    Both reads that reach the corrupt row are asserted, because the obligation is
+    that the band filter did not *change* the failure mode: an unwrapped
+    ``sqlite3`` error is not what ``core/protocols.py`` documents for a read.
+    Corruption is injected against the raw file: the store only ever writes valid
+    JSON, so nothing reachable through its own API produces this state, and the
+    contract nonetheless names it ("a stored record is corrupt").
 
-    Both reads are asserted, because the obligation is that the band filter did not
-    *change* the failure mode. Corruption is injected against the raw file: the
-    store only ever writes valid JSON, so nothing reachable through its own API
-    produces this state, and the contract nonetheless names it ("a stored record is
-    corrupt").
-
-    Note which row is corrupted and which band is asked for — they differ. One bad
-    row makes every band-scoped search fail, whatever band it selects, because the
-    subquery reads them all. That amplification is documented on ``_search_sync``
-    and accepted; the alternative is silently dropping unreadable rows from a
-    band's answer.
+    Since ADR-0328 §7:11 the band is a derived column rather than a ``json_extract``
+    over every row's blob, so a band-scoped search that does not select the corrupt
+    row's band never decodes it, and answers from the rows it does select.
     """
     store = make_store()
     await store.add(_semantic("ok", "coffee", source=MemorySource.USER_ASSERTED))
@@ -466,7 +486,9 @@ async def test_a_band_scoped_search_reports_a_corrupt_row_as_a_store_error(
     with pytest.raises(MemoryStoreError):
         await reopened.search("coffee")
     with pytest.raises(MemoryStoreError):
-        await reopened.search("coffee", bands=[BeliefBand.ASSERTED])
+        await reopened.search("coffee", bands=[BeliefBand.DERIVED])
+    found = await reopened.search("coffee", bands=[BeliefBand.ASSERTED])
+    assert [record.id for record in found.records] == ["ok"]
 
 
 async def test_empty_query_matches_nothing(make_store: Callable[..., SqliteMemoryStore]) -> None:
@@ -1369,7 +1391,7 @@ async def test_export_returns_live_records_only(
     exported = await store.export()
 
     assert [r.id for r in exported] == ["live"]
-    assert isinstance(exported[0], SemanticMemory)  # typed, not a blob
+    assert isinstance(exported[0], Memory)  # typed, not a blob
 
 
 async def test_expired_records_are_hidden_from_get_and_search(
@@ -1654,13 +1676,13 @@ async def test_list_beliefs_kind_filter_reaches_the_sql_pre_filter(
     # once is what a single-placeholder mistake would break.
     store = make_store()
     await store.add(_semantic("s", "a fact"))
-    await store.add(_preference("p", "a preference"))
+    await store.add(_episode("e", "an exchange"))
 
-    both = await store.list_beliefs(kinds=[MemoryKind.SEMANTIC, MemoryKind.PREFERENCE])
-    one = await store.list_beliefs(kinds=[MemoryKind.PREFERENCE])
+    both = await store.list_beliefs(kinds=[MemoryKind.MEMORY, MemoryKind.EPISODIC])
+    one = await store.list_beliefs(kinds=[MemoryKind.EPISODIC])
 
-    assert {r.id for r in both} == {"s", "p"}
-    assert [r.id for r in one] == ["p"]
+    assert {r.id for r in both} == {"s", "e"}
+    assert [r.id for r in one] == ["e"]
 
 
 async def _write_real_schema_db(
@@ -1769,13 +1791,7 @@ async def test_a_stated_subject_round_trips_and_reaches_its_column(
     ``valid_until`` already have.
     """
     store = make_store()
-    stored = SemanticMemory(
-        id="1",
-        content="prefers a window seat",
-        fact="prefers a window seat",
-        about_person="Marta",
-        provenance=_provenance(),
-    )
+    stored = _semantic("1", "prefers a window seat", about_person="Marta")
 
     await store.add(stored)
 
@@ -1790,15 +1806,7 @@ async def test_the_subject_column_keeps_the_label_verbatim(
 ) -> None:
     """Nothing between the user and the column normalises a label (ADR-0100 §6)."""
     store = make_store()
-    await store.add(
-        SemanticMemory(
-            id="1",
-            content="c",
-            fact="c",
-            about_person="  marta  ",
-            provenance=_provenance(),
-        )
-    )
+    await store.add(_semantic("1", "c", about_person="  marta  "))
 
     assert _subject_column(store, "1") == "  marta  "
 
@@ -1823,13 +1831,9 @@ async def test_an_overwrite_rewrites_the_subject_column(
     subject the record no longer states.
     """
     store = make_store()
-    await store.add(
-        SemanticMemory(
-            id="1", content="c", fact="c", about_person="Marta", provenance=_provenance()
-        )
-    )
+    await store.add(_semantic("1", "c", about_person="Marta"))
 
-    await store.add(SemanticMemory(id="1", content="c", fact="c", provenance=_provenance()))
+    await store.add(_semantic("1", "c"))
 
     assert _subject_column(store, "1") is None
     got = await store.get("1")
@@ -2631,10 +2635,10 @@ async def test_a_confirming_instant_survives_the_stores_round_trip(
     """
     confirmed_at = datetime(2025, 7, 4, 8, 30, tzinfo=UTC)
     store = make_store()
-    record = SemanticMemory(
+    record = EpisodicMemory(
         id="s1",
         content="the office moved to Lisbon",
-        fact="the office moved to Lisbon",
+        occurred_at=_WHEN,
         provenance=Provenance(
             source=MemorySource.OBSERVED,
             confidence=0.6,
@@ -2646,7 +2650,7 @@ async def test_a_confirming_instant_survives_the_stores_round_trip(
     await store.add(record)
     got = await store.get("s1")
 
-    assert got is not None
+    assert isinstance(got, EpisodicMemory)
     assert got.provenance.last_confirmed_at == confirmed_at
     assert got.provenance.last_updated == _WHEN
 
@@ -2669,7 +2673,7 @@ async def test_a_blob_written_before_the_field_existed_decodes_as_unknown(
     """
     database = tmp_path / "memory.db"
     store = make_store()
-    await store.add(_preference("p1", "prefers concise replies"))
+    await store.add(_episode("p1", "prefers concise replies"))
     store.close()
 
     raw = sqlite3.connect(str(database))
@@ -2687,7 +2691,7 @@ async def test_a_blob_written_before_the_field_existed_decodes_as_unknown(
 
     got = await make_store().get("p1")
 
-    assert got is not None
+    assert isinstance(got, EpisodicMemory)
     assert got.provenance.last_confirmed_at is None
 
 
@@ -2718,7 +2722,7 @@ async def test_a_blob_written_under_adr_0204_decodes_narrowed_on_the_first_read(
     """
     database = tmp_path / "memory.db"
     store = make_store()
-    await store.add(_preference("p1", "prefers concise replies"))
+    await store.add(_episode("p1", "prefers concise replies"))
     store.close()
 
     raw = sqlite3.connect(str(database))
@@ -2753,8 +2757,8 @@ async def test_a_blob_the_old_field_left_false_decodes_to_the_default(
     """
     database = tmp_path / "memory.db"
     store = make_store()
-    await store.add(_preference("p1", "prefers concise replies"))
-    await store.add(_preference("p2", "prefers a written summary"))
+    await store.add(_episode("p1", "prefers concise replies"))
+    await store.add(_episode("p2", "prefers a written summary"))
     store.close()
 
     raw = sqlite3.connect(str(database))
@@ -2974,7 +2978,7 @@ async def test_pre_m36_stores_are_refused_without_modification(tmp_path: Path, s
     assert db.stat().st_mode == mode
 
 
-@pytest.mark.parametrize("marker", [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 0])
+@pytest.mark.parametrize("marker", [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 0])
 def test_current_shape_with_missing_or_unsupported_marker_is_refused(
     tmp_path: Path, marker: int | None
 ) -> None:

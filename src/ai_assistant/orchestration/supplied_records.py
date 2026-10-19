@@ -50,7 +50,7 @@ from ai_assistant.orchestration.disclosure import (
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from ai_assistant.core.types import MemoryRecord
+    from ai_assistant.core.types import SuppliedRecord
     from ai_assistant.orchestration.disclosure import TurnSupply
 
 __all__ = ["SuppliedRecords"]
@@ -69,10 +69,10 @@ class SuppliedRecords:
         """Hold nothing yet."""
         # Keyed by the object, so a record handed in again each round is held once;
         # two versions of one stored record are two objects and both count.
-        self._windows: dict[int, MemoryRecord] = {}
-        self._obtained: dict[int, MemoryRecord] = {}
+        self._windows: dict[int, SuppliedRecord] = {}
+        self._obtained: dict[int, SuppliedRecord] = {}
 
-    def windows(self, records: Iterable[MemoryRecord]) -> None:
+    def windows(self, records: Iterable[SuppliedRecord]) -> None:
         """Hold the records of the activation's windows (ADR-0276 §3-§4).
 
         Args:
@@ -80,7 +80,7 @@ class SuppliedRecords:
         """
         self._windows.update((id(one), one) for one in records)
 
-    def obtained(self, records: Iterable[MemoryRecord]) -> None:
+    def obtained(self, records: Iterable[SuppliedRecord]) -> None:
         """Hold records the activation obtained other than through its windows.
 
         What either recall run kept, what a call returned, a digest's records included,

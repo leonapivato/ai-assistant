@@ -158,6 +158,7 @@ if TYPE_CHECKING:
         GrantScope,
         HeldNotification,
         Identifier,
+        MemoryChange,
         MemoryDecision,
         MemoryIngestResult,
         MemoryKind,
@@ -1069,14 +1070,13 @@ class MemoryStore(Protocol):
         The batch form of :meth:`get`, landed because two contract-mandated
         callers resolve *k* ids at a time — a conversation resume's history tail
         (ADR-0074 §5) and belief presentation, which ADR-0073 §4 and ADR-0077 §6
-        oblige to resolve every citation of every belief on a page. At
-        ``list_beliefs``' default page of 50 and
-        :data:`~ai_assistant.core.types.MAX_EVIDENCE_CITATIONS` citations each
-        that is 3,200 single reads for one screen, each one a lock acquisition on
-        the shipped store; this makes it 50. ADR-0074 §5 declined it and named the
-        hub as where to revisit — that trigger did **not** fire, and this lands on
-        the argument the deferral actually turned on rather than on the one it
-        named (ADR-0086 §6 partially supersedes ADR-0074 §5).
+        oblige to resolve every citation of every belief on a page; ADR-0328 §15:2
+        resolves every support of a memory the same way. A page of memories each
+        resolving its supports one ``get`` at a time is a lock acquisition per
+        support on the shipped store; this makes it one per memory. ADR-0074 §5
+        declined it and named the hub as where to revisit — that trigger did **not**
+        fire, and this lands on the argument the deferral actually turned on rather
+        than on the one it named (ADR-0086 §6 partially supersedes ADR-0074 §5).
 
         **It never disagrees with ``get``.** For every id, this returns the record
         :meth:`get` would return, or omits it exactly where :meth:`get` would
@@ -1243,8 +1243,9 @@ class MemoryStore(Protocol):
         per band and composes; the budget and the order stay with it (ADR-0113 §6).
 
         **Within one call the bands partition; across calls they do not.** Every
-        returned record's band is one the caller selected — ``band_of`` is total, so
-        a record has exactly one band at one instant — and an implementation may not
+        returned record's band is one the caller selected —
+        :func:`~ai_assistant.core.types.record_band` is total, so a record has exactly
+        one band at one instant — and an implementation may not
         return an out-of-band record, in particular may not pad a short result with
         the next-nearest neighbour of another band to fill a page. A short result is
         the correct answer to a band with nothing more to give; padding converts an
@@ -1252,9 +1253,9 @@ class MemoryStore(Protocol):
 
         Across calls **no disjointness is promised and none may be assumed**, and
         the mechanism is on the write path rather than hypothetical: ``add`` is an
-        upsert keyed on the caller's id and a ``REINFORCE`` fold takes the incoming
-        provenance's source at the target's id (ADR-0045 §5b), so a fold moves a
-        record between bands at a stable id. A consumer composing band-scoped reads
+        upsert keyed on the caller's id and a ``REINFORCE`` adds supports to a memory
+        at its stable id (ADR-0328 §11:6), so a fold can move a memory between bands
+        at that id. A consumer composing band-scoped reads
         therefore **deduplicates by record id**, keeping the copy from the
         higher-precedence band in ADR-0072 §5's order and counting it once against
         that band's budget — resolving the race by arrival order would decide
@@ -1275,11 +1276,9 @@ class MemoryStore(Protocol):
                 stated rather than left to be read off ``list_beliefs`` because that
                 is how one implementation comes to treat ``bands=()`` as "no filter",
                 the opposite outcome, on a parameter whose suite never asked. Keyed
-                on :class:`~ai_assistant.core.types.BeliefBand` and never on
-                ``MemorySource``, for ``list_beliefs``' reason: a source filter would
-                push ``band_of`` into every caller and let one ask for half a band —
-                ``OBSERVED`` without ``INFERRED`` — which ADR-0072 §4 keeps
-                indistinguishable to the supersession law. Duplicates are set
+                on :class:`~ai_assistant.core.types.BeliefBand`, the record's band as
+                :func:`~ai_assistant.core.types.record_band` computes it (ADR-0328
+                §11:2), and never on a standing or a source. Duplicates are set
                 semantics and change nothing. ``bands`` and ``kinds`` compose by
                 **conjunction**: a record is eligible when its band is selected *and*
                 its kind is.
@@ -1501,12 +1500,15 @@ class MemoryStore(Protocol):
         limit: int = 50,
         offset: int = 0,
     ) -> list[MemoryRecord]:
-        """Enumerate the beliefs held right now, newest revision first (ADR-0073 §1).
+        """Enumerate the memories held right now, newest revision first (ADR-0073 §1).
 
         The band-scoped read ADR-0072 §7 ruled owed: "show me what you believe
-        about me". It carries **no query text** and is not a retrieval — nothing is
-        ranked and no relevance is computed — so it is an enumeration with a stable
-        order and a page rather than a filter on :meth:`search`.
+        about me". **It lists memories, and excludes episodes by default**
+        (ADR-0328 §11:2, ADR-0074 §6): with ``kinds`` ``None`` only the memory kind is
+        listed, and an episode is listed only where the caller names its kind. It
+        carries **no query text** and is not a retrieval — nothing is ranked and no
+        relevance is computed — so it is an enumeration with a stable order and a page
+        rather than a filter on :meth:`search`.
 
         **Both read-time axes are honoured, exactly as ``get``/``search`` honour
         them.** An expired record is never returned, and neither is a record not
@@ -1516,13 +1518,14 @@ class MemoryStore(Protocol):
         record of one it used to, and it stays reachable through ``export`` alone
         (ADR-0073 §3). There is deliberately no ``include_retired`` axis.
 
-        **The order is total, stable and specified: ``provenance.last_updated``
-        descending, ties broken by ``id`` ascending.** Some total order has to be
-        named or two stores answer the same page differently while each believes it
-        conforms — the argument ``AuditTrail.recent`` already makes, applied to a
-        second store. Newest-revision-first is the right default for inspection,
-        and supersession moves ``last_updated``, so a corrected topic surfaces
-        where the user will look for it.
+        **The order is total, stable and specified: transaction time descending,
+        ties broken by ``id`` ascending** — a memory's latest operation's instant
+        (ADR-0328 §7:8), an episode's ``provenance.last_updated``, as
+        :func:`~ai_assistant.core.types.record_transaction_time` computes both. Some
+        total order has to be named or two stores answer the same page differently
+        while each believes it conforms. Newest-revision-first is the right default
+        for inspection, and every operation moves the transaction time, so a
+        corrected topic surfaces where the user will look for it.
 
         **A page is the slice ``[offset : offset + limit]`` of the ordered,
         filtered sequence.** Take every record passing **both** filters and **both**
@@ -1553,18 +1556,16 @@ class MemoryStore(Protocol):
         Args:
             bands: If given, restrict results to these belief bands. ``None`` means
                 every band; an **empty sequence selects nothing**. Keyed on
-                :class:`~ai_assistant.core.types.BeliefBand` and never on
-                ``MemorySource``: the band is the vocabulary ADR-0072 §2 ratified
-                and the unit the user reads, and a source filter would push
-                ``band_of`` into every caller and let one ask for half a band —
-                ``OBSERVED`` without ``INFERRED`` — which ADR-0072 §4 keeps
-                indistinguishable to the supersession law.
-            kinds: If given, restrict results to these memory kinds. The same
-                convention, stated rather than inferred from ``search`` so no
-                implementation reads ``kinds=()`` as "no filter" — the opposite
-                outcome, every record instead of none. The two filters compose by
-                **conjunction**: a record is listed when its band is selected *and*
-                its kind is.
+                :class:`~ai_assistant.core.types.BeliefBand`, the band
+                :func:`~ai_assistant.core.types.record_band` computes (ADR-0328
+                §11:2): the vocabulary ADR-0072 §2 ratified and the unit the user
+                reads.
+            kinds: If given, restrict results to these kinds; ``None`` means the
+                memory kind alone, so episodes are excluded by default (ADR-0328
+                §11:2). An **empty sequence selects nothing**, stated rather than
+                inferred from ``search`` so no implementation reads ``kinds=()`` as
+                "no filter". The two filters compose by **conjunction**: a record is
+                listed when its band is selected *and* its kind is.
             limit: Maximum number of records in the page. ``limit=0`` returns an
                 empty page: asking for nothing is a question with an answer.
                 Bounded by default (50, matching ``AuditTrail.recent``), because an
@@ -1854,11 +1855,14 @@ class MemoryStore(Protocol):
 
 @runtime_checkable
 class MemoryPolicy(Protocol):
-    """Decides the fate of a proposed memory update — the "dispose" half.
+    """Decides the fate of a proposed memory — the "dispose" half.
 
-    The model *proposes* memories; a deterministic policy implementing this
-    Protocol *disposes* of them, so writes to long-term memory are reviewable
-    and bounded rather than an unmediated side effect of generation.
+    The producer *proposes* a memory; a deterministic policy implementing this
+    Protocol *disposes* of it, so writes to long-term memory are reviewable and
+    bounded rather than an unmediated side effect of generation. A policy reads a
+    memory through ADR-0328 §12: where an earlier clause it implements names a
+    source, a band or a confidence, it reads the memory's band (§6:4) and whether it
+    rests on outside content (§7:6), and no memory carries a confidence (§10:2).
     """
 
     async def decide(
@@ -1868,365 +1872,175 @@ class MemoryPolicy(Protocol):
         conflicts: Sequence[MemoryRecord],
         relations: Mapping[str, ConflictRelation] | None = None,
     ) -> MemoryDecision:
-        """Rule on a proposed memory update.
+        """Rule on a proposed memory.
 
-        **A ruling is a total function of its arguments** (ADR-0159 §2, ratifying
-        ADR-0005 §3 rather than relaxing it). No implementation consults a
-        ``ModelProvider``, a ``BatchCompleter``, a store, a clock or a network.
-        ``decide`` returns the same ruling for the same ``proposal``, the same
-        ``conflicts`` and the same ``relations``, and every input its ruling
-        depends on is an argument or a construction-time property of the
-        implementation. This is the standing
-        :class:`NotificationPolicy` already states in the same terms and cites this
-        method as the shape it copies: an implementation that awaits anything
-        outside its arguments has already broken the clause.
+        **A ruling is a total function of its arguments** (ADR-0159 §2, ADR-0328
+        §11:10). No implementation consults a ``ModelProvider``, a
+        ``BatchCompleter``, a store, a clock or a network. ``decide`` returns the same
+        ruling for the same ``proposal``, the same ``conflicts`` and the same
+        ``relations``.
 
         **``relations`` is what a fold may rest on, and similarity is not**
         (ADR-0159 §1, §4). A member of ``conflicts`` is surfaced by *topical
-        similarity*, which ADR-0038 §2 and ADR-0045 §5 have long ruled is neither
-        contradiction nor agreement; a
-        :class:`~ai_assistant.core.types.ConflictRelation` is a statement about how
-        the proposal stands to one *named* member, made by something entitled to
-        make it. A member absent from the mapping is **unlabelled** — nothing was
-        determined about it, and it supplies ground for nothing.
+        similarity*; a :class:`~ai_assistant.core.types.ConflictRelation` is a
+        statement about how the proposal stands to one *named* member. A member absent
+        from the mapping is **unlabelled** and supplies ground for nothing. A policy
+        **ignores any entry whose key is not the id of a member of ``conflicts``**. A
+        target-carrying ruling names one of the records ``decide`` was handed
+        (ADR-0040 §5). ``None`` and an empty mapping rule identically. The mapping is
+        a runtime read-only view (ADR-0159 §8).
 
-        A policy **ignores any entry whose key is not the id of a member of
-        ``conflicts``**, and treats a member absent from the mapping as unlabelled.
-        The existing target-coherence obligation is unchanged: a target-carrying
-        ruling still names one of the records ``decide`` was handed (ADR-0040 §5).
+        **A tainted derived proposal is never committed unconfirmed** (ADR-0106 §6,
+        read through ADR-0328 §12 and §13:4). No policy returns a committing ruling —
+        ``ACCEPT``, ``REINFORCE`` or ``SUPERSEDE`` — on a proposal whose memory is in
+        the ``DERIVED`` band, rests on outside content, and carries no
+        :class:`~ai_assistant.core.types.UserConfirmation`. Its terminal ruling is
+        ``ASK_USER`` or ``REJECT``. The condition is band-scoped: an ``ATTESTED``
+        memory rests on outside content by its nature and must still be allowed to
+        commit. A confirmation passes it.
 
-        ``None`` and an empty mapping rule identically — every member is unlabelled
-        either way — and they are still different facts: ``None`` says nothing
-        determined relations for this ingest at all, ``{}`` says something did and
-        labelled nothing. The caller's mapping is a **runtime read-only** view
-        (ADR-0159 §8), so narrowing it with ``isinstance(relations, dict)`` and
-        writing recovers no mutable object a caller holds.
-
-        **A tainted derived proposal is never committed unconfirmed** (ADR-0106
-        §6, giving ADR-0098 §4's fourth clause its enforcement point). No policy
-        returns a committing ruling — ``ACCEPT``, ``REINFORCE``, ``SUPERSEDE`` or
-        ``STORE_TEMPORARY`` — on a proposal whose ``proposed.provenance`` is in
-        the ``DERIVED`` band, carries
-        :attr:`~ai_assistant.core.types.Provenance.derived_from_external`, and
-        carries no :class:`~ai_assistant.core.types.UserConfirmation` — whatever
-        the policy's other rules, and however trusted the producer. Its terminal
-        ruling is ``ASK_USER`` or ``REJECT``; the contract admits either, and
-        which one a policy picks is its own reasoning. The fact is read off the
-        argument already passed, so this needs no store and no evidence
-        resolution — which is why ADR-0098 §5 could not site the rule and this
-        one can.
-
-        **The condition is band-scoped, and deliberately not
-        :func:`~ai_assistant.core.types.rests_on_recorded_external_content`.**
-        The two differ in both directions and each difference is load-bearing. An
-        ``ATTESTED`` proposal satisfies that predicate by definition and must
-        still be allowed to commit — a ceiling stated over it would refuse every
-        reader's import and make the reader useless. And a stray
-        ``derived_from_external`` outside the ``DERIVED`` band triggers nothing,
-        because ADR-0106 §7 leaves such a record constructible while ADR-0106 §2
-        says the field means nothing there. The rule is about a model-authored
-        generalisation about the user that external content helped produce, never
-        a faithful transcription at a band that already caps its standing
-        (ADR-0098 §4).
-
-        **A confirmation passes it.** ADR-0078 §5's confirmed answer is a
-        *re-ingest*: the coordinator rebuilds the proposal carrying the user's
-        authority and calls the writer again, marker and all. A rule firing a
-        second time there would ask the user the question they just answered, and
-        a tainted consolidation could never land at all. A ruling reached by
-        asking the user is not the *auto*-acceptance ADR-0098 §4 forbids.
-
-        Nothing here obliges the *wording* of any ``reason`` (ADR-0106 §6): a
-        deployment injecting its own policy owns the legibility of its own
-        questions, and this ceiling still binds it.
+        **No policy stores a proposal tentatively** (ADR-0328 §10:3): no
+        implementation rules ``STORE_TEMPORARY``, and a writer handed that ruling
+        refuses it. A proposal that does not meet an evidence bar is not committed;
+        the bar is the observer's decision's.
 
         Args:
             proposal: The candidate memory and why it was proposed.
-            conflicts: Existing records the proposal contradicts, already
-                resolved from the store (the proposal carries their ids).
+            conflicts: Existing records the proposal contradicts, already resolved
+                from the store (the proposal carries their ids).
             relations: How the proposal stands to named members of ``conflicts``,
-                keyed by :attr:`~ai_assistant.core.types.MemoryRecord.id`
-                (ADR-0159 §8). ``None`` where nothing determined any — no
-                reconciler ran, or the ingest was one where none may. Read-only;
-                a policy never mutates it and is never handed a mapping its caller
-                still reads.
+                keyed by record id (ADR-0159 §8). ``None`` where nothing determined
+                any. Read-only.
 
         Returns:
-            The decision to accept, reject, reinforce or supersede a named
-            target record, defer to the user, or store the proposal temporarily.
+            The decision to accept, reject, reinforce or supersede a named target
+            record, or to defer to the user.
         """
         ...
 
 
 @runtime_checkable
 class MemoryWriter(Protocol):
-    """The memory write path: conflicts, policy, persistence, in one call.
+    """The memory write path: conflicts, policy, persistence (ADR-0028, ADR-0328 §11).
 
-    The "persist" half of propose/dispose/persist (ADR-0028). It exists so a
-    consumer of memory — the `orchestration` pipeline, above all — can commit a
-    proposal without re-deriving `memory`'s own semantics: how a conflict is
-    found, and what folding two records into one means.
+    The "persist" half of propose/dispose/persist. A writer holds its own
+    :class:`MemoryPolicy` and its own store, and exposes neither. **The store it
+    writes to must be the one its caller retrieves from** — a composition-root
+    obligation, unenforceable here because no store is on this seam (ADR-0028 §4).
 
-    A writer holds its own :class:`MemoryPolicy` and its own store, and exposes
-    neither. **The store it writes to must be the one its caller retrieves
-    from** — a composition-root obligation, unenforceable here precisely because
-    no store is on this seam (ADR-0028 §4).
+    Two members: :meth:`ingest` creates a memory under the policy (ADR-0328 §11:4),
+    and :meth:`apply` applies one operation to one stored memory (§11:3). Every change
+    to a memory's supports, status, validity or open questions is an operation citing
+    the support that caused it (§5:1), and no write changes a memory's wording (§3:2).
 
-    How :meth:`ingest` observes the proposal it is handed is governed by this
-    module's input-observation clause (ADR-0065).
+    How :meth:`ingest` and :meth:`apply` observe what they are handed is governed by
+    this module's input-observation clause (ADR-0065).
     """
 
     async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
-        """Resolve conflicts, ask the policy to rule, and apply its ruling.
+        """Resolve conflicts, ask the policy to rule, and apply its ruling (ADR-0328 §11:4-§11:9).
 
-        **Evidence must resolve.** A proposal whose ``proposed`` record is in the
-        ``DERIVED`` band and whose ``provenance.evidence`` names a record this
-        store does not hold is **refused**, before any ruling is sought: nothing
-        is written, and no decision is returned (ADR-0077 §5). The refusal is a
-        raise rather than a fabricated ``REJECT`` because a ruling is the policy's
-        to make (ADR-0005 §3).
+        The proposal carries a memory whose supports and create its producer built.
 
-        This is a check, not a guarantee — an evidence record destroyed **by
-        another actor** between the check and the write leaves a citation that no
-        longer resolves, and no seam closes that. What it buys is that **every
-        citation resolved once**, so a citation that later stops resolving is
-        *loss* rather than a producer bug, and a surface presenting the belief can
-        say so honestly. That residue stands exactly as it did (ADR-0077 §5/§6): a
-        citation destroyed under the writer by someone else is *loss*, rendered as
-        a tombstone with the presented confidence lowered, and no writer refusal
-        closes it. What ADR-0081 §5 bounds is only the sentence's reach — a
-        destruction performed by **this call's own write** is not that residue and
-        is refused outright, below. ADR-0077 §5 is thereby **amended, not
-        superseded**: nothing it decided changes, and every mechanism §6 specifies
-        is keyed on a citation *failing* to resolve, which the refused case never
-        reaches.
+        - **``ACCEPT`` installs the proposed memory** (§11:5), as a new record: an id
+          already naming a stored record is refused with
+          ``MemoryStoreConflictError`` and nothing written (ADR-0108 §1-§3).
+        - **``REINFORCE`` adds the proposal's supports to the target**, one add
+          support each, and leaves the target's wording as it is; a support the
+          target already carries changes nothing (§11:6). Placement's ratchet
+          (ADR-0217 §3) and the union of topics (ADR-0213 §8) apply as on any fold
+          (§11:9). The write is conditional on the target's revision (ADR-0219 §5).
+        - **``SUPERSEDE`` installs the proposed memory at a fresh id** and ends each
+          memory the ruling retires, with an end citing the new memory's first
+          support, added to the retired memory as an ``against`` support. Each retired
+          memory names the new one as its successor and the new one names them as the
+          memories it replaces, in one atomic write (§11:7, §5:6). An end
+          ADR-0328 §6:5 refuses, or a retired memory that already carries the part
+          that support points at, refuses the whole ingest with nothing written.
+        - **``REJECT`` and ``ASK_USER`` write nothing** (§11:8); a
+          ``STORE_TEMPORARY`` ruling is refused, with nothing written (§10:3).
 
-        It is deliberately **not** a floor on citing *nothing*: an empty evidence
-        tuple names no record that fails to resolve, so it passes here and is
-        judged by the policy, which is where ADR-0072 §3 put that rule. The two do
-        not overlap, and each lives in exactly one place.
+        **What a ``SUPERSEDE`` retires** is the write path's law read through
+        ADR-0328 §12: the target and every other conflict whose band is retirable —
+        ``DERIVED`` or ``ATTESTED`` (ADR-0079 §3, ADR-0092 §4) — less every conflict
+        the writer holds a ``RESTATES`` or ``ADDS`` relation for (ADR-0159 §5), and
+        narrowed to the labelled contradictions where the writer holds any
+        (ADR-0171 §2). An ``ASSERTED`` memory is retired only where the proposal's
+        confirmation genuinely covers it (ADR-0078 §5b), and nothing folds onto an
+        ``ASSERTED`` target but an agreeing ``REINFORCE`` (ADR-0121 §5, ADR-0214 §3),
+        which only adds supports. A ``REINFORCE`` of an ``ASSERTED`` proposal onto an
+        ``ATTESTED`` target is refused (ADR-0038 §2a). A ``SUPERSEDE`` naming a
+        conflict the writer holds a ``RESTATES`` or ``ADDS`` relation for is refused
+        (ADR-0159 §5).
 
-        **No write consumes the evidence its own proposal cites** (ADR-0081 §1).
-        A ruling that would **install** the proposal at an id that same proposal's
-        ``provenance.evidence`` names is **refused**: nothing is written, no window
-        is closed, and no decision is returned. A write *installs* when it stores
-        the proposal's content at an id — ``ACCEPT`` and ``STORE_TEMPORARY`` at the
-        proposed record's own id, ``REINFORCE`` at the fold target it names, where
-        a fold would union the target's id into the evidence of the record it
-        writes *at* that id. A ``REINFORCE`` naming a ``target_id`` that is **not
-        among the conflicts** installs nothing and is unaffected: it still raises
-        on that standing ground instead, since this rule adds one refusal to the
-        writer and subtracts none. It holds **whether or not** a record already stands
-        there, and for **every** band, not only ``DERIVED``: the defect is a belief
-        standing as its own warrant, and an ``ASSERTED`` or ``EXTERNAL`` record can
-        reach it with nothing destroyed at all. The refusal keys on ids and write
-        modes alone, so it reads nothing from the store and cannot be raced.
-
-        A ``SUPERSEDE`` **re-mints** instead. Its correction lands at a freshly
-        minted id, so where that candidate is one the proposal cites a conforming
-        writer mints another rather than installing there; where it cannot find a
-        free id within its own bound it refuses, with every target left live and
-        unchanged (ADR-0081 §4). Its retirement-set writes **retire** rather than
-        install — the record is written back with only its window narrowed and is
-        retained — so a ``SUPERSEDE`` retiring a record the proposal cites still
-        retires it and still lands. That is ADR-0077 §6's ratified residue, and
-        this rule adds no refusal to ``SUPERSEDE`` and removes none: every standing
-        refusal at this boundary keeps its precedence and its scope, and being
-        cited neither triggers one nor excuses one.
-
-        The rule is quantified over **this proposal's** evidence and **this
-        write's** destination, both in hand when each write is formed — never over
-        the tuple a ``REINFORCE`` unions (ADR-0081 §1a). A target that already
-        cited *itself* is therefore out of scope: the fold neither creates that
-        condition nor destroys the cited record, and refusing it would make such a
-        record permanently unfoldable while making the refusal depend on state read
-        from the store. ``REJECT`` and ``ASK_USER`` write nothing and are
-        unaffected — once the call reaches the policy, a self-citing proposal the
-        policy declines is reported as the decision the policy made rather than
-        converted into an exception. The refusals that already *precede* a ruling
-        keep that precedence: a self-citing proposal whose evidence does not
-        resolve, or whose conflict set is over the ceiling, is still refused before
-        any policy is asked.
-
-        **An installing ruling states that it installs, and a colliding id is
-        refused** (ADR-0108 §1, §2, §3). ``ACCEPT`` and ``STORE_TEMPORARY`` write
-        the proposal as a *new* record: the ruling is that it contradicts nothing
-        retrieved, so an id already naming a stored record is an accident in every
-        case, and the write is **refused** — nothing written, no window closed. The
-        writer does **not** re-mint the proposal's id and does not retry. That id
-        is the producer's, and re-minting it would edit a record the producer made
-        (ADR-0081 §9) and return an id nobody proposed; the refusal is a
-        ``MemoryStoreConflictError``, whose documented remedy — re-mint and retry —
-        is the producer's to take. This is the writer declaring what it means,
-        not a store default doing it for free: :meth:`MemoryStore.add` remains an
-        upsert, and a writer reaching for it here would silently destroy the
-        standing record (#630). ``REINFORCE`` is the opposite case and is
-        unaffected: it folds *at the target the ruling named*, so landing on a
-        stored record is the decision rather than a collision, and it upserts.
-
-        **A correction resolves every conflict it is shown, or it does not land**
-        (ADR-0079 §1). A writer's conflict limit is a *ceiling*, not a truncation
-        budget: at or below it the whole set conflict resolution surfaced reaches
-        the policy — nothing retrieved is discarded — and above it this call
-        **refuses**, writing nothing, closing no window and seeking no ruling. The
-        obligation is stated on what the writer *retrieved*, because that is all a
-        writer can observe; retrieval is not thereby exhaustive, and a conflict it
-        never surfaced is invisible to this rule (issue #457). The limit's value
-        stays each writer's own tuning; only the behaviour at the boundary is
-        contract.
-
-        **A ``SUPERSEDE`` retires the whole ruled-on set** (ADR-0079 §3, restating
-        ADR-0050 §1): the record ``target_id`` names — **including** where that
-        target is ``EXTERNAL`` (ADR-0045 §5b) — *and* every other conflict in the
-        set the policy ruled on whose source is supersedable, in one atomic unit
-        with the correction. The two standing refusals are unchanged: nothing folds
-        onto a ``USER_ASSERTED`` target under either ruling, and a ``USER_ASSERTED``
-        *sibling* is never swept in **by the widening** — topical similarity may not
-        retire a record the user gave us (ADR-0045 §5). The user's own answer may:
-        ADR-0078 §5b narrows that hold-out for a **confirmed** correction, where
-        every confirmed asserted conflict is retired in the same batch and not only
-        the named target. Which sources the widening itself sweeps in is the
-        writer's **retirement class**, not this docstring's to enumerate: ADR-0079
-        §3 states the obligation intensionally — "whose source is supersedable" — so that
-        widening the class widens the contract without editing it, and ADR-0092 §4
-        has since widened it to include ``EXTERNAL``. The class is an allow-list
-        rather than "not ``USER_ASSERTED``" (ADR-0038 §2a), so a source added later
-        is enrolled by decision and never by omission, and the shared conformance
-        suite is what holds every writer to the same set.
-
-        **A conflict the writer holds a ``RESTATES`` or ``ADDS`` relation for is
-        never retired, by any ruling** (ADR-0159 §5, narrowing the obligation
-        above). It is not in the retirement set of a ``SUPERSEDE`` naming another
-        member, and a ``SUPERSEDE`` naming *it* is refused rather than performed.
-        The relation is one the **writer** holds and determined for itself, never
-        one read off the ruling — ADR-0038 §2a's shape, at the boundary that
-        performs the write.
-
-        **A supersession sweeps in only what the writer labelled a contradiction**
-        (ADR-0171 §2, narrowing the obligation above a second time). Where the
-        writer holds a ``CONTRADICTS`` relation for at least one member of the set
-        the policy ruled on, the ``SUPERSEDE`` retires the record ``target_id``
-        names and, beyond it, **only** those other members of that set it holds a
-        ``CONTRADICTS`` relation for; a member it holds **no** relation for is left
-        live, whatever its source. Where the writer holds that relation for **no**
-        member of the set, ADR-0079 §3's obligation binds exactly as it stands,
-        narrowed by ADR-0159 §5 and by nothing further — so a writer that determines
-        no relations at all conforms unchanged, and a user's correction, which
-        determines none by construction, still retires every stale sibling it is
-        shown (ADR-0079 §1). ADR-0078 §5b's confirmed batch is untouched by the
-        narrowing: an asserted conflict a confirmation covers is retired on exactly
-        the footing it had before, with no condition added and none removed. Like
-        the exclusion above, the relations are the writer's **own** and are never
-        read off the ruling.
-
-        **A retirement clamps, and never resurrects** (ADR-0080 §1). Each record a
-        supersession retires is written back with its window closed at the
-        **earlier** of the writer's close instant and the record's own
-        ``valid_until``, every other field preserved — so a retirement never
-        extends a window and never moves ``valid_from``. One close instant serves
-        the whole retirement set; how a writer determines that instant is expressly
-        not contract, so a writer with no clock at all still conforms. A record
-        already ended by its own terms is written back unchanged on the window,
-        which counts as resolved rather than skipped.
-
-        Where no representable close exists — a record the ruling would retire
-        carries a ``valid_from`` at or after that end, so the window would be empty
-        or inverted — this call **refuses**, with nothing written, no window
-        closed, and every record in the set left **unchanged**: a statement about
-        the stored records and their windows, not about what a later read returns,
-        which ADR-0045 §6's read-time predicate decides at the reader's own clock
-        (ADR-0080 §3).
-
-        **No writer *installs* a record whose ``provenance.evidence`` exceeds
-        :data:`~ai_assistant.core.types.MAX_EVIDENCE_CITATIONS`** (ADR-0086 §2).
-        Where the record it would install does, it installs the retained subset
-        and records the count of what it did not. The bound lives here and not on
-        :class:`~ai_assistant.core.types.Provenance` because a validator would run
-        on deserialisation too and make an *already-stored* over-long belief
-        unreadable; the type admits a longer tuple, and a record already stored
-        with one stays readable.
-
-        - **"Install" is ADR-0081 §1's sense**, reused rather than redefined: a
-          write installs when it stores the proposal's content at an id — an
-          ``ACCEPT`` or ``STORE_TEMPORARY`` at the proposed record's id, a
-          ``REINFORCE`` at its fold target, a ``SUPERSEDE``'s correction at the id
-          it mints. **A write that merely *retires* is not an install** and carries
-          the record as it stands, so a ``SUPERSEDE`` whose target is a legacy
-          over-bound record retires it with its tuple and its ``evidence_elided``
-          untouched. Truncating on the way *off* the read path would be an eager
-          rewrite, which is the failure this bound is placed here to avoid.
-        - **A ``REINFORCE`` whose union would exceed the bound retains the last
-          ``MAX_EVIDENCE_CITATIONS`` of the deduplicated union** — recency, because
-          the union deduplicates by id so every citation has weight exactly one and
-          "most reinforcing" does not exist to be selected, while the oldest
-          citations are the ones likeliest to have expired already (ADR-0086 §3).
-          ``SUPERSEDE`` is untouched by this: ADR-0040 §5a has it carry nothing of
-          the target across, so there is no union to bound.
-        - **The elision is recorded, never silent** (ADR-0086 §4). The installed
-          record's ``evidence_elided`` is the **sum of the counts on every record
-          the install draws content from, plus the citations this install
-          displaces** — one recurrence over every install, so a ``REINFORCE`` sums
-          both records' counts even when the union fits and a proposal that already
-          carried a count never has it reset. A ``SUPERSEDE`` draws from the
-          proposal alone; the target's count is not inherited, even though the
-          target's id survives.
-
-        The scope is a :class:`~ai_assistant.core.types.MemoryRecord` install.
-        :class:`~ai_assistant.core.types.Goal` carries a ``Provenance`` too and
-        does not cross this seam; ADR-0077 §11 assigns that to the lane adding an
-        inferred-goal producer.
+        **The refusals before a ruling.** A proposal whose memory carries a support
+        pointing at an episode the store does not hold is refused with
+        ``UnresolvedEvidenceError`` and nothing written (§4:7). Conflict detection
+        surfacing more conflicts than the writer resolves in one ingest is refused
+        (ADR-0079 §1). **After the ruling and before any write**, a write-producing
+        ruling on a ``DataTier.SECRET`` proposal is refused (ADR-0078 §5b check 0), and
+        a ruling that would install the proposal at an id its own supports point at is
+        refused (ADR-0081 §1): ``SelfConsumingWriteError`` for an ``ACCEPT`` at the
+        proposed id, ``FoldOntoCitedRecordError`` for a ``REINFORCE`` at its target.
+        A ``SUPERSEDE``'s minted id re-mints past such an id rather than refusing.
+        A retirement whose close is unrepresentable is refused with every memory left
+        unchanged (ADR-0080 §3, ADR-0328 §5:11).
 
         Args:
-            proposal: The candidate memory and why it was proposed. Its
-                ``conflicts`` are resolved here, not supplied by the caller.
+            proposal: The candidate memory and why it was proposed. Its ``conflicts``
+                are resolved here, not supplied by the caller.
 
         Returns:
-            The policy's decision and the id written, or ``None`` if nothing
-            was.
+            The policy's decision and the id left live, or ``None`` if nothing was
+            written.
 
         Raises:
-            UnresolvedEvidenceError: If a ``DERIVED`` proposal cites a record the
-                store does not hold. Carries the unresolved ids, so a caller can
-                tell an evidence record that went away under it from a producer
-                citing something it was never handed. Nothing is written and the
-                policy is not asked. A ``MemoryStoreError``, so an existing
-                handler for that class still catches it.
-            MemoryStoreError: If conflict resolution surfaces more conflicts than
-                this writer will resolve in one ingest (ADR-0079 §1) — nothing
-                written, no ruling sought; if a record the ruling would retire has
-                no representable close (ADR-0080 §3) — nothing written, every
-                record in the set unchanged; if a ``SUPERSEDE`` cannot mint an
-                uncited free id within its bound (ADR-0081 §4) — nothing written,
-                every target live and unchanged; if reading conflicts or writing a
-                record failed; or if a ``REINFORCE`` or ``SUPERSEDE`` named a
-                ``target_id`` that is not among the conflicts. Each of those
-                refusals raises this class and **not**
-                ``UnresolvedEvidenceError``, which names an *evidence* failure
-                rather than a conflict set, a target's window, or a write set
-                (ADR-0080 §7, ADR-0081 §3).
-            SelfConsumingWriteError: If an ``ACCEPT`` or ``STORE_TEMPORARY`` would
-                install the proposal at ``proposed.id`` and the proposal cites it
-                (ADR-0081 §1) — nothing written, every target live and unchanged.
-                The **producer** minted that id and the producer cited it, so
-                nothing outside it chose either value and the refusal is a producer
-                fault. A ``MemoryStoreError``, so an existing handler for that
-                class still catches it.
-            FoldOntoCitedRecordError: If a ``REINFORCE`` would fold onto a record
-                the proposal cites. A subclass of the above, because the
-                destination is the ruling's ``target_id`` — chosen by the
-                **policy**, by conflict detection over the proposal's own content,
-                which a producer generalising over the records it cites cannot
-                foresee. **This is the only arm a caller may continue past**: it
-                may treat the refusal as a ruling on one proposal, count it and
-                carry on, while the base class propagates (ADR-0116 §2, §4).
-                Catching the base in order to reach both absorbs a producer bug
-                into the path built for the case that is not one.
+            UnresolvedEvidenceError: If a support points at an episode the store does
+                not hold (§4:7). Nothing is written and the policy is not asked.
+            MemoryStoreError: On every other refusal above, or a store failure.
+                Nothing is written. ``MemoryStoreStaleError`` where a write met a
+                record another writer moved, on each of a bounded number of attempts
+                (ADR-0219 §5).
+            SelfConsumingWriteError: If an ``ACCEPT`` would install the proposal at an
+                id its own supports point at (ADR-0081 §1).
+            FoldOntoCitedRecordError: If a ``REINFORCE`` would fold onto a record the
+                proposal's supports point at — the only arm a caller may continue past
+                (ADR-0116 §2, §4).
+        """
+        ...
 
-                ADR-0081 §3 declined a subclass here on the ground that the
-                refusal "is never a race and always a producer fault, and no
-                caller has a second branch to take". ADR-0116 §3 keeps the first
-                half, bounds the second to the producer-chosen arm, and records
-                that the third expired when a scheduled bulk producer arrived.
+    async def apply(self, change: MemoryChange) -> None:
+        """Apply one operation to one stored memory (ADR-0328 §11:3).
+
+        Computes the record the operation yields from the memory the caller read
+        (:func:`~ai_assistant.core.types.applied_operation`) and writes it
+        conditionally on that memory's revision (§5:4), so a memory another writer
+        moved in between is refused rather than overwritten. An end, a mark wrong or a
+        replace naming a successor is written in one atomic write with the
+        successor's create (§5:6). Placement, topics and the track record are not
+        operations and are not written here (§5:2).
+
+        Every write §4, §5 or §6:5 refuses is refused, with nothing written: a support
+        pointing at an episode the store does not hold (§4:7); an operation citing a
+        support the memory does not carry once applied (§5:3); a create, which starts
+        a memory and is :meth:`ingest`'s (§11:4); a transition §5:7 does not allow; a
+        support stopped twice (§5:8); an end whose about-when lies after its instant
+        (§5:10); an unrepresentable close (§5:11); and a lower standing overriding a
+        higher one (§6:5). An add support whose part the memory already carries
+        changes nothing and is not an error (§4:8).
+
+        Args:
+            change: The memory as read, the operation, and what it brings with it.
+
+        Raises:
+            UnresolvedEvidenceError: If the support it adds, or the successor's,
+                points at an episode the store does not hold.
+            MemoryStoreStaleError: If the stored memory is not the one read: its
+                revision moved, or it is gone. Nothing is written; re-read and
+                re-decide.
+            MemoryStoreConflictError: If the successor's id names a stored record.
+            MemoryStoreError: If any other rule refuses the operation, or a store
+                failure. Nothing is written.
         """
         ...
 
@@ -2382,7 +2196,7 @@ class Reader(Protocol):
 
         **Each proposal carries a ``rationale`` naming the source, and a
         ``sensitivity`` chosen for what the source holds rather than defaulted.**
-        ``MemoryUpdateProposal.sensitivity`` defaults to ``DataTier.PERSONAL``,
+        ``SourceProposal.sensitivity`` defaults to ``DataTier.PERSONAL``,
         which is correct for a calendar and must not be assumed correct for the
         next source; a producer that defaults its way past that classification is
         the failure ADR-0004 §1's tiering exists to prevent.
@@ -2434,7 +2248,7 @@ class Fetcher(Protocol):
 
     The **fetch** seam: it shows what a configured local root currently holds, and
     reads one entry of that listing into a single attested
-    :class:`~ai_assistant.core.types.MemoryRecord` carrying the file's own text.
+    :class:`~ai_assistant.core.types.SemanticMemory` carrying the file's own text.
     Named for its product role, as every Protocol here is (``MemoryWriter``,
     ``Reader``): the role is *fetching one named thing, now, for this turn*.
 
@@ -8766,27 +8580,22 @@ class AssistantEngine(Protocol):
         self,
         *,
         bands: Sequence[BeliefBand] | None = None,
-        kinds: Sequence[MemoryKind] | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
     ) -> tuple[BeliefSummary, ...]:
-        """List what the assistant believes, newest revision first.
+        """List the memories the assistant holds, newest revision first.
 
-        **Returns summaries, not beliefs**, and the type is the enforcement
-        (ADR-0085 §4a). ADR-0077 §6 gives the listing *existence* — the count, the
-        lost count and the adjusted confidence — and gives resolved citations to
-        :meth:`belief` alone. A :class:`~ai_assistant.core.types.BeliefSummary` has
-        nowhere to put a citation's content, so a conforming listing cannot ship
-        the corpus on every page.
-
-        The listing still *resolves* existence per citation, because the adjusted
-        confidence is a function of how many citations resolved.
+        **Memories only**: the listing excludes episodes (ADR-0328 §11:2, ADR-0074
+        §6), and every entry is a :class:`~ai_assistant.core.types.BeliefSummary`
+        carrying the values ADR-0328 §15:1 names. **Returns summaries, not the
+        single-memory view**, and the type is the enforcement (ADR-0085 §4a): a
+        summary has nowhere to put a support's content, so a conforming listing cannot
+        ship the corpus on every page. It still resolves whether each memory's
+        supports' episodes resolve, for §15:7's mark.
 
         Args:
-            bands: Which standings to include, or ``None`` for every band. An empty
+            bands: Which bands to include, or ``None`` for every band. An empty
                 sequence selects nothing, which is a different answer from ``None``.
-            kinds: Which typed memories to include, or ``None`` for every kind. The
-                two filters compose by conjunction.
             limit: How many to return. Defaults to
                 :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`, and an
                 implementation called without it behaves as though it had been
@@ -8794,7 +8603,7 @@ class AssistantEngine(Protocol):
             offset: How many to skip.
 
         Returns:
-            One summary per live belief, in the store's stated order.
+            One summary per live memory, in the store's stated order.
 
         Raises:
             ValueError: If ``limit`` or ``offset`` is outside ``[0, 2**63)``.
@@ -8806,17 +8615,16 @@ class AssistantEngine(Protocol):
         ...
 
     async def belief(self, record_id: Identifier) -> Belief | None:
-        """Read one belief with its citations resolved, or ``None`` if there is none.
+        """Read one memory with its supports resolved, or ``None`` if there is none.
 
-        The other half of ADR-0077 §6's split: this is the view that renders the
-        surviving citations as readable evidence and the lost ones as tombstones.
+        The single-memory view (ADR-0328 §15:2): every support, the part it points
+        at resolved to readable content or shown as gone.
 
         Args:
-            record_id: The belief's id, as the listing showed it.
+            record_id: The memory's id, as the listing showed it.
 
         Returns:
-            The belief, or ``None`` where the store holds no live record by that
-            id.
+            The memory, or ``None`` where the store holds no live memory by that id.
 
         Raises:
             ValueError: If ``record_id`` is blank.

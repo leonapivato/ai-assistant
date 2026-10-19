@@ -59,9 +59,9 @@ from ai_assistant.core.errors import (
     MemoryStoreEmbeddingExpiredError,
     MemoryStoreError,
 )
-from ai_assistant.core.types import EpisodicMemory
+from ai_assistant.core.types import EpisodicMemory, record_band
 from ai_assistant.memory._channel_reads import channel_of
-from ai_assistant.memory._episode_format import check_format, inspect_existing
+from ai_assistant.memory._episode_format import check_memory_format, inspect_existing
 from ai_assistant.memory._episode_guard import is_open
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory.sqlite_store import (
@@ -144,7 +144,7 @@ _LEGACY_SOURCE_COLUMNS: Final = "rowid, id, kind, data, NULL"
 #: so the two cannot come to disagree about what a rebuilt row carries.
 _DESTINATION_COLUMNS: Final = (
     "rowid, id, kind, data, expires_at, valid_until, valid_from, about_person, revision, "
-    "occurred_at, channel_type, channel_instance, is_open"
+    "occurred_at, channel_type, channel_instance, is_open, band"
 )
 
 #: The named columns of :data:`_DESTINATION_COLUMNS` — ``rowid`` is implicit and is
@@ -302,7 +302,7 @@ def _schema_is_current(work: sqlite3.Connection) -> bool:
         is the exit every sibling condition takes.
     """
     try:
-        check_format(work)
+        check_memory_format(work)
         columns = {str(row[1]) for row in work.execute("PRAGMA table_info(records)")}
         tables = {
             str(row[0]) for row in work.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -429,8 +429,10 @@ def _decode(data: str, record_id: object) -> MemoryRecord:
 
 def _derived(
     record: MemoryRecord,
-) -> tuple[int | None, int | None, int | None, str | None, int | None, str | None, str | None, int]:
-    """The lifecycle, window, subject, instant, channel and open columns, as the write path does.
+) -> tuple[
+    int | None, int | None, int | None, str | None, int | None, str | None, str | None, int, str
+]:
+    """The lifecycle, window, subject, instant, channel, open and band columns, as written.
 
     Kept in this shape — read off the decoded model, not re-parsed from the JSON —
     so it cannot drift from ``SqliteMemoryStore._persist_record``, which is the
@@ -480,6 +482,9 @@ def _derived(
         None if channel is None else channel.channel_type,
         None if channel is None else channel.instance_id,
         int(is_open(record)),
+        # ADR-0328 §7:11's derivation, which ``search`` binds before its cut: a rebuild
+        # that left it ``NULL`` would drop every record out of every band-scoped read.
+        str(record_band(record)),
     )
 
 
@@ -640,7 +645,7 @@ class Reembedder:
         conn = _connect(self._store)
         try:
             _require_rollback_journal(conn, self._store)
-            check_format(conn)
+            check_memory_format(conn)
             meta = _read_meta(conn, str(self._store))
             records = _count(conn, "records", str(self._store))
         finally:
@@ -770,7 +775,7 @@ class Reembedder:
         try:
             work = _connect(self._work)
             try:
-                check_format(source)
+                check_memory_format(source)
                 columns = _source_columns(source, self._store)
                 embedded = await self._copy(source, work, cursor, resumed, plan, progress, columns)
                 self._finalise(source, work)
@@ -1177,10 +1182,11 @@ def _insert(
         channel_type,
         instance,
         open_episode,
+        band,
     ) = _derived(record)
     work.execute(
         f"INSERT INTO records({_DESTINATION_COLUMNS}) "  # noqa: S608 — a module-level literal, never caller data
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             rowid,
             record_id,
@@ -1195,6 +1201,7 @@ def _insert(
             channel_type,
             instance,
             open_episode,
+            band,
         ),
     )
     # An open episode carries no vector (ADR-0286 §12:5), as the store wrote it.
@@ -1321,7 +1328,7 @@ def _verify(
         MemoryStoreError: If anything does not line up. The caller has not
             touched the live store at this point and must not.
     """
-    check_format(work)
+    check_memory_format(work)
     meta = _read_meta(work, str(plan.work))
     if set(meta) != _STORE_META_KEYS:
         _fail(f"its metadata holds {sorted(meta)}, expected exactly {sorted(_STORE_META_KEYS)}")
@@ -1338,7 +1345,7 @@ def _verify(
         if left[:4] != right[:4]:
             _fail(f"row {right[0]!r} differs from the live store's row {left[0]!r}")
         record = _decode(str(right[3]), right[1])
-        if (*right[4:8], *right[9:13]) != _derived(record):
+        if (*right[4:8], *right[9:14]) != _derived(record):
             _fail(f"row {right[0]!r} has columns that disagree with the record stored in it")
         highest = max(highest, _verified_stamp(left, right))
     _verify_issuer(source, work, highest)

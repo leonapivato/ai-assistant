@@ -37,17 +37,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
-from ai_assistant.core.types import (
-    EpisodicMemory,
-    MemoryKind,
-    MemorySource,
-    Provenance,
-    SemanticMemory,
-)
+from ai_assistant.core.types import EpisodicMemory, MemoryKind, MemorySource, Provenance
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.models.embeddings import HashingEmbedder
 from ai_assistant.models.fastembed_embedder import FastEmbedEmbedder
 from ai_assistant.testing import FakeTraceSink
+from ai_assistant.testing.memories import memory
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -183,12 +178,8 @@ class Measurement:
 
 
 def _records() -> list[MemoryRecord]:
-    provenance = Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AT)
     observed = Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=_AT)
-    facts: list[MemoryRecord] = [
-        SemanticMemory(id=key, content=text, fact=text, provenance=provenance)
-        for key, text in FACTS.items()
-    ]
+    facts: list[MemoryRecord] = [memory(key, text) for key, text in FACTS.items()]
     episodes: list[MemoryRecord] = [
         EpisodicMemory(id=key, content=text, occurred_at=_AT, provenance=observed)
         for key, text in EPISODES.items()
@@ -201,7 +192,7 @@ async def _scores(store: SqliteMemoryStore, cue: str) -> dict[str, float]:
     found = await store.search(
         cue,
         limit=len(FACTS) + len(EPISODES),
-        kinds=(MemoryKind.EPISODIC, MemoryKind.SEMANTIC),
+        kinds=(MemoryKind.EPISODIC, MemoryKind.MEMORY),
     )
     return {record.id: record.score for record in found.records if record.score is not None}
 

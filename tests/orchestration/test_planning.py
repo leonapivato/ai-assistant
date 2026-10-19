@@ -20,6 +20,7 @@ from ai_assistant.core.types import (
     ActivationDigest,
     ActivationUnderstanding,
     Attestation,
+    BeliefBand,
     CapabilityEffect,
     CapabilityResult,
     ChannelContext,
@@ -36,7 +37,9 @@ from ai_assistant.core.types import (
     Idempotency,
     InputOrigin,
     LabelKind,
+    Memory,
     MemorySource,
+    MemoryWriterName,
     Message,
     NewConversation,
     OfferedTool,
@@ -52,19 +55,20 @@ from ai_assistant.core.types import (
     RiskLevel,
     Role,
     RoundResponse,
-    SemanticMemory,
     StageEntry,
     StageOutcome,
     StoryMember,
     StoryMemberKind,
     ToolCost,
     ToolDefinition,
+    TrackRecordEntry,
     UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
     UnderstandingReference,
     UnderstandingReferent,
     WholeTextReply,
+    band_of,
 )
 from ai_assistant.orchestration.planning import (
     DELIBERATE_REPEAT,
@@ -83,6 +87,13 @@ from ai_assistant.orchestration.planning import (
     offered_tools,
 )
 from ai_assistant.testing import FakeDiagnosticSink, FakeToolCallingCompleter
+from ai_assistant.testing.memories import (
+    confirmed_support,
+    memory,
+    remembered_support,
+    said_support,
+    sourced_support,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -1226,22 +1237,22 @@ async def test_a_round_with_no_notes_marks_none() -> None:
 # --- ADR-0308 §3: what recall found ---------------------------------------------------------
 
 
-def _remembered(memory_id: str, source: MemorySource, fact: str) -> SemanticMemory:
-    return SemanticMemory(
-        id=memory_id,
-        content=fact,
-        fact=fact,
-        provenance=Provenance(
-            source=source,
-            confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.8,
-            last_updated=_AT,
-            attestation=(
-                Attestation(reported_by="mail", reported_at=_AT)
-                if source is MemorySource.EXTERNAL
-                else None
-            ),
-        ),
-    )
+def _remembered(memory_id: str, source: MemorySource, fact: str) -> Memory:
+    """A memory in the band ``source`` names (ADR-0328 §12), dated :data:`_AT`.
+
+    ``EXTERNAL`` is a source support from the mail reader, which rests on outside
+    content; ``USER_ASSERTED`` the user's own message; anything else a remember call.
+    """
+    match band_of(source):
+        case BeliefBand.ASSERTED:
+            support = said_support(when=_AT, added_at=_AT)
+        case BeliefBand.ATTESTED:
+            support = sourced_support(
+                Attestation(reported_by="mail", reported_at=_AT), when=_AT, added_at=_AT
+            )
+        case BeliefBand.DERIVED:
+            support = remembered_support(when=_AT, added_at=_AT)
+    return memory(memory_id, fact, support)
 
 
 async def test_a_found_episode_is_shown_by_its_records_with_its_stories_labels() -> None:
@@ -1342,18 +1353,57 @@ async def test_a_found_memory_record_is_shown_only_where_its_source_is_not_outsi
         {
             "label": "M1",
             "item": "a remembered fact: something the user said",
+            "standing": "the user said it",
             "last_updated": _AT.isoformat(),
+            "as_of": _AT.isoformat(),
+            "learned": _AT.isoformat(),
             "fact": "The dentist is Dr Rao.",
+            "reading_certainty": "not judged",
         },
         {
             "label": "M2",
             "item": "a remembered fact: something the assistant worked out",
+            "standing": "the assistant inferred it",
             "last_updated": _AT.isoformat(),
+            "as_of": _AT.isoformat(),
+            "learned": _AT.isoformat(),
             "fact": "Appointments are on Fridays.",
+            "evidence": {"supporting": 1, "against": 0, "episodes": 1},
+            "reading_certainty": "not judged",
         },
     ]
     assert "Your appointment moved" not in completer.last_call.messages[1].content
     assert "m-mail" not in {one.id for one in planned.labels}
+
+
+async def test_a_memory_label_carries_what_adr_0328_15_5_names() -> None:
+    """ADR-0328 §15:5: standing, age, reading certainty only where not ``sure``, and the
+    track record only where it has one; the evidence summary only for an inference."""
+    confirmed = memory(
+        "m-confirmed", "The dentist is Dr Rao.", confirmed_support(when=_AT, added_at=_AT)
+    )
+    relied = TrackRecordEntry(
+        episode="activation:relied",
+        relied_at=_AT,
+        held_up=False,
+        recorded_at=_AT,
+        recorded_by=MemoryWriterName.REMEMBER,
+    )
+    undated = memory(
+        "m-undated",
+        "Appointments are on Fridays.",
+        remembered_support(when=None, added_at=_AT),
+        track_record=(relied,),
+    )
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(recalled=(confirmed, undated)))
+    shown_confirmed, shown_undated = _sent(completer)["recalled"]
+    assert shown_confirmed["standing"] == "the user confirmed this wording"
+    assert "reading_certainty" not in shown_confirmed
+    assert "evidence" not in shown_confirmed
+    assert "track_record" not in shown_confirmed
+    assert (shown_undated["as_of"], shown_undated["learned"]) == ("unknown", "unknown")
+    assert shown_undated["track_record"] == {"relied_on": 1, "held_up": 0, "let_down": 1}
 
 
 async def test_a_found_episode_the_episode_window_shows_is_not_shown_again() -> None:

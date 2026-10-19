@@ -100,7 +100,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Sequence
 
     from ai_assistant.core.protocols import DiagnosticSink, ModelProvider
-    from ai_assistant.core.types import SemanticMemory
+    from ai_assistant.core.types import Memory
     from ai_assistant.orchestration.held_results import HeldResult
 
 __all__ = [
@@ -507,7 +507,7 @@ class DigestingStage:
 
     async def digest_recall(
         self,
-        fetch: Callable[[], Awaitable[Sequence[SemanticMemory]]],
+        fetch: Callable[[], Awaitable[Sequence[Memory]]],
         *,
         question: str,
         labels: ActivationLabels,
@@ -543,7 +543,7 @@ class DigestingStage:
 
     async def digest_records(
         self,
-        fetch: Callable[[], Awaitable[Sequence[SemanticMemory]]],
+        fetch: Callable[[], Awaitable[Sequence[Memory]]],
         *,
         result_id: str | None,
         question: str,
@@ -585,7 +585,9 @@ class DigestingStage:
         fetched = await self._fetched(fetch, deadline)
         if isinstance(fetched, str):
             return await self._recorded(question, fetched, labels, result_id=result)
-        records = [_Record(kind=LabelKind.MEMORY, thing=one.id, text=one.fact) for one in fetched]
+        records = [
+            _Record(kind=LabelKind.MEMORY, thing=one.id, text=one.content) for one in fetched
+        ]
         if not records:
             _log.info("digest_skipped", stage="digesting", reason="nothing_fetched")
             return None
@@ -593,8 +595,8 @@ class DigestingStage:
         return await self._recorded(question, kept, labels, result_id=result)
 
     async def _fetched(
-        self, fetch: Callable[[], Awaitable[Sequence[SemanticMemory]]], deadline: datetime
-    ) -> Sequence[SemanticMemory] | DigestFailure:
+        self, fetch: Callable[[], Awaitable[Sequence[Memory]]], deadline: datetime
+    ) -> Sequence[Memory] | DigestFailure:
         """Recall's records, fetched inside the deadline, or why they could not be."""
         remaining = (deadline - self._now()).total_seconds()
         if remaining <= 0:

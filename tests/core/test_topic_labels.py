@@ -25,6 +25,7 @@ from ai_assistant.core.types import (
     SemanticMemory,
     TopicLabel,
 )
+from ai_assistant.testing.memories import memory
 
 _LABEL: TypeAdapter[str] = TypeAdapter(TopicLabel)
 
@@ -175,7 +176,7 @@ def test_a_record_over_the_install_bound_constructs_and_decodes() -> None:
 
 def _proposal(topics: tuple[str, ...]) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(
-        proposed=_record(topics=topics),
+        proposed=memory("m-1", "the user sleeps badly", topics=topics),
         rationale="because the episodes support it",
         sensitivity=DataTier.PERSONAL,
     )
@@ -197,7 +198,7 @@ def test_a_content_difference_still_separates_two_questions() -> None:
     """The exclusion is of one field, not of the projection's discrimination."""
     labelled = _proposal(("health",))
     other = MemoryUpdateProposal(
-        proposed=_record(content="the user swims", fact="the user swims", topics=("health",)),
+        proposed=memory("m-1", "the user swims", topics=("health",)),
         rationale="because the episodes support it",
         sensitivity=DataTier.PERSONAL,
     )

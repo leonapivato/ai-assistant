@@ -71,7 +71,6 @@ from ai_assistant.testing.cancellation import SuspendableResource
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from ai_assistant.core.types import MemoryRecord
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: The identity this fake declares unless a test names another. Tier 2 and says what
@@ -385,7 +384,7 @@ class FakeFetcher:
         monotonic, wall = deadlines
         return self._monotonic() >= monotonic or _nanoseconds(self._now()) >= wall
 
-    def _mint_record(self, text: str) -> MemoryRecord:
+    def _mint_record(self, text: str) -> SemanticMemory:
         """One ``SEMANTIC``, ``EXTERNAL``-sourced record carrying the text verbatim."""
         read_at = self._now()
         return SemanticMemory(

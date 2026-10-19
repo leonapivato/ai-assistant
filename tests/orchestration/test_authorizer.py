@@ -31,8 +31,10 @@ from ai_assistant.core.types import (
     Idempotency,
     InputOrigin,
     LabelKind,
+    Memory,
     MemoryDecisionKind,
     MemorySource,
+    MemoryStanding,
     NewConversation,
     PermissionOutcome,
     Placement,
@@ -51,11 +53,13 @@ from ai_assistant.core.types import (
     StoryMemberKind,
     StoryNote,
     StoryNoteAuthor,
+    SupportOrigin,
     ToolCall,
     ToolCost,
     ToolDefinition,
     ToolResult,
     WholeTextReply,
+    part_episode,
 )
 from ai_assistant.orchestration import acting
 from ai_assistant.orchestration.acting import (
@@ -732,7 +736,9 @@ async def test_remembering_is_filled_by_the_hub_and_passes_memory_policy() -> No
     }
     (asked,) = hub.memory_policy.calls
     assert asked.proposal.proposed.id == remembered_record_id("effect:1")
-    assert asked.proposal.proposed.provenance.source is MemorySource.INFERRED
+    assert asked.proposal.proposed.standing is MemoryStanding.INFERENCE
+    (support,) = asked.proposal.proposed.supports
+    assert support.origin is SupportOrigin.REMEMBERED
     assert asked.conflicts == ()
 
 
@@ -763,7 +769,9 @@ async def test_remembering_after_outside_content_is_marked_and_needs_you() -> No
 
     assert decided.verdicts[0].verdict is Verdict.NEEDS_YOU
     (asked,) = hub.memory_policy.calls
-    assert asked.proposal.proposed.provenance.derived_from_external is True
+    assert asked.proposal.proposed.rests_on_outside_content is True
+    (support,) = asked.proposal.proposed.supports
+    assert support.origin is SupportOrigin.REMEMBERED_OVER_OUTSIDE
 
 
 # --- the match and the message ----------------------------------------------------------------
@@ -890,8 +898,8 @@ async def test_a_remembered_statement_is_written_once_through_actings_own_record
 
     assert acted.calls[0].outcome is ActedOutcome.DONE
     written = await hub.memory.get(remembered_record_id("effect:1"))
-    assert written is not None
-    assert written.provenance.evidence == (_EPISODE,)
+    assert isinstance(written, Memory)
+    assert [part_episode(one.points_at) for one in written.supports] == [_EPISODE]
     (effect,) = await plans.activation_effects([_ACTIVATION])
     assert effect.decision_id == first.verdicts[0].decision_id
     assert repeated.calls[0].outcome is ActedOutcome.NOT_DONE

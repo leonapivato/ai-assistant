@@ -35,20 +35,20 @@ from aged_store import (
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     BeliefBand,
+    EpisodicMemory,
     MemoryKind,
     MemoryRecord,
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
-    PreferenceMemory,
     Provenance,
-    SemanticMemory,
     Validity,
 )
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.memory import health as health_module
 from ai_assistant.memory.health import MAX_K, StoreHealthReader, StoreHealthReport
 from ai_assistant.testing import FakeTraceSink
+from ai_assistant.testing.memories import memory_in_band
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -93,22 +93,17 @@ def _record(  # noqa: PLR0913 — one keyword per field a census reads, which is
     *,
     expires_at: datetime | None = None,
     validity: Validity | None = None,
-    source: MemorySource = MemorySource.OBSERVED,
+    band: BeliefBand = BeliefBand.DERIVED,
     about_person: str | None = None,
 ) -> MemoryRecord:
-    """One semantic record, varying only the fields a census reads."""
-    return SemanticMemory(
-        id=record_id,
-        content=content,
-        fact=content,
+    """One memory, varying only the fields a census reads."""
+    return memory_in_band(
+        record_id,
+        content,
+        band,
         about_person=about_person,
         expires_at=expires_at,
         validity=validity if validity is not None else Validity(),
-        provenance=Provenance(
-            source=source,
-            confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.6,
-            last_updated=_NOW,
-        ),
     )
 
 
@@ -145,12 +140,12 @@ async def _write(store: SqliteMemoryStore, records: Sequence[MemoryRecord]) -> N
     )
 
 
-def _preference(record_id: str, content: str, *, validity: Validity | None = None) -> MemoryRecord:
-    """One preference record, so a case can decompose a store by more than one kind."""
-    return PreferenceMemory(
+def _episode(record_id: str, content: str, *, validity: Validity | None = None) -> MemoryRecord:
+    """One episode, so a case can decompose a store by more than one kind (ADR-0328 §2:1)."""
+    return EpisodicMemory(
         id=record_id,
         content=content,
-        preference=content,
+        occurred_at=_NOW,
         validity=validity if validity is not None else Validity(),
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_NOW),
     )
@@ -650,9 +645,9 @@ class TestWhatTheReportCarries:
                 _record("s0", "t0 p0 u0"),
                 _record("s1", "t0 p1 u1", validity=closed),
                 _record("s2", "t0 p2 u2", validity=closed),
-                _preference("p0", "t0 p3 u3"),
-                _preference("p1", "t0 p4 u4"),
-                _preference("p2", "t0 p5 u5", validity=closed),
+                _episode("p0", "t0 p3 u3"),
+                _episode("p1", "t0 p4 u4"),
+                _episode("p2", "t0 p5 u5", validity=closed),
             ],
         )
         store.close()
@@ -660,16 +655,17 @@ class TestWhatTheReportCarries:
         report = _census_of(store_path, k=2)
 
         kinds = dict(report.by_kind)
-        semantic = kinds[MemoryKind.SEMANTIC.value]
-        preference = kinds[MemoryKind.PREFERENCE.value]
-        assert (semantic.total, semantic.live, semantic.retired) == (3, 1, 2)
-        assert (preference.total, preference.live, preference.retired) == (3, 2, 1)
+        memories = kinds[MemoryKind.MEMORY.value]
+        episodes = kinds[MemoryKind.EPISODIC.value]
+        assert (memories.total, memories.live, memories.retired) == (3, 1, 2)
+        assert (episodes.total, episodes.live, episodes.retired) == (3, 2, 1)
         # Of the kind's own total, which is what "the total" is inside a part of a
         # decomposition — and 1/3 rather than the 1/6 a store-wide denominator gives.
-        assert semantic.live_share.value == pytest.approx(1 / 3)
-        assert preference.live_share.value == pytest.approx(2 / 3)
-        assert semantic.retired_share.value == pytest.approx(2 / 3)
-        assert kinds[MemoryKind.EPISODIC.value].live_share.defined is False
+        assert memories.live_share.value == pytest.approx(1 / 3)
+        assert episodes.live_share.value == pytest.approx(2 / 3)
+        assert memories.retired_share.value == pytest.approx(2 / 3)
+        # No store holds a minted record since ADR-0328 §2:4, so this kind is empty.
+        assert kinds[MemoryKind.SEMANTIC.value].live_share.defined is False
 
         rendered = report.render()
         assert "0.3333" in rendered
@@ -682,7 +678,7 @@ class TestWhatTheReportCarries:
     ) -> None:
         """§3 states the band fill "for each ``BeliefBand``", not for each band met.
 
-        A store of nothing but ``OBSERVED`` records has no attested belief and no
+        A store of nothing but inferences has no attested belief and no
         asserted one. Omitting those lines would leave a reader to guess whether
         the band was empty or the report forgot it — which is §1's own argument
         about a zero, applied to a count that really was measured.
@@ -714,7 +710,7 @@ class TestWhatTheReportCarries:
                     "zzsecretidzz",
                     "t0 p0 qqcontentqq",
                     about_person="wwsubjectww",
-                    source=MemorySource.USER_ASSERTED,
+                    band=BeliefBand.ASSERTED,
                 ),
                 *_plain(5, start=1),
             ],
@@ -728,7 +724,7 @@ class TestWhatTheReportCarries:
         assert "wwsubjectww" not in rendered
         assert "0." in rendered, "a report stating nothing would pass the three assertions above"
         # The labels §7 does permit are here, so the absences above are absences.
-        assert MemoryKind.SEMANTIC.value in rendered
+        assert MemoryKind.MEMORY.value in rendered
         assert BeliefBand.ASSERTED.value in rendered
         assert BeliefBand.DERIVED.value in rendered
 

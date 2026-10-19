@@ -1,16 +1,26 @@
 """Ingesting proposed memories: conflict detection, policy, and application.
 
-``MemoryIngestor`` closes the propose/dispose/persist loop. Given a
-:class:`~ai_assistant.core.types.MemoryUpdateProposal` (the "propose" half), it:
+``MemoryIngestor`` closes the propose/dispose/persist loop (ADR-0028, ADR-0328 §11).
+Given a :class:`~ai_assistant.core.types.MemoryUpdateProposal` whose memory its
+producer built, it:
 
-1. detects conflicting existing memories (same kind, highly similar content),
-2. asks the injected :class:`~ai_assistant.core.protocols.MemoryPolicy` to rule
-   on the proposal given those conflicts (the "dispose" half), and
-3. applies the ruling to the injected
-   :class:`~ai_assistant.core.protocols.MemoryStore` (the "persist" half).
+1. refuses a proposal whose supports point at an episode the store does not hold
+   (ADR-0328 §4:7),
+2. detects conflicting memories (highly similar wording),
+3. asks the injected :class:`~ai_assistant.core.protocols.MemoryPolicy` to rule, and
+4. applies the ruling to the injected :class:`~ai_assistant.core.protocols.MemoryStore`:
+   an ``ACCEPT`` installs the memory, a ``REINFORCE`` adds its supports to the target,
+   a ``SUPERSEDE`` installs it at a fresh id and ends what it retires (§11:5-§11:8).
 
-It depends only on the store and policy contracts, so it is agnostic to which
-concrete store or policy is wired in.
+It also applies one operation to one stored memory (:meth:`MemoryIngestor.apply`,
+§11:3), computing the record the operation yields through ``core``'s
+:func:`~ai_assistant.core.types.applied_operation`, which the canonical fake computes
+through too.
+
+It depends only on the store and policy contracts, so it is agnostic to which concrete
+store or policy is wired in. Every rule of the ratified write path over a field
+ADR-0328 keeps stays as it stood, read through §12 (§11:9): where a rule named a
+``MemorySource`` it reads the memory's band.
 """
 
 from __future__ import annotations
@@ -18,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from math import isfinite
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, assert_never
@@ -33,35 +43,36 @@ from ai_assistant.core.errors import (
     UnresolvedEvidenceError,
 )
 from ai_assistant.core.types import (
-    MAX_EVIDENCE_CITATIONS,
     MAX_TOPICS_PER_RECORD,
     BeliefBand,
     ConflictRelation,
     DataTier,
-    EpisodicMemory,
+    LegacyPart,
+    Memory,
     MemoryDecisionKind,
     MemoryIngestResult,
     MemoryKind,
-    MemorySource,
+    MemoryOperation,
+    MemoryOperationKind,
+    MemorySupport,
     MemoryWrite,
     MemoryWriteMode,
-    Provenance,
+    SupportDirection,
     TraceKind,
     TraceRecordSet,
     Validity,
-    band_of,
+    applied_operation,
+    part_episode,
+    record_band,
 )
 from ai_assistant.memory import traces
 from ai_assistant.memory._agreement import agrees
 from ai_assistant.memory._reconciler import ReconcilerOutcome
 
-# `memory`'s own policy module, for its floor predicate alone (ADR-0159 §2, §10).
-# The dependency is on a *predicate over the proposal*, not on the injected policy:
-# `MemoryIngestor` still takes rulings from whatever `MemoryPolicy` it was given,
-# and this import is what stops the invocation condition becoming a second copy of
-# the floor that could drift from the one that rules. ADR-0159 §10 forbids the
-# duplicate in as many words — "both modules are `memory`'s, so a duplicate that
-# could drift is avoidable here and is not to be written".
+# `memory`'s own policy module, for its floor predicate alone (ADR-0159 §2, §10). The
+# dependency is on a *predicate over the proposal*, not on the injected policy: this
+# import is what stops the invocation condition becoming a second copy of the floor
+# that could drift from the one that rules.
 from ai_assistant.memory.policy import clears_admissibility_floor
 
 if TYPE_CHECKING:
@@ -70,6 +81,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, TraceSink
     from ai_assistant.core.types import (
+        MemoryChange,
         MemoryDecision,
         MemoryRecord,
         MemoryUpdateProposal,
@@ -80,17 +92,10 @@ _DEFAULT_CONFLICT_THRESHOLD = 0.75
 
 #: The **ceiling** on the conflicts one ingest resolves, not a truncation budget
 #: (ADR-0079 §1). At or below it the whole detected set reaches the policy and a
-#: ``SUPERSEDE`` retires all of it; above it the ingest refuses. That re-founding
-#: is why the value is 100 rather than ADR-0050's 5: a truncation budget wants to
-#: be small, a circuit breaker wants to be an order of magnitude past any ordinary
-#: correction — above 100 above-threshold same-kind conflicts the store is holding
-#: a runaway, and a correction is the wrong moment to discover that quietly.
+#: ``SUPERSEDE`` retires all of it; above it the ingest refuses.
 _DEFAULT_CONFLICT_LIMIT = 100
 
-#: How many times supersession re-mints a colliding id before giving up. A minted
-#: id (``uuid4``) collides with vanishing probability, so a handful of attempts is
-#: already far past any real collision; the bound exists to make a *pathological*
-#: id factory (one that always collides) fail loudly rather than spin (ADR-0045 §4).
+#: How many times supersession re-mints a colliding id before giving up (ADR-0045 §4).
 _MAX_SUPERSEDE_ATTEMPTS = 5
 
 
@@ -98,129 +103,62 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-# --- two classes, because one constant answered two questions (ADR-0092 §5) ---
-# Until ADR-0092 these were a single `_SUPERSEDABLE` frozenset, and they were the
-# same set only by coincidence. §4 breaks the coincidence, and the split is the
-# whole of ADR-0092 §5: widening one identifier would have made the *reinforce*
-# refusal below stop firing for an `EXTERNAL` target — a one-line change that
-# passes the gate and reopens the exact data loss ADR-0038 §2a reproduced.
-#
-# **They must not be tidied back into one.** ADR-0092's Consequences names this as
-# the kind of thing a later reader merges; the conformance case pinning the
-# `USER_ASSERTED` -> `EXTERNAL` `REINFORCE` refusal is what stops the tidy-up. The
-# general shape is worth naming, since it is the second time this file has produced
-# it: ADR-0045 §5 had to make the same refusal *relation*-aware after ADR-0040 §3
-# had keyed it on the records. A set that answers two questions answers neither once
-# the questions come apart.
+# --- three classes, because one constant answered two questions (ADR-0092 §5) ---
+# Read through ADR-0328 §12: each was a set of sources and is now a set of bands.
+# **They must not be tidied back into one**: they answer different questions, and the
+# conformance cases pinning each refusal are what stop the tidy-up.
 
-#: The **retirement class** — beliefs a correction is warranted to retire, used by
+#: The **retirement class** — bands a correction is warranted to retire, used by
 #: :func:`_retirement_set`'s widening (ADR-0050 §1, ADR-0079 §3, widened by ADR-0092
-#: §4). Held here as well as in `policy`, deliberately: the policy chooses, but
-#: `MemoryIngestor` takes rulings from *any* injected `MemoryPolicy`, so the safety
-#: property has to hold at the boundary that performs the write rather than at the
-#: one that recommends it. Still an allow-list rather than "not USER_ASSERTED", so a
-#: `MemorySource` added later is not enrolled in a destructive rule by omission
-#: (ADR-0038 §2a's surviving argument).
-_RETIREMENT_CLASS = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED, MemorySource.EXTERNAL})
+#: §4). Held here as well as in `policy`, deliberately: the policy chooses, but this
+#: writer takes rulings from *any* injected `MemoryPolicy`, so the safety property has
+#: to hold at the boundary that performs the write. An allow-list rather than "not
+#: ASSERTED", so a band added later is not enrolled in a destructive rule by omission.
+_RETIREMENT_CLASS = frozenset({BeliefBand.DERIVED, BeliefBand.ATTESTED})
 
-#: The **reinforce-safe class** — targets a user assertion may safely fold onto *at
-#: the target's id*, used by :func:`_refuse_unsafe_fold`'s ``REINFORCE`` arm
-#: (ADR-0038 §2a, narrowed to ``REINFORCE`` by ADR-0045 §5b, widened with
-#: ``USER_ASSERTED`` by ADR-0121 §5). Membership means "does not carry a foreign
-#: idempotency key", and **``EXTERNAL`` still does not satisfy it**: a `REINFORCE`
-#: inherits the target's id, so a correction folded onto an imported record is
-#: overwritten by the next routine sync. ADR-0092 §4 widened what an assertion may
-#: *retire* and has no ground to touch what it may fold onto — a `SUPERSEDE` is safe
-#: there only because ADR-0045 §4 makes it mint a fresh id.
-#:
-#: **``USER_ASSERTED`` joins to match the membership rule, not past it** (ADR-0121
-#: §5). A record the user gave us carries no foreign key either; it was outside the
-#: set only because clause 1 already refused *every* fold onto it, so the question
-#: this set answers never arose for it. With clause 1 carrying ADR-0121's agreeing
-#: exception the question is live, and leaving the source out would refuse the
-#: permitted fold a second time, for a reason that is false of it. That is the drift
-#: ADR-0092 §5 warns about read from the other side: a set whose membership stops
-#: matching the question it answers.
-#:
-#: **It is still not the retirement class, and the two must not be tidied into one.**
-#: The sets now differ in *both* directions — ``EXTERNAL`` is retirable and not
-#: foldable-onto, ``USER_ASSERTED`` is foldable-onto and not retirable — so a merge
-#: is no longer even coincidentally harmless.
-_REINFORCE_SAFE = frozenset(
-    {MemorySource.OBSERVED, MemorySource.INFERRED, MemorySource.USER_ASSERTED}
-)
+#: The **reinforce-safe class** — targets an asserted proposal may fold onto
+#: (ADR-0038 §2a, narrowed to ``REINFORCE`` by ADR-0045 §5b, widened with ``ASSERTED``
+#: by ADR-0121 §5). ``ATTESTED`` still does not satisfy it: a memory resting on a
+#: connected source's report is the source's to re-report, not the user's to fold into.
+_REINFORCE_SAFE = frozenset({BeliefBand.DERIVED, BeliefBand.ASSERTED})
 
-#: The **incoming** sources clause 1's agreeing-fold exception admits — the sources a
-#: proposal may carry and still fold onto a ``USER_ASSERTED`` target under
-#: :func:`_agreeing_restatement` (ADR-0121 §5 as widened by ADR-0214 §3). ADR-0121 §5
-#: required ``USER_ASSERTED``; ADR-0214 §3 widens that one condition to
-#: ``{USER_ASSERTED, OBSERVED, INFERRED}`` and changes no other, because the fold's
-#: safety is a property of the *arm* — :func:`_merge`'s corroboration arm writes the
-#: target's own bytes back at the target's own id (ADR-0214 §4) — and not of the
-#: incoming record's source.
-#:
-#: **Held apart from :data:`_REINFORCE_SAFE`, whose members it happens to match**
-#: (ADR-0092 §5, ADR-0214 §3). That set answers clause 2's question — may a
-#: ``USER_ASSERTED`` proposal fold at *this record's* id — which ADR-0214 does not
-#: ask and which turns on whether the **target's** id is a foreign system's key. This
-#: one answers "which incoming source may fold onto an assertion", which turns on
-#: which arm of :func:`_merge` the fold takes. A frozenset answering both "answers
-#: neither once the questions come apart", and ADR-0214 §4 names clause 1's exception
-#: as the permission that does need an allow-list of its own.
-#:
-#: **An allow-list rather than ``is not EXTERNAL``**, for ADR-0038 §2a's surviving
-#: argument: a ``MemorySource`` added later is not enrolled by omission in a
-#: permission to write at a user assertion's id. ``EXTERNAL`` is out for ADR-0121
-#: §3's reason, unweakened by identity of content (ADR-0214 §2).
-_AGREEING_FOLD_INCOMING = frozenset(
-    {MemorySource.USER_ASSERTED, MemorySource.OBSERVED, MemorySource.INFERRED}
-)
+#: The **incoming** bands clause 1's agreeing-fold exception admits (ADR-0121 §5 as
+#: widened by ADR-0214 §3). ``ATTESTED`` is out for ADR-0121 §3's reason.
+_AGREEING_FOLD_INCOMING = frozenset({BeliefBand.ASSERTED, BeliefBand.DERIVED})
 
 #: The rulings that dispatch a write. Check 0 (:func:`_refuse_secret_write`) gates
-#: exactly these and nothing else, because ADR-0004 §3 forbids a secret **in the
-#: database** rather than a secret being judged: ``ASK_USER`` and ``REJECT`` write
-#: nothing, so refusing them would break the ordinary secret-tier path ADR-0078 §1
-#: promises to preserve. Derived as a complement rather than listed, so a sixth
-#: write-producing ruling joins the gate rather than slipping past a list nobody
-#: updated.
+#: exactly these, derived as a complement so a new write-producing ruling joins the
+#: gate rather than slipping past a list nobody updated.
 _WRITE_PRODUCING_KINDS = frozenset(MemoryDecisionKind) - {
     MemoryDecisionKind.ASK_USER,
     MemoryDecisionKind.REJECT,
 }
 
-#: The relations that put a conflict **beyond retirement**, by any ruling
-#: (ADR-0159 §5). A member the writer holds one of these for is not in the
-#: retirement set of a ``SUPERSEDE`` naming another member, and a ``SUPERSEDE``
-#: naming *it* is refused rather than performed.
-#:
-#: **This is where ADR-0159 would otherwise have destroyed most.** ADR-0050 §1
-#: defines the retirement set on an explicit premise — "every entry in the conflict
-#: set the detector surfaced is a same-kind, at-or-above-threshold contradiction of
-#: the proposal; they are all the belief being corrected, restated". #1188 measures
-#: that premise false at the ratified threshold: the set is routinely a mixture of
-#: restatements, additions and contradictions. Left standing, giving the observed
-#: path a supersession arm would have turned one lost fact per fold into up to
-#: ``conflict_limit`` lost facts per correction. The narrowing is not a refinement of
-#: ADR-0050 §1; it is the condition on which ADR-0159 §4(b) may exist at all.
-#:
-#: ``CONTRADICTS`` is deliberately absent: a labelled contradiction is exactly what a
-#: correction is warranted to retire, and the retirement class still decides whether
-#: it may be.
-#:
-#: **This set is no longer the whole exclusion** (ADR-0171 §2). It says what a
-#: *labelled* member is spared from; what an **unlabelled** member is spared from is
-#: decided in :func:`_retirement_set`, over the crossing rather than the member, and
-#: is not expressible here — a set of relations has no term for a member's *absence*
-#: from the mapping, which is exactly how an unlabelled member came to be swept in.
-#: ``CONTRADICTS`` therefore does a second job now: its presence anywhere in the
-#: crossing is what puts that crossing under the narrowing. The two questions are
-#: separate lookups deliberately, for the reason ADR-0092 §5 gives one set answering
-#: two questions.
+#: The relations that put a conflict **beyond retirement**, by any ruling (ADR-0159
+#: §5). ``CONTRADICTS`` is deliberately absent, and its presence anywhere in a crossing
+#: is what puts that crossing under ADR-0171 §2's narrowing.
 _UNRETIRABLE_RELATIONS = frozenset({ConflictRelation.RESTATES, ConflictRelation.ADDS})
 
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _asserted(record: MemoryRecord) -> bool:
+    """Whether ``record`` is in the ``ASSERTED`` band (ADR-0328 §12's first row)."""
+    return record_band(record) is BeliefBand.ASSERTED
+
+
+def _cited_ids(memory: Memory) -> frozenset[str]:
+    """The ids ``memory``'s supports point at: their episodes and legacy records.
+
+    ADR-0328 §12 reads "the evidence a record cites" as the episodes its supports point
+    at; a legacy support points at the record stored before ADR-0328 (§4's part table).
+    """
+    return frozenset(
+        part.record if isinstance(part, LegacyPart) else part.episode
+        for part in (support.points_at for support in memory.supports)
+    )
 
 
 def _check_tuning(*, conflict_threshold: float, conflict_limit: int) -> None:
@@ -273,124 +211,51 @@ def _refuse_unsafe_fold(
 ) -> None:
     """Refuse a fold that would destroy data, gated on the ruling where it must be.
 
-    Runs before either a ``REINFORCE`` or a ``SUPERSEDE`` arm is selected. Two
-    folds are refused; they differ in whether the ruling matters, because
-    ADR-0045 §4 made only ``SUPERSEDE`` mint a new id while ``REINFORCE`` still
-    folds at the *target's* id:
+    Read through ADR-0328 §12:
 
-    - **Clause 1 — any fold onto a ``USER_ASSERTED`` target.** Kept **record-keyed
-      for both rulings** (ADR-0045 §5). A window-closing ``SUPERSEDE`` no longer
-      *destroys* the assertion, but the conflict signal is topical similarity, not
-      contradiction (ADR-0038 §5), and is too weak to retire a record the user
-      gave us — a justification the window does not touch. So nothing, of any
-      source, under either ruling, may fold onto an assertion — **except** under
-      two exceptions, and no others.
-
-      The first is a confirmation that covers this very target
-      (:func:`_confirmation_covers`, ADR-0078 §5b). There the signal is not topical
-      similarity: it is the user's answer, which ADR-0045 §7 named as one of the two
-      acceptable gates.
-
-      The second is an **agreeing fold** (:func:`_agreeing_restatement`, ADR-0121
-      §5 as widened by ADR-0214 §3): a ``REINFORCE`` whose incoming record's source
-      is in :data:`_AGREEING_FOLD_INCOMING` and which agrees with the target under
-      ADR-0121 §1. Clause 1's two justifications
-      are both about a fold that *replaces or retires* what the user told us, and
-      this fold does neither — :func:`_merge`'s corroboration arm writes the
-      target's own content back at the target's own id, keeps its source,
-      confidence, window and attestation, retires nothing and closes no window. Nor
-      does it run on the 0.75 score: the conflict set supplies a *candidate* and
-      ADR-0121 §1's predicate, which reads no score, decides. ADR-0078 §5b's reason
-      for drawing its own exception at ``SUPERSEDE`` — "a ``REINFORCE`` onto an
-      assertion would rewrite the user's own words at the target's id, which no
-      answer authorises" — is exactly right and is exactly what this fold makes
-      false, which is what the exception is keyed on and all it is keyed on.
-
-      The clause is therefore **narrowed by exception, not lifted**, and it stands
-      verbatim in every other case: every ``SUPERSEDE`` outside ADR-0078 §5b's
-      exception, every ``REINFORCE`` whose records do not agree, and every fold whose
-      incoming record is ``EXTERNAL``, is refused as before. It carries **two**
-      exceptions after ADR-0214 and not three — §3 widens the second by one condition
-      rather than adding a third, because the widening is keyed on the same fact as
-      the exception it widens: §4 makes the fold write the target's own bytes back at
-      the target's own id, which is a property of the *arm* and not of the incoming
-      record's source.
-      **Both exceptions stay record-keyed**, which is the property ADR-0045 §5 was
-      protecting: this one's predicate reads the target's source, the incoming
-      record's source and both records' ``kind`` and ``content``, all facts about
-      the records and none of them the relation between them. The ruling appears in
-      it only to name which fold is permitted, exactly as ADR-0078 §5b's does.
-    - **Clause 2 — a ``USER_ASSERTED`` proposal onto an ``EXTERNAL`` target,
-      ``REINFORCE`` only.** The external id is that system's idempotency key. A
-      ``REINFORCE`` still inherits it, so the correction is overwritten by the next
-      routine sync (ADR-0038 §2a) — the refusal stays. A ``SUPERSEDE`` now gets a
-      *fresh* id (ADR-0045 §4), so that hazard is gone and an ``EXTERNAL``
-      supersession is permitted at the writer boundary (ADR-0045 §5b). The arm is
-      therefore **narrowed to ``REINFORCE``**, not removed. Untouched by ADR-0078.
-
-      **It is keyed on :data:`_REINFORCE_SAFE` and not on the retirement class, and
-      the two are no longer the same set** (ADR-0092 §5). ADR-0092 §4 put
-      ``EXTERNAL`` in the class a correction may *retire*; had this arm kept reading
-      that class, ``source not in …`` would have gone false for an ``EXTERNAL``
-      target and this refusal would have silently stopped firing — reopening the
-      loss ADR-0038 §2a reproduced and ADR-0045 §5 kept refused by name. The two
-      questions are different: this one asks "may an assertion fold at *this
-      record's* id", which turns on whether the id is a foreign system's key.
-
-    ``DefaultMemoryPolicy`` proposes none of these — its rule 6 defers, and rule 9
-    names a retirable conflict for ``SUPERSEDE`` rather than ``REINFORCE`` — but a
-    policy reaches the ingestor through an injected seam and any conforming
-    implementation may rule differently. The refusal therefore lives here, at the
-    boundary that performs the write, rather than in the policy that recommends it.
-    That is also why **both** exceptions are **verified rather than trusted**: a
-    gate that opened on an unexamined field, or on the ruling's say-so that the
-    records agree, would hand that guarantee back to the caller's good intentions
-    (ADR-0078 §5b, ADR-0121 §5). ADR-0121's arm is the first case where the default
-    policy really does rule a fold onto an assertion and ADR-0214 §1's is the second,
-    so the duplication is no longer merely defensive — it is recomputed here on every
-    such write. ADR-0214 §3's widened condition is verified the same way and for the
-    same reason: the writer reads the incoming record's source itself rather than
-    taking the ruling's word for which arm it belongs on.
-
-    Fail-closed rather than silently downgrading, for the reason that already
-    makes an absent fold target raise instead of falling back to storing the
-    proposal as new: a write that loses data while reporting success is worse
-    than one that stops.
+    - **Clause 1 — any fold onto an ``ASSERTED`` target** is refused (ADR-0038 §3,
+      ADR-0045 §5), except where a confirmation covers this very target
+      (:func:`_confirmation_covers`, ADR-0078 §5b) or the fold is an agreeing
+      ``REINFORCE`` (:func:`_agreeing_restatement`, ADR-0121 §5, ADR-0214 §3), which
+      only adds the proposal's supports to the target and changes nothing the user told
+      us (ADR-0328 §11:6). Both exceptions are verified here rather than trusted from
+      the ruling.
+    - **Clause 2 — an asserted proposal onto a target outside the reinforce-safe class,
+      ``REINFORCE`` only** (ADR-0038 §2a, ADR-0045 §5b): an ``ATTESTED`` target is
+      refused.
 
     Args:
         target: The conflict the ruling names.
-        proposal: The proposal **as handed to ``ingest``** — whose ``conflicts``
-            are the frozen ids the question was asked about, read *before*
-            conflict resolution replaced them (ADR-0078 §5b check 4).
+        proposal: The proposal **as handed to ``ingest``**, whose ``conflicts`` are the
+            frozen ids the question was asked about (ADR-0078 §5b check 4).
         kind: The ruling being applied.
-        resolved: The conflict ids *this* ingest resolved — the live set.
+        resolved: The conflict ids *this* ingest resolved.
 
     Raises:
-        MemoryStoreError: If the fold is one of the two above and no covering
-            confirmation permits it.
+        MemoryStoreError: If the fold is one of the two above and no exception admits
+            it.
     """
     incoming = proposal.proposed
     if (
-        target.provenance.source is MemorySource.USER_ASSERTED
+        _asserted(target)
         and not _confirmation_covers(target, proposal, kind, resolved=resolved)
         and not _agreeing_restatement(target, incoming, kind)
     ):
         msg = (
-            f"refusing to fold onto {target.id!r}: a {incoming.provenance.source} record may not "
-            f"be folded onto a user-asserted one, whose belief it would overwrite "
-            f"(ADR-0038 §3, ADR-0045 §5, narrowed by ADR-0078 §5b and ADR-0121 §5)"
+            f"refusing to fold onto {target.id!r}: a {incoming.band} memory may not be folded "
+            f"onto one the user asserted (ADR-0038 §3, ADR-0045 §5, narrowed by ADR-0078 §5b "
+            f"and ADR-0121 §5)"
         )
         raise MemoryStoreError(msg)
     if (
         kind is MemoryDecisionKind.REINFORCE
-        and incoming.provenance.source is MemorySource.USER_ASSERTED
-        and target.provenance.source not in _REINFORCE_SAFE
+        and incoming.band is BeliefBand.ASSERTED
+        and record_band(target) not in _REINFORCE_SAFE
     ):
         msg = (
-            f"refusing to reinforce {target.id!r}: a user assertion may not be reinforced onto a "
-            f"{target.provenance.source} record, whose id it would inherit and the next sync "
-            f"overwrite — only OBSERVED and INFERRED beliefs may be reinforced this way "
-            f"(ADR-0038 §2a, narrowed to REINFORCE by ADR-0045 §5b)"
+            f"refusing to reinforce {target.id!r}: a user assertion may not be reinforced onto "
+            f"a {record_band(target)} memory (ADR-0038 §2a, narrowed to REINFORCE by "
+            f"ADR-0045 §5b)"
         )
         raise MemoryStoreError(msg)
 
@@ -398,34 +263,11 @@ def _refuse_unsafe_fold(
 def _may_reconcile(proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]) -> bool:
     """ADR-0159 §2's invocation condition, in full and in one place.
 
-    A reconciler is invoked **exactly when** all three hold: the proposed record's
-    ``provenance.source`` is not ``USER_ASSERTED``; no member of the conflict set is
-    ``USER_ASSERTED``; and the proposal clears the admissibility floor
-    (:func:`~ai_assistant.memory.policy.clears_admissibility_floor`). On every other
-    ingest none is invoked, **no relation is computed**, no model request is made,
-    and ``decide`` is called with ``None``.
-
-    **It is normative rather than left to a reconciler's own economics, because it
-    is a correctness boundary and not a cost heuristic** (§2).
-
-    - The two ``USER_ASSERTED`` populations are already owned. A ``USER_ASSERTED``
-      proposal is ADR-0121 §2's arm and a conflict set holding one is the
-      ``ASK_USER`` arm ADR-0159 §4 leaves untouched; neither reads a relation, so
-      computing one there would buy nothing and would spend a model request *inside
-      the ingest lock* on the two paths a user waits on — the ``learn`` and
-      ``answer`` direct seams, whose proposals are asserted.
-    - The floor is here because the ruling is too late. It runs inside ``decide``,
-      so a reconciler sited on the other two conditions alone would run ahead of it:
-      for two of the floor's populations that costs a request on a proposal about to
-      be rejected or deferred, and for the third it is unrecoverable — a
-      ``DataTier.SECRET`` proposal would put tier-0 content into a model request
-      before ADR-0004 §3's gate had run, and the ``ASK_USER`` that follows recalls
-      nothing.
-
-    **It binds this writer whatever ``MemoryPolicy`` it holds.** Every condition is
-    a property of the proposal and the set alone, so it is not a prediction about
-    how a policy will rule, and an injected policy carrying no floor of its own does
-    not lift it.
+    A reconciler is invoked **exactly when** all three hold: the proposed memory is not
+    ``ASSERTED``; no member of the conflict set is; and the proposal clears the
+    admissibility floor. On every other ingest none is invoked and ``decide`` is called
+    with ``None``. A correctness boundary, not a cost heuristic, and it binds this writer
+    whatever ``MemoryPolicy`` it holds.
 
     Args:
         proposal: The proposal being ingested.
@@ -435,8 +277,8 @@ def _may_reconcile(proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRec
         Whether relations may be determined for this ingest.
     """
     return (
-        proposal.proposed.provenance.source is not MemorySource.USER_ASSERTED
-        and all(c.provenance.source is not MemorySource.USER_ASSERTED for c in conflicts)
+        proposal.proposed.band is not BeliefBand.ASSERTED
+        and not any(_asserted(conflict) for conflict in conflicts)
         and clears_admissibility_floor(proposal)
     )
 
@@ -489,49 +331,24 @@ def _refuse_retiring_a_related_conflict(
         raise MemoryStoreError(msg)
 
 
-def _agreeing_restatement(
-    target: MemoryRecord, incoming: MemoryRecord, kind: MemoryDecisionKind
-) -> bool:
+def _agreeing_restatement(target: MemoryRecord, incoming: Memory, kind: MemoryDecisionKind) -> bool:
     """Whether clause 1's ADR-0121 §5 exception admits this fold.
 
-    Three conditions, and each is exactly as wide as the clause makes it:
-
-    1. **The ruling is ``REINFORCE``.** A ``SUPERSEDE`` onto an assertion is
-       untouched by this exception whatever the records say — it retires what the
-       user told us, which only their own answer authorises (ADR-0078 §5b).
-    2. **The incoming record's source is in :data:`_AGREEING_FOLD_INCOMING`** —
-       ``USER_ASSERTED``, ``OBSERVED`` or ``INFERRED`` (ADR-0214 §3, widening
-       ADR-0121 §5's ``USER_ASSERTED``). ADR-0121 §5 required the assertion because
-       that was the only way, at its base, to reach :func:`_merge`'s corroboration
-       arm: a non-asserted proposal would have taken the ordinary arm and *demoted*
-       the assertion to an observation, which is the second half of ADR-0038 §2a's
-       reason for clause 1. ADR-0214 §4 removes that dependency by keying the
-       corroboration arm on the **target's** source alone, so the condition that was
-       doing the work is now the arm's and this one is widened rather than dropped.
-       ``EXTERNAL`` stays out: a fold at an imported record's id is overwritten by
-       the next routine sync whatever the two records say (ADR-0121 §3, ADR-0214 §2).
-    3. **The records agree** under ADR-0121 §1 (:func:`~ai_assistant.memory.
-       _agreement.agrees`) — ``kind`` and normalised ``content``, no score, no
-       provenance field, no embedding.
-
-    **Recomputed here rather than read off the ruling** (ADR-0121 §5, ADR-0038 §2a).
-    A policy reaches this writer through an injected seam, so a gate that trusted
-    the ruling's word for the predicate would be no gate at all; and because the
-    ruling is *not* consulted beyond its kind, a policy that rules ``REINFORCE`` on
-    records that do not agree is refused exactly as it was before ADR-0121.
+    Three conditions: the ruling is ``REINFORCE``; the incoming memory's band is in
+    :data:`_AGREEING_FOLD_INCOMING` (ADR-0214 §3); and the two agree under ADR-0121 §1
+    (wording and kind, no score). Recomputed here rather than read off the ruling.
 
     Args:
         target: The stored record the ruling folds into.
-        incoming: The proposed record being folded in.
+        incoming: The proposed memory.
         kind: The ruling being applied.
 
     Returns:
-        Whether the fold is the one ADR-0121 §5 permits as widened by ADR-0214 §3,
-        in which case :func:`_merge` writes it as ADR-0214 §4 specifies.
+        Whether the fold is the one ADR-0121 §5 permits.
     """
     return (
         kind is MemoryDecisionKind.REINFORCE
-        and incoming.provenance.source in _AGREEING_FOLD_INCOMING
+        and incoming.band in _AGREEING_FOLD_INCOMING
         and agrees(target, incoming)
     )
 
@@ -616,38 +433,14 @@ def _confirmation_covers(
 def _refuse_secret_write(decision: MemoryDecision, proposal: MemoryUpdateProposal) -> None:
     """Refuse any *write* of a ``DataTier.SECRET`` proposal (ADR-0078 §5b check 0).
 
-    **A refusal at the writer boundary, independent of the model validator**
-    ``MemoryUpdateProposal`` carries, because a validator is
-    not a boundary: ``model_construct`` and ``model_copy(update=...)`` both skip
-    validation, and this repository already treats a definition "tampered past
-    ``frozen=True`` with ``object.__setattr__``" as inside its threat model
-    (ADR-0018 §3, ADR-0021 §4). Without this, every check in
-    :func:`_confirmation_covers` can pass on a validator-bypassing secret proposal
-    under an injected ``SUPERSEDE`` policy and the writer persists a secret to the
-    ``MemoryStore`` — ADR-0004 §3's "never in the memory database", reached through
-    the one seam whose whole job is to refuse writes nobody authorised.
-
-    **It gates the write, not the ruling, and the placement follows from that.** It
-    runs *after* the policy has ruled and *before* any write is dispatched, so it
-    reaches every write-producing ruling and no ruling that writes nothing. Both
-    ends are load-bearing:
-
-    - **Not inside** :func:`_refuse_unsafe_fold`, which ``ingest`` reaches only for
-      ``REINFORCE`` and ``SUPERSEDE`` — that would let an injected policy ruling
-      ``ACCEPT`` or ``STORE_TEMPORARY`` write the secret straight through
-      :meth:`MemoryIngestor._apply`.
-    - **Not at the top of ``ingest`` either.** An unconditional refusal *before* the
-      policy runs would turn the ordinary secret-tier path into an error: today a
-      secret ``learn`` reaches ``DefaultMemoryPolicy``, is ruled ``ASK_USER``,
-      writes nothing and raises nothing (ADR-0078 §1), and that behaviour is what
-      ADR-0078 preserves. ADR-0004 §3 forbids a secret *in the database*, not a
-      secret being *judged*.
-
-    So ``ASK_USER`` and ``REJECT`` return normally, because neither writes anything.
+    A refusal at the writer boundary, independent of the proposal's own validator,
+    which ``model_construct`` skips. It gates the write and not the ruling: it runs
+    after the policy has ruled and before any write is dispatched, so ``ASK_USER`` and
+    ``REJECT`` return normally (ADR-0004 §3 forbids a secret in the database, not a
+    secret being judged).
 
     Raises:
         MemoryStoreError: If the ruling would write and the proposal is Tier 0.
-            Nothing is written.
     """
     if decision.kind in _WRITE_PRODUCING_KINDS and proposal.sensitivity is DataTier.SECRET:
         msg = (
@@ -658,156 +451,67 @@ def _refuse_secret_write(decision: MemoryDecision, proposal: MemoryUpdateProposa
         raise MemoryStoreError(msg)
 
 
+def _refuse_tentative_store(decision: MemoryDecision) -> None:
+    """Refuse a ``STORE_TEMPORARY`` ruling (ADR-0328 §10:3).
+
+    No ``MemoryPolicy`` stores a proposal tentatively, so a ruling that would is one
+    this writer refuses, with nothing written, from whatever policy it holds.
+
+    Raises:
+        MemoryStoreError: If the ruling is ``STORE_TEMPORARY``.
+    """
+    if decision.kind is MemoryDecisionKind.STORE_TEMPORARY:
+        msg = (
+            "refusing a STORE_TEMPORARY ruling: no proposal is stored tentatively, and one "
+            "that does not meet an evidence bar is not committed (ADR-0328 §10:3)"
+        )
+        raise MemoryStoreError(msg)
+
+
 def _installed_at(
-    decision: MemoryDecision, proposed: MemoryRecord, *, resolved: tuple[str, ...]
+    decision: MemoryDecision, proposed: Memory, *, resolved: tuple[str, ...]
 ) -> str | None:
     """The id this ruling would **install** the proposal at, if any (ADR-0081 §1).
 
-    A write *installs* when it stores the proposal's content at an id: whatever
-    stood there stops being retrievable and the id now names the belief the
-    proposal carries. A write *retires* when it stores an **existing** record back
-    with only its validity window narrowed (ADR-0080 §1) — the record is retained,
-    ``export`` still carries it, and nothing of the proposal lands at its id.
-
-    ``None`` means "this ruling installs nothing at an id known here":
-
-    - ``REJECT`` and ``ASK_USER`` write nothing at all.
-    - ``SUPERSEDE`` installs at a **freshly minted** id that does not exist until
-      :meth:`MemoryIngestor._apply_supersede` mints it, so its candidate is tested
-      *there*, inside the bounded re-mint loop, and a hit re-mints rather than
-      refusing (ADR-0081 §2's "two evaluation points, one rule", §4). Its
-      retirement-set writes retire rather than install and are never refused by
-      this rule.
-    - a ``REINFORCE`` whose ``target_id`` is **not among the conflicts this ingest
-      resolved**. ADR-0081 §6 defines the fold's write id as "its fold target,
-      which is **drawn from the conflicts** and therefore always stored", so a
-      ruling naming anything else has no destination at all: it installs nothing,
-      and the standing "not among the conflicts" refusal in
-      :meth:`MemoryIngestor._apply` is what applies — which is what §6 means by "a
-      ``REINFORCE`` naming a target absent from the conflicts still raises the
-      existing not-among-the-conflicts error". Reading the ruling's ``target_id``
-      as a destination without that test would let this rule pre-empt a standing
-      refusal, and ADR-0081 §4 is explicit that it "adds one refusal to the writer
-      and subtracts none".
-
-    ``resolved`` is therefore an input, and it costs nothing: it is the tuple
-    :meth:`MemoryIngestor._ingest` already computed from the conflict search
-    *before* the policy was asked, fixed inside the ingestor's lock. So the
-    predicate still performs **no store read** of its own, adds no I/O, and cannot
-    be raced (ADR-0081 §1) — it reads a value the call is already holding.
-
-    The install/retire distinction is a property of the **write**, not of what the
-    store happens to hold, which is what keeps the predicate free of any store read.
+    ``ACCEPT`` installs at the proposed id; a ``REINFORCE`` writes the proposal's supports
+    at its target, where that target is among the conflicts this ingest resolved;
+    ``SUPERSEDE`` installs at a freshly minted id tested inside
+    :meth:`MemoryIngestor._apply_supersede`; and the rest install nothing.
     """
     match decision.kind:
-        case MemoryDecisionKind.ACCEPT | MemoryDecisionKind.STORE_TEMPORARY:
+        case MemoryDecisionKind.ACCEPT:
             return proposed.id
         case MemoryDecisionKind.REINFORCE:
-            # The fold lands at the *target's* id, which the ruling supplies —
-            # never at `proposed.id`. `_merge` writes there and unions both
-            # evidence tuples, so a proposal citing its own fold target would end
-            # up standing as its own warrant with nothing destroyed at all. A
-            # target outside the resolved set is no destination: nothing is folded
-            # onto it, and `_apply` refuses it on the standing ground.
             return decision.target_id if decision.target_id in resolved else None
-        case MemoryDecisionKind.SUPERSEDE:
+        case (
+            MemoryDecisionKind.SUPERSEDE
+            | MemoryDecisionKind.REJECT
+            | MemoryDecisionKind.ASK_USER
+            | MemoryDecisionKind.STORE_TEMPORARY
+        ):
             return None
-        case MemoryDecisionKind.REJECT | MemoryDecisionKind.ASK_USER:
-            return None
-    # No `case _`: with every member named, mypy narrows the fall-through to
-    # `Never`, so a *new* `MemoryDecisionKind` fails the type check here rather
-    # than silently acquiring an unguarded write (the fail-closed shape
-    # `_WRITE_PRODUCING_KINDS` gets from being a complement).
     assert_never(decision.kind)
 
 
 def _refuse_self_consuming_write(
     decision: MemoryDecision, proposal: MemoryUpdateProposal, *, resolved: tuple[str, ...]
 ) -> None:
-    """Refuse a write that would land at an id the proposal cites (ADR-0081 §1).
+    """Refuse a write that would land at an id the proposal's supports point at (ADR-0081 §1).
 
-    The fourth obligation on ``MemoryWriter.ingest``, stacked on ADR-0079 §4's two
-    and ADR-0077 §5's one and conflicting with none of them. Those are about the
-    *conflict* set and about the evidence set's *existence*; this one is about the
-    write set's **disjointness** from the evidence set. ADR-0077 §5's check buys
-    "every citation resolved once" — a write that consumes its own citation makes
-    that promise true and useless in the same instant, and leaves a belief standing
-    as its own warrant.
-
-    **It gates the write, not the ruling**, so it sits between the policy's ruling
-    and the write dispatch — the seam :func:`_refuse_secret_write` already occupies,
-    reached by every write-producing ruling and by no ruling that writes nothing
-    (ADR-0081 §2). Three placements are ruled out there, each for a reason already
-    on the record:
-
-    - **Not in** :meth:`MemoryIngestor._require_resolvable_evidence`, which runs
-      before the policy — at which point the write set is not yet known, because
-      ``REINFORCE``'s destination is ``decision.target_id``.
-    - **Not in** :func:`_refuse_unsafe_fold`, which ``ACCEPT`` and
-      ``STORE_TEMPORARY`` never reach — the same hole ADR-0078 §10 records when it
-      excepts check 0 from that helper, and those two rulings carry most of this
-      defect.
-    - **Not split in two**, with the ``proposed.id`` half hoisted ahead of the
-      ruling where it *is* computable. That would put one rule in two places
-      (ADR-0077 §5) and pre-empt a ruling the policy is entitled to make: a
-      self-citing proposal the policy declines should be a ``REJECT`` the user can
-      read, not an exception (ADR-0080 §3 declined the same hoist).
-
-    **It reads nothing from the store.** Its inputs are the observed proposal, the
-    ruling, and the conflict ids this ingest already resolved — all fixed and
-    private to this call before it is reached, so it costs no ``get``,
-    adds no I/O inside the ingestor's lock, and — unlike ADR-0077 §5's
-    resolvability check — cannot itself be raced. It is therefore never a race and
-    always a producer fault, which is why the refusal earns **no** new error class
-    (§3) and specifically is **not** ``UnresolvedEvidenceError``: the evidence here
-    resolves perfectly well, and what is wrong is that the write would consume it.
-
-    The empty-slot case is refused too. For a ``DERIVED`` proposal it cannot arise
-    (ADR-0077 §5 already refused a citation resolving to nothing), but for an
-    ``ASSERTED`` or ``EXTERNAL`` one the install would store a record whose evidence
-    names itself and nothing else that exists — the same defect arriving with no
-    destruction at all. Refusing it is what makes the rule statable without a store
-    read rather than *in spite* of having none. The degenerate case where the record
-    already at that id is itself self-citing is refused as well (ADR-0081 §1):
-    distinguishing it would cost a ``get`` on every write-producing ingest to
-    protect a state the rule says must not exist.
-
-    Quantified over **the proposal's** evidence and **this write's** destination,
-    not over the tuple :func:`_merge` unions (ADR-0081 §1a): a target that already
-    cited itself is out of scope, since the fold neither creates that condition nor
-    destroys anything, and testing the merged tuple would make such a record
-    permanently unfoldable *and* make the refusal depend on state read from the
-    store. Scoped to no band, unlike ADR-0077 §5's floor (§1b): a record citing
-    nothing satisfies it trivially, while band-scoping would leave ``ASSERTED`` and
-    ``EXTERNAL`` free to fabricate their own warrant.
-
-    Args:
-        decision: The ruling the policy made.
-        proposal: The proposal as this call observed it.
-        resolved: The conflict ids this ingest resolved — what makes a
-            ``REINFORCE``'s ``target_id`` a destination rather than an invalid
-            ruling (ADR-0081 §6).
+    Read through ADR-0328 §12: what a proposal cites is the episodes (and legacy records)
+    its supports point at. It gates the write, between the ruling and the dispatch, and
+    reads nothing from the store.
 
     Raises:
-        FoldOntoCitedRecordError: If a ``REINFORCE`` would fold onto a record the
-            proposal cites — the destination the *policy* chose (ADR-0116 §2).
-        SelfConsumingWriteError: If an ``ACCEPT`` or ``STORE_TEMPORARY`` would
-            install at ``proposed.id`` and the proposal cites it — the destination
-            the *producer* chose. Both are ``MemoryStoreError``; nothing is
-            written, no window is closed, and no decision is returned.
+        FoldOntoCitedRecordError: If a ``REINFORCE`` would write onto a record the
+            proposal's supports point at — the destination the *policy* chose
+            (ADR-0116 §2).
+        SelfConsumingWriteError: If an ``ACCEPT`` would install at ``proposed.id`` and the
+            proposal's supports point at it — the destination the *producer* chose.
     """
     proposed = proposal.proposed
     destination = _installed_at(decision, proposed, resolved=resolved)
-    if destination is not None and destination in proposed.provenance.evidence:
-        # Which arm, by **who chose the destination** (ADR-0116 §2). `ACCEPT` and
-        # `STORE_TEMPORARY` install at `proposed.id`, minted and cited by the
-        # producer, so nothing outside it chose either value and the refusal is the
-        # producer bug ADR-0081 §Context describes. `REINFORCE` installs at the
-        # ruling's `target_id`, which the *policy* picked by conflict detection over
-        # the proposal's own content — unforeseeable to a producer generalising over
-        # the records it cites, and the only arm a caller may continue past (§4).
-        # The ruling is already in hand here, so the discrimination costs no extra
-        # input and no store read, which is the property ADR-0081 §1 protects.
+    if destination is not None and destination in _cited_ids(proposed):
         refusal = (
             FoldOntoCitedRecordError
             if decision.kind is MemoryDecisionKind.REINFORCE
@@ -815,9 +519,8 @@ def _refuse_self_consuming_write(
         )
         msg = (
             f"refusing to write {proposed.id!r}: a {decision.kind} ruling would install it at "
-            f"{destination!r}, an id its own provenance cites as evidence — the belief would "
-            f"stand as its own warrant, and no citation a write consumes can be presented "
-            f"honestly (ADR-0081 §1)"
+            f"{destination!r}, an id its own supports point at — the memory would stand as its "
+            f"own warrant (ADR-0081 §1)"
         )
         raise refusal(msg)
 
@@ -870,145 +573,18 @@ def _retirement_set(
     resolved: tuple[str, ...],
     relations: Mapping[str, ConflictRelation],
 ) -> list[MemoryRecord]:
-    """The full set of conflicting beliefs a ``SUPERSEDE`` retires (ADR-0050 §1, #244).
+    """The full set of conflicting memories a ``SUPERSEDE`` retires (ADR-0050 §1, #244).
 
-    A ``SUPERSEDE`` names the *relation* — the proposal overturns the belief the
-    conflict set holds — not a single record (ADR-0040 §1). Every entry in
-    ``conflicts`` is a same-kind, at-or-above-threshold contradiction the proposal
-    just displaced, so retiring only the policy's best-ranked ``target`` would leave
-    a second and third stale belief on the same topic live: exactly the honesty gap
-    issue #244 reports. The applier therefore closes the window of the target **and**
-    of every other conflict it is *warranted* to retire.
-
-    The set is the named ``target`` plus every other conflict whose source is in
-    :data:`_RETIREMENT_CLASS` (``OBSERVED``/``INFERRED``/``EXTERNAL``) — the beliefs
-    a correction is warranted to displace. **``EXTERNAL`` joined that class in
-    ADR-0092 §4**, which discharges the adoption ADR-0045 §5/§7/§10 deferred and
-    partially supersedes ADR-0050 §1's hold-out: the external calendar is an *input*
-    and not the truth, so a user's correction retires the import rather than leaving
-    it live beside them. The band is retirable on ADR-0038 §2's own error calculus,
-    which turns on recoverability — an attested belief is not re-derivable by us and
-    is **re-reportable by its source**, on a schedule, a recovery path at least as
-    reliable as re-observation.
-
-    One source stays held out of the *widening*, and only one:
-
-    - ``USER_ASSERTED`` conflicts are never swept in **on similarity** — clause 1
-      stands, record-keyed, for both rulings (ADR-0045 §5): topical similarity may
-      not retire a record the user gave us. ``DefaultMemoryPolicy`` never even
-      reaches ``SUPERSEDE`` with an asserted conflict present unless the user
-      confirmed it (it rules ``ASK_USER``, ADR-0050 §2), but the applier excludes
-      them regardless, since it takes rulings from any injected policy.
-
-      **The one exception is the user's own answer** (ADR-0078 §5b's narrowing of
-      ADR-0050 §1's hold-out): an asserted conflict the incoming proposal's
-      ``confirmation`` genuinely covers *is* retired, so a confirmation naming two
-      prior assertions retires both in the one atomic batch. It is verified per
-      record through the same five checks the named target passes
-      (:func:`_confirmation_covers`) rather than inferred from the target having
-      passed them, because under an injected policy a confirmation can arrive with
-      an *inference* named as the target while a live assertion sits in ``retires``
-      — and the widening would then act on an authority nothing had checked.
-      ``retires`` remains a **ceiling rather than an instruction**: naming an id
-      does not retire it, it only bounds what may be. That rule stands untouched by
-      ADR-0092 §4; what has gone is its second justification, since an ``EXTERNAL``
-      id in ``retires`` no longer needs a confirmation's authority to be swept in —
-      the class carries it, and a confirmation exists to authorise retiring an
-      **assertion**.
-
-    **This is not :data:`_REINFORCE_SAFE`, and the difference is load-bearing**
-    (ADR-0092 §5). That set's membership is stated where it is defined and is
-    deliberately not restated here — the enumeration this sentence used to carry
-    went stale the first time the set widened (ADR-0121 §5), which is the drift
-    ADR-0092 §5 warns about read from the documentation side. What is load-bearing
-    at *this* site is that ``EXTERNAL`` is in the retirement class and not in
-    ``_REINFORCE_SAFE``, because the question that set answers — may an assertion
-    fold at *this record's* id — turns on the foreign idempotency key an
-    ``EXTERNAL`` record carries, which widening the retirement class does not
-    change.
-
-    ``target`` leads the list (it is the primary the policy named and
-    ``MemoryDecision`` audits); order among the rest follows ``conflicts`` (retrieval
-    score), so the batch is deterministic. This needs no ``target_id`` widening in
-    ``core`` — closing N windows is N atomic upserts, exactly what issue #244 and
-    ADR-0045 §7 said the validity window makes possible without growing the contract.
-
-    Since ADR-0079 §3 this set is a **``MemoryWriter`` contract obligation** rather
-    than one implementation's habit, driven by the shared conformance suite and
-    matched by ``FakeMemoryWriter``. Nothing here changed with the promotion — and
-    nothing is discarded before this function any more either (ADR-0079 §1), so the
-    "full set" it retires is now the full set retrieval surfaced.
-
-    **ADR-0159 §5 narrows the widening, and it is the second hold-out.** A conflict
-    this writer holds a ``RESTATES`` or ``ADDS`` relation for is **never retired**,
-    by any ruling: it is not the belief being corrected, it is a restatement of one
-    or a distinct fact that similarity surfaced beside it. ADR-0050 §1's own premise
-    — that every entry in the set "is a same-kind, at-or-above-threshold
-    contradiction of the proposal" — is what #1188 measured false, and without this
-    exclusion a supersession arm on the observed path would turn one lost fact per
-    fold into up to ``conflict_limit`` lost facts per correction. Where this writer
-    holds no relation for a member, the obligation binds exactly as ADR-0079 §3
-    states it, so an ingest ADR-0159 §2 excludes retires precisely what it always
-    did.
-
-    **ADR-0171 §2 narrows it a second time, and its discriminator is the crossing
-    rather than the member.** Where this writer holds a ``CONTRADICTS`` relation for
-    at least one member of the ruled-on set, the set is the named ``target`` and,
-    beyond it, only those other members it holds a ``CONTRADICTS`` relation for: a
-    member it holds **no** relation for is left live, whatever its source. Where it
-    holds that relation for *no* member, ADR-0079 §3's obligation binds exactly as it
-    stands, narrowed by ADR-0159 §5 and by nothing else. #1302 measured what the
-    unnarrowed rule destroys — 56 supersessions retired 146 records, and in the worst
-    crossing ten of the twelve retired were never labelled at all.
-
-    **The three arms that reach here sort themselves by construction.** The
-    *reconciled* arm (ADR-0159 §4(b)) always carries a labelled contradiction, since
-    ``DefaultMemoryPolicy`` rules ``SUPERSEDE`` there only at a ``CONTRADICTS``
-    member — this is the arm the narrowing bites on. The *asserted* arm reaches no
-    reconciler at all (:func:`_may_reconcile` excludes an asserted proposal and any
-    crossing holding an asserted member), so this writer holds no relations, no member
-    is labelled, and the whole set is handed to ADR-0079 §3 unchanged: a user's
-    correction still retires every stale sibling it is shown (ADR-0079 §1, #313/#314).
-    **That is the case a narrowing phrased as "retire only labelled contradictions"
-    would have destroyed**, and it is why the rule is stated over the crossing. The
-    *degraded* arm (ADR-0159 §6) holds at most the certain rung's ``RESTATES``
-    labels, and that rung can never produce ``CONTRADICTS``, so §6's ratified floor
-    behaves exactly as it does today — sparing on the strength of a test that was
-    never run would be the wrong direction, and this does not.
-
-    **ADR-0078 §5b's confirmation batch is untouched** (ADR-0171 §2's second clause),
-    which is why the narrowing sits on the retirement-class limb below and on nothing
-    else: an asserted conflict a confirmation genuinely covers is retired on exactly
-    the footing it had before, with no condition added and none removed. The two
-    cannot meet on one crossing anyway — a crossing carrying a ``CONTRADICTS``
-    relation is one this writer reconciled, and a reconciled crossing holds no
-    ``USER_ASSERTED`` member — but the clause is honoured in the code rather than left
-    to that argument, because a contract leaving it to inference is one §5b can be
-    read out of.
-
-    **Why the crossing and not the member.** This writer cannot tell a member left
-    unlabelled *beyond the bound* from one no reconciler ever judged:
-    :meth:`MemoryIngestor._relations_for` holds no consulted set to except it with,
-    which ADR-0164 §6 and §9 decline to supply and #1225 records as open. So the
-    predicate asks the coarser question this writer can answer from what it already
-    holds — not *why* is this member unlabelled, but did this crossing produce a
-    labelled contradiction at all (ADR-0171 §4). Nothing new crosses any seam and this
-    function's signature does not grow.
-
-    **An untrusted label stays untrusted in the safe direction only.** A reconciler
-    that under-reports ``CONTRADICTS`` causes records to be spared. One that
-    volunteers a label for a member ADR-0159 §3 required it to discard can now put
-    that member in the retirement set — but this writer would have swept the same
-    record in today, unlabelled, so the narrowing takes destruction away from that
-    reconciler and never grants it (ADR-0171 §4, #1225).
-
-    The relations are **this writer's own**, handed to no policy (ADR-0159 §8): if
-    the writer's mapping and the policy's were one object, a safety property
-    ADR-0038 §2a requires the *writer* to hold would rest on the untrusted ruling —
-    exactly the failure §5 exists to avoid.
+    The named ``target`` plus every other conflict in the retirement class
+    (``DERIVED`` or ``ATTESTED``, ADR-0079 §3, ADR-0092 §4), less every member this
+    writer holds a ``RESTATES`` or ``ADDS`` relation for (ADR-0159 §5) and, where this
+    crossing produced a labelled contradiction at all, less every member not labelled
+    ``CONTRADICTS`` (ADR-0171 §2). An ``ASSERTED`` member is swept in only where the
+    proposal's confirmation genuinely covers it (ADR-0078 §5b), on its own footing.
+    ``target`` leads the list and the rest follow ``conflicts``' order.
 
     Args:
-        target: The conflict the ruling names, which leads the returned list.
+        target: The conflict the ruling names.
         conflicts: The full resolved set, best-ranked first.
         proposal: The proposal as handed to ``ingest``, for the confirmation checks.
         resolved: The conflict ids this ingest resolved.
@@ -1017,10 +593,6 @@ def _retirement_set(
     Returns:
         The named target followed by every other conflict warranted for retirement.
     """
-    # ADR-0171 §2's discriminator, read over the whole ruled-on set including the
-    # named target: did this crossing produce a labelled contradiction at all? Where
-    # it did, the widening reaches only the other members labelled the same way;
-    # where it did not, the third clause hands the set to ADR-0079 §3 unchanged.
     labelled_contradiction = any(
         relations.get(conflict.id) is ConflictRelation.CONTRADICTS for conflict in conflicts
     )
@@ -1031,16 +603,14 @@ def _retirement_set(
         and relations.get(conflict.id) not in _UNRETIRABLE_RELATIONS
         and (
             (
-                conflict.provenance.source in _RETIREMENT_CLASS
+                record_band(conflict) in _RETIREMENT_CLASS
                 and (
                     not labelled_contradiction
                     or relations.get(conflict.id) is ConflictRelation.CONTRADICTS
                 )
             )
-            # ADR-0171 §2's second clause: the confirmation batch is reached on its
-            # own footing, so the narrowing above is not a condition on it.
             or (
-                conflict.provenance.source is MemorySource.USER_ASSERTED
+                _asserted(conflict)
                 and _confirmation_covers(
                     conflict, proposal, MemoryDecisionKind.SUPERSEDE, resolved=resolved
                 )
@@ -1050,115 +620,64 @@ def _retirement_set(
     return [target, *others]
 
 
-def _close_window(target: MemoryRecord, now: datetime) -> MemoryRecord:
-    """Return ``target`` retired at the earlier of ``now`` and its own end (ADR-0080 §1).
+def _supersede(incoming: Memory, new_id: str, retired: Sequence[str]) -> Memory:
+    """The superseding memory: ``incoming`` at a fresh id, naming what it replaces.
 
-    The target stays on disk — retained, off the read path — with
-    ``valid_until = end``; ``valid_from`` and every other field are preserved.
-    Written with ``model_copy(update=...)``, so ``now`` must already be a guarded,
-    aware-UTC reading (the ingestor's :meth:`MemoryIngestor._now_utc`), and it is
-    **one instant for the whole retirement set** (ADR-0080 §1), sampled by
-    :meth:`MemoryIngestor._apply_supersede` before any close is computed.
+    Nothing of the overturned memory is carried onto the one that overturns it (ADR-0040
+    §5a). It is written at a freshly minted id (ADR-0045 §4), given a fresh open window
+    (the point of a supersession is a *live* memory), and its create names every memory
+    it retires among those it replaces (ADR-0328 §5:6, §11:7).
+    """
+    first, *rest = incoming.operations
+    create = first.model_copy(
+        update={"replaces": tuple(dict.fromkeys([*first.replaces, *retired]))}
+    )
+    return Memory.model_validate(
+        incoming.model_dump()
+        | {"id": new_id, "validity": Validity(), "operations": (create, *rest)}
+    )
 
-    ADR-0080 §1 ratified the clamp these two lines had been carrying as unratified
-    "correctness floors", and partially superseded ADR-0045 §4 step 1's unqualified
-    ``valid_until = now`` in doing so:
 
-    - **The clamp.** ``end = now`` where the window is unbounded at the end,
-      otherwise ``end = min(now, valid_until)``. A retirement never widens a window,
-      never moves its start, and never touches its content. Overwriting an earlier
-      producer-set end with a later ``now`` would push a self-closed belief back onto
-      the read path for ``[valid_until, now)``; retirement takes a belief *off* the
-      read path and never puts one back. Where the record has already ended by its
-      own terms the write back is a no-op on the window — which still counts as
-      resolved and still rides in the batch (ADR-0080 §6), so the applier branches on
-      nothing.
-    - **The refusal.** If the chosen end is at or before ``valid_from`` (empty or
-      inverted), refuse before the batch — including the **tie** ``end ==
-      valid_from``, which is the half-open interval ``[F, F)`` and live at no instant
-      (ADR-0080 §3). ``model_copy(update=...)`` skips ``Validity``'s validator, and
-      ``SqliteMemoryStore``'s decode re-runs it on load, so persisting such a window
-      would store a record the store cannot read back. Under a close-coherent
-      composition this fires only at that tie; anything else that reaches it is a
-      store read *ahead* of the writer's close, which is the clock-coherence gap
-      issue #460 carries.
+def _ended(target: MemoryRecord, successor: Memory, now: datetime) -> Memory:
+    """``target`` ended by a supersession (ADR-0328 §11:7).
 
-    The refusal is deliberately **not** hoisted into detection: a window that cannot
-    be closed is a problem only for a record a ruling actually retires, so refusing
-    earlier would fail ``ACCEPT`` and ``REINFORCE`` ingests that touch no window
-    (ADR-0080 §6). It raises plain ``MemoryStoreError`` and specifically **not**
-    ``UnresolvedEvidenceError``, which names a proposal whose *evidence* does not
-    resolve rather than a *target's* window (ADR-0080 §7).
+    An end citing the successor's first support, added to ``target`` as an ``against``
+    support that does not back it as worded, and naming the successor. The close is
+    §5:10's — that support's about-when where it carries one, else ``now`` — clamped and
+    never resurrecting (§5:11, ADR-0080 §1).
 
     Raises:
-        MemoryStoreError: If the chosen end is at or before ``valid_from`` (empty or
-            inverted); nothing is written and every record in the set is unchanged.
+        MemoryStoreError: If ``target`` is not a memory, already carries the part that
+            support points at, or the end is refused by §5:10, §5:11 or §6:5. The whole
+            ingest is refused with nothing written.
     """
-    window = target.validity
-    end = now if window.valid_until is None else min(now, window.valid_until)
-    if window.valid_from is not None and end <= window.valid_from:
+    if not isinstance(target, Memory):
+        msg = f"cannot retire {target.id!r}: a supersession retires memories only"
+        raise MemoryStoreError(msg)
+    first = successor.supports[0]
+    if target.support_at(first.points_at) is not None:
         msg = (
-            f"cannot retire {target.id!r}: a close at {end.isoformat()} is at or before its "
-            f"valid_from {window.valid_from.isoformat()} — an unrepresentable window the store "
-            f"would reject (ADR-0080 §3)"
+            f"cannot retire {target.id!r}: it already carries the part the superseding "
+            f"memory's first support points at (ADR-0328 §11:7)"
         )
         raise MemoryStoreError(msg)
-    return target.model_copy(update={"validity": window.model_copy(update={"valid_until": end})})
-
-
-def _supersede(incoming: MemoryRecord, new_id: str) -> MemoryRecord:
-    """The superseding record: ``incoming`` at a fresh, target-free id (ADR-0045 §4).
-
-    Nothing of the overturned belief is carried onto the record that overturns
-    it — least of all its ``evidence``. ADR-0005 §2 defines that field as
-    references *supporting* the record, so unioning the contradicted record's
-    evidence into a correction would attach the observations that produced the
-    wrong belief as justification for the right one: a fabricated warrant in the
-    one field callers use to explain why a memory exists (ADR-0038 §1a).
-
-    A user's assertion is its own warrant and needs no borrowed support, so the
-    superseding record is simply ``incoming`` — its provenance is already exactly
-    right — written at a **freshly-minted** id, not the target's. ADR-0045 §4
-    stopped rehoming the correction onto the stale id: the target is retained with
-    a closed window (:func:`_close_window`) and the correction becomes a *new*
-    record. The id is also not ``incoming.id`` — that is caller-supplied and could
-    name an unrelated live record — but the minted id, which is written
-    insert-if-absent so a collision is rejected, not clobbered.
-
-    The correction is given a **fresh open window** (ADR-0045 §4), overriding any
-    ``validity`` the proposal happened to carry: the whole point of a supersession
-    is to install a *live* belief, so a proposal with a producer-set closed or
-    future-dated window must not leave the store with the target retired and the
-    correction already hidden or not yet live — which would be no live belief at
-    all. Every other field of ``incoming`` is kept (§5a: the live record is the
-    proposed record but for its id and window).
-    """
-    return incoming.model_copy(update={"id": new_id, "validity": Validity()})
-
-
-def _bounded_evidence(evidence: Sequence[str], *, elided: int) -> tuple[tuple[str, ...], int]:
-    """ADR-0086 §3's retention rule and §4's recurrence, in one place.
-
-    Keeps the **last** :data:`MAX_EVIDENCE_CITATIONS` entries — the tuple is
-    ordered oldest-accumulated first, so the oldest are the ones displaced. Recency
-    rather than "most reinforcing" because the union deduplicates by id, so every
-    citation carries weight exactly one and there is no ranking to select on;
-    meanwhile the oldest citations are precisely those likeliest to have expired
-    already (ADR-0074 §7), and retaining them would spend a bounded budget on the
-    residue and leave "why do you believe that?" unanswerable.
-
-    Args:
-        evidence: The citations the install would carry, oldest first.
-        elided: The sum of ``evidence_elided`` over every record this install
-            draws content from — two for a fold, one for every other ruling.
-
-    Returns:
-        The retained citations, and the elision count to store: ``elided`` plus
-        the number this install displaced. Never an exact total of what the record
-        no longer carries, and deliberately so (ADR-0086 §4).
-    """
-    displaced = max(len(evidence) - MAX_EVIDENCE_CITATIONS, 0)
-    return tuple(evidence[displaced:]), elided + displaced
+    against = MemorySupport.model_validate(
+        first.model_dump()
+        | {"direction": SupportDirection.AGAINST, "backs_as_worded": False, "added_at": now}
+    )
+    end = MemoryOperation(
+        kind=MemoryOperationKind.END,
+        cites=first.points_at,
+        note="superseded by a memory that overturns it",
+        at=now,
+        by=successor.operations[0].by,
+        successor=successor.id,
+    )
+    try:
+        return applied_operation(target, end, support=against)
+    except ValueError as exc:
+        msg = f"cannot retire {target.id!r}: {exc}"
+        raise MemoryStoreError(msg) from exc
 
 
 def _bounded_topics(admitted: Sequence[str]) -> tuple[str, ...]:
@@ -1206,21 +725,11 @@ def _topics_of_fold(target: MemoryRecord, incoming: MemoryRecord) -> tuple[str, 
     downward on this same install rather than raising, keeping the first
     :data:`MAX_TOPICS_PER_RECORD` of its own labels ahead of any incoming one.
 
-    **Code-point order among the incoming labels is the only order available**, and
-    that is a fact about this field rather than a preference. ADR-0086 §3 could read
-    position as age because ``Provenance.evidence`` is ordered by accumulation; §1
+    **Code-point order among the incoming labels is the only order available**: §1
     fixes this tuple's order by code point precisely so that order carries *no*
-    meaning, so position here is not age and cannot be read as any other property
-    either. Applying ADR-0086 §3's own method — ask which criteria the data actually
-    supports — leaves exactly the one §1's storage order already fixes:
-    deterministic, implementation-independent and identical on every store. It does
-    not need to be a *good* order among peers: by the paragraph above, every label it
-    ranks is one the surviving record was never previously filed under.
+    meaning. Deterministic, implementation-independent and identical on every store.
 
-    **Nothing is counted.** ADR-0086 §4's ``evidence_elided`` is deliberately not
-    copied (§1): ``evidence`` claims a warrant whose size ADR-0073 §4 obliges a
-    surface to convey, while §7 rules that a topic set is never a claim to
-    completeness. A count of labels not carried answers a question no surface asks.
+    **Nothing is counted** (§1): a topic set is never a claim to completeness (§7).
     """
     carried = set(target.topics)
     return _bounded_topics(
@@ -1231,455 +740,57 @@ def _topics_of_fold(target: MemoryRecord, incoming: MemoryRecord) -> tuple[str, 
     )
 
 
-def _installed(record: MemoryRecord) -> MemoryRecord:
-    """``record`` with its evidence and its topics brought under their bounds.
+def _installed(memory: Memory) -> Memory:
+    """``memory`` with its topics brought under :data:`MAX_TOPICS_PER_RECORD` (ADR-0213 §1).
 
-    Applied at **every install** and at no retirement, which is the whole of the
-    rule's scope. "Install" is ADR-0081 §1's sense, the one :func:`_installed_at`
-    already implements: a write installs when it stores the proposal's content at
-    an id. A retirement writes an *existing* record back with only its window
-    narrowed (:func:`_close_window`), asserts nothing new about the warrant, and
-    is therefore exempt — a legacy over-bound target is retired intact rather than
-    truncated on its way *off* the read path, which would be the eager rewrite
-    ADR-0077 §6 refused and the read-path failure ADR-0086 §2 exists to avoid.
-
-    A no-op — the same object, not a copy — for anything already under the bound,
-    which is every record any shipped producer authors and every fold
-    :func:`_merge` has already bounded. Where it does bite it rebuilds
-    :class:`Provenance` through ``model_validate`` rather than
-    ``model_copy(update=...)``, so the type's own validators run on the value that
-    is stored (ADR-0026 §2's hazard).
-
-    **:data:`MAX_TOPICS_PER_RECORD` is enforced here too, and for ADR-0213 §1's own
-    reasons rather than by analogy.** That section puts the bound at this seam
-    deliberately — the type stays permissive so that a later ADR raising the constant
-    changes what this deployment *writes* and not what an older peer can *read*, and
-    so that §8's union has exactly one place to be bounded rather than two that can
-    disagree. This is §8's second admission arm: for every install that is not a
-    fold — an ``ACCEPT``, the surviving record of a ``SUPERSEDE``, or any other write
-    storing a proposal's content at an id — the admission order is the record's own
-    labels in canonical order. The fold's arm is :func:`_topics_of_fold`, which has
-    already brought its survivor under the bound by the time it reaches here, so this
-    is a no-op on that path rather than a second, differently-ordered cut.
-
-    **Every install and no retirement**, which is the scope both bounds share and
-    ADR-0213 §1 restates in ADR-0081 §1's sense: a write that merely retires an
-    existing record — storing it back with only its validity window narrowed
-    (:func:`_close_window`) — asserts nothing new about what the record is about,
-    changes no label, and carries the tuple as it stands. An over-bound record from
-    outside this deployment's bound therefore decodes, reads, converges downward on
-    its next install, and rides whole into the history ``export`` keeps.
-
-    **Nothing counts what a topics overflow declined**, and that asymmetry with
-    ``evidence_elided`` is ADR-0213 §1's decision rather than an omission: §7 rules
-    that a topic set is never a claim to completeness, so a count of labels not
-    carried answers a question no surface asks and no clause obliges.
+    Applied at every install and at no retirement. A no-op — the same object — for a
+    memory already under the bound. A memory carries no citation bound (ADR-0328
+    §10:4): every support is kept (§4:9).
     """
-    provenance = record.provenance
-    retained, elided = _bounded_evidence(provenance.evidence, elided=provenance.evidence_elided)
-    topics = _bounded_topics(sorted(record.topics))
-    if elided == provenance.evidence_elided and topics == record.topics:
-        return record
-    if elided == provenance.evidence_elided:
-        return record.model_copy(update={"topics": topics})
-    bounded = Provenance.model_validate(
-        provenance.model_dump() | {"evidence": retained, "evidence_elided": elided}
-    )
-    return record.model_copy(update={"provenance": bounded, "topics": topics})
+    topics = _bounded_topics(sorted(memory.topics))
+    if topics == memory.topics:
+        return memory
+    return memory.model_copy(update={"topics": topics})
 
 
-def _corroborates(target: MemoryRecord, incoming: MemoryRecord) -> bool:
-    """Does this fold contribute evidence and currency and nothing else?
+def _reinforced(target: MemoryRecord, incoming: Memory, *, now: datetime) -> Memory:
+    """``target`` with ``incoming``'s supports added, one add support each (ADR-0328 §11:6).
 
-    **Two clauses, one rule.** ADR-0103 §6 ruled it for a ``DERIVED`` proposal onto
-    an ``ATTESTED`` target; ADR-0214 §4 rules it for **every** ``REINFORCE`` whose
-    target is ``USER_ASSERTED``, whatever the incoming record's source. ADR-0103
-    §6's reasoning is what both stand on, and it is true of the second word for
-    word: agreement "is information about whether the belief still holds, not about
-    how much warrant it has: the observation supplies no warrant the target did not
-    already have." An observation agreeing with what the user told us is exactly
-    that sentence — we watched the user and re-derived a belief they had already
-    given us on their own authority, so the observation adds no warrant and adds two
-    real things: the episode that showed it, and the fact that the belief was seen
-    to hold again when that episode happened.
+    The target's wording is left as it is (§3:2); a support whose part the target
+    already carries changes nothing and keeps its fields (§4:8). Placement's ratchet
+    (ADR-0217 §3, :meth:`~ai_assistant.core.types.Placement.folded_with`) and the union of
+    topics (ADR-0213 §8) apply as on any fold (§11:9); neither is an operation (§5:2).
+    Each add support is written at ``now`` by the writer that wrote the incoming
+    memory's create, and each added support is stamped as added at ``now``.
 
-    **ADR-0214 §4's clause subsumes ADR-0121 §4's second**, which was the case where
-    the incoming record is ``USER_ASSERTED`` and which it rules identically. The two
-    clauses that remain cannot both reach one fold — a target is not both
-    ``USER_ASSERTED`` and in the ``ATTESTED`` band — so no precedence between them
-    is stated, and ADR-0103 §6's own clause is unchanged in scope, wording and
-    effect (ADR-0121 §9, ADR-0214 §7).
-
-    **Keyed on the target's source and total over the incoming record's, because the
-    mirror of the refusal is the safe shape** (ADR-0214 §4). ADR-0038 §2a's general
-    lesson — "*every* fold overwrites the target, so the target is what has to be
-    checked" — applies to how a fold folds exactly as it applies to whether it may.
-    Stated over the target alone this is a **floor** rather than an enumeration: if
-    a later ADR admits a fourth incoming source through clause 1's exception, that
-    fold corroborates by default rather than falling to an ordinary arm nobody
-    weighed for it. A rule that has to be widened in two places to stay correct is
-    one that will one day be widened in one, and the place it would be forgotten is
-    the arm that overwrites the user's own words. So this is deliberately **not**
-    :data:`_AGREEING_FOLD_INCOMING` read a second time.
-
-    **Selected by the pairing, never by re-testing ADR-0121 §1's predicate.**
-    :func:`_refuse_unsafe_fold` has already refused every fold onto a
-    ``USER_ASSERTED`` target whose records do not agree
-    (:func:`_agreeing_restatement`) — so this clause is reachable only when they do.
-    Testing the predicate again *here* would be worse than redundant: were the
-    refusal ever weakened, an *ordinary*-arm fold would overwrite the user's
-    assertion with the incoming record's content, which is the outcome both clauses
-    exist to prevent. Selecting on the pairing alone makes the safe arm the one that
-    catches a slip.
-
-    **Keyed on ADR-0103 §6's bands, and on neither record's confidence.** The clause
-    reads
-    "where a ``REINFORCE``'s target is in the ``ATTESTED`` band and its incoming
-    record is in the ``DERIVED`` band", so it is the pairing that selects the arm,
-    not the arithmetic — the same fold at ``0.7`` and at ``1.0`` folds the same
-    way. Only the ``1.0`` case is #646's crash (the maximum lands a derived source
-    at full confidence and ``Provenance._derived_is_never_certain`` refuses it,
-    ADR-0077 §7); the rest is the trade ADR-0103 §6 names in terms — "where the
-    derived incoming record's strength happens to exceed the attested target's,
-    today's ``max`` would raise the survivor's number and this clause does not".
-    A crash-keyed guard would have fixed the exception and left the rule the
-    exception was a symptom of.
-
-    **Naming ``ATTESTED`` on the target side keeps that clause inside the reachable
-    set** (ADR-0103 §6). The wider "a ``DERIVED`` proposal onto any target" would
-    sweep in the ``ASSERTED`` target, and the only fold that reaches an assertion is
-    ADR-0121 §5's, whose incoming record is ``USER_ASSERTED`` and so not
-    ``DERIVED`` — a confirmation still admits none, since
-    :func:`_confirmation_covers` check 1 takes only a ``SUPERSEDE``, which retires
-    rather than folds. So the wider phrasing would prescribe how to fold a fold that
-    may not happen. The remaining pairings are left exactly as they stand: a
-    ``DERIVED`` target reinforced by an ``EXTERNAL`` record still folds to
-    ``EXTERNAL`` at the maximum, which the ``ATTESTED`` band admits (ADR-0038 §2a)
-    and §6's first clause therefore permits — the misattribution that leaves behind
-    is filed as #733 and is deliberately not fixed here; and same-band folds other
-    than ADR-0121's are untouched.
-
-    **The second clause is keyed on the ``USER_ASSERTED`` *source*, not on the
-    ``ASSERTED`` band** (ADR-0214 §4). A band-keyed test would enrol a
-    ``MemorySource`` added into that band later into a fold rule nobody weighed for
-    it — the omission hazard ADR-0038 §2a's allow-list shape exists to refuse — and
-    it would be *wider than the refusal it pairs with*, since clause 1 is itself
-    stated over ``USER_ASSERTED`` and not over the band. It would then prescribe how
-    to fold folds clause 1 does not reach, which is the failure ADR-0103 §6 named
-    when it chose its own keying. So the corroboration rule is target-keyed on one
-    side and band-keyed on the other; that irregularity is argued rather than
-    tidied, and ADR-0214's Consequences point anyone tempted to make the two clauses
-    look alike at ADR-0103 §6's paragraph on why its own keying is "deliberate
-    rather than economical".
-
-    Args:
-        target: The stored record the ruling folds into.
-        incoming: The proposed record being folded in.
-
-    Returns:
-        Whether the survivor is the target contributed to, rather than the incoming
-        record wearing the target's id.
+    Raises:
+        MemoryStoreError: If ``target`` is not a memory, or an add support is refused.
     """
-    if target.provenance.source is MemorySource.USER_ASSERTED:
-        return True
-    return (
-        band_of(target.provenance.source) is BeliefBand.ATTESTED
-        and band_of(incoming.provenance.source) is BeliefBand.DERIVED
-    )
-
-
-def _confirming_instant(
-    target: Provenance, incoming: Provenance, *, now: datetime
-) -> datetime | None:
-    """The survivor's ``last_confirmed_at``: ADR-0103 §6's rule, ADR-0109 §5's shape.
-
-    The later of the two records' **usable** confirming instants; the usable one
-    where only one is usable; ``None`` where neither is. An instant is usable when
-    it is not ``None`` and not in the writer's future at the moment of the fold —
-    ``now`` is the ingestor's own injected, guarded clock, never a module-level
-    wall clock, so the selection is deterministic under test (ADR-0109 §5).
-
-    **The clock is what makes this the rule ADR-0103 §6 wrote rather than "the
-    later present value".** #741's pair is the proof: an ``ATTESTED`` target whose
-    ``reported_at`` is future-dated — stored unchanged, because ADR-0092 §3 does
-    not refuse a source's clock skew — folded with a ``DERIVED`` record confirmed
-    in January. Selecting the later *present* value takes the future one, and a
-    read then reports *unknown* for a belief with a perfectly good January
-    confirmation on the other side: the manufactured staleness ADR-0103 §6's
-    unknown-does-not-spread paragraph and ADR-0103 §9's third constraint both
-    refuse, reached at the fold. Selecting over usable values takes January.
-
-    **Composed rather than inherited on both arms.** The ordinary arm's survivor is
-    the incoming record wearing the target's id, so taking the incoming record's
-    instant alone would move a belief's currency *backwards* whenever the target
-    held the later confirmation — reachable with no producer doing anything
-    unusual, a proposal citing a December episode reinforcing a belief confirmed in
-    January. "A confirmation we *do* hold is not unmade" is ADR-0103 §6's own
-    sentence about the unknown case and reads identically about the merely-older
-    one.
-
-    **The selection is made once, and a future instant that later becomes past is
-    not promoted retroactively.** Nothing is lost by that: the target's
-    ``attestation`` survives the fold under ADR-0103 §6, so the record still says
-    what the source reported and when it claimed to be reporting it.
-
-    Args:
-        target: The stored record's provenance.
-        incoming: The proposed record's provenance.
-        now: The ingestor's clock reading, defining "our future" for this fold.
-
-    Returns:
-        The instant the survivor carries, or ``None`` for ADR-0103 §9's unknown.
-    """
-    usable = [
-        instant
-        for instant in (target.last_confirmed_at, incoming.last_confirmed_at)
-        if instant is not None and instant <= now
-    ]
-    return max(usable, default=None)
-
-
-def _merge(target: MemoryRecord, incoming: MemoryRecord, *, now: datetime) -> MemoryRecord:
-    """Fold ``incoming`` into ``target``, keeping the target's id.
-
-    Newer content wins; evidence is unioned and confidence taken as the maximum,
-    so a merge strengthens rather than weakens what is known — **except** where the
-    incoming record corroborates rather than accumulates (:func:`_corroborates`,
-    below): ADR-0103 §6's pairing, and — since ADR-0214 §4 — *every* fold onto a
-    ``USER_ASSERTED`` target, whatever the incoming record's source.
-
-    **Reinforcement only.** Both halves of that — the union and the maximum —
-    assume the two records *agree*. Only a ``REINFORCE`` ruling reaches this
-    function (ADR-0040 §3): a contradiction is a ``SUPERSEDE``, which
-    :meth:`MemoryIngestor._apply` routes to :func:`_supersede` instead.
-
-    **A derived record folded onto an attested one contributes its evidence and
-    nothing else** (ADR-0103 §6). The survivor keeps the target's ``source``,
-    ``attestation``, content and confidence; the evidence union and the
-    transaction stamp move, and the confirming instant is **composed** from both
-    sides rather than taken from either (ADR-0109 §5, below). Two rules that are
-    each right on their own produced #646 between them — "take the maximum" is
-    right about *evidence* and wrong
-    about *what a derived source can warrant* — and the survivor was a
-    ``Provenance`` ``core`` refuses, so the fold raised a ``ValidationError`` and
-    nothing was written at all. Agreement between a derived observation and a
-    better-warranted record is real information, but it is information about
-    whether the belief still holds, not about how much warrant it has: the
-    observation supplies no warrant the target did not already have. So the
-    agreement is recorded where ADR-0103 §6 puts it — in the unioned evidence,
-    which retains the episode the observation stands on — and not in a number that
-    would claim the attested source said something it did not.
-
-    **Every fold onto a user assertion folds the same way** (ADR-0214 §4, subsuming
-    ADR-0121 §4's second clause), on the same reasoning applied to a wider
-    population: no warrant arrives that the record did not already have — the user's
-    word is already the top of the scale — so the survivor is the stored target with
-    its ``content``, ``provenance.source``, ``provenance.confidence``,
-    ``attestation``, ``validity`` and ``expires_at`` unchanged, and the incoming
-    record contributes its evidence and its confirming instant. That holds whether
-    the incoming record is the user restating themselves (ADR-0121) or an
-    observation we re-derived from watching them (ADR-0214), and it is what makes
-    clause 1's exception *provable* rather than argued: the write puts the target's
-    own bytes back at the target's own id — not similar bytes, not normalised bytes,
-    the same ones — so ADR-0045 §5 clause 1's two justifications, both about a fold
-    that replaces or retires what the user told us, do not reach it. ADR-0038 §2a's
-    second half is answered by the same fact: the survivor keeps the target's
-    ``provenance.source``, so a fold from a non-asserted proposal does not downgrade
-    the record out of the ``ASSERTED`` band or out of the profile ADR-0072 §1
-    defines as that band.
-
-    **What is given up is named** (ADR-0214 §4). Where the incoming observation's
-    confidence happens to be relevant at all, today's ``max`` is not taken and the
-    assertion's number stands — trivially right here, and worth saying because on
-    ADR-0103 §6's pairing the same trade cost something real. Nothing is destroyed:
-    the observation's episode is retained and cited on the survivor, and it remains
-    available to propose the derived belief on its own terms if the assertion is
-    ever retired.
-
-    **The whole target record survives, not only its provenance.** ADR-0103 §6
-    gives the incoming record exactly two contributions, so its content, its
-    ``validity`` window and its ``expires_at`` are all left behind with its
-    confidence. Keeping the content is required rather than tidy: an
-    ``attestation`` is present exactly when the band is ``ATTESTED`` (ADR-0092 §1),
-    so a survivor that kept the target's attestation while carrying the incoming
-    record's text would attribute to an external system words it never reported,
-    and one that dropped the band to keep the text would drop the record of who
-    reported the belief and when — a disclosure obligation (ADR-0073 §4), not a
-    nicety.
-
-    **``last_updated`` still comes from the incoming record on both arms, and that
-    is not a third contribution.** It is transaction time — "the clock of the store
-    changing its mind" (ADR-0045 §3, ADR-0103 §9) — and the store is changing its
-    mind here, because the survivor's evidence is not the evidence the target was
-    stored with. What ADR-0103 §6 withholds from the incoming record are the
-    belief's own properties, which it enumerates; a stamp saying when *we* last
-    revised the record is not one of them, and keeping the target's would claim a
-    write that just happened never did.
-
-    **Currency is composed here, on both arms, from the two records and the
-    ingestor's clock** (ADR-0109 §5, §6). ADR-0103 §6's third contribution — the
-    survivor's currency is measured from the later of the two records' *usable*
-    confirming instants, from whichever one is usable where only one is, and as
-    unknown only where neither is, never from the moment of the fold — is
-    implementable now that the instant is stored on the record rather than resolved
-    from the episodes (ADR-0109 §1). :func:`_confirming_instant` is that selection,
-    and it reads two values this function already holds plus ``now``: no store
-    read, so ADR-0081 §1's store-free, cannot-be-raced property is kept whole. It
-    governs **every** ``REINFORCE``, in every band pairing — ADR-0103 §9's fourth
-    clause says "whatever band that record came from", which is vacuous under
-    ADR-0103 §6's pairing alone, and a same-band rule that withheld currency would
-    age a belief re-observed every week exactly as fast as one nobody has seen
-    since.
-
-    **The citation bound can no longer displace the instant, which is why #744's
-    finding has nowhere left to act.** Where the incoming record alone carries more
-    than :data:`MAX_EVIDENCE_CITATIONS`, its own oldest-accumulated citations are
-    displaced, and accumulation order is not ``occurred_at`` order — so the
-    displaced one can be the episode carrying the latest instant, and
-    ``evidence_elided`` retains a count and never an id (ADR-0086 §4), so that
-    instant is not recoverable from the survivor's tuple. Under a *resolver* the
-    survivor's currency would silently fall back to the latest retained citation. It
-    does not here: both inputs to the selection were computed by their producers
-    when the confirming events were in hand, which is **before** ADR-0086 §3's bound
-    ever applied, so the instant stopped depending on the citation list at the
-    moment the proposal was authored. The bound bites exactly as it always did —
-    ADR-0103 §1's promise not to disturb ADR-0086's citation bound holds — and it
-    now displaces citations and nothing else.
-
-    **``derived_from_external`` is the disjunction of both sides, on both arms**
-    (ADR-0106 §4). It joins ``confidence`` and ``evidence`` in the combining
-    minority rather than the majority that takes ``incoming``'s value, and the
-    asymmetry runs the wrong way for the majority style here: a new field written
-    as ``incoming.provenance.derived_from_external`` would clear a tainted target
-    the first time a clean proposal reinforced it, which is exactly the laundering
-    the marker exists to stop. The direction that has to be exercised is therefore
-    a **tainted target reinforced by an untainted incoming** — the opposite
-    direction passes an implementation that merely copies the incoming field and
-    proves nothing.
-
-    **``placement`` is the *meet* of both sides, on both arms** (ADR-0204 §5 as
-    ADR-0217 §3 generalises it from a disjunction to a meet). Every word of the
-    paragraph above transfers: a survivor written as ``incoming``'s placement alone
-    would widen a narrowed target the first time an unnarrowed proposal reinforced
-    it — the laundering moved one step along, which is the failure the field exists
-    to stop. It is written on **both arms** rather than on the arm that happens to be
-    observed, because each arm's ``model_copy`` would otherwise inherit *that side's*
-    placement and quietly discard the other's.
-
-    **The meet is :meth:`~ai_assistant.core.types.Placement.folded_with` and its
-    eligibility rule is why the fold calls that rather than ``narrowest_of``**
-    (ADR-0217 §3). A placement whose setter is ``PROPOSED`` is not a *side* of a meet
-    against one whose setter is ``OWNER_ACT`` or ``DERIVED``: these are two
-    placements of **one belief**, so weighing the proposal would let a model undo the
-    owner's act on that belief by duplication. A record the owner has unguarded —
-    reach ``ANYONE``, setter ``OWNER_ACT`` — folded with a freshly proposed reach
-    ``OWNER`` therefore survives as the owner left it, while the same stored side
-    folded with an incoming ``DERIVED`` narrowing survives narrowed, because an act
-    does not lift a derivation. The survivor's instant is the winning side's and
-    never the instant of the fold: the stamp names when the placement was set, not
-    when a duplicate was merged.
-
-    The corroboration arm takes the meet too, and not the target's placement
-    alone. ADR-0103 §6 withholds the incoming record's *belief properties* from
-    the survivor, and a placement is not one of them: it is a fact about who may
-    receive the record, and the ratchet is stated over the fold rather than over
-    either side.
-
-    **The union is bounded here, before the ``Provenance`` is constructed**, so
-    the constructor's validators run on the value that is stored — the surrounding
-    ``model_copy(update=...)`` skips them (ADR-0026 §2). ADR-0040 §5a's "retains
-    **both** records' evidence" holds up to :data:`MAX_EVIDENCE_CITATIONS` and is
-    partially superseded beyond it (ADR-0086 §3, §11): the oldest are displaced and
-    counted. The fold is the one install drawing from **two** sources, so both
-    records' ``evidence_elided`` are summed — including when the union fits and
-    nothing is displaced, since an incoming record carrying a count of its own
-    would otherwise have that history dropped (ADR-0086 §4). Both arms union and
-    bound identically; ADR-0103 §6 changes what the survivor *warrants*, never what
-    it cites.
-
-    **On the ordinary arm the ``attestation`` is the incoming one** (ADR-0092 §6),
-    and this is required rather than optional: the ``Provenance`` below is built
-    field by field, so ``Provenance``'s iff validator would raise on an attested
-    fold that carried none. The rule follows that arm's own shape — ``source`` and
-    ``last_updated`` already come from the incoming record because newer content
-    wins, and the attestation describes the content that survived. It therefore
-    never disagrees with the ``source`` beside it, including in the awkward case
-    where one source's record is reinforced by another's report: the survivor
-    honestly says who reported the text it now holds. **The corroboration arm keeps
-    that property by keeping the target's attestation**, which is the same rule
-    read against ADR-0103 §6's content ruling rather than a departure from it: the
-    attestation still describes the content that survived and still agrees with the
-    ``source`` beside it. Taking the incoming attestation on ADR-0103 §6's pairing
-    is not merely wrong but impossible — a ``DERIVED`` record carries none, and an
-    ``EXTERNAL`` survivor without one is refused by the same iff validator. On
-    ADR-0121 §4's pairing both sides carry ``None`` (the ``ASSERTED`` band admits
-    no attestation), so the arms cannot be told apart by their output there and the
-    rule is stated for the property rather than for the case that observes it.
-
-    Args:
-        target: The stored record the ruling folds into.
-        incoming: The proposed record being folded in.
-        now: The writer's clock reading, which defines "our future" for
-            :func:`_confirming_instant`'s usability test and for nothing else.
-            Passed in rather than read here, so this function stays a pure
-            function of its arguments and the caller keeps the clock guard that
-            translates a bad reading into `memory`'s own error (ADR-0026 §4).
-
-    Returns:
-        The survivor: the target's record on the corroboration arm, the incoming
-        record wearing the target's id on the ordinary one.
-    """
-    union = tuple(dict.fromkeys([*target.provenance.evidence, *incoming.provenance.evidence]))
-    evidence, elided = _bounded_evidence(
-        union,
-        elided=target.provenance.evidence_elided + incoming.provenance.evidence_elided,
-    )
-    # Selected once, before the arms: ADR-0109 §6 makes the rule identical on both,
-    # and computing it in one place is what stops the two arms drifting.
-    confirmed_at = _confirming_instant(target.provenance, incoming.provenance, now=now)
-    # Likewise selected once, before the arms: ADR-0106 §4 states the rule over the
-    # fold as a disjunction of both sides, so neither arm may read one side alone.
-    tainted = target.provenance.derived_from_external or incoming.provenance.derived_from_external
-    # And once more, for the same reason and by the same rule, on the envelope
-    # rather than on the warrant since ADR-0217 §1: ADR-0204 §5's first clause states
-    # the ratchet over the fold, generalised to a meet by ADR-0217 §3, so no fold,
-    # merge or reinforcement writes a wider reach over a narrower one on either arm.
-    placement = target.placement.folded_with(incoming.placement)
-    # And once more, on the envelope rather than on the warrant: ADR-0213 §8 states
-    # the union over the fold, so neither arm may take one side's tuple. Computed
-    # here, before the arms, for the reason the three above are — one rule in one
-    # place cannot drift between two arms.
-    topics = _topics_of_fold(target, incoming)
-    if _corroborates(target, incoming):
-        corroborated = Provenance(
-            source=target.provenance.source,
-            confidence=target.provenance.confidence,
-            evidence=evidence,
-            evidence_elided=elided,
-            last_updated=incoming.provenance.last_updated,
-            attestation=target.provenance.attestation,
-            derived_from_external=tainted,
-            last_confirmed_at=confirmed_at,
+    if not isinstance(target, Memory):
+        msg = f"cannot reinforce {target.id!r}: a reinforcement adds supports to a memory only"
+        raise MemoryStoreError(msg)
+    writer = incoming.operations[0].by
+    folded = target
+    for support in incoming.supports:
+        if folded.support_at(support.points_at) is not None:
+            continue
+        added = support.model_copy(update={"added_at": now})
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.ADD_SUPPORT,
+            cites=support.points_at,
+            note="added by a proposal that agrees with this memory",
+            at=now,
+            by=writer,
         )
-        return target.model_copy(
-            update={"provenance": corroborated, "topics": topics, "placement": placement}
-        )
-    provenance = Provenance(
-        source=incoming.provenance.source,
-        confidence=max(target.provenance.confidence, incoming.provenance.confidence),
-        evidence=evidence,
-        evidence_elided=elided,
-        last_updated=incoming.provenance.last_updated,
-        attestation=incoming.provenance.attestation,
-        derived_from_external=tainted,
-        last_confirmed_at=confirmed_at,
-    )
-    return incoming.model_copy(
+        try:
+            folded = applied_operation(folded, operation, support=added)
+        except ValueError as exc:
+            msg = f"cannot reinforce {target.id!r}: {exc}"
+            raise MemoryStoreError(msg) from exc
+    return folded.model_copy(
         update={
-            "id": target.id,
-            "provenance": provenance,
-            "topics": topics,
-            "placement": placement,
+            "placement": target.placement.folded_with(incoming.placement),
+            "topics": _topics_of_fold(target, incoming),
         }
     )
 
@@ -1934,8 +1045,8 @@ class MemoryIngestor:
     """Runs a proposed memory through conflict detection, policy, and storage.
 
     Structurally satisfies :class:`~ai_assistant.core.protocols.MemoryWriter`
-    (ADR-0028 §2), which is how `orchestration` reaches this write path without
-    importing it.
+    (ADR-0028 §2, ADR-0328 §11), which is how `orchestration` reaches this write path
+    without importing it.
     """
 
     def __init__(  # noqa: PLR0913 — one parameter per injected collaborator plus two knobs
@@ -1954,62 +1065,31 @@ class MemoryIngestor:
         """Initialise the ingestor.
 
         Args:
-            store: Where accepted memories are persisted and conflicts sought.
+            store: Where memories are persisted and conflicts sought.
             policy: The deterministic policy that rules on each proposal.
             traces_sink: Where this writer's ``MEMORY_WRITE`` traces are appended
-                (ADR-0119 §8). **Required with no default**, which §7 states as a
-                clause of its own: "a composition that omits it does not
-                type-check", because an optional sink defaults to unwired and "no
-                traces is indistinguishable from no events". A
-                :class:`~ai_assistant.core.protocols.TraceSink` and never a
-                ``TraceStore``: §7 gives an emitter the append and withholds the
-                walk.
-            traces_now: Clock the ``MEMORY_WRITE`` trace's ``occurred_at`` is
-                stamped from. **A seam of its own rather than a second reader of
-                ``now``**, because sharing one made the instrument change the work:
-                ADR-0080 §1 requires one ingest to close every window it retires on
-                a **single** clock reading, and an emitter reading first turned the
-                applier's reading into the second, moving the close instant. That
-                is precisely what ADR-0119 §5 forbids an instrument doing, and two
-                clocks is how it holds rather than how it is promised. Defaults to
-                the wall clock, so a test freezing ``now`` for the write's own
-                semantics does not thereby freeze the instant a trace records.
-            conflict_threshold: Minimum retrieval score for an existing record to
-                count as conflicting with the proposal.
+                (ADR-0119 §8). Required with no default (§7).
+            traces_now: Clock the ``MEMORY_WRITE`` trace's ``occurred_at`` is stamped
+                from — a seam of its own, so the instrument does not move the close
+                instant a supersession reads (ADR-0119 §5, ADR-0080 §1).
+            conflict_threshold: Minimum retrieval score for an existing memory to count
+                as conflicting with the proposal.
             conflict_limit: The **ceiling** on the conflicts one ingest resolves
-                (ADR-0079 §1). At or below it the whole detected set reaches the
-                policy; above it :meth:`_detect_conflicts` refuses. Its value stays
-                tuning — only the behaviour at the boundary is contract.
-            now: Clock used to stamp expiry on temporary stores and to close a
-                superseded target's window; injectable for deterministic tests.
-                Guarded by :func:`~ai_assistant.core.clock.checked_clock`, which is
-                what protects :meth:`_expiry`'s and :meth:`_apply_supersede`'s
-                ``model_copy(update=...)`` writes — those skip validators, so the
-                producer is the only place left to catch a non-conforming reading
-                (ADR-0026 §2).
-            id_factory: Mints the fresh id a ``SUPERSEDE`` writes its correction at
-                (ADR-0045 §4); injectable so tests assert exact ids, mirroring the
-                clock and ADR-0022 §5's goal-id factory. Guarded at its output by
-                :func:`_checked_id`, for the same reason the clock is: the id is
-                installed with ``model_copy(update=...)``, so a non-``str`` or empty
-                reading would reach the store unchecked. Defaults to random UUIDs.
-            reconciler: Determines ADR-0159 §1 relations between the proposal and
-                the members of its conflict set, between the probe and the ruling
-                (:func:`_may_reconcile`). **Optional with a ruled, safe absence**
-                (ADR-0159 §6): with none injected the relations this writer holds
-                are ADR-0121 §1's certain agreements and nothing else, and
-                ``decide`` is handed ``None`` — which ``DefaultMemoryPolicy`` rules
-                on as §6 ratifies, folding where two strings are identical and
-                duplicating where they are not. That is what makes a reconciler
-                *optional machinery*: no deployment is forced to acquire a provider,
-                and no test of this write path needs one.
+                (ADR-0079 §1).
+            now: Clock an operation's instant is read from — a supersession's end and a
+                reinforcement's add support — and a retirement's close; guarded by
+                :func:`~ai_assistant.core.clock.checked_clock` (ADR-0026 §2).
+            id_factory: Mints the fresh id a ``SUPERSEDE`` writes its memory at
+                (ADR-0045 §4), guarded at its output by :func:`_checked_id`.
+            reconciler: Determines ADR-0159 §1 relations between the probe and the
+                ruling (:func:`_may_reconcile`). Optional, with a ruled, safe absence
+                (ADR-0159 §6).
 
         Raises:
             TypeError: If ``conflict_limit`` is not an integer, or
                 ``conflict_threshold`` is a ``bool`` (see :func:`_check_tuning`).
-            ValueError: If ``conflict_limit`` is below 1, or
-                ``conflict_threshold`` is not a finite value in ``[0, 1]`` (see
-                :func:`_check_tuning`).
+            ValueError: If ``conflict_limit`` is below 1, or ``conflict_threshold`` is
+                not a finite value in ``[0, 1]`` (see :func:`_check_tuning`).
         """
         _check_tuning(conflict_threshold=conflict_threshold, conflict_limit=conflict_limit)
         self._store = store
@@ -2017,9 +1097,6 @@ class MemoryIngestor:
         self._conflict_threshold = conflict_threshold
         self._conflict_limit = conflict_limit
         self._clock = checked_clock(now, owner="MemoryIngestor")
-        # §3 stamps the instant on the emitter rather than on the trace store, so
-        # the trace means the write and not the append. Its own clock, for the
-        # reason ``traces_now`` documents.
         self._traces = traces.MemoryTraces(
             kind=TraceKind.MEMORY_WRITE,
             sink=traces_sink,
@@ -2028,151 +1105,47 @@ class MemoryIngestor:
         )
         self._id_factory = id_factory
         self._reconciler = reconciler
-        # Guards the read-modify-write in `ingest` (issue #248). **Kept** by
-        # ADR-0219 §5 rather than made redundant by the conditional fold: it is
-        # the only thing serialising the injected policy's `decide` within one
-        # ingestor, and it keeps the common case off the retry path entirely.
-        # Whether it can be narrowed or dropped is a question for a lane that
-        # measures it. Constructed
-        # here rather than lazily because since Python 3.10 an `asyncio.Lock`
-        # binds no loop until it is first awaited, so an ingestor may be built
-        # before the loop exists.
-        #
-        # One lock for all proposals, deliberately. The finest key that would
-        # still be *correct* is the proposal's `MemoryKind`, since
-        # `_detect_conflicts` searches within one kind and `_apply` refuses a
-        # target outside the conflicts, so two proposals of different kinds can
-        # never contend for a record. It is rejected on cost, not correctness:
-        # it buys concurrency between kinds that nothing has asked for, on a
-        # section whose only awaits are two store calls and a deterministic
-        # policy, and it pays by making the safety property depend on conflict
-        # detection staying kind-scoped — a coupling a later cross-kind
-        # conflict rule would break silently, which is the failure mode this
-        # change exists to remove.
+        # Guards the read-modify-write in `ingest` and `apply` (issue #248), kept by
+        # ADR-0219 §5 beside the conditional write: it serialises the injected policy's
+        # `decide` within one ingestor and keeps the common case off the retry path.
         self._lock = asyncio.Lock()
 
     async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
-        """Detect conflicts, apply the policy, and persist the outcome.
+        """Detect conflicts, apply the policy, and persist the outcome (ADR-0328 §11:4).
 
-        The three steps are one **read-modify-write**: a fold (``REINFORCE`` or
-        ``SUPERSEDE``) folds the proposal into a conflict snapshot taken by the
-        search above it, and writes the result back at that record's id.
-        Interleaved, two ingests both snapshot the same target before either
-        writes, and an unconditional write silently discards the first — with both
-        callers handed a healthy result. Since ADR-0038 the discarded write may be
-        a user correction.
+        One **read-modify-write**, closed by two mechanisms (#248, ADR-0219 §5): the
+        lock keeps two ingests through this object from interleaving, and every write
+        derived from a read is conditional on that read's revision, so a record another
+        writer moved in between is refused and :meth:`_ingest` re-runs the whole cycle
+        once against the store as it now stands.
 
-        **Two mechanisms close that, and they close different halves of it**
-        (issue #248, ADR-0046 §5, ADR-0219 §5).
-
-        - **The lock keeps the common case off the retry path.** The whole
-          sequence is serialised on an ``asyncio.Lock`` held by this ingestor
-          (#262), so two ingests through *this* object never interleave at all. It
-          spans the injected policy's ``decide``, because the ruling is what the
-          write is derived from; a policy that blocks on I/O therefore blocks
-          other ingests. That is the cost of the guarantee, not an oversight.
-        - **The conditional write closes what the lock cannot reach.** The fold
-          writes ``IF_UNCHANGED`` at the revision of the record it was derived
-          from, so a target another writer moved in between is *refused* rather
-          than overwritten, and :meth:`_ingest` re-runs the whole cycle once
-          against the store as it now stands. That covers the two residuals
-          ADR-0046 §5 named and #262's lock does not: a second
-          ``MemoryIngestor`` over one store, holding a different lock, and a
-          second *process* sharing a store file, which no in-process lock
-          reaches. On a durable backend the comparison and the write are one
-          indivisible step inside the batch's transaction (ADR-0219 §3).
-
-        Neither is redundant and neither is a substitute for the other, which is
-        why ADR-0219 §5 keeps the lock: the mode does not serialise ``decide``,
-        and the lock does not cross an object or a process boundary.
-
-        **Five refusals precede or replace a ruling**, in the order they fire:
-
-        1. **Unresolvable evidence** (ADR-0077 §5): a ``DERIVED`` proposal citing a
-           record this store does not hold raises ``UnresolvedEvidenceError``
-           naming every such id, before conflict detection and before the policy is
-           asked (:meth:`_require_resolvable_evidence`).
-        2. **Over the conflict ceiling** (ADR-0079 §1): detection surfacing more
-           conflicts than :data:`_DEFAULT_CONFLICT_LIMIT` — whatever this ingestor
-           was tuned to — raises ``MemoryStoreError`` with nothing written and no
-           ruling sought (:meth:`_detect_conflicts`).
-        3. **A secret-tier write** (ADR-0078 §5b check 0): once the policy has ruled
-           and before any write is dispatched, a write-producing ruling on a
-           ``DataTier.SECRET`` proposal raises ``MemoryStoreError``
-           (:func:`_refuse_secret_write`). ``ASK_USER`` and ``REJECT`` return
-           normally, which is what preserves the ordinary secret-tier path.
-        4. **A write that consumes its own evidence** (ADR-0081 §1): at that same
-           seam, a ruling that would *install* the proposal at an id the proposal's
-           ``provenance.evidence`` names raises ``MemoryStoreError``
-           (:func:`_refuse_self_consuming_write`) — ``ACCEPT`` and
-           ``STORE_TEMPORARY`` at ``proposed.id``, ``REINFORCE`` at the ruling's
-           ``target_id``, whether or not a record stands there and for every band.
-           ``SUPERSEDE`` is decided at its *minted* id instead, inside
-           :meth:`_apply_supersede`, where a hit re-mints rather than refusing (§4);
-           its retirement-set writes retire rather than install and are never
-           refused by this rule.
-        5. **An unretirable window** (ADR-0080 §3): a ``SUPERSEDE`` whose retirement
-           set holds a record whose window cannot be closed representably raises
-           ``MemoryStoreError`` before the atomic batch (:func:`_close_window`).
-
-        And **two refusals at the fold**: a fold onto a ``USER_ASSERTED`` target
-        raises unless the proposal carries a confirmation that genuinely covers that
-        target (ADR-0045 §5, narrowed by ADR-0078 §5b and ADR-0121 §5,
-        :func:`_confirmation_covers`); and a ``SUPERSEDE`` naming a conflict this
-        writer determined the proposal ``RESTATES`` or ``ADDS`` to raises, because
-        such a conflict is never retired by any ruling (ADR-0159 §5,
-        :func:`_refuse_retiring_a_related_conflict`).
-
-        **Between the conflict probe and the ruling sits the reconciler**
-        (ADR-0159 §2), on the invocation condition :func:`_may_reconcile` states —
-        which is where the admissibility floor is read, because inside ``decide`` it
-        would be too late. Its request is inside this ingest's lock, knowingly: the
-        reconciler reads the conflict snapshot, so moving it outside would
-        reintroduce the lost-update race the lock closes, on a path where the
-        discarded write may now be a supersession. A second ingest arriving during a
-        reconciliation waits for it, and the delays queue rather than overlap
-        (ADR-0159 §6).
+        **The refusals**, in the order they fire: a support pointing at an episode the
+        store does not hold (ADR-0328 §4:7, ``UnresolvedEvidenceError``); more conflicts
+        than one ingest resolves (ADR-0079 §1); after the ruling, a write-producing
+        ruling on secret-tier data (ADR-0078 §5b), a ``STORE_TEMPORARY`` ruling
+        (ADR-0328 §10:3), and a write landing at an id the proposal's supports point at
+        (ADR-0081 §1); at the fold, a fold onto an ``ASSERTED`` target no exception admits
+        (ADR-0045 §5, ADR-0078 §5b, ADR-0121 §5) and a ``SUPERSEDE`` naming a conflict
+        this writer holds a ``RESTATES`` or ``ADDS`` relation for (ADR-0159 §5); and an
+        end §5:10, §5:11 or §6:5 refuses, or a retired memory already carrying the part
+        the new memory's first support points at (§11:7).
 
         Args:
-            proposal: The memory update to rule on and persist.
+            proposal: The memory to rule on and persist.
 
         Returns:
-            The policy's decision and the id written, if anything was written.
+            The policy's decision and the id left live, if anything was written.
 
         Raises:
-            UnresolvedEvidenceError: If a ``DERIVED`` proposal cites a record the
-                store does not hold; nothing is written and the policy is not asked.
-            MemoryStoreError: If detection surfaces more conflicts than this
-                ingestor will resolve in one ingest, if a write-producing ruling
-                landed on a ``DataTier.SECRET`` proposal, if a ruling would install
-                the proposal at an id it cites, if a fold onto a ``USER_ASSERTED``
-                target is not covered by a confirmation, if a ``SUPERSEDE`` names a
-                conflict this writer holds a ``RESTATES`` or ``ADDS`` relation for,
-                if a retirement's window cannot be closed, or on any other store or
-                applier failure. That includes the ``MemoryStoreStaleError`` a fold
-                raises where **both** of its two attempts met a target another
-                writer had moved (ADR-0219 §5): a subclass, so this member gains no
-                error and ADR-0028 §5's one-error seam is unmoved.
+            UnresolvedEvidenceError: If a support points at an episode the store does
+                not hold; nothing is written and the policy is not asked.
+            MemoryStoreError: On every other refusal above, or any store failure,
+                including the ``MemoryStoreStaleError`` a write raises where both of its
+                two attempts met a record another writer had moved (ADR-0219 §5).
         """
-        # One observation of the caller's proposal, taken on this coroutine's
-        # first executed line — before the lock, which is `ingest`'s first await
-        # (`core.protocols`' input clause, ADR-0065; issue #366). Everything below
-        # reads only this copy. Without it the sequence reads `proposal.proposed`
-        # three times across two awaits: once to search for conflicts, once inside
-        # the injected policy, and once to build what is written. `MemoryRecord`
-        # is mutable and `DefaultMemoryPolicy` is only one of the policies this
-        # seam accepts — a model-backed one would widen the window to a network
-        # call — so a caller that mutated its own record mid-flight could make
-        # `_retirement_set` close the windows of beliefs contradicting the content
-        # searched *first* while the record installed came from the read *last*.
-        # Not a torn record (the store snapshots its own input, ADR-0056) but a
-        # semantic desync one level up: beliefs retired over a statement that was
-        # never stored.
+        # One observation of the caller's proposal, on this coroutine's first executed
+        # line — before the lock, which is `ingest`'s first await (ADR-0065, #366).
         observed = proposal.model_copy(deep=True)
-        # One crossing, one ``MEMORY_WRITE`` trace (ADR-0119 §5, §8), and the
-        # write's mode carried by the seam label. ``_locked_ingest`` is
-        # *constructed* here and not started, so the observation above is still on
-        # this coroutine's first executed line (ADR-0065).
         ingested = await self._traces.observing(
             traces.SEAM_INGEST,
             self._locked_ingest(observed),
@@ -2181,79 +1154,87 @@ class MemoryIngestor:
         )
         return ingested.result
 
-    async def _locked_ingest(self, proposal: MemoryUpdateProposal) -> _Ingested:
-        """One proposal under the ordinary per-proposal hold.
+    async def apply(self, change: MemoryChange) -> None:
+        """Apply one operation to one stored memory (ADR-0328 §11:3).
 
-        The proposal is already this object's own snapshot at :meth:`ingest`, so it
-        is not copied again.
+        The record the operation yields is computed by
+        :func:`~ai_assistant.core.types.applied_operation` from the memory the caller
+        read, and written ``IF_UNCHANGED`` at that memory's revision (§5:4), with the
+        successor an end, a mark wrong or a replace names written ``INSERT_IF_ABSENT`` in
+        the same atomic batch (§5:6). An add support whose part the memory already
+        carries changes nothing, and nothing is written (§4:8).
 
-        Returns:
-            The proposal's result together with the ids a ``SUPERSEDE`` retired,
-            which ADR-0119 §8 wants and ``MemoryIngestResult`` does not carry.
+        Args:
+            change: The memory as read, the operation, and what it brings.
+
+        Raises:
+            UnresolvedEvidenceError: If the support it adds, or a support of the
+                successor, points at an episode the store does not hold (§4:7).
+            MemoryStoreStaleError: If the stored memory is not the one read.
+            MemoryStoreConflictError: If the successor's id names a stored record.
+            MemoryStoreError: If §4, §5 or §6:5 refuses the operation, or a store
+                failure. Nothing is written.
         """
+        observed = change.model_copy(deep=True)
+        async with self._lock:
+            await self._apply_change(observed)
+
+    async def _apply_change(self, change: MemoryChange) -> None:
+        memory = change.memory
+        added = () if change.support is None else (change.support,)
+        successor = () if change.successor is None else change.successor.supports
+        await self._require_held_episodes(memory.id, (*added, *successor))
+        try:
+            after = applied_operation(
+                memory, change.operation, support=change.support, question=change.question
+            )
+        except ValueError as exc:
+            msg = f"refusing to apply a {change.operation.kind} to {memory.id!r}: {exc}"
+            raise MemoryStoreError(msg) from exc
+        if after is memory:
+            return
+        batch = [
+            MemoryWrite(
+                record=after,
+                mode=MemoryWriteMode.IF_UNCHANGED,
+                expected_revision=memory.revision,
+            )
+        ]
+        if change.successor is not None:
+            batch.append(
+                MemoryWrite(
+                    record=_installed(change.successor), mode=MemoryWriteMode.INSERT_IF_ABSENT
+                )
+            )
+        await self._store.write_atomic(batch)
+
+    async def _locked_ingest(self, proposal: MemoryUpdateProposal) -> _Ingested:
+        """One proposal under the ordinary per-proposal hold."""
         async with self._lock:
             return await self._ingest(proposal)
 
     async def _ingest(self, observed: MemoryUpdateProposal) -> _Ingested:
         """One proposal's read-modify-write, re-run once if the store moved under it.
 
-        ADR-0219 §5's bound, and the half of #248 that the conditional write on its
-        own does not close: the mode makes a lost update *impossible*, and this makes
-        the ingest that met one *converge*. Without it a stale refusal would reach the
-        caller as a `MemoryStoreError` on an ingest that had nothing wrong with it.
-
-        **The re-run is the whole cycle and never a re-submission** (§5). Conflict
-        detection, the reconciler, the policy's ruling and the fold all run again
-        against the store as it now stands, and the merge computed over the rejected
-        snapshot is discarded rather than resent. A fold folds a proposal into a
-        *snapshot*: re-submitting that payload against a moved target is the lost
-        update wearing a conditional write's clothes, and re-asking the policy is the
-        only thing that keeps the ruling derived from the state the write lands on.
-        That is the property #262's lock buys within one ingestor, restored across
-        ingestors and across processes.
-
-        **Two attempts in all**, matching ADR-0217 §7's bound, and written as two
-        statements rather than a loop so the bound is the code rather than a constant
-        the code consults. A second refusal propagates as the ``MemoryStoreError`` it
-        is — the caller is told the store would not take the write, and is never
-        handed the healthy ``MemoryIngestResult`` ADR-0046 §5 says the old race handed
-        both writers. Raised from inside the first refusal's handler, so the traceback
-        names both.
+        ADR-0219 §5's bound: two attempts in all, the re-run the whole cycle and never a
+        re-submission of the payload computed over the rejected snapshot.
 
         Raises:
             MemoryStoreStaleError: If a second attempt is also refused as stale.
-                Nothing is written by either attempt.
         """
-        if (
-            isinstance(observed.proposed, EpisodicMemory)
-            and observed.proposed.processing_record is not None
-        ):
-            msg = "processing records cannot be supplied through MemoryWriter"
-            raise MemoryStoreError(msg)
         try:
             return await self._ingest_once(observed)
         except MemoryStoreStaleError:
-            # Nothing was written — ADR-0219 §3's all-or-nothing — so there is no
-            # partial state to unwind before the cycle runs again.
             return await self._ingest_once(observed)
 
     async def _ingest_once(self, observed: MemoryUpdateProposal) -> _Ingested:
-        await self._require_resolvable_evidence(observed.proposed)
+        await self._require_held_episodes(observed.proposed.id, observed.proposed.supports)
         conflicts = await self._detect_conflicts(observed.proposed)
         resolved = tuple(record.id for record in conflicts)
-        # Shallow is right here: this copies the ingestor's *own* snapshot, whose
-        # `proposed` no caller holds a reference to. `observed` is deliberately
-        # **kept** rather than rebound: its `conflicts` are the frozen ids the
+        # `observed` is kept rather than rebound: its `conflicts` are the frozen ids the
         # question was asked about, and ADR-0078 §5b check 4 recomputes the
-        # `question_key` from exactly those — comparing against the live set below
-        # would refuse every honest answer (ADR-0078 §7's "no asserted conflict
-        # ever confirmable").
+        # `question_key` from exactly those.
         ruled = observed.model_copy(update={"conflicts": resolved})
-        # Between the probe and the ruling, and behind the admissibility floor
-        # (ADR-0159 §2). The relations this writer determines are its own; what
-        # crosses the policy seam is a read-only view over a **copy**, so nothing
-        # the ruling does with what it was handed can reach the mapping
-        # `_retirement_set` rules from (ADR-0159 §8).
         determined = await self._relations_for(ruled, conflicts)
         relations = determined.relations
         decision = await self._policy.decide(
@@ -2263,40 +1244,17 @@ class MemoryIngestor:
             if relations is None or self._reconciler is None
             else MappingProxyType(dict(relations)),
         )
-        # Check 0, between the ruling and the write dispatch (ADR-0078 §5b): it
-        # gates every write-producing ruling and no ruling that writes nothing, so
-        # it belongs neither inside `_refuse_unsafe_fold` (which `ACCEPT` never
-        # reaches) nor at the top of `ingest` (which would break the ordinary
-        # secret-tier path §1 preserves).
         _refuse_secret_write(decision, observed)
-        # ADR-0081 §1, at the same seam and for the same structural reason: it is a
-        # property of the *write*, so it belongs after the ruling that determines the
-        # write set and before the dispatch that performs it. `SUPERSEDE`'s minted
-        # destination does not exist yet and is tested in `_apply_supersede` (§2).
+        _refuse_tentative_store(decision)
         _refuse_self_consuming_write(decision, observed, resolved=resolved)
         applied = await self._apply(
             decision, observed, conflicts, resolved=resolved, relations=relations or {}
         )
-        # The resolved ids come back on **every** ruling (ADR-0078 §4). ADR-0028 §3
-        # declined this and named the exact condition for revisiting — a consumer
-        # that needs to *show* the user what a proposal contradicted. Nothing new is
-        # computed; the value the copy above already carries across the policy seam
-        # crosses the writer seam too, so a caller reads the conflicts the policy
-        # actually saw instead of re-deriving `_detect_conflicts` in `orchestration`
-        # (the duplication ADR-0028 §4 deleted) or re-detecting later, by which point
-        # the set has moved.
         return _Ingested(
             result=MemoryIngestResult(
                 decision=decision, record_id=applied.record_id, conflicts=resolved
             ),
             superseded=applied.superseded,
-            # ADR-0164 §4: what the trace counts is what **this** object held, never
-            # the read-only view handed to ``decide`` above nor anything the policy
-            # returned. An injected policy can narrow a ``Mapping`` at run time, and
-            # an instrument a policy can move is measuring the policy; the view is
-            # lossy even when the policy is honest, since it is ``None`` in the
-            # no-reconciler deployment while this writer holds the certain rung's
-            # labels.
             reconciliation=determined,
         )
 
@@ -2461,98 +1419,67 @@ class MemoryIngestor:
         # would have no conclusion to draw from either.
         return failed
 
-    async def _require_resolvable_evidence(self, record: MemoryRecord) -> None:
-        """Refuse a ``DERIVED`` proposal citing a record this store does not hold.
+    async def _require_held_episodes(
+        self, memory_id: str, supports: Sequence[MemorySupport]
+    ) -> None:
+        """Refuse supports pointing at an episode the store does not hold (ADR-0328 §4:7).
 
-        ADR-0077 §5's write-time resolvability floor, and the first thing an ingest
-        does: it runs **before** conflict detection and before the policy is asked,
-        because a proposal whose warrant does not exist is inadmissible rather than
-        rule-able. The refusal is a raise and not a fabricated ``REJECT`` — a ruling
-        is the policy's to make (ADR-0005 §3), and a writer inventing one would put
-        a decision nobody made into the ingest result.
-
-        Scoped to the ``DERIVED`` band, because that is the band ADR-0072 §3
-        obliges to cite. It is deliberately **not** a floor on citing *nothing*: an
-        empty tuple names no record that fails to resolve, so it passes here and is
-        the ``MemoryPolicy``'s to judge (``DefaultMemoryPolicy`` rule 2). Putting
-        one rule in two places is what ADR-0077 §5 exists to avoid.
-
-        The ids are reported **in citation order** and de-duplicated, so a caller
-        comparing them against the batch it selected reads each failure once
-        (:class:`~ai_assistant.core.errors.UnresolvedEvidenceError`). *Every*
-        unresolved id is named rather than the first: the stage's race-versus-bug
-        discrimination is a quantified statement over the whole set, and a partial
-        list would let a producer bug hide behind an expiry that accompanied it.
+        Every support but a legacy one, whatever the memory's band — ADR-0077 §5's
+        resolvability floor, which ADR-0328 widens from a derived record's citations to
+        every support. Read through one ``get_many``, so the episodes are judged against
+        one state of the store. The ids are reported in support order, once each.
 
         Raises:
-            UnresolvedEvidenceError: If any cited id names no record the store
-                returns; nothing is written and no ruling is sought.
+            UnresolvedEvidenceError: If any support's episode does not resolve; nothing
+                is written and no ruling is sought.
         """
-        if band_of(record.provenance.source) is not BeliefBand.DERIVED:
+        episodes = list(
+            dict.fromkeys(
+                episode
+                for episode in (part_episode(support.points_at) for support in supports)
+                if episode is not None
+            )
+        )
+        if not episodes:
             return
-        unresolved: list[str] = []
-        for cited in dict.fromkeys(record.provenance.evidence):
-            if await self._store.get(cited) is None:
-                unresolved.append(cited)
+        held = await self._store.get_many(episodes)
+        unresolved = [
+            episode
+            for episode in episodes
+            if (found := held.get(episode)) is None or found.kind != MemoryKind.EPISODIC.value
+        ]
         if unresolved:
             msg = (
-                f"refusing to ingest {record.id!r}: its {record.provenance.source} provenance "
-                f"cites {len(unresolved)} record(s) this store does not hold — "
-                f"{', '.join(repr(cited) for cited in unresolved)} (ADR-0077 §5)"
+                f"refusing to write {memory_id!r}: {len(unresolved)} of its supports point at "
+                f"an episode this store does not hold — "
+                f"{', '.join(repr(one) for one in unresolved)} (ADR-0328 §4:7)"
             )
             raise UnresolvedEvidenceError(msg, unresolved)
 
-    async def _detect_conflicts(self, record: MemoryRecord) -> list[MemoryRecord]:
+    async def _detect_conflicts(self, memory: Memory) -> list[MemoryRecord]:
         """Return every conflict retrieval surfaced, or refuse above the ceiling.
 
-        ``conflict_limit`` is a **ceiling, not a truncation budget** (ADR-0079 §1):
-        at or below it the whole detected set is handed to the policy — nothing this
-        method holds is discarded — and above it the ingest refuses, writing nothing,
-        closing no window and asking for no ruling. Truncating instead would defeat
-        more than the retirement set: ``DefaultMemoryPolicy``'s two asserted-conflict
-        gates are predicates over the set they are *handed*, so an assertion ranked
-        past the cut would silently stop reaching them.
-
-        **Two rows of headroom over the ceiling, for two independent reasons.** One
-        is the standing over-fetch for the proposal's own record — the store applies
-        the limit before this method can drop it, so at ``conflict_limit=1`` a
-        re-proposal would otherwise spend its only slot on a record that is then
-        discarded, hiding a genuine conflict ranked just below (#110). One extra
-        suffices there: ids are unique in a store, so at most one match is the
-        proposal itself. The other is ADR-0079 §1's **overflow probe**: without a
-        row beyond the ceiling, "retrieval surfaced exactly ``conflict_limit``" and
-        "it surfaced more" are indistinguishable.
-
-        This is a bound, not a loop — one ranked read, as today, with a wider limit —
-        so it makes no claim that retrieval is exhaustive. ``search`` returns "the
-        records most relevant to ``query``, best first", which is what lets a row
-        scoring below the threshold prove no later returned row scores at or above
-        it; what it never surfaced is invisible here, and closing *that* is a
-        ``MemoryStore`` obligation filed as issue #457.
+        ``conflict_limit`` is a **ceiling, not a truncation budget** (ADR-0079 §1). Two
+        rows of headroom over it: one for the proposal's own memory (#110), one for the
+        overflow probe. Conflicts are memories alone: an episode is never one.
 
         Raises:
-            MemoryStoreError: If retrieval surfaced more conflicts than this
-                ingestor will resolve in one ingest.
+            MemoryStoreError: If retrieval surfaced more conflicts than this ingestor
+                will resolve in one ingest.
         """
-        # ``capped`` is unwrapped and not acted on. ADR-0128 §6 leaves that policy to
-        # its own lane, and the fact lands before the policy that reads it: this
-        # read now *knows* whether the ceiling bound it, where before "retrieval
-        # surfaced everything" and "retrieval ran out of candidates" were the same
-        # short answer. Refusing on it would be a new refusal on the write path and
-        # needs the ruling ADR-0079 §1's ceiling is stated under.
         found = await self._store.search(
-            record.content,
+            memory.content,
             limit=self._conflict_limit + 2,
-            kinds=[MemoryKind(record.kind)],
+            kinds=[MemoryKind.MEMORY],
         )
         conflicts = [
             match
             for match in found.records
-            if match.id != record.id and (match.score or 0.0) >= self._conflict_threshold
+            if match.id != memory.id and (match.score or 0.0) >= self._conflict_threshold
         ]
         if len(conflicts) > self._conflict_limit:
             msg = (
-                f"refusing to ingest {record.id!r}: conflict resolution surfaced more than "
+                f"refusing to ingest {memory.id!r}: conflict resolution surfaced more than "
                 f"{self._conflict_limit} conflicting records, more than one ingest resolves. "
                 f"Nothing was written and no ruling was sought — a correction resolves every "
                 f"conflict it is shown, or it does not land (ADR-0079 §1)"
@@ -2570,46 +1497,17 @@ class MemoryIngestor:
         relations: Mapping[str, ConflictRelation],
     ) -> _Applied:
         proposed = proposal.proposed
-        # Every arm below that *installs* passes its record through `_installed`
-        # (ADR-0086 §2), which is what makes the bound a property of the seam
-        # rather than of one ruling: a later ruling that installs cannot acquire an
-        # unbounded write by forgetting to opt in. It is a no-op on a `_merge`
-        # result, which has already applied the same rule to the union it formed.
         match decision.kind:
             case MemoryDecisionKind.ACCEPT:
                 return _Applied(await self._install(_installed(proposed)))
-            case MemoryDecisionKind.STORE_TEMPORARY:
-                expires_at = self._expiry(decision.ttl)
-                return _Applied(
-                    await self._install(
-                        _installed(proposed.model_copy(update={"expires_at": expires_at}))
-                    )
-                )
             case MemoryDecisionKind.REINFORCE | MemoryDecisionKind.SUPERSEDE:
                 target = next((c for c in conflicts if c.id == decision.target_id), None)
                 if target is None:
-                    # A fold naming an absent target must fail loudly: silently
-                    # storing the proposal as new would create the duplicate the
-                    # fold was meant to prevent, while reporting success.
                     msg = f"fold target {decision.target_id!r} is not among the conflicts"
                     raise MemoryStoreError(msg)
                 _refuse_unsafe_fold(target, proposal, decision.kind, resolved=resolved)
-                # ADR-0159 §5, beside the standing refusals and never in place of
-                # one: a `SUPERSEDE` naming a conflict this writer determined the
-                # proposal restates or adds to is refused, because retiring the
-                # named target is what the ruling means and there is nothing to
-                # leave out.
                 _refuse_retiring_a_related_conflict(target, decision.kind, relations)
-                # Past the refusal, the ruling names the relation, so the ingestor
-                # no longer reads provenance to recover it (ADR-0040 §3): SUPERSEDE
-                # retires the contradicted belief (window-close) and writes the
-                # correction as a new record, REINFORCE folds the two at the target's
-                # id.
                 if decision.kind is MemoryDecisionKind.SUPERSEDE:
-                    # The whole retirement set, not the ruling's `target_id`:
-                    # ADR-0050 §1 / #244 retire every supersedable conflict the
-                    # correction contradicts, and ADR-0119 §8 wants the ids that
-                    # were actually closed rather than the one that was named.
                     retiring = _retirement_set(
                         target,
                         conflicts,
@@ -2621,23 +1519,12 @@ class MemoryIngestor:
                         await self._apply_supersede(retiring, proposed),
                         tuple(record.id for record in retiring),
                     )
-                # The clock reading is the fold's, taken here rather than inside
-                # `_merge`: `_now_utc` translates a bad reading into this
-                # subsystem's `MemoryStoreError` (ADR-0026 §4), and a module-level
-                # helper has no error class to raise. It also keeps `_merge` a pure
-                # function of its arguments, which is what makes ADR-0109 §5's
-                # selection deterministic under test.
                 return _Applied(
                     await self._fold(
-                        _installed(_merge(target, proposed, now=self._now_utc())),
-                        # ADR-0219 §5: the fold is conditional on the revision of
-                        # the record it was *derived from*, read off `target`
-                        # rather than off the merged record. `_merge` carries the
-                        # target's fields forward, so the two happen to agree
-                        # today — but the merged record is one this ingestor
-                        # *built*, and §2 makes reading an expectation off a built
-                        # record the fail-open mistake the separate field exists to
-                        # rule out.
+                        _installed(_reinforced(target, proposed, now=self._now_utc())),
+                        # ADR-0219 §5: conditional on the revision of the record the fold
+                        # was derived from, read off `target` and never off a record this
+                        # ingestor built (§2).
                         expected_revision=target.revision,
                     )
                 )
@@ -2727,150 +1614,54 @@ class MemoryIngestor:
         )
         return written[0]
 
-    async def _apply_supersede(self, targets: list[MemoryRecord], proposed: MemoryRecord) -> str:
-        """Close every ``target``'s window and write ``proposed`` as a new record.
+    async def _apply_supersede(self, targets: list[MemoryRecord], proposed: Memory) -> str:
+        """End every ``target`` and install ``proposed`` at a fresh id, atomically.
 
-        ``targets`` is the full conflicting set a ``SUPERSEDE`` retires
-        (:func:`_retirement_set`, ADR-0050 §1 / #244): the policy's best-ranked
-        target leads, followed by every other supersedable conflict the correction
-        contradicts. All of them plus the correction are one atomic batch —
-        ``[IF_UNCHANGED(T_closed) for each target] + [INSERT_IF_ABSENT(P_new)]`` — via
-        :meth:`MemoryStore.write_atomic` (ADR-0046), so a failure part-way cannot
-        leave some beliefs retired with no live replacement (the regression ADR-0045
-        §8 refused to ship). Retiring N is as atomic and reversible-in-history as
-        retiring one, which is why closing N windows needs no ``target_id`` widening
-        in ``core`` (issue #244, ADR-0045 §7).
+        ``targets`` is the full retirement set (:func:`_retirement_set`). The batch is
+        ``[IF_UNCHANGED(ended target) for each target] + [INSERT_IF_ABSENT(new)]``
+        (ADR-0046, ADR-0219 §5), so a failure part-way cannot leave memories retired with
+        no live replacement (ADR-0045 §8). Each target is ended by an end citing the new
+        memory's first support, added to it as an ``against`` support, and naming the new
+        memory as its successor; the new memory's create names every one of them among
+        those it replaces (ADR-0328 §11:7, §5:6). One clock reading serves every end
+        (ADR-0080 §1).
 
-        **Every close is conditional** (ADR-0219 §5): a window-close is computed from
-        a target this ingest read, so it carries that read's ``revision`` and is
-        refused where another writer moved the row in between. ``IF_UNCHANGED``'s
-        presence requirement is *physical* (ADR-0219 §4), which is what lets a
-        window-close be conditional at all — an already-closed or expired target is
-        present, and its revision is the one compared. The correction's
-        ``INSERT_IF_ABSENT`` is untouched and carries no expectation: it names an id
-        that must be **absent**, which is the opposite condition and a different
-        refusal, so the batch stays the two kinds of element ADR-0045 §4 and
-        ADR-0046 §2 shape it into.
-
-        The correction's id is minted by the guarded id factory and written
-        insert-if-absent, so a collision with any stored record — every retained
-        target included — is *rejected*, not clobbered; on the resulting
-        :class:`~ai_assistant.core.errors.MemoryStoreConflictError` the applier
-        re-mints and retries, bounded by :data:`_MAX_SUPERSEDE_ATTEMPTS`. A minted id
-        the **proposal cites** joins that same bounded loop (ADR-0081 §4): installing
-        the correction there would leave it standing as its own warrant, reached
-        without replacing anything, so the applier re-mints rather than refusing —
-        a re-mint is free and always available. Any other
-        ``MemoryStoreError`` aborts with **every** target left **live and unchanged**,
-        because the atomic batch rolls all the window-closes back together.
-
-        The close instant is **this ingestor's** clock (ADR-0045 §4, ADR-0026), read
-        **once** for the whole retirement set and never re-determined per target
-        (ADR-0080 §1): a per-target reading would let one atomic batch record two
-        different close times for one ruling, so a reader could not say when the
-        correction took effect. Each target's own end is then clamped against it
-        (:func:`_close_window`). A retired target leaves the read path once the
-        *store's* read clock reaches the close —
-        the same read-time semantics ``expires_at`` has. In production the store and
-        this ingestor each *independently sample* the real wall clock (neither is
-        given a ``now`` in ``build_engine``), and a ``get`` after ``ingest`` returns
-        samples at or after the close — provided the wall clock advances forward
-        between the two — so the target is hidden. A store read that samples *behind*
-        the close (an injected test clock, or the wall clock stepping backward between
-        the two samples) keeps it briefly visible, exactly as a backward step
-        un-expires an ``expires_at`` record — a read-time-filtering property, not a
-        supersession bug (issue #460 tracks an absolute, clock-coherence-independent
-        guarantee; ADR-0080 §9 leaves this semantics exactly as ADR-0045 §6 has it).
+        The new id is minted by the guarded id factory and re-minted, within
+        :data:`_MAX_SUPERSEDE_ATTEMPTS`, past an id that collides with a stored record, an
+        id a target holds, or an id the proposal's supports point at (ADR-0081 §4).
 
         Returns:
-            The **live** record's id — the correction's freshly-minted id, not any
-            retired target's (ADR-0045 §4).
+            The **live** memory's id — the fresh one (ADR-0045 §4).
 
         Raises:
-            MemoryStoreStaleError: If any target moved, or was deleted, between the
-                read this supersession was computed over and the batch. Nothing is
-                written and every target is left live and unchanged; it leaves the
-                re-mint loop unretried — an id is not what went wrong — and
-                :meth:`_ingest` re-runs the whole cycle once (ADR-0219 §5).
-            MemoryStoreError: If the id factory is malformed (:func:`_checked_id`), if
-                a target's window cannot be closed (:func:`_close_window`), if the
-                bounded re-mint cannot find a free id, or on any other store failure —
-                in every case every target is left live and unchanged.
+            MemoryStoreStaleError: If any target moved between this ingest's read and the
+                batch; nothing is written and :meth:`_ingest` re-runs the cycle.
+            MemoryStoreError: If the id factory is malformed, an end is refused, the
+                bounded re-mint finds no free id, or any other store failure — every target
+                left live and unchanged.
         """
-        # One close instant for the whole set (ADR-0080 §1), and every target's end
-        # computed from it before any write: a `_close_window` that refuses (a
-        # `valid_from` at or after the chosen end, ADR-0080 §3) then aborts the whole
-        # supersession with nothing written and every record in the set unchanged.
-        # There is deliberately no "skip the awkward one and retire the rest" —
-        # that would commit a correction while leaving live a conflict the policy
-        # ruled on, ADR-0079 §1's defect one member deep (ADR-0080 §6).
         now = self._now_utc()
-        closed = [_close_window(target, now) for target in targets]
-        retired_ids = {target.id for target in targets}
-        # ADR-0081 §1's second evaluation point (§2, §4). `SUPERSEDE`'s destination
-        # does not exist until it is minted, so its candidate is tested here — beside
-        # the retained-target test and before the batch is assembled — rather than at
-        # the seam the three other installing rulings are decided at. Quantified over
-        # *this proposal's* evidence, which `_supersede` carries onto the correction
-        # unchanged.
-        cited = frozenset(proposed.provenance.evidence)
+        retired_ids = [target.id for target in targets]
+        cited = _cited_ids(proposed)
         last_conflict: MemoryStoreConflictError | None = None
         for _ in range(_MAX_SUPERSEDE_ATTEMPTS):
             new_id = _checked_id(self._id_factory, owner="MemoryIngestor")
-            if new_id in cited:
-                # A minted id the proposal cites would leave the correction standing
-                # as its own warrant — ADR-0081 §1's defect reached without replacing
-                # anything, since `INSERT_IF_ABSENT` overwrites nothing. It **re-mints**
-                # rather than refusing, because a re-mint is free and always available,
-                # which is exactly why the retained-target collision below is handled
-                # that way. For a `DERIVED` proposal this is belt to ADR-0077 §5's
-                # braces (a cited record that resolves is stored, so the insert would
-                # already conflict and re-mint); it does real work for the `ASSERTED`
-                # and `EXTERNAL` bands §5 does not check, where the cited id may name
-                # nothing and the insert would succeed.
+            if new_id in cited or new_id in retired_ids:
                 last_conflict = MemoryStoreConflictError(
-                    f"minted id {new_id!r} is cited by the proposal's own evidence; re-minting"
+                    f"minted id {new_id!r} is cited by the proposal or names a retired memory; "
+                    f"re-minting"
                 )
                 continue
-            if new_id in retired_ids:
-                # The minted id names one of the retained targets — a *stored* id, so
-                # it must be re-minted (ADR-0045 §4: the absent-id obligation covers
-                # "the retained target included"). Writing it would make the batch two
-                # writes to one id, which `write_atomic` rejects as a hard
-                # `MemoryStoreError` (repeated id, ADR-0046 §3) rather than the
-                # retryable conflict this is, aborting a re-mint the ADR requires.
-                last_conflict = MemoryStoreConflictError(
-                    f"minted id {new_id!r} names a superseded target; re-minting"
-                )
-                continue
-            # The retirements are **not** bounded: `_close_window` writes an
-            # existing record back with only its window narrowed, which ADR-0081 §1
-            # calls a retirement rather than an install, so a legacy over-bound
-            # target goes back with its tuple and its count untouched (ADR-0086 §2).
-            # The correction *is* an install, and carries the proposal's own count
-            # — never the target's, which ADR-0040 §5a keeps off the record that
-            # overturns it (ADR-0086 §4).
-            # ADR-0219 §5: each window-close is conditional on the target it was
-            # computed from, and the paired install is left exactly as ADR-0045 §4
-            # and ADR-0046 §2 shape it — so the batch is still the two elements
-            # those sections describe, one of them now carrying an expectation.
-            # The expectation comes off `targets` and never off `closed`: a
-            # `_close_window` result is a record this ingestor *built*, and §2 rules
-            # out reading an expectation off one of those.
+            successor = _installed(_supersede(proposed, new_id, retired_ids))
             batch = [
                 MemoryWrite(
-                    record=closed_target,
+                    record=_ended(target, successor, now),
                     mode=MemoryWriteMode.IF_UNCHANGED,
                     expected_revision=target.revision,
                 )
-                for target, closed_target in zip(targets, closed, strict=True)
+                for target in targets
             ]
-            batch.append(
-                MemoryWrite(
-                    record=_installed(_supersede(proposed, new_id)),
-                    mode=MemoryWriteMode.INSERT_IF_ABSENT,
-                )
-            )
+            batch.append(MemoryWrite(record=successor, mode=MemoryWriteMode.INSERT_IF_ABSENT))
             try:
                 await self._store.write_atomic(batch)
             except MemoryStoreConflictError as exc:
@@ -2886,12 +1677,10 @@ class MemoryIngestor:
     def _now_utc(self) -> datetime:
         """The guarded clock's reading, as `memory`'s own error (ADR-0026 §4).
 
-        Load-bearing for :meth:`_expiry`. ``model_copy(update=...)`` does **not**
-        re-run validators, so an ``expires_at`` installed that way reaches the
-        store exactly as this method left it — and since ADR-0023 makes
-        ``MemoryBase.expires_at`` *reject* a naive value rather than assume UTC,
-        there is no validator downstream that would have caught it. The guard at
-        the producer is therefore the whole protection on this path.
+        Load-bearing for every instant this writer stamps through
+        ``model_copy(update=...)``, which does **not** re-run validators: an added
+        support's ``added_at`` reaches the store exactly as this method left it, so the
+        guard at the producer is the whole protection on that path.
 
         This replaces the ADR-0023 §6 shim that stood here, and the module-local
         canonicaliser it carried (#169). ADR-0030 §4 permits exactly one
@@ -2907,13 +1696,3 @@ class MemoryIngestor:
             return self._clock()
         except ClockReadingError as exc:
             raise MemoryStoreError(str(exc)) from exc
-
-    def _expiry(self, ttl: timedelta | None) -> datetime | None:
-        """Stamp an expiry ``ttl`` from now, failing loudly if it is unrepresentable."""
-        if ttl is None:
-            return None
-        try:
-            return self._now_utc() + ttl
-        except OverflowError as exc:
-            msg = f"temporary-store ttl {ttl!r} overflows the representable date range"
-            raise MemoryStoreError(msg) from exc

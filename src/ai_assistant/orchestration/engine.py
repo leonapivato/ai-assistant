@@ -94,9 +94,8 @@ from ai_assistant.core.types import (
     EpisodeCaptureReport,
     EpisodeChunk,
     EpisodePage,
-    Evidence,
     InformationalEventResult,
-    MemoryKind,
+    Memory,
     MemoryWrite,
     MemoryWriteMode,
     Modality,
@@ -117,16 +116,18 @@ from ai_assistant.core.types import (
     StoryNoteAuthor,
     StoryNoteId,
     StoryOutcome,
+    SupportPart,
     TextChannelPayload,
     WholeTextReply,
-    band_of,
+    belief_summary,
+    belief_view,
     chat_conversation_ids,
     check_chat_cursor,
     check_chat_position,
     check_story_page,
     checked_chat_devices,
     describe_untrusted,
-    rests_on_recorded_external_content,
+    part_episode,
     secret_value,
     story_members,
     story_move_members,
@@ -256,7 +257,6 @@ if TYPE_CHECKING:
         GrantScope,
         HeldNotification,
         Identifier,
-        MemoryRecord,
         MessageReceipt,
         NonBlankEncodableText,
         NotificationCandidate,
@@ -780,188 +780,6 @@ async def _written_preferences(
     """
     await store.set_preferences(preferences)
     return await store.preferences()
-
-
-#: The floor a belief's **presented** confidence falls to as its support is lost
-#: (ADR-0077 §6). A documented positive constant, and the *exact* value is this
-#: lane's: what §6 ratifies is that the adjustment is a pure function of the stored
-#: confidence and how many citations still resolve, bounded above by the stored
-#: value and below by ``min(stored, floor)``.
-#:
-#: Positive rather than zero because a belief whose evidence is all gone is **held,
-#: marked and answerable — not auto-retired** (§6): a presented zero would read as
-#: "the assistant no longer believes this", which is the cascade under another name.
-#: Low, because an unsupported derived belief that keeps reaching prompts at its old
-#: standing is the "wrong record laundered into a fact" ADR-0072 §6 exists to
-#: prevent.
-_PRESENTATION_FLOOR = 0.1
-
-
-def presented_confidence(stored: float, *, cited: int, resolved: int) -> float:
-    """The confidence a surface states, given how much support still resolves (§6).
-
-    **Presentation only.** The stored number never moves: nothing here writes, and
-    ``MemoryStore.search`` stays confidence-neutral (ADR-0072 §5), so retrieval order
-    is untouched by a value computed at the moment of display. ``export`` likewise
-    carries the record *as stored* — an export is the user's data as held, not a
-    rendering of it (ADR-0007 §3).
-
-    The ratified properties, all of which this satisfies by construction:
-
-    * **equal to ``stored`` when every citation resolves**, and when the record
-      cites nothing at all (an assertion's warrant is the user's own word);
-    * **bounded above by ``stored``** — losing support never makes a belief look
-      better held;
-    * **bounded below by ``min(stored, floor)``**, never by the floor alone. That
-      is the whole of the edge case: ``Provenance.confidence`` permits ``0.0`` and
-      only *this* producer is bound to a positive ladder, so a belief can be stored
-      at or beneath the floor — where an absolute floor and "never above stored"
-      have no value between them at all. Capping the floor by the stored value keeps
-      both bounds satisfiable everywhere;
-    * **strictly decreasing in lost support while above the effective floor**, and
-      unchanged once it has reached it — which, for a belief stored at or below the
-      floor, is from the first loss onward. A value that has run out of room to fall
-      says nothing about how much support went away, which is what the tombstones
-      beside it are for;
-    * **no clock, no randomness, nothing read from a store.**
-
-    Args:
-        stored: The confidence as written on the record.
-        cited: How many citations the record carries.
-        resolved: How many of them still resolve to a record the store holds.
-
-    Returns:
-        The number every surface states for this belief.
-    """
-    floor = min(stored, _PRESENTATION_FLOOR)
-    # Nothing cited, or nothing lost: the stored value stands unadjusted.
-    if cited in (0, resolved):
-        return stored
-    # Linear between the effective floor (nothing resolves) and the stored value
-    # (everything does). Where ``stored <= floor`` the two coincide and the span is
-    # zero, so the result is ``stored`` at every level of support — the no-op §6
-    # names, with the loss carried by the tombstones instead.
-    return floor + (stored - floor) * (resolved / cited)
-
-
-def belief_from_record(record: MemoryRecord, evidence: tuple[Evidence, ...] = ()) -> Belief:
-    """Project one stored record into the belief a person reads (ADR-0073 §7).
-
-    The one place a ``core`` :class:`~ai_assistant.core.types.MemoryRecord` is read
-    on the single-belief path, and one of the two places
-    :func:`~ai_assistant.core.types.band_of` is applied — which is the deciding
-    reason this is a function in `orchestration` and not a constructor on the
-    promoted model (ADR-0085 §6a). ``band_of`` is ADR-0072 §1's projection and
-    ADR-0073 §7 puts it in the engine; putting it in ``core/types.py`` would make
-    ``core`` the home of a policy decision the engine owns.
-
-    ``evidence`` is resolved by the caller, because resolving it is a *store read*
-    and this is a pure projection. It must carry one entry per citation on the
-    record, in order: the presented confidence is computed from how many of them
-    resolved, so a caller that dropped the lost ones would report a belief as fully
-    supported at the exact moment it stopped being.
-
-    **``evidence_elided`` travels as stored — not clamped, not rounded, not
-    recomputed** (ADR-0107 §8 item 2). It looks like a bug beside the resolved
-    tuple, because it can exceed ``len(evidence)`` and can be non-zero where the
-    tuple is empty; both are correct. The number counts displacements over the
-    record's whole history and is an **upper bound** over a different population
-    than the retained citations (ADR-0086 §4), which also double-counts in two
-    reachable cases. ADR-0086 §4's rule for ``export`` is that the stored number
-    travels so "the bound's imprecision travels with the field rather than being
-    resolved in the artifact"; a projection that clamped it to the retained count
-    would resolve exactly that imprecision, and resolve it wrongly. It is carried on
-    **every** band (ADR-0107 §3): §2's rendering obligation is scoped to ``DERIVED``
-    and this is not a rendering.
-
-    **The origin of what it shows travels too** (ADR-0189 §1, §2): the record's
-    ``attestation`` projected **whole** — never split into two scalars, which would
-    reintroduce on the surface's side of the seam the half-states ADR-0092 §2 made
-    unconstructable on the record's — and the answer
-    :func:`~ai_assistant.core.types.rests_on_recorded_external_content` gives for
-    this record's provenance. That function is read and
-    ``Provenance.derived_from_external`` is **not**: ADR-0106 §2 rules that every
-    consumer asking "does this rest on recorded external content?" calls it, because
-    the hand-rolled disjunction "is short enough that every consumer will write it
-    and one of them will write only the second half". Carrying the predicate's whole
-    answer rather than only the part ``band`` does not cover is what stops each
-    *client* re-deriving that disjunction and dropping the same half (ADR-0189 §3).
-
-    Both travel **as the record holds them**, on every band: ADR-0189 §1's second
-    clause forbids a projection computing a rendering, choosing a wording, or
-    omitting a fact because the surface it expects would not display it. What a
-    surface says about them is ADR-0189 §4's, and this is not a rendering either.
-    """
-    provenance = record.provenance
-    resolved = sum(1 for item in evidence if not item.lost)
-    return Belief(
-        id=record.id,
-        band=band_of(provenance.source),
-        kind=MemoryKind(record.kind),
-        content=record.content,
-        confidence=presented_confidence(
-            provenance.confidence, cited=len(evidence), resolved=resolved
-        ),
-        evidence=evidence,
-        last_updated=provenance.last_updated,
-        valid_until=record.validity.valid_until,
-        evidence_elided=provenance.evidence_elided,
-        attestation=provenance.attestation,
-        rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
-    )
-
-
-def belief_summary_from_record(record: MemoryRecord, *, cited: int, resolved: int) -> BeliefSummary:
-    """Project one stored record into the summary the **listing** ships (ADR-0085 §4a).
-
-    The listing's counterpart to :func:`belief_from_record`, and the difference is
-    the whole of ADR-0077 §6's split: this takes *how many* citations resolved
-    rather than the resolved citations themselves, so no citation's content can
-    reach a page. ADR-0073 §4's floor — "a citation the surface cannot render as
-    evidence is never rendered *as* evidence" — becomes a static guarantee here
-    rather than a convention, because a
-    :class:`~ai_assistant.core.types.BeliefSummary` holds no citations at all.
-
-    The adjusted confidence still needs the counts, which is why the listing keeps
-    resolving *existence* per citation (ADR-0077 §6).
-
-    **``evidence_elided`` travels as stored**, for the reason
-    :func:`belief_from_record` states at length: it is an upper bound over the
-    record's whole history, so it may exceed ``cited`` and may be non-zero where
-    ``cited`` is zero, and clamping it to the retained count would resolve ADR-0086
-    §4's deliberate imprecision wrongly. It is neither an input to nor an output of
-    the presented confidence — feeding elisions into that function "would lower a
-    belief's presented confidence because the system worked, which inverts the
-    signal" (ADR-0086 §4).
-
-    **The origin of what it shows is carried here exactly as
-    :func:`belief_from_record` carries it** (ADR-0189 §1, §2), and the sameness is
-    the point: ADR-0085 §4a's split is about *citations*, not about provenance, and
-    a listing that disclosed less of a belief's origin than the detail view it is
-    drilled into would make the two disagree about a fact neither computes. Both
-    read :func:`~ai_assistant.core.types.rests_on_recorded_external_content` and
-    neither reads ``Provenance.derived_from_external`` (ADR-0106 §2).
-
-    Args:
-        record: The stored record.
-        cited: How many citations the record carries.
-        resolved: How many of them still resolve to a record the store holds.
-    """
-    provenance = record.provenance
-    return BeliefSummary(
-        id=record.id,
-        band=band_of(provenance.source),
-        kind=MemoryKind(record.kind),
-        content=record.content,
-        confidence=presented_confidence(provenance.confidence, cited=cited, resolved=resolved),
-        last_updated=provenance.last_updated,
-        evidence_count=cited,
-        lost_evidence=cited - resolved,
-        valid_until=record.validity.valid_until,
-        evidence_elided=provenance.evidence_elided,
-        attestation=provenance.attestation,
-        rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
-    )
 
 
 def conversation_summary(conversation: Conversation) -> ConversationSummary:
@@ -3062,16 +2880,15 @@ class Engine:
         self,
         *,
         bands: Sequence[BeliefBand] | None = None,
-        kinds: Sequence[MemoryKind] | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
     ) -> tuple[BeliefSummary, ...]:
-        """Enumerate the beliefs the assistant holds right now (ADR-0073 §1, §7).
+        """Enumerate the memories the assistant holds right now (ADR-0073 §1, ADR-0328 §11:2).
 
         The read half of "the user can read the assistant's beliefs about them".
-        It relays the filters to :meth:`~ai_assistant.core.protocols.MemoryStore.list_beliefs`
-        and translates each record into a :class:`Belief`, which is where
-        :func:`~ai_assistant.core.types.band_of` is applied (ADR-0073 §7).
+        It relays the filter to :meth:`~ai_assistant.core.protocols.MemoryStore.list_beliefs`,
+        which lists memories and never episodes, and projects each through
+        :func:`~ai_assistant.core.types.belief_summary` (ADR-0328 §15:1).
 
         Everything about *what* comes back is the store's ratified contract, not
         this façade's: live beliefs only (a retired record is history, reachable
@@ -3084,7 +2901,7 @@ class Engine:
         asking for the next page, and a total would be a second query against a
         Tier 1 store for a UI nobody has designed.
 
-        Both filters are **materialised before the awaiting task is created**, so a
+        The filter is **materialised before the awaiting task is created**, so a
         caller that mutates the sequence it passed cannot change which page it gets:
         the store's own input-observation clause (ADR-0065) binds what the store
         reads, and this keeps the relay through :meth:`_tracked` — which defers the
@@ -3093,9 +2910,6 @@ class Engine:
         Args:
             bands: If given, restrict the listing to these belief bands. ``None``
                 means every band; an **empty sequence selects nothing**.
-            kinds: If given, restrict it to these memory kinds, same convention. The
-                two compose by conjunction: a belief is listed when its band is
-                selected *and* its kind is.
             limit: How many beliefs the page holds at most. Bounded by default,
                 because an unbounded read of a Tier 1 store by default is a shape
                 worth not offering (ADR-0021 §4).
@@ -3117,26 +2931,24 @@ class Engine:
         # Materialised here, before the first await, so a caller that mutates the
         # sequence it passed cannot change which page it gets (ADR-0085 §3d).
         snapshot_bands = None if bands is None else tuple(bands)
-        snapshot_kinds = None if kinds is None else tuple(kinds)
         page_argument(limit, name="limit")
         page_argument(offset, name="offset")
         check_arguments(
             "beliefs",
             max_bytes=self._max_payload_bytes,
             bands=snapshot_bands,
-            kinds=snapshot_kinds,
             limit=limit,
             offset=offset,
         )
 
         return await self._tracked(
-            self._beliefs(bands=snapshot_bands, kinds=snapshot_kinds, limit=limit, offset=offset),
+            self._beliefs(bands=snapshot_bands, limit=limit, offset=offset),
             "beliefs",
             checked=True,
         )
 
     async def belief(self, record_id: Identifier) -> Belief | None:
-        """Read the one belief ``record_id`` names, or ``None`` (ADR-0073 §5, §7).
+        """Read the one memory ``record_id`` names, or ``None`` (ADR-0073 §5, ADR-0328 §15:2).
 
         The single-belief read the deletion ceremony needs: a person cannot consent
         to destroying something they were not shown, so :meth:`forget` is preceded by
@@ -3154,8 +2966,11 @@ class Engine:
         Args:
             record_id: The id the user named, taken as opaque.
 
+        An id naming an episode is not a memory, and ``None`` comes back for it too
+        (ADR-0328 §2:1).
+
         Returns:
-            The belief, or ``None`` when no live belief has that id.
+            The memory's single view, or ``None`` when no live memory has that id.
 
         Raises:
             RuntimeError: If the engine is shutting down.
@@ -6590,91 +6405,71 @@ class Engine:
         self,
         *,
         bands: tuple[BeliefBand, ...] | None,
-        kinds: tuple[MemoryKind, ...] | None,
         limit: int,
         offset: int,
     ) -> tuple[BeliefSummary, ...]:
-        """Relay the enumeration to the store and summarise each record (ADR-0073 §7).
+        """Relay the enumeration to the store and summarise each memory (ADR-0328 §15:1).
 
-        The filters arrive already materialised by :meth:`beliefs`; the page's order
+        The filter arrives already materialised by :meth:`beliefs`; the page's order
         and membership are the store's, and this adds no re-ordering, no re-filtering
-        and no count of its own.
+        and no count of its own. Its supports' episodes are resolved in one read for
+        the page, so each summary can say whether none of them resolves (§15:7).
         """
-        records = await self._memory.list_beliefs(
-            bands=bands, kinds=kinds, limit=limit, offset=offset
+        records = await self._memory.list_beliefs(bands=bands, limit=limit, offset=offset)
+        memories = [record for record in records if isinstance(record, Memory)]
+        contents = await self._support_contents(memories)
+        now = self._clock()
+        return tuple(
+            belief_summary(
+                memory,
+                now=now,
+                supports_gone=all(
+                    contents.get(support.points_at) is None for support in memory.supports
+                ),
+            )
+            for memory in memories
         )
-        return tuple([await self._summarise(record) for record in records])
 
     async def _belief(self, record_id: str) -> Belief | None:
-        """Read one live record and project it, or report that there is none."""
+        """Read one live memory and project it, or report that there is none."""
         record = await self._memory.get(record_id)
-        return None if record is None else await self._project(record)
+        if not isinstance(record, Memory):
+            return None
+        contents = await self._support_contents((record,))
+        return belief_view(record, now=self._clock(), contents=contents)
 
-    async def _resolved_citations(self, record: MemoryRecord) -> list[Evidence]:
-        """Resolve the record's citations at the moment of presentation (ADR-0077 §6).
+    async def _support_contents(self, memories: Sequence[Memory]) -> dict[SupportPart, str | None]:
+        """Resolve each support's part to readable content at presentation (ADR-0328 §15:2).
 
-        **Lazily, here, and without rewriting anything.** The evidence tuple keeps
-        the ids as written and the whole tuple is resolved through
-        :meth:`~ai_assistant.core.protocols.MemoryStore.get_many`, so a citation the
-        user destroyed — or one that expired under a retention horizon, which is the
-        *commoner* case and has no event to hook — renders as a tombstone rather than
-        a dangling id. Nothing is written: the record graph is frozen (ADR-0068), and
-        losing evidence is not the producer changing its mind.
-
-        **One batch read per record, not one ``get`` per citation** (ADR-0086 §6, §8
-        item 6). `get_many` never disagrees with `get` — an id it omits is exactly an
-        id `get` would answer ``None`` for, on all three read-time outcomes — so every
-        tombstone this renders is the one the loop rendered. What changes is that a
-        record's citations are now judged against **one** instant and one state of the
-        store rather than against *n* of each, so a belief's rendered count can no
-        longer disagree with its own tombstones because a citation expired partway
-        through its own presentation.
-
-        The answer is assembled by walking ``provenance.evidence``, never the mapping:
-        the tuple carries the order and any repeated id, and a mapping carries neither
-        (§6, "a mapping, not a sequence"). A record citing nothing asks for nothing,
-        which §6 gives an answer and no round trip.
+        **Lazily, here, and without rewriting anything** (ADR-0077 §6, kept by §15:7).
+        A part that points into an episode reads as that episode's content, and as gone
+        (``None``) where the episode no longer resolves: a support the user's forgetting
+        took still counts, and is shown as gone and never as evidence. A legacy part
+        reads as the content of the record it carries (§16:4). Every episode the
+        memories point into is read through **one**
+        :meth:`~ai_assistant.core.protocols.MemoryStore.get_many` (ADR-0086 §6), so
+        every support is judged against one state of the store.
 
         Resolution happens at this façade rather than in `interfaces/`, which golden
-        rule 3 keeps thin and which ADR-0072 §7 already refused to give a
-        live-at-now computation.
+        rule 3 keeps thin.
         """
-        cited = record.provenance.evidence
-        found = await self._memory.get_many(cited)
-        resolved: list[Evidence] = []
-        for one in cited:
-            episode = found.get(one)
-            resolved.append(Evidence(content=None if episode is None else episode.content))
-        return resolved
-
-    async def _project(self, record: MemoryRecord) -> Belief:
-        """Project one record into the **single-belief** view, citations and all."""
-        return belief_from_record(record, tuple(await self._resolved_citations(record)))
-
-    async def _summarise(self, record: MemoryRecord) -> BeliefSummary:
-        """Project one record into the **listing**'s summary (ADR-0085 §4a).
-
-        The listing "resolves *existence* and renders the count, the lost count, and
-        the adjusted confidence" (ADR-0077 §6), so existence is still resolved per
-        citation — the adjusted confidence is a function of how many resolved — but
-        the contents go nowhere: a
-        :class:`~ai_assistant.core.types.BeliefSummary` has no field one could
-        occupy. That is what removes the ``beliefs * citations * content`` term from
-        ADR-0085 §8f's frame arithmetic, structurally rather than by argument.
-
-        **The listing still resolves, and now it resolves in one read per belief.**
-        ADR-0085 §4a removed the payload and none of the reads — the count, the lost
-        count and the adjusted confidence are all functions of how many citations
-        resolved — so this shares :meth:`_resolved_citations` with the single-belief
-        view and inherits its batch (ADR-0086 §6, §8 item 6). A page is one
-        ``get_many`` per listed belief rather than one ``get`` per citation of each.
-        """
-        citations = await self._resolved_citations(record)
-        return belief_summary_from_record(
-            record,
-            cited=len(citations),
-            resolved=sum(1 for item in citations if not item.lost),
+        parts = [support.points_at for memory in memories for support in memory.supports]
+        episodes = tuple(
+            dict.fromkeys(e for part in parts if (e := part_episode(part)) is not None)
         )
+        found = await self._memory.get_many(episodes) if episodes else {}
+        contents: dict[SupportPart, str | None] = {}
+        for memory in memories:
+            for support in memory.supports:
+                part = support.points_at
+                episode = part_episode(part)
+                if episode is None:
+                    carried = (support.carries or {}).get("content")
+                    contents[part] = carried if isinstance(carried, str) and carried else None
+                else:
+                    record = found.get(episode)
+                    contents[part] = None if record is None else record.content
+        return contents
 
     def _checked(self, result: _T, method: str) -> _T:
         """Refuse a result the contract does not admit, before returning it (§8c).
@@ -6742,8 +6537,5 @@ class Engine:
 
 __all__ = [
     "Engine",
-    "belief_from_record",
-    "belief_summary_from_record",
     "conversation_summary",
-    "presented_confidence",
 ]

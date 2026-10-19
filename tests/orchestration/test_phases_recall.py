@@ -36,7 +36,6 @@ from ai_assistant.core.types import (
     MemoryWriteMode,
     Provenance,
     RecallOutcome,
-    SemanticMemory,
     StageOutcome,
     TextChannelPayload,
 )
@@ -51,6 +50,8 @@ from ai_assistant.testing import (
     FakeStoryStore,
     FakeTraceSink,
 )
+from ai_assistant.testing.memories import memory as memory_record
+from ai_assistant.testing.memories import remembered_support, said_support
 from ai_assistant.testing.tool_calling import DEFAULT_ROUND_TEXT
 
 if TYPE_CHECKING:
@@ -64,18 +65,16 @@ _R = ControllerRule
 _DONE = StageOutcome.DONE
 
 #: A stored belief the ordinary turn's words recall on the canonical fake.
-_BOOKED: Final = SemanticMemory(
-    id="fact-booked",
-    content="The campsite at Pine Flat is booked for Friday.",
-    fact="The campsite at Pine Flat is booked for Friday.",
-    provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
+_BOOKED: Final = memory_record(
+    "fact-booked",
+    "The campsite at Pine Flat is booked for Friday.",
+    said_support(when=AT, added_at=AT),
 )
 #: A second stored belief the same words recall.
-_PERMIT: Final = SemanticMemory(
-    id="fact-permit",
-    content="The campsite at Pine Flat needs a fire permit.",
-    fact="The campsite at Pine Flat needs a fire permit.",
-    provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
+_PERMIT: Final = memory_record(
+    "fact-permit",
+    "The campsite at Pine Flat needs a fire permit.",
+    said_support(when=AT, added_at=AT),
 )
 _TURN: Final = "book the campsite at Pine Flat"
 
@@ -198,7 +197,7 @@ async def test_a_found_recall_is_recorded_and_shown_to_understanding() -> None:
     assert [item.id for item in record.recall.items] == ["fact-booked"]
     (shown,) = _shown(model)
     assert shown["label"] == "M1"
-    assert shown["fact"] == _BOOKED.fact
+    assert shown["fact"] == _BOOKED.content
 
 
 async def test_a_recall_that_found_nothing_is_recorded_and_said() -> None:
@@ -373,7 +372,7 @@ async def test_a_recalled_record_forgotten_before_understanding_is_not_rendered(
     assert record.recall is not None
     assert {item.id for item in record.recall.items} == {"fact-booked", "fact-permit"}
     (shown,) = _shown(model)
-    assert (shown["label"], shown["fact"]) == ("M1", _PERMIT.fact)
+    assert (shown["label"], shown["fact"]) == ("M1", _PERMIT.content)
     # Understanding's fetch is the first; planning fetches what recall kept after it.
     (fetch, *_) = [log for log in logs if log["event"] == "stage_fetch"]
     assert (fetch["fetched"], fetch["missing"]) == (2, 1)
@@ -402,12 +401,7 @@ async def test_an_episode_the_window_holds_is_not_recalled() -> None:
         occurred_at=AT,
         provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
     )
-    fact = SemanticMemory(
-        id="fact-eco",
-        content=text,
-        fact=text,
-        provenance=Provenance(source=MemorySource.INFERRED, confidence=0.8, last_updated=AT),
-    )
+    fact = memory_record("fact-eco", text, remembered_support(when=AT, added_at=AT))
     model = FakeModelProvider(STATED_PROPOSAL)
     harness = _harness(await _seeded(episode, fact), understanding_model=model)
     _, captured = await event(harness)

@@ -44,7 +44,8 @@ from ai_assistant.core.types import (
     DataTier,
     Idempotency,
     InputOrigin,
-    MemorySource,
+    Memory,
+    MemoryStanding,
     MessageAuthor,
     NewMessage,
     PermissionOutcome,
@@ -54,15 +55,14 @@ from ai_assistant.core.types import (
     PlacementSetter,
     PlanningRound,
     ProposedCall,
-    Provenance,
     Reversibility,
     RiskLevel,
     RoundResponse,
-    SemanticMemory,
     StageOutcome,
     StoryActor,
     StoryMember,
     StoryMemberKind,
+    SupportOrigin,
     TelegramForwardKind,
     TelegramForwardOrigin,
     TelegramQuotedMessage,
@@ -116,6 +116,8 @@ from ai_assistant.testing import (
     FakeToolImplementation,
     FakeWebSearcher,
 )
+from ai_assistant.testing.memories import memory as memory_record
+from ai_assistant.testing.memories import said_support
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -991,7 +993,7 @@ async def test_a_bare_yes_with_nothing_to_connect_it_to_records_no_pointer() -> 
 # --- memory (§8:5, §5:5) ------------------------------------------------------------------
 
 
-async def test_after_a_search_a_remember_asks_and_a_yes_saves_it_with_its_source() -> None:
+async def test_after_a_search_a_remember_asks_and_a_yes_saves_it_confirmed() -> None:
     hub = _Hub()
     statement = "The museum opens at nine."
     hub.reader.nothing()
@@ -1015,10 +1017,12 @@ async def test_after_a_search_a_remember_asks_and_a_yes_saves_it_with_its_source
     await hub.turn("Yes, keep that.", conversation=conversation, message_id="m-2")
 
     (saved,) = await _beliefs(hub.memory, statement)
-    # Its source is kept as the proposal carried it, and the decision that wrote it
-    # names the approval (§5:3).
-    assert saved.provenance.derived_from_external
-    assert saved.provenance.source is MemorySource.INFERRED
+    # ADR-0328 §13:3: it rests on the yes, so it stands at "you confirmed this wording"
+    # though the activation that asked had read outside content; and the decision that
+    # wrote it names the approval (ADR-0321 §5:3).
+    (support,) = saved.supports
+    assert support.origin is SupportOrigin.CONFIRMATION
+    assert saved.standing is MemoryStanding.CONFIRMED
     (decided,) = [
         one
         for one in await hub.harness.trail.recent(limit=20)
@@ -1029,12 +1033,12 @@ async def test_after_a_search_a_remember_asks_and_a_yes_saves_it_with_its_source
     assert decided.approved_part is not None
 
 
-async def _beliefs(memory: FakeMemoryStore, fact: str) -> list[SemanticMemory]:
-    """The live beliefs stating ``fact``."""
+async def _beliefs(memory: FakeMemoryStore, fact: str) -> list[Memory]:
+    """The live memories stating ``fact``."""
     return [
         one
         for one in await memory.export()
-        if isinstance(one, SemanticMemory) and one.fact == fact and one.validity.valid_until is None
+        if isinstance(one, Memory) and one.content == fact and one.validity.valid_until is None
     ]
 
 
@@ -1063,16 +1067,8 @@ async def _replacing(
     hub: _Hub, statement: str, old: str, *, placement: Placement | None = None
 ) -> tuple[str, EpisodicMemory]:
     """The user's earlier assertion ``old``, and a remember of ``statement`` asked about."""
-    asserted = SemanticMemory(
-        id="assertion:1",
-        content=old,
-        fact=old,
-        provenance=Provenance(
-            source=MemorySource.USER_ASSERTED,
-            confidence=1.0,
-            evidence=("episode:earlier",),
-            last_updated=AT,
-        ),
+    asserted = memory_record(
+        "assertion:1", old, said_support("episode:earlier", when=AT, added_at=AT)
     )
     if placement is not None:
         asserted = asserted.model_copy(update={"placement": placement})

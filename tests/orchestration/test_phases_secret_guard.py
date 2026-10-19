@@ -334,9 +334,16 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     """ADR-0221 §7's reliance, stated at the phases' seams rather than assumed.
 
     **The records** (carried from ADR-0221 §11 test 13, judged there and still true of
-    their fields). ``EpisodicMemory`` and ``SemanticMemory`` with ``Provenance``,
-    ``Attestation``, ``ReportedExtent``, ``Validity``, ``Placement`` and ``Capture``
-    hold Tier 1 memory text, identifiers, clocks and closed values.
+    their fields). ``EpisodicMemory`` with ``Provenance``, ``Attestation``,
+    ``ReportedExtent``, ``Validity``, ``Placement`` and ``Capture`` hold Tier 1 memory
+    text, identifiers, clocks and closed values. ``Memory`` (ADR-0328 §3), which took
+    ``SemanticMemory``'s place in the graph, holds its wording and the envelope's
+    fields, with ``MemorySupport``, its parts (``InputPart``, ``RoundMessagePart``,
+    ``EvidenceItemPart``, ``ConfirmationPart``, ``RememberCallPart``, ``LegacyPart``),
+    ``MemoryOperation``, ``OpenQuestion`` and ``TrackRecordEntry``: episode addresses,
+    positions, identifiers, clocks, closed values, notes in words and an
+    ``Attestation``. A legacy support's ``carries`` is the record stored before ADR-0328
+    as frozen JSON — Tier 1 memory text, which the type admits no carrier into.
     ``EpisodeProcessingRecord`` (ADR-0275) holds identifiers,
     closed values and clocks, and the trigger it recorded — ``RecordedChannelTrigger``
     with its input, channel, context items and reply kind, the user's own words among
@@ -446,6 +453,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ChannelContextItem",
         "ChannelIdentity",
         "ClaimedAuthor",
+        "ConfirmationPart",
         "DeletedMessage",
         "DigestItem",
         "Digested",
@@ -456,11 +464,18 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "EpisodeProcessingRecord",
         "EpisodicMemory",
         "EvidenceItem",
+        "EvidenceItemPart",
         "HeldResult",
+        "InputPart",
+        "LegacyPart",
         "LineMessage",
+        "Memory",
+        "MemoryOperation",
+        "MemorySupport",
         "Message",
         "NewConversation",
         "OfferedTool",
+        "OpenQuestion",
         "PlaceItem",
         "PlaceWindow",
         "Placement",
@@ -484,9 +499,10 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "RecordedSpeechInput",
         "RecordedTextInput",
         "RefusedCall",
+        "RememberCallPart",
         "ReportedExtent",
+        "RoundMessagePart",
         "RoundResponse",
-        "SemanticMemory",
         "ShortView",
         "SpokenReply",
         "StageEntry",
@@ -503,6 +519,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "SuppliedWindow",
         "ToolCost",
         "ToolDefinition",
+        "TrackRecordEntry",
         "TranscriptMessage",
         "TranscriptWindow",
         "UnboundedAudienceSupply",
