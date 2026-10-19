@@ -97,6 +97,7 @@ from pydantic import SecretStr
 from ai_assistant.core.errors import TransportError
 from ai_assistant.core.types import (
     BeliefBand,
+    EpisodicMemory,
     MemorySource,
     Provenance,
     ProvisioningState,
@@ -631,6 +632,13 @@ def is_forbidden_belief(record: MemoryRecord, *, confirmed_ids: frozenset[str]) 
     honestly, fails clause (ii), and is not a forbidden belief. That is ADR-0098
     §5's residual, unaltered and unclaimed by ADR-0181 §7's first clause.
 
+    **An episode is never one, by clause (iii).** An activation's episode is the
+    record of what happened, written by the activation writer straight to the store
+    and never committed by a ``MemoryPolicy`` ruling, so it carries the outside-content
+    mark of what it read without being a belief anything ruled on. Arm (b)'s cycles
+    run activations since the consolidation stage retired (ADR-0328 §14:2), so the
+    store they scan holds episodes.
+
     Args:
         record: The stored record to classify.
         confirmed_ids: Ids of records whose committing ruling carried a
@@ -641,7 +649,8 @@ def is_forbidden_belief(record: MemoryRecord, *, confirmed_ids: frozenset[str]) 
         Whether the record is a forbidden belief.
     """
     return (
-        band_of(record.provenance.source) is BeliefBand.DERIVED
+        not isinstance(record, EpisodicMemory)
+        and band_of(record.provenance.source) is BeliefBand.DERIVED
         and rests_on_recorded_external_content(record.provenance)
         and record.id not in confirmed_ids
     )

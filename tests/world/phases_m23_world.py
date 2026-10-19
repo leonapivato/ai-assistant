@@ -29,6 +29,11 @@ default, the real ``ThresholdActionPolicy``.
   sends, arm (a)'s scenario cannot reach the gate at all; so this world offers
   ``send_email``, and the arm measures the gate and the stand-in at the posture's worst
   case: a capability that leaves the hub, offered to a planner that obeys the injection.
+* **``remember`` is wired, and offered for arm (b) alone.** Its runner holds the real
+  writer through acting's own-records seam, as the composition root wires it. Since
+  the consolidation stage retired (ADR-0328 §14:2) it is the one production path left
+  that proposes a ``DERIVED`` belief, so arm (b)'s cycles run an activation whose
+  planner obeys the injection by remembering it (:class:`RememberingPlanner`).
 * **Nothing parks** (ADR-0306 §4:8). A call the policy asks the user about is *needs
   you*, recorded in the trail and run by nothing; the parked confirmation card arm (a)
   asserts on the old path has no counterpart here.
@@ -40,6 +45,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import timedelta
+from itertools import count
 from typing import TYPE_CHECKING, Final
 
 from m23_harness import (
@@ -72,6 +78,12 @@ from ai_assistant.orchestration.grants import GrantOperations
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools
 from ai_assistant.orchestration.recall import RecallStage
+from ai_assistant.orchestration.remembering import (
+    REMEMBER,
+    REMEMBER_CAPABILITY,
+    STATEMENT_ARGUMENT,
+    RememberCalls,
+)
 from ai_assistant.orchestration.understanding import (
     RecentEpisodes,
     UnderstandingStage,
@@ -169,6 +181,55 @@ class ObeyingPlanner(FakeToolCallingCompleter):
         super().__init__(response=respond)
 
 
+class RememberingPlanner(FakeToolCallingCompleter):
+    """Planning that obeys the injection by remembering it, once per activation.
+
+    Arm (b)'s producer on the phases: ``remember`` is the one production path left
+    that proposes a ``DERIVED`` belief, since the consolidation stage retired
+    (ADR-0328 §14:2). Each activation's first round, the one shown no earlier round,
+    proposes remembering ``statement``; every later round, which the phases run after
+    a round's calls (ADR-0315), writes :data:`AFTER`. The hub, not this double, fills
+    whether the activation read outside content (ADR-0306 §4:5).
+    """
+
+    def __init__(self, *, statement: str) -> None:
+        """Propose remembering ``statement`` in each activation's first round."""
+        self.statement = statement
+        proposed = count(1)
+
+        def respond(messages: Sequence[Message], _tools: Sequence[OfferedTool]) -> RoundResponse:
+            if shown_rounds(messages):
+                return RoundResponse(text=AFTER)
+            return RoundResponse(
+                calls=(
+                    ProposedCall(
+                        call_id=f"remember-{next(proposed)}",
+                        name=REMEMBER_CAPABILITY,
+                        arguments={STATEMENT_ARGUMENT: statement},
+                    ),
+                )
+            )
+
+        super().__init__(response=respond)
+
+
+def shown_rounds(messages: Sequence[Message]) -> list[dict[str, object]]:
+    """The earlier rounds of its activation one planning call was shown.
+
+    Planning's last message is the round's JSON input, whose ``rounds`` holds each
+    earlier round with its calls and their outcomes (ADR-0307 §2:3).
+
+    Args:
+        messages: One planning call's messages.
+
+    Returns:
+        The rounds, empty for an activation's first round.
+    """
+    shown = json.loads(messages[-1].content)
+    rounds: list[dict[str, object]] = shown["rounds"]
+    return rounds
+
+
 @dataclass(frozen=True, slots=True)
 class PhasesWorld:
     """One assembled deployment running the phases, with the probes arm (a) reads.
@@ -178,7 +239,9 @@ class PhasesWorld:
         store: The one memory store the reader's beliefs are in and recall searches.
         ingestion: What the retired scheduled ingestion wrote, replayed.
         trail: The audit trail every ruling is recorded in.
-        planner: The planning double, whose calls show what planning was shown.
+        planner: The planning double, whose calls show what planning was shown: an
+            :class:`ObeyingPlanner` for arm (a), a :class:`RememberingPlanner` for
+            arm (b).
         digests: The recall digest's provider, whose calls show the planted content
             reached a model of the activation.
         connector: The socket that must never be opened.
@@ -190,7 +253,7 @@ class PhasesWorld:
     store: InMemoryMemoryStore
     ingestion: PriorIngestion
     trail: FakeAuditTrail
-    planner: ObeyingPlanner
+    planner: FakeToolCallingCompleter
     digests: FakeModelProvider
     connector: Connector
     source: Path
@@ -198,15 +261,21 @@ class PhasesWorld:
 
 
 def build_phases_world(
-    tmp_path: Path, *, to: str, policy: ActionPolicy | None = None
+    tmp_path: Path,
+    *,
+    to: str,
+    policy: ActionPolicy | None = None,
+    remembers: str | None = None,
 ) -> PhasesWorld:
-    """Assemble one deployment running the phases, its planner obeying toward ``to``.
+    """Assemble one deployment running the phases, its planner obeying the injection.
 
     Args:
         tmp_path: The directory the planted ``.ics`` is written into.
         to: The recipient the obeying planner names.
         policy: The gate, or ``None`` for the shipping ``ThresholdActionPolicy``. Only
             the calibration case passes another.
+        remembers: Where set, the planner obeys by remembering this statement instead
+            of sending, and ``remember`` is offered beside the send (arm (b)).
 
     Returns:
         The assembled world, not yet started.
@@ -242,9 +311,13 @@ def build_phases_world(
     stories = FakeStoryStore(now=lambda: NOW)
     chat = FakeConversationStore(now=lambda: NOW)
 
-    planner = ObeyingPlanner(to=to)
+    planner: FakeToolCallingCompleter = (
+        ObeyingPlanner(to=to) if remembers is None else RememberingPlanner(statement=remembers)
+    )
     digests = FakeModelProvider(reply=_DIGESTED)
-    tools = PhaseTools(registry=registry, invoker=registry)
+    # ``remember`` is the assistant's own records, reached through acting's own-records
+    # seam over the real writer (ADR-0306 §3:3), as the composition root wires it.
+    tools = PhaseTools(registry=registry, invoker=registry, own_records=(REMEMBER,))
     phases = PhasePath(
         completer=planner,
         provider=digests,
@@ -261,14 +334,16 @@ def build_phases_world(
         acting=ActingStage(
             plans=plans,
             invoker=tools,
-            own_records=OwnRecordsByCapability({}),
+            own_records=OwnRecordsByCapability(
+                {REMEMBER_CAPABILITY: RememberCalls(writer=writer, memory=store, now=lambda: NOW)}
+            ),
             timeout=timedelta(seconds=5),
             now=lambda: NOW,
         ),
         tools=tools,
         plans=plans,
         writer=ChatWriter(conversations=chat, max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES),
-        capabilities=(SEND,),
+        capabilities=(SEND,) if remembers is None else (SEND, REMEMBER_CAPABILITY),
         round_limit=3,
         round_wait=timedelta(seconds=5),
         excerpt_chars=2000,
