@@ -73,7 +73,7 @@ person links their account from the signed-in page are the private repository's.
 ### Why the hop to the relay is TLS, when the hosted listener is plain HTTP
 
 ADR-0327 §5:6 lets the gateway's hosted listener speak plain HTTP to the edge, on the box. Its
-reasoning was this: the gateway accepts connections and fetches nothing (§3:4); it checks a
+reasoning was this: the gateway accepts connections and fetches nothing (ADR-0327 §3:4); it checks a
 signature on every request; and an assertion lives for at most five minutes, so a replay is
 bounded and reaches only the operator. None of that carries over to the relay.
 
@@ -146,9 +146,13 @@ sender with the hub's own setting.
 > start, and changes only with the settings, at a restart. No call, request or answer selects or
 > changes it.
 
-> **Normative.** `telegram_relay_origin` is an HTTPS origin, refused at settings load unless it
-> canonicalises under ADR-0231 §8. Its canonical form is the one origin a relayed line reaches.
-> So it names a host, never an IP literal, and carries no path.
+> **Normative.** `telegram_relay_origin` is an HTTPS origin. The composition root puts it through
+> the seam's canonicaliser (ADR-0231 §8) before it builds the line's client, and a value that does
+> not canonicalise refuses the hub's start. Its canonical form is the one origin a relayed line
+> reaches, so it names a host, never an IP literal, and carries no path.
+
+> **Normative.** `Settings` checks `telegram_relay_origin` at load only as text, and holds no copy
+> of the canonicaliser's rules: ADR-0231 §8:7 keeps those at the seam, in `ai_assistant.tools`.
 
 > **Normative.** `telegram_relay_origin` is refused at settings load while the line is not
 > configured, that is, while ADR-0323 §3:2's two settings are unset.
@@ -158,6 +162,9 @@ sender with the hub's own setting.
 > `telegram_relay_origin` is set, and when it is non-empty while that origin is unset. Each is
 > something the operator wrote about a relay, so a value no reading makes true is refused rather
 > than ignored (ADR-0327 §6:13's reason).
+
+> **Normative.** A certificate in `telegram_relay_certificates` that the relayed transport cannot
+> load as a trust anchor refuses the hub's start, at the composition root, before any call.
 
 > **Normative.** The relay's certificates are Tier 2 configuration, written at the hub by the
 > operator at setup. Rotating them is an act at the hub: the operator adds the new certificate,
@@ -188,8 +195,11 @@ mode, and every ADR-0323 rule they keep holds as it does against Telegram.
 > **Normative.** The relay may withhold an update from a hub, such as one its own linking flow
 > consumes. A withheld update reaches no hub.
 
-> **Normative.** Each update id the relay hands a hub is greater than every update id it handed
-> that hub before, and is never handed again with a different update.
+> **Normative.** An update the relay hands a hub for the first time has an id greater than every
+> update id it handed that hub before. An update handed again, because the hub has not confirmed
+> it, keeps its id and is handed unaltered. No id is ever handed with a different update.
+
+> **Normative.** Every poll's updates are in ascending update id.
 
 > **Normative.** A hub's poll offset confirms that hub's updates below it and no other hub's. An
 > update the hub has not confirmed is handed again on the hub's next poll, until the hub
@@ -245,7 +255,7 @@ What each answer becomes in the hub, by the client's existing rules:
 > first call reaches (§13:1). Each binds unchanged otherwise.
 
 Where ADR-0323 names Telegram as the source of a value, such as the sender id, a message's time,
-a forward's original sender or a sent message's id, the value is still Telegram's: §4:3 and §4:8
+a forward's original sender or a sent message's id, the value is still Telegram's: §4:3 and §4:9
 of this decision make the relay hand it on unaltered.
 
 ### 5. Who establishes the sender
@@ -410,11 +420,11 @@ and through it Telegram.
 | 5 | Transport pinned, no redirect | One origin, configured and canonicalised. TLS is verified against the configured certificates alone before any write, and no redirect is followed (§3:4, §7) |
 | 6 | The payload bound before transmission, described after | As ADR-0323 §13 |
 | 7 | A named approver able to refuse | The person, by unlinking at the relay, and the owner's setup, by disconnecting or unsetting (§11:3) |
-| 8 | What is transmitted is bound to what was authorised | As ADR-0323 §13. The relay refuses every other chat as well (§4:14) |
+| 8 | What is transmitted is bound to what was authorised | As ADR-0323 §13. The relay refuses every other chat as well (§4:15) |
 | 9 | Multi-recipient calls as one set | As ADR-0323 §13: one recipient |
-| 10 | Destinations canonicalised | The relay's origin is canonicalised under ADR-0231 §8 at settings load and compared exactly. The chat id is compared for equality with the setting |
+| 10 | Destinations canonicalised | The relay's origin is canonicalised by the seam's canonicaliser (ADR-0231 §8) before the client is built, and compared exactly. The chat id is compared for equality with the setting |
 | 11 | Resolving a name is gated or forbidden | As ADR-0323 §13: the line resolves no username |
-| 12 | An attempt identifier and an explicit outcome | As ADR-0323 §13. A relay's answers keep the three outcomes apart (§4:10–§4:11) |
+| 12 | An attempt identifier and an explicit outcome | As ADR-0323 §13. A relay's answers keep the three outcomes apart (§4:11–§4:12) |
 | 13 | Payload classification settled | As ADR-0323 §12, for the one chat, through the relay |
 | 14 | Failure paths tested | §12:6 |
 
@@ -478,6 +488,10 @@ For a hosted person:
 > **Normative.** In relayed mode the approval also ends when the person unlinks their account at
 > the relay. The relay then serves that hub nothing and sends nothing on its credential.
 
+> **Normative.** In relayed mode the user's act ADR-0323 §3:3 names, which creates the channel,
+> declares its audience private and names the one chat, is the person's link act at the relay.
+> The settings the operator writes at the person's request carry it out.
+
 The person's act is recorded by the relay, outside this repository, and the hub records only the
 setup. The link is still mechanically necessary: without it the relay serves the hub nothing and
 refuses every send (§5:2, §6:1). So the hub's line carries nothing the person did not link.
@@ -495,8 +509,8 @@ linking is the relay's.
 | The contract's conformance suite | `tests/` | Gains relayed mode's obligations: §6:3's refusal, §7's anchors, and the origin |
 | `HttpsTelegramBotClient` | `tools/egress.py` | Takes the origin it reaches at construction: the fixed one, or the canonical relay origin |
 | A transport anchored on configured certificates | `tools/egress.py` | A `StreamOutboundTransport` whose TLS context trusts the given certificates alone (§7:3) |
-| `telegram_relay_origin`, `telegram_relay_certificates` | `core/config.py` | New, refused at load as §3 states |
-| The line's wiring | `app/composition.py` | Builds the relayed client and its transport while `telegram_relay_origin` is set |
+| `telegram_relay_origin`, `telegram_relay_certificates` | `core/config.py` | New, with §3's structural refusals at load: text only, no canonicaliser (§3:5) |
+| The line's wiring | `app/composition.py` | Canonicalises the relay origin through the seam and loads the certificates, refusing the hub's start on either failure (§3:4, §3:8), then builds the relayed client and its transport while `telegram_relay_origin` is set |
 
 > **Normative.** The `TelegramBotClient` contract's rule 5 and rule 3 are restated as the table
 > above states. That is a breaking contract change under golden rule 5, landing with its
@@ -548,8 +562,9 @@ effect when this decision is ratified.
 | ADR-0323 | What changes |
 | --- | --- |
 | §2:1 | The bot is the shared one, which the person linked their account to, not one the user connected |
-| §2:7, §5:5, §5:6, §5:7, §11:10, §13:1 | In their naming of Telegram as what the line's calls reach, alone: the relay stands in its place (§4:15) |
+| §2:7, §5:5, §5:6, §5:7, §11:10, §13:1 | In their naming of Telegram as what the line's calls reach, alone: the relay stands in its place (§4:16) |
 | §3:1 | The credential is the hub's relay credential, not the bot's token (§6:4) |
+| §3:3 | Its *user's act* is the person's link act, carried out by the settings the operator writes at their request (§11:4) |
 | §4:3 | Restated by §5:1: Telegram's report, as the relay hands it on |
 | §11:4, §11:8, §11:9 | In the addition: they bind the relay credential as they bind the bot's token (§6:5, §6:6) |
 | §11:5 | The one origin is the configured relay origin, verified against the configured certificates (§3:4, §7) |
@@ -563,20 +578,21 @@ effect when this decision is ratified.
 
 - **ADR-0323 §2:3**, the channel's identity, binds unchanged. §6:7 makes a mode change a new
   connection, and with it a new channel.
-- **ADR-0323 §3:2–§3:6**, **§4:1–§4:2**, **§4:4–§4:13**, **§5:1–§5:4**, **§5:8–§5:11**, **§6**,
+- **ADR-0323 §3:2**, **§3:4–§3:6**, **§4:1–§4:2**, **§4:4–§4:13**, **§5:1–§5:4**, **§5:8–§5:11**, **§6**,
   **§7–§10**, **§11:1–§11:3**, **§11:6–§11:7** and **§11:11–§11:14** bind a relayed line
-  unchanged. The relay serves them faithfully (§4), and §5:3 restates §4 and §5 for the reader.
-  §3:5 stands: the hub builds no pairing flow. §3:6 stands: disconnecting removes the relay
-  credential.
-- **ADR-0323 §12:2 and §12:4**, and **§15**, bind unchanged. §12's table is #3141's.
+  unchanged. The relay serves them faithfully (this decision's §4), and this decision's §5:3
+  restates ADR-0323 §4 and §5 for the reader. ADR-0323 §3:5 stands: the hub builds no pairing
+  flow. ADR-0323 §3:6 stands: disconnecting removes the relay credential.
+- **ADR-0323 §12:2 and §12:4**, and **§15**, bind unchanged. This decision's §12 table is
+  #3141's.
 - **ADR-0323 §16**: its supersessions of ADR-0155, ADR-0148, ADR-0154, ADR-0292 and ADR-0321
   stand, and they reach a relayed line as they reach a direct one. The relay is on the box the
   hub is on, run by the same operator. Under #879's reading of ADR-0155 §1:1 it is not another
   party's service, and §10:1–§10:2 keep it from holding a copy beyond the call.
 - **ADR-0191 §4:2** is kept (§7). **ADR-0191 §5:4** is not used (§8:4). **ADR-0191 §3** binds:
   the relayed transport is handed to the client by the composition root alone.
-- **ADR-0231 §8** binds whole: the relay's origin is canonicalised by it, and IP literals stay
-  refused (§3:4).
+- **ADR-0231 §8** binds whole: the relay's origin is canonicalised by it, at the seam and not in
+  `core` (ADR-0231 §8:7), and IP literals stay refused (§3:4–§3:5).
 - **ADR-0174 §1:1**, as ADR-0327 §3:1 leaves it, is unchanged (§9:1).
 - **ADR-0327** is unchanged. Its hosted listener stays plain HTTP. The context above states why
   this hop differs.
@@ -600,7 +616,7 @@ effect when this decision is ratified.
   different account, the operator updates the hub's setting, and that is a new place (ADR-0323
   §2:3).
 - **The operator holds one more setup act per hub**: the relay credential and the relay's
-  certificate. Rotating the certificate is an act at every hub (§3:7).
+  certificate. Rotating the certificate is an act at every hub (§3:9).
 - **Direct mode stays.** The owner's own hub, or anyone's, can keep a bot of its own.
 - **Follow-on work.** #3141 builds §12's table, after this decision merges and after the learning
   walk's lane that holds `core/` and the line's users has landed. The private repository builds
