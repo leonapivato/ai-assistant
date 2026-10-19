@@ -2726,11 +2726,21 @@ _run_parted_round() {
 }
 
 # Each part turn's captured message, kept in `.review/` beside the artifact the
-# round records (§5:11), under the artifact's own name. Written before the
-# artifact, so an interruption leaves at worst an inert directory no artifact
-# names, never an artifact whose parts are missing. A re-review of identical
-# content reuses the artifact's name (ADR-0027 §6), so it replaces that name's
-# parts as it replaces the artifact.
+# round records (§5:11), under the artifact's own name.
+#
+# A re-review of identical content reuses that name (ADR-0027 §6), so this
+# round's messages replace an earlier recording's, and the artifact and its parts
+# directory are two renames that cannot be one. The ORDER is what keeps them
+# paired at every point an interruption can land: the messages are staged first;
+# then the earlier recording's ARTIFACT is withdrawn, before its parts are
+# touched; then the parts are swapped in; and only after that does the caller
+# rename this round's artifact into place. So an interruption leaves the earlier
+# artifact with its own parts, or no artifact at all, or this round's artifact
+# with this round's parts — never a verdict beside another attempt's messages,
+# which `ship` would then accept. No artifact is the safe failure here, exactly as
+# everywhere else in this script: it costs a re-run, where a mispaired one is
+# evidence for messages that round never read. A staged directory an
+# interruption strands is `.partial.<pid>`, and nothing reads it.
 _keep_part_messages() {
     local dest="${review_dir}/parts/${artifact##*/}"
     dest="${dest%.md}"
@@ -2738,6 +2748,7 @@ _keep_part_messages() {
     mkdir -p "${review_dir}/parts"
     rm -rf "$staged"
     cp -R "${parts_work}/messages" "$staged"
+    rm -f "$artifact"
     rm -rf "$dest"
     mv "$staged" "$dest"
 }
