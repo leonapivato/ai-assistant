@@ -851,3 +851,93 @@ def test_plan_reports_the_parts_of_a_parted_round(tmp_path: Path) -> None:
     assert re.search(r"fixed content +\d+ bytes", plan)
     assert _invocations(tmp_path / "plan-state") == 0
     assert not (repo / ".review").exists()
+
+
+# --- §5:11: a re-review never pairs a verdict with another attempt's parts -----
+
+_REAL_MV = shutil.which("mv") or "/bin/mv"
+
+
+def _install_interrupting_mv(bin_dir: Path, boundary: str) -> None:
+    """An `mv` that SIGKILLs the round at one rename, standing in for an interruption.
+
+    It sits ahead of the real one on `PATH`, passes every other rename through,
+    and kills its parent — the round — at the boundary named:
+
+    * ``parts`` — just before this round's part messages are renamed into place;
+    * ``artifact-before`` — just before this round's artifact is renamed in;
+    * ``artifact-after`` — just after it has been.
+    """
+    artifact_rename = '[[ "$dest" == */.review/*.md && "$src" == *.md.partial.* ]]'
+    condition = {
+        "parts": '[[ "$dest" == */.review/parts/* && "$src" == *.partial.* ]]',
+        "artifact-before": artifact_rename,
+        "artifact-after": artifact_rename,
+    }[boundary]
+    if boundary == "artifact-after":
+        action = f'"{_REAL_MV}" "$@"; kill -9 "$PPID"; exit 0'
+    else:
+        action = 'kill -9 "$PPID"; exit 0'
+    script = (
+        "#!/usr/bin/env bash\n"
+        'src="${@: -2:1}"\n'
+        'dest="${@: -1}"\n'
+        f"if {condition}; then\n"
+        f"    {action}\n"
+        "fi\n"
+        f'exec "{_REAL_MV}" "$@"\n'
+    )
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    mv = bin_dir / "mv"
+    mv.write_text(script)
+    mv.chmod(0o755)
+
+
+def _recorded_round(state: Path, label: str) -> None:
+    """Steer a two-part round so its messages and verdict all carry `label`."""
+    state.mkdir()
+    (state / "review-1.md").write_text(f"{label} part one\n")
+    (state / "review-2.md").write_text(f"{label} part two\n")
+    (state / "review-3.md").write_text(f"{label} verdict body\n\nAPPROVE\n")
+
+
+@pytest.mark.parametrize(
+    ("boundary", "survives"),
+    [("parts", None), ("artifact-before", None), ("artifact-after", "SECOND")],
+)
+def test_an_interrupted_rereview_never_mispairs_artifact_and_parts(
+    tmp_path: Path, boundary: str, survives: str | None
+) -> None:
+    """Interrupted anywhere, a re-review leaves a matching pair or no artifact.
+
+    A re-review of identical content reuses the artifact's name and its parts
+    directory (ADR-0027 §6), and the two cannot be renamed as one. Whatever the
+    interruption, `ship` must never find one attempt's verdict beside another
+    attempt's part messages.
+    """
+    repo = tmp_path / "repo"
+    _build_two_part_change(repo)
+    sha = _git(repo, "rev-parse", "HEAD")
+    first = tmp_path / "state-1"
+    _recorded_round(first, "FIRST")
+    run_review(repo, tmp_path, FAKE_CODEX_STATE_DIR=str(first))
+    stem = require_artifact(repo, sha).stem
+    second = tmp_path / "state-2"
+    _recorded_round(second, "SECOND")
+    install_fake_codex(tmp_path / "bin")
+    _install_interrupting_mv(tmp_path / "bin", boundary)
+
+    result = run_review(repo, tmp_path, check=False, FAKE_CODEX_STATE_DIR=str(second))
+
+    assert result.returncode != 0, "the round was interrupted"
+    artifact = artifact_for(repo, sha)
+    if survives is None:
+        assert artifact is None, "the earlier artifact is withdrawn before its parts change"
+        return
+    assert artifact is not None
+    assert f"{survives} verdict body" in artifact.read_text()
+    kept = repo / ".review" / "parts" / stem
+    assert sorted(p.read_text() for p in kept.iterdir()) == [
+        f"{survives} part one\n",
+        f"{survives} part two\n",
+    ]
