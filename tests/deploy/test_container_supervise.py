@@ -370,9 +370,11 @@ def test_the_hub_exiting_on_its_own_is_the_containers_exit(
     assert run.all_ended()
 
 
-def test_a_gateway_that_never_listens_is_a_deployment_fault(layout: Any) -> None:
+def test_a_gateway_that_exits_before_it_listens_is_a_restart(layout: Any) -> None:
+    # Its `1` is the same for a setting it refused and for a fault that clears, and
+    # ADR-0083 §5 makes the case that does not answer the question a restart.
     run = _Run(layout, FAKE_GATEWAY_REFUSES="1")
-    assert run.result() == supervise.EXIT_DEPLOYMENT
+    assert run.result() == supervise.EXIT_RESTART
     assert run.saw("hub.signal") == "SIGTERM"
     assert run.all_ended()
 
