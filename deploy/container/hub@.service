@@ -1,0 +1,46 @@
+# One person's hub container, supervised by systemd (#3160): hub@<person>.service.
+#
+# scripts/deploy_container.py installs this file as /etc/systemd/system/hub@.service,
+# writing the person directory's root in place of /srv/hubs when it is told another,
+# and docs/guide/container.md describes everything it reads. Nothing here is a secret:
+# the model key is in hub.env, read by the docker client, and the keyring passphrase is
+# a mounted file, read inside the container.
+#
+# Why systemd and not a Docker restart policy: ADR-0083 §3's D1 asks for a supervisor
+# that restarts on 1 and leaves 78 down, and none of Docker's policies can leave 78
+# down. `docker run` without --detach exits with the container's own code, which is
+# what lets RestartPreventExitStatus read it, and its output is this unit's journal.
+
+[Unit]
+Description=The hub container for %i
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# HUB_IMAGE, the image the last deploy installed, by its id; HUB_PORT, the person's port
+# on the host's loopback. Written by the deploy, and by nothing else.
+EnvironmentFile=/srv/hubs/%i/unit.env
+ExecStartPre=-/usr/bin/docker rm --force hub-%i
+# --pull never: the image is the one the deploy built or was given on this box, and a
+# name that is missing here is never fetched from a registry instead.
+ExecStart=/usr/bin/docker run --rm --pull never --name hub-%i --network bridge \
+    --env-file /srv/hubs/%i/hub.env \
+    --volume hub-%i-data:/data \
+    --volume hub-%i-keyring:/home/assistant/.local/share/keyrings \
+    --volume /srv/hubs/%i/keyring-passphrase:/run/secrets/keyring-passphrase:ro \
+    --publish 127.0.0.1:${HUB_PORT}:8423 \
+    --stop-timeout 90 \
+    ${HUB_IMAGE}
+# ADR-0083's D2 is shutdown_drain_seconds plus thirty, sixty by default. Docker waits 90
+# for the drain before it kills, and systemd waits 120 for Docker, so the drain is cut
+# by Docker's own SIGKILL at 90, never by systemd's earlier.
+ExecStop=/usr/bin/docker stop --time 90 hub-%i
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=78
+
+[Install]
+WantedBy=multi-user.target
