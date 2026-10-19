@@ -15156,13 +15156,20 @@ class BeliefSummary(BaseModel):
     (§15:3): a memory carries none. ``supports_gone`` is §15:7's mark: the memory is
     held and answerable, and every one of its supports' episodes is gone.
 
+    **An episode is listed only where a caller names the episodic kind** (ADR-0074 §6,
+    which ADR-0328 §18 keeps beside §11:2's default), and is projected onto the same
+    type by :func:`episode_summary`: ``kind`` says which it is, and an episode has no
+    standing and no status (``None``), rests on no supports, and was learned when it
+    happened. Its band and its outside-content mark are its provenance's (§12).
+
     Attributes:
-        id: The memory's id, opaque, and what ``forget`` names.
+        id: The record's id, opaque, and what ``forget`` names.
+        kind: ``memory``, or ``episodic`` for an episode a caller asked for.
         content: Its wording.
-        standing: Its standing (§6).
+        standing: Its standing (§6); ``None`` exactly for an episode.
         band: The band its standing is grouped in (§6:4). ADR-0189 §1 calls this the
             standing; ADR-0328 §15 carries both.
-        status: ``current``, ``ended`` or ``wrong``.
+        status: ``current``, ``ended`` or ``wrong``; ``None`` exactly for an episode.
         valid_until: The end of its validity window, where one is set.
         as_of: As of (§7:3), at the moment of projection, or ``None`` for unknown.
         learned: Learned (§7:4), or ``None`` for unknown.
@@ -15177,11 +15184,12 @@ class BeliefSummary(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    id: Identifier = Field(description="The memory's id, opaque, and what ``forget`` names.")
-    content: EncodableText = Field(description="The memory's wording.")
-    standing: MemoryStanding
+    id: Identifier = Field(description="The record's id, opaque, and what ``forget`` names.")
+    kind: Literal["memory", "episodic"] = "memory"
+    content: EncodableText = Field(description="The record's wording.")
+    standing: MemoryStanding | None
     band: BeliefBand
-    status: MemoryStatus
+    status: MemoryStatus | None
     valid_until: UtcInstant | None = None
     as_of: UtcInstant | None = None
     learned: UtcInstant | None = None
@@ -15193,6 +15201,17 @@ class BeliefSummary(BaseModel):
     rests_on_outside_content: bool = False
     supports_gone: bool = False
 
+    @model_validator(mode="after")
+    def _kind_decides_standing(self) -> Self:
+        episodic = self.kind == "episodic"
+        if (self.standing is None) != episodic or (self.status is None) != episodic:
+            msg = (
+                "a memory's projection carries its standing and status, and an episode's "
+                "carries neither (ADR-0328 §15:1, ADR-0074 §6)"
+            )
+            raise ValueError(msg)
+        return self
+
 
 class Belief(BeliefSummary):
     """One live memory on the **single-memory view**, its supports resolved (ADR-0328 §15:2).
@@ -15203,11 +15222,22 @@ class Belief(BeliefSummary):
     :class:`Memory`: the engine computes every value once, so no adapter computes a
     standing, and drops what a surface has no use for.
 
+    An episode's view (:func:`episode_view`) carries no support: an episode rests on
+    none, its warrant being that it happened.
+
     Attributes:
-        supports: One entry per support, in the order the memory carries them.
+        supports: One entry per support, in the order the memory carries them; none
+            for an episode.
     """
 
-    supports: tuple[SupportView, ...] = Field(min_length=1)
+    supports: tuple[SupportView, ...] = ()
+
+    @model_validator(mode="after")
+    def _a_memory_shows_its_supports(self) -> Self:
+        if bool(self.supports) != (self.kind == "memory"):
+            msg = "a memory's view carries every support, and an episode's carries none"
+            raise ValueError(msg)
+        return self
 
 
 def _summary_fields(memory: Memory, *, now: datetime, supports_gone: bool) -> dict[str, object]:
@@ -15286,6 +15316,47 @@ def belief_view(
     return Belief.model_validate(
         _summary_fields(memory, now=now, supports_gone=gone) | {"supports": supports}
     )
+
+
+def _episode_fields(episode: EpisodicMemory) -> dict[str, object]:
+    """An episode's listing fields (ADR-0074 §6, read through ADR-0328 §12)."""
+    return {
+        "id": episode.id,
+        "kind": "episodic",
+        "content": episode.content,
+        "standing": None,
+        "band": record_band(episode),
+        "status": None,
+        "valid_until": episode.validity.valid_until,
+        "learned": episode.occurred_at,
+        "evidence": EvidenceSummary(supporting=0, against=0, episodes=0),
+        "track_record": TrackRecordSummary(relied_on=0, held_up=0, let_down=0),
+        "rests_on_outside_content": record_rests_on_outside_content(episode),
+    }
+
+
+def episode_summary(episode: EpisodicMemory) -> BeliefSummary:
+    """Project an episode a caller asked for onto the listing (ADR-0074 §6).
+
+    Args:
+        episode: The episode, as the store returned it.
+
+    Returns:
+        Its summary: no standing, no status, learned when it happened.
+    """
+    return BeliefSummary.model_validate(_episode_fields(episode))
+
+
+def episode_view(episode: EpisodicMemory) -> Belief:
+    """Project an episode onto the single view ``forget``'s ceremony reads (ADR-0073 §5).
+
+    Args:
+        episode: The episode, as the store returned it.
+
+    Returns:
+        Its view, carrying no support.
+    """
+    return Belief.model_validate(_episode_fields(episode))
 
 
 class ConversationSummary(BaseModel):

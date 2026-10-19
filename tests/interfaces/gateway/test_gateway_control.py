@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     Belief,
     BeliefBand,
     GrantScope,
+    MemoryKind,
     ReportedExtent,
     belief_view,
 )
@@ -387,9 +388,11 @@ async def test_a_lost_hub_and_a_hub_refusal_are_two_conditions_on_a_grant_act() 
 
 
 #: Every member ADR-0328 §15:1 has both memory views carry, and no other: no
-#: confidence, no presented confidence and no elision count (§15:3).
+#: confidence, no presented confidence and no elision count (§15:3). ``kind`` tells a
+#: memory from an episode a request named the episodic kind for (ADR-0074 §6).
 _LISTED: Final = {
     "id",
+    "kind",
     "band",
     "standing",
     "status",
@@ -565,19 +568,42 @@ async def test_an_absent_band_filter_and_an_empty_one_are_different_questions() 
         assert [arguments["bands"] for _, arguments in engine.calls] == [None, ()]
 
 
-async def test_the_listing_relays_no_kind_so_episodes_never_reach_the_panel() -> None:
-    """ADR-0328 §11:2, and #3143: the listing holds memories, never episodes.
+async def test_the_page_asks_with_no_kind_so_episodes_never_reach_the_panel() -> None:
+    """ADR-0328 §11:2, and #3143: with no kind the listing holds memories alone.
 
-    The page asks with no filter, and the gateway relays only the bands: there is no
-    kind to relay, so the engine's own listing — memories only — is what the panel
-    shows.
+    The page asks with no filter, so the engine's default — memories only — is what
+    the panel shows; a request naming the episodic kind is relayed as it was asked
+    (ADR-0074 §6), and no request the page sends names one.
     """
     engine = FakeAssistantEngine()
     engine.hold("rec-1", content="held")
+    engine.hold_episode("ep-1", content="an exchange")
     async with _harness(engine) as one:
+        _, listed = await one.whole("POST", "/beliefs", {})
         await one.whole("POST", "/beliefs", {"kinds": ["episodic"]})
 
-        assert engine.calls == [("beliefs", {"bands": None})]
+        assert [row["id"] for row in listed["beliefs"]] == ["rec-1"]
+        assert engine.calls == [
+            ("beliefs", {"bands": None, "kinds": None}),
+            ("beliefs", {"bands": None, "kinds": (MemoryKind.EPISODIC,)}),
+        ]
+
+
+async def test_the_ceremony_read_resolves_an_episodes_id() -> None:
+    """ADR-0177 §5's ceremony read, on an episode's id (ADR-0074 §6, ADR-0073 §5).
+
+    ``forget`` destroys an episode exactly as it destroys a belief, so the read the
+    confirmation is rendered from answers for one: its view, with no standing and no
+    support.
+    """
+    engine = FakeAssistantEngine()
+    engine.hold_episode("ep-1", content="an exchange")
+    async with _harness(engine) as one:
+        status, body = await one.whole("POST", "/belief", {"record_id": "ep-1"})
+
+        assert status == 200
+        shown = body["belief"]
+        assert (shown["kind"], shown["standing"], shown["supports"]) == ("episodic", None, [])
 
 
 async def test_a_band_of_no_vocabulary_is_refused_rather_than_dropped() -> None:

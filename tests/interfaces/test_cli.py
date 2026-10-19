@@ -50,6 +50,7 @@ from ai_assistant.core.types import (
     GrantScope,
     HeldNotification,
     Memory,
+    MemoryKind,
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
@@ -892,17 +893,18 @@ class _RecordingBeliefEngine:
     def __init__(self, page: tuple[Belief, ...] = (), *, one: Belief | None = None) -> None:
         self._page = page
         self._one = one
-        self.listed: list[tuple[object, int, int]] = []
+        self.listed: list[tuple[object, object, int, int]] = []
         self.forgotten: list[str] = []
 
     async def beliefs(
         self,
         *,
         bands: object = None,
+        kinds: object = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[Belief, ...]:
-        self.listed.append((bands, limit, offset))
+        self.listed.append((bands, kinds, limit, offset))
         return self._page
 
     async def belief(self, record_id: str) -> Belief | None:
@@ -1271,13 +1273,50 @@ async def _holding(content: str) -> FakeMemoryStore:
 async def test_drive_beliefs_lists_what_the_engine_holds(output: StringIO) -> None:
     """Against a real engine over fakes, a stored memory is listed with its standing."""
     engine = _engine(memory=await _holding("the office is in Boston"))
-    code = await cli._drive_beliefs(engine, bands=None, limit=50, offset=0)
+    code = await cli._drive_beliefs(engine, bands=None, kinds=None, limit=50, offset=0)
     assert code == 0
     rendered = _flat(output.getvalue())
     assert "the office is in Boston" in rendered
     assert "asserted · you said it" in rendered  # what the user said lands in their band
     assert "1 belief(s)" in rendered
-    assert "where is the office?" not in rendered  # the episode is never listed (§11:2)
+    assert "where is the office?" not in rendered  # not listed by default (§11:2)
+    await engine.aclose()
+
+
+async def test_drive_beliefs_lists_episodes_where_the_episodic_kind_is_named(
+    output: StringIO,
+) -> None:
+    """ADR-0074 §6: ``--kind episodic`` still lists episodes, in their own words."""
+    engine = _engine(memory=await _holding("the office is in Boston"))
+    code = await cli._drive_beliefs(
+        engine, bands=None, kinds=[MemoryKind.EPISODIC], limit=50, offset=0
+    )
+    assert code == 0
+    rendered = _flat(output.getvalue())
+    assert "where is the office?" in rendered
+    assert "a captured exchange" in rendered
+    assert "this records an exchange that happened" in rendered
+    assert "Happened:" in rendered
+    assert "activation:held" in rendered  # the id forget takes
+    assert "the office is in Boston" not in rendered
+    await engine.aclose()
+
+
+async def test_forget_on_an_episodes_id_shows_it_then_destroys_it(output: StringIO) -> None:
+    """ADR-0074 §6: ``forget <id>`` destroys an episode exactly as it destroys a belief.
+
+    The ceremony's read (ADR-0073 §5) resolves the episode, shows it, and the yes
+    destroys it.
+    """
+    store = await _holding("the office is in Boston")
+    engine = _engine(memory=store)
+    code = await cli._drive_forget(engine, "activation:held", confirm=lambda _b: True)
+    assert code == 0
+    rendered = _flat(output.getvalue())
+    assert "About to forget" in rendered
+    assert "where is the office?" in rendered
+    assert "Forgotten" in rendered
+    assert await store.get("activation:held") is None
     await engine.aclose()
 
 
@@ -1294,6 +1333,7 @@ async def test_drive_beliefs_surfaces_a_read_failure_with_a_nonzero_exit(
     code = await cli._drive_beliefs(
         _FailingEngine(),  # type: ignore[arg-type]  # the adapter needs only this call
         bands=None,
+        kinds=None,
         limit=50,
         offset=0,
     )
@@ -1385,32 +1425,34 @@ def test_beliefs_command_relays_its_filters(monkeypatch: pytest.MonkeyPatch) -> 
         ["beliefs", "--band", "derived", "--band", "attested", "--limit", "5", "--offset", "10"],
     )
     assert result.exit_code == 0
-    assert engine.listed == [([BeliefBand.DERIVED, BeliefBand.ATTESTED], 5, 10)]
+    assert engine.listed == [([BeliefBand.DERIVED, BeliefBand.ATTESTED], None, 5, 10)]
 
 
 def test_beliefs_command_asks_for_every_band_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An absent ``--band`` means "every", because an empty filter selects nothing."""
+    """An absent ``--band`` means "every", and an absent ``--kind`` the engine's default.
+
+    An empty filter selects nothing, so absence is relayed as ``None``: every band, and
+    memories alone (ADR-0328 §11:2).
+    """
     engine = _RecordingBeliefEngine()
     _wire(monkeypatch, engine)
 
     result = CliRunner().invoke(cli.app, ["beliefs"])
     assert result.exit_code == 0
-    assert engine.listed == [(None, 50, 0)]
+    assert engine.listed == [(None, None, 50, 0)]
 
 
-def test_beliefs_command_offers_no_kind_to_choose(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ADR-0328 §11:2: the listing holds memories and never episodes, so ``--kind`` went.
-
-    A usage error before any engine is built, as every parse refusal here is (#1970).
-    """
-    opened = _wire_recording_opens(monkeypatch, FakeAssistantEngine())
+def test_beliefs_command_relays_kind_episodic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADR-0074 §6: ``--kind episodic`` still lists episodes, relayed as the kind."""
+    engine = _RecordingBeliefEngine()
+    _wire(monkeypatch, engine)
 
     result = CliRunner().invoke(cli.app, ["beliefs", "--kind", "episodic"])
 
-    assert result.exit_code == 2
-    assert opened == []
+    assert result.exit_code == 0
+    assert engine.listed == [(None, [MemoryKind.EPISODIC], 50, 0)]
 
 
 @pytest.mark.parametrize("bad", ["-1", str(2**63)])

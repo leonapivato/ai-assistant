@@ -195,6 +195,7 @@ from ai_assistant.core.types import (
     GrantableSource,
     GrantScope,
     HeldNotification,
+    MemoryKind,
     MessageAddedChange,
     MessageDeletedChange,
     MessageReceipt,
@@ -3562,8 +3563,9 @@ class Gateway:
     async def _beliefs(self, request: Request) -> Response:
         """List the memories held, band-scoped, as summaries (ADR-0073 §1, ADR-0328 §15:1).
 
-        Memories only, never episodes: the engine's listing excludes them (ADR-0328
-        §11:2, #3143).
+        Memories by default: the engine's listing excludes episodes unless the
+        request names the episodic kind (ADR-0328 §11:2, ADR-0074 §6, #3143). The page
+        never names it.
 
         **An absent filter and an empty one are different answers** and both cross:
         ``bands`` omitted selects every band, and ``bands: []`` selects nothing. The
@@ -3571,8 +3573,8 @@ class Gateway:
         question the browser did not ask.
 
         Args:
-            request: The admitted request, carrying optional ``bands``, ``limit`` and
-                ``offset``.
+            request: The admitted request, carrying optional ``bands``, ``kinds``,
+                ``limit`` and ``offset``.
 
         Returns:
             One summary per live belief the filters admit.
@@ -3582,6 +3584,7 @@ class Gateway:
             partial(
                 self._engine.beliefs,
                 bands=_members(payload, "bands", BeliefBand),
+                kinds=_members(payload, "kinds", MemoryKind),
                 limit=_page(payload, "limit", DEFAULT_PAGE_SIZE),
                 offset=_page(payload, "offset", 0),
             )
@@ -4980,9 +4983,10 @@ def _belief_fields(belief: Belief | BeliefSummary) -> dict[str, Any]:
     track = belief.track_record
     return {
         "id": belief.id,
+        "kind": belief.kind,
         "band": belief.band.value,
-        "standing": belief.standing.value,
-        "status": belief.status.value,
+        "standing": None if belief.standing is None else belief.standing.value,
+        "status": None if belief.status is None else belief.status.value,
         "content": belief.content,
         "valid_until": _instant(belief.valid_until),
         "as_of": _instant(belief.as_of),
