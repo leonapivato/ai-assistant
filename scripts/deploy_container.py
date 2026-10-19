@@ -80,10 +80,10 @@ establishes, and refuses or fails loudly without:
 * ``route_localnet`` is ``0`` for ``all`` and for every interface that is not the
   loopback or Docker's own (``docker0``, ``br-*``, ``veth*``), so the kernel drops a
   packet for ``127.0.0.0/8`` that arrives from another machine;
-* the raw table's ``PREROUTING`` chain drops what arrives for the container's address
-  on any interface but its bridge, by the rule Docker Engine 28 and later writes
-  (``-d <address>/32 ! -i <bridge> -j DROP``), and no rule before it can accept the
-  packet first.
+* the raw table's ``PREROUTING`` chain drops what arrives for the hosted listener at
+  the container's address on any interface but its bridge, by the rule Docker Engine 28
+  and later writes for a published port (``-d <address>/32 ! -i <bridge> -p tcp -m tcp
+  --dport 8423 -j DROP``), and no rule before it can accept the packet first.
 
 What it cannot see: a firewall that is not iptables' (Docker's nftables backend is
 refused, not read), the network beyond the box, and any process on the box that
@@ -561,7 +561,12 @@ def route_localnet_problems(out: str) -> list[str]:
 
 
 def raw_rule_problem(rules: str, address: str, bridge: str) -> str | None:
-    """Find the drop that keeps other machines off the container's bridge address.
+    """Find the drop that keeps other machines off the hosted listener's bridge address.
+
+    Docker Engine 28 writes it per published port, as
+    ``-d <address>/32 ! -i <bridge> -p tcp -m tcp --dport 8423 -j DROP``; a drop of the
+    whole address is accepted too. The hosted listener is the one thing listening on the
+    container's address, so a drop of its port is a drop of the door.
 
     Args:
         rules: ``iptables -t raw -S PREROUTING``.
@@ -569,15 +574,17 @@ def raw_rule_problem(rules: str, address: str, bridge: str) -> str | None:
         bridge: The bridge's interface.
 
     Returns:
-        ``None`` when the chain drops what arrives for ``address`` on any other
+        ``None`` when the chain drops what arrives for the listener on any other
         interface before anything can accept it, or why it cannot be shown to.
     """
-    wanted = ["-A", "PREROUTING", "-d", f"{address}/32", "!", "-i", bridge, "-j", "DROP"]
+    whole = ["-A", "PREROUTING", "-d", f"{address}/32", "!", "-i", bridge]
+    port = [*whole, "-p", "tcp", "-m", "tcp", "--dport", str(HOSTED_PORT)]
+    wanted = ([*whole, "-j", "DROP"], [*port, "-j", "DROP"])
     for line in rules.splitlines():
         words = line.split()
         if not words or words[0] != "-A":
             continue
-        if words == wanted:
+        if words in wanted:
             return None
         target = words[words.index("-j") + 1] if "-j" in words[:-1] else None
         if target is None or target not in _NON_ACCEPTING_TARGETS:
@@ -586,9 +593,9 @@ def raw_rule_problem(rules: str, address: str, bridge: str) -> str | None:
                 f"{address}, and it may accept a packet for the container from elsewhere"
             )
     return (
-        f"the raw table's PREROUTING chain has no `-d {address}/32 ! -i {bridge} -j DROP`.\n"
-        "Docker Engine 28 and later write it for each container on a bridge, on the\n"
-        "iptables firewall backend; without it another machine may route to the container"
+        f"the raw table's PREROUTING chain has no `{' '.join(port[2:])} -j DROP`.\n"
+        "Docker Engine 28 and later write it for each published port, on the iptables\n"
+        "firewall backend; without it another machine may route to the container"
     )
 
 
@@ -1244,7 +1251,7 @@ class Deployment:
         return [
             f"door: 127.0.0.1:{self.port} answers {door} without the edge's assertion",
             f"reachability: published to 127.0.0.1:{self.port} alone, on {network} at"
-            f" {address}, which the raw table closes to every other interface",
+            f" {address}, whose {HOSTED_PORT} the raw table closes to every other interface",
         ]
 
     def _bridge_interface(self, network: str, problems: list[str]) -> str:

@@ -173,10 +173,11 @@ that no other machine reaches the hosted listener. It checks that `route_localne
 `0` for every interface but the loopback and Docker's own, so nothing routes a packet
 for the loopback port in from another machine. Once the container runs, it checks that
 the container is on its own bridge network, publishes `8423` to `127.0.0.1` alone and
-has no IPv6 address, and that the raw table's `PREROUTING` chain drops what arrives for the
-container's bridge address on any other interface. Docker Engine 28 and later write
-that rule on the iptables backend. A box where it cannot establish one of these is
-refused, or its container stopped, with the reason. What it cannot see is a firewall
+has no IPv6 address, and that the raw table's `PREROUTING` chain drops what arrives for
+the container's bridge address, at the hosted port, on any other interface. Docker
+Engine 28 and later write that rule for each published port, on the iptables backend.
+A box where it cannot establish one of these is refused, or its container stopped, with
+the reason. What it cannot see is a firewall
 other than iptables, the network beyond the box, and a process on the box that forwards
 the port itself.
 

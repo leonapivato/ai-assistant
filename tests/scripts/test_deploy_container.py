@@ -36,7 +36,10 @@ OLD_COMMIT = "a" * 40
 NEW_COMMIT = "b" * 40
 OLD_ID = "sha256:" + "1" * 64
 ADDRESS = "172.17.0.2"
-DOCKER_DROP = f"-A PREROUTING -d {ADDRESS}/32 ! -i br-0123456789ab -j DROP"
+DOCKER_DROP = (
+    f"-A PREROUTING -d {ADDRESS}/32 ! -i br-0123456789ab -p tcp -m tcp --dport 8423 -j DROP"
+)
+LOOPBACK_DROP = "-A PREROUTING -d 127.0.0.1/32 ! -i lo -p tcp -m tcp --dport 8501 -j DROP"
 LOCALNET = "\n".join(
     f"/proc/sys/net/ipv4/conf/{name}/route_localnet:0"
     for name in ("all", "default", "eth0", "lo", "docker0")
@@ -67,7 +70,7 @@ class FakeBox:
     #: How the backup goes: "verified", "unverified", "refused", "silent" or "elsewhere".
     backup: str = "verified"
     localnet: str = LOCALNET
-    raw_rules: str = f"-P PREROUTING ACCEPT\n{DOCKER_DROP}"
+    raw_rules: str = f"-P PREROUTING ACCEPT\n{LOOPBACK_DROP}\n{DOCKER_DROP}"
     door: str = "403"
     ports: object = None
     mode: str = "hub-alice"
@@ -650,7 +653,9 @@ def test_unit_env_round_trips() -> None:
 @pytest.mark.parametrize(
     ("rules", "found"),
     [
-        (f"-P PREROUTING ACCEPT\n{DOCKER_DROP}", None),
+        (f"-P PREROUTING ACCEPT\n{LOOPBACK_DROP}\n{DOCKER_DROP}", None),
+        (f"-A PREROUTING -d {ADDRESS}/32 ! -i br-0123456789ab -j DROP", None),
+        (DOCKER_DROP.replace("8423", "8424"), "has no `-d 172.17.0.2/32"),
         (f"-A PREROUTING -j CT --notrack\n{DOCKER_DROP}", None),
         (f"-A PREROUTING -i eth0 -j ACCEPT\n{DOCKER_DROP}", "may accept"),
         (f"-A PREROUTING -j MYCHAIN\n{DOCKER_DROP}", "may accept"),
