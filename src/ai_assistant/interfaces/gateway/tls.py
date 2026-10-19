@@ -23,10 +23,13 @@ before either listener is bound. The only thing between it and the bind is that
 mint, which §8 orders after it, so the pair is still read exactly once and still
 read for the bind alone.
 
-**Every refusal here is a stay-down deployment fault** (ADR-0083 §5) and reaches
-the owner as ADR-0168 §5's shape — "does not start, and reports why". §2 admits no
-softer outcome: "It does not bind the loopback listener alone and continue, and it
-does not bind the remote listener without TLS."
+**Every refusal here but one is a stay-down deployment fault** (ADR-0083 §5), and
+every one reaches the owner as ADR-0168 §5's shape — "does not start, and reports
+why". §2 admits no softer outcome: "It does not bind the loopback listener alone and
+continue, and it does not bind the remote listener without TLS." The one is a
+certificate not yet in force, which a restart unchanged gets past once the clock
+reaches it — "if yes — even eventually — it is ``1``" — so it is raised as
+:class:`~.exits.ClearableRefusalError` and the gateway exits ``1`` on it (#3167).
 
 **What is deliberately not checked, because §1 says so in terms.** No clause of
 ADR-0202 "requires the gateway to determine a certificate's issuer, its provenance,
@@ -49,6 +52,7 @@ from typing import TYPE_CHECKING, Final
 from cryptography import x509
 
 from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.interfaces.gateway.exits import ClearableRefusalError
 from ai_assistant.wire.custody import displayable, first_ancestor_fault
 
 if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
@@ -122,8 +126,11 @@ class RemoteTls:
             instant: The reading of the gateway's own clock.
 
         Raises:
-            ConfigurationError: If the certificate is not yet in force, or has
-                expired.
+            ClearableRefusalError: If the certificate is not yet in force. The clock
+                reaches it without anyone acting, so a restart is what gets past it
+                (ADR-0083 §5's "even eventually"), and the gateway exits ``1``.
+            ConfigurationError: If the certificate has expired, which only a
+                renewal changes.
         """
         shown = displayable(self.path)
         if instant < self.not_before:
@@ -134,7 +141,7 @@ class RemoteTls:
                 f"with it (ADR-0202 §2, §8). Usually this machine's clock is behind the "
                 f"one the certificate was issued against"
             )
-            raise ConfigurationError(msg)
+            raise ClearableRefusalError(msg)
         if instant > self.not_after:
             msg = (
                 f"gateway_remote_tls_certificate={shown} expired at "
@@ -174,7 +181,8 @@ def remote_tls(settings: Settings, *, now: Callable[[], datetime]) -> RemoteTls 
         ConfigurationError: On every condition §§2, 3 and 6 refuse at start. Each is
             a stay-down fault: restarting unchanged never succeeds, and what has to
             change is the configuration, the files' permissions, or the certificate
-            the owner installed.
+            the owner installed. The exception is §8's near bound, a certificate not
+            yet in force, raised as :class:`~.exits.ClearableRefusalError`.
     """
     if settings.gateway_remote_address is None:
         return None

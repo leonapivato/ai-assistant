@@ -29,6 +29,8 @@ from gateway_tls import issue_pair
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.interfaces.gateway import exits
+from ai_assistant.interfaces.gateway.exits import ClearableRefusalError
 from ai_assistant.interfaces.gateway.server import Gateway
 from ai_assistant.interfaces.gateway.tls import remote_tls
 from ai_assistant.testing import FakeAssistantEngine
@@ -259,8 +261,10 @@ def test_an_expired_certificate_is_refused_and_the_bound_is_named(tmp_path: Path
         not_after=_NOW - datetime.timedelta(seconds=1),
     )
 
-    with pytest.raises(ConfigurationError, match="expired at"):
+    with pytest.raises(ConfigurationError, match="expired at") as refused:
         _read(certificate, key)
+    # Only a renewal changes it, so it stays down (ADR-0083 §5, #3167).
+    assert exits.exit_code(refused.value) == exits.EXIT_DEPLOYMENT
 
 
 def test_a_certificate_not_yet_in_force_is_refused_and_says_which_bound(
@@ -284,8 +288,12 @@ def test_a_certificate_not_yet_in_force_is_refused_and_says_which_bound(
         not_after=_NOW + datetime.timedelta(days=90),
     )
 
-    with pytest.raises(ConfigurationError, match="is not valid until"):
+    with pytest.raises(ClearableRefusalError, match="is not valid until") as refused:
         _read(certificate, key)
+    # The clock reaches the bound without anyone acting, so a restart gets past it —
+    # ADR-0083 §5's "even eventually" — and the gateway comes back rather than staying
+    # down (#3167).
+    assert exits.exit_code(refused.value) == exits.EXIT_RESTART
 
 
 def test_a_certificate_inside_both_bounds_is_admitted(tmp_path: Path) -> None:
