@@ -170,7 +170,10 @@ carries the person's authority (the #879 ruling):
 # The devices the hub knows, before choosing ASSISTANT_GATEWAY_HOSTED_DEVICE.
 docker exec hub-alice ai-assistant-device list
 
-# The hosted browser device does nothing until it holds a role (ADR-0327 §10).
+# The hosted browser device does nothing until it holds a role (ADR-0327 §10). It
+# exists only once the gateway has named it, on the first request it relays: have
+# the person sign in through the edge once, check that `list` shows alice-web, and
+# only then give it the role.
 docker exec hub-alice ai-assistant-device assign alice-web commands
 
 # A connection's credential goes to the keyring, read from standard input.

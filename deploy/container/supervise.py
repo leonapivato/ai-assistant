@@ -410,12 +410,51 @@ class KeyringState(Enum):
     UNLOCKED = "unlocked"
 
 
-def keyring_state() -> KeyringState:
+#: How long one look at the keyring may take, in seconds, before it counts as "not yet".
+_PROBE_DEADLINE: Final = 5.0
+
+#: The flag that runs :func:`ask_the_bus` and prints its answer, for :func:`keyring_state`.
+_PROBE_FLAG: Final = "--keyring-state"
+
+
+def keyring_state(
+    *, command: Sequence[str] | None = None, deadline: float = _PROBE_DEADLINE
+) -> KeyringState:
+    """Look at the keyring from a child process that can be abandoned.
+
+    The bus library's calls take no deadline, so a bus that accepted the connection
+    and then stopped answering would hold an in-process look forever: past the
+    keyring's own deadline, and past a stop signal, which only sets a flag this
+    program reads between looks. A child is killed at ``deadline`` instead, and its
+    silence is "not yet".
+
+    Args:
+        command: The child's command line, or ``None`` for this program's own
+            ``--keyring-state``.
+        deadline: How long it may take, in seconds.
+
+    Returns:
+        The state, ``ABSENT`` where the child did not answer with one in time.
+    """
+    argv = command or (sys.executable, "-I", str(Path(__file__).resolve()), _PROBE_FLAG)
+    try:
+        completed = subprocess.run(  # noqa: S603 — this program's own command line
+            argv, capture_output=True, text=True, timeout=deadline, check=False
+        )
+    except subprocess.TimeoutExpired:
+        return KeyringState.ABSENT
+    try:
+        return KeyringState(completed.stdout.strip())
+    except ValueError:
+        return KeyringState.ABSENT
+
+
+def ask_the_bus() -> KeyringState:
     """Ask the session bus whether the default collection is there and unlocked.
 
     The default collection is the one the ``keyring`` library's SecretService backend
     writes to, and ``gnome-keyring-daemon --unlock`` creates the login keyring that
-    answers for it.
+    answers for it. Run by :func:`keyring_state`'s child, never in the supervisor.
 
     Returns:
         The state, ``ABSENT`` where the service has not registered on the bus yet.
@@ -868,7 +907,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the container.
 
     Args:
-        argv: The arguments, or ``None`` for the process's. There are none.
+        argv: The arguments, or ``None`` for the process's. There are none an
+            operator passes; ``--keyring-state`` is :func:`keyring_state`'s child.
 
     Returns:
         The container's exit code.
@@ -877,7 +917,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="supervise.py",
         description="Supervise one person's hub and its gateway in their container.",
     )
-    parser.parse_args(argv)
+    parser.add_argument(_PROBE_FLAG, action="store_true", help=argparse.SUPPRESS)
+    if parser.parse_args(argv).keyring_state:
+        print(ask_the_bus().value)
+        return EXIT_OK
     return run(Layout(), os.environ)
 
 

@@ -4,7 +4,8 @@
 
 It needs a container runtime and nothing of this repository's environment: the one
 library it takes is ``cryptography``, to sign an assertion as the sign-in edge would
-(ADR-0327 §6). Everything it creates is named ``hub-smoke-*`` and removed at the end.
+(ADR-0327 §6). Everything it creates is named ``hub-smoke-<this run's suffix>`` and
+removed at the end, and nothing it did not create is.
 
 What it proves, in order:
 
@@ -32,6 +33,7 @@ import http.client
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -47,9 +49,12 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 RUNTIME: Final = os.environ.get("CONTAINER_RUNTIME", "docker")
-NAME: Final = "hub-smoke"
-DATA: Final = "hub-smoke-data"
-KEYRING: Final = "hub-smoke-keyring"
+#: This run's own suffix, so two runs on one machine never name, or remove, each
+#: other's container and volumes.
+_RUN: Final = secrets.token_hex(4)
+NAME: Final = f"hub-smoke-{_RUN}"
+DATA: Final = f"hub-smoke-{_RUN}-data"
+KEYRING: Final = f"hub-smoke-{_RUN}-keyring"
 PORT: Final = 18423
 HOST_NAME: Final = "hub.smoke.test"
 ISSUER: Final = "https://edge.smoke.test"

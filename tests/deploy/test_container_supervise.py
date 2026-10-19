@@ -254,6 +254,41 @@ def test_the_containers_exit_combines_the_runs_and_the_hubs(
     assert supervise._settle(code, hub) == container
 
 
+# --- The keyring probe ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("printed", "state"),
+    [
+        ("unlocked", "UNLOCKED"),
+        ("locked\n", "LOCKED"),
+        ("absent", "ABSENT"),
+        ("Traceback (most recent call last):", "ABSENT"),
+        ("", "ABSENT"),
+    ],
+)
+def test_the_probe_reads_the_childs_answer(printed: str, state: str) -> None:
+    command = (sys.executable, "-c", f"print({printed!r})")
+    assert supervise.keyring_state(command=command) is supervise.KeyringState[state]
+
+
+def test_a_probe_that_stalls_is_abandoned_at_its_deadline() -> None:
+    # A bus that accepted the connection and stopped answering: the child is killed,
+    # and the supervisor gets "not yet" in time to read its deadline and a stop.
+    command = (sys.executable, "-c", "import time; time.sleep(30)")
+    started = time.monotonic()
+    assert supervise.keyring_state(command=command, deadline=0.5) is supervise.KeyringState.ABSENT
+    assert time.monotonic() - started < 10
+
+
+def test_the_probe_flag_prints_what_the_bus_says(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(supervise, "ask_the_bus", lambda: supervise.KeyringState.LOCKED)
+    assert supervise.main(["--keyring-state"]) == supervise.EXIT_OK
+    assert capsys.readouterr().out == "locked\n"
+
+
 # --- 2 to 5. The supervision, with stand-in children --------------------------------
 
 
@@ -504,6 +539,21 @@ class _Smoke:
 
     def clean(self) -> None:
         self.cleaned = True
+
+
+def test_each_smoke_run_names_its_own_container_and_volumes() -> None:
+    # So a second run on one machine neither collides with the first nor removes what
+    # the first created: the cleanup names only this run's resources.
+    again = importlib.util.spec_from_file_location(
+        "container_smoke_again", _ROOT / "deploy" / "container" / "smoke.py"
+    )
+    assert again is not None
+    assert again.loader is not None
+    other = importlib.util.module_from_spec(again)
+    again.loader.exec_module(other)
+    for name in ("NAME", "DATA", "KEYRING"):
+        assert getattr(smoke, name).startswith(f"hub-smoke-{smoke._RUN}")
+        assert getattr(smoke, name) != getattr(other, name)
 
 
 def test_a_passing_smoke_run_cleans_up() -> None:
