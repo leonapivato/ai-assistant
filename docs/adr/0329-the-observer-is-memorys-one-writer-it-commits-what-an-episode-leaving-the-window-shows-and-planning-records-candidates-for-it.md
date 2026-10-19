@@ -414,8 +414,10 @@ the ask comes from planning, through the same question and approval.
 
 > **Normative.** A finding that ends, marks wrong or replaces a stored memory is one
 > proposal to `ingest` carrying the new memory and that one retiring operation, citing a
-> support of the new memory added to the retired one as `against`. `MemoryPolicy` rules on
-> the new memory over every conflict but the memory it retires. On an `ACCEPT` the ingest
+> counted `for` support of the new memory that backs it as worded, added to the retired one
+> as `against`, so the cited support never ranks above the new memory's standing and an
+> inference retires only a memory at inference. `MemoryPolicy` rules on the new memory over
+> every conflict but the memory it retires. On an `ACCEPT` the ingest
 > installs the new memory and applies the operation in one atomic write, each naming the
 > other (ADR-0328 §5:6). On a `REINFORCE` of an end or a mark wrong, it adds the supports
 > to the target and applies the operation naming no successor, in one atomic write. On a
@@ -423,7 +425,9 @@ the ask comes from planning, through the same question and approval.
 > writes nothing, and the finding's outcome says so.
 
 > **Normative.** ADR-0328 §6:5 refuses a retiring operation whose cited support ranks below
-> the memory's standing, and the whole proposal with it.
+> the memory's standing, and the whole proposal with it. The writer also refuses a
+> proposal whose retiring operation cites a support that is not a counted `for` support of
+> the new memory backing it as worded, with nothing written.
 
 > **Normative.** A memory the observer writes takes the narrowest placement over every
 > record its run was supplied — the scout's supply included — as ADR-0217 §3:3 and §3:5
