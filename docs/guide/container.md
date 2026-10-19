@@ -115,9 +115,12 @@ What each line holds:
   `shutdown_drain_seconds` plus thirty seconds, which is sixty by default; Docker's
   own default of ten would cut every drain short.
 
-Run it on a bridge network, Docker's default. On the host's own network
-(`--network host`) the container sees every address the box has, and it refuses to
-choose among them.
+Run it on a bridge network, Docker's default, and never on the host's own network
+(`--network host`): there the hosted listener would bind one of the box's own
+addresses. The container refuses to start where it sees more than one address
+besides loopback, which on a box running Docker is always true of the host's
+network, but that is a count and not a guarantee — a host with one private address
+and no bridge would pass it.
 
 It is ready when its health check passes:
 
