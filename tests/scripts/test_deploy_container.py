@@ -21,7 +21,7 @@ from typing import IO, TYPE_CHECKING, Any
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _operator_recipes import SCRIPTS, load
+from _operator_recipes import SCRIPTS, git, init_repo, load
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -331,6 +331,9 @@ def deployment(box: FakeBox, **overrides: object) -> Any:
         "sleep": lambda _seconds: None,
         "stage_context": fake_stage,
         "ready_timeout": 5,
+        # The fake commits are in no clone; ADR-0326 §5:4's ruling on real ones is
+        # deploy_hub's to test, and the tests below drive it through this deploy.
+        "history": lambda _repo, _installed, _deploying: None,
     }
     settings.update(overrides)
     return dc.Deployment(**settings)
@@ -825,6 +828,101 @@ def test_deploy_refuses_while_another_deploy_holds_the_lock() -> None:
         deployment(box).run()
     assert str(PERSON.lock) in box.files, "someone else's lock is not removed"
     assert len(box.ran) == 2  # the directory's stat, and the mkdir
+
+
+def _line(tmp_path: Path) -> tuple[Path, str, str]:
+    """A clone holding two commits in a line, and the two, earlier first."""
+    repo = tmp_path / "clone"
+    init_repo(repo)
+    earlier = git(repo, "rev-parse", "HEAD")
+    (repo / "f.txt").write_text("two\n")
+    git(repo, "commit", "-qam", "two")
+    return repo, earlier, git(repo, "rev-parse", "HEAD")
+
+
+def _over(installed: str, deploying: str) -> FakeBox:
+    """A served box whose unit runs ``installed``, with ``deploying`` on it as ``received:1``."""
+    box = served_box()
+    box.images[OLD_ID] = (OLD_ID, installed)
+    box.images["received:1"] = ("sha256:" + "7" * 64, deploying)
+    return box
+
+
+def test_deploy_refuses_an_earlier_build_before_the_unit_is_touched(tmp_path: Path) -> None:
+    repo, earlier, later = _line(tmp_path)
+    box = _over(later, earlier)
+
+    with pytest.raises(dc.DeployError) as caught:
+        deployment(box, image_ref="received:1", repo=repo, history=dc.history_refusal).run()
+
+    message = str(caught.value)
+    assert f"{earlier[:12]} is an earlier build than {later[:12]}" in message
+    assert "ADR-0326 §5:4" in message
+    assert "restore the backup" in message
+    assert message.endswith("Nothing has been stopped or changed.")
+    assert not {"systemctl stop", "docker run", "unit.env", "systemctl start"} & set(verbs(box))
+    assert dc.UNIT_PATH not in box.files, "the unit is installed only once the commit is ruled"
+    assert str(PERSON.lock) not in box.files
+
+
+def test_deploy_refuses_over_an_image_with_no_commit_label() -> None:
+    # Unknown, not earlier: nothing shows the new commit is the later one.
+    box = _over("<no value>", NEW_COMMIT)
+    _refused_untouched(
+        box, "is not one this clone holds", image_ref="received:1", history=dc.history_refusal
+    )
+
+
+def test_deploy_admits_a_later_build_by_the_clones_history(tmp_path: Path) -> None:
+    repo, earlier, later = _line(tmp_path)
+    box = _over(earlier, later)
+
+    deployment(box, image_ref="received:1", repo=repo, history=dc.history_refusal).run()
+
+    assert box.container_image == "sha256:" + "7" * 64
+
+
+def test_deploy_allow_earlier_deploys_an_earlier_build(tmp_path: Path) -> None:
+    repo, earlier, later = _line(tmp_path)
+    box = _over(later, earlier)
+
+    deployment(
+        box, image_ref="received:1", repo=repo, history=dc.history_refusal, allow_earlier=True
+    ).run()
+
+    assert box.container_image == "sha256:" + "7" * 64
+    assert "docker run" in verbs(box), "the backup is still taken first"
+
+
+def test_deploy_first_install_has_no_earlier_build_to_rule_on() -> None:
+    def unasked(_repo: Path, _installed: str, _deploying: str) -> str | None:
+        raise AssertionError("a first install has no installed commit")
+
+    deployment(FakeBox(files=person_files(served=False)), port=8501, history=unasked).run()
+
+
+@pytest.mark.parametrize(("flag", "allowed"), [([], False), (["--allow-earlier"], True)])
+def test_main_passes_allow_earlier_to_the_deploy(
+    monkeypatch: pytest.MonkeyPatch, flag: list[str], allowed: bool
+) -> None:
+    seen: list[bool] = []
+
+    class Recorded:
+        def __init__(self, **settings: Any) -> None:
+            seen.append(settings["allow_earlier"])
+
+        def run(self) -> list[str]:
+            return []
+
+    monkeypatch.setattr(dc, "Deployment", Recorded)
+
+    assert dc.main(["alice", "box.example.com", *flag]) == 0
+    assert seen == [allowed]
+
+
+def test_allow_earliers_help_names_the_operators_judgement() -> None:
+    help_text = " ".join(dc._parser().format_help().split())
+    assert "no schema change between the two, which the operator must know" in help_text
 
 
 def test_deploy_refuses_an_unlabelled_image() -> None:

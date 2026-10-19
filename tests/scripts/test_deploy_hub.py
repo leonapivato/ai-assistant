@@ -1328,8 +1328,8 @@ def test_an_absent_marker_alone_takes_the_locked_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Unknown is not clean: something is installed, but nothing shows what set it
-    # was installed against.
-    box = _deploy_against(_repo(tmp_path), monkeypatch, marker="")
+    # was installed against. (Nor what commit: ADR-0326 §5:4's ruling wants the flag.)
+    box = _deploy_against(_repo(tmp_path), monkeypatch, "--allow-earlier", marker="")
 
     assert len(box.exports) == 1
 
@@ -1358,7 +1358,9 @@ def test_an_empty_venv_takes_the_locked_path_whatever_the_marker_says(
 def test_a_deployed_commit_this_clone_lacks_takes_the_locked_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    box = _deploy_against(_repo(tmp_path), monkeypatch, marker=f"commit={'0' * 40}\n")
+    box = _deploy_against(
+        _repo(tmp_path), monkeypatch, "--allow-earlier", marker=f"commit={'0' * 40}\n"
+    )
 
     assert len(box.exports) == 1
 
@@ -1423,8 +1425,16 @@ def test_a_supplied_wheel_exports_its_attested_commits_lockfile(
 
     monkeypatch.setattr(_FakeBox, "run_local", _run_local)
 
+    # No marker, so the commit installed is unknown: ADR-0326 §5:4 wants the flag.
     box = _deploy_against(
-        repo, monkeypatch, "--wheel", str(wheel), "--wheel-commit", attested, marker=""
+        repo,
+        monkeypatch,
+        "--wheel",
+        str(wheel),
+        "--wheel-commit",
+        attested,
+        "--allow-earlier",
+        marker="",
     )
 
     assert len(box.exports) == 1
@@ -1653,6 +1663,167 @@ def test_a_dirty_deployed_marker_is_not_proof_of_the_committed_set(tmp_path: Pat
 )
 def test_a_dirty_marker_is_recognised_in_both_formats(text: str, dirty: bool) -> None:
     assert _MODULE.marker_is_dirty(text) is dirty
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0326 §5:4: an earlier build is never started over a later one's data     #
+# --------------------------------------------------------------------------- #
+
+
+def _history(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """A clone with a line of three commits and one that diverged from the first.
+
+    Returns:
+        The clone, and each commit by name: ``first``, ``second``, ``third`` in a
+        line, and ``side`` branched from ``first``.
+    """
+    repo = _repo(tmp_path)
+    commits = {"first": git(repo, "rev-parse", "HEAD")}
+    for name in ("second", "third"):
+        (repo / "f.txt").write_text(f"{name}\n")
+        git(repo, "commit", "-qam", name)
+        commits[name] = git(repo, "rev-parse", "HEAD")
+    git(repo, "switch", "-qc", "side", commits["first"])
+    (repo / "f.txt").write_text("side\n")
+    git(repo, "commit", "-qam", "side")
+    commits["side"] = git(repo, "rev-parse", "HEAD")
+    git(repo, "switch", "-q", "main")
+    return repo, commits
+
+
+@pytest.mark.parametrize(
+    ("installed", "deploying"),
+    [("first", "first"), ("first", "second"), ("first", "third"), ("second", "third")],
+)
+def test_the_installed_commit_or_a_later_one_is_admitted(
+    tmp_path: Path, installed: str, deploying: str
+) -> None:
+    repo, commits = _history(tmp_path)
+
+    assert _MODULE.history_refusal(repo, commits[installed], commits[deploying]) is None
+
+
+def test_an_abbreviated_installed_commit_is_read_as_the_commit_it_names(tmp_path: Path) -> None:
+    # The pre-recipe marker is a bare sha, and may be a short one.
+    repo, commits = _history(tmp_path)
+
+    assert _MODULE.history_refusal(repo, commits["first"][:8], commits["second"]) is None
+
+
+@pytest.mark.parametrize(
+    ("installed", "deploying", "said"),
+    [
+        ("third", "first", "is an earlier build than"),
+        ("second", "first", "is an earlier build than"),
+        ("second", "side", "has diverged from"),
+        ("side", "third", "has diverged from"),
+    ],
+)
+def test_an_earlier_or_diverged_commit_is_refused(
+    tmp_path: Path, installed: str, deploying: str, said: str
+) -> None:
+    repo, commits = _history(tmp_path)
+
+    refusal = _MODULE.history_refusal(repo, commits[installed], commits[deploying])
+
+    assert refusal is not None
+    assert said in refusal
+    assert commits[deploying][:12] in refusal
+    assert commits[installed][:12] in refusal
+
+
+@pytest.mark.parametrize(
+    "installed",
+    [
+        "0" * 40,  # fetched nowhere here
+        "",  # no marker, or one withdrawn mid-install
+        "-dirty",
+        "main",  # a ref, which a record cannot stand for
+    ],
+)
+def test_an_installed_commit_this_clone_cannot_name_is_unknown_not_earlier(
+    tmp_path: Path, installed: str
+) -> None:
+    repo, commits = _history(tmp_path)
+
+    refusal = _MODULE.history_refusal(repo, installed, commits["third"])
+
+    assert refusal is not None
+    assert "is not one this clone holds" in refusal
+
+
+def test_a_dirty_install_of_the_same_commit_is_unknown(tmp_path: Path) -> None:
+    # A dirty deploy installed a tree no commit holds, so even its own commit is
+    # not shown to be at least as late as it.
+    repo, commits = _history(tmp_path)
+
+    refusal = _MODULE.history_refusal(repo, f"{commits['third']}-dirty", commits["third"])
+
+    assert refusal is not None
+    assert "is not one this clone holds" in refusal
+
+
+def test_a_deploying_commit_this_clone_cannot_name_is_unknown(tmp_path: Path) -> None:
+    repo, commits = _history(tmp_path)
+
+    refusal = _MODULE.history_refusal(repo, commits["first"], "f" * 40)
+
+    assert refusal is not None
+    assert f"{'f' * 40} is not a commit this clone holds" in refusal
+
+
+def _deploy_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed: str, *args: str
+) -> _FakeBox:
+    """Deploy ``first`` over a venv whose marker records ``installed``."""
+    repo, commits = _history(tmp_path)
+    git(repo, "switch", "-q", "--detach", commits["first"])
+    return _deploy_against(repo, monkeypatch, *args, marker=f"commit={commits[installed]}\n")
+
+
+def test_an_earlier_build_is_refused_before_anything_is_built_or_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(_MODULE.DeployError) as caught:
+        _deploy_over(tmp_path, monkeypatch, "third")
+
+    message = str(caught.value)
+    assert "is an earlier build than" in message
+    assert "ADR-0326 §5:4" in message
+    assert "restore the backup" in message
+    assert "--allow-earlier" in message
+    assert message.endswith("Nothing has been stopped or installed.")
+    issued = "\n".join(_FakeBox.last.issued)
+    for step in ("uv build", "uv export", "scp", "stop", "BACKUP_PROBE=", "pip install"):
+        assert step not in issued, step
+
+
+def test_allow_earlier_deploys_an_earlier_build_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    box = _deploy_over(tmp_path, monkeypatch, "third", "--allow-earlier")
+
+    assert len(box.installs()) == 1
+    said = capsys.readouterr().err
+    assert "history: " in said
+    assert "is an earlier build than" in said
+    assert "as --allow-earlier says" in said
+
+
+def test_a_first_deploy_has_no_earlier_build_to_rule_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An empty venv and no marker: nothing is installed for this to be earlier than.
+    box = _deploy_against(_repo(tmp_path), monkeypatch, marker="", version="(not installed)")
+
+    assert len(box.installs()) == 1
+
+
+def test_the_allow_earlier_help_says_the_operator_must_know_no_schema_change_lies_between() -> None:
+    help_text = " ".join(_MODULE._parser().format_help().split())
+
+    assert "--allow-earlier" in help_text
+    assert "no schema change between the two, which the operator must know" in help_text
 
 
 # --------------------------------------------------------------------------- #

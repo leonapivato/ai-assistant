@@ -124,6 +124,16 @@ the passphrase file, the environment and where the artifact will go.
   directory and takes no backup. An empty venv under a marker is refused: a hub
   has served there, and there is no earlier build to back it up with.
 
+**An earlier build is refused before anything is built** (ADR-0326 §5:4). Over a venv
+that holds a build, the deploy is admitted only when the commit it deploys is the
+marker's or a later one, by this clone's history. An earlier commit is refused, and so
+is one that has diverged from the marker's, and so is any commit when the marker names
+none this clone holds: a dirty deploy, a marker withdrawn mid-install, a commit fetched
+nowhere here. That last is *unknown*, not *earlier*, and unknown is not clean. The
+refusal names the way back, a later build or the backup restored into a new path and
+served by the earlier build. ``--allow-earlier`` overrides it, and is the operator's word
+that no schema change lies between the two releases; nothing here computes that.
+
 Once the hub has been stopped for the backup, a failure in the install or
 before the restart leaves it **stopped**, and says so: the venv may hold part of
 the new build, and starting that on a person's directory could upgrade it with
@@ -523,6 +533,115 @@ def lockfile_drift(repo: Path, deployed: str, target: str) -> str | None:
         raise DeployError(f"the deployed commit {deployed[:12]} is not in this clone's history")
     diff = _git("diff", "--stat", deployed, target, "--", "uv.lock", repo=repo)
     return diff or None
+
+
+def history_refusal(repo: Path, installed: str, deploying: str) -> str | None:
+    """Say why ADR-0326 §5:4 refuses this deploy over the build installed, if it does.
+
+    A deploy is admitted when the commit it deploys is the one the hub was last
+    installed from, or a later one: that commit is its ancestor. Everything else is
+    refused, because nothing shows no schema change lies between the two: an earlier
+    commit, one that has diverged from it, and either commit this clone does not hold.
+    The last is *unknown*, not *earlier*, and unknown is not clean. Whether a schema
+    change lies between is never computed here; ``--allow-earlier`` is the operator's
+    word that none does.
+
+    Args:
+        repo: The clone whose history rules.
+        installed: The commit the hub was last installed from, as its record holds it:
+            the deployed-commit marker, or the running image's revision label. Anything
+            that is not a commit's hex name, a ``-dirty`` one among them, is unknown.
+        deploying: The commit this deploy installs, without any ``-dirty`` suffix.
+
+    Returns:
+        Why the deploy is refused, one sentence without its full stop, or ``None`` when
+        it is admitted.
+    """
+    last = _commit_here(repo, installed)
+    if last is None:
+        return (
+            f"nothing shows {deploying[:12]} is not an earlier build: the commit the hub was\n"
+            f"last installed from, {installed or '(none recorded)'}, is not one this clone holds"
+        )
+    target = _commit_here(repo, deploying)
+    if target is None:
+        return (
+            f"{deploying} is not a commit this clone holds, so nothing shows it is not\n"
+            f"earlier than {last[:12]}, the commit the hub was last installed from"
+        )
+    if _is_ancestor(repo, last, target):
+        return None
+    if _is_ancestor(repo, target, last):
+        return (
+            f"{target[:12]} is an earlier build than {last[:12]}, the commit the hub was last\n"
+            "installed from"
+        )
+    return (
+        f"{target[:12]} has diverged from {last[:12]}, the commit the hub was last installed\n"
+        "from: neither is an ancestor of the other"
+    )
+
+
+#: What a refusal under :func:`history_refusal` says next, for either deploy.
+HISTORY_WAY_BACK = (
+    "An earlier build is never started on a directory a later build has served, unless\n"
+    "no schema change lies between the two releases (ADR-0326 §5:4). To undo a deploy,\n"
+    "install a later build that opens the directory, or restore the backup a deploy took\n"
+    "(ADR-0326 §6) into a new path and serve the earlier build from that. Pass\n"
+    "--allow-earlier only when you know no schema change lies between the two."
+)
+#: What ``--allow-earlier``'s help says, for either deploy.
+ALLOW_EARLIER_HELP = (
+    "deploy a commit not shown to be the installed one or a later one: an earlier"
+    " one, a diverged one, or either of the two not held by this clone. Only for a"
+    " release with no schema change between the two, which the operator must know;"
+    " nothing here checks it (ADR-0326 §5:4)"
+)
+#: A commit's hex name, full or abbreviated: never a ref a record could smuggle in.
+_HEX_COMMIT = re.compile(r"[0-9a-fA-F]{7,40}")
+
+
+def _commit_here(repo: Path, recorded: str) -> str | None:
+    """Return the full commit ``recorded`` names in ``repo``, or ``None``.
+
+    Args:
+        repo: The repository root.
+        recorded: A commit's hex name, as a marker or a label records it.
+
+    Returns:
+        The 40-character sha, or ``None`` when ``recorded`` is not a hex name or not a
+        commit this clone holds.
+    """
+    if _HEX_COMMIT.fullmatch(recorded) is None:
+        return None
+    completed = subprocess.run(  # noqa: S603  # fixed argv, no shell, resolved binary
+        [_binary("git"), "rev-parse", "--verify", "--quiet", f"{recorded}^{{commit}}"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else None
+
+
+def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+    """Report whether ``ancestor`` is ``descendant`` or one of its ancestors.
+
+    Args:
+        repo: The repository root.
+        ancestor: A full commit sha this clone holds.
+        descendant: Another.
+
+    Returns:
+        True only when git says so; any other answer reads as not.
+    """
+    completed = subprocess.run(  # noqa: S603  # fixed argv, no shell, resolved binary
+        [_binary("git"), "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=str(repo),
+        capture_output=True,
+        check=False,
+    )
+    return completed.returncode == 0
 
 
 def lockfile_uncommitted(repo: Path) -> bool:
@@ -1983,6 +2102,33 @@ def _within(path: str, directory: str) -> bool:
     return PurePosixPath(path).is_relative_to(PurePosixPath(directory))
 
 
+def _rule_on_history(plan: Plan, repo: Path, commit: str, marker: str, version_output: str) -> None:
+    """Refuse a commit earlier than the venv's build, or not known to be later.
+
+    Args:
+        plan: The plan.
+        repo: The repository root.
+        commit: The commit being deployed.
+        marker: The box's marker, as :func:`marker_body` cut it out of the read.
+        version_output: The version read's standard output, banner and all.
+
+    Raises:
+        DeployError: If :func:`history_refusal` refuses and ``--allow-earlier`` was
+            not passed.
+    """
+    # An empty venv holds no build to be earlier than: a first deploy, or a box
+    # whose marker outlived its venv, which the backup's ruling refuses.
+    if venv_is_empty(version_output):
+        return
+    installed = _recorded_commit(marker) or ""
+    refusal = history_refusal(repo, installed, commit.removesuffix("-dirty"))
+    if refusal is None:
+        return
+    if not plan.args.allow_earlier:
+        raise DeployError(f"{refusal}.\n{HISTORY_WAY_BACK}\n{_UNTOUCHED}")
+    print(f"history: {refusal};\n         deploying it, as --allow-earlier says", file=sys.stderr)
+
+
 def _rule_on_backup(
     plan: Plan, marker: str, version_output: str, ssh: Callable[[str], list[str]]
 ) -> BackupTarget | None:
@@ -2157,6 +2303,7 @@ def _deploy(plan: Plan, repo: Path, commit: str) -> None:
     before_marker = marker_body(_run_local(ssh(plan.read_marker())), plan.token)
     version_output = _run_local(ssh(plan.read_version()))
     before_version = version_output.strip()
+    _rule_on_history(plan, repo, commit, before_marker, version_output)
     reason = _rule_on_dependencies(plan, repo, commit, before_marker, version_output)
     plan.locked = reason is not None
     if reason is None:
@@ -2419,6 +2566,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-dirty", action="store_true", help="deploy an uncommitted tree, marked dirty"
     )
+    parser.add_argument("--allow-earlier", action="store_true", help=ALLOW_EARLIER_HELP)
     parser.add_argument(
         "--dry-run", action="store_true", help="print the commands, contact nothing"
     )
