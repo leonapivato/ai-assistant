@@ -2013,7 +2013,7 @@ class MemoryWriter(Protocol):
         """Apply one operation to one stored memory (ADR-0328 §11:3).
 
         Computes the record the operation yields from the memory the caller read
-        (:func:`~ai_assistant.core.types.applied_operation`) and writes it
+        (§5's rules, applied by the writer itself) and writes it
         conditionally on that memory's revision (§5:4), so a memory another writer
         moved in between is refused rather than overwritten. An end, a mark wrong or a
         replace naming a successor is written in one atomic write with the

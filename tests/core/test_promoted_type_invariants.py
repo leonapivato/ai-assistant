@@ -24,11 +24,11 @@ from pydantic import ValidationError
 from ai_assistant.core.types import (
     BeliefSummary,
     EvidenceSummary,
+    Memory,
     MemoryOperation,
     MemoryOperationKind,
     MemoryWriterName,
     SupportDirection,
-    applied_operation,
     belief_summary,
 )
 from ai_assistant.testing.memories import memory, said_support
@@ -74,15 +74,17 @@ class TestBeliefSummary:
         backing = said_support()
         explaining = said_support("activation:other", direction=SupportDirection.AGAINST)
         held = memory("rec-3", "the office is in Boston", backing, explaining)
-        stopped = applied_operation(
-            held,
-            MemoryOperation(
-                kind=MemoryOperationKind.STOP_COUNTING,
-                cites=explaining.points_at,
-                stops=backing.points_at,
-                at=AT,
-                by=MemoryWriterName.REMEMBER,
-            ),
+        stop = MemoryOperation(
+            kind=MemoryOperationKind.STOP_COUNTING,
+            cites=explaining.points_at,
+            stops=backing.points_at,
+            at=AT,
+            by=MemoryWriterName.REMEMBER,
+        )
+        # The record as a writer leaves it, built from its shape: what ``core`` computes
+        # from a record is under test here, not how a writer applies the stop.
+        stopped = Memory.model_validate(
+            held.model_dump() | {"operations": (*held.operations, stop)}
         )
         assert not held.is_unbacked
         assert stopped.is_unbacked
