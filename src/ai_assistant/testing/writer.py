@@ -521,6 +521,8 @@ class FakeMemoryWriter:
             MemoryStoreError: On every other refusal ``MemoryIngestor`` makes.
         """
         observed = proposal.model_copy(deep=True)
+        # One public call is one entry, however many attempts the stale retry makes.
+        self.calls.append(observed.model_copy(deep=True))
         async with self._lock:
             try:
                 return await self._ingest(observed)
@@ -572,7 +574,6 @@ class FakeMemoryWriter:
             await self._store.write_atomic(batch)
 
     async def _ingest(self, observed: MemoryUpdateProposal) -> MemoryIngestResult:
-        self.calls.append(observed.model_copy(deep=True))
         await self._require_held_episodes(observed.proposed.id, observed.proposed.supports)
         conflicts = await self._conflicts_for(observed.proposed)
         resolved = tuple(record.id for record in conflicts)

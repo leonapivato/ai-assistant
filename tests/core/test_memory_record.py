@@ -311,6 +311,27 @@ def test_the_highest_backing_support_decides_and_a_stopped_one_counts_for_nothin
     assert inferred not in stopped.counted_supports
 
 
+def test_stopping_the_highest_backing_support_lowers_the_standing_and_its_band() -> None:
+    """§5:8, §6:2: a stopped support ranks for nothing, so the standing falls with it.
+
+    The user's own backing explained away by a user-origin ``against`` support (equal
+    rank, so §6:5 permits it) leaves the remembered support alone counting: the memory
+    stands at inference, in band ``DERIVED``.
+    """
+    inferred = remembered_support()
+    said = said_support()
+    explaining = said_support("activation:no", direction=SupportDirection.AGAINST)
+    held = memory("m", "c", said, inferred, explaining)
+    assert (held.standing, held.band) == (MemoryStanding.SAID, BeliefBand.ASSERTED)
+
+    stopped = applied_operation(
+        held,
+        _operation(MemoryOperationKind.STOP_COUNTING, explaining, stops=said.points_at),
+    )
+
+    assert (stopped.standing, stopped.band) == (MemoryStanding.INFERENCE, BeliefBand.DERIVED)
+
+
 def test_an_against_support_never_raises_the_standing() -> None:
     """§6:2: only ``for`` supports backing as worded rank."""
     held = memory(
@@ -777,11 +798,21 @@ def test_an_attested_episodes_projection_carries_its_attestation() -> None:
     assert episode_summary(episode).attestation == _SOURCE
     assert episode_view(episode).attestation == _SOURCE
     assert episode_summary(_episode()).attestation is None
-    held = belief_view(memory("m", "c", sourced_support(_SOURCE)), now=_LATER, contents={})
-    assert held.attestation is None
-    with pytest.raises(ValidationError, match="supports"):
+
+
+def test_a_memorys_projection_carries_the_source_details_its_standing_rests_on() -> None:
+    """§2:6's value on the listing, so it can say which source and when (ADR-0189 §1, §4).
+
+    A memory from a source carries its latest backing source support's details; one at
+    any other standing carries none, and a projection claiming some is refused.
+    """
+    sourced = belief_view(memory("m", "c", sourced_support(_SOURCE)), now=_LATER, contents={})
+    assert sourced.attestation == _SOURCE
+    said = belief_view(memory("m", "c", said_support()), now=_LATER, contents={})
+    assert said.attestation is None
+    with pytest.raises(ValidationError, match="from a source"):
         BeliefSummary.model_validate(
-            held.model_dump(exclude={"supports"}) | {"attestation": _SOURCE}
+            said.model_dump(exclude={"supports"}) | {"attestation": _SOURCE}
         )
 
 

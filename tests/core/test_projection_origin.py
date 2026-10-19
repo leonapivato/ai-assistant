@@ -40,10 +40,9 @@ REPORTED_AT: Final = datetime(2026, 7, 30, 9, 0, 0, tzinfo=UTC)
 ORIGIN: Final = ("standing", "band", "rests_on_outside_content")
 
 #: What ADR-0328 §15:3 keeps off every projection of a memory, and what ADR-0189 §2's
-#: predicate became: its name is §7:6's. ``attestation`` stays a field, for an
-#: episode's projection alone (ADR-0189 §2:1, which §18 supersedes for a memory only):
-#: a memory's source details are on each support (§15:2), and its ``attestation`` is
-#: always ``None``.
+#: predicate became: its name is §7:6's. ``attestation`` stays a field: an episode's
+#: provenance attestation (ADR-0189 §2:1), or the source details a memory's standing
+#: rests on (ADR-0328 §2:6); every support's own details are on the single view (§15:2).
 ABSENT: Final = (
     "confidence",
     "presented_confidence",

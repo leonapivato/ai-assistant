@@ -109,6 +109,7 @@ from ai_assistant.core.types import (
     TraceKind,
     TraceOutcome,
     UnderstandingOmission,
+    rests_on_recorded_external_content,
 )
 from ai_assistant.evaluation import SqliteTraceStore
 from ai_assistant.memory import (
@@ -525,8 +526,10 @@ def _memory_record_carry(records: Records) -> Records:
         if not isinstance(provenance, dict):
             carried[key] = value
             continue
-        source = provenance.get("source")
-        outside = source == "external" or bool(provenance.get("derived_from_external"))
+        # The core predicate over the validated provenance, as the head's upgrade reads
+        # it (§16:4): a user's own assertion never rests on external content, whatever
+        # its `derived_from_external` says (ADR-0106 §2's band guard).
+        outside = rests_on_recorded_external_content(Provenance.model_validate(provenance))
         part: Json = {"part": "legacy", "record": value["id"]}
         support: dict[str, Json] = {
             "points_at": part,

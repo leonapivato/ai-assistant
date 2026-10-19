@@ -1707,6 +1707,9 @@ class _Request:
                 "supporting": evidence.supporting,
                 "against": evidence.against,
                 "episodes": evidence.episodes,
+                # §7:2's latest `when` among the counted supports, against included,
+                # which as of (the latest confirming instant) does not carry.
+                "latest": _instant_or_unknown(evidence.latest),
             }
         certainty = record.reading_certainty
         if certainty is not ReadingCertainty.SURE:

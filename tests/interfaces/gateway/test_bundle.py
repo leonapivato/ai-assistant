@@ -2944,6 +2944,17 @@ def test_a_supports_source_is_shown_with_its_own_report_time() -> None:
     assert "support.when" in support  # the encounter time stays, apart from the report
 
 
+def test_the_panel_says_the_evidences_latest_date_and_the_source_its_standing_rests_on() -> None:
+    """§7:2's latest date for an inference, and ADR-0189 §4's source and clock on a row."""
+    functions = _functions(_code("app.js"))
+
+    assert "evidence.latest" in functions["whyHeld"]
+    assert "None of it is dated." in functions["whyHeld"]
+    assert "belief.attestation.reported_by" in functions["beliefLines"]
+    assert "belief.attestation.reported_at" in functions["beliefLines"]
+    assert "on its own clock" in functions["beliefLines"]
+
+
 def test_the_browser_says_a_warrant_from_outside_in_the_terminals_sentence() -> None:
     """ADR-0189 §4's clause, read through ADR-0328 §12, the same on both surfaces.
 
