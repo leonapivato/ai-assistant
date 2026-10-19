@@ -32,9 +32,11 @@ this machine the box, its commands run as root through ``sudo -n``; that is how 
   backup is verified, so until then the unit's next start is the earlier image.
 * ``<person>/backups/``: each deploy's artifact, ``pre-deploy-<UTC>-<run>.age``, outside
   the data volume and never deleted (ADR-0326 §6:3). Pruning is the operator's act.
-* The volumes ``hub-<person>-data`` and ``hub-<person>-keyring``, the container
-  ``hub-<person>`` and the unit ``hub@<person>.service``, from
+* The volumes ``hub-<person>-data`` and ``hub-<person>-keyring``, the container and
+  bridge network ``hub-<person>``, and the unit ``hub@<person>.service``, from
   ``deploy/container/hub@.service``, which every deploy installs as it is in this tree.
+  The unit is one template for every person, so ``--hubs-dir`` is one root per box, and
+  a deploy naming another is refused.
 
 **Where the image is built.** On the box, from a context staged here: ``build.sh
 --context`` refuses a dirty tree, builds the wheel and exports ``uv.lock``'s runtime set
@@ -58,9 +60,10 @@ deploys an image already on the box, which must carry ``build.sh``'s commit labe
    run on the data, so whatever fails, the earlier one is never started on it again
    (ADR-0326 §5:4). Undoing the deploy is a later image or a restore of the backup.
 4. The new container is verified: healthy, running the new image, the door answering
-   ``403`` on the published loopback port, and the reachability check below. A
-   container that never becomes healthy is left to its unit; one whose reachability
-   cannot be established is stopped.
+   ``403`` on the published loopback port, and the reachability check below. One that
+   never becomes healthy is left to its unit only where that check passes; otherwise,
+   and whenever the door or the check fails, it is stopped, and a stop that cannot be
+   confirmed is said to be one.
 
 **What the backup copies** is the hub's own directory by construction: the data volume
 mounted at ``/data``, the directory the image pins, and ``supervise.py`` refuses an
@@ -825,6 +828,12 @@ class Deployment:
                 "missing: the person's data is not where the unit mounts it. Find it before\n"
                 f"deploying; this deploy never starts a hub on a new volume over one.\n{_UNTOUCHED}"
             )
+        if installed is not None and not self._volume_exists(person.keyring_volume):
+            raise DeployError(
+                f"{person.unit_env} names an image but the volume {person.keyring_volume} is\n"
+                "missing: the unit would start on a new, empty keyring, and every credential\n"
+                f"the person's connections stored would be gone. Find it first.\n{_UNTOUCHED}"
+            )
         if installed is not None:
             if self._image(installed.image) is None:
                 raise DeployError(
@@ -834,8 +843,27 @@ class Deployment:
                 )
             self._check_passphrase(person.backup_passphrase, "backup")
         self.port = self._rule_on_port(installed)
+        self._check_unit_root()
         self._check_box_network()
         return installed
+
+    def _check_unit_root(self) -> None:
+        """Refuse a person-directory root other than the one the box's unit reads.
+
+        The unit is one template for every person on the box, so moving its root for
+        one person would move it for all of them.
+        """
+        installed = self._read(PurePosixPath(UNIT_PATH))
+        if installed is None:
+            return
+        wanted = f"EnvironmentFile={self.person.hubs_dir}/%i/unit.env"
+        if wanted not in installed.splitlines():
+            named = [line for line in installed.splitlines() if line.startswith("EnvironmentFile=")]
+            raise DeployError(
+                f"{UNIT_PATH} reads {', '.join(named) or 'no EnvironmentFile'}, not\n"
+                f"{wanted}. The unit serves every person on this box, so the person\n"
+                f"directories have one root per box: pass that --hubs-dir.\n{_UNTOUCHED}"
+            )
 
     def _check_person_dir(self) -> None:
         path = self.person.dir
@@ -1218,14 +1246,14 @@ class Deployment:
                 )
             self.sleep(_POLL_SECONDS)
 
-    def verify(self) -> list[str]:
-        """Check the door and ADR-0327 §5:2 on the running container.
+    def reachability(self) -> str:
+        """Establish ADR-0327 §5:2 on the running container.
 
         Returns:
-            What was established, one line each, for the report.
+            What was established, for the report.
 
         Raises:
-            DeployError: If either cannot be established.
+            DeployError: If it cannot be established.
         """
         fields = self._container()
         if fields is None:
@@ -1247,12 +1275,54 @@ class Deployment:
                     problems.append(f"{problem}. The chain:\n{shown}")
         if problems:
             raise DeployError("ADR-0327 §5:2 cannot be established:\n" + "\n".join(problems))
-        door = self._door()
-        return [
-            f"door: 127.0.0.1:{self.port} answers {door} without the edge's assertion",
+        return (
             f"reachability: published to 127.0.0.1:{self.port} alone, on {network} at"
-            f" {address}, whose {HOSTED_PORT} the raw table closes to every other interface",
-        ]
+            f" {address}, whose {HOSTED_PORT} the raw table closes to every other interface"
+        )
+
+    def stop_new(self) -> str:
+        """Stop the unit on the new image, and say whether it is stopped.
+
+        Never raises: it runs on the way out of a failure.
+
+        Returns:
+            A sentence for the operator.
+        """
+        unit = self.person.unit
+        stopped = self.box.run(["systemctl", "stop", unit])
+        try:
+            state = self._unit_state().get("ActiveState")
+            running = self._ok(
+                [DOCKER, "ps", "--quiet", "--filter", f"name=^{self.person.container}$"],
+                "asking whether the container runs",
+            ).split()
+        except DeployError as exc:
+            state, running = f"unknown ({exc})", ["?"]
+        if stopped.ok and state in {"inactive", "failed"} and not running:
+            return (
+                f"{unit} is stopped: it does not serve while this is so, and the earlier\n"
+                "image is not started on its data (ADR-0326 §5:4)."
+            )
+        return (
+            f"{unit} could NOT be shown stopped (stop exit {stopped.code}, state {state},\n"
+            f"container {'running' if running else 'gone'}): it may still serve where this\n"
+            f"deploy could not establish who reaches it. Stop it by hand: systemctl stop {unit}"
+        )
+
+    def _contain(self) -> str:
+        """After a start that did not become ready: keep it only if no other machine reaches it.
+
+        Returns:
+            A sentence for the operator.
+        """
+        try:
+            established = self.reachability()
+        except DeployError as exc:
+            return f"{exc}\n{self.stop_new()}"
+        return (
+            f"{established}; so the unit keeps the new image as its supervisor rules, and the\n"
+            "earlier one is not started again on data the new one has served (ADR-0326 §5:4)."
+        )
 
     def _bridge_interface(self, network: str, problems: list[str]) -> str:
         """The person's network's interface on the host, when it is a bridge.
@@ -1361,20 +1431,16 @@ class Deployment:
             self._start()
             self.await_ready(image.id)
         except DeployError as exc:
-            raise DeployError(
-                f"{exc}\nThe new image has started on the data, so the earlier one is not\n"
-                "started again (ADR-0326 §5:4); the unit keeps the new one as its supervisor\n"
-                f"rules. {_backup_line(artifact)}"
-            ) from exc
+            raise DeployError(f"{exc}\n{self._contain()}\n{_backup_line(artifact)}") from exc
         try:
-            verified = self.verify()
+            reachability = self.reachability()
+            door = self._door()
         except DeployError as exc:
-            self.box.run(["systemctl", "stop", self.person.unit])
-            raise DeployError(
-                f"{exc}\n{self.person.unit} is stopped: it does not serve while this is so,\n"
-                f"and the earlier image is not started on its data (ADR-0326 §5:4).\n"
-                f"{_backup_line(artifact)}"
-            ) from exc
+            raise DeployError(f"{exc}\n{self.stop_new()}\n{_backup_line(artifact)}") from exc
+        verified = [
+            f"door: 127.0.0.1:{self.port} answers {door} without the edge's assertion",
+            reachability,
+        ]
         return [
             f"person: {self.person.name}, {self.person.unit}, port {self.port}",
             f"before: {before}",
