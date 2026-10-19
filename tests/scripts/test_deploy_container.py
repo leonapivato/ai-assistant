@@ -81,6 +81,8 @@ class FakeBox:
     stop_fails: bool = False
     #: The link drops after the new image starts: every later stop fails.
     stop_fails_once_started: bool = False
+    #: A unit another deploy installs while this one builds.
+    unit_installed_meanwhile: bytes | None = None
 
     def run(self, argv: Sequence[str], *, stdin: IO[bytes] | None = None) -> Any:
         argv = list(argv)
@@ -219,6 +221,8 @@ class FakeBox:
         return 0, f"{found[0]} {found[1]}\n", ""
 
     def docker_build(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
+        if self.unit_installed_meanwhile is not None:
+            self.files[dc.UNIT_PATH] = File(0, 0o644, self.unit_installed_meanwhile)
         self.built += 1
         commit = argv[argv.index("--label") + 1].split("=", 1)[1]
         tag = argv[argv.index("--tag") + 1]
@@ -496,6 +500,22 @@ def test_deploy_not_ready_but_contained_is_left_to_its_unit() -> None:
     assert [argv[:2] for argv in box.ran].count(["systemctl", "stop"]) == 1
 
 
+def test_deploy_interrupted_while_starting_is_contained() -> None:
+    box = served_box(health="starting", raw_rules="-P PREROUTING ACCEPT\n")
+
+    def interrupt(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(dc.DeployError) as caught:
+        deployment(box, sleep=interrupt).run()
+
+    message = str(caught.value)
+    assert message.startswith("interrupted once the new image")
+    assert "hub@alice.service is stopped" in message
+    assert box.active == "inactive"
+    assert str(PERSON.lock) not in box.files
+
+
 def test_deploy_says_when_an_uncontained_container_cannot_be_stopped() -> None:
     box = served_box(raw_rules="-P PREROUTING ACCEPT\n")
     box.stop_fails_once_started = True
@@ -614,6 +634,25 @@ def test_deploy_refuses_a_root_other_than_the_installed_units() -> None:
     unit = dc.render_unit(dc.UNIT_SOURCE.read_text(encoding="utf-8"), PurePosixPath("/opt/people"))
     box.files[dc.UNIT_PATH] = File(0, 0o644, unit.encode())
     _refused_untouched(box, "one root per box")
+
+
+def test_deploy_rechecks_the_root_under_the_box_lock() -> None:
+    other = dc.render_unit(dc.UNIT_SOURCE.read_text(encoding="utf-8"), PurePosixPath("/opt/x"))
+    box = served_box(unit_installed_meanwhile=other.encode())
+
+    _refused_untouched(box, "one root per box")
+
+    assert box.files[dc.UNIT_PATH].data == other.encode()
+    assert dc.UNIT_LOCK not in box.files
+
+
+def test_deploy_waits_for_the_box_lock_and_then_refuses() -> None:
+    box = served_box()
+    box.files[dc.UNIT_LOCK] = File(0, 0o700, directory=True)
+
+    _refused_untouched(box, "installing\nthe unit")
+
+    assert dc.UNIT_LOCK in box.files, "another deploy's lock is not removed"
 
 
 def test_deploy_keeps_an_installed_unit_of_the_same_root() -> None:
