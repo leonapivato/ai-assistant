@@ -135,6 +135,9 @@ DEFAULT_HUBS_DIR = "/srv/hubs"
 #: The person-directory root the shipped unit names, replaced when ``--hubs-dir`` differs.
 UNIT_HUBS_DIR = "/srv/hubs"
 UNIT_PATH = "/etc/systemd/system/hub@.service"
+#: The box's lock on installing the unit: under /run, so a reboot clears a stale one.
+UNIT_LOCK = "/run/hub-deploy-unit.lock"
+_UNIT_LOCK_ATTEMPTS = 30
 DOCKER = "/usr/bin/docker"
 #: Where a staged build context is unpacked on the box, root's alone.
 BOX_STAGE_PARENT = "/var/tmp"  # noqa: S108  # root-owned staging, made 0700 per run
@@ -1064,15 +1067,33 @@ class Deployment:
     def install_unit(self) -> None:
         """Install the unit as this tree has it, reloading systemd when it changed.
 
+        The unit is every person's, so it is installed under a lock of the box's, and
+        its root is checked again inside it: two deploys to two people cannot both pass
+        the preflight and then each install a different root.
+
         Raises:
-            DeployError: If it cannot be written or systemd cannot reload.
+            DeployError: If the lock cannot be had, the root differs, or the unit cannot
+                be written or systemd cannot reload.
         """
         wanted = render_unit(UNIT_SOURCE.read_text(encoding="utf-8"), self.person.hubs_dir)
-        if self._read(PurePosixPath(UNIT_PATH)) == wanted:
-            return
-        self._write(PurePosixPath(UNIT_PATH), wanted)
-        self._ok(["systemctl", "daemon-reload"], "reloading systemd")
-        say(f"installed {UNIT_PATH}")
+        for attempt in range(_UNIT_LOCK_ATTEMPTS):
+            if self.box.run(["mkdir", "-m", "0700", "--", UNIT_LOCK]).ok:
+                break
+            if attempt == _UNIT_LOCK_ATTEMPTS - 1:
+                raise DeployError(
+                    f"could not make {UNIT_LOCK}: another deploy on this box is installing\n"
+                    f"the unit, or one was killed doing it (a reboot clears it).\n{_UNTOUCHED}"
+                )
+            self.sleep(_POLL_SECONDS)
+        try:
+            self._check_unit_root()
+            if self._read(PurePosixPath(UNIT_PATH)) == wanted:
+                return
+            self._write(PurePosixPath(UNIT_PATH), wanted)
+            self._ok(["systemctl", "daemon-reload"], "reloading systemd")
+            say(f"installed {UNIT_PATH}")
+        finally:
+            self.box.run(["rmdir", "--", UNIT_LOCK])
 
     # -- 2. the backup --------------------------------------------------------
 
@@ -1419,24 +1440,28 @@ class Deployment:
         artifact = None if installed is None else self.back_up(installed)
         try:
             self.name_new_image(image, first=installed is None)
-        except DeployError as exc:
+        except (DeployError, KeyboardInterrupt) as exc:
             if installed is None:
                 raise
             raise DeployError(
-                f"{exc}\nThe new image never ran. {self.restart_earlier(installed)}\n"
+                f"{_reason(exc)}\nThe new image never ran. {self.restart_earlier(installed)}\n"
                 f"{_backup_line(artifact)}"
             ) from exc
         try:
             say(f"starting {self.person.unit} on {image.name}")
             self._start()
             self.await_ready(image.id)
-        except DeployError as exc:
-            raise DeployError(f"{exc}\n{self._contain()}\n{_backup_line(artifact)}") from exc
+        except (DeployError, KeyboardInterrupt) as exc:
+            raise DeployError(
+                f"{_reason(exc)}\n{self._contain()}\n{_backup_line(artifact)}"
+            ) from exc
         try:
             reachability = self.reachability()
             door = self._door()
-        except DeployError as exc:
-            raise DeployError(f"{exc}\n{self.stop_new()}\n{_backup_line(artifact)}") from exc
+        except (DeployError, KeyboardInterrupt) as exc:
+            raise DeployError(
+                f"{_reason(exc)}\n{self.stop_new()}\n{_backup_line(artifact)}"
+            ) from exc
         verified = [
             f"door: 127.0.0.1:{self.port} answers {door} without the edge's assertion",
             reachability,
@@ -1448,6 +1473,13 @@ class Deployment:
             *verified,
             _backup_line(artifact),
         ]
+
+
+def _reason(exc: BaseException) -> str:
+    """Say what stopped the deploy, an interrupt included."""
+    if isinstance(exc, KeyboardInterrupt):
+        return "interrupted once the new image was being named in unit.env or started."
+    return str(exc)
 
 
 def _backup_line(artifact: PurePosixPath | None) -> str:
