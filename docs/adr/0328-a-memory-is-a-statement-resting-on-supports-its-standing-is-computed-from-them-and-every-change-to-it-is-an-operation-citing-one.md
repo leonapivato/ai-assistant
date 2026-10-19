@@ -1,6 +1,6 @@
 # 328. A memory is a statement resting on supports: its standing is computed from them, and every change to it is an operation citing one
 
-- Status: Partially superseded by ADR-0329 (§11:3 and §11:4, in the additions alone; §15:5, in the addition alone)
+- Status: Partially superseded by ADR-0329 (§4:2's origin table and §4:12, in the additions alone; §11:3 and §11:4, in the additions alone; §15:5, in the addition alone)
 - Date: 2026-10-18
 - Scope: what the memory store holds beside episodes. The memory record, its supports, its operations, its track record and its open questions; the values computed from it; how today's writers write it until the observer's decision is built; and the mechanical upgrade of every record stored before it. Batch [#3148](https://github.com/leonapivato/ai-assistant/issues/3148), lane L-α, for milestone #3 ([#2528](https://github.com/leonapivato/ai-assistant/issues/2528)).
 - Dependency: ADR-0045, ADR-0217, ADR-0219, ADR-0286, ADR-0306, ADR-0308, ADR-0321 and ADR-0326, as their status lines leave them.
@@ -9,7 +9,7 @@
 - **Supersedes**, each in what remains in force (§18): ADR-0009 and ADR-0122.
 - **Partially supersedes**, in the clauses §18's second table names: ADR-0005, ADR-0072, ADR-0073, ADR-0077, ADR-0086, ADR-0092, ADR-0103, ADR-0106, ADR-0107, ADR-0109, ADR-0159, ADR-0189, ADR-0217 and ADR-0321.
 - **Leaves to the observer's decision**, the second ADR of batch #3148 (§17): who writes memories once the observer exists and when, candidates, the evidence bar, how open questions are raised and reach planning, who records the track record, and the supersessions of ADR-0306 §3:2, ADR-0309 §6:5, ADR-0285 §1:2, ADR-0319 §5 and ADR-0321 §5's yes path.
-- Partially superseded: 2026-10-18 by ADR-0329 — §11:3, in the addition alone: `MemoryWriter` also gains a member that records one track-record entry (ADR-0329 §14:4). §11:4, in the addition alone: a proposal may carry one retiring operation on a stored memory (ADR-0329 §12:4). §15:5, in the addition alone: planning's label also carries each unresolved open question (ADR-0329 §6:6). Every other clause stands. This replacement takes effect on ratification of ADR-0329. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-18 by ADR-0329 — §4:2's origin table and §4:12, in the additions alone: a support may be an observer's inference, addressed by the episode whose processing drew it, with the origin `observer_inference`, ranking at inference and not outside, its `when` that episode's `occurred_at` (ADR-0329 §9:7). §11:3, in the addition alone: `MemoryWriter` also gains a member that records one track-record entry (ADR-0329 §14:4). §11:4, in the addition alone: a proposal may carry one retiring operation on a stored memory (ADR-0329 §12:4). §15:5, in the addition alone: planning's label also carries each unresolved open question (ADR-0329 §6:6). Every other clause stands. This replacement takes effect on ratification of ADR-0329. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
