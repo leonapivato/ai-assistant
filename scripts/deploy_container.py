@@ -74,7 +74,8 @@ each derived from the data directory alone; this script adds none and removes no
 published loopback port or by the container's address on the bridge. What this deploy
 establishes, and refuses or fails loudly without:
 
-* the container is on Docker's default bridge, not the host's network, and publishes
+* the container is on the person's own bridge network, ``hub-<person>``, which the unit
+  makes, and not the host's network, and it publishes
   exactly one port, ``8423/tcp``, to ``127.0.0.1`` alone, and has no IPv6 address;
 * ``route_localnet`` is ``0`` for ``all`` and for every interface that is not the
   loopback or Docker's own (``docker0``, ``br-*``, ``veth*``), so the kernel drops a
@@ -379,6 +380,11 @@ class Person:
         return f"hub@{self.name}.service"
 
     @property
+    def network(self) -> str:
+        """The person's own bridge network, which the unit creates."""
+        return f"hub-{self.name}"
+
+    @property
     def data_volume(self) -> str:
         """The data directory's volume."""
         return f"hub-{self.name}-data"
@@ -586,19 +592,20 @@ def raw_rule_problem(rules: str, address: str, bridge: str) -> str | None:
     )
 
 
-def container_problems(fields: dict[str, object], port: int) -> list[str]:
+def container_problems(fields: dict[str, object], port: int, network: str) -> list[str]:
     """Rule on the network half of :data:`_CONTAINER_FIELDS`.
 
     Args:
         fields: The decoded inspect fields.
         port: The person's loopback port.
+        network: The person's own bridge network.
 
     Returns:
         A sentence per way the container is reachable other than as published.
     """
     problems: list[str] = []
-    if fields.get("mode") != "bridge":
-        problems.append(f"the container's network is {fields.get('mode')!r}, not Docker's bridge")
+    if fields.get("mode") != network:
+        problems.append(f"the container's network is {fields.get('mode')!r}, not {network!r}")
     expected = {f"{HOSTED_PORT}/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(port)}]}
     ports = fields.get("ports")
     published = (
@@ -610,30 +617,31 @@ def container_problems(fields: dict[str, object], port: int) -> list[str]:
             f"127.0.0.1:{port} alone"
         )
     networks = fields.get("networks")
-    if not isinstance(networks, dict) or list(networks) != ["bridge"]:
+    if not isinstance(networks, dict) or list(networks) != [network]:
         names = list(networks) if isinstance(networks, dict) else networks
-        problems.append(f"the container is on the networks {names}, not on 'bridge' alone")
+        problems.append(f"the container is on the networks {names}, not on {network!r} alone")
         return problems
-    bridge = networks["bridge"]
-    if isinstance(bridge, dict) and bridge.get("GlobalIPv6Address"):
+    attached = networks[network]
+    if isinstance(attached, dict) and attached.get("GlobalIPv6Address"):
         problems.append(
             "the container has an IPv6 address on the bridge, which this deploy does not check"
         )
     return problems
 
 
-def container_address(fields: dict[str, object]) -> str:
-    """The container's IPv4 address on the default bridge.
+def container_address(fields: dict[str, object], network: str) -> str:
+    """The container's IPv4 address on the person's network.
 
     Args:
         fields: The decoded inspect fields.
+        network: The person's own bridge network.
 
     Returns:
         The address, or ``""`` when it has none.
     """
     networks = fields.get("networks")
-    bridge = networks.get("bridge") if isinstance(networks, dict) else None
-    address = bridge.get("IPAddress") if isinstance(bridge, dict) else None
+    attached = networks.get(network) if isinstance(networks, dict) else None
+    address = attached.get("IPAddress") if isinstance(attached, dict) else None
     return address if isinstance(address, str) else ""
 
 
@@ -1215,37 +1223,62 @@ class Deployment:
         fields = self._container()
         if fields is None:
             raise DeployError(f"{self.person.container} is gone")
-        problems = container_problems(fields, self.port or 0)
-        address = container_address(fields)
+        network = self.person.network
+        problems = container_problems(fields, self.port or 0, network)
+        address = container_address(fields, network)
         if not problems:
             if not address:
                 problems.append("the container has no IPv4 address on the bridge")
             else:
-                bridge = self._ok(
-                    [
-                        DOCKER,
-                        "network",
-                        "inspect",
-                        "--format",
-                        '{{index .Options "com.docker.network.bridge.name"}}',
-                        "bridge",
-                    ],
-                    "reading the bridge's interface",
-                ).strip()
+                bridge = self._bridge_interface(network, problems)
                 rules = self._ok(
                     ["iptables", "-t", "raw", "-S", "PREROUTING"], "reading the raw table"
                 )
-                problem = raw_rule_problem(rules, address, bridge)
+                problem = raw_rule_problem(rules, address, bridge) if bridge else None
                 if problem:
-                    problems.append(problem)
+                    shown = "\n".join(f"    {line}" for line in rules.splitlines()) or "    (empty)"
+                    problems.append(f"{problem}. The chain:\n{shown}")
         if problems:
             raise DeployError("ADR-0327 §5:2 cannot be established:\n" + "\n".join(problems))
         door = self._door()
         return [
             f"door: 127.0.0.1:{self.port} answers {door} without the edge's assertion",
-            f"reachability: published to 127.0.0.1:{self.port} alone, on the bridge at"
+            f"reachability: published to 127.0.0.1:{self.port} alone, on {network} at"
             f" {address}, which the raw table closes to every other interface",
         ]
+
+    def _bridge_interface(self, network: str, problems: list[str]) -> str:
+        """The person's network's interface on the host, when it is a bridge.
+
+        Args:
+            network: The network.
+            problems: Where to say why it is not one.
+
+        Returns:
+            The interface, or ``""`` with a problem recorded.
+        """
+        out = (
+            self._ok(
+                [
+                    DOCKER,
+                    "network",
+                    "inspect",
+                    "--format",
+                    '{{.Driver}}|{{.Id}}|{{index .Options "com.docker.network.bridge.name"}}',
+                    network,
+                ],
+                f"reading the network {network}",
+            )
+            .strip()
+            .split("|")
+        )
+        if len(out) < 2 or out[0] != "bridge":  # noqa: PLR2004
+            problems.append(f"the network {network} is {'|'.join(out)!r}, not a bridge")
+            return ""
+        # Docker names a user-defined bridge's interface br-<the id's first twelve>,
+        # unless the network was made with a name of its own.
+        named = out[2] if len(out) > 2 and out[2] != "<no value>" else ""  # noqa: PLR2004
+        return named or f"br-{out[1][:12]}"
 
     def _door(self) -> str:
         host = self._ok(

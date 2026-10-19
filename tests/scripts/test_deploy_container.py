@@ -36,7 +36,7 @@ OLD_COMMIT = "a" * 40
 NEW_COMMIT = "b" * 40
 OLD_ID = "sha256:" + "1" * 64
 ADDRESS = "172.17.0.2"
-DOCKER_DROP = f"-A PREROUTING -d {ADDRESS}/32 ! -i docker0 -j DROP"
+DOCKER_DROP = f"-A PREROUTING -d {ADDRESS}/32 ! -i br-0123456789ab -j DROP"
 LOCALNET = "\n".join(
     f"/proc/sys/net/ipv4/conf/{name}/route_localnet:0"
     for name in ("all", "default", "eth0", "lo", "docker0")
@@ -70,9 +70,10 @@ class FakeBox:
     raw_rules: str = f"-P PREROUTING ACCEPT\n{DOCKER_DROP}"
     door: str = "403"
     ports: object = None
-    mode: str = "bridge"
+    mode: str = "hub-alice"
     contexts: list[set[str]] = field(default_factory=list)
     built: int = 0
+    driver: str = "bridge"
 
     def run(self, argv: Sequence[str], *, stdin: IO[bytes] | None = None) -> Any:
         argv = list(argv)
@@ -244,12 +245,13 @@ class FakeBox:
             "image": self.container_image,
             "mode": self.mode,
             "ports": self.ports or {"8423/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8501"}]},
-            "networks": {"bridge": {"IPAddress": ADDRESS, "GlobalIPv6Address": ""}},
+            "networks": {"hub-alice": {"IPAddress": ADDRESS, "GlobalIPv6Address": ""}},
         }
         return 0, json.dumps(fields), ""
 
     def docker_network(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
-        return 0, "docker0\n", ""
+        assert argv[-1] == "hub-alice"
+        return 0, f"{self.driver}|0123456789abcdef|<no value>\n", ""
 
     def docker_exec(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
         return 0, "alice.example.com\n", ""
@@ -470,6 +472,25 @@ def test_deploy_unreachability_not_established_stops_the_new_container() -> None
     assert [argv[:2] for argv in box.ran].count(["systemctl", "start"]) == 1
 
 
+def test_deploy_names_the_chain_when_the_drop_is_missing() -> None:
+    box = served_box(raw_rules="-P PREROUTING ACCEPT\n-A PREROUTING -j CT --notrack\n")
+
+    with pytest.raises(dc.DeployError) as caught:
+        deployment(box).run()
+
+    assert "The chain:\n    -P PREROUTING ACCEPT\n    -A PREROUTING -j CT --notrack" in str(
+        caught.value
+    )
+
+
+def test_deploy_refuses_a_person_network_that_is_not_a_bridge() -> None:
+    box = served_box(driver="macvlan")
+
+    with pytest.raises(dc.DeployError, match="not a bridge"):
+        deployment(box).run()
+    assert box.active == "inactive"
+
+
 def test_deploy_door_that_does_not_refuse_fails() -> None:
     box = served_box(door="200")
 
@@ -634,11 +655,11 @@ def test_unit_env_round_trips() -> None:
         (f"-A PREROUTING -i eth0 -j ACCEPT\n{DOCKER_DROP}", "may accept"),
         (f"-A PREROUTING -j MYCHAIN\n{DOCKER_DROP}", "may accept"),
         ("-P PREROUTING ACCEPT\n", "has no `-d 172.17.0.2/32"),
-        (DOCKER_DROP.replace("docker0", "br-1"), "has no"),
+        (DOCKER_DROP.replace("br-0123456789ab", "docker0"), "has no"),
     ],
 )
 def test_raw_rule_problem(rules: str, found: str | None) -> None:
-    problem = dc.raw_rule_problem(rules, ADDRESS, "docker0")
+    problem = dc.raw_rule_problem(rules, ADDRESS, "br-0123456789ab")
 
     assert problem is None if found is None else found in (problem or "")
 
@@ -657,7 +678,7 @@ def test_route_localnet_ignores_docker_and_loopback_but_not_all() -> None:
 @pytest.mark.parametrize(
     ("change", "said"),
     [
-        ({"mode": "host"}, "not Docker's bridge"),
+        ({"mode": "host"}, "not 'hub-alice'"),
         ({"ports": {"8423/tcp": [{"HostIp": "0.0.0.0", "HostPort": "8501"}]}}, "publishes"),  # noqa: S104
         (
             {
@@ -668,21 +689,24 @@ def test_route_localnet_ignores_docker_and_loopback_but_not_all() -> None:
             },
             "publishes",
         ),
-        ({"networks": {"bridge": {}, "other": {}}}, "not on 'bridge' alone"),
-        ({"networks": {"bridge": {"IPAddress": ADDRESS, "GlobalIPv6Address": "fd00::2"}}}, "IPv6"),
+        ({"networks": {"hub-alice": {}, "bridge": {}}}, "not on 'hub-alice' alone"),
+        (
+            {"networks": {"hub-alice": {"IPAddress": ADDRESS, "GlobalIPv6Address": "fd00::2"}}},
+            "IPv6",
+        ),
     ],
 )
 def test_container_problems(change: dict[str, object], said: str) -> None:
     fields: dict[str, object] = {
-        "mode": "bridge",
+        "mode": "hub-alice",
         "ports": {"8423/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8501"}], "9/udp": None},
-        "networks": {"bridge": {"IPAddress": ADDRESS, "GlobalIPv6Address": ""}},
+        "networks": {"hub-alice": {"IPAddress": ADDRESS, "GlobalIPv6Address": ""}},
     }
-    assert dc.container_problems(fields, 8501) == []
+    assert dc.container_problems(fields, 8501, "hub-alice") == []
 
     fields.update(change)
 
-    assert any(said in problem for problem in dc.container_problems(fields, 8501))
+    assert any(said in problem for problem in dc.container_problems(fields, 8501, "hub-alice"))
 
 
 @pytest.mark.parametrize(

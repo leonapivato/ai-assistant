@@ -418,10 +418,10 @@ class Run:
         root("systemctl", "start", UNIT)
         await_healthy()
         root("systemctl", "stop", UNIT)
+        # Inactive, not failed: systemd counts the docker client's 0, or the SIGTERM it
+        # sends a client still exiting after `docker stop`, as a clean end.
         state = await_state("inactive")
-        if state.get("ExecMainStatus") != "0":
-            msg = f"a stop ended the unit with {state}, not 0"
-            raise SmokeError(msg)
+        step(f"stopped: {state}")
 
     def run(self) -> None:
         """Every check, in order."""
@@ -434,12 +434,14 @@ class Run:
         self.supervisor()
 
     def clean(self) -> None:
-        """Show the unit's journal, and remove the person from the box."""
+        """Show the unit's journal and the raw table, and remove the person from the box."""
+        print(root("iptables", "-t", "raw", "-S", check=False), flush=True)
         print(root("journalctl", "--unit", UNIT, "--no-pager", "--lines", "200", check=False))
         root("systemctl", "disable", "--now", UNIT, check=False)
         root("docker", "rm", "--force", CONTAINER, check=False)
         root("docker", "volume", "rm", "--force", f"hub-{PERSON}-data", check=False)
         root("docker", "volume", "rm", "--force", f"hub-{PERSON}-keyring", check=False)
+        root("docker", "network", "rm", f"hub-{PERSON}", check=False)
         root("rm", "-rf", "--", str(DIRECTORY), check=False)
 
 
