@@ -12,6 +12,7 @@ Read the pages in order. Each one ends where the next one starts.
 | [`first-run.md`](first-run.md) | A data directory, a model key, a running hub, and a browser you can ask things in |
 | [`phone.md`](phone.md) | The same browser page on your phone, over your own overlay network |
 | [`remote-hub.md`](remote-hub.md) | The hub on one machine and your laptop as a client of it |
+| [`container.md`](container.md) | One person's hub and gateway in a container of their own, behind the sign-in edge |
 
 `first-run.md` is the whole of what "it works" means. `phone.md` and
 `remote-hub.md` are each optional and independent of each other: you can do
