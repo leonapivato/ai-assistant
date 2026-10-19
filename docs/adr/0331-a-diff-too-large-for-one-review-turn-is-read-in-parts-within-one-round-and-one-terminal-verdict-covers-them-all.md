@@ -1,6 +1,6 @@
 # 331. A diff too large for one review turn is read in parts within one round, and one terminal verdict covers them all
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-19
 - Scope: how `scripts/codex-review.sh` hands a committed diff to the reviewer when the diff does not fit one turn, and what a recorded review then attests. Tracker: #3176, the pull request whose rounds could not start.
 - Dependency: ADR-0020, ADR-0025, ADR-0027 and ADR-0209, as their status lines leave them.
