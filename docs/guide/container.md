@@ -153,12 +153,14 @@ The deploy never creates, reads or prints a passphrase. It refuses, before it st
 anything, a passphrase file that is missing, empty, owned by another uid or readable by
 anyone else, and keep a copy of each off the box: the backup passphrase is the only key
 to the artifacts (ADR-0123 §5). The rest is named from the person: the volumes
-`hub-<person>-data` and `hub-<person>-keyring`, the container `hub-<person>`, and the
-unit `hub@<person>.service`, which the deploy installs from
-`deploy/container/hub@.service`. That unit is this page's systemd unit made real: the
-flags above, `docker run` in the foreground so its exit is the container's,
-`Restart=on-failure`, `RestartPreventExitStatus=78`, a stop timeout of 120 seconds over
-Docker's 90, and a start at boot. `journalctl --unit hub@alice` is the container's log.
+`hub-<person>-data` and `hub-<person>-keyring`, the container `hub-<person>` on a bridge
+network of its own, also `hub-<person>`, and the unit `hub@<person>.service`, which the
+deploy installs from `deploy/container/hub@.service`. That unit is this page's systemd
+unit made real: the flags above, `docker run` in the foreground so its exit is the
+container's, `Restart=on-failure`, `RestartPreventExitStatus=78`, a stop timeout of 120
+seconds over Docker's 90, and a start at boot. A misconfigured gateway exits `78` through
+the container (#3167), so it too stays down until someone acts. `journalctl --unit
+hub@alice` is the container's log.
 
 The image is built on the box, from a context `deploy/container/build.sh --context`
 stages here out of a clean tree, and is labelled with its commit; nothing is pushed to
@@ -170,8 +172,8 @@ Before it stops anything, the deploy also checks what ADR-0327 §5:2 asks of the
 that no other machine reaches the hosted listener. It checks that `route_localnet` is
 `0` for every interface but the loopback and Docker's own, so nothing routes a packet
 for the loopback port in from another machine. Once the container runs, it checks that
-the container is on Docker's bridge, publishes `8423` to `127.0.0.1` alone and has no
-IPv6 address, and that the raw table's `PREROUTING` chain drops what arrives for the
+the container is on its own bridge network, publishes `8423` to `127.0.0.1` alone and
+has no IPv6 address, and that the raw table's `PREROUTING` chain drops what arrives for the
 container's bridge address on any other interface. Docker Engine 28 and later write
 that rule on the iptables backend. A box where it cannot establish one of these is
 refused, or its container stopped, with the reason. What it cannot see is a firewall
