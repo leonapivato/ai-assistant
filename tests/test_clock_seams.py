@@ -105,11 +105,9 @@ from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.memory.health import StoreHealthReader
 from ai_assistant.orchestration import (
     ConnectionOperations,
-    ConsolidationStage,
     ConversationLifecycle,
     Engine,
     GrantOperations,
-    MemoryWriteStage,
     UpcomingEventStage,
 )
 from ai_assistant.orchestration import traces as operation_traces
@@ -614,13 +612,6 @@ async def _engine(now: Clock) -> None:
     ).purge_expired()
 
 
-def _writes(memory: FakeMemoryStore) -> MemoryWriteStage:
-    """The write stage every memory-writing stage takes, on a conforming clock."""
-    return MemoryWriteStage(
-        writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: _AWARE),
-    )
-
-
 def _tool() -> ToolDefinition:
     """The one side-effecting tool the permission seams are driven over."""
     return ToolDefinition(
@@ -659,15 +650,6 @@ def _decision(request: ActionRequest) -> PermissionDecision:
 
 
 # ---- drivers -------------------------------------------------------------
-
-
-async def _consolidation(now: Clock) -> None:
-    """Consolidation reads its clock to fix the run budget before the first chunk."""
-    memory = FakeMemoryStore(now=lambda: _AWARE)
-    await memory.add(_record())
-    await ConsolidationStage(
-        memory=memory, writes=_writes(memory), model=FakeModelProvider(), now=now
-    ).run()
 
 
 async def _conversation_lifecycle(now: Clock) -> None:
@@ -860,7 +842,6 @@ SEAMS = [
     # (#781). Nothing here is a new claim about what a seam *should* raise: each
     # row is what driving that seam's real entry point over a naive reading was
     # observed to produce, which is the only thing this table can honestly assert.
-    Seam("ConsolidationStage", _consolidation, ClockReadingError),
     Seam("ConversationLifecycle", _conversation_lifecycle, ConversationStoreError),
     Seam("CurrentTime", _current_time, ClockReadingError),
     Seam("FakeAuditTrail", _fake_audit_trail, AuditError),
@@ -1166,7 +1147,6 @@ PROPAGATED: Final[dict[str, str]] = {
         "ADR-0309 adds **no** error class to `core.errors`, and a clock this process "
         "cannot read is not a round's outcome: no call ran and no message was claimed"
     ),
-    "ConsolidationStage": _UNDECLARED,
     "CurrentTime": ("documented at ``tools/builtin.py:148``, and `tools` is not in §4's list"),
     "StoreHealthReader": _UNDECLARED,
     "UpcomingEventStage": _UNDECLARED,

@@ -65,15 +65,9 @@ here precisely because neither store may hold the other (golden rule 1).
 
 ``MemoryWriteStage`` is the **write stage**: the one place a producer's proposal
 reaches memory. It holds the ratified ``MemoryWriter``, and an ``ASK_USER`` ruling
-writes nothing and is logged by the proposal's id (ADR-0309 §5).
-
-``ConsolidationStage`` is the **consolidation stage** (ADR-0106, ADR-0111,
-ADR-0114), a producer's stage, and the only one that is also its own
-producer. It walks the memory store a bounded chunk at a time from a durable
-cursor, asks an injected ``ModelProvider`` what each chunk justifies believing,
-and puts every proposal through the write stage — computing the derived-taint
-marker itself, from the input set it selected, and discarding whatever the model
-emitted for that field (ADR-0106 §3).
+writes nothing and is logged by the proposal's id (ADR-0309 §5). Its one producer,
+the consolidation stage, retired (ADR-0328 §14:2), so the composition root builds
+none until another producer holds it.
 
 ``NotificationWriteStage`` is ADR-0130 §3's **producer seam**, concrete: it holds
 the deterministic policy and hands it to the store, so the duplicate lookup, the
@@ -88,10 +82,6 @@ interruption.
 """
 
 from ai_assistant.orchestration.connections import ConnectionOperations
-from ai_assistant.orchestration.consolidation import (
-    ConsolidationReport,
-    ConsolidationStage,
-)
 from ai_assistant.orchestration.conversations import ConversationLifecycle
 from ai_assistant.orchestration.engine import (
     Engine,
@@ -116,8 +106,6 @@ __all__ = [
     "ENVELOPE_RESERVE_BYTES",
     "MIN_FRAME_BYTES",
     "ConnectionOperations",
-    "ConsolidationReport",
-    "ConsolidationStage",
     "ConversationLifecycle",
     "Engine",
     "GrantOperations",

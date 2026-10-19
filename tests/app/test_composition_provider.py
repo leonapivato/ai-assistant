@@ -26,6 +26,8 @@ from ai_assistant.core.errors import ConfigurationError, ModelError, ModelUnavai
 from ai_assistant.core.types import Message, Role
 from ai_assistant.memory import MemoryIngestor, ModelBackedReconciler
 from ai_assistant.models import PydanticAIProvider, RetryingProvider, RoutingProvider
+from ai_assistant.orchestration.acting import OwnRecordsByCapability
+from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY, RememberCalls
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -275,15 +277,17 @@ def test_every_spec_is_checked_not_merely_the_first() -> None:
 
 
 def _consolidation_provider(engine: Engine) -> ModelProvider:
-    """The provider the composed engine's consolidation stage will actually call.
+    """The provider consolidation's route builds, as the composed engine holds it.
 
-    The same deliberate reach-in ``_routed_model`` uses: the composition root's
-    obligations are about *which object ends up where*, and no public surface
-    exposes that — the stage holds its provider and shows nobody.
+    Reached through the matters pass, which rides the route with the story tidy-up
+    since the consolidation stage retired (ADR-0328 §14:4). The same deliberate
+    reach-in ``_routed_model`` uses: the composition root's obligations are about
+    *which object ends up where*, and no public surface exposes that — the pass
+    holds its provider and shows nobody.
     """
-    stage = engine._consolidation
-    assert stage is not None, "consolidation is always wired"
-    return stage._model
+    matters_pass = engine._matters_pass
+    assert matters_pass is not None, "the matters pass is always wired"
+    return matters_pass._model
 
 
 def test_consolidation_reads_through_the_conversational_route_when_unset() -> None:
@@ -385,7 +389,7 @@ def test_an_uninstalled_consolidation_vendor_stops_the_build(tmp_path: Path) -> 
     """Consolidation's route is vendor-checked too, at startup (ADR-0062 §2, ADR-0285 §5).
 
     Without it a deployment whose answers route perfectly well would fail on the
-    first consolidation run instead — a scheduled job an operator is least likely to
+    first background run instead — a scheduled job an operator is least likely to
     be watching while they still remember changing the setting.
     """
     settings = Settings(default_model="anthropic:claude-x", consolidation_model="groq:llama-3")
@@ -400,12 +404,16 @@ def test_an_uninstalled_consolidation_vendor_stops_the_build(tmp_path: Path) -> 
 def _reconciler_of(engine: Engine) -> ModelBackedReconciler:
     """The reconciler the composed engine's writer holds.
 
-    Reached through the consolidation stage's write stage, which is the *one* write
-    stage every producer shares (ADR-0078 §3) and therefore holds the one writer.
+    Reached through ``remember``'s runner on the phases' acting stage, the one writer's
+    holder since the consolidation stage retired (ADR-0328 §14:2).
     """
-    stage = engine._consolidation
-    assert stage is not None, "consolidation is always wired"
-    writer = stage._writes._writer
+    phases = engine._phases
+    assert phases is not None
+    own_records = phases._acting._own_records
+    assert isinstance(own_records, OwnRecordsByCapability)
+    runner = own_records._runners[REMEMBER_CAPABILITY]
+    assert isinstance(runner, RememberCalls)
+    writer = runner._writer
     assert isinstance(writer, MemoryIngestor)
     reconciler = writer._reconciler
     assert isinstance(reconciler, ModelBackedReconciler)
@@ -415,7 +423,7 @@ def _reconciler_of(engine: Engine) -> ModelBackedReconciler:
 def _reconciler_provider(engine: Engine) -> ModelProvider:
     """The provider the composed engine's writer will actually label through.
 
-    The same deliberate reach-in consolidation's uses: the composition root's
+    The same deliberate reach-in ``_consolidation_provider`` uses: the composition root's
     obligations are about *which object ends up where*, and no public surface
     exposes that — a writer holds its reconciler and shows nobody, which is the
     whole of ADR-0159 §2's "``memory``-internal seam".

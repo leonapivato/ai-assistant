@@ -68,7 +68,6 @@ from ai_assistant.orchestration import (
     presented_confidence,
 )
 from ai_assistant.orchestration import engine as engine_module
-from ai_assistant.orchestration.consolidation import ConsolidationReport
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, DrainPhase
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.speech import DEFAULT_MAX_SPOKEN_AUDIO_BYTES
@@ -2134,23 +2133,6 @@ async def test_a_sweep_that_did_not_run_omits_its_key_rather_than_reporting_zero
     assert dict(trace.metrics) == {"records": 0}
 
 
-def test_a_consolidation_run_reads_as_ok_with_exhausted_carried() -> None:
-    """A run that returns is ``OK``, whether it exhausted the store or spent its budget.
-
-    The deferred-question queue's cap was the one halt, and it retired with the
-    queue (ADR-0319 §5). ``exhausted`` is the fact that tells the two completed
-    runs apart, so it is carried as a metric.
-    """
-    spent = engine_module._consolidated(ConsolidationReport(chunks=2, exhausted=False))
-    walked = engine_module._consolidated(ConsolidationReport(chunks=3, exhausted=True))
-
-    assert spent.outcome is TraceOutcome.OK
-    assert walked.outcome is TraceOutcome.OK
-    assert spent.metrics["exhausted"] is False
-    assert walked.metrics["exhausted"] is True
-    assert spent.metrics["chunks"] == 2
-
-
 async def test_a_result_too_large_to_return_records_the_refusal_not_a_success() -> None:
     """The trace and the caller's answer must agree (ADR-0119 §3, §8).
 
@@ -2186,7 +2168,7 @@ async def test_a_maintenance_report_is_not_measured_against_the_payload_limit() 
     """``checked`` is per operation, and the four maintenance ones are exempt.
 
     ADR-0085 §1 fixes the promoted ``AssistantEngine`` surface and none of
-    ``start``/``purge_expired``/``consolidate`` is on it: their reports
+    ``start``/``purge_expired``/``decide_story_flags`` is on it: their reports
     go to the hub's scheduler in-process and never cross a wire (ADR-0083 §8). They
     were never measured before this lane and they are not measured now — the flag
     exists so that stays a stated fact rather than an accident of which call site

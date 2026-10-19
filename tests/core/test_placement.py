@@ -8,8 +8,9 @@ record written before the field existed.
 
 The arms that need a producer, a supply site or a store are elsewhere: the fold's
 setter propagation is pinned against ``memory/ingest.py`` and its canonical fake,
-the derivation over mixed placements against ``orchestration/consolidation.py``, and
-the reduction to ADR-0199 §1's two audiences against the spoken supply site.
+and the reduction to ADR-0199 §1's two audiences against the spoken supply site. The
+derivation over mixed placements was pinned against the consolidation stage, which
+retired (ADR-0328 §14:2); :meth:`Placement.narrowest_of` itself is pinned below.
 """
 
 from __future__ import annotations

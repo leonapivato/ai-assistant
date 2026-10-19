@@ -1468,6 +1468,11 @@ class Settings(BaseSettings):
             "job; never 0."
         ),
     )
+    # **The consolidation stage this was written for retired; the setting stays as
+    # the schedule of the background memory work, and the scheduler's `matters_pass`
+    # row runs at it, disabled by default (ADR-0328 §14:2-§14:3).** What follows is
+    # the record of why it was admitted.
+    #
     # **Leg 7's consolidation job, and the precondition its absence used to
     # enforce.** ADR-0111 §4's second clause makes a per-operation deadline "a
     # precondition of being chunked at all", and its prose is explicit that this
@@ -1501,9 +1506,9 @@ class Settings(BaseSettings):
         default=None,
         gt=timedelta(0),
         description=(
-            "How often the hub distils stored records into durable beliefs, one bounded "
-            "run per tick (ADR-0083 §7, ADR-0111 §4). Disabled by default; set a "
-            "duration to enable it, and 'none' to disable it again. Never 0."
+            "How often the hub runs its background memory work, the matters pass, one "
+            "bounded run per tick (ADR-0083 §7, ADR-0300 §9:3). Disabled by default; set "
+            "a duration to enable it, and 'none' to disable it again. Never 0."
         ),
     )
 
@@ -1526,8 +1531,10 @@ class Settings(BaseSettings):
     # ``scheduler_chunk_size``", so the obligation was the ADR's and did not wait on
     # a caller. A chunked job arriving without them would be deciding its own bounds
     # on the way past, which is what naming the figures was meant to prevent
-    # (ADR-0074 §9.3). That reader is now here: leg 7's consolidation walk hands
-    # ``scheduler_chunk_size`` to ``MemoryStore.walk_records`` as its ``limit``.
+    # (ADR-0074 §9.3). Its reader was leg 7's consolidation walk, handing
+    # ``scheduler_chunk_size`` to ``MemoryStore.walk_records`` as its ``limit``; that
+    # stage retired and the walk stays with no caller until store maintenance
+    # (ADR-0328 §11, §14:2). The matters pass reads ``scheduler_run_budget``.
     scheduler_run_budget: _DurationSetting = Field(
         default=timedelta(minutes=5),
         gt=timedelta(0),
@@ -2932,6 +2939,9 @@ class Settings(BaseSettings):
         ),
     )
 
+    # The consolidation stage retired, and this route stays for the background work
+    # that rides it: the story tidy-up and the matters pass (ADR-0328 §14:4).
+    #
     # Which model consolidation reads through (ADR-0285 §5). A **first-class named
     # setting** rather than an accident of ``default_model``, because a
     # consolidation prompt carries a whole chunk of stored records — among the most
@@ -2958,9 +2968,10 @@ class Settings(BaseSettings):
     consolidation_model: _ModelSpec | None = Field(
         default=None,
         description=(
-            "Model that consolidation reads stored records through, in pydantic-ai "
-            "'provider:model' form. Unset means the same route conversation uses. "
-            "Never falls back, whichever route it names."
+            "Model the background memory work (the story tidy-up and the matters pass) "
+            "reads stored records through, in pydantic-ai 'provider:model' form. Unset "
+            "means the same route conversation uses. Never falls back, whichever route "
+            "it names."
         ),
     )
 

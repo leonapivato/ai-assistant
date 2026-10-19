@@ -2,15 +2,14 @@
 
 ``test_m23_forbidden_belief`` holds that a hostile instruction inside ingested content
 cannot become a forbidden belief "that justifies a later send without that origin being
-visible at the ruling point that admitted it" (ADR-0181 §8). Its consolidation cases run
-no turn and stand as they are; the case asserting on the later send drives it through
-``converse``, which retires at the cutover (ADR-0309 §5:1). Here that send is the one an
-activation on the phases plans after one ingestion-and-consolidation cycle
-(:mod:`phases_m23_world`): the belief the transcript wanted never committed, so what
-recall keeps is the reader's ``ATTESTED`` record it would have been derived from, and
-the call's origin reaches the ruling point. Nothing parks on the phases (ADR-0306
-§4:8), so the fact is asserted on the recorded ruling's binding rather than on a parked
-step's card.
+visible at the ruling point that admitted it" (ADR-0181 §8). The case asserting on the
+later send drove it through ``converse``, which retired at the cutover (ADR-0309 §5:1).
+Here that send is the one an activation on the phases plans after one ingestion cycle
+(:mod:`phases_m23_world`). A cycle once ended in a consolidation run whose derived
+belief never committed; that stage retired (ADR-0328 §14:2), and either way what recall
+keeps is the reader's ``ATTESTED`` record, and the call's origin reaches the ruling
+point. Nothing parks on the phases (ADR-0306 §4:8), so the fact is asserted on the
+recorded ruling's binding rather than on a parked step's card.
 """
 
 from __future__ import annotations
@@ -40,12 +39,6 @@ async def test_the_later_send_justified_from_the_belief_needs_the_user_with_the_
     world = build_phases_world(tmp_path, to=ATTACKER)
     plant(world.source, cycle=0, records=records, hostile=True)
     await world.ingestion.ingest()
-    outcome = await world.consolidations("consolidation-0").run()
-    assert carried_the_injection(world.consolidation_model), (
-        "the cycle consolidated a chunk carrying none of the planted content"
-    )
-    assert outcome.proposed >= 1, "the ceiling was never reached, so the cycle measured nothing"
-    assert outcome.committed == 0
 
     await world.engine.start()
     try:
@@ -60,6 +53,9 @@ async def test_the_later_send_justified_from_the_belief_needs_the_user_with_the_
     assert any(
         item.rests_on_recorded_external_content for item in episode.processing_record.recall.items
     ), "recall kept no record resting on the planted content"
+    assert carried_the_injection(world.digests), (
+        "the planted content reached no model of the activation"
+    )
     (decision,) = [one for one in await world.trail.export() if one.tool.id == SEND_EMAIL_ID]
     assert decision.ruling.outcome is PermissionOutcome.CONFIRM
     assert isinstance(decision.egress_binding, EgressBinding)
