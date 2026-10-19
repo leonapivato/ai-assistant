@@ -77,6 +77,10 @@ class FakeBox:
     contexts: list[set[str]] = field(default_factory=list)
     built: int = 0
     driver: str = "bridge"
+    health: str = "healthy"
+    stop_fails: bool = False
+    #: The link drops after the new image starts: every later stop fails.
+    stop_fails_once_started: bool = False
 
     def run(self, argv: Sequence[str], *, stdin: IO[bytes] | None = None) -> Any:
         argv = list(argv)
@@ -109,10 +113,13 @@ class FakeBox:
             )
             return 0, state, ""
         if verb == "stop":
+            if self.stop_fails:
+                return 255, "", "ssh: connection closed"
             self.active = "inactive"
             self.container_image = None
             return 0, "", ""
         if verb == "start":
+            self.stop_fails = self.stop_fails_once_started
             env = dc.parse_unit_env(self.files[str(PERSON.unit_env)].data.decode())
             outcome = self.starts.get(env.image, "healthy")
             if outcome == "78":
@@ -244,7 +251,7 @@ class FakeBox:
             return 1, "", "Error: No such container"
         fields = {
             "status": "running",
-            "health": "healthy",
+            "health": self.health,
             "image": self.container_image,
             "mode": self.mode,
             "ports": self.ports or {"8423/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8501"}]},
@@ -464,6 +471,44 @@ def test_deploy_new_image_that_stays_down_is_not_rolled_back() -> None:
     assert len(starts) == 1, "the earlier image is never started on data the new one served"
 
 
+def test_deploy_not_ready_and_not_contained_is_stopped() -> None:
+    box = served_box(health="starting", raw_rules="-P PREROUTING ACCEPT\n")
+
+    with pytest.raises(dc.DeployError) as caught:
+        deployment(box).run()
+
+    message = str(caught.value)
+    assert "was not healthy within" in message
+    assert "ADR-0327 §5:2 cannot be established" in message
+    assert "hub@alice.service is stopped" in message
+    assert box.active == "inactive"
+
+
+def test_deploy_not_ready_but_contained_is_left_to_its_unit() -> None:
+    box = served_box(health="starting")
+
+    with pytest.raises(dc.DeployError) as caught:
+        deployment(box).run()
+
+    message = str(caught.value)
+    assert "so the unit keeps the new image as its supervisor rules" in message
+    assert box.active == "active"
+    assert [argv[:2] for argv in box.ran].count(["systemctl", "stop"]) == 1
+
+
+def test_deploy_says_when_an_uncontained_container_cannot_be_stopped() -> None:
+    box = served_box(raw_rules="-P PREROUTING ACCEPT\n")
+    box.stop_fails_once_started = True
+
+    with pytest.raises(dc.DeployError) as caught:
+        deployment(box).run()
+
+    message = str(caught.value)
+    assert "could NOT be shown stopped (stop exit 255, state active" in message
+    assert "Stop it by hand: systemctl stop hub@alice.service" in message
+    assert "is stopped: it does not serve" not in message
+
+
 def test_deploy_unreachability_not_established_stops_the_new_container() -> None:
     box = served_box(raw_rules="-P PREROUTING ACCEPT\n")
 
@@ -556,6 +601,29 @@ def test_deploy_refuses_a_record_with_no_volume() -> None:
     box = served_box()
     box.volumes.discard(PERSON.data_volume)
     _refused_untouched(box, "never starts a hub on a new volume")
+
+
+def test_deploy_refuses_a_record_with_no_keyring_volume() -> None:
+    box = served_box()
+    box.volumes.discard(PERSON.keyring_volume)
+    _refused_untouched(box, "a new, empty keyring")
+
+
+def test_deploy_refuses_a_root_other_than_the_installed_units() -> None:
+    box = served_box()
+    unit = dc.render_unit(dc.UNIT_SOURCE.read_text(encoding="utf-8"), PurePosixPath("/opt/people"))
+    box.files[dc.UNIT_PATH] = File(0, 0o644, unit.encode())
+    _refused_untouched(box, "one root per box")
+
+
+def test_deploy_keeps_an_installed_unit_of_the_same_root() -> None:
+    box = served_box()
+    unit = dc.render_unit(dc.UNIT_SOURCE.read_text(encoding="utf-8"), HUBS)
+    box.files[dc.UNIT_PATH] = File(0, 0o644, unit.encode())
+
+    deployment(box).run()
+
+    assert ["systemctl", "daemon-reload"] not in box.ran
 
 
 def test_deploy_refuses_when_the_earlier_image_is_gone() -> None:

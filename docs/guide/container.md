@@ -138,8 +138,8 @@ just deploy-container alice box.example.com               # every deploy after i
 ```
 
 The box needs Docker, systemd, `curl` and `iptables`. For each person it reads a
-directory the operator writes by hand, `/srv/hubs/<person>/` (`--hubs-dir` moves it),
-owned by root and writable by root alone:
+directory the operator writes by hand, `/srv/hubs/<person>/` (`--hubs-dir` moves it, for
+every person on the box at once), owned by root and writable by root alone:
 
 | Path | Who writes it | Owner and mode |
 | --- | --- | --- |
@@ -306,8 +306,10 @@ this order:
 
 Once the new image has run, the deploy never starts the earlier one on that data, because
 an earlier build cannot open a directory a later one upgraded (§5:4). A new image that
-fails its checks is left to its unit, or stopped when the reachability checks fail, and
-undoing the deploy is a later image, or the backup restored into a new volume. The
+does not become healthy is left to its unit only where the reachability checks pass;
+otherwise, and whenever the door or those checks fail, the deploy stops it, and says so
+plainly if it cannot. Undoing the deploy is a later image, or the backup restored into a
+new volume. The
 artifact is kept; the deploy deletes none, and pruning old ones is the operator's act.
 
 The backup copies the data volume as the image pins it, `/data`, with the exclusions the
