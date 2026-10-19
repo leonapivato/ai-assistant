@@ -39,6 +39,8 @@ ADDRESS = "172.17.0.2"
 DOCKER_DROP = (
     f"-A PREROUTING -d {ADDRESS}/32 ! -i br-0123456789ab -p tcp -m tcp --dport 8423 -j DROP"
 )
+#: An accepting rule whose quoted comment names another target.
+BYPASS = '-A PREROUTING -i eth0 -m comment --comment "bypass -j DROP rules" -j ACCEPT'
 LOOPBACK_DROP = "-A PREROUTING -d 127.0.0.1/32 ! -i lo -p tcp -m tcp --dport 8501 -j DROP"
 LOCALNET = "\n".join(
     f"/proc/sys/net/ipv4/conf/{name}/route_localnet:0"
@@ -585,6 +587,11 @@ def test_deploy_first_install_interrupted_after_its_record_is_undone_whole() -> 
     assert box.enabled  # last: mypy reads the earlier `not box.enabled` as still holding
 
 
+def test_deploy_reads_a_quoted_comment_as_one_argument() -> None:
+    box = served_box(raw_rules=f"-P PREROUTING ACCEPT\n{BYPASS}\n{DOCKER_DROP}")
+    _refused_untouched(box, '--comment "bypass -j DROP rules" -j ACCEPT\', which may accept')
+
+
 def test_deploy_refuses_a_raw_chain_that_may_accept_before_dockers_drop() -> None:
     box = served_box(
         raw_rules=f"-P PREROUTING ACCEPT\n-A PREROUTING -i eth0 -j ACCEPT\n{DOCKER_DROP}"
@@ -888,6 +895,12 @@ def test_unit_env_round_trips() -> None:
         (f"-A PREROUTING -i eth0 -j ACCEPT\n{DOCKER_DROP}", "may accept"),
         (f"{DOCKER_DROP}\n-A PREROUTING -i eth0 -j ACCEPT", "may accept"),
         (f"-A PREROUTING -i eth0 -g MYCHAIN\n{DOCKER_DROP}", "may accept"),
+        (f"{BYPASS}\n{DOCKER_DROP}", "may accept"),
+        (f'-A PREROUTING -m comment --comment "keep -j" -j DROP\n{DOCKER_DROP}', None),
+        (f'-A PREROUTING -m comment --comment "a drop" -j DROP\n{DOCKER_DROP}', None),
+        (f'-A PREROUTING -m comment --comment "unclosed -j DROP\n{DOCKER_DROP}', "may accept"),
+        (f"-A PREROUTING -i eth0\n{DOCKER_DROP}", "may accept"),
+        (f"-X PREROUTING\n{DOCKER_DROP}", "may accept"),
         (f"-A PREROUTING -j MYCHAIN\n{DOCKER_DROP}", "may accept"),
         ("-P PREROUTING ACCEPT\n", "has no `-d 172.17.0.2/32"),
         (DOCKER_DROP.replace("br-0123456789ab", "docker0"), "has no"),
