@@ -309,6 +309,7 @@ from ai_assistant.core.types import (
 from ai_assistant.interfaces import episode_inspection, story_inspection
 from ai_assistant.interfaces.devices import this_device as _this_device
 from ai_assistant.interfaces.gateway import Disclosure, Note, run_gateway
+from ai_assistant.interfaces.gateway import exits as gateway_exits
 from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.wire import (
     GRANTABLE_SCOPES,
@@ -4019,6 +4020,16 @@ async def _serve_gateway() -> int:
     ``AssistantEngine`` Protocol, by the same client the CLI uses and by the same
     selection between the loopback and remote transports" (ADR-0168 §1).
 
+    **A fault exits by ADR-0083 §5's table, the hub's own** (#3167):
+    ``78`` where restarting unchanged never succeeds — a setting it refused, an
+    edge key that will not load, a hosted address this machine does not hold, a
+    file or port the operating system will not give it — and ``1`` for everything
+    that may clear. Without the distinction a supervisor restarts a gateway that
+    refused a setting until somebody notices, which is §5's "crash loop wearing a
+    diagnosis". :func:`~ai_assistant.interfaces.gateway.exits.exit_code` reads the
+    verdict the refusal was raised with, and a ``78`` says, after the cause, that it
+    stays down and what ends that.
+
     Returns:
         The process exit code. Stopping the gateway is an ordinary end rather than
         a failure, so an interrupt exits zero.
@@ -4030,7 +4041,17 @@ async def _serve_gateway() -> int:
         await _run_the_gateway(settings, engine)
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
-        return _EXIT_ERROR
+        code = gateway_exits.exit_code(exc)
+        if code == gateway_exits.EXIT_DEPLOYMENT:
+            # ADR-0083 §5: "every `78` prints its cause and the operator action". The
+            # cause is the line above; this is what ends the refusal, in words that
+            # carry nothing but the code (ADR-0004 §5).
+            _print(
+                f"[red]The gateway stays down (exit {code}):[/] it would refuse the same "
+                f"way at every start. Change what the line above names, then start it "
+                f"again."
+            )
+        return code
     except KeyboardInterrupt, asyncio.CancelledError:
         _print("[dim]Gateway stopped. Every session ended with it.[/]")
     return _EXIT_OK
@@ -4076,7 +4097,9 @@ async def _run_the_gateway(settings: Settings, engine: AssistantEngine) -> None:
         ConfigurationError: If the gateway could not start. The category is this
             adapter's boundary rather than a claim that a setting is malformed —
             the same conversion :func:`_disclose_bootstrap` already makes of the
-            ``OSError`` from a standard output that will not take the value.
+            ``OSError`` from a standard output that will not take the value — and
+            it is a :class:`~.gateway.exits.ClearableRefusalError` wherever the
+            errno is one a restart can get past (see :func:`_gateway_did_not_start`).
     """
     try:
         await run_gateway(
@@ -4123,6 +4146,14 @@ def _gateway_did_not_start(
     to say which. It is the round-one repair one level down: claim what is visible
     from here, and no more.
 
+    **Which of ADR-0083 §5's codes it earns is the errno's to say** (#3167), and only
+    the few that mean the operating system will not let this process do this — an
+    unreadable bundle, a port below 1024 this user may not bind — are the stay-down
+    ``78`` (:func:`~.gateway.exits.stays_down`). A taken port is a ``1``, because
+    whatever holds it is serving or stopping, as a contended hub lock is (ADR-0083
+    §1); every other errno is a ``1`` by §5's tie-break. Each ``1`` is raised as
+    :class:`~.gateway.exits.ClearableRefusalError`, which says so.
+
     Args:
         exc: What the start raised.
         port: ``gateway_port``, named only where the errno is about a port.
@@ -4130,7 +4161,9 @@ def _gateway_did_not_start(
             whether an ephemeral bind of its own is in the path.
 
     Returns:
-        The error :func:`_serve_gateway`'s boundary renders and exits non-zero on.
+        The error :func:`_serve_gateway`'s boundary renders and exits non-zero on: a
+        plain ``ConfigurationError`` where the errno stays down, and a
+        :class:`~.gateway.exits.ClearableRefusalError` everywhere else.
     """
     if exc.errno == errno.EADDRINUSE and not probes_an_address:
         cause = (
@@ -4156,7 +4189,11 @@ def _gateway_did_not_start(
         f"bootstrap value it printed above is already dead — it ceased with this "
         f"process (ADR-0182 §2)"
     )
-    return ConfigurationError(msg)
+    return (
+        ConfigurationError(msg)
+        if gateway_exits.stays_down(exc)
+        else gateway_exits.ClearableRefusalError(msg)
+    )
 
 
 #: What the owner is told about each of ADR-0182 §1's three reportable conditions.
@@ -4243,7 +4280,11 @@ def _disclose_bootstrap(disclosure: Disclosure) -> None:
         disclosure: The value, the origins, the advisory count and the act.
 
     Raises:
-        ConfigurationError: If standard output cannot be written.
+        ConfigurationError: If standard output cannot be written. A
+            :class:`~.gateway.exits.ClearableRefusalError` unless the errno is one
+            no restart changes, for the reason :func:`_gateway_did_not_start`
+            gives: a stream that refused a write is most often a reader that went
+            away, and the next start is handed a new one (#3167).
     """
     act = disclosure.mint_act
     beside = (
@@ -4267,7 +4308,9 @@ def _disclose_bootstrap(disclosure: Disclosure) -> None:
             "the gateway's bootstrap value could not be written to standard output, "
             "so no browser could be admitted; run it where its output is readable"
         )
-        raise ConfigurationError(msg) from exc
+        if gateway_exits.stays_down(exc):
+            raise ConfigurationError(msg) from exc
+        raise gateway_exits.ClearableRefusalError(msg) from exc
 
 
 async def _list_conversations(*, limit: int, offset: int) -> int:

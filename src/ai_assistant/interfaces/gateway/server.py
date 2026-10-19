@@ -1315,7 +1315,9 @@ class Gateway:
                 it, refuse the owner's own named device at every exchange with
                 nothing saying why, or serve a certificate no browser accepts. Also
                 if the hosted listener's device cannot be named on the wire or an
-                edge key cannot be loaded (ADR-0327 §6:4, §10:3).
+                edge key cannot be loaded (ADR-0327 §6:4, §10:3). The one that is
+                not stay-down is a certificate not yet in force, which the clock
+                clears and which is raised as :class:`~.exits.ClearableRefusalError`.
         """
         _check_the_remote_listener_can_serve(settings, agent=agent)
         #: What the edge's assertions are held to (ADR-0327 §6), read once and never
@@ -1714,7 +1716,9 @@ class Gateway:
                 holds, or if the certificate's validity has stopped covering this
                 moment since it was read. Each is a stay-down deployment fault
                 (ADR-0083 §5): restarting unchanged never succeeds, and what has to
-                change is the configuration, the overlay, or the certificate.
+                change is the configuration, the overlay, or the certificate — except
+                a certificate a clock that moved back has put before its validity,
+                which is :class:`~.exits.ClearableRefusalError`.
             OSError: If the bind fails for any other reason. Left to propagate for
                 the reason :mod:`ai_assistant.service.remote` leaves it — "the raw
                 errno distinguishes a stay-down fault from a transient one" — and an
