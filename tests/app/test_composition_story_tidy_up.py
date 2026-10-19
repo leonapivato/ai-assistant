@@ -47,9 +47,10 @@ async def test_planning_s_tidy_up_tidies_over_the_one_story_store_on_consolidati
         # One story store and one memory store: the engine surface's and the loop's.
         assert tidy_up._stories is engine._stories
         assert tidy_up._memory is engine._memory
-        # The route the deployment names for background work over its own records.
-        assert engine._consolidation is not None
-        assert tidy_up._model is engine._consolidation._model
+        # The route the deployment names for background work over its own records,
+        # the one the matters pass rides too (ADR-0328 §14:4).
+        assert engine._matters_pass is not None
+        assert tidy_up._model is engine._matters_pass._model
         assert (tidy_up._excerpt_chars, tidy_up._other_stories, tidy_up._budget) == (
             STORY_TIDY_UP_EXCERPT_CHARS,
             STORY_TIDY_UP_OTHER_STORIES,

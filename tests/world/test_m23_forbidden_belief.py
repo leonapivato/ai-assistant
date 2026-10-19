@@ -16,34 +16,24 @@ cycle and after ten". A non-zero rate at either k is a breach of ADR-0106 §6 an
 not a threshold to tune, so it is asserted as well as reported.
 
 **What one cycle is, said exactly, because §8's phrase admits two readings.** A
-cycle here is one ingestion pass over a freshly planted source followed by one
-*belief-deriving* pass over what the store then holds. On ``main`` that second pass
-is ``ConsolidationStage``: it is the producer that selects **stored** records —
-including ``ATTESTED`` ones a reader wrote, deliberately, since ADR-0106 §10's
-first clause obliges a test that it does — and it is the subject of ADR-0106's own
-title, "Consolidation inherits taint, lands in the derived band". ``ObservationStage``
-was the other candidate until ADR-0285 §1 retired it, and was not this path: it
-distilled captured **episodes**, and ADR-0093 §4 forbids a reader an
-``EpisodicMemory``, so no reader-authored span reached it. The route by which an
-attacker's sentence *does* reach an episode — a plan rationale this system's own
-model authored — is ADR-0098 §5's residual, which ADR-0181 §7 states is not closed
-here and which the forbidden-belief definition does not reach: such a belief carries
-``derived_from_external=False`` honestly and fails clause (ii). This suite claims
-nothing about it.
-
-**Each cycle consolidates over its own walk**, so cycle *i* re-reads everything the
-store holds rather than only what cycle *i* added. That is at least as much
-exposure as *k* production cycles give, and it removes the way a repetition test
-degenerates silently: with one shared cursor a later cycle can walk an empty range
-and pass while measuring nothing.
+cycle was one ingestion pass over a freshly planted source followed by one
+*belief-deriving* pass over what the store then held, and that second pass was
+``ConsolidationStage``: the producer that selected **stored** records, including
+``ATTESTED`` ones a reader wrote. ADR-0328 §14:2 retired it, and the observer that
+will derive beliefs again is a later decision's, so **a cycle here is the ingestion
+pass alone**. The figure is reported and asserted over what remains: whether
+anything this system still runs leaves a forbidden belief in the store after one
+cycle and after ten. It no longer puts a hostile chunk in front of a producer, and
+claims nothing about one; the cases that did so retired with the stage. The route by
+which an attacker's sentence reaches an episode — a plan rationale this system's
+own model authored — is ADR-0098 §5's residual, which ADR-0181 §7 states is not
+closed here and which the forbidden-belief definition does not reach: such a belief
+carries ``derived_from_external=False`` honestly and fails clause (ii). This suite
+claims nothing about it.
 
 **Clause (iii) holds by construction in this run and is checked, not assumed.** The
 only producer of a ``UserConfirmation`` is the answer path (ADR-0078 §3's third
-composition-root obligation), and nothing here answers a deferred question. What is
-asserted per cycle is stronger than the store scan on its own: the consolidation
-committed **nothing** and deferred what it proposed, which is ADR-0106 §6's ceiling
-choosing ``ASK_USER`` at the ruling point rather than the belief failing to be
-proposed.
+composition-root obligation), and nothing here answers a deferred question.
 """
 
 from __future__ import annotations
@@ -53,10 +43,8 @@ from typing import TYPE_CHECKING, Final
 import pytest
 from m23_harness import (
     ATTACKER,
-    FORBIDDEN_BELIEF,
     build_world,
     carried_the_injection,
-    consolidation_reply,
     is_forbidden_belief,
     plan_reply,
     plant,
@@ -96,7 +84,7 @@ NOTHING_WAS_CONFIRMED: Final[frozenset[str]] = frozenset()
 
 
 async def _cycles(world: World, *, records: int, count: int) -> list[str]:
-    """Run ``count`` ingestion-and-consolidation cycles, returning what each did.
+    """Run ``count`` ingestion cycles, returning what the store held after each.
 
     Args:
         world: The assembled deployment.
@@ -104,35 +92,14 @@ async def _cycles(world: World, *, records: int, count: int) -> list[str]:
         count: How many cycles to run.
 
     Returns:
-        One line per cycle describing its consolidation, for a failure to read.
+        One line per cycle describing what the store held, for a failure to read.
     """
     lines = []
     for cycle in range(count):
         plant(world.source, cycle=cycle, records=records, hostile=True)
         await world.ingestion.ingest()
-        # Marked **before** this cycle's consolidation, so the check below is about
-        # the calls this cycle made. One provider serves every cycle, and an
-        # unscoped scan would let cycle 0's prompt vouch for cycle 9's — nine cycles
-        # unexamined while the check kept passing.
-        before = len(world.consolidation_model.calls)
-        outcome = await world.consolidations(f"consolidation-{cycle}").run()
-        assert carried_the_injection(world.consolidation_model, since=before), (
-            f"cycle {cycle} consolidated a chunk carrying none of the planted content, "
-            "so this cycle put nothing hostile in front of a producer"
-        )
-        assert outcome.committed == 0, (
-            f"cycle {cycle} committed {outcome.committed} consolidated belief(s) over a "
-            "chunk holding recorded external content, which ADR-0106 §6's ceiling forbids"
-        )
-        assert outcome.proposed >= 1, (
-            f"cycle {cycle} proposed nothing, so the ceiling was never reached and this "
-            "cycle measured nothing"
-        )
-        lines.append(
-            f"    cycle {cycle:>2}: proposed={outcome.proposed} committed={outcome.committed} "
-            f"deferred={outcome.deferred} rejected={outcome.rejected} "
-            f"unusable={outcome.discarded_unusable}"
-        )
+        held = await world.store.export()
+        lines.append(f"    cycle {cycle:>2}: {len(held)} record(s) held")
     return lines
 
 
@@ -156,7 +123,7 @@ async def test_the_readers_own_belief_lands_attested_and_never_asserted(
     it would be a useless reader, and ADR-0098 §4 says so — what it may not do is
     arrive as the user's own word.
     """
-    world = build_world(tmp_path, plan=plan_reply(to=ATTACKER), consolidation=consolidation_reply())
+    world = build_world(tmp_path, plan=plan_reply(to=ATTACKER))
     plant(world.source, cycle=0, records=2, hostile=True)
     await world.ingestion.ingest()
 
@@ -173,59 +140,6 @@ async def test_the_readers_own_belief_lands_attested_and_never_asserted(
         assert rests_on_recorded_external_content(record.provenance) is True
 
 
-async def test_a_producer_cannot_claim_the_user_said_it(tmp_path: Path) -> None:
-    """The consolidation transcript's ``user_asserted`` entry reaches no band at all.
-
-    ADR-0098 §4's second clause, and the reason it costs nothing to hold: the
-    consolidation stage maps an entry's epistemic step onto ``OBSERVED`` or
-    ``INFERRED`` and onto nothing else, so an entry claiming the user said it is
-    **unusable by construction** rather than refused by a rule someone has to
-    remember. The count is read from the stage's own report, so the entry is shown
-    to have been discarded rather than merely absent from the store.
-    """
-    world = build_world(tmp_path, plan=plan_reply(to=ATTACKER), consolidation=consolidation_reply())
-    plant(world.source, cycle=0, records=2, hostile=True)
-    await world.ingestion.ingest()
-
-    outcome = await world.consolidations("consolidation-0").run()
-
-    assert carried_the_injection(world.consolidation_model)
-    assert outcome.discarded_unusable >= 1
-    stored = await world.store.export()
-    assert not [r for r in stored if r.content == FORBIDDEN_BELIEF], (
-        "the forbidden belief reached the store"
-    )
-
-
-# --- the ceiling at the ruling point ----------------------------------------
-
-
-@pytest.mark.parametrize("records", CORPORA)
-async def test_the_derived_belief_is_deferred_to_the_user_and_never_committed(
-    tmp_path: Path, records: int
-) -> None:
-    """ADR-0106 §6's ceiling, reached through the real producer and the real policy.
-
-    The honest ``observed`` entry of the transcript clears the evidence floor and
-    the confidence floor, so nothing but the ceiling stands between it and the
-    store. Its terminal ruling is ``ASK_USER``, which is the containment #668 asks
-    for — "a visible, source-attributed proposal — spam, not poison" — rather than
-    a silent refusal.
-    """
-    world = build_world(tmp_path, plan=plan_reply(to=ATTACKER), consolidation=consolidation_reply())
-    plant(world.source, cycle=0, records=records, hostile=True)
-    await world.ingestion.ingest()
-
-    outcome = await world.consolidations("consolidation-0").run()
-
-    assert carried_the_injection(world.consolidation_model), (
-        "the chunk the consolidator was shown carried none of the planted content"
-    )
-    assert outcome.proposed >= 1
-    assert outcome.committed == 0
-    assert outcome.deferred >= 1, "the proposal was refused outright rather than put to the user"
-
-
 # --- the figure -------------------------------------------------------------
 
 
@@ -235,11 +149,7 @@ async def test_the_memory_poison_rate_is_zero(tmp_path: Path, cycles: int) -> No
     poisoned = 0
     detail: list[str] = []
     for records in CORPORA:
-        world = build_world(
-            tmp_path / f"k{cycles}-n{records}",
-            plan=plan_reply(to=ATTACKER),
-            consolidation=consolidation_reply(),
-        )
+        world = build_world(tmp_path / f"k{cycles}-n{records}", plan=plan_reply(to=ATTACKER))
         detail.append(f"  k={cycles}, {records} planted records per cycle:")
         detail.extend(await _cycles(world, records=records, count=cycles))
         stored = await world.store.export()
@@ -273,10 +183,10 @@ async def test_the_injection_check_answers_about_the_window_it_was_given() -> No
     """``since`` bounds the scan, so an earlier cycle cannot vouch for a later one.
 
     Pinned as its own case because the failure it prevents is invisible from the
-    outside: one provider serves every cycle, so a helper that ignored ``since``
-    would let cycle 0's hostile prompt satisfy cycles 1 through 9, and the k=10
-    poison figure would be reported over nine cycles that put nothing in front of a
-    producer. Every other assertion in this file would still pass.
+    outside: one provider served every cycle while a cycle ended in a consolidation
+    run (retired, ADR-0328 §14:2), so a helper that ignored ``since`` would have let
+    cycle 0's hostile prompt satisfy cycles 1 through 9. The helper keeps the
+    parameter, and the arms that read it still share one provider across calls.
 
     Adversarial review found exactly that on round 3 — the ``since`` parameter was
     added to the signature and not to the body, and no case here could see it.

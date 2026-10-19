@@ -88,7 +88,6 @@ class FakeEngine:
         self.started = 0
         self.closed = 0
         self.purged = 0
-        self.consolidated = 0
         self.decided_flags = 0
         self.reconsidered = 0
         self.noticed = 0
@@ -122,24 +121,17 @@ class FakeEngine:
         # (ADR-0119 §10) — the honest report for a stand-in that holds no store.
         return PurgeReport(records=0, traces=None)
 
-    async def consolidate(self) -> None:
-        # Leg 7's chunked walk (ADR-0106, ADR-0111). Present whether or not a
-        # deployment arms the job, because `jobs_for` builds §7's whole table
-        # before filtering it by interval, so a stand-in missing a method the real
-        # façade carries fails the hub's *startup* rather than only the job it
-        # would have armed.
-        self.consolidated += 1
-        _marker.info("fake_engine_consolidated")
-
     async def decide_story_flags(self) -> None:
-        # ADR-0300 §9:3's matters pass, on consolidation's interval. Present for
-        # ``consolidate``'s reason exactly: `jobs_for` builds the whole table before
-        # filtering it by interval.
+        # ADR-0300 §9:3's matters pass, at `consolidation_interval` (ADR-0328
+        # §14:3). Present whether or not a deployment arms the job, because
+        # `jobs_for` builds §7's whole table before filtering it by interval, so a
+        # stand-in missing a method the real façade carries fails the hub's
+        # *startup* rather than only the job it would have armed.
         self.decided_flags += 1
         _marker.info("fake_engine_decided_story_flags")
 
     async def notice_upcoming_events(self) -> int:
-        # ADR-0132's upcoming-event producer. Present for ``consolidate``'s reason
+        # ADR-0132's upcoming-event producer. Present for ``decide_story_flags``'s reason
         # exactly — ``jobs_for`` builds §7's whole table before filtering it by
         # interval — and disabled because nothing may read a user's personal files
         # because a default said so (ADR-0093 §7, ADR-0132 §4), so
@@ -151,7 +143,7 @@ class FakeEngine:
 
     async def reconsider_notifications(self) -> int:
         # Leg 10's reconsideration drain (ADR-0130 §5), and the one job on §7's
-        # table that ships **enabled** — so unlike `consolidate` this
+        # table that ships **enabled** — so unlike `decide_story_flags` this
         # stand-in is actually driven by the default table rather than merely
         # required to exist for it to be built.
         self.reconsidered += 1

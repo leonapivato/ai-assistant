@@ -26,7 +26,7 @@ projection in `interfaces/` (ADR-0073 §7).
 
 Beside those sits the **maintenance surface** ADR-0083 §8 adds for that scheduler:
 :meth:`Engine.start`'s sweeps, :meth:`Engine.purge_expired`,
-:meth:`Engine.notice_upcoming_events`, :meth:`Engine.consolidate` and
+:meth:`Engine.notice_upcoming_events`, :meth:`Engine.decide_story_flags` and
 :attr:`Engine.drain_phase`. New *concrete* surface on this class rather than
 ``core`` contract surface — the scheduler holds this object from inside the hub,
 not the ``AssistantEngine`` Protocol a client sees, which names none of these.
@@ -118,7 +118,6 @@ from ai_assistant.core.types import (
     StoryNoteId,
     StoryOutcome,
     TextChannelPayload,
-    TraceOutcome,
     WholeTextReply,
     band_of,
     chat_conversation_ids,
@@ -282,10 +281,6 @@ if TYPE_CHECKING:
         UserMessage,
     )
     from ai_assistant.orchestration.connections import ConnectionOperations
-    from ai_assistant.orchestration.consolidation import (
-        ConsolidationReport,
-        ConsolidationStage,
-    )
     from ai_assistant.orchestration.conversations import ConversationLifecycle
     from ai_assistant.orchestration.delivery import DeliveryOutbox
     from ai_assistant.orchestration.grants import GrantOperations
@@ -785,41 +780,6 @@ async def _written_preferences(
     """
     await store.set_preferences(preferences)
     return await store.preferences()
-
-
-def _consolidated(report: ConsolidationReport) -> Observation:
-    """Read one consolidation run onto its own ``OPERATION`` trace (ADR-0119 §8).
-
-    **A run that returns is ``OK``.** A run stopped at a question the
-    deferred-question queue refused at its cap was the one halt ADR-0111 §9 gave
-    ``INCOMPLETE``, and that queue has retired, so nothing produces ``INCOMPLETE``
-    any more (#3025, ADR-0319 §5): an ``ASK_USER`` ruling is counted
-    as deferred and its chunk recorded as done (ADR-0319 §5), so a run that
-    returns has either exhausted the store or spent its budget, and both are
-    completed runs. ``exhausted`` tells those two apart, so it is carried as a
-    metric.
-
-    Args:
-        report: What the run examined, proposed and recorded.
-
-    Returns:
-        The run's counters, under an ``OK`` outcome.
-    """
-    return Observation(
-        outcome=TraceOutcome.OK,
-        metrics={
-            "chunks": report.chunks,
-            "examined": report.examined,
-            "proposed": report.proposed,
-            "committed": report.committed,
-            "deferred": report.deferred,
-            "rejected": report.rejected,
-            "discarded_unusable": report.discarded_unusable,
-            "discarded_over_limit": report.discarded_over_limit,
-            "refused_self_citing": report.refused_self_citing,
-            "exhausted": report.exhausted,
-        },
-    )
 
 
 #: The floor a belief's **presented** confidence falls to as its support is lost
@@ -1474,7 +1434,6 @@ class Engine:
         grant_operations: GrantOperations,
         connection_operations: ConnectionOperations,
         upcoming: UpcomingEventStage | None = None,
-        consolidation: ConsolidationStage | None = None,
         notifications: NotificationStore | None = None,
         notification_policy: NotificationPolicy | None = None,
         notification_outbox: DeliveryOutbox | None = None,
@@ -1683,20 +1642,6 @@ class Engine:
                 about it: it refuses rather than reporting an empty success,
                 because a job that reports health while doing nothing is the
                 failure mode this corpus keeps naming (ADR-0022 §4a).
-            consolidation: The chunked consolidation stage (ADR-0106, ADR-0111), or
-                ``None`` where this deployment wires none. It writes through the
-                *same* write stage every other producer here uses — ADR-0106 §6
-                obliges it by name, because a job calling ``MemoryWriter.ingest``
-                directly would rule ``ASK_USER`` on a thousand consolidations and
-                persist not one question — and it walks the **same ``MemoryStore``
-                instance** ``memory`` names, or it would propose beliefs citing
-                records the write path cannot resolve.
-
-                **Optional for ``upcoming``'s reason**, one job over: the
-                consolidation job ships disabled, so an engine without the stage is
-                an ordinary deployment rather than a half-built one. And
-                :meth:`consolidate` refuses rather than reporting an empty success,
-                for the same reason again.
             notifications: The durable home of held notifications and the user's
                 standing settings (ADR-0130 §9), or ``None`` where this deployment
                 wires none — which every deployment does today, the ADR ratifying
@@ -1933,7 +1878,6 @@ class Engine:
         self._grants = grant_operations
         self._connections = connection_operations
         self._upcoming = upcoming
-        self._consolidation = consolidation
         if (notifications is None) != (notification_policy is None):
             msg = (
                 "a notification store and a notification policy are wired together or "
@@ -2484,75 +2428,16 @@ class Engine:
             raise ConfigurationError(msg)
         return await self._tracked(self._upcoming.notice(), "notice_upcoming_events", _noticed)
 
-    async def consolidate(self) -> ConsolidationReport:
-        """Distil stored records into durable beliefs, one bounded run (ADR-0106).
-
-        The **maintenance surface**'s third scheduled operation. ADR-0083 §8 already
-        settled that this is "new *concrete* surface on a class in
-        ``orchestration``, not ``core`` contract surface", and ADR-0085 §1 fixes the
-        promoted ``AssistantEngine`` Protocol at fifteen *request* methods with
-        lifecycle deliberately off it — "a Protocol constrains what an
-        implementation must have, not what it may not". :meth:`purge_expired` and
-        :meth:`notice_upcoming_events` are the standing proof, and ADR-0114 §9 records this as a
-        non-decision so the implementing lane does not relitigate it.
-
-        **Takes no argument, deliberately**, which is what makes it a legal
-        ``JobBody`` and keeps the whole of the chunking below the façade where
-        ADR-0111 §1 put the cursor. The scheduler holds an ``Engine`` and nothing
-        else — no store, no cursor, no subsystem import — and "neither reads it,
-        writes it, nor passes it".
-
-        **One run, not a walk to exhaustion.** It commits chunks until its work is
-        exhausted or its run budget is spent, then returns; the scheduler re-arms it
-        from completion plus its interval exactly like a job that finished, because
-        it is not told which happened and does not need to be (ADR-0111 §4). A run
-        that halts at a chunk it could not record as done is a **completed run that
-        did not exhaust its work**, never a failure — recording it as one would make
-        a queue at its cap indistinguishable from a broken store (ADR-0111 §9).
-
-        Tracked like every other public method, so shutdown drains the write it is
-        in the middle of before closing the connections it is writing through
-        (ADR-0042 §2).
-
-        Returns:
-            What the run did, in Tier 2 counts and two dispositions. Every count
-            zero is a **successful** pass over material that justified nothing, and
-            no caller may read it as a failure.
-
-        Raises:
-            RuntimeError: If the engine is shutting down. The scheduler treats this
-                as *stop* rather than as a job failure (ADR-0083 §8), which is what
-                :data:`ENGINE_SHUTTING_DOWN` exists for.
-            ConfigurationError: If this engine was built with no consolidation
-                stage, for :meth:`notice_upcoming_events`'s reason: an empty report would be
-                indistinguishable from material that justified nothing, so a
-                deployment whose stage failed to wire would look healthy forever
-                while consolidating nothing — the shape ADR-0022 §4a refuses.
-            MemoryStoreError: If the store could not be read or the write path
-                failed. The cursor is left where it was, so the chunk in flight is
-                re-processed on the next run (ADR-0111 §3).
-            ModelError: Propagated unwrapped from the provider, its classification
-                intact (ADR-0013 §5). Same disposition: nothing is recorded as done.
-        """
-        self._reject_if_closing()
-        if self._consolidation is None:
-            msg = (
-                "no consolidation stage is wired, so there is nothing to consolidate; "
-                "it needs a model provider and the memory store the write stage "
-                "persists to (ADR-0106 §6, ADR-0111 §4)"
-            )
-            raise ConfigurationError(msg)
-        return await self._tracked(self._consolidation.run(), "consolidate", _consolidated)
-
     async def decide_story_flags(self) -> MattersPassReport:
         """Decide the flags on the stories, one bounded run (ADR-0300 §9:3, ADR-0302 §5).
 
         The **maintenance surface**'s scheduled run of the matters pass, on
-        :meth:`consolidate`'s shape: concrete surface on this class and not
+        :meth:`notice_upcoming_events`'s shape: concrete surface on this class and not
         ``AssistantEngine``'s (ADR-0083 §8, ADR-0302 §4:6's *"AssistantEngine gains
         nothing"*), taking no argument so it is a legal ``JobBody``, and driven by the
-        scheduler's ``matters_pass`` row on consolidation's interval, the schedule of
-        the background memory work §9:3 names.
+        scheduler's ``matters_pass`` row at ``consolidation_interval``, the schedule of
+        the background memory work §9:3 names, which outlived the consolidation stage
+        (ADR-0328 §14:3).
 
         **The engine decides nothing itself.** It delegates to
         :class:`~ai_assistant.orchestration.matters_pass.MattersPass`, which writes
@@ -2571,7 +2456,7 @@ class Engine:
             RuntimeError: If the engine is shutting down. The scheduler treats this
                 as *stop* rather than as a job failure (ADR-0083 §8).
             ConfigurationError: If this engine was built with no matters pass, for
-                :meth:`consolidate`'s reason: an empty report would be
+                :meth:`notice_upcoming_events`'s reason: an empty report would be
                 indistinguishable from a store with no flag on it (ADR-0022 §4a).
             StoryStoreError: If the story store could not be read or written. What
                 the run wrote before it stands, each decision in its own transaction.

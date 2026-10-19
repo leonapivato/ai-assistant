@@ -40,7 +40,6 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import timedelta
-from itertools import count
 from typing import TYPE_CHECKING, Final
 
 from m23_harness import (
@@ -50,10 +49,8 @@ from m23_harness import (
     WINDOW,
     Connector,
     PriorIngestion,
-    _Consolidations,
     _Keyring,
     _Records,
-    consolidation_reply,
     plant,
 )
 
@@ -70,7 +67,6 @@ from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapabilit
 from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.chat import ChatWriter
 from ai_assistant.orchestration.connections import ConnectionOperations
-from ai_assistant.orchestration.consolidation import ConsolidationStage
 from ai_assistant.orchestration.conversations import ConversationLifecycle
 from ai_assistant.orchestration.grants import GrantOperations
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
@@ -81,7 +77,6 @@ from ai_assistant.orchestration.understanding import (
     UnderstandingStage,
     WindowsStage,
 )
-from ai_assistant.orchestration.writes import MemoryWriteStage
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.readers import CalendarReader
 from ai_assistant.testing import (
@@ -189,10 +184,6 @@ class PhasesWorld:
         connector: The socket that must never be opened.
         source: The ``.ics`` file :func:`m23_harness.plant` rewrites.
         conversations: The chat space the reader takes messages from.
-        consolidations: A consolidation stage over a named walk, as
-            :class:`m23_harness.World`'s, for arm (b)'s cycles.
-        consolidation_model: The consolidation's provider, replaying the transcript
-            that tries to launder the injection.
     """
 
     engine: Engine
@@ -204,8 +195,6 @@ class PhasesWorld:
     connector: Connector
     source: Path
     conversations: FakeConversationStore
-    consolidations: _Consolidations
-    consolidation_model: FakeModelProvider
 
 
 def build_phases_world(
@@ -226,7 +215,6 @@ def build_phases_world(
     writer = MemoryIngestor(
         store=store, policy=DefaultMemoryPolicy(), traces_sink=FakeTraceSink(), now=lambda: NOW
     )
-    writes = MemoryWriteStage(writer=writer)
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     source = tmp_path / "calendar.ics"
@@ -325,19 +313,6 @@ def build_phases_world(
         phases=phases,
         now=lambda: NOW,
     )
-    walks = count(1)
-    consolidation_model = FakeModelProvider(consolidation_reply())
-
-    def consolidations(walk: str) -> ConsolidationStage:
-        return ConsolidationStage(
-            memory=store,
-            writes=writes,
-            model=consolidation_model,
-            now=lambda: NOW,
-            id_factory=lambda: f"c-{next(walks)}",
-            walk=walk,
-        )
-
     return PhasesWorld(
         engine=engine,
         store=store,
@@ -348,8 +323,6 @@ def build_phases_world(
         connector=connector,
         source=source,
         conversations=chat,
-        consolidations=consolidations,
-        consolidation_model=consolidation_model,
     )
 
 

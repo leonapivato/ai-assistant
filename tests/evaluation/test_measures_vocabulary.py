@@ -35,6 +35,11 @@ _RETIRED_OBSERVATION_SEAMS = frozenset({"observe", "observe_due"})
 #: terms.
 _RETIRED_BUT_CLASSIFIED = frozenset({"learn", "converse", "resume", "answer"})
 
+#: ``consolidate``, which ADR-0328 §14:2 retires from the engine and which stays on
+#: the machine set on the same terms: the traces a store already holds under it keep
+#: counting as the system's own initiative, and no operation emits it again.
+_RETIRED_MACHINE_SEAMS = frozenset({"consolidate"})
+
 
 class TestMetricKeys:
     """Each key this package reads is the key ``memory/traces.py`` writes."""
@@ -78,11 +83,15 @@ class TestSeamSets:
         Less the retired seams that keep their classification, which are named so that
         each is asserted retired rather than passed over.
         """
-        for seam in (vocabulary.USER_SEAMS | vocabulary.MACHINE_SEAMS) - _RETIRED_BUT_CLASSIFIED:
+        retired = _RETIRED_BUT_CLASSIFIED | _RETIRED_MACHINE_SEAMS
+        for seam in (vocabulary.USER_SEAMS | vocabulary.MACHINE_SEAMS) - retired:
             assert hasattr(Engine, seam), seam
         for seam in _RETIRED_BUT_CLASSIFIED:
             assert not hasattr(Engine, seam), seam
             assert seam in vocabulary.USER_SEAMS, seam
+        for seam in _RETIRED_MACHINE_SEAMS:
+            assert not hasattr(Engine, seam), seam
+            assert seam in vocabulary.MACHINE_SEAMS, seam
 
     def test_the_two_sets_are_disjoint(self) -> None:
         """A seam on both lists would put one write in two causes."""

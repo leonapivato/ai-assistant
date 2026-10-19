@@ -83,6 +83,8 @@ from ai_assistant.memory import (
 )
 from ai_assistant.models import BoundedEmbedder, HashingEmbedder
 from ai_assistant.orchestration import Engine
+from ai_assistant.orchestration.acting import OwnRecordsByCapability
+from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY, RememberCalls
 from ai_assistant.orchestration.upcoming import (
     NOTIFICATION_CLASS as UPCOMING_NOTIFICATION_CLASS,
 )
@@ -209,20 +211,39 @@ async def test_build_engine_wires_one_memory_store_into_both_the_engine_and_the_
     that it is "unenforceable here precisely because no store is on this seam" —
     so the composition root is the only place it can be checked, and identity is
     the only way to check it. Split the two and what the assistant learns is written
-    somewhere nothing ever reads. The writer is reached through the one write stage
-    every producer shares (ADR-0078 §3), consolidation's.
+    somewhere nothing ever reads. The writer is reached through ``remember``'s
+    runner (:func:`_memory_writer`).
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         memory = engine._memory
         assert isinstance(memory, SqliteMemoryStore)
-        consolidation = engine._consolidation
-        assert consolidation is not None
-        writer = consolidation._writes._writer
-        assert isinstance(writer, MemoryIngestor)  # narrows the Protocol-typed seam
-        assert writer._store is memory
+        assert _memory_writer(engine)._store is memory
     finally:
         await engine.aclose()
+
+
+def _memory_writer(engine: Engine) -> MemoryIngestor:
+    """The one :class:`MemoryIngestor` the root builds, as the engine holds it.
+
+    Reached through ``remember``'s runner on the phases' acting stage, which holds
+    it since the consolidation stage, its other holder, retired (ADR-0328 §14:2).
+
+    Args:
+        engine: The engine the root built.
+
+    Returns:
+        The writer, narrowed from the Protocol-typed seams it sits behind.
+    """
+    phases = engine._phases
+    assert phases is not None
+    own_records = phases._acting._own_records
+    assert isinstance(own_records, OwnRecordsByCapability)
+    runner = own_records._runners[REMEMBER_CAPABILITY]
+    assert isinstance(runner, RememberCalls)
+    writer = runner._writer
+    assert isinstance(writer, MemoryIngestor)  # narrows the Protocol-typed seam
+    return writer
 
 
 async def test_build_engine_wires_the_on_device_embedder_by_default(tmp_path: Path) -> None:
@@ -1727,10 +1748,10 @@ async def test_only_the_maintenance_operation_is_handed_the_trace_store(
     try:
         holders = _holders_of(engine, built[0])
         assert sorted(holders) == [
-            "engine._consolidation._writes._writer._traces._sink",
             "engine._memory._traces._sink",
             "engine._notifications._traces._sink",
             "engine._operation_traces._sink",
+            "engine._phases._acting._own_records._runners['remember']._writer._traces._sink",
             "engine._traces",
         ], f"the trace store is reachable from {holders}"
     finally:
@@ -1814,25 +1835,36 @@ async def test_a_keep_forever_horizon_sweeps_no_trace(
         await engine.aclose()
 
 
-def _holders_of(root: object, target: object, *, depth: int = 6) -> list[str]:
+def _holders_of(root: object, target: object, *, depth: int = 7) -> list[str]:
     """Every attribute path from ``root`` that reaches ``target``.
 
     Bounded in depth and cycle-guarded, because an engine's object graph is deep
-    and partly cyclic. **Six levels rather than four** since ADR-0119 §8's memory
-    emitters landed: the writer's sink sits at
-    ``engine._consolidation._writes._writer._traces._sink``, one hop past where four
-    stopped, so the walk would have reported one memory emitter and silently
-    missed its twin. Eight finds nothing six does not, so six is a bound rather
-    than a lucky number.
+    and partly cyclic. **Seven levels, and a dict's values are walked as part of
+    the attribute holding it**, since the consolidation stage retired (ADR-0328
+    §14:2): the writer's sink was reached at
+    ``engine._consolidation._writes._writer._traces._sink``, and its one holder now
+    is ``remember``'s runner, inside the acting stage's dict of runners by
+    capability, so a walk of six levels over attributes alone would report one
+    memory emitter and silently miss its twin. Ten finds nothing seven does not, so
+    seven is a bound rather than a lucky number.
     """
     found: list[str] = []
     seen: set[int] = set()
+
+    def children(subject: object) -> list[tuple[str, object]]:
+        pairs: list[tuple[str, object]] = []
+        for name, value in vars(subject).items():
+            if isinstance(value, dict):
+                pairs.extend((f"{name}[{key!r}]", item) for key, item in value.items())
+            else:
+                pairs.append((name, value))
+        return pairs
 
     def visit(subject: object, path: str, remaining: int) -> None:
         if remaining == 0 or id(subject) in seen:
             return
         seen.add(id(subject))
-        for name, value in vars(subject).items():
+        for name, value in children(subject):
             if value is target:
                 found.append(f"{path}.{name}")
             elif hasattr(value, "__dict__"):
@@ -2398,10 +2430,7 @@ async def test_build_composition_tunes_the_ingestor_to_the_figure_it_reports(
     """
     composed = build_composition(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        consolidation = composed.engine._consolidation
-        assert consolidation is not None
-        writer = consolidation._writes._writer
-        assert isinstance(writer, MemoryIngestor)  # narrows the Protocol-typed seam
+        writer = _memory_writer(composed.engine)
         assert writer._conflict_limit + 2 == composed.conflict_search_limit
     finally:
         await composed.engine.aclose()

@@ -5,7 +5,7 @@ public method, so the operation's name, its outcome, its elapsed time and its
 fault class are all in hand at one place, for a turn, a scheduled job and a
 client command alike". That is three of the dispatch's five seams behind one
 wiring point, and it follows from ADR-0083 §8's ruling that "every scheduler job
-is a public ``Engine`` call" — a consolidation run, a retention purge and a
+is a public ``Engine`` call" — a matters pass run, a retention purge and a
 user's turn are one kind of event distinguished by the seam label and the
 outcome, not three kinds needing three emitters.
 
@@ -217,7 +217,7 @@ class OperationTraces:
         **The scope opens here and not at the call site**, because this is the
         boundary §4 means by "one ``AssistantEngine`` operation": every trace any
         subsystem emits while this awaits — a ``RETRIEVAL`` inside a turn, a
-        ``MEMORY_WRITE`` inside a consolidation chunk — reads the same identifier
+        ``MEMORY_WRITE`` inside a scheduled job — reads the same identifier
         out of the context and joins to this one.
 
         **A cancellation is never classified** (§3, ADR-0060 §1). ``except

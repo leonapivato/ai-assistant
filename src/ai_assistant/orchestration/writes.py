@@ -15,10 +15,10 @@ data (ADR-0004 §5). Whether a deferred proposal
 should become something the user is asked is for the learning work to decide,
 not this stage.
 
-**One stage, injected into every producer's stage.** ``ConsolidationStage``
-reaches memory through this object rather than through a ``MemoryWriter`` handle
-of its own, so every producer's proposal takes the one route and is reported the
-same way.
+**One stage, injected into every producer's stage**, so every producer's proposal
+takes the one route and is reported the same way. Its one producer, the
+consolidation stage, retired (ADR-0328 §14:2), and nothing in production holds it
+until another producer does.
 """
 
 from __future__ import annotations

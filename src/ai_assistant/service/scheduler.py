@@ -32,8 +32,8 @@ correctness bug: ADR-0007 §2 enforces retention at *read* time, and every job o
 the list is a physical reclaim or a re-derivation of something a read path already
 computes. Serialising buys a scheduler that is one thing to reason about, one thing
 to cancel and one thing to drain. §7 attaches a revisit trigger to that choice —
-*when a job's typical runtime approaches its interval*, which consolidation
-(leg 7) is likely to do first — and this module deliberately does not pre-empt it.
+*when a job's typical runtime approaches its interval* — and this module
+deliberately does not pre-empt it.
 
 **Elapsed time is ``asyncio.sleep``** (§9), which is loop-monotonic, needs no
 contract and is cancellable — which is how phase A of shutdown stops it promptly.
@@ -209,58 +209,18 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       deployment is a lead comfortably larger than its interval. That is this
       producer's coverage argument and it is a bounded one.
 
-    * **Consolidation** — leg 7's chunked walk (ADR-0106, ADR-0111), and the
-      **last** row, which is a scheduling decision rather than a listing order.
-      Every job is due at the first tick, and this is the one whose run is bounded
-      by a budget rather than by its backlog, so putting it last is what lets each
-      sibling have its turn at boot before the loop is occupied for up to
-      ``scheduler_run_budget`` plus one chunk.
-
-      **Its absence used to be the decision, and ADR-0111 §4's second clause is
-      what has changed.** §4 makes a per-operation deadline "a precondition of
-      being chunked at all", and says in terms that this "must be checked rather
-      than assumed": "a job whose chunk reaches an operation with no deadline is
-      not a job that may be chunked under this ADR, and its lane owes that
-      operation a deadline before it may be scheduled." A chunk's model call was
-      always bounded by ``model_timeout_seconds``; its **writes** reach the
-      ``Embedder`` through ``MemoryStore.write_atomic``, and that seam was
-      unbounded — so a hung backend held this serial loop past any run budget.
-      ADR-0118 put ``embedding_timeout_seconds`` on it, wired by the composition
-      root at the single point every consumer goes through (§2), which is what
-      #820 closed. The check now comes out bounded and the row is admissible;
-      ADR-0111 §11 leaves the arming itself to "an implementation lane's act
-      against this text once ratified".
-
-      **Disabled by default, and not for want of a cursor.** This job has had one
-      from the start — ADR-0111 §1's walk position, advanced strictly after each
-      chunk's effects — so its default was never about repetition. What it
-      expresses is cost and duty cycle: a model call per chunk, and a sibling's
-      worst-case delay a fresh install must not accept by omission.
-
-      **It is also the job ADR-0083 §7's revisit condition named** — "revisit when
-      a job's typical runtime approaches its interval, which is what consolidation
-      (leg 7) is likely to do first" — and ADR-0111 §8 answers it with a bounded
-      run rather than concurrency: "The scheduler runs one job at a time. A
-      long-running job is made tolerable by bounding its run (§4), never by running
-      jobs concurrently." Its run budget and chunk size are already ``Settings``,
-      so the delay it imposes on a sibling is a figure an operator can read off the
-      configuration rather than an unknown.
-
-      **The whole of the chunking stays below the façade**, where ADR-0111 §1 put
-      the cursor: ``Engine.consolidate`` takes no argument, and this row holds a
-      bound method and neither reads the cursor, writes it, nor passes it.
     * **The matters pass** — ADR-0300 §9:3's background pass deciding the flags on
       the stories, as ADR-0302 §5 builds it. §9:3 runs it "on the schedule of the
-      background memory work, consolidation", so the row reads
-      ``consolidation_interval`` and nothing of its own: armed exactly where
-      consolidation is, at the same interval, and disabled with it. **A row of its
-      own rather than a step inside** ``Engine.consolidate``, so each job's failure
-      is its own log line and its own trace, a provider error in one never costs
-      the other its run, and ``ConsolidationReport`` stays the report of the walk
-      it describes. It is the same kind of row as the two above it — a bound public
-      engine method holding no store (ADR-0083 §8) — and the last, for
-      consolidation's reason: its run is bounded by ``scheduler_run_budget`` rather
-      than by its backlog, so a sibling waits behind it at most that long.
+      background memory work, consolidation", and that schedule outlived the
+      consolidation stage, whose row retired (ADR-0328 §14:2-§14:3): the row reads
+      ``consolidation_interval`` and nothing of its own, so it is **disabled by
+      default** and armed only by an operator setting that interval. It is the same
+      kind of row as the two above it — a bound public engine method holding no
+      store (ADR-0083 §8) — and the **last**, which is a scheduling decision rather
+      than a listing order: every job is due at the first tick, and this is the one
+      whose run is bounded by ``scheduler_run_budget`` rather than by its backlog,
+      so putting it last lets each sibling have its turn at boot and a sibling waits
+      behind it at most that long.
 
     **No reader ingests on this table** (ADR-0294 §1). The calendar's and the email
     source's scheduled ingestion rows are retired and nothing replaces them here: a
@@ -292,7 +252,6 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
             settings.calendar_upcoming_interval,
             engine.notice_upcoming_events,
         ),
-        ("consolidation", settings.consolidation_interval, engine.consolidate),
         ("matters_pass", settings.consolidation_interval, engine.decide_story_flags),
     )
     return tuple(

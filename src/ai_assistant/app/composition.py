@@ -65,12 +65,10 @@ from ai_assistant.models import (
 from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.orchestration import (
     ConnectionOperations,
-    ConsolidationStage,
     ConversationLifecycle,
     Engine,
     GrantOperations,
     HeldSource,
-    MemoryWriteStage,
     NotificationWriteStage,
     UpcomingEventStage,
 )
@@ -242,7 +240,7 @@ STORY_TIDY_UP_OTHER_STORIES: Final = UNDERSTANDING_STORY_CANDIDATES
 #: How long one tidy-up may take, its one completion included (ADR-0300 §5). Nobody
 #: waits for a run, so the bound is not latency: it is what frees the story for a
 #: later run when a completion hangs, since at most one runs on a story at a time.
-#: Consolidation's per-run budget is five minutes for a whole chunk of records; a
+#: The scheduler's per-run budget is five minutes for a whole background run; a
 #: tidy-up is one summary, so two.
 STORY_TIDY_UP_BUDGET: Final = timedelta(minutes=2)
 
@@ -266,7 +264,7 @@ STORY_TIDY_UP_DECISIONS: Final = STORY_TIDY_UP_OTHER_STORIES
 #: the recent ones. **Excerpt: 1,000 characters**, half the
 #: tidy-up's, because a completion here is shown two or more stories' episodes and
 #: decides what they are about rather than folding in what was settled. A run's time
-#: is bounded by ``scheduler_run_budget``, consolidation's, on whose schedule it runs.
+#: is bounded by ``scheduler_run_budget``, and it runs at ``consolidation_interval``.
 MATTERS_PASS_DECISIONS: Final = 5
 MATTERS_PASS_FLAGS_PER_RUN: Final = 10
 MATTERS_PASS_EPISODES: Final = 6
@@ -636,8 +634,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
       ``ToolRegistry`` and the acting ``ToolInvoker`` (ADR-0029 §8), and is handed
       the ``InvocationLedger`` face of the one :class:`SqliteAuditTrail` — never
       the trail itself (ADR-0192 §9);
-    * **one** :class:`MemoryWriteStage` over that writer is shared by every
-      producer's stage;
     * one :class:`SqlitePlanStore` and one :class:`SqliteAuditTrail` are shared by
       the phases and the façade — the façade reads the trail (query-only) for the
       decision and invocation listings (ADR-0052 §1);
@@ -648,9 +644,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     * the model seam is composed **retry inside routing**, the order ADR-0013 §3
       recommends and that nothing in `models/` can enforce, since enforcing it
       would mean a wrapper knowing what wraps it (see :func:`_build_model_provider`);
-    * **consolidation's** seam is composed differently on purpose — retry and *no
-      routing*, one named route that never falls back (ADR-0285 §5, see
-      :func:`_build_consolidation_provider`);
+    * **consolidation's** seam, the background route ``consolidation_model`` names, is
+      composed differently on purpose — retry and *no routing*, one named route that
+      never falls back (ADR-0285 §5, see :func:`_build_consolidation_provider`);
     * the **grant store is opened here**, as the **sixth** connection-owning Tier 1
       store, and the *same object* is passed twice — as a
       :class:`~ai_assistant.core.protocols.SourceGrantStore` to the grant operations
@@ -776,9 +772,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     # later failure.
     model = _build_model_provider(settings, _model_specs(settings))
     # Consolidation's route, built here and separately: it is one route and it never
-    # falls back (ADR-0285 §5). Above the data directory with the rest, so a
-    # consolidation spec naming an uninstalled vendor fails the build rather than
-    # the first consolidation run.
+    # falls back (ADR-0285 §5). The consolidation stage retired, and the route stays
+    # for the background work that rides it, the story tidy-up and the matters pass
+    # (ADR-0328 §14:4). Above the data directory with the rest, so a spec naming an
+    # uninstalled vendor fails the build rather than the first background run.
     consolidation_model = _build_consolidation_provider(settings, _consolidation_spec(settings))
     # The reconciler's route, on consolidation's shape and for its reasons
     # (ADR-0159 §3, ADR-0285 §5): one route, named rather than inherited, and no
@@ -1477,9 +1474,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 max_conflicts=settings.reconciler_max_conflicts,
             ),
         )
-        # **One** write stage, over that writer, shared by every producer's stage.
-        # An `ASK_USER` ruling writes nothing and is logged (ADR-0309 §5).
-        writes = MemoryWriteStage(writer=writer)
         # ADR-0300 §5's tidy-up, **one operation** for planning's tidy-up call (ADR-0300 §10:4), so
         # at most one run is on a story at a time (§5:10). Its lookalike search keeps what recall
         # would, at recall's threshold for the embedder wired (ADR-0303 §5:7). It runs on
@@ -1742,35 +1736,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                     now=_utcnow,
                     lead=settings.calendar_upcoming_lead,
                 )
-            ),
-            # Leg 7's consolidation stage (ADR-0106, ADR-0111, ADR-0114), over the
-            # *same* write stage the three producers above use and the *same*
-            # memory store it walks. Both are composition-root obligations no type
-            # expresses (ADR-0028 §4): a second write stage would rule `ASK_USER` on
-            # a thousand consolidations and park not one question, and a second
-            # store would have it propose beliefs citing records the write path
-            # cannot resolve — which ADR-0114's Alternatives give as the decisive
-            # reason the walk sits *on* `MemoryStore` rather than beside it.
-            #
-            # **Its own route, built from `consolidation_model`** — or from
-            # `default_model` where that is unset — and one that never falls back
-            # (ADR-0285 §5; `_build_consolidation_provider`). A consolidation prompt
-            # carries a whole chunk of stored records, and the work is deferrable by
-            # construction, because a run that fails does not record its chunk as
-            # done, so a second recipient buys nothing.
-            #
-            # **Always wired, unlike the upcoming-event producer**, because nothing about it
-            # is conditional on a source or a grant: the job is armed by its
-            # interval alone, which is `None` until an operator sets it. The two
-            # bounds are ADR-0111 §4's `Settings` fields, so the delay this job can
-            # impose on a sibling is a figure an operator can read off the
-            # configuration.
-            consolidation=ConsolidationStage(
-                memory=memory,
-                writes=writes,
-                model=consolidation_model,
-                chunk_size=settings.scheduler_chunk_size,
-                run_budget=settings.scheduler_run_budget,
             ),
             # Leg 10's notification chassis (ADR-0130 §3, §9). **The two are wired
             # together or not at all**, which the ``Engine`` refuses to be built
@@ -2096,9 +2061,9 @@ def ensure_model_credentials(settings: Settings) -> None:
     model error it is.
 
     Every route is checked — the router's whole preference order *and*
-    consolidation's own — because ADR-0285 §5 gives consolidation a route that
-    never falls back, so a credential it lacks disables consolidation silently
-    rather than being covered by a sibling. Duplicates are checked once;
+    consolidation's own — because ADR-0285 §5 gives that route one spec that never
+    falls back, so a credential it lacks disables the background work riding it
+    silently rather than being covered by a sibling. Duplicates are checked once;
     consolidation's spec defaults to ``default_model``, and repeating the probe
     would only repeat the message.
 
@@ -2467,7 +2432,10 @@ def _build_model_provider(settings: Settings, specs: Sequence[str]) -> RoutingPr
 
 
 def _consolidation_spec(settings: Settings) -> str:
-    """The one ``"provider:model"`` spec consolidation reads through (ADR-0285 §5).
+    """The one ``"provider:model"`` spec of consolidation's route (ADR-0285 §5).
+
+    The consolidation stage retired; the route stays, and the story tidy-up and the
+    matters pass ride it (ADR-0328 §14:4).
 
     ``consolidation_model`` when the operator named one; otherwise ``default_model``
     — **the route already configured for conversation**, and deliberately not the
@@ -2498,25 +2466,28 @@ def _consolidation_spec(settings: Settings) -> str:
 def _build_consolidation_provider(settings: Settings, spec: str) -> RetryingProvider:
     """Build consolidation's model seam: **retry, and no routing at all** (ADR-0285 §5).
 
-    The deliberate difference from :func:`_build_model_provider`: **a consolidation
-    call's failure is never re-sent to a second provider.** ADR-0013 §4 already rules
-    the mechanism — "a caller who names a model has already chosen" — and its own
-    Consequences decide the case:
+    The deliberate difference from :func:`_build_model_provider`: **a call on this
+    route is never re-sent to a second provider.** The route outlived the stage it is
+    named for (ADR-0328 §14:4); the story tidy-up and the matters pass ride it, and
+    what follows was argued for consolidation and holds for both: each is
+    background work over the assistant's own records that nobody waits on.
+    ADR-0013 §4 already rules the mechanism — "a caller who names a model has
+    already chosen" — and its own Consequences decide the case:
 
     * fallback's cost is that *more providers may see a given prompt*, which for a
-      turn buys an answer the user is waiting for. A consolidation run buys nothing
-      with it, because the work is **deferrable**: a run that fails does not record
-      its chunk as done, nothing is waiting, and the free remedy is the next run.
+      turn buys an answer the user is waiting for. A background run buys nothing
+      with it, because the work is **deferrable**: nothing is waiting, and the free
+      remedy is the next run.
     * it is the one payload where the trade inverts. A turn's prompt is one
-      utterance; a consolidation prompt is a whole chunk of stored records, so
+      utterance; a background prompt carries the assistant's stored records, so
       widening the set of recipients for reliability is exactly what ADR-0004 §7's
       minimisation rule argues against when the reliability buys nothing.
 
-    So consolidation is handed a :class:`RetryingProvider` and not a
+    So the route is a :class:`RetryingProvider` and not a
     :class:`RoutingProvider` — there is no second candidate for a routable failure
     to advance to, rather than a router that happens to hold one route. **Retry is
     not fallback**: it re-sends to the *same* provider, so it widens no recipient
-    set, and dropping it would make consolidation less resilient than every other
+    set, and dropping it would make this route less resilient than every other
     call for no privacy gain.
 
     The route **requires its own credential** (ADR-0013 §6), which follows from the
@@ -2531,13 +2502,13 @@ def _build_consolidation_provider(settings: Settings, spec: str) -> RetryingProv
         spec: Consolidation's ``"provider:model"`` spec (:func:`_consolidation_spec`).
 
     Returns:
-        The provider consolidation reads stored records through.
+        The provider the background work reads stored records through.
 
     Raises:
         ConfigurationError: If ``spec`` names a vendor unknown to pydantic-ai or
             whose optional package is not installed — checked here for the reason
             ADR-0062 §2 gives, so an operator learns at startup rather than on the
-            first consolidation run. It is checked even when it repeats
+            first background run. It is checked even when it repeats
             ``default_model``: the check is cheap, and a helper that trusted a caller
             to have checked already would break the day the two stop coinciding.
     """

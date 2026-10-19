@@ -41,7 +41,6 @@ from ai_assistant.memory._reconciler import (
     _quoted_span,
     _render,
 )
-from ai_assistant.orchestration.consolidation import _render as consolidation_render
 from ai_assistant.testing import FakeModelProvider
 
 if TYPE_CHECKING:
@@ -779,22 +778,18 @@ async def test_an_id_returned_with_its_display_quotes_is_discarded() -> None:
     ],
     ids=["forged-line", "carriage-return", "line-separators", "backslash-quote", "plain"],
 )
-def test_the_two_assemblers_escape_a_span_with_the_same_transform(span: str) -> None:
-    """`memory._reconciler` and `orchestration.consolidation` may not drift apart.
+def test_the_assembler_escapes_a_span_with_the_json_transform(span: str) -> None:
+    """`memory._reconciler` escapes a span with `json.dumps`, exactly.
 
-    They cannot share a function: golden rule 1 forbids `memory` importing
-    `orchestration`, which is why ADR-0183 §13 records the transform as three copies
-    across the tree and why this one is a fourth rather than an import. What can be
-    shared is the *property*, so it is pinned here over spans that separate every
-    plausible near-miss — `ensure_ascii=False`, a hand-rolled replacement table, a
-    single-quoted repr — rather than by identity, which is unavailable.
+    It was pinned against `orchestration.consolidation`'s copy, which golden rule 1
+    kept it from importing; that stage retired (ADR-0328 §14:2), and what stays
+    pinned is the *property*, over spans that separate every plausible near-miss —
+    `ensure_ascii=False`, a hand-rolled replacement table, a single-quoted repr.
     """
     record = _record("r", span)
 
     reconciler_prompt = _render(record, [record])
-    consolidation_prompt = consolidation_render([record], ())
 
     escaped = json.dumps(span)
     assert _quoted_span(span) == escaped
     assert reconciler_prompt.count(escaped) == 2  # the proposal's and the member's
-    assert escaped in consolidation_prompt

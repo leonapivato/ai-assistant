@@ -2284,9 +2284,10 @@ class MemoryBase(BaseModel):
       surface, store, retrieval path, scheduler job, migration or later ADR derives
       a record's topics at read time, and none derives them from ``content``, from
       a rendered facet, from a composed reply or from any other span of content
-      after the write. Exactly one producer proposes any:
-      ``ConsolidationStage`` (§6, narrowed by ADR-0285 §1). Every other writes
-      the empty tuple, and no producer labels a record another producer wrote.
+      after the write. Exactly one producer proposed any, the consolidation
+      stage (§6, narrowed by ADR-0285 §1), and it retired (ADR-0328 §14:2), so
+      every producer now writes the empty tuple, and no producer labels a record
+      another producer wrote.
     * **Empty means "no topic was recorded"** (§7). Not "about nothing" and not
       "about everything". No consumer reads an empty tuple as matching a
       topic-scoped query, and none reads it as excluded from a query naming no
