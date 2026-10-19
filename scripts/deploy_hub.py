@@ -611,19 +611,33 @@ def _commit_here(repo: Path, recorded: str) -> str | None:
         recorded: A commit's hex name, as a marker or a label records it.
 
     Returns:
-        The 40-character sha, or ``None`` when ``recorded`` is not a hex name or not a
-        commit this clone holds.
+        The 40-character sha, or ``None`` when ``recorded`` is not a hex name, or is
+        not the prefix of exactly one object here, or that object is not a commit.
+
+    The prefix is read as an object name alone. ``rev-parse <prefix>`` would prefer
+    a branch or tag of that name, so a hex-named ref could stand in for the commit
+    the record names; ``--disambiguate`` lists objects and never consults a ref.
     """
     if _HEX_COMMIT.fullmatch(recorded) is None:
         return None
-    completed = subprocess.run(  # noqa: S603  # fixed argv, no shell, resolved binary
-        [_binary("git"), "rev-parse", "--verify", "--quiet", f"{recorded}^{{commit}}"],
+    git = _binary("git")
+    listed = subprocess.run(  # noqa: S603  # fixed argv, no shell, resolved binary
+        [git, "rev-parse", f"--disambiguate={recorded}"],
         cwd=str(repo),
         capture_output=True,
         text=True,
         check=False,
-    )
-    return completed.stdout.strip() if completed.returncode == 0 else None
+    ).stdout.split()
+    if len(listed) != 1:
+        return None
+    kind = subprocess.run(  # noqa: S603  # fixed argv, no shell, resolved binary
+        [git, "cat-file", "-t", listed[0]],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    return listed[0] if kind == "commit" else None
 
 
 def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
