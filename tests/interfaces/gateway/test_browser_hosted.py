@@ -16,6 +16,19 @@ either, and the page's exchange is what every case observes.
 about how many: at most one per event, and none after a failure until the owner acts.
 
 **Nothing sleeps** (ADR-0216 §7): each case waits on a state the page reaches.
+
+**The edge stops before its context closes** (issue #3168). A case ends on the state it
+asserted, not on the page having nothing more to ask for — a web font the browser
+fetches for the panel it has just drawn is commonly still being forwarded. A route
+callback that raises is not raised in its case: Playwright keeps the error and raises it
+from the connection's *next* call, which is the next case's ``browser.new_context``. And
+closing the context makes the forward raise: ``context.close()`` disposes the context's
+request client first, which disposes every response it fetched, so a ``route.fulfill``
+of one fetched just before is refused — "Fetch response has been disposed" — while the
+page is still open to receive it. So the door unroutes with ``behavior="ignoreErrors"``
+first, Playwright's own remedy, under which what a callback still running raises after
+the unroute is swallowed rather than kept — and answers the streams it held once the
+context is closed, so none of their handling is left pending.
 """
 
 from __future__ import annotations
@@ -31,6 +44,7 @@ import pytest
 from browser_drive import DESKTOP, PHONE, SESSION_IDLE_MARGIN, DriveEngine, press
 from gateway_edge import DOOR, DOOR_ORIGIN, FakeEdge
 from gateway_timing import Clock, Timers
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import expect
 
 from ai_assistant.core.config import Settings
@@ -76,6 +90,8 @@ class Door:
         hold_exchange: Set, an exchange waits on it before it is forwarded, so a case
             can make a second refusal arrive while one is out.
         held: The stream requests held open.
+        forwards: Every forward's task, so a case can wait out one that its door was
+            closed under.
     """
 
     page: Page
@@ -92,9 +108,15 @@ class Door:
     swap_cookie: str | None = None
     hold_exchange: asyncio.Event | None = None
     held: list[Route] = field(default_factory=list)
+    forwards: list[asyncio.Task[Any]] = field(default_factory=list)
 
     async def forward(self, route: Route) -> None:
         """Forward one request to the hosted listener, as the edge does."""
+        # Playwright runs each callback as a task of its own (`RouteHandler`), so the
+        # current one is this forward and nothing wider.
+        task = asyncio.current_task()
+        assert task is not None
+        self.forwards.append(task)
         request = route.request
         path = request.url.removeprefix(DOOR_ORIGIN).split("?")[0]
         if path in _STREAMED:
@@ -171,6 +193,7 @@ async def through_the_door(
     assert hosted is not None
     servers.append(hosted)
     context: BrowserContext | None = None
+    held: list[Route] = []
     try:
         context = await browser.new_context(viewport=viewport or DESKTOP)
         page = await context.new_page()
@@ -182,6 +205,7 @@ async def through_the_door(
             clock=clock,
             timers=timers,
             port=settings.gateway_hosted_port,
+            held=held,
         )
         await context.route(f"{DOOR_ORIGIN}/**", door.forward)
         if open_page:
@@ -190,7 +214,23 @@ async def through_the_door(
     finally:
         try:
             if context is not None:
-                await context.close()
+                # The edge first, so a forward still out when the case ended raises at
+                # nobody (module docstring). Nested, so a callback's error from inside
+                # the case — which this unroute is the connection's next call for, and
+                # so raises — is the case's failure without leaving the context open.
+                try:
+                    await context.unroute_all(behavior="ignoreErrors")
+                finally:
+                    await context.close()
+                    # A held stream's callback has returned, but Playwright's handling
+                    # of its request still waits on the answer it never got. Answered
+                    # here, into the closed context, where nothing receives it — so no
+                    # handling is left pending for the run's loop to cancel at its
+                    # close, where, with the route above gone, Playwright's clean-up
+                    # of it raises into the connection's kept error.
+                    for route in held:
+                        with contextlib.suppress(PlaywrightError):
+                            await route.abort()
         finally:
             gateway.close()
             for server in servers:
@@ -429,6 +469,40 @@ async def test_a_door_refusal_mid_session_says_where_signing_in_happens(
         await expect(state).to_contain_text("The sign-in door refused this request")
         await expect(door.page.locator("#hosted-again")).to_be_visible()
         assert door.exchanges == 1
+
+
+# --- The harness: a forward the door was closed under -----------------------------------
+
+
+async def test_a_forward_still_out_when_the_door_closes_fails_no_later_case(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Issue #3168: a request the edge was still forwarding when its case ended raises
+    into nothing after the door is gone — not into the next case's first call.
+
+    The exchange is held at the edge across the door's whole teardown and let go once
+    the context is closed, so its ``route.fetch`` runs against a request client that
+    ``close()`` disposed. That is one window of the two this guards; the other, a
+    fetched response fulfilled between the disposal and the close, is as narrow as a
+    single message and cannot be held open from outside Playwright. The two meet the
+    same mechanism — a callback's error kept for the connection's next call — and the
+    one unroute closes both.
+
+    **The error is kept for the next call and raised at its start**, so the case makes
+    two once the forward has ended: the first may begin before the error is kept, and
+    the round trip it waits on means the second cannot.
+    """
+    release = asyncio.Event()
+    async with through_the_door(gateway_browser, tmp_path, open_page=False) as door:
+        door.hold_exchange = release
+        await door.page.goto(f"{DOOR_ORIGIN}/")
+        await expect(door.page.locator("#hosted-state")).to_contain_text("Starting a session")
+        assert door.exchanges == 1
+    release.set()
+    await asyncio.wait(door.forwards)
+
+    after = await gateway_browser.new_context()
+    await after.close()
 
 
 async def test_the_page_never_holds_an_assertion(gateway_browser: Browser, tmp_path: Path) -> None:
