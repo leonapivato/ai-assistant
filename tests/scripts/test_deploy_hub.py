@@ -1772,6 +1772,31 @@ def test_a_deploying_commit_this_clone_cannot_name_is_unknown(tmp_path: Path) ->
     assert f"{'f' * 40} is not a commit this clone holds" in refusal
 
 
+def test_a_dirty_tree_is_unknown_even_over_its_own_commit(tmp_path: Path) -> None:
+    # The tree may hold an earlier release's store code: no commit shows what it is.
+    repo, commits = _history(tmp_path)
+
+    refusal = _MODULE.history_refusal(repo, commits["third"], f"{commits['third']}-dirty")
+
+    assert refusal is not None
+    assert "-dirty is not a commit this clone holds" in refusal
+
+
+def test_a_dirty_deploy_needs_allow_earlier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path)
+    head = git(repo, "rev-parse", "HEAD")
+    (repo / "f.txt").write_text("an uncommitted change\n")
+
+    with pytest.raises(_MODULE.DeployError, match="-dirty is not a commit this clone holds"):
+        _deploy_against(repo, monkeypatch, "--allow-dirty", marker=f"commit={head}\n")
+    box = _deploy_against(
+        repo, monkeypatch, "--allow-dirty", "--allow-earlier", marker=f"commit={head}\n"
+    )
+    assert len(box.installs()) == 1
+
+
 def _deploy_over(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed: str, *args: str
 ) -> _FakeBox:

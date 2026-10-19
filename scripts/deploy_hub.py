@@ -127,9 +127,10 @@ the passphrase file, the environment and where the artifact will go.
 **An earlier build is refused before anything is built** (ADR-0326 §5:4). Over a venv
 that holds a build, the deploy is admitted only when the commit it deploys is the
 marker's or a later one, by this clone's history. An earlier commit is refused, and so
-is one that has diverged from the marker's, and so is any commit when the marker names
-none this clone holds: a dirty deploy, a marker withdrawn mid-install, a commit fetched
-nowhere here. That last is *unknown*, not *earlier*, and unknown is not clean. The
+is one that has diverged from the marker's, and so is any deploy when the marker names
+no commit this clone holds (a dirty deploy, a marker withdrawn mid-install, a commit
+fetched nowhere here) and any deploy of a dirty tree. Those are *unknown*, not
+*earlier*, and unknown is not clean. The
 refusal names the way back, a later build or the backup restored into a new path and
 served by the earlier build. ``--allow-earlier`` overrides it, and is the operator's word
 that no schema change lies between the two releases; nothing here computes that.
@@ -551,7 +552,8 @@ def history_refusal(repo: Path, installed: str, deploying: str) -> str | None:
         installed: The commit the hub was last installed from, as its record holds it:
             the deployed-commit marker, or the running image's revision label. Anything
             that is not a commit's hex name, a ``-dirty`` one among them, is unknown.
-        deploying: The commit this deploy installs, without any ``-dirty`` suffix.
+        deploying: The commit this deploy installs, read the same way: a ``-dirty``
+            one is a tree no commit holds, so it too is unknown.
 
     Returns:
         Why the deploy is refused, one sentence without its full stop, or ``None`` when
@@ -2121,7 +2123,7 @@ def _rule_on_history(plan: Plan, repo: Path, commit: str, marker: str, version_o
     if venv_is_empty(version_output):
         return
     installed = _recorded_commit(marker) or ""
-    refusal = history_refusal(repo, installed, commit.removesuffix("-dirty"))
+    refusal = history_refusal(repo, installed, commit)
     if refusal is None:
         return
     if not plan.args.allow_earlier:
