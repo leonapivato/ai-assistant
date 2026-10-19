@@ -96,6 +96,7 @@ from ai_assistant.core.types import (
     EpisodePage,
     InformationalEventResult,
     Memory,
+    MemoryKind,
     MemoryWrite,
     MemoryWriteMode,
     Modality,
@@ -127,6 +128,8 @@ from ai_assistant.core.types import (
     check_story_page,
     checked_chat_devices,
     describe_untrusted,
+    episode_summary,
+    episode_view,
     part_episode,
     secret_value,
     story_members,
@@ -2880,15 +2883,19 @@ class Engine:
         self,
         *,
         bands: Sequence[BeliefBand] | None = None,
+        kinds: Sequence[MemoryKind] | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
     ) -> tuple[BeliefSummary, ...]:
         """Enumerate the memories the assistant holds right now (ADR-0073 §1, ADR-0328 §11:2).
 
         The read half of "the user can read the assistant's beliefs about them".
-        It relays the filter to :meth:`~ai_assistant.core.protocols.MemoryStore.list_beliefs`,
-        which lists memories and never episodes, and projects each through
-        :func:`~ai_assistant.core.types.belief_summary` (ADR-0328 §15:1).
+        It relays the filters to
+        :meth:`~ai_assistant.core.protocols.MemoryStore.list_beliefs`, which lists
+        memories alone unless a caller names the episodic kind (ADR-0328 §11:2,
+        ADR-0074 §6), and projects a memory through
+        :func:`~ai_assistant.core.types.belief_summary` (ADR-0328 §15:1) and an episode
+        through :func:`~ai_assistant.core.types.episode_summary`.
 
         Everything about *what* comes back is the store's ratified contract, not
         this façade's: live beliefs only (a retired record is history, reachable
@@ -2901,7 +2908,7 @@ class Engine:
         asking for the next page, and a total would be a second query against a
         Tier 1 store for a UI nobody has designed.
 
-        The filter is **materialised before the awaiting task is created**, so a
+        Both filters are **materialised before the awaiting task is created**, so a
         caller that mutates the sequence it passed cannot change which page it gets:
         the store's own input-observation clause (ADR-0065) binds what the store
         reads, and this keeps the relay through :meth:`_tracked` — which defers the
@@ -2910,6 +2917,8 @@ class Engine:
         Args:
             bands: If given, restrict the listing to these belief bands. ``None``
                 means every band; an **empty sequence selects nothing**.
+            kinds: If given, restrict it to these kinds, same convention, except
+                that ``None`` means memories alone. The two compose by conjunction.
             limit: How many beliefs the page holds at most. Bounded by default,
                 because an unbounded read of a Tier 1 store by default is a shape
                 worth not offering (ADR-0021 §4).
@@ -2931,18 +2940,20 @@ class Engine:
         # Materialised here, before the first await, so a caller that mutates the
         # sequence it passed cannot change which page it gets (ADR-0085 §3d).
         snapshot_bands = None if bands is None else tuple(bands)
+        snapshot_kinds = None if kinds is None else tuple(kinds)
         page_argument(limit, name="limit")
         page_argument(offset, name="offset")
         check_arguments(
             "beliefs",
             max_bytes=self._max_payload_bytes,
             bands=snapshot_bands,
+            kinds=snapshot_kinds,
             limit=limit,
             offset=offset,
         )
 
         return await self._tracked(
-            self._beliefs(bands=snapshot_bands, limit=limit, offset=offset),
+            self._beliefs(bands=snapshot_bands, kinds=snapshot_kinds, limit=limit, offset=offset),
             "beliefs",
             checked=True,
         )
@@ -2966,8 +2977,10 @@ class Engine:
         Args:
             record_id: The id the user named, taken as opaque.
 
-        An id naming an episode is not a memory, and ``None`` comes back for it too
-        (ADR-0328 §2:1).
+        An id naming an episode reads as its view
+        (:func:`~ai_assistant.core.types.episode_view`), so the ceremony shows an
+        episode before :meth:`forget` destroys it, exactly as it shows a memory
+        (ADR-0074 §6).
 
         Returns:
             The memory's single view, or ``None`` when no live memory has that id.
@@ -6405,6 +6418,7 @@ class Engine:
         self,
         *,
         bands: tuple[BeliefBand, ...] | None,
+        kinds: tuple[MemoryKind, ...] | None,
         limit: int,
         offset: int,
     ) -> tuple[BeliefSummary, ...]:
@@ -6415,26 +6429,33 @@ class Engine:
         and no count of its own. Its supports' episodes are resolved in one read for
         the page, so each summary can say whether none of them resolves (§15:7).
         """
-        records = await self._memory.list_beliefs(bands=bands, limit=limit, offset=offset)
-        memories = [record for record in records if isinstance(record, Memory)]
-        contents = await self._support_contents(memories)
+        records = await self._memory.list_beliefs(
+            bands=bands, kinds=kinds, limit=limit, offset=offset
+        )
+        contents = await self._support_contents(
+            [record for record in records if isinstance(record, Memory)]
+        )
         now = self._clock()
         return tuple(
             belief_summary(
-                memory,
+                record,
                 now=now,
                 supports_gone=all(
-                    contents.get(support.points_at) is None for support in memory.supports
+                    contents.get(support.points_at) is None for support in record.supports
                 ),
             )
-            for memory in memories
+            if isinstance(record, Memory)
+            else episode_summary(record)
+            for record in records
         )
 
     async def _belief(self, record_id: str) -> Belief | None:
-        """Read one live memory and project it, or report that there is none."""
+        """Read one live record and project it, or report that there is none."""
         record = await self._memory.get(record_id)
-        if not isinstance(record, Memory):
+        if record is None:
             return None
+        if not isinstance(record, Memory):
+            return episode_view(record)
         contents = await self._support_contents((record,))
         return belief_view(record, now=self._clock(), contents=contents)
 

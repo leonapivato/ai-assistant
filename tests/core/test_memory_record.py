@@ -16,6 +16,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
     Attestation,
+    Belief,
     BeliefBand,
     BeliefSummary,
     EpisodicMemory,
@@ -47,6 +48,8 @@ from ai_assistant.core.types import (
     applied_operation,
     belief_summary,
     belief_view,
+    episode_summary,
+    episode_view,
     origin_is_outside,
     origin_standing,
     record_attestation,
@@ -697,3 +700,35 @@ def test_parts_point_into_their_episodes() -> None:
     assert LegacyPart(record="r").record == "r"
     assert sourced_support(_SOURCE).points_at.part == "evidence_item"
     assert support_with_origin(SupportOrigin.OUTSIDE_INPUT).outside
+
+
+def test_an_episode_a_caller_asked_for_is_projected_without_a_standing() -> None:
+    """ADR-0074 §6: ``--kind episodic`` lists episodes, and ``forget`` shows one.
+
+    An episode has no standing, no status and no supports; its band and outside mark
+    are its provenance's (§12), and it was learned when it happened.
+    """
+    episode = _episode()
+    summary = episode_summary(episode)
+    view = episode_view(episode)
+    assert (summary.kind, summary.standing, summary.status) == ("episodic", None, None)
+    assert summary.band is BeliefBand.DERIVED
+    assert summary.rests_on_outside_content
+    assert summary.learned == AT
+    assert view.supports == ()
+    assert view.model_dump(exclude={"supports"}) == summary.model_dump()
+
+
+def test_a_projection_says_which_kind_it_is_and_carries_its_shape() -> None:
+    """A memory's projection carries a standing and supports; an episode's neither."""
+    held = belief_view(memory("m", "c"), now=_LATER, contents={})
+    assert held.kind == "memory"
+    with pytest.raises(ValidationError, match="standing"):
+        BeliefSummary.model_validate(held.model_dump(exclude={"supports"}) | {"standing": None})
+    with pytest.raises(ValidationError, match="supports"):
+        Belief.model_validate(held.model_dump() | {"supports": ()})
+    episodic = episode_summary(_episode()).model_dump()
+    with pytest.raises(ValidationError, match="standing"):
+        BeliefSummary.model_validate(
+            episodic | {"standing": MemoryStanding.SAID, "status": MemoryStatus.CURRENT}
+        )

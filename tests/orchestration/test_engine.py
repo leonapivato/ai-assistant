@@ -951,7 +951,8 @@ def test_a_projection_carries_exactly_what_adr_0328_15_1_names() -> None:
     assert summary.learned == AT - timedelta(days=2)
     assert summary.as_of == AT
     assert (summary.evidence.supporting, summary.evidence.episodes) == (2, 2)
-    for absent in ("confidence", "evidence_elided", "kind", "attestation"):
+    assert summary.kind == "memory"
+    for absent in ("confidence", "evidence_elided", "attestation"):
         assert absent not in BeliefSummary.model_fields
         assert absent not in Belief.model_fields
 
@@ -1167,11 +1168,34 @@ async def test_belief_is_none_for_an_id_no_live_record_has() -> None:
     assert await harness.engine.belief("retired") is None
 
 
-async def test_belief_is_none_for_an_episode() -> None:
-    """ADR-0328 §2:1: an episode is not a memory, so the single-memory read declines it."""
+async def test_belief_reads_an_episode_as_its_view_so_forget_can_show_it() -> None:
+    """ADR-0074 §6: ``forget <id>`` destroys an episode exactly as it destroys a belief.
+
+    So the single read the ceremony takes (ADR-0073 §5) answers for an episode's id
+    with :func:`episode_view`: no standing, no supports, learned when it happened.
+    """
     harness = Harness()
     await harness.memory.add(_episode_record("ep-1", "they asked for metric units"))
+    shown = await harness.engine.belief("ep-1")
+    assert shown is not None
+    assert shown.kind == "episodic"
+    assert shown.standing is None
+    assert shown.supports == ()
+    assert await harness.engine.forget("ep-1") is True
     assert await harness.engine.belief("ep-1") is None
+
+
+async def test_the_listing_lists_episodes_only_where_the_episodic_kind_is_named() -> None:
+    """ADR-0328 §11:2 changes the default alone; ADR-0074 §6's ``--kind episodic`` stands."""
+    harness = Harness()
+    await harness.memory.add(_memory("rec-1"))
+    await harness.memory.add(_episode_record("ep-1", "they asked for metric units"))
+    assert [one.id for one in await harness.engine.beliefs()] == ["rec-1"]
+    episodic = await harness.engine.beliefs(kinds=[MemoryKind.EPISODIC])
+    assert [(one.id, one.kind) for one in episodic] == [("ep-1", "episodic")]
+    both = await harness.engine.beliefs(kinds=[MemoryKind.EPISODIC, MemoryKind.MEMORY])
+    assert {one.id for one in both} == {"rec-1", "ep-1"}
+    assert await harness.engine.beliefs(kinds=[]) == ()
 
 
 async def test_forget_destroys_the_record_and_reports_that_it_did() -> None:

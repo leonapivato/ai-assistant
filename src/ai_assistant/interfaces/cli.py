@@ -271,6 +271,7 @@ from ai_assistant.core.types import (
     DiscloserProvenance,
     EgressBinding,
     GrantScope,
+    MemoryKind,
     MemoryStanding,
     MemoryStatus,
     MessageAddedChange,
@@ -424,6 +425,16 @@ _BELIEFS_BAND_OPTION = typer.Option(
     None,
     "--band",
     help="Only show beliefs in this band (repeatable). Default: every band.",
+)
+
+
+_BELIEFS_KIND_OPTION = typer.Option(
+    None,
+    "--kind",
+    help=(
+        "Only show records of this kind (repeatable). Default: memories alone — pass "
+        "--kind episodic to see captured conversation turns."
+    ),
 )
 
 
@@ -2935,6 +2946,7 @@ def _confirm_delete_conversation() -> bool:
 @app.command()
 def beliefs(
     band: list[BeliefBand] | None = _BELIEFS_BAND_OPTION,
+    kind: list[MemoryKind] | None = _BELIEFS_KIND_OPTION,
     limit: int = typer.Option(
         50,
         "--limit",
@@ -2961,9 +2973,11 @@ def beliefs(
     # An absent repeatable flag arrives as an empty list, which the façade would read
     # as "select nothing" — the deliberate meaning of an *explicitly* empty filter
     # (ADR-0073 §1). A CLI has no way to say that and no reason to, so absent and
-    # empty both become "every band". The listing holds memories and never episodes
-    # (ADR-0328 §11:2), so there is no kind to choose.
-    code = asyncio.run(_list_beliefs(bands=band or None, limit=limit, offset=offset))
+    # empty both become "every band", and for --kind "memories alone", the engine's
+    # default (ADR-0328 §11:2). `--kind episodic` still lists episodes (ADR-0074 §6).
+    code = asyncio.run(
+        _list_beliefs(bands=band or None, kinds=kind or None, limit=limit, offset=offset)
+    )
     raise typer.Exit(code)
 
 
@@ -4323,6 +4337,7 @@ async def _forget_conversation(conversation_id: str, *, assume_yes: bool) -> int
 async def _list_beliefs(
     *,
     bands: list[BeliefBand] | None,
+    kinds: list[MemoryKind] | None,
     limit: int,
     offset: int,
 ) -> int:
@@ -4342,7 +4357,7 @@ async def _list_beliefs(
         _render_error(exc)
         return _EXIT_ERROR
 
-    return await _drive_beliefs(engine, bands=bands, limit=limit, offset=offset)
+    return await _drive_beliefs(engine, bands=bands, kinds=kinds, limit=limit, offset=offset)
 
 
 async def _list_sources() -> int:
@@ -4926,6 +4941,7 @@ async def _drive_beliefs(
     engine: AssistantEngine,
     *,
     bands: list[BeliefBand] | None,
+    kinds: list[MemoryKind] | None,
     limit: int,
     offset: int,
 ) -> int:
@@ -4937,7 +4953,7 @@ async def _drive_beliefs(
     in the engine (ADR-0072 §7, ADR-0073 §7).
     """
     try:
-        page = await engine.beliefs(bands=bands, limit=limit, offset=offset)
+        page = await engine.beliefs(bands=bands, kinds=kinds, limit=limit, offset=offset)
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
@@ -6526,6 +6542,8 @@ def _standing_line(belief: Belief | BeliefSummary) -> str:
     is. A memory that ended or was marked wrong is never listed (the listing is live),
     but the single view says so if one ever reaches it.
     """
+    if belief.standing is None:
+        return f"\n  [bold cyan]{belief.band.value}[/] · a captured exchange"
     head = f"\n  [bold cyan]{belief.band.value}[/] · {_STANDING_WORDS[belief.standing]}"
     match belief.status:
         case MemoryStatus.CURRENT:
@@ -6534,6 +6552,8 @@ def _standing_line(belief: Belief | BeliefSummary) -> str:
             return f"{head} · [yellow]no longer holds[/]"
         case MemoryStatus.WRONG:
             return f"{head} · [yellow]marked wrong[/]"
+        case None:  # pragma: no cover - a memory always carries one
+            return head
         case _:  # pragma: no cover - exhaustive
             assert_never(belief.status)
 
@@ -6574,6 +6594,8 @@ def _why(belief: Belief | BeliefSummary) -> str:
     band where that ADR put it).
     """
     match belief.standing:
+        case None:
+            return _why_episodic(belief)
         case MemoryStanding.CONFIRMED:
             return "you confirmed this wording when I asked you."
         case MemoryStanding.SAID:
@@ -6584,6 +6606,26 @@ def _why(belief: Belief | BeliefSummary) -> str:
             return _evidence_words(belief) + _outside_warrant(belief)
         case _:  # pragma: no cover - exhaustive
             assert_never(belief.standing)
+
+
+def _why_episodic(belief: Belief | BeliefSummary) -> str:
+    """Why a captured episode is held: because it happened (ADR-0075 §2, ADR-0223 §5).
+
+    Listed only where ``--kind episodic`` asked for it (ADR-0074 §6). Its outside mark
+    is said in the episode's own words: the material in front of this system traced
+    back to a connected source, and the record is still its own account.
+    """
+    outside = (
+        " Some of the material I had in front of me during this exchange traces back to a "
+        "connected source rather than to you — the record above is still my own account of "
+        "what was said."
+        if belief.rests_on_outside_content
+        else ""
+    )
+    return (
+        "this records an exchange that happened — I captured it at the time, so there was "
+        "nothing to work out and nothing to weigh."
+    ) + outside
 
 
 def _forget_warning(band: BeliefBand) -> str:
@@ -6717,6 +6759,14 @@ def _render_belief_fields(belief: Belief | BeliefSummary) -> None:
     _print(_standing_line(belief))
     _render_content(belief.content)
     _print(f"  [dim]Why:[/] {_why(belief)}")
+    if belief.kind == "episodic":
+        # An episode has no standing, supports or reading (ADR-0074 §6): when it
+        # happened, its window and its id are what it carries.
+        _print(f"  [dim]Happened:[/] {_when_or_unknown(belief.learned)}")
+        if belief.valid_until is not None:
+            _print(f"  [dim]Kept until:[/] {_when(belief.valid_until)}")
+        _print(f"  [dim]id:[/] {_safe(belief.id)}")
+        return
     _print(f"  [dim]Learned:[/] {_when_or_unknown(belief.learned)}")
     _print(f"  [dim]As of:[/] {_when_or_unknown(belief.as_of)}")
     certainty = belief.reading_certainty
@@ -6757,7 +6807,10 @@ def _render_supports(belief: Belief) -> None:
     A support whose part no longer resolves is **an explicit tombstone** — never a
     bare id, never a silent gap, and never shown as evidence (ADR-0073 §4's floor). It
     still counts, which is why it is listed. One that was stopped from counting says so.
+    An episode rests on none, and prints nothing here.
     """
+    if not belief.supports:
+        return
     _print("  [dim]Rests on:[/]")
     for support in belief.supports:
         against = (

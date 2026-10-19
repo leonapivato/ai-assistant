@@ -48,7 +48,6 @@ ABSENT: Final = (
     "evidence_elided",
     "attestation",
     "rests_on_recorded_external_content",
-    "kind",
 )
 
 

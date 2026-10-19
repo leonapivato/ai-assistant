@@ -72,6 +72,7 @@ from ai_assistant.core.types import (
     EpisodeCaptureReport,
     EpisodeChunk,
     EpisodePage,
+    EpisodicMemory,
     EvidenceItemPart,
     GrantableSource,
     GrantScope,
@@ -79,8 +80,10 @@ from ai_assistant.core.types import (
     InputPart,
     LegacyPart,
     Memory,
+    MemoryKind,
     MemoryOperation,
     MemoryOperationKind,
+    MemorySource,
     MemorySupport,
     MemoryWriterName,
     MessageAuthor,
@@ -91,6 +94,7 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
     ProcessingStatus,
+    Provenance,
     RecordedInvocation,
     RememberCallPart,
     SendOutcome,
@@ -119,6 +123,7 @@ from ai_assistant.core.types import (
     checked_chat_devices,
     describe_untrusted,
     encodable_text,
+    episode_view,
     secret_value,
     story_members,
     story_move_members,
@@ -1007,35 +1012,47 @@ class FakeAssistantEngine:
         self,
         *,
         bands: Sequence[BeliefBand] | None = None,
+        kinds: Sequence[MemoryKind] | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
     ) -> tuple[BeliefSummary, ...]:
-        """List the memories held, as summaries that carry no supports."""
+        """List what is held, as summaries that carry no supports.
+
+        Memories alone where ``kinds`` is ``None``, and an episode only where a caller
+        names the episodic kind (ADR-0328 §11:2, ADR-0074 §6).
+        """
         # Materialised before the first await, so a caller that mutates the sequence
         # it passed cannot change which page it gets (ADR-0085 §3d). This engine
         # never suspends, which is one of the three ways ADR-0065 permits the clause
         # to be discharged; snapshotting anyway is what makes the property a
         # property of the code rather than of the fact that it happens not to await.
         selected_bands = None if bands is None else tuple(bands)
+        selected_kinds = None if kinds is None else tuple(kinds)
         page_argument(limit, name="limit")
         page_argument(offset, name="offset")
         check_arguments(
             "beliefs",
             max_bytes=self._max_payload_bytes,
             bands=selected_bands,
+            kinds=selected_kinds,
             limit=limit,
             offset=offset,
         )
-        self.calls.append(("beliefs", {"bands": selected_bands}))
+        self.calls.append(("beliefs", {"bands": selected_bands, "kinds": selected_kinds}))
+        wanted = (
+            frozenset({MemoryKind.MEMORY.value})
+            if selected_kinds is None
+            else frozenset(str(kind) for kind in selected_kinds)
+        )
         matching = [
             _summary_of(belief)
             for belief in self.beliefs_held.values()
-            if selected_bands is None or belief.band in selected_bands
+            if (selected_bands is None or belief.band in selected_bands) and belief.kind in wanted
         ]
         return self._checked(tuple(matching[offset : offset + limit]), "beliefs")
 
     async def belief(self, record_id: Identifier) -> Belief | None:
-        """Read one memory with its supports, or ``None`` where none is held."""
+        """Read one memory with its supports, or an episode, or ``None`` where none is held."""
         named = identifier(record_id, name="record_id")
         check_arguments("belief", max_bytes=self._max_payload_bytes, record_id=named)
         self.calls.append(("belief", {"record_id": named}))
@@ -2225,6 +2242,44 @@ class FakeAssistantEngine:
         self.beliefs_held[record_id] = held
         # The placement follows the belief it belongs to, so seeding over an id this
         # engine already holds **replaces** it rather than inheriting the last one's.
+        self.placements.pop(record_id, None)
+        if placement is not None:
+            self.placements[record_id] = placement
+        return held
+
+    def hold_episode(
+        self,
+        record_id: str,
+        *,
+        content: str,
+        occurred_at: datetime = _AT,
+        placement: Placement | None = None,
+    ) -> Belief:
+        """Put one episode in memory, and return the view ``belief`` reads it as.
+
+        Projected by ``core``'s :func:`~ai_assistant.core.types.episode_view`, so it
+        is listed only where a caller names the episodic kind (ADR-0074 §6).
+
+        Args:
+            record_id: The episode's id.
+            content: Its content.
+            occurred_at: When it happened.
+            placement: Who may receive it; ``None`` leaves the default.
+
+        Returns:
+            The episode's view.
+        """
+        held = episode_view(
+            EpisodicMemory(
+                id=record_id,
+                content=content,
+                occurred_at=occurred_at,
+                provenance=Provenance(
+                    source=MemorySource.OBSERVED, confidence=0.9, last_updated=occurred_at
+                ),
+            )
+        )
+        self.beliefs_held[record_id] = held
         self.placements.pop(record_id, None)
         if placement is not None:
             self.placements[record_id] = placement

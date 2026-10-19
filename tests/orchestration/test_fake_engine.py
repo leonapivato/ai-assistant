@@ -92,6 +92,7 @@ from ai_assistant.core.types import (
     EgressSpan,
     EpisodicMemory,
     GrantScope,
+    MemoryKind,
     MemoryStanding,
     MemoryWrite,
     MessageAuthor,
@@ -519,12 +520,13 @@ class _LazyFilterEngine(FakeAssistantEngine):
         self,
         *,
         bands: Sequence[BeliefBand] | None = None,
+        kinds: Sequence[MemoryKind] | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
     ) -> tuple[BeliefSummary, ...]:
         """Suspend first, then read ``bands`` — so a mid-call mutation is visible."""
         await asyncio.sleep(0)
-        return await super().beliefs(bands=bands, limit=limit, offset=offset)
+        return await super().beliefs(bands=bands, kinds=kinds, limit=limit, offset=offset)
 
 
 async def test_the_materialisation_clause_catches_a_lazy_filter() -> None:

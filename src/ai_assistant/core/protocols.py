@@ -8580,14 +8580,18 @@ class AssistantEngine(Protocol):
         self,
         *,
         bands: Sequence[BeliefBand] | None = None,
+        kinds: Sequence[MemoryKind] | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
     ) -> tuple[BeliefSummary, ...]:
         """List the memories the assistant holds, newest revision first.
 
-        **Memories only**: the listing excludes episodes (ADR-0328 §11:2, ADR-0074
-        §6), and every entry is a :class:`~ai_assistant.core.types.BeliefSummary`
-        carrying the values ADR-0328 §15:1 names. **Returns summaries, not the
+        **Memories by default**: with no ``kinds`` the listing excludes episodes
+        (ADR-0328 §11:2), and a caller naming the episodic kind lists them (ADR-0074
+        §6, kept by ADR-0328 §18). Every entry is a
+        :class:`~ai_assistant.core.types.BeliefSummary`: a memory's carries the values
+        ADR-0328 §15:1 names, and an episode's is
+        :func:`~ai_assistant.core.types.episode_summary`'s. **Returns summaries, not the
         single-memory view**, and the type is the enforcement (ADR-0085 §4a): a
         summary has nowhere to put a support's content, so a conforming listing cannot
         ship the corpus on every page. It still resolves whether each memory's
@@ -8596,6 +8600,8 @@ class AssistantEngine(Protocol):
         Args:
             bands: Which bands to include, or ``None`` for every band. An empty
                 sequence selects nothing, which is a different answer from ``None``.
+            kinds: Which kinds to include, or ``None`` for memories alone. An empty
+                sequence selects nothing. The two filters compose by conjunction.
             limit: How many to return. Defaults to
                 :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`, and an
                 implementation called without it behaves as though it had been
@@ -8603,7 +8609,7 @@ class AssistantEngine(Protocol):
             offset: How many to skip.
 
         Returns:
-            One summary per live memory, in the store's stated order.
+            One summary per live record selected, in the store's stated order.
 
         Raises:
             ValueError: If ``limit`` or ``offset`` is outside ``[0, 2**63)``.
@@ -8618,13 +8624,16 @@ class AssistantEngine(Protocol):
         """Read one memory with its supports resolved, or ``None`` if there is none.
 
         The single-memory view (ADR-0328 §15:2): every support, the part it points
-        at resolved to readable content or shown as gone.
+        at resolved to readable content or shown as gone. An id naming an episode
+        reads as :func:`~ai_assistant.core.types.episode_view`, so ``forget``'s
+        ceremony shows an episode before destroying it, as it shows a memory
+        (ADR-0074 §6, ADR-0073 §5).
 
         Args:
-            record_id: The memory's id, as the listing showed it.
+            record_id: The record's id, as the listing showed it.
 
         Returns:
-            The memory, or ``None`` where the store holds no live memory by that id.
+            The view, or ``None`` where the store holds no live record by that id.
 
         Raises:
             ValueError: If ``record_id`` is blank.

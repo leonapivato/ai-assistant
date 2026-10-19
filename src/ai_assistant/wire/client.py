@@ -132,6 +132,7 @@ if TYPE_CHECKING:
         GrantScope,
         HeldNotification,
         Identifier,
+        MemoryKind,
         MessageReceipt,
         NonBlankEncodableText,
         NotificationDelivery,
@@ -591,18 +592,20 @@ class HubClient:
         self,
         *,
         bands: Sequence[BeliefBand] | None = None,
+        kinds: Sequence[MemoryKind] | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
     ) -> tuple[BeliefSummary, ...]:
-        """One page of the memories held about the user (ADR-0328 §11:2).
+        """One page of the memories held about the user (ADR-0328 §11:2, ADR-0074 §6).
 
-        **The filter is materialised here, before the first ``await``**
+        **The filters are materialised here, before the first ``await``**
         (ADR-0085 §3d): a caller that mutates the sequence it passed cannot change
         which page it gets. ``None`` and empty stay different — ``None`` selects
-        every band, an empty sequence selects nothing.
+        every band, or memories alone, and an empty sequence selects nothing.
 
         Args:
             bands: Which bands to include, or ``None`` for every one.
+            kinds: Which kinds to include, or ``None`` for memories alone.
             limit: How many records this page holds.
             offset: How many to skip.
 
@@ -610,14 +613,15 @@ class HubClient:
             The page.
         """
         snapshot_bands = None if bands is None else tuple(bands)
+        snapshot_kinds = None if kinds is None else tuple(kinds)
         page_argument(limit, name="limit")
         page_argument(offset, name="offset")
         return await self._call(  # type: ignore[no-any-return]
-            "beliefs", bands=snapshot_bands, limit=limit, offset=offset
+            "beliefs", bands=snapshot_bands, kinds=snapshot_kinds, limit=limit, offset=offset
         )
 
     async def belief(self, record_id: Identifier) -> Belief | None:
-        """One memory in full, with its supports resolved (ADR-0328 §15:2).
+        """One memory in full, with its supports resolved, or an episode (ADR-0328 §15:2).
 
         Args:
             record_id: Which record.

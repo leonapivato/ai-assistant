@@ -104,6 +104,7 @@ from ai_assistant.core.types import (
     CostBasis,
     GrantScope,
     Idempotency,
+    MemoryKind,
     NotificationCandidate,
     NotificationDelivery,
     PermissionDecision,
@@ -1899,6 +1900,10 @@ class AssistantEngineContract(
         await beliefs.hold("the office is in Boston")
         assert await beliefs.engine.beliefs(bands=[]) == ()
         assert await beliefs.engine.beliefs(bands=None) != ()
+        assert await beliefs.engine.beliefs(kinds=[]) == ()
+        # ``None`` kinds is memories alone (ADR-0328 §11:2), never every kind.
+        assert await beliefs.engine.beliefs(kinds=None) != ()
+        assert await beliefs.engine.beliefs(kinds=[MemoryKind.EPISODIC]) == ()
 
     # --- clause 5: the size limit, in both directions (§8c) ----------------
 

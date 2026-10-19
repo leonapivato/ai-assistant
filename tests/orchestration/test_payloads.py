@@ -346,7 +346,8 @@ class TestComposites:
         assert _encoded(_belief()) == (
             '{"as_of":"2026-08-01T12:00:00Z","band":"asserted","content":"prefers dark mode",'
             '"evidence":{"against":0,"episodes":2,"latest":"2026-08-01T12:00:00Z",'
-            '"supporting":2},"id":"b-1","learned":"2026-08-01T12:00:00Z","legacy":false,'
+            '"supporting":2},"id":"b-1","kind":"memory","learned":"2026-08-01T12:00:00Z",'
+            '"legacy":false,'
             '"reading_certainty":"sure","rests_on_outside_content":false,"standing":"said",'
             '"status":"current","supports":[{"about_when":null,"content":"said so",'
             '"counts":true,"direction":"for","how_sure":null,"note":"",'

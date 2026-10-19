@@ -426,7 +426,8 @@ def test_a_request_argument_object_sorts_rather_than_keeping_keyword_order(
 _BELIEF_BYTES: Final = (
     b'{"as_of":"2026-08-01T12:00:00Z","band":"asserted","content":"prefers dark mode",'
     b'"evidence":{"against":0,"episodes":2,"latest":"2026-08-01T12:00:00Z","supporting":2},'
-    b'"id":"b-1","learned":"2026-08-01T12:00:00Z","legacy":false,"reading_certainty":null,'
+    b'"id":"b-1","kind":"memory","learned":"2026-08-01T12:00:00Z","legacy":false,'
+    b'"reading_certainty":null,'
     b'"rests_on_outside_content":false,"standing":"said","status":"current",'
     b'"supports":[{"about_when":null,"content":"said so","counts":true,"direction":"for",'
     b'"how_sure":null,"note":"","origin":"user_message","part":"input",'
@@ -467,7 +468,7 @@ def test_a_belief_shaped_model_takes_its_ratified_bytes() -> None:
     ``null`` field emitted rather than omitted, which is what ADR-0124 §9's second limb
     rests on for version 110.
     """
-    assert len(_BELIEF_BYTES) == 824
+    assert len(_BELIEF_BYTES) == 840
     assert _both(_belief()) == _BELIEF_BYTES
 
 
