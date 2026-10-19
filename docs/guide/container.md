@@ -87,6 +87,10 @@ other passphrase stays locked, and the container refuses to start on it.
 
 ## 3. Run it
 
+On a box you operate for other people, do not run it by hand: the deploy path below
+runs it under systemd, and every later upgrade backs it up first. By hand, for one hub
+of your own:
+
 ```bash
 docker volume create alice-data
 docker volume create alice-keyring
@@ -121,6 +125,58 @@ addresses. The container refuses to start where it sees more than one address
 besides loopback, which on a box running Docker is always true of the host's
 network, but that is a count and not a guarantee — a host with one private address
 and no bridge would pass it.
+
+### On a box, the deploy path runs it
+
+`scripts/deploy_container.py` (`just deploy-container`) builds, backs up, replaces and
+verifies one person's container as one act, from a machine that has no container
+runtime, over ssh as root:
+
+```bash
+just deploy-container alice box.example.com --port 8501   # the first install
+just deploy-container alice box.example.com               # every deploy after it
+```
+
+The box needs Docker, systemd, `curl` and `iptables`. For each person it reads a
+directory the operator writes by hand, `/srv/hubs/<person>/` (`--hubs-dir` moves it),
+owned by root and writable by root alone:
+
+| Path | Who writes it | Owner and mode |
+| --- | --- | --- |
+| `hub.env` | The operator: the env file of step 2 | root, `0600` |
+| `keyring-passphrase` | The operator, as in step 2 | uid 10001, `0400` |
+| `backup-passphrase` | The operator, the same way: the key to every backup | uid 10001, `0400` |
+| `unit.env` | The deploy alone: the image id the unit runs, and the port | root, `0644` |
+| `backups/` | The deploy: one artifact per deploy, never deleted | uid 10001, `0700` |
+
+The deploy never creates, reads or prints a passphrase. It refuses, before it stops
+anything, a passphrase file that is missing, empty, owned by another uid or readable by
+anyone else, and keep a copy of each off the box: the backup passphrase is the only key
+to the artifacts (ADR-0123 §5). The rest is named from the person: the volumes
+`hub-<person>-data` and `hub-<person>-keyring`, the container `hub-<person>`, and the
+unit `hub@<person>.service`, which the deploy installs from
+`deploy/container/hub@.service`. That unit is this page's systemd unit made real: the
+flags above, `docker run` in the foreground so its exit is the container's,
+`Restart=on-failure`, `RestartPreventExitStatus=78`, a stop timeout of 120 seconds over
+Docker's 90, and a start at boot. `journalctl --unit hub@alice` is the container's log.
+
+The image is built on the box, from a context `deploy/container/build.sh --context`
+stages here out of a clean tree, and is labelled with its commit; nothing is pushed to
+or pulled from a registry but the base images. `--image <ref>` deploys an image already
+on the box instead, if it carries that label. Never prune the image a person's unit
+runs: the next deploy backs up with it.
+
+Before it stops anything, the deploy also checks what ADR-0327 §5:2 asks of the box,
+that no other machine reaches the hosted listener. It checks that `route_localnet` is
+`0` for every interface but the loopback and Docker's own, so nothing routes a packet
+for the loopback port in from another machine. Once the container runs, it checks that
+the container is on Docker's bridge, publishes `8423` to `127.0.0.1` alone and has no
+IPv6 address, and that the raw table's `PREROUTING` chain drops what arrives for the
+container's bridge address on any other interface. Docker Engine 28 and later write
+that rule on the iptables backend. A box where it cannot establish one of these is
+refused, or its container stopped, with the reason. What it cannot see is a firewall
+other than iptables, the network beyond the box, and a process on the box that forwards
+the port itself.
 
 It is ready when its health check passes:
 
@@ -228,14 +284,35 @@ WantedBy=multi-user.target
 
 ## Upgrading
 
-Build the new image, stop the container, remove it, and run the command from step 3
-with the new tag. The volumes carry the data directory and the keyring across, and
-the hub upgrades its stores as it opens them (ADR-0326 §4).
+Run the deploy again. An upgrade is a cutover (ADR-0326 §2:6), and the deploy does it in
+this order:
 
-ADR-0326 §6 requires a deploy to a person's hub to take a verified backup of the
-data directory before it installs. The container deploy path that does that is not
-built yet; it is #3160. Until it is, take that backup with the container
-stopped, before you remove it.
+1. **Everything it can refuse, while the hub still serves.** The person's files and their
+   modes, the volumes, the image the unit runs now, the port, the box's routing; then the
+   new image is built and the unit installed. A refusal ends with `Nothing has been
+   stopped or changed.`
+2. **The backup, before the new image runs** (§6:1). The unit is stopped, and the image
+   that wrote the data runs its own `ai-assistant-backup` over the data volume, in a
+   container with no network, to `backups/pre-deploy-<UTC>-<run>.age`. A backup that
+   fails, or is written but unverified, leaves `unit.env` as it was and starts the unit
+   again: the earlier image runs, and the new one never has (§6:2).
+3. **The new image**, named in `unit.env` and started on the same volumes (§3:1). The
+   hub upgrades its stores as it opens them (§4).
+4. **The checks.** The container is healthy and runs the new image, the door answers
+   `403` without the edge's assertion, and the reachability checks of step 3 pass.
+
+Once the new image has run, the deploy never starts the earlier one on that data, because
+an earlier build cannot open a directory a later one upgraded (§5:4). A new image that
+fails its checks is left to its unit, or stopped when the reachability checks fail, and
+undoing the deploy is a later image, or the backup restored into a new volume. The
+artifact is kept; the deploy deletes none, and pruning old ones is the operator's act.
+
+The backup copies the data volume as the image pins it, `/data`, with the exclusions the
+tool makes and no others (ADR-0123 §3, ADR-0314 §7:5). It runs with the image's own
+settings and not `hub.env`, because the data directory and every exclusion follow from
+`/data` alone. One deploy per person runs at a time: a second refuses while
+`/srv/hubs/<person>/.deploy-lock` exists, and a deploy killed outright leaves it for
+you to remove.
 
 ## When it does not work
 
@@ -257,15 +334,19 @@ Every refusal ends with `(exit 78)` on a `hub-container:` line, or with the hub'
 
 ## What this page is not
 
-- **The deploy path.** Building, backing up, replacing and verifying a person's
-  container as one act is #3160.
-- **Provisioning a person from an invite**, and **installing a container runtime
-  on the box**: both are the private operations repository's.
+- **Provisioning a person from an invite**, which writes the person directory the
+  deploy reads, and **installing a container runtime on the box**: both are the
+  private operations repository's.
+- **A deploy with Podman, or with Docker's nftables firewall.** The deploy path runs
+  `docker` under systemd, and reads the iptables rules Docker writes.
 - **The sign-in edge.** This page assumes one, and configures the gateway to check
   what it signs.
 
 The image is proven by the `container` workflow on GitHub's runners, which builds
 it and drives every step above on a fresh volume: readiness, the door, the setup
 acts, a restart and a replacement carrying the data, a clean stop, and each
-refusal. It is built with Docker; `CONTAINER_RUNTIME=podman just container-image`
-builds the same file, and nothing on this page is proven with Podman.
+refusal. Its `deploy` job proves the deploy path the same way, with the runner as the
+box: a first install, an upgrade that backs up and carries the data, a failed backup
+that leaves the earlier image running, and the unit restarting a killed container and
+leaving a `78` down. It is built with Docker; `CONTAINER_RUNTIME=podman just
+container-image` builds the same file, and nothing on this page is proven with Podman.

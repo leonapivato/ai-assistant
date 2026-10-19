@@ -650,6 +650,17 @@ deploy-hub host *args:
 container-image *args:
     deploy/container/build.sh "$@"
 
+# One person's container, deployed as one act (#3160): the image built on the box
+# from this clean tree, the data volume backed up with the earlier image before the
+# new one runs (ADR-0326 §6), the unit started on it and the door checked. The first
+# argument is the person, the second the box, or `--local` for this machine; a first
+# install takes `--port`. docs/guide/container.md has the box's layout.
+#
+# Last line, because `just --list` shows only that one: what this recipe does.
+# Build, back up, replace and verify one person's hub container (issue #3160)
+deploy-container person *args:
+    uv run python scripts/deploy_container.py "$@"
+
 # One agent per clone (ADR-0015 §2), and each clone carries untracked local state
 # no merge ever moves between them. This mirrors the documented list —
 # `scripts/clone_sync_files.txt`, which is data and carries its own note that
