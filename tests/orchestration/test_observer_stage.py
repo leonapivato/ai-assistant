@@ -1011,6 +1011,50 @@ async def test_an_outcome_whose_record_failed_to_be_written_is_not_committed_aga
     assert len(created) == 1
 
 
+async def test_a_landed_write_whose_record_failed_to_be_written_reaches_the_outcome() -> None:
+    """§16:1: the plan store refusing the write that carries ``written`` loses nothing.
+
+    The run ends at the failed write (§16:6's backstop), and the next attempt in this
+    process starts from the finding as it was built, so a commit deciding nothing the
+    second time still records the memory the first one created.
+    """
+    harness = Harness()
+    await _three(harness)
+    write_observation = harness.plans.write_observation
+    refused = False
+
+    async def failing_checkpoint(record: Any, *, expected_revision: int) -> Any:
+        nonlocal refused
+        if not refused and any(one.written for one in record.findings):
+            refused = True
+            msg = "the plan store could not write"
+            raise PlanningError(msg)
+        return await write_observation(record, expected_revision=expected_revision)
+
+    harness.plans.write_observation = failing_checkpoint  # type: ignore[method-assign]  # one outage
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")),
+        commit=FakeModelProvider.scripted(_create(), reply(action="nothing")),
+    )
+
+    await observer.run()
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.findings[0].written == ()
+    assert record.findings[0].outcome is None
+    created = [one for one in await harness.memory.export() if isinstance(one, Memory)]
+    assert len(created) == 1
+
+    await observer.run()
+
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.state is ObservationState.PROCESSED
+    outcome = record.findings[0].outcome
+    assert outcome is not None
+    assert [(one.memory, one.operations) for one in outcome.writes] == [
+        (created[0].id, (MemoryOperationKind.CREATE,))
+    ]
+
+
 async def test_a_supersession_whose_retirements_were_unread_records_them_on_the_retry() -> None:
     """§16:1: every operation a landed supersession made is on the finding's outcome."""
     harness = Harness(ruling=MemoryDecisionKind.SUPERSEDE)

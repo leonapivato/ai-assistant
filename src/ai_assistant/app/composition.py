@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, assert_never
 
@@ -2748,16 +2748,23 @@ def _observer_commit_spec(settings: Settings) -> str:
 
 
 def _build_observer_provider(settings: Settings, spec: str) -> RetryingProvider:
-    """Build one of the observer's model seams: **retry, and no routing** (ADR-0329 §9:9).
+    """Build one of the observer's model seams: **one attempt, and no routing** (§9:9).
 
-    Consolidation's shape (:func:`_build_consolidation_provider`), by ADR-0285 §5:3's
-    rule, which §9:9 applies: the observer's work is deferrable — an episode that fails
-    waits and is retried (§16:4) — so fallback would buy nothing and widen the set of
-    providers shown the user's episodes and memories. Retry re-sends to the same
-    provider, so it widens nothing.
+    No routing, by ADR-0285 §5:3's rule, which ADR-0329 §9:9 applies: the observer's work
+    is deferrable — an episode that fails waits and is retried (§16:4) — so fallback
+    would buy nothing and widen the set of providers shown the user's episodes and
+    memories.
+
+    **And no retry inside the call**, which is where it parts from consolidation's
+    shape. The observer counts every model call against its daily budget, recording it
+    before it is made (§16:9); a retrying wrapper would send several requests under
+    that one record, so the budget would bound records rather than calls. The
+    observer's own retry is the recorded backoff of a failed attempt (§16:4), each of
+    whose calls is counted. The wrapper stays for its per-attempt deadline
+    (``model_timeout_seconds``), so a hung call ends and frees the one run (§16:6).
 
     Args:
-        settings: Loaded application settings — the resilience knobs every route gets.
+        settings: Loaded application settings — the deadline every route gets.
         spec: The route's ``"provider:model"`` spec.
 
     Returns:
@@ -2769,7 +2776,8 @@ def _build_observer_provider(settings: Settings, spec: str) -> RetryingProvider:
             run (ADR-0062 §2).
     """
     ensure_vendor_available(spec)
-    return RetryingProvider(PydanticAIProvider(spec), policy=RetryPolicy.from_settings(settings))
+    policy = replace(RetryPolicy.from_settings(settings), max_attempts=1)
+    return RetryingProvider(PydanticAIProvider(spec), policy=policy)
 
 
 def _reconciler_spec(settings: Settings) -> str:
