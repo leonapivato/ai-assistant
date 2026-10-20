@@ -102,8 +102,13 @@ def stamped(record: ObservationRecord, revision: int) -> ObservationRecord:
     """Return ``record`` carrying the revision the store issued for this write.
 
     Raises:
-        PlanningError: If the issuer has run past the bound a revision carries.
+        PlanningError: If the revision is not positive — ``0`` is the revision of a
+            record no store has stored, and an issuer never stamps it — or the issuer
+            has run past the bound a revision carries.
     """
+    if revision < 1:
+        msg = f"an issued observation revision is positive, and {revision} is not"
+        raise PlanningError(msg)
     if revision >= _REVISION_BOUND:
         msg = "the plan store has issued every observation revision it can"
         raise PlanningError(msg)
