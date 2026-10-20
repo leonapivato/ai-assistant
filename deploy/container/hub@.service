@@ -10,6 +10,11 @@
 # that restarts on 1 and leaves 78 down, and none of Docker's policies can leave 78
 # down. `docker run` without --detach exits with the container's own code, which is
 # what lets RestartPreventExitStatus read it, and its output is this unit's journal.
+#
+# $HUB_RELAY_MAPPING is unbraced on purpose: systemd splits an unbraced variable that is
+# a word of its own into zero or more arguments, so where it is empty (or unset, in a
+# unit.env written before it existed) the run has no argument for it at all, where
+# ${...} would pass docker an empty one.
 
 [Unit]
 Description=The hub container for %i
@@ -20,7 +25,9 @@ Wants=network-online.target
 [Service]
 Type=exec
 # HUB_IMAGE, the image the last deploy installed, by its id; HUB_PORT, the person's port
-# on the host's loopback. Written by the deploy, and by nothing else.
+# on the host's loopback; HUB_RELAY_MAPPING, for a hub whose Telegram line is relayed,
+# --add-host=<the relay's host>:<its address on the box> (ADR-0330 §8:2), and empty for
+# every other hub. Written by the deploy, and by nothing else.
 EnvironmentFile=/srv/hubs/%i/unit.env
 ExecStartPre=-/usr/bin/docker rm --force hub-%i
 # The person's own bridge network, so no other person's container shares a bridge with
@@ -35,6 +42,7 @@ ExecStart=/usr/bin/docker run --rm --pull never --name hub-%i --network hub-%i \
     --volume /srv/hubs/%i/keyring-passphrase:/run/secrets/keyring-passphrase:ro \
     --publish 127.0.0.1:${HUB_PORT}:8423 \
     --stop-timeout 90 \
+    $HUB_RELAY_MAPPING \
     ${HUB_IMAGE}
 # ADR-0083's D2 is shutdown_drain_seconds plus thirty, sixty by default. Docker waits 90
 # for the drain before it kills, and systemd waits 120 for Docker, so the drain is cut

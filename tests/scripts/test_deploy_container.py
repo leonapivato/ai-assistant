@@ -200,10 +200,11 @@ class FakeBox:
         return 0, "", ""
 
     def cmd_grep(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
-        pattern = re.compile(argv[4].replace("[[:space:]]", r"\s"), re.IGNORECASE)
+        pattern = re.compile(argv[-3].replace("[[:space:]]", r"\s"), re.IGNORECASE)
         lines = self.files[argv[-1]].data.decode().splitlines()
-        count = sum(1 for line in lines if pattern.search(line))
-        return (0 if count else 1), f"{count}\n", ""
+        hits = [line for line in lines if pattern.search(line)]
+        out = f"{len(hits)}\n" if "--count" in argv else "".join(f"{hit}\n" for hit in hits)
+        return (0 if hits else 1), out, ""
 
     def cmd_find(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
         wanted = argv[argv.index("-lx") + 1]
@@ -742,6 +743,98 @@ def test_deploy_refuses_a_changed_drain() -> None:
     _refused_untouched(box, "ASSISTANT_SHUTDOWN_DRAIN_SECONDS")
 
 
+RELAY_ORIGIN = b"ASSISTANT_TELEGRAM_RELAY_ORIGIN=https://telegram-relay:8443\n"
+
+
+def _mapping(box: FakeBox) -> str:
+    text = box.files[str(PERSON.unit_env)].data.decode()
+    lines = [line for line in text.splitlines() if line.startswith("HUB_RELAY_MAPPING=")]
+    assert len(lines) == 1, text
+    return lines[0].partition("=")[2]
+
+
+def test_deploy_maps_a_relayed_hubs_relay_host_to_the_address_given() -> None:
+    box = served_box()
+    box.files[str(PERSON.env_file)].data += RELAY_ORIGIN
+
+    report = deployment(box, relay_address="10.254.0.1").run()
+
+    assert _mapping(box) == "--add-host=telegram-relay:10.254.0.1"
+    assert "relay:  --add-host telegram-relay:10.254.0.1" in report
+    assert box.active == "active"
+
+
+def test_deploy_reads_the_relay_origin_alone_from_the_env_file() -> None:
+    box = served_box()
+    box.files[str(PERSON.env_file)].data += RELAY_ORIGIN
+
+    deployment(box, relay_address="10.254.0.1").run()
+
+    reads = [argv for argv in box.ran if str(PERSON.env_file) in argv]
+    assert reads, "the env file is examined"
+    assert all(argv[0] in {"stat", "grep"} for argv in reads), "never cat: it holds the key"
+    relay = [argv for argv in reads if argv[0] == "grep" and "--count" not in argv]
+    assert len(relay) == 1
+    assert relay[0][-3] == "^[[:space:]]*ASSISTANT_TELEGRAM_RELAY_ORIGIN="
+
+
+def test_deploy_refuses_a_relayed_hub_with_no_relay_address() -> None:
+    box = served_box()
+    box.files[str(PERSON.env_file)].data += RELAY_ORIGIN
+    recorded = box.files[str(PERSON.unit_env)].data
+
+    _refused_untouched(box, "Pass --relay-address")
+
+    assert box.files[str(PERSON.unit_env)].data == recorded
+    assert box.active == "active", "the earlier image still serves"
+
+
+@pytest.mark.parametrize("address", [None, "10.254.0.1"])
+def test_deploy_leaves_a_direct_hubs_run_without_a_mapping(address: str | None) -> None:
+    box = served_box()
+
+    report = deployment(box, relay_address=address).run()
+
+    assert _mapping(box) == ""
+    assert "relay:  none, the line is direct" in report
+
+
+@pytest.mark.parametrize(
+    ("lines", "host"),
+    [
+        ("", None),
+        ("ASSISTANT_TELEGRAM_RELAY_ORIGIN=https://telegram-relay:8443\n", "telegram-relay"),
+        (
+            "  assistant_telegram_relay_origin=HTTPS://Relay.Box.Internal:8443 \n",
+            "relay.box.internal",
+        ),
+    ],
+)
+def test_relay_host_is_the_origins_host_name(lines: str, host: str | None) -> None:
+    assert dc.relay_host(lines) == host
+
+
+@pytest.mark.parametrize(
+    ("lines", "said"),
+    [
+        (
+            "ASSISTANT_TELEGRAM_RELAY_ORIGIN=https://a:8443\nASSISTANT_TELEGRAM_RELAY_ORIGIN=https://b:8443\n",
+            "2 times",
+        ),
+        ("ASSISTANT_TELEGRAM_RELAY_ORIGIN=https://10.254.0.1:8443\n", "never an address"),
+        ("ASSISTANT_TELEGRAM_RELAY_ORIGIN=https://[fd00::1]:8443\n", "never an address"),
+        ("ASSISTANT_TELEGRAM_RELAY_ORIGIN=telegram-relay:8443\n", "names no host name"),
+        ("ASSISTANT_TELEGRAM_RELAY_ORIGIN=\n", "names no host name"),
+        ("ASSISTANT_TELEGRAM_RELAY_ORIGIN=https://relay_box:8443\n", "names no host name"),
+        ("ASSISTANT_TELEGRAM_RELAY_ORIGIN=https://[telegram-relay:8443\n", "names no host name"),
+    ],
+)
+def test_relay_host_refuses_what_it_cannot_map(lines: str, said: str) -> None:
+    with pytest.raises(dc.DeployError, match=said) as caught:
+        dc.relay_host(lines)
+    assert "Nothing has been stopped or changed." in str(caught.value)
+
+
 def test_deploy_refuses_a_served_volume_with_no_record_of_its_image() -> None:
     box = served_box()
     del box.files[str(PERSON.unit_env)]
@@ -975,10 +1068,11 @@ def test_parse_unit_env_refuses_what_the_deploy_does_not_write() -> None:
         dc.parse_unit_env("HUB_IMAGE=ai-assistant-hub:latest\nHUB_PORT=8501\n")
 
 
-def test_unit_env_round_trips() -> None:
+@pytest.mark.parametrize("relay", [None, "telegram-relay:10.254.0.1"])
+def test_unit_env_round_trips(relay: str | None) -> None:
     image = dc.Image(id=OLD_ID, commit=OLD_COMMIT, name="ai-assistant-hub:aaaaaaaaaaaa")
 
-    parsed = dc.parse_unit_env(dc.render_unit_env(image, 8501, "now"))
+    parsed = dc.parse_unit_env(dc.render_unit_env(image, 8501, "now", relay))
 
     assert parsed == dc.Installed(image=OLD_ID, port=8501)
 
@@ -1064,6 +1158,9 @@ def test_container_problems(change: dict[str, object], said: str) -> None:
         ["alice", "box", "--hubs-dir", "srv"],
         ["alice", "box", "--hubs-dir", "/srv/hub data"],
         ["alice", "box", "--hubs-dir", "/srv/100%"],
+        ["alice", "box", "--relay-address", "telegram-relay"],
+        ["alice", "box", "--relay-address", "fd00::1"],
+        ["alice", "box", "--relay-address", "10.254.0.1 --privileged"],
     ],
 )
 def test_main_refuses_bad_arguments_before_contacting_anything(
@@ -1085,6 +1182,14 @@ def test_container_uid_is_the_images() -> None:
     assert f"EXPOSE {dc.HOSTED_PORT}" in dockerfile
     assert "ENV PATH=/opt/assistant/venv/bin" in dockerfile
     assert "ASSISTANT_DATA_DIR=/data" in dockerfile
+
+
+def test_relay_setting_is_the_hubs_own() -> None:
+    from ai_assistant.core.config import Settings  # noqa: PLC0415  # held to its source
+
+    prefix = Settings.model_config.get("env_prefix", "")
+    assert "telegram_relay_origin" in Settings.model_fields
+    assert f"{prefix}telegram_relay_origin".upper() == dc._RELAY_SETTING
 
 
 def test_labels_and_tag_are_build_shs() -> None:
