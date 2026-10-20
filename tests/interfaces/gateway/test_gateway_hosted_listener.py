@@ -850,6 +850,47 @@ def _suspended_locals() -> list[object]:
     return found
 
 
+def _live_requests() -> list[Request]:
+    """Every gateway request anything in this process still holds.
+
+    **Told apart by the object's real type, never by ``isinstance``** (issue #3189).
+    The scan visits every object the collector tracks, and ``isinstance`` reads an
+    instance's own ``__class__`` where its real type does not match: code the object
+    supplies. Other cases in the suite build objects whose ``__class__`` raises on
+    purpose, and one still alive in a long run, or garbage not yet collected, failed
+    this scan with its error. ``type()`` reads the real type and runs nothing.
+    """
+    return [obj for obj in gc.get_objects() if issubclass(type(obj), Request)]
+
+
+class _ForeignCodeRanError(Exception):
+    """Raised by :class:`_ClassRaises` if anything reads its ``__class__``."""
+
+
+class _ClassRaises:
+    """An object whose own ``__class__`` raises, as some of the suite's cases build."""
+
+    @property  # type: ignore[misc]  # a raising __class__ is the point
+    def __class__(self) -> Any:
+        """Raise: a reader ran this object's own code."""
+        raise _ForeignCodeRanError
+
+
+def test_the_scan_for_live_requests_runs_no_object_s_own_code() -> None:
+    """Issue #3189: a live object whose ``__class__`` raises does not fail the scan.
+
+    The object is hostile to ``isinstance`` (checked first, so this case cannot pass
+    with a harmless plant), and the scan completes with it alive.
+    """
+    planted = _ClassRaises()
+    with pytest.raises(_ForeignCodeRanError):
+        isinstance(planted, Request)
+
+    _live_requests()
+
+    assert type(planted) is _ClassRaises
+
+
 async def test_the_assertion_is_held_only_while_it_is_checked() -> None:
     """§9:2: "The gateway holds an assertion only while it checks the request that
     carried it." With an admitted request suspended inside the engine — the longest
@@ -865,7 +906,7 @@ async def test_the_assertion_is_held_only_while_it_is_checked() -> None:
         await engine.occupied.wait()
         try:
             held = _suspended_locals()
-            live_requests = [obj for obj in gc.get_objects() if isinstance(obj, Request)]
+            live_requests = _live_requests()
         finally:
             engine.release.set()
         answer = await listing
