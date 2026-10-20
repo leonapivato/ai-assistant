@@ -333,3 +333,30 @@ def test_the_three_reasons_are_three_conditions() -> None:
     """One fault name per reason, and no two reasons share one (ADR-0298 §6:2)."""
     assert set(REFUSAL_FAULTS) == set(DeviceRefusal)
     assert len(set(REFUSAL_FAULTS.values())) == len(DeviceRefusal)
+
+
+# --- Through the sign-in door, the sentence is the person's (ADR-0327 §10) -------------
+
+
+@pytest.mark.parametrize("reason", list(DeviceRefusal))
+def test_through_the_door_a_sentence_names_who_can_set_it_up_and_no_command(
+    reason: DeviceRefusal,
+) -> None:
+    """The person on the hosted door holds no machine of the hub's and knows no device by
+    name: the sentence says what is not set up and who can set it up, and nothing more."""
+    said = refusal_detail(reason, device=_PHONE, gateway=_GATEWAY_NODE, hosted=True)
+
+    assert "The person who set it up for you" in said
+    for operator in (_PHONE, _GATEWAY_NODE, "ai-assistant-device", "my-devices", "hub"):
+        assert operator not in said
+
+
+def test_through_the_door_the_three_reasons_are_still_three_sentences() -> None:
+    """ADR-0298 §6:2's three conditions stay three to the person, so the one who set it
+    up can be told which it was."""
+    said = {
+        refusal_detail(reason, device=_PHONE, gateway=_GATEWAY_NODE, hosted=True)
+        for reason in DeviceRefusal
+    }
+
+    assert len(said) == len(DeviceRefusal)

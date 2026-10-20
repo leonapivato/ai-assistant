@@ -42,12 +42,14 @@ from typing import TYPE_CHECKING, Any
 import gateway_ports
 import pytest
 from browser_drive import DESKTOP, PHONE, SESSION_IDLE_MARGIN, DriveEngine, press
-from gateway_edge import DOOR, DOOR_ORIGIN, FakeEdge
+from gateway_edge import DOOR, DOOR_ORIGIN, HOSTED_DEVICE, FakeEdge
 from gateway_timing import Clock, Timers
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import expect
 
 from ai_assistant.core.config import Settings
+from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
+from ai_assistant.core.types import ChatDevice, DeviceAccess
 from ai_assistant.interfaces.gateway.server import Gateway, packaged_bundle
 
 if TYPE_CHECKING:
@@ -469,6 +471,118 @@ async def test_a_door_refusal_mid_session_says_where_signing_in_happens(
         await expect(state).to_contain_text("The sign-in door refused this request")
         await expect(door.page.locator("#hosted-again")).to_be_visible()
         assert door.exchanges == 1
+
+
+# --- What the hub refuses, said to the person on the door (ADR-0327 §10) --------------
+
+#: What nothing the page says through the door names: the commands, the machine, the
+#: device id. The person there can run none of them and has never heard of the id.
+_OPERATOR_WORDS = ("ai-assistant-device", "my-devices", "hub's machine", HOSTED_DEVICE)
+
+
+@pytest.mark.parametrize("reason", list(DeviceRefusal))
+async def test_a_refused_first_conversation_says_who_can_turn_it_on(
+    gateway_browser: Browser, tmp_path: Path, reason: DeviceRefusal
+) -> None:
+    """The owner's first message through the door was refused with an operator's command
+    line. Each of ADR-0298 §6's reasons is now said as what is not set up, and who can set
+    it up — and still as its own sentence."""
+    async with through_the_door(gateway_browser, tmp_path, viewport=PHONE) as door:
+
+        async def refused() -> Any:
+            msg = "refused for the device"
+            raise DeviceRefusedError(msg, reason=reason)
+
+        door.engine.start_conversation = refused  # type: ignore[method-assign]
+        await expect(door.page.locator("#console")).to_be_visible()
+        await door.page.click("#chat-button")
+        await door.page.click("#chat-start")
+
+        slot = door.page.locator("#chat .fault")
+        await expect(slot).to_contain_text("That didn't go through, so nothing was done.")
+        await expect(slot).to_contain_text("The person who set it up for you")
+        said = await slot.inner_text()
+        for word in _OPERATOR_WORDS:
+            assert word not in said
+
+
+async def test_the_devices_note_names_no_command_through_the_door(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ "My devices" is changed at the command line, which the person on the door has no
+    way to run: the note says who can add this page instead."""
+    async with through_the_door(gateway_browser, tmp_path) as door:
+        await expect(door.page.locator("#console")).to_be_visible()
+        await door.page.click("#chat-button")
+
+        note = door.page.locator("#chat-this-device")
+        await expect(note).to_contain_text("This page is not one of your devices yet")
+        await expect(note).to_contain_text("The person who set up your assistant can add it.")
+        said = await note.inner_text()
+        for word in _OPERATOR_WORDS:
+            assert word not in said
+
+
+# --- The phone: the box to write in stays on screen, and nothing scrolls sideways ------
+
+#: What is left of a 390x844 screen with a phone's keyboard up.
+_KEYBOARD_UP = 508
+
+#: A message a phone has to wrap somewhere other than at a space.
+_UNBROKEN = "https://example.com/" + "a-path-with-no-place-to-break-" * 6
+
+
+async def test_on_a_phone_the_box_to_write_in_is_on_screen_and_nothing_scrolls_sideways(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """At 390px the open conversation's send control is inside the first screen, a long
+    unbroken message wraps rather than widening the page, and with the keyboard up a
+    message of many lines grows the box to a share of the screen and no further, the
+    send control still on it."""
+    async with through_the_door(gateway_browser, tmp_path, viewport=PHONE) as door:
+        await door.engine.set_my_devices(
+            [ChatDevice(device_id=HOSTED_DEVICE, access=DeviceAccess.READ_WRITE)]
+        )
+        await door.engine.start_conversation()
+        await expect(door.page.locator("#console")).to_be_visible()
+        await door.page.click("#chat-button")
+        await door.page.locator("#chat-conversations button.chat-open").click()
+        await expect(door.page.locator("#chat-thread")).to_be_visible()
+
+        await door.page.fill("#chat-text", _UNBROKEN)
+        await door.page.click("#chat-send")
+        await expect(door.page.locator("#chat-transcript li").last).to_contain_text(
+            "a-path-with-no-place"
+        )
+        page_width = await door.page.evaluate("document.documentElement.scrollWidth")
+        assert page_width <= PHONE["width"]
+
+        send = await door.page.locator("#chat-send").bounding_box()
+        assert send is not None
+        assert send["y"] + send["height"] <= PHONE["height"]
+
+        # The keyboard up, where the browser shrinks the page for it: the box grows to a
+        # share of what is left of the screen and no further.
+        await door.page.set_viewport_size({"width": PHONE["width"], "height": _KEYBOARD_UP})
+        await door.page.fill("#chat-text", "\n".join(f"line {n}" for n in range(12)))
+        box = await door.page.locator("#chat-text").bounding_box()
+        send = await door.page.locator("#chat-send").bounding_box()
+        assert box is not None
+        assert send is not None
+        assert box["height"] <= _KEYBOARD_UP * 0.2 + 1
+        assert send["y"] + send["height"] <= _KEYBOARD_UP
+
+
+async def test_the_page_asks_a_phone_to_make_room_for_its_keyboard(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The chat is sized to the screen, so the keyboard must shrink the screen rather
+    than cover the box being typed in, where the browser offers the choice."""
+    async with through_the_door(gateway_browser, tmp_path, viewport=PHONE) as door:
+        viewport = await door.page.get_attribute("meta[name=viewport]", "content")
+
+    assert viewport is not None
+    assert "interactive-widget=resizes-content" in viewport
 
 
 # --- The harness: a forward the door was closed under -----------------------------------

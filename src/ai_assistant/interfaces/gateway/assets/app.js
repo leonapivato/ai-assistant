@@ -515,6 +515,9 @@ async function readBody(response) {
 // arrived as a stream's terminal value, because the gateway writes the same names
 // on both — so §9's distinction survives to what the owner reads rather than
 // stopping at a status code a stream cannot revise.
+// The headline of each of the hub's three device refusals on the hosted door (below).
+const HOSTED_DEVICE_REFUSED = "That didn't go through, so nothing was done.";
+
 const FAULTS = {
   // The remedy is no longer here: under ADR-0182 §1 a value is printed at start **and**
   // whenever the owner mints one, so "the value the gateway printed" had become the
@@ -584,10 +587,20 @@ const FAULTS = {
   // ADR-0298 §6: the hub refused the request for the device this browser is, before
   // it changed anything. One name per reason, so each reads as its own condition; the
   // gateway's `detail` names the device and the command that changes the answer.
-  "device-not-accepted":
-    "The hub does not accept this device through this gateway, so nothing was done.",
-  "device-without-role": "The hub has not given this device a role yet, so nothing was done.",
-  "device-not-allowed": "This device's roles do not allow that, so nothing was done.",
+  //
+  // Through the sign-in door the reader is a person who holds no machine of the hub's
+  // and knows no device by name (ADR-0327 §10), so the headline says only that nothing
+  // happened: the gateway's `detail` there says, per reason, what is not set up yet and
+  // who can set it up.
+  "device-not-accepted": HOSTED
+    ? HOSTED_DEVICE_REFUSED
+    : "The hub does not accept this device through this gateway, so nothing was done.",
+  "device-without-role": HOSTED
+    ? HOSTED_DEVICE_REFUSED
+    : "The hub has not given this device a role yet, so nothing was done.",
+  "device-not-allowed": HOSTED
+    ? HOSTED_DEVICE_REFUSED
+    : "This device's roles do not allow that, so nothing was done.",
   "no-such-belief":
     "No live belief has that id. It may never have existed, or it may have been " +
     "revised or forgotten already — this surface shows and destroys only beliefs " +
@@ -3563,6 +3576,14 @@ function renderMyDevices() {
       "from here.";
   } else if (chat.thisDevice === undefined) {
     said.textContent = "";
+  } else if (HOSTED) {
+    // Through the sign-in door this browser is the person's one hosted browser device,
+    // "the web" rather than a machine (ADR-0327 §10), and adding it is the setup's act
+    // rather than a command the person can run — so it is said without either.
+    said.textContent = held
+      ? "This page is one of your devices, so every new conversation is shown here."
+      : "This page is not one of your devices yet, so a new conversation is not shown " +
+        "here on its own. The person who set up your assistant can add it.";
   } else if (held) {
     said.textContent = `This browser is device ${chat.thisDevice}, one of your devices.`;
   } else {
@@ -3572,8 +3593,9 @@ function renderMyDevices() {
       `then on is shown on it: assistant my-devices --add ${chat.thisDevice}`;
   }
   // The roles the hub's stream last sent (ADR-0298 §7:9), said beside the device.
-  if (chat.roles !== undefined && said.textContent !== "") {
-    said.textContent += ` ${rolesSaid(chat.roles)}`;
+  const roles = chat.roles === undefined ? "" : rolesSaid(chat.roles);
+  if (roles !== "" && said.textContent !== "") {
+    said.textContent += ` ${roles}`;
   }
   if (chat.myDevices.length === 0) {
     const none = document.createElement("li");
@@ -3590,6 +3612,12 @@ function renderMyDevices() {
 // with no roster role may still read and write the conversations it is a device of. What
 // drops everything is the refusal for holding no role (§7:17, `dropOnRefusal`).
 function rolesSaid(roles) {
+  if (HOSTED) {
+    return roles.length === 0
+      ? "It is not set up to ask or manage anything from here yet, though the " +
+          "conversations shown here still work."
+      : "";
+  }
   if (roles.length === 0) {
     return (
       "The hub's device roster gives it no role, so it cannot ask or manage from here; " +
