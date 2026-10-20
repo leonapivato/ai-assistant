@@ -10,6 +10,10 @@ makes is the person ``ci``'s, under ``/srv/hubs/ci``, and is removed at the end.
 
 What it proves, in order:
 
+0. **A first install killed outright resumes** (#3185). The deploy is killed with
+   ``SIGKILL`` once it says it has recorded the install, mid-way through making the
+   volumes and ``unit.env``; the lock it held is free again at once, and the first
+   install below, run again over what it left, finishes.
 1. **A first install.** The unit starts the image the deploy built, the door refuses an
    unsigned request and serves a signed one, and an admin act and a keyring write land.
 2. **An upgrade.** The deploy backs the volume up before the new image runs, the artifact
@@ -33,6 +37,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -56,6 +61,8 @@ UNIT: Final = f"hub@{PERSON}.service"
 CONTAINER: Final = f"hub-{PERSON}"
 CONTAINER_UID: Final = "10001"
 DEADLINE: Final = 600.0
+#: The deploy's line once a first install has recorded itself and is making its volumes.
+RECORDED: Final = "; making its volumes"
 _CONVERSATION: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _KEYRING_WRITE: Final = (
     "from ai_assistant.secret_store import select_backend as s; "
@@ -325,11 +332,48 @@ class Run:
             msg = f"the keyring entry is {carried!r}, not 'carried'"
             raise SmokeError(msg)
 
+    def killed_first_install(self) -> None:
+        """Kill a first install outright once it has recorded itself.
+
+        Raises:
+            SmokeError: If it ended before that, or its lock outlived it.
+        """
+        step("a first install killed outright once it has recorded itself")
+        process = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+            [sys.executable, str(DEPLOY), PERSON, "--local", "--port", str(PORT)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=REPO,
+        )
+        assert process.stderr is not None  # noqa: S101 — a pipe, asked for above
+        for line in process.stderr:
+            print(line, end="", flush=True)
+            if RECORDED in line:
+                process.kill()
+                break
+        process.wait()
+        process.stderr.close()
+        if process.returncode != -signal.SIGKILL:
+            msg = f"the deploy ended (exit {process.returncode}) before it recorded the install"
+            raise SmokeError(msg)
+        step(f"it left: {' '.join(root('ls', '-A', str(DIRECTORY)).split())}")
+        lock = DIRECTORY / ".deploy-lock"
+        try:
+            # Its holder ends once it reads the end of the dead deploy's pipe.
+            root("flock", "--wait", "10", "--", str(lock), "true")
+        except SmokeError as exc:
+            msg = f"the killed deploy's lock on {lock} was not released"
+            raise SmokeError(msg) from exc
+
     def first_install(self) -> None:
-        """Deploy a person with nothing on the box yet."""
+        """Deploy a person with nothing on the box yet, or what a killed install left."""
         step("a first install")
         if deploy("--port", str(PORT)).returncode != 0:
             msg = "the first install failed"
+            raise SmokeError(msg)
+        if ".first-install" in root("ls", "-A", str(DIRECTORY)).split():
+            msg = "the first install left its record"
             raise SmokeError(msg)
         if backups():
             msg = f"a first install took a backup: {backups()}"
@@ -493,6 +537,7 @@ class Run:
         """Every check, in order."""
         step(f"Docker {root('docker', 'version', '--format', '{{.Server.Version}}').strip()}")
         self.write_person()
+        self.killed_first_install()
         self.first_install()
         print(root("iptables", "-t", "raw", "-S", "PREROUTING"), flush=True)
         self.upgrade()

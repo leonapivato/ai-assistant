@@ -118,9 +118,33 @@ replaces. A relayed hub deployed without it is refused before anything is stoppe
 since it would start only to fail at its first poll. A hub that sets no origin is in
 direct mode, and its run is as it was: ``--relay-address`` is not used for it.
 
-**One deploy per person at a time.** ``<person>/.deploy-lock`` is made at the start and
-removed at the end; a run that cannot make it refuses, and one killed outright leaves it
-for the operator to remove.
+**One deploy per person at a time, and one unit install per box.** Each is a ``flock``
+on a box file, ``<person>/.deploy-lock`` for the whole deploy and
+``/run/hub-deploy-unit.lock`` while the unit is installed, which every person's deploy
+writes. The box commands are separate ssh sessions, so the lock is held by one more: a
+``flock`` on the box whose holder reads its standard input, a pipe from this process
+alone, to its end. The deploy releases it by closing the pipe; a deploy killed outright
+closes it by dying, the holder ends, and the kernel releases the lock with its
+descriptor. So no run ever finds a dead deploy's lock, and the files themselves mean
+nothing: an earlier deploy's lock directory serves as the file.
+
+The ssh link can drop under the holder alone. Its ssh then exits, and the deploy refuses
+to change anything more: it looks before it installs the unit, before it stops the hub
+for the backup, and before it names the new image. On the box, sshd ends the holder
+when it sees the link gone, which may be the TCP keepalive's two hours, and until then
+another deploy refuses and is told how to find the holder. A box command already running
+when its own link drops runs to its end unwatched, as one always has; the next deploy's
+checks are what meet it: a backup container still mounting the data volume is refused by
+the check that the volume is still.
+
+**A first install that ends early is resumed** (#3185). It records itself in
+``<person>/.first-install`` before it makes the volumes and removes the record once
+``unit.env`` is written and before the unit is enabled or started, each step synced to
+the box's disk. While the record stands nothing can have run on the volumes, so the next
+deploy finds the record, keeps the volumes, and installs again, writing ``unit.env``
+over any the interrupted run wrote. Volumes with neither a record nor ``unit.env`` are
+still refused: that may be a person's data with nothing to say which image wrote it
+(ADR-0326 §6:1).
 """
 
 from __future__ import annotations
@@ -172,9 +196,16 @@ DEFAULT_HUBS_DIR = "/srv/hubs"
 #: The person-directory root the shipped unit names, replaced when ``--hubs-dir`` differs.
 UNIT_HUBS_DIR = "/srv/hubs"
 UNIT_PATH = "/etc/systemd/system/hub@.service"
-#: The box's lock on installing the unit: under /run, so a reboot clears a stale one.
+#: The box's lock on installing the unit, which every person's deploy shares.
 UNIT_LOCK = "/run/hub-deploy-unit.lock"
-_UNIT_LOCK_ATTEMPTS = 30
+#: How long a deploy waits for another to finish installing the unit.
+_UNIT_LOCK_SECONDS = 60
+#: What a lock's holder prints once it holds the lock, and the exit status of one that
+#: could not have it: ``flock --conflict-exit-code``'s, sysexits' ``EX_TEMPFAIL``.
+HELD = b"held\n"
+_BUSY = 75
+#: How long a released holder has to end before it is killed.
+_RELEASE_SECONDS = 30
 DOCKER = "/usr/bin/docker"
 #: Where a staged build context is unpacked on the box, root's alone.
 BOX_STAGE_PARENT = "/var/tmp"  # noqa: S108  # root-owned staging, made 0700 per run
@@ -260,6 +291,22 @@ class Result:
         return self.err.strip() or self.out.strip() or "(no output)"
 
 
+class Lease(Protocol):
+    """A lock on the box, held by a box process that lives as long as this deploy."""
+
+    def held(self) -> bool:
+        """Whether the process holding it is still running.
+
+        Returns:
+            ``False`` once it has ended, the lock with it.
+        """
+        ...
+
+    def release(self) -> None:
+        """End the holding process, and the lock with it. Never raises."""
+        ...
+
+
 class Box(Protocol):
     """Where the person's container runs."""
 
@@ -272,6 +319,19 @@ class Box(Protocol):
 
         Returns:
             Its exit status and output.
+        """
+        ...
+
+    def hold(self, argv: Sequence[str]) -> Lease | Result:
+        """Start a command that holds a lock until its standard input ends.
+
+        Args:
+            argv: The command: one that prints :data:`HELD` once it holds the lock,
+                then reads its standard input to its end.
+
+        Returns:
+            The lease while it holds the lock, or its exit status and output once it
+            has ended without printing :data:`HELD`.
         """
         ...
 
@@ -302,6 +362,66 @@ def _execute(argv: Sequence[str], stdin: IO[bytes] | None) -> Result:
         completed.returncode,
         completed.stdout.decode("utf-8", "replace"),
         completed.stderr.decode("utf-8", "replace"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessLease:
+    """A lock held by a local process: ``ssh`` or ``sudo`` running the box's holder.
+
+    Its standard input is a pipe from this process alone, so it ends when this deploy
+    does, however it ends: a kill closes the pipe, the holder on the box reads its end
+    and exits, and the kernel releases the lock with its descriptor.
+    """
+
+    process: subprocess.Popen[bytes]
+
+    def held(self) -> bool:
+        """Whether the holder still runs.
+
+        Returns:
+            ``False`` once it has exited, as it does when its link to the box drops.
+        """
+        return self.process.poll() is None
+
+    def release(self) -> None:
+        """Close the holder's standard input and wait for it to end."""
+        try:
+            self.process.communicate(timeout=_RELEASE_SECONDS)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.communicate()
+
+
+def _hold(argv: Sequence[str]) -> ProcessLease | Result:
+    """Start a local process that holds a lock, and wait until it holds it or has ended.
+
+    Args:
+        argv: The process.
+
+    Returns:
+        Its lease once it prints :data:`HELD`, else its exit status and output.
+
+    Raises:
+        DeployError: If the executable cannot be started.
+    """
+    try:
+        process = subprocess.Popen(  # noqa: S603  # an argv, never a shell line
+            list(argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+    except OSError as exc:
+        raise DeployError(f"could not run {argv[0]}: {exc.strerror or exc}") from exc
+    assert process.stdout is not None  # noqa: S101  # a pipe, asked for above
+    said = b""
+    while line := process.stdout.readline():
+        if line == HELD:
+            return ProcessLease(process)
+        said += line
+    out, err = process.communicate()
+    return Result(
+        process.returncode,
+        (said + out).decode("utf-8", "replace"),
+        err.decode("utf-8", "replace"),
     )
 
 
@@ -346,6 +466,17 @@ class SshBox:
         """
         return _execute(self.argv(argv), stdin)
 
+    def hold(self, argv: Sequence[str]) -> ProcessLease | Result:
+        """Hold a lock on the box for as long as this deploy's ssh session to it lasts.
+
+        Args:
+            argv: The holder.
+
+        Returns:
+            Its lease, or how it ended. ssh's own failure is ``255``.
+        """
+        return _hold(self.argv(argv))
+
 
 @dataclass(frozen=True, slots=True)
 class LocalBox:
@@ -375,6 +506,17 @@ class LocalBox:
             Its exit status and output.
         """
         return _execute(self.argv(argv), stdin)
+
+    def hold(self, argv: Sequence[str]) -> ProcessLease | Result:
+        """Hold a lock here, as root, for as long as this deploy runs.
+
+        Args:
+            argv: The holder.
+
+        Returns:
+            Its lease, or how it ended.
+        """
+        return _hold(self.argv(argv))
 
 
 # --------------------------------------------------------------------------- #
@@ -421,8 +563,13 @@ class Person:
 
     @property
     def lock(self) -> PurePosixPath:
-        """The directory whose existence is a deploy in progress."""
+        """The file a deploy in progress holds a ``flock`` on; its existence means nothing."""
         return self.dir / ".deploy-lock"
+
+    @property
+    def first_install(self) -> PurePosixPath:
+        """Present while a first install's volumes have had no hub run on them."""
+        return self.dir / ".first-install"
 
     @property
     def container(self) -> str:
@@ -959,15 +1106,17 @@ class Deployment:
         self._check_env_file()
         self.relay = self._rule_on_relay()
         self._check_passphrase(person.keyring_passphrase, "keyring")
-        text = self._read(person.unit_env)
-        installed = None if text is None else parse_unit_env(text)
+        installed = self._installed()
         served = self._volume_exists(person.data_volume)
-        if installed is None and served:
+        if installed is None and served and self._stat(person.first_install) is None:
             raise DeployError(
                 f"the volume {person.data_volume} exists but {person.unit_env} does not, so a\n"
                 "hub has served data here and nothing says which image wrote it: no backup can\n"
                 "be taken with that image before installing (ADR-0326 §6:1). Back the volume\n"
-                f"up by hand, write unit.env naming that image, and deploy again.\n{_UNTOUCHED}"
+                "up by hand, write unit.env naming that image, and deploy again. Only if you\n"
+                "know no hub ever ran on it (a first install interrupted by a deploy older\n"
+                f"than {person.first_install}), remove {person.data_volume} and\n"
+                f"{person.keyring_volume} instead, and deploy again.\n{_UNTOUCHED}"
             )
         if installed is not None and not served:
             raise DeployError(
@@ -993,6 +1142,22 @@ class Deployment:
         self._check_unit_root()
         self._check_box_network()
         return installed
+
+    def _installed(self) -> Installed | None:
+        """What the unit runs, or ``None`` when no hub has run on the person's volumes.
+
+        A first install records itself before it makes the volumes and removes the
+        record before anything starts on them, so while the record stands the volumes
+        hold nothing a hub wrote, whatever ``unit.env`` says: the install is resumed.
+
+        Returns:
+            What ``unit.env`` names, or ``None`` for a first install, new or resumed.
+        """
+        if self._stat(self.person.first_install) is not None:
+            say(f"{self.person.first_install}: a first install that ran nothing; resuming it")
+            return None
+        text = self._read(self.person.unit_env)
+        return None if text is None else parse_unit_env(text)
 
     def _check_unit_root(self) -> None:
         """Refuse a person-directory root other than the one the box's unit reads.
@@ -1148,7 +1313,9 @@ class Deployment:
                 "+",
             ]
         )
-        others = [line for line in taken.out.splitlines() if line.strip()]
+        # A resumed first install's own unit.env is the one it replaces.
+        own = str(self.person.unit_env)
+        others = [line for line in taken.out.splitlines() if line.strip() and line != own]
         if others:
             raise DeployError(
                 f"port {self.port} is already another person's: {', '.join(others)}.\n{_UNTOUCHED}"
@@ -1285,15 +1452,12 @@ class Deployment:
                 be written or systemd cannot reload.
         """
         wanted = render_unit(UNIT_SOURCE.read_text(encoding="utf-8"), self.person.hubs_dir)
-        for attempt in range(_UNIT_LOCK_ATTEMPTS):
-            if self.box.run(["mkdir", "-m", "0700", "--", UNIT_LOCK]).ok:
-                break
-            if attempt == _UNIT_LOCK_ATTEMPTS - 1:
-                raise DeployError(
-                    f"could not make {UNIT_LOCK}: another deploy on this box is installing\n"
-                    f"the unit, or one was killed doing it (a reboot clears it).\n{_UNTOUCHED}"
-                )
-            self.sleep(_POLL_SECONDS)
+        lease = self._lock(UNIT_LOCK, wait=_UNIT_LOCK_SECONDS)
+        if isinstance(lease, Result):
+            raise DeployError(
+                f"another deploy on this box held {UNIT_LOCK}, installing the unit, for\n"
+                f"{_UNIT_LOCK_SECONDS}s. {_holder_hint(UNIT_LOCK, lease)}\n{_UNTOUCHED}"
+            )
         try:
             self._check_unit_root()
             if self._read(PurePosixPath(UNIT_PATH)) == wanted:
@@ -1302,7 +1466,23 @@ class Deployment:
             self._ok(["systemctl", "daemon-reload"], "reloading systemd")
             say(f"installed {UNIT_PATH}")
         finally:
-            self.box.run(["rmdir", "--", UNIT_LOCK])
+            lease.release()
+
+    def _lock(self, path: str | PurePosixPath, *, wait: int) -> Lease | Result:
+        """Take a ``flock`` on a box file, held until released or this deploy ends.
+
+        Args:
+            path: The file, made if missing; an earlier deploy's lock directory serves.
+            wait: Seconds to wait for another holder, or ``0`` not to wait.
+
+        Returns:
+            The lease, or how the holder ended: exit :data:`_BUSY` when another holds it.
+        """
+        argv = ["flock", f"--conflict-exit-code={_BUSY}"]
+        argv += ["--nonblock"] if wait == 0 else [f"--wait={wait}"]
+        # The holder prints once it holds the lock and then reads its standard input to
+        # its end, which comes when this deploy releases it or ends, however it ends.
+        return self.box.hold([*argv, "--", str(path), "sh", "-c", "echo held && exec cat"])
 
     # -- 2. the backup --------------------------------------------------------
 
@@ -1473,7 +1653,7 @@ class Deployment:
         return door, established
 
     def name_new_image(self, image: Image, *, first: bool) -> None:
-        """Enable the unit and name the new image in ``unit.env``, starting nothing.
+        """Name the new image in ``unit.env`` and enable the unit, starting nothing.
 
         Args:
             image: The image to run.
@@ -1482,28 +1662,50 @@ class Deployment:
         Raises:
             DeployError: If the volumes, the unit or ``unit.env`` cannot be set up.
         """
+        if first:
+            self._install_first(image)
+            return
+        self._ok(["systemctl", "enable", self.person.unit], f"enabling {self.person.unit}")
+        # Replaced whole, so until this lands the unit's next start is the earlier image.
+        self._write_unit_env(image)
+
+    def _install_first(self, image: Image) -> None:
+        """Make a first install's volumes and ``unit.env``, recorded until they are made.
+
+        :attr:`Person.first_install` is written before the volumes are made, and removed
+        once ``unit.env`` is written and before the unit is enabled or started. While it
+        stands nothing can run on the volumes, so a run that fails or is killed with it
+        standing leaves volumes that hold nothing a hub wrote, and the next deploy
+        resumes the install on them.
+
+        Args:
+            image: The image to run.
+        """
         person = self.person
+        self._write(
+            person.first_install,
+            f"# Written by scripts/deploy_container.py at {self.stamp}: a first install\n"
+            f"# that has run nothing on {person.data_volume} or {person.keyring_volume}.\n",
+            mode="0600",
+        )
+        self._sync(person.first_install, person.dir)
+        say(f"a first install, recorded in {person.first_install}; making its volumes")
+        for volume in (person.data_volume, person.keyring_volume):
+            if not self._volume_exists(volume):
+                self._ok([DOCKER, "volume", "create", volume], f"creating {volume}")
+        self._write_unit_env(image)
+        self._sync(person.unit_env, person.dir)
+        self._ok(["rm", "-f", "--", str(person.first_install)], "removing the record")
+        self._sync(person.dir)
         self._ok(["systemctl", "enable", person.unit], f"enabling {person.unit}")
-        created: list[str] = []
-        try:
-            if first:
-                for volume in (person.data_volume, person.keyring_volume):
-                    if not self._volume_exists(volume):
-                        self._ok([DOCKER, "volume", "create", volume], f"creating {volume}")
-                        created.append(volume)
-            assert self.port is not None  # noqa: S101  # set by the preflight
-            # Replaced whole, so until this lands the unit's next start is the earlier image.
-            self._write(person.unit_env, render_unit_env(image, self.port, self.stamp, self.relay))
-        except BaseException:
-            if first:
-                # Nothing has started, so the first install is undone whole: no unit at
-                # boot, no record (its rename may have landed before the failure), and no
-                # volume a later deploy would read as data no record explains.
-                self.box.run(["systemctl", "disable", person.unit])
-                self.box.run(["rm", "-f", "--", str(person.unit_env)])
-                for volume in created:
-                    self.box.run([DOCKER, "volume", "rm", volume])
-            raise
+
+    def _write_unit_env(self, image: Image) -> None:
+        assert self.port is not None  # noqa: S101  # set by the preflight
+        self._write(self.person.unit_env, render_unit_env(image, self.port, self.stamp, self.relay))
+
+    def _sync(self, *paths: PurePosixPath) -> None:
+        """Put files and directory entries on the box's disk, so a crash keeps them."""
+        self._ok(["sync", "--", *map(str, paths)], "syncing the person's directory")
 
     def await_ready(self, image_id: str) -> None:
         """Wait for the unit's container to be healthy on ``image_id``.
@@ -1701,18 +1903,18 @@ class Deployment:
         """
         person = self.person
         self._check_person_dir()
-        lock = self.box.run(["mkdir", "-m", "0700", "--", str(person.lock)])
-        if not lock.ok:
+        lease = self._lock(person.lock, wait=0)
+        if isinstance(lease, Result):
             raise DeployError(
-                f"could not make {person.lock}: another deploy to {person.name} is running,\n"
-                f"or one was killed. Remove it once none is.\n{lock.said()}\n{_UNTOUCHED}"
+                f"another deploy to {person.name} holds {person.lock}.\n"
+                f"{_holder_hint(str(person.lock), lease)}\n{_UNTOUCHED}"
             )
         try:
-            return self._run()
+            return self._run(lease)
         finally:
-            self.box.run(["rmdir", "--", str(person.lock)])
+            lease.release()
 
-    def _run(self) -> list[str]:
+    def _run(self, lease: Lease) -> list[str]:
         installed = self.preflight()
         image = self.prepare_image()
         before = "none, a first install"
@@ -1721,9 +1923,12 @@ class Deployment:
             commit = earlier.commit if earlier is not None else ""
             self.rule_on_history(commit, image.commit)
             before = f"{installed.image} (commit {commit or 'unlabelled'})"
+        _still_held(lease, self.person.lock, _UNTOUCHED)
         self.install_unit()
+        _still_held(lease, self.person.lock, "Nothing has been stopped.")
         artifact = None if installed is None else self.back_up(installed)
         try:
+            _still_held(lease, self.person.lock, "Nothing was installed.")
             self.name_new_image(image, first=installed is None)
         except (DeployError, KeyboardInterrupt) as exc:
             if installed is None:
@@ -1749,6 +1954,46 @@ class Deployment:
             f"relay:  {relay}",
             _backup_line(artifact),
         ]
+
+
+def _holder_hint(path: str, refused: Result) -> str:
+    """Say why a lock could not be had, and how to find who holds it.
+
+    Args:
+        path: The lock file.
+        refused: How its holder ended.
+
+    Returns:
+        The sentences for the operator.
+    """
+    if refused.code != _BUSY:
+        return f"Taking it failed (exit {refused.code}):\n{refused.said()}"
+    return (
+        "A deploy holds it for as long as it runs, and the kernel releases it when the\n"
+        "deploy ends, however it ends, so a deploy that was killed holds nothing. Wait for\n"
+        f"the one running, or find it on the box with `fuser -v {path}`."
+    )
+
+
+def _still_held(lease: Lease, path: PurePosixPath, untouched: str) -> None:
+    """Refuse to go on once the person's lock has been lost.
+
+    Its holder ends early only when its link to the box drops, and then another deploy
+    may take the lock: so this deploy changes nothing more.
+
+    Args:
+        lease: The person's lock.
+        path: Its file, for the message.
+        untouched: What has not been changed, for the message.
+
+    Raises:
+        DeployError: If the lock is no longer held.
+    """
+    if not lease.held():
+        raise DeployError(
+            f"the session holding {path} on the box ended, so another deploy may now hold\n"
+            f"it: the link to the box dropped. Deploy again once it is back.\n{untouched}"
+        )
 
 
 def _reason(exc: BaseException) -> str:
