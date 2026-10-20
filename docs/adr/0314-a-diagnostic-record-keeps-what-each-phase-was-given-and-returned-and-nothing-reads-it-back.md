@@ -1,6 +1,6 @@
 # 314. A diagnostic record keeps what each phase was given and returned, and nothing reads it back
 
-- Status: Partially superseded by ADR-0316 (§3:4, in the addition alone: the server's own tools include ADR-0316's activation viewer) and ADR-0333 (§4's table, §6:1 and §8:1's `DiagnosticSource` row, each in the addition alone: the observer as a source, writing to a file of its own)
+- Status: Partially superseded by ADR-0316 (§3:4, in the addition alone: the server's own tools include ADR-0316's activation viewer) and ADR-0333 (§4's table, §6:1 and §8:1's `DiagnosticSource` row, each in the addition alone: the observer as a source, writing to a file of its own) and ADR-0334 (§4's table, in the addition alone: a model call's given entry also carries its prompt's name, version and origin)
 - Date: 2026-10-13
 - Scope: the phases, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): a per-activation record of what each phase was given and what it returned, for the owner to read on the server when a decision cannot otherwise be explained ([#2863](https://github.com/leonapivato/ai-assistant/issues/2863)).
 - Authorization: the owner agreed the design on 2026-10-12 in #2863: on all hubs as an opt-in, with a retention window, strictly write-only, raw outside text kept within the window, and forgetting covering it later or the window doing the forgetting. The dispatcher assigned 0314 and authorized ratifying it once its reviews are green. The clauses that settle what that agreement leaves open are listed as such in the pull request.
@@ -16,6 +16,7 @@
   ratification of ADR-0316. This reciprocal header record accompanies the numbered draft
   under ADR-0070 and ADR-0082; the ratified body below is preserved.
 - Partially superseded: 2026-10-20 by ADR-0333 — §4's table, which §4:1 binds, in the addition alone: the observer is a source, writing each model call's rendered request and reply, its scout's findings, each finding's outcome and how each attempt ended (ADR-0333 §2). §6:1, in the addition alone: an activation's observer entries are a second file, `<activation_id>.observer.jsonl` (ADR-0333 §3:1). §8:1's `DiagnosticSource` row, in the addition alone: the member `observer` (ADR-0333 §2:1). Every other clause stands. This replacement takes effect on ratification of ADR-0333. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-20 by ADR-0334 — §4's table, which §4:1 binds, in the addition alone: each given entry written for a model call whose instruction a template supplied also carries `prompt`, the prompt's name, its template's version, and `default` or `override` (ADR-0334 §8:2). Every other clause stands. This replacement takes effect on ratification of ADR-0334. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
