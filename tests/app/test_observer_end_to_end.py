@@ -1,0 +1,184 @@
+"""The observer wired and on, driven end to end through the production root (ADR-0329).
+
+#3154's first scenario, in process: "remember I'm allergic to peanuts" records a
+candidate (§3:1), which the panel shows pending (§18:1); once ten more activations have
+pushed its episode out of the episode window, the run the last freeze starts (§7:6)
+commits the memory at "you said it", citing the user's message (§9, §11:1, §12), records
+the episode processed (§16:1), and the candidate is pending no more.
+
+The substitutes are the model-facing seams alone, as every ``tests/app`` phases suite
+substitutes them (:mod:`phases_composition_support`): planning's rounds are scripted, and
+the provider's ``complete`` answers understanding with a stated reading and the
+observer's two steps from what each is shown. **No call leaves the process**, and
+nothing contacts a hub.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING, Any, Final
+
+from phases_composition_support import UNDERSTANDING_PROMPT, build_phased, until
+
+from ai_assistant.app import composition
+from ai_assistant.core.types import (
+    InputPart,
+    Memory,
+    MemoryOperationKind,
+    MemoryStanding,
+    ObservationState,
+    ObserverStep,
+    ProposedCall,
+    Role,
+    RoundResponse,
+    SupportOrigin,
+)
+from ai_assistant.core.types import Message as ModelMessage
+from ai_assistant.models import PydanticAIProvider
+from ai_assistant.orchestration.observer.prompts import COMMIT_INSTRUCTION, SCOUT_INSTRUCTION
+from ai_assistant.testing import FakeToolCallingCompleter
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from pathlib import Path
+
+    import pytest
+
+    from ai_assistant.core.types import Message, OfferedTool
+
+_FACT: Final = "The user is allergic to peanuts."
+_ASKED: Final = "remember I'm allergic to peanuts"
+_UNDERSTOOD: Final = json.dumps({"meaning": "As said.", "meaning_ground": "stated"})
+
+
+class _Planning:
+    """Planning's rounds: ``remember`` on the request, then a plain reply to everything."""
+
+    def __init__(self) -> None:
+        self.recorded = False
+
+    def __call__(self, messages: Sequence[Message], _tools: Sequence[OfferedTool]) -> RoundResponse:
+        said = messages[-1].content
+        if _ASKED in said and not self.recorded:
+            self.recorded = True
+            call = ProposedCall(
+                call_id="c1",
+                name="remember",
+                arguments={"fact": _FACT, "why": "health", "rests_on_input": True},
+            )
+            return RoundResponse(text="Got it, I'll remember.", calls=(call,))
+        if self.recorded and "Got it, I'll remember." in said:
+            return RoundResponse()
+        return RoundResponse(text="Noted.")
+
+
+class _Models:
+    """The provider's ``complete``: understanding, the scout and the commit step."""
+
+    def __init__(self) -> None:
+        self.steps: list[ObserverStep] = []
+        self.scouted: list[dict[str, Any]] = []
+
+    def __call__(self, messages: Sequence[Message]) -> str:
+        system = messages[0].content
+        if UNDERSTANDING_PROMPT in system:
+            return _UNDERSTOOD
+        if system == SCOUT_INSTRUCTION:
+            self.steps.append(ObserverStep.SCOUT)
+            return self._scout(json.loads(messages[-1].content))
+        if system == COMMIT_INSTRUCTION:
+            self.steps.append(ObserverStep.COMMIT)
+            return self._commit(json.loads(messages[-1].content))
+        return "Noted."
+
+    def _scout(self, shown: dict[str, Any]) -> str:
+        self.scouted.append(shown)
+        leaving = shown["leaving"]
+        findings = [
+            {
+                "claim": hint["fact"],
+                "rests_on": [
+                    part["part"] for part in leaving["parts"] if part["from"] == "the user"
+                ],
+                "candidate": hint["candidate"],
+            }
+            for hint in leaving["candidates"]
+        ]
+        return json.dumps({"findings": findings})
+
+    def _commit(self, shown: dict[str, Any]) -> str:
+        supports = [
+            {"part": part["part"], "direction": "for", "backs_as_worded": True, "how_sure": "sure"}
+            for part in shown["parts"]
+        ]
+        return json.dumps({"action": "create", "wording": shown["claim"], "supports": supports})
+
+
+async def test_a_request_to_remember_is_pending_then_kept_once_it_leaves_the_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3, §7, §9, §11:1, §12, §16, §18:1, through the composed engine."""
+    assert composition.REMEMBER_RECORDS_CANDIDATES
+    planning = _Planning()
+    phased = build_phased(tmp_path, monkeypatch, completer=FakeToolCallingCompleter(planning))
+    models = _Models()
+
+    async def complete(
+        _self: PydanticAIProvider, messages: Sequence[Message], *, model: str | None = None
+    ) -> Message:
+        del model
+        return ModelMessage(role=Role.ASSISTANT, content=models(messages))
+
+    monkeypatch.setattr(PydanticAIProvider, "complete", complete)
+    engine = phased.engine
+    plans = engine._plans
+    try:
+        await engine.start()
+        conversation = await phased.start_conversation()
+        asked = await phased.say(_ASKED, conversation)
+
+        assert "Got it, I'll remember." in await phased.answered(conversation)
+        (pending,) = await engine.pending_candidates()
+        assert (pending.episode_id, pending.fact) == (asked.address, _FACT)
+        assert [one for one in await phased.memory.export() if isinstance(one, Memory)] == []
+
+        # Nine more: the window holds ten, so the request's episode is still in it.
+        for turn in range(9):
+            await phased.say(f"thanks, number {turn}", conversation)
+        assert models.steps == [], "nothing has left the window, so nothing was read"
+        assert await plans.observations([asked.address]) == ()
+
+        # The tenth pushes it out, and the run its freeze starts commits it.
+        await phased.say("one more thing", conversation)
+
+        async def processed() -> bool:
+            held = await plans.observations([asked.address])
+            return bool(held) and held[0].state is ObservationState.PROCESSED
+
+        await until(processed, what="the request's episode to be processed")
+        (record,) = await plans.observations([asked.address])
+        (attempt,) = record.attempts
+        assert [one.step for one in attempt.calls] == [ObserverStep.SCOUT, ObserverStep.COMMIT]
+        (finding,) = record.findings
+        assert finding.candidate is not None
+        assert finding.written == ()
+        assert finding.outcome is not None
+        (write,) = finding.outcome.writes
+        assert write.operations == (MemoryOperationKind.CREATE,)
+
+        kept = await phased.memory.get(write.memory)
+        assert isinstance(kept, Memory)
+        assert kept.content == _FACT
+        assert kept.standing is MemoryStanding.SAID
+        (support,) = kept.supports
+        assert support.origin is SupportOrigin.USER_MESSAGE
+        assert isinstance(support.points_at, InputPart)
+        assert support.points_at.episode == asked.address
+        assert support.added_by.value == "observer"
+        # The scout read the request's own words, quoted, with its candidate as a hint.
+        (shown,) = models.scouted
+        assert any(_ASKED in part["text"] for part in shown["leaving"]["parts"])
+        assert engine._observer is not None
+        assert await engine.pending_candidates() == ()
+    finally:
+        await engine.aclose()

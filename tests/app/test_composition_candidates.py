@@ -1,11 +1,11 @@
 """The composition root's switch for planning's side of the observer (ADR-0329 §19:3).
 
-Off, every deployment's ``remember`` is the interim's (ADR-0328 §13): it writes through
-``MemoryPolicy``, nothing records a candidate, reliance is not offered, and the panel's
-read of the pending candidates answers none (ADR-0329 §18:2). Turned on —
-the one line the lane wiring the observer changes — ``remember`` records a candidate,
-its lookup is the look-ups', and reliance is offered. No setting reads it, so no
-person's hub can turn it on by itself.
+On — turned on in the change that wires the observer (§19:3) — ``remember`` records a
+candidate, its lookup is the look-ups', and reliance is offered. Off, as it stood until
+then, ``remember`` is the interim's (ADR-0328 §13): it writes through ``MemoryPolicy``,
+nothing records a candidate, reliance is not offered, and the panel's read of the
+pending candidates answers none (ADR-0329 §18:2). No setting reads it, so no person's
+hub can turn it by itself.
 
 **Nothing here opens a socket.** Every case builds the engine over a hashing embedder and
 closes it.
@@ -43,9 +43,9 @@ def _phases(tmp_path: Path) -> tuple[Engine, PhasePath]:
     return engine, phases
 
 
-def test_the_switch_is_off_and_is_no_setting() -> None:
-    """§19:3: off until the observer is wired, and nothing a hub reads turns it on."""
-    assert composition.REMEMBER_RECORDS_CANDIDATES is False
+def test_the_switch_is_on_and_is_no_setting() -> None:
+    """§19:3: on with the observer wired, and nothing a hub reads turns it."""
+    assert composition.REMEMBER_RECORDS_CANDIDATES is True
     assert not any("candidate" in name for name in Settings.model_fields)
 
 
@@ -54,8 +54,11 @@ def test_the_lookups_count_is_a_composition_root_constant() -> None:
     assert composition.CANDIDATE_LOOKUP_LIMIT >= 1
 
 
-async def test_off_remember_is_the_interims_and_reliance_is_not_offered(tmp_path: Path) -> None:
-    """ADR-0328 §13: the declaration, the runner, the policy and today's instruction."""
+async def test_off_remember_is_the_interims_and_reliance_is_not_offered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0328 §13: the declaration, the runner, the policy and the interim's instruction."""
+    monkeypatch.setattr(composition, "REMEMBER_RECORDS_CANDIDATES", False)
     engine, phases = _phases(tmp_path)
     try:
         offered = {str(one.capability): one for one in await phases._offered()}
@@ -75,11 +78,8 @@ async def test_off_remember_is_the_interims_and_reliance_is_not_offered(tmp_path
         await engine.aclose()
 
 
-async def test_on_remember_records_candidates_and_reliance_is_offered(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """§§3-6: what the observer's lane gets by turning the one constant on."""
-    monkeypatch.setattr(composition, "REMEMBER_RECORDS_CANDIDATES", True)
+async def test_on_remember_records_candidates_and_reliance_is_offered(tmp_path: Path) -> None:
+    """§§3-6: what every deployment gets, now the one constant is on."""
     engine, phases = _phases(tmp_path)
     try:
         offered = {str(one.capability): one for one in await phases._offered()}

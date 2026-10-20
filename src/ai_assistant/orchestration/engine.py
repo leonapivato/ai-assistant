@@ -26,10 +26,11 @@ projection in `interfaces/` (ADR-0073 §7).
 
 Beside those sits the **maintenance surface** ADR-0083 §8 adds for that scheduler:
 :meth:`Engine.start`'s sweeps, :meth:`Engine.purge_expired`,
-:meth:`Engine.notice_upcoming_events`, :meth:`Engine.decide_story_flags` and
-:attr:`Engine.drain_phase`. New *concrete* surface on this class rather than
-``core`` contract surface — the scheduler holds this object from inside the hub,
-not the ``AssistantEngine`` Protocol a client sees, which names none of these.
+:meth:`Engine.notice_upcoming_events`, :meth:`Engine.decide_story_flags`,
+:meth:`Engine.observe_episodes` and :attr:`Engine.drain_phase`. New *concrete* surface on
+this class rather than ``core`` contract surface — the scheduler holds this object from
+inside the hub, not the ``AssistantEngine`` Protocol a client sees, which names none of
+these.
 
 **No operation here reads a source to propose what it read into memory**
 (ADR-0294 §1). The calendar's and the email source's scheduled ingestion are
@@ -296,6 +297,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.delivery import DeliveryOutbox
     from ai_assistant.orchestration.grants import GrantOperations
     from ai_assistant.orchestration.matters_pass import MattersPass, MattersPassReport
+    from ai_assistant.orchestration.observer import Observer, RunOutcome
     from ai_assistant.orchestration.phase_path import PhasePath, PhaseWorking
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.story_links import (
@@ -663,6 +665,30 @@ def _matters_decided(report: MattersPassReport) -> Observation:
             "refused": report.refused,
             "raced": report.raced,
             "exhausted": report.exhausted,
+        }
+    )
+
+
+def _observed(outcome: RunOutcome) -> Observation:
+    """Read one observer run onto its own ``OPERATION`` trace (ADR-0119 §8).
+
+    Code-owned counts only: no episode id, no claim and nothing of any memory (ADR-0004
+    §5, ADR-0329 §15:7).
+
+    Args:
+        outcome: What the run did.
+
+    Returns:
+        The run's counters, keyed by literals written here (§2's second clause).
+    """
+    return Observation(
+        metrics={
+            "busy": outcome.busy,
+            "processed": outcome.processed,
+            "skipped": outcome.skipped,
+            "waiting": outcome.waiting,
+            "stuck": outcome.stuck,
+            "held": outcome.held,
         }
     )
 
@@ -1321,6 +1347,7 @@ class Engine:
         diagnostic_window: timedelta | None = None,
         telegram: TelegramLineSeams | None = None,
         candidates: bool = False,
+        observer: Observer | None = None,
     ) -> None:
         """Wire the façade from injected collaborators.
 
@@ -1668,6 +1695,11 @@ class Engine:
                 :meth:`pending_candidates` read anything: off, the default, it answers
                 none, since ``remember`` then writes a memory under ADR-0328 §13's
                 interim and no call it recorded is a candidate.
+            observer: ADR-0329's observer, memory's one writer, or ``None``. Wired, a
+                run starts each time an activation's episode is frozen, without the
+                activation waiting on it, and :meth:`observe_episodes` runs it for the
+                scheduler's row (§7:6); ``None`` starts nothing, and
+                :meth:`observe_episodes` refuses.
 
         Raises:
             TypeError: If ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is
@@ -1704,6 +1736,12 @@ class Engine:
         _check_positive_int(max_payload_bytes, name="max_payload_bytes")
         self._plans = plans
         self._candidates = candidates
+        # ADR-0329 §7:6, §16:6: the observer, and the one run a frozen episode starts in
+        # the background — never a second while it runs, and once more after it where an
+        # episode froze in the meantime.
+        self._observer = observer
+        self._observing: asyncio.Task[None] | None = None
+        self._observe_again = False
         self._trail = trail
         self._spend = spend
         self._reads = reads
@@ -2335,6 +2373,84 @@ class Engine:
             )
             raise ConfigurationError(msg)
         return await self._tracked(self._matters_pass.run(), "decide_story_flags", _matters_decided)
+
+    async def observe_episodes(self) -> RunOutcome:
+        """Run the observer once over the episodes due (ADR-0329 §7:6, §16).
+
+        The **maintenance surface**'s scheduled run of the observer, on
+        :meth:`decide_story_flags`'s shape: concrete surface on this class and not
+        ``AssistantEngine``'s (ADR-0083 §8), taking no argument so it is a legal
+        ``JobBody``, and driven by the scheduler's ``observer`` row at
+        ``observer_interval``, so that an episode waiting for a retry or the budget is
+        not held for the next activation (§7:6). A run is also started, untraced and
+        not awaited by anyone, each time an activation's episode is frozen.
+
+        **One run at a time** (§16:6): asked for while a run — this row's or the one a
+        frozen episode started — is going, it does not start and answers busy.
+
+        Tracked like every other public method, so shutdown drains the write it is in
+        the middle of before closing the stores it writes through (ADR-0042 §2).
+
+        Returns:
+            What the run did, in counts.
+
+        Raises:
+            RuntimeError: If the engine is shutting down. The scheduler treats this
+                as *stop* rather than as a job failure (ADR-0083 §8).
+            ConfigurationError: If this engine was built with no observer, for
+                :meth:`notice_upcoming_events`'s reason: an empty run would be
+                indistinguishable from a hub with no episode due (ADR-0022 §4a).
+            MemoryStoreError: If the queue's episodes cannot be enumerated.
+            PlanningError: If the queue's observation records cannot be read.
+        """
+        self._reject_if_closing()
+        if self._observer is None:
+            msg = (
+                "no observer is wired, so there is no episode to observe; it needs its two "
+                "model routes, the memory, plan and story stores and the write stage "
+                "(ADR-0329 §15:1)"
+            )
+            raise ConfigurationError(msg)
+        return await self._tracked(self._observer.run(), "observe_episodes", _observed)
+
+    def _observe_soon(self) -> None:
+        """Start a run once an activation's episode is frozen, nobody waiting on it (§7:6).
+
+        In a context of its own, as a chat read is (:meth:`_spawn_read`), so the
+        activation that froze is not the run's, and tracked like every other task here
+        so :meth:`aclose` drains it (ADR-0042 §2). While a run started this way is going,
+        a further freeze starts no second one (§16:6): it asks the running one to go
+        round once more, so an episode its freeze pushed out of the window is not left
+        for the scheduler's row.
+        """
+        if self._observer is None or self._closing:
+            return
+        if self._observing is not None and not self._observing.done():
+            self._observe_again = True
+            return
+        self._observe_again = False
+        task = asyncio.get_running_loop().create_task(
+            self._observing_runs(self._observer), context=contextvars.Context()
+        )
+        self._observing = task
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+
+    async def _observing_runs(self, observer: Observer) -> None:
+        """Run the observer, and again while a freeze asked for another during the run.
+
+        A failure is the run's alone and is logged by its class (ADR-0004 §5): nobody
+        waits on this task, the episodes it left wait for the next run (§16:4, §16:9),
+        and an activation is never answered by it.
+        """
+        while True:
+            self._observe_again = False
+            try:
+                await observer.run()
+            except Exception as exc:
+                _log.warning("observer_run_failed", stage="freeze", error_class=type(exc).__name__)
+            if not self._observe_again or self._closing:
+                return
 
     async def receive(
         self,
@@ -5886,6 +6002,9 @@ class Engine:
                             raise
                     except Exception:
                         capture_loss("terminal", "failed")
+                    # ADR-0329 §7:6: the episode is frozen, so a run of the observer
+                    # starts, without this activation waiting on it.
+                    self._observe_soon()
                 failure = _stopped_failure(state, failure)
                 answer = _answered(
                     value, failure, state=state, unfinished=unfinished, check=check_output

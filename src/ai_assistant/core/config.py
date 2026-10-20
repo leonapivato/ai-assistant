@@ -3196,6 +3196,67 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- The observer, memory's one writer (ADR-0329 §7:6, §9:9, §16:9) ----------
+    # Two routes, a budget and a cadence; every other bound the observer works within
+    # is a composition-root constant (`ObserverLimits`), because none of them is a
+    # deployment's choice.
+    #
+    # **The two routes are consolidation's shape** (ADR-0329 §9:9, ADR-0285 §5:3): each
+    # is named by its own setting, falls to `default_model` where unset — which names no
+    # provider the operator did not already configure, so ADR-0004 §2's property cannot
+    # be breached by leaving them unset — and never falls back, because the work is
+    # deferrable and a second provider would widen who reads the user's episodes for a
+    # reliability nobody is waiting on. The scout reads an episode and what came after
+    # it and proposes what is worth keeping, so it is meant for a capable model; the
+    # commit step decides one finding from only what it rests on, so a cheaper model
+    # will do. The settings choose; the decision does not.
+    observer_scout_model: _ModelSpec | None = Field(
+        default=None,
+        description=(
+            "Model the observer's scout reads an episode leaving the window through and "
+            "proposes what to remember with, in pydantic-ai 'provider:model' form. Unset "
+            "means the same route conversation uses. Never falls back."
+        ),
+    )
+    observer_commit_model: _ModelSpec | None = Field(
+        default=None,
+        description=(
+            "Model the observer's commit step decides each proposed memory with, from only "
+            "what it rests on, in pydantic-ai 'provider:model' form. Unset means the same "
+            "route conversation uses. Never falls back."
+        ),
+    )
+    # **The daily budget** (ADR-0329 §16:9): the most model calls the observer makes in
+    # any 24 hours, the scout's and the commit step's together. A run that would exceed
+    # it stops and the episodes left wait, none dropped, so a low budget slows learning
+    # and loses nothing. Zero is admitted and means the observer makes no call at all:
+    # every due episode waits until the budget is raised.
+    observer_daily_calls: _IntegerSetting = Field(
+        default=300,
+        ge=0,
+        lt=2**63,
+        description=(
+            "The most model calls the observer may make in any 24 hours, its scout's and "
+            "its commit step's together. A run that would go past it stops, and what is "
+            "left waits for a later run; nothing is dropped."
+        ),
+    )
+    # **The scheduler's row** (ADR-0329 §7:6, ADR-0083 §7): a run also starts when an
+    # activation's episode freezes, so this cadence is what retries a waiting episode
+    # and drains the catch-up on a quiet hub. **Armed by default**, which §7:6 decides,
+    # and on ADR-0083 §7's convention otherwise: finite and strictly positive, `None`
+    # to disable, never `0`.
+    observer_interval: _OptionalDuration = Field(
+        default=timedelta(minutes=15),
+        gt=timedelta(0),
+        description=(
+            "How often the hub runs the observer on a timer, beside the run each finished "
+            "activation starts, so an episode waiting for a retry or the budget is not held "
+            "for the next activation (ADR-0083 §7). Set it to 'none' to disable the timer; "
+            "never 0."
+        ),
+    )
+
     # --- Proactive notification (ADR-0130 §5, §7, §9) ---------------------
     # Three deployment tunings, and **only** three: §9 is explicit that no
     # standing setting of §6 becomes a `Settings` field. Reach levels, quiet

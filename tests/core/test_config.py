@@ -944,6 +944,11 @@ def test_every_integer_setting_is_discovered() -> None:
         # ``OversizedValueError`` on every press, from a deployment that looks
         # configured.
         "hub_max_spoken_audio_bytes",
+        # ADR-0329 §16:9's daily budget of the observer's model calls, and the
+        # ``bool`` argument once more: ``observer_daily_calls=True`` is a budget of one
+        # call a day, so the observer scouts one episode and then holds every other
+        # while it looks configured. Zero is admitted and means no call at all.
+        "observer_daily_calls",
     }
 
 
@@ -1225,6 +1230,11 @@ def test_every_duration_setting_is_discovered() -> None:
         # minutes rather than hours and why a `bool` here is the difference
         # between "re-rule every five minutes" and "re-rule every second".
         "notification_reconsider_interval",
+        # ADR-0329 §7:6's observer row, on ADR-0083 §7's convention unchanged — finite
+        # and strictly positive, or `None` for disabled and never `0` — and armed by
+        # default, which §7:6 decides. The `bool` guard is the difference between a
+        # retry every fifteen minutes and an observer run every second.
+        "observer_interval",
         # ADR-0130 §7's retention for a held notification: finite by default,
         # with `None` the user's deliberate "keep them" and the one escape the cap
         # axis does not offer.

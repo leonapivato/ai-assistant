@@ -209,6 +209,15 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
       deployment is a lead comfortably larger than its interval. That is this
       producer's coverage argument and it is a bounded one.
 
+    * **The observer** — ADR-0329 §7:6's row, beside the run each frozen episode
+      starts, so an episode waiting for a retry or for the daily budget is not held for
+      the next activation. A bound public engine method holding no store (ADR-0083
+      §8), like the rows above it. **Armed by default** at ``observer_interval``, which
+      §7:6 decides. A run takes at most a composition-root number of episodes
+      (§16:8), so it stays bounded on this serial loop whatever the queue, and one
+      asked for while the frozen episode's run is going answers busy and starts
+      nothing (§16:6).
+
     * **The matters pass** — ADR-0300 §9:3's background pass deciding the flags on
       the stories, as ADR-0302 §5 builds it. §9:3 runs it "on the schedule of the
       background memory work, consolidation", and that schedule outlived the
@@ -252,6 +261,7 @@ def jobs_for(engine: Engine, settings: Settings) -> tuple[Job, ...]:
             settings.calendar_upcoming_interval,
             engine.notice_upcoming_events,
         ),
+        ("observer", settings.observer_interval, engine.observe_episodes),
         ("matters_pass", settings.consolidation_interval, engine.decide_story_flags),
     )
     return tuple(

@@ -42,6 +42,7 @@ from ai_assistant.core.protocols import AssistantEngine
 from ai_assistant.core.types import GrantScope
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, Engine
 from ai_assistant.orchestration.matters_pass import MattersPassReport
+from ai_assistant.orchestration.observer import RunOutcome
 from ai_assistant.readers import CALENDAR_READER_NAME
 from ai_assistant.service.scheduler import Job, Scheduler, jobs_for
 
@@ -77,17 +78,18 @@ async def _drive(scheduler: Scheduler, *, until: asyncio.Event) -> None:
 async def test_the_job_table_is_the_adr_s_enabled_defaults_in_the_adr_s_order(
     tmp_path: Path,
 ) -> None:
-    """§7's table, built over a real engine: three jobs armed by default.
+    """§7's table, built over a real engine: four jobs armed by default.
 
     A real ``Engine`` rather than a stand-in, because the claim being made is about
     *which methods the jobs are bound to* — and a fake with the right attribute
     names would satisfy that assertion while proving nothing about the façade the
     hub actually holds.
 
-    **Three enabled by default**, and no observation job among them (ADR-0285 §3).
-    The reconsideration job's own default is minutes for ADR-0130 §5's reason:
-    "with no producers it rules nothing, and a held record whose window has passed
-    is the one thing this ADR cannot leave to a later act".
+    **Four enabled by default.** The reconsideration job's own default is minutes for
+    ADR-0130 §5's reason: "with no producers it rules nothing, and a held record whose
+    window has passed is the one thing this ADR cannot leave to a later act". The
+    observer's row is armed by default because ADR-0329 §7:6 says so, so a retry is not
+    held for the next activation.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
@@ -97,28 +99,33 @@ async def test_the_job_table_is_the_adr_s_enabled_defaults_in_the_adr_s_order(
             "retention_purge",
             "conversation_sweep",
             "notification_reconsider",
+            "observer",
         ]
         assert [job.interval for job in jobs] == [
             timedelta(hours=1),
             timedelta(hours=1),
             timedelta(minutes=5),
+            timedelta(minutes=15),
         ]
     finally:
         await engine.aclose()
 
 
-async def test_no_observation_job_is_scheduled_even_where_the_old_variable_is_set(
+async def test_no_retired_observation_job_is_scheduled_even_where_the_old_variable_is_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-0285 §3 and §11:3: "The scheduler arms no observation job."
+    """ADR-0285 §3:1: the retired observer's job stays retired.
 
     Through production composition: the hub's own ``load_settings``, ``build_engine``
     and ``jobs_for``, over an environment that still carries the variable a
-    pre-change deployment set to arm it — which is the cutover §5 warns about,
-    where a setting naming no field is ignored without an error. Every interval is
-    armed beside it, so the table this reads is the widest a deployment can build,
-    and the check is over every row's name *and* every row's bound method: a job
-    renamed but still bound to an observation body would pass a name check alone.
+    pre-change deployment set to arm it — which is the cutover ADR-0285 §5 warns
+    about, where a setting naming no field is ignored without an error. Every
+    interval is armed beside it, so the table this reads is the widest a deployment
+    can build, and the check is over every row's name *and* every row's bound method.
+
+    The one row about observing is ADR-0329 §7:6's: the new observer's, named
+    ``observer``, bound to ``Engine.observe_episodes`` and armed at
+    ``observer_interval``, which the old variable does not move.
     """
     monkeypatch.setenv("ASSISTANT_OBSERVATION_INTERVAL", "PT6H")
     monkeypatch.setenv("ASSISTANT_EMBEDDER", "hashing")
@@ -129,8 +136,11 @@ async def test_no_observation_job_is_scheduled_even_where_the_old_variable_is_se
         jobs = jobs_for(engine, settings)
 
         assert "matters_pass" in {job.name for job in jobs}, "the table is the armed one"
-        assert not any("observ" in job.name for job in jobs)
-        assert not any("observ" in getattr(job.run, "__name__", "") for job in jobs)
+        (observing,) = [job for job in jobs if "observ" in job.name]
+        assert observing.name == "observer"
+        assert observing.run == engine.observe_episodes
+        assert observing.interval == Settings().observer_interval
+        assert [job for job in jobs if "observ" in getattr(job.run, "__name__", "")] == [observing]
         assert not hasattr(engine, "observe_due")
         assert not hasattr(engine, "observe")
     finally:
@@ -224,6 +234,7 @@ async def test_a_disabled_job_is_absent_from_the_table_not_present_and_skipped(
                 retention_purge_interval=None,
                 conversation_sweep_interval=None,
                 notification_reconsider_interval=None,
+                observer_interval=None,
             ),
         )
         assert none_at_all == ()
@@ -232,6 +243,7 @@ async def test_a_disabled_job_is_absent_from_the_table_not_present_and_skipped(
         assert [job.name for job in without_purge] == [
             "conversation_sweep",
             "notification_reconsider",
+            "observer",
         ]
     finally:
         await engine.aclose()
@@ -957,6 +969,7 @@ async def test_the_consolidation_row_is_retired_and_its_interval_arms_the_matter
             "retention_purge",
             "conversation_sweep",
             "notification_reconsider",
+            "observer",
             "matters_pass",
         ]
         assert not any("consolidat" in getattr(job.run, "__name__", "") for job in armed)
@@ -995,6 +1008,37 @@ async def test_the_matters_pass_runs_on_consolidations_schedule_and_only_with_it
         assert (report.flags, report.exhausted) == (0, True)
     finally:
         await engine.aclose()
+
+
+async def test_the_observer_row_is_armed_by_default_and_runs_the_engine_s_observer(
+    tmp_path: Path,
+) -> None:
+    """ADR-0329 §7:6: a scheduler row whose interval a setting holds, armed by default.
+
+    Bound by identity to the engine's concrete maintenance method (ADR-0083 §8), which
+    takes no argument and is on no Protocol. The production composition wires the
+    observer, so the row's body runs: over an empty store nothing is due and no model
+    call is made. ``None`` disables the timer, and ``0`` is refused at load.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        jobs = {job.name: job for job in jobs_for(engine, Settings())}
+        observing = jobs["observer"]
+        assert observing.run == engine.observe_episodes
+        assert observing.interval == timedelta(minutes=15)
+        assert not hasattr(AssistantEngine, "observe_episodes")
+
+        outcome = await observing.run()
+
+        assert isinstance(outcome, RunOutcome)
+        assert outcome == RunOutcome()
+        disabled = jobs_for(engine, Settings(observer_interval=None))
+        assert "observer" not in {job.name for job in disabled}
+    finally:
+        await engine.aclose()
+
+    with pytest.raises(ValidationError):
+        Settings(observer_interval=timedelta(0))
 
 
 async def test_the_matters_pass_can_be_disabled_but_never_by_zero(
