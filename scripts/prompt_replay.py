@@ -79,7 +79,7 @@ from pydantic import ValidationError
 from ai_assistant.app import build_engine, composition
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.diagnostics import failure_body
-from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.core.errors import ConfigurationError, ModelError
 from ai_assistant.core.prompts import PromptOrigin, PromptTemplate
 from ai_assistant.core.types import Message, OfferedTool, Role
 from ai_assistant.evaluation.diagnostic_record import OBSERVER_SUFFIX, SUFFIX
@@ -93,7 +93,7 @@ from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME, SOCKET_FILENAME
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Iterator, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
 
     from pydantic_ai import models
     from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
@@ -776,8 +776,8 @@ class Planned:
     """One call a run will send: one request and one candidate (§4:10).
 
     Attributes:
-        givens: The given entries it replays: one, or each that holds the same request,
-            as a call the observer wrote under several activations does (§4:11).
+        givens: The given entries it replays: one, or each entry of a call the observer
+            wrote under several activations (§4:11).
         candidate: The candidate.
         prompt: The prompt's name, or ``None`` where the entry's cannot be named.
         instruction: The rendered or recorded instruction it sends.
@@ -826,8 +826,8 @@ def plan_run(
     """Every call the run would send: each distinct request for each candidate (§4:10).
 
     A template candidate is sent for the entries of its own prompt; the recorded
-    instruction for every entry. Entries holding the same request are one call, whose
-    result is written under each (§4:11).
+    instruction for every entry. The observer's call written under several activations
+    is one call, whose result is written under each (§4:11).
     """
     plan = Plan(entries=len(givens))
     groups: dict[str, list[Given]] = {}
@@ -853,13 +853,21 @@ def plan_run(
 
 
 def _request_key(given: Given) -> str:
+    """What makes entries one call: the observer's same call under several activations.
+
+    Only the observer writes one call's given entry under several activations (ADR-0333
+    §2:9), each body naming its own episode and attempt beside the same step, request,
+    finding and prompt. Every other entry is a call of its own, and so is an observer
+    entry whose prompt key differs, so no entry is rendered from another's flags.
+    """
     body = given.body
+    if given.source != "observer":
+        return json.dumps([given.file, given.line])
     held = {
-        "source": given.source,
         "stage": given.stage,
         "messages": body.get("messages"),
-        "tools": body.get("tools"),
         "finding": body.get("finding"),
+        "prompt": body.get("prompt"),
     }
     return json.dumps(held, sort_keys=True, ensure_ascii=True)
 
@@ -1274,6 +1282,74 @@ class _StatedSettings(Settings):
         return (init_settings,)
 
 
+@dataclass(slots=True)
+class CallMeter:
+    """Every model request a rerun's composition makes, counted against its bound (§8:2).
+
+    The observer's daily budget counts its own calls (§8:4), but a write it makes may
+    reach the memory reconciler, whose calls, and their retries, are not the observer's.
+    So every request through the package's two request paths is counted here, and one
+    past the bound is refused before it is sent.
+    """
+
+    bound: int
+    made: int = 0
+    refused: int = 0
+
+    def take(self) -> None:
+        """Count one request, or refuse it where the bound is reached.
+
+        Raises:
+            ModelError: The bare class, neither retryable nor routable, so no wrapper
+                tries again: the bound is reached.
+        """
+        if self.made >= self.bound:
+            self.refused += 1
+            msg = f"the rerun's bound of {self.bound} model calls is reached"
+            raise ModelError(msg)
+        self.made += 1
+
+    @property
+    def spent(self) -> bool:
+        """Whether the bound is reached."""
+        return self.made >= self.bound
+
+
+#: The package's request paths: every completion, and every planning round.
+_METERED: Final = (
+    (PydanticAIProvider, "complete"),
+    (PydanticAIToolCallingCompleter, "respond"),
+)
+
+
+@contextlib.contextmanager
+def metered(bound: int) -> Iterator[CallMeter]:
+    """Count every model request made inside against ``bound``, for the rerun's run alone.
+
+    Yields:
+        The meter.
+    """
+    meter = CallMeter(bound)
+    originals = [(cls, name, vars(cls)[name]) for cls, name in _METERED]
+    for cls, name, original in originals:
+        setattr(cls, name, _metered_method(original, meter))
+    try:
+        yield meter
+    finally:
+        for cls, name, original in originals:
+            setattr(cls, name, original)
+
+
+def _metered_method(
+    original: Callable[..., Awaitable[object]], meter: CallMeter
+) -> Callable[..., Awaitable[object]]:
+    async def counted(self: object, *args: object, **kwargs: object) -> object:
+        meter.take()
+        return await original(self, *args, **kwargs)
+
+    return counted
+
+
 @dataclass(frozen=True, slots=True)
 class RerunOptions:
     """What a rerun was asked for."""
@@ -1360,15 +1436,17 @@ async def rerun(
             if limit != original:
                 report(f"the episode selector's bound is narrowed from {original} to {limit}")
             engine = build(settings)
-        try:
-            await _observe(engine, report)
-        finally:
-            await engine.aclose()
+        with metered(options.bound) as meter:
+            try:
+                await _observe(engine, meter, report)
+            finally:
+                await engine.aclose()
+        report(f"{meter.made} model calls made (bound {options.bound}); {meter.refused} refused")
     return 0
 
 
-async def _observe(engine: Engine, report: Callable[[str], None]) -> None:
-    """Run the observer until a run finds nothing due, is busy, or the budget holds it."""
+async def _observe(engine: Engine, meter: CallMeter, report: Callable[[str], None]) -> None:
+    """Run the observer until a run finds nothing due, is busy, or a bound stops it."""
     runs = 0
     while True:
         outcome: RunOutcome = await engine.observe_episodes()
@@ -1379,6 +1457,9 @@ async def _observe(engine: Engine, report: Callable[[str], None]) -> None:
             + (", held by the budget" if outcome.held else "")
         )
         done = outcome.processed + outcome.skipped + outcome.waiting + outcome.stuck
+        if meter.spent:
+            report(f"the bound of {meter.bound} model calls is reached")
+            return
         if outcome.held or outcome.busy or done == 0:
             return
 
