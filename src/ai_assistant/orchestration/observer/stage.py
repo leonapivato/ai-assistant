@@ -112,6 +112,10 @@ from ai_assistant.orchestration.observer.commit import (
     commit_view,
 )
 from ai_assistant.orchestration.observer.entries import Diagnosed, ObserverEntries
+from ai_assistant.orchestration.observer.prompts import (
+    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_SCOUT_PROMPT,
+)
 from ai_assistant.orchestration.observer.reading import EpisodeReader, episode_text
 from ai_assistant.orchestration.observer.scout import (
     ScoutReply,
@@ -125,6 +129,7 @@ from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from ai_assistant.core.prompts import PromptTemplate
     from ai_assistant.core.protocols import (
         DiagnosticSink,
         MemoryStore,
@@ -276,6 +281,8 @@ class Observer:
         stories: StoryStore,
         episodes: EpisodeSelector,
         limits: ObserverLimits,
+        scout_prompt: PromptTemplate,
+        commit_prompt: PromptTemplate,
         now: Callable[[], datetime],
         mint: Callable[[], str] | None = None,
         diagnostics: DiagnosticSink | None = None,
@@ -297,12 +304,26 @@ class Observer:
             stories: The story store a story's summary and members are read from (§8:1).
             episodes: ADR-0276 §4's episode selector (§7:1, §15:3).
             limits: Every bound, budget and instant (§§7, 8, 16).
+            scout_prompt: The template of ``OBSERVER_SCOUT_PROMPT``, default or
+                override, as the composition root read it at start (ADR-0334 §3:5).
+            commit_prompt: The template of ``OBSERVER_COMMIT_PROMPT``, likewise.
             now: The clock every record, call and write is stamped from.
             mint: Mints the fresh part of a new memory's and question's id; a random
                 one where ``None``.
             diagnostics: The diagnostic record's write seam (ADR-0333 §2:7), or ``None``
                 where ``diagnostic_record`` is false and no entry is built.
+
+        Raises:
+            ValueError: If ``scout_prompt`` or ``commit_prompt`` is not a template of
+                its step's prompt.
         """
+        if scout_prompt.declaration != OBSERVER_SCOUT_PROMPT:
+            msg = "the scout renders the observer_scout prompt (ADR-0334 §2)"
+            raise ValueError(msg)
+        if commit_prompt.declaration != OBSERVER_COMMIT_PROMPT:
+            msg = "the commit step renders the observer_commit prompt (ADR-0334 §2)"
+            raise ValueError(msg)
+        self._prompts = {ObserverStep.SCOUT: scout_prompt, ObserverStep.COMMIT: commit_prompt}
         self._scout = scout
         self._commit = commit
         self._memory = memory
@@ -567,7 +588,12 @@ class Observer:
         Each new finding carries the meet of what the scout was supplied (§12:6), so a
         commit in a later attempt, by this process or after a restart, starts from it.
         """
-        reply = await self._call(attempt, ObserverStep.SCOUT, self._scout, scout_messages(reading))
+        reply = await self._call(
+            attempt,
+            ObserverStep.SCOUT,
+            self._scout,
+            scout_messages(reading, self._prompts[ObserverStep.SCOUT]),
+        )
         proposal = parsed(reply, ScoutReply)
         if proposal is None:
             raise _Unparsed(ObserverStep.SCOUT)
@@ -658,7 +684,7 @@ class Observer:
             attempt,
             ObserverStep.COMMIT,
             self._commit,
-            commit_messages(view),
+            commit_messages(view, self._prompts[ObserverStep.COMMIT]),
             finding=_finding(attempt, finding_id),
         )
         decision = parsed(reply, CommitReply)
@@ -710,7 +736,9 @@ class Observer:
         # mid-flight still counts against the budget (§16:9).
         await self._save(attempt, findings=attempt.record.findings)
         targets = () if attempt.diagnosed is None else (attempt.diagnosed,)
-        await self._entries.given(targets, step, messages, finding=finding)
+        await self._entries.given(
+            targets, step, messages, prompt=self._prompts[step], finding=finding
+        )
         named = None if finding is None else finding.id
         try:
             reply = await route.complete(messages)

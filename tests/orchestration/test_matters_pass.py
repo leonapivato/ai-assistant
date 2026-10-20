@@ -33,8 +33,9 @@ from ai_assistant.core.types import (
     StorySummaryDraft,
     StorySummaryLine,
 )
-from ai_assistant.orchestration.matters_pass import MattersPass
-from ai_assistant.testing import FakeModelProvider, FakeStoryStore
+from ai_assistant.orchestration.matters_pass import MATTERS_PASS_PROMPT, MattersPass
+from ai_assistant.orchestration.story_tidy_up import STORY_TIDY_UP_PROMPT
+from ai_assistant.testing import FakeModelProvider, FakeStoryStore, default_prompt, prompt_from
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -72,6 +73,7 @@ def _pass(  # noqa: PLR0913 — one knob per bound a case varies
         episodes=6,
         notes=notes,
         budget=budget,
+        prompt=default_prompt(MATTERS_PASS_PROMPT),
     )
 
 
@@ -80,10 +82,6 @@ def _shown(model: FakeModelProvider, call: int = 0) -> dict[str, Any]:
     assert (system.role, user.role) == (Role.SYSTEM, Role.USER)
     shown: dict[str, Any] = json.loads(user.content)
     return shown
-
-
-def _instruction(model: FakeModelProvider) -> str:
-    return model.calls[0].messages[0].content
 
 
 async def _story(stories: FakeStoryStore, *activations: str) -> str:
@@ -225,6 +223,48 @@ async def test_a_decision_to_leave_is_recorded_and_the_flag_is_not_decided_again
     assert (second.flags, second.decided) == (0, 0)
     assert len(model.calls) == 1
     assert await _decisions(stories, trip) == [(flag, StoryDecision.LEFT, StoryActor.MATTERS_PASS)]
+
+
+async def test_the_system_message_is_what_the_template_renders() -> None:
+    """ADR-0334 §3:5: the instruction is the template handed in, default or override."""
+    stories, memory, _trip, _other = await _pair()
+    model = FakeModelProvider(_LEAVE)
+    matters = MattersPass(
+        model=model,
+        stories=stories,
+        memory=memory,
+        excerpt_chars=1000,
+        flags_per_run=10,
+        decisions=5,
+        episodes=6,
+        notes=5,
+        budget=_BUDGET,
+        prompt=prompt_from(MATTERS_PASS_PROMPT, "Decide."),
+    )
+
+    await matters.run()
+
+    system = model.calls[0].messages[0]
+    assert (system.role, system.content) == (Role.SYSTEM, "Decide.")
+
+
+async def test_the_pass_refuses_another_prompts_template() -> None:
+    """ADR-0334 §2: the matters pass renders the matters_pass prompt alone."""
+    stories = _stories()
+
+    with pytest.raises(ValueError, match="matters_pass prompt"):
+        MattersPass(
+            model=FakeModelProvider(_LEAVE),
+            stories=stories,
+            memory=await memory_of(),
+            excerpt_chars=1000,
+            flags_per_run=10,
+            decisions=5,
+            episodes=6,
+            notes=5,
+            budget=_BUDGET,
+            prompt=default_prompt(STORY_TIDY_UP_PROMPT),
+        )
 
 
 # --- ADR-0303 §6 and §8:7-§8:8: the notes that go -----------------------------------
@@ -392,7 +432,6 @@ async def test_a_move_may_name_notes_alone_and_no_episode(episodes: list[str] | 
     assert await _members(stories, other) == ["b-1"]
     assert await _notes(stories, other) == ["The dentist is on Tuesday."]
     assert await _notes(stories, trip) == ["Camping at Riverside."]
-    assert "A move may name notes alone, with `episodes` empty" in _instruction(model)
 
 
 @pytest.mark.parametrize("named", [[], ["N9"], ["N3", "S2"]])
@@ -842,8 +881,6 @@ async def test_it_is_shown_recorded_decisions_on_the_same_stories_first_then_new
         for shown in decisions
     ] == [("like_another", ["S1", "S2"], 0), ("like_another", ["S1"], 1)]
     assert {shown["outcome"] for shown in decisions} == {"left"}
-    instruction = _instruction(model)
-    assert "is decided as that decision was, unless what came to those stories since" in instruction
     assert await _decisions(stories, other) == [
         (earlier, StoryDecision.LEFT, StoryActor.MATTERS_PASS),
         (again, StoryDecision.LEFT, StoryActor.MATTERS_PASS),
@@ -1069,5 +1106,6 @@ def test_its_bounds_are_positive(bounds: dict[str, Any]) -> None:
             model=FakeModelProvider(),
             stories=_stories(),
             memory=None,  # type: ignore[arg-type]  # never reached: the bound refuses first
+            prompt=default_prompt(MATTERS_PASS_PROMPT),
             **arguments,
         )

@@ -35,8 +35,11 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.core.types import Message as ModelMessage
 from ai_assistant.models import PydanticAIProvider
-from ai_assistant.orchestration.observer.prompts import COMMIT_INSTRUCTION, SCOUT_INSTRUCTION
-from ai_assistant.testing import FakeToolCallingCompleter
+from ai_assistant.orchestration.observer.prompts import (
+    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_SCOUT_PROMPT,
+)
+from ai_assistant.testing import FakeToolCallingCompleter, default_renderings
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -49,6 +52,9 @@ if TYPE_CHECKING:
 _FACT: Final = "The user is allergic to peanuts."
 _ASKED: Final = "remember I'm allergic to peanuts"
 _UNDERSTOOD: Final = json.dumps({"meaning": "As said.", "meaning_ground": "stated"})
+#: The observer's two steps' calls, told apart by their default's renderings, not words.
+_SCOUT: Final = default_renderings(OBSERVER_SCOUT_PROMPT)
+_COMMIT: Final = default_renderings(OBSERVER_COMMIT_PROMPT)
 
 
 class _Planning:
@@ -83,10 +89,10 @@ class _Models:
         system = messages[0].content
         if system in UNDERSTANDING_INSTRUCTIONS:
             return _UNDERSTOOD
-        if system == SCOUT_INSTRUCTION:
+        if system in _SCOUT:
             self.steps.append(ObserverStep.SCOUT)
             return self._scout(json.loads(messages[-1].content))
-        if system == COMMIT_INSTRUCTION:
+        if system in _COMMIT:
             self.steps.append(ObserverStep.COMMIT)
             return self._commit(json.loads(messages[-1].content))
         return "Noted."

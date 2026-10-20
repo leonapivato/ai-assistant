@@ -47,6 +47,10 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.authorizer import values_digest
 from ai_assistant.orchestration.observer import Observer, ObserverLimits
+from ai_assistant.orchestration.observer.prompts import (
+    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_SCOUT_PROMPT,
+)
 from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.orchestration.understanding import RecentEpisodes
 from ai_assistant.orchestration.writes import MemoryWriteStage
@@ -57,6 +61,7 @@ from ai_assistant.testing import (
     FakeModelProvider,
     FakePlanStore,
     FakeStoryStore,
+    default_prompt,
 )
 from ai_assistant.testing.activation import ended_pass
 
@@ -286,6 +291,8 @@ class Harness:
             stories=self.stories,
             episodes=RecentEpisodes(memory=self.memory, limit=window),
             limits=limits(**bounds),
+            scout_prompt=default_prompt(OBSERVER_SCOUT_PROMPT),
+            commit_prompt=default_prompt(OBSERVER_COMMIT_PROMPT),
             now=self.clock,
             mint=self.mint,
             diagnostics=diagnostics,

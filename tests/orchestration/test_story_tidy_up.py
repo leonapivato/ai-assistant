@@ -41,8 +41,9 @@ from ai_assistant.core.types import (
     StorySummaryLine,
     StorySummaryRefusalReason,
 )
-from ai_assistant.orchestration.story_tidy_up import StoryTidyUp, TidyUpResult
-from ai_assistant.testing import FakeModelProvider, FakeStoryStore
+from ai_assistant.orchestration.matters_pass import MATTERS_PASS_PROMPT
+from ai_assistant.orchestration.story_tidy_up import STORY_TIDY_UP_PROMPT, StoryTidyUp, TidyUpResult
+from ai_assistant.testing import FakeModelProvider, FakeStoryStore, default_prompt, prompt_from
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -82,6 +83,7 @@ def _tidy_up(  # noqa: PLR0913 — one knob per bound a case varies
         decisions=decisions,
         budget=budget,
         threshold=threshold,
+        prompt=default_prompt(STORY_TIDY_UP_PROMPT),
     )
 
 
@@ -225,60 +227,45 @@ async def test_the_prompt_quotes_its_records_under_labels_attributed_by_record()
     assert shown["other_stories"] == []
 
 
-async def test_the_instruction_states_what_adr_0303_has_it_state() -> None:
+async def test_the_system_message_is_what_the_template_renders_with_the_cap() -> None:
+    """ADR-0334 §3:5, §4:2: the template handed in, with the cap the hub's check holds."""
     stories, memory, trip = await _trip()
     model = FakeModelProvider(_reply(["A camping trip."]))
+    template = prompt_from(STORY_TIDY_UP_PROMPT, "Cap: $story_summary_cap_chars")
+    tidy_up = StoryTidyUp(
+        model=model,
+        stories=stories,
+        memory=memory,
+        excerpt_chars=2000,
+        other_stories=5,
+        decisions=5,
+        budget=_BUDGET,
+        threshold=_ANY_MATCH,
+        prompt=template,
+    )
 
-    await _tidy_up(model, stories, memory).run(trip)
+    await tidy_up.run(trip)
 
-    instruction = model.calls[0].messages[0].content
-    for clause in (
-        # §5:4: the newer statement wins, requirements stay, done and answered drop off.
-        "The user's newer statement wins over an older one, whether either was said in "
-        "an episode or written as a note",
-        "the older statement leaves the summary",
-        "The user's stated requirements stay in the summary until the user changes them",
-        "A next step that is done, and a question that has been answered, drop off",
-        # §5:5: the cap, and condensing to fit it.
-        f"at most {STORY_SUMMARY_CAP_CHARS} characters",
-        "Condense the summary to fit within that",
-        # §3:5: a line resting on outside content says so in its words.
-        "A line resting on outside content says so in its own words",
-        # §5:3 and §2:7: a summary may be empty, and a line cites nothing.
-        "write no line",
-        "it cites nothing",
-        "The summary does not repeat the records",
-        "`two_matters`",
-        "`like_another`",
-    ):
-        assert clause in instruction
-    # Retired whole by ADR-0303, restated by ADR-0304 §7 without their marks.
-    for clause in (
-        "A vague later remark leaves an earlier statement of the user's standing: only "
-        "the user's later, clear words replace it.",
-        "It says only what that source reported: do not blend sources in one line",
-    ):
-        assert clause in instruction
+    system = model.calls[0].messages[0]
+    assert (system.role, system.content) == (Role.SYSTEM, f"Cap: {STORY_SUMMARY_CAP_CHARS}")
 
 
-async def test_the_instruction_states_what_adr_0304_has_it_state_of_the_other_stories() -> None:
-    """ADR-0304 §6:2-§6:3: shown only for the flag, nothing copied, sharing no reason."""
-    stories, memory, trip = await _trip()
-    model = FakeModelProvider(_reply(["A camping trip."]))
+async def test_the_tidy_up_refuses_another_prompts_template() -> None:
+    """ADR-0334 §2: the tidy-up renders the story_tidy_up prompt alone."""
+    stories, memory, _trip_id = await _trip()
 
-    await _tidy_up(model, stories, memory).run(trip)
-
-    instruction = model.calls[0].messages[0].content
-    for clause in (
-        "The other stories are shown only so that you can judge the flag about them below",
-        "nothing of theirs is copied onto this summary",
-        "a separate story that looks like the same matter as this one",
-        "Sharing an episode is not by itself a reason to raise it",
-    ):
-        assert clause in instruction
-    # Nothing of ADR-0300's retired protocol is asked for (ADR-0303 §5:2).
-    for retired in ("safety_net", "safety-net", "supersession", '"cites"', "verbatim"):
-        assert retired not in instruction
+    with pytest.raises(ValueError, match="story_tidy_up prompt"):
+        StoryTidyUp(
+            model=FakeModelProvider(_reply([])),
+            stories=stories,
+            memory=memory,
+            excerpt_chars=2000,
+            other_stories=5,
+            decisions=5,
+            budget=_BUDGET,
+            threshold=_ANY_MATCH,
+            prompt=default_prompt(MATTERS_PASS_PROMPT),
+        )
 
 
 async def test_an_outside_episodes_raw_input_is_never_rendered_and_it_marks_the_summary() -> None:
@@ -886,8 +873,6 @@ async def test_it_is_shown_the_decisions_recorded_for_its_story_newest_first() -
         ("left", "two_matters", ["this story"], 0),
     ]
     assert all(decision["recorded_at"] == AT.isoformat() for decision in shown["decisions"])
-    instruction = model.calls[0].messages[0].content
-    assert "is raised again only where what you take in now" in instruction
     assert other != trip
 
 
@@ -1066,4 +1051,5 @@ def test_its_bounds_are_positive_and_its_threshold_finite(
             decisions=5,
             budget=_BUDGET,
             threshold=threshold,
+            prompt=default_prompt(STORY_TIDY_UP_PROMPT),
         )

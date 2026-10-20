@@ -74,6 +74,7 @@ from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.chat import ChatWriter
 from ai_assistant.orchestration.connections import ConnectionOperations
 from ai_assistant.orchestration.conversations import ConversationLifecycle
+from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
 from ai_assistant.orchestration.grants import GrantOperations
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools
@@ -356,6 +357,7 @@ def build_phases_world(
         recall_cap=6,
         recall_digest_wait=timedelta(seconds=5),
         now=lambda: NOW,
+        digesting_prompt=default_prompt(DIGESTING_PROMPT),
     )
 
     engine = Engine(

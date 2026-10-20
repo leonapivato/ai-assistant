@@ -35,9 +35,9 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ai_assistant.core.types import Message, ObservationFinding, Role
-from ai_assistant.orchestration.observer.prompts import SCOUT_INSTRUCTION
 
 if TYPE_CHECKING:
+    from ai_assistant.core.prompts import PromptTemplate
     from ai_assistant.core.types import SupportPart
     from ai_assistant.orchestration.observer.reading import Reading
 
@@ -55,7 +55,7 @@ class _ProposedFinding(BaseModel):
 
 
 class ScoutReply(BaseModel):
-    """The scout's whole reply (``SCOUT_INSTRUCTION``'s shape); an unnamed key is dropped."""
+    """The scout's whole reply (its instruction's shape); an unnamed key is dropped."""
 
     model_config = ConfigDict(frozen=True, extra="ignore")
     findings: tuple[_ProposedFinding, ...] = ()
@@ -86,17 +86,19 @@ def parsed[T: BaseModel](content: str, shape: type[T]) -> T | None:
         return None
 
 
-def scout_messages(reading: Reading) -> list[Message]:
+def scout_messages(reading: Reading, prompt: PromptTemplate) -> list[Message]:
     """The scout's one call: its instruction, and the reading as quoted source data.
 
     Args:
         reading: What the observer read around the leaving episode.
+        prompt: The template of ``OBSERVER_SCOUT_PROMPT``, default or override, as the
+            composition root read it at start (ADR-0334 §3:5).
 
     Returns:
         The conversation the scout's route completes.
     """
     return [
-        Message(role=Role.SYSTEM, content=SCOUT_INSTRUCTION),
+        Message(role=Role.SYSTEM, content=prompt.render()),
         Message(role=Role.USER, content=json.dumps(reading.payload(), ensure_ascii=True)),
     ]
 

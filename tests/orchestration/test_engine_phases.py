@@ -125,6 +125,7 @@ from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapabilit
 from ai_assistant.orchestration.authorizer import AuthorizingStage, Verdict
 from ai_assistant.orchestration.chat import COULDNT_FINISH, ChatWriter, couldnt_finish
 from ai_assistant.orchestration.conversations import conversation_channel
+from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
 from ai_assistant.orchestration.lookups import (
     LOOK_UP_CAPABILITIES,
@@ -152,7 +153,7 @@ from ai_assistant.orchestration.story_calls import (
     StoryCalls,
 )
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
-from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
+from ai_assistant.orchestration.story_tidy_up import STORY_TIDY_UP_PROMPT, StoryTidyUp
 from ai_assistant.orchestration.understanding import (
     UNDERSTANDING_PROMPT,
     AskedIn,
@@ -382,6 +383,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
         place: MessageWriter = chat if wrap is None else wrap(chat)
         return path(
             planning_prompt=default_prompt(PLANNING_PROMPT),
+            digesting_prompt=default_prompt(DIGESTING_PROMPT),
             completer=completer,
             provider=digests if digests is not None else FakeModelProvider(reply=_DIGESTED),
             authorizing=authorizing(
@@ -2489,6 +2491,7 @@ def _tidy_up(
             decisions=0,
             budget=timedelta(seconds=_SETTLE),
             threshold=0.0,
+            prompt=default_prompt(STORY_TIDY_UP_PROMPT),
         )
 
     return build

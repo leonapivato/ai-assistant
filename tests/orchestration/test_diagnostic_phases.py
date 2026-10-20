@@ -38,7 +38,7 @@ from ai_assistant.core.types import (
     Role,
     RoundResponse,
 )
-from ai_assistant.orchestration.digesting import ActivationLabels, DigestingStage
+from ai_assistant.orchestration.digesting import DIGESTING_PROMPT, ActivationLabels, DigestingStage
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.held_results import HeldResult
 from ai_assistant.orchestration.planning import (
@@ -388,7 +388,12 @@ class _Provider:
 
 def _digesting(provider: Any, sink: FakeDiagnosticSink | None) -> DigestingStage:
     return DigestingStage(
-        provider=provider, recorder=_DigestRecorder(), part_chars=10_000, now=_now, diagnostics=sink
+        provider=provider,
+        recorder=_DigestRecorder(),
+        part_chars=10_000,
+        now=_now,
+        diagnostics=sink,
+        prompt=default_prompt(DIGESTING_PROMPT),
     )
 
 
@@ -419,6 +424,7 @@ async def test_digesting_writes_each_part_s_prompt_its_reply_and_the_items_dropp
     assert _body(given) == {
         **about,
         "messages": [one.model_dump(mode="json") for one in provider.calls[0]],
+        "prompt": default_prompt(DIGESTING_PROMPT).provenance(),
     }
     assert _body(returned) == {
         **about,
@@ -449,7 +455,12 @@ async def test_parts_run_in_parallel_are_told_apart_however_they_finish() -> Non
     held = HeldResult(result_id="result:2", round_id="r1", decision_id="d1", content="x" * 150)
     sink = FakeDiagnosticSink()
     stage = DigestingStage(
-        provider=_Reversed(), recorder=_DigestRecorder(), part_chars=60, now=_now, diagnostics=sink
+        provider=_Reversed(),
+        recorder=_DigestRecorder(),
+        part_chars=60,
+        now=_now,
+        diagnostics=sink,
+        prompt=default_prompt(DIGESTING_PROMPT),
     )
 
     with diagnosed_activation(_ACTIVATION, clock=_now):
