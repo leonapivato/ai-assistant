@@ -68,6 +68,16 @@ keeps the request it had, so it is given no marks either.
 **Nothing here retries or re-routes**, as nothing in the streaming sibling does:
 ``RoutingProvider`` and ``RetryingProvider`` wrap ``ModelProvider`` completions, and a
 round's resilience is the caller's to decide.
+
+**A recorded round can be sent again, for the owner's replay tool alone** (ADR-0335
+§4:8-§4:9). :meth:`PydanticAIToolCallingCompleter.replay_round` sends one round exactly
+as :meth:`~PydanticAIToolCallingCompleter.respond` sends it where the record is on,
+summarised thinking included, and hands the caller the provider's whole response, every
+part in order, thinking included, beside the round it reads as or why it reads as none
+(ADR-0335 §10 lets that thinking reach the replay's results). It writes no entry, even
+where the completer holds a sink, binds no activation and is on no Protocol, and no
+stage calls it (§4:9). It sends to the one model it is named, which may not fall back to
+another (§4:7), and it sends once and continues nothing (§4:10).
 """
 
 from __future__ import annotations
@@ -105,7 +115,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from pydantic_ai import models
-    from pydantic_ai.messages import ModelResponse
+    from pydantic_ai.messages import ModelMessage, ModelResponse
     from pydantic_ai.settings import ThinkingLevel
 
     from ai_assistant.core.protocols import DiagnosticSink
@@ -227,23 +237,7 @@ class PydanticAIToolCallingCompleter:
                 response that cannot be read as a round, or was cut at its output
                 ceiling, is a :class:`~ai_assistant.core.errors.ModelResponseError`.
         """
-        if not messages:
-            msg = "respond() requires at least one message"
-            raise ModelError(msg)
-        if messages[-1].role is Role.ASSISTANT:
-            msg = "respond() requires a conversation awaiting a reply"
-            raise ModelError(msg)
-        history = _to_model_messages(messages)
-        offered = [_native(OfferedTool.model_validate(tool.model_dump())) for tool in tools]
-        names = [tool.name for tool in offered]
-        if len(set(names)) != len(names):
-            msg = "respond() requires distinct tool names"
-            raise ModelError(msg)
-        if ROUND_TOOL in names:
-            msg = f"the tool name {ROUND_TOOL!r} is reserved for the round's notes"
-            raise ModelError(msg)
-        sent = [*offered, _round_tool()]
-        parameters = ModelRequestParameters(function_tools=sent, allow_text_output=True)
+        history, parameters = _round_request(messages, tools, caller="respond()")
         try:
             chosen = infer_model(self._default_model if model is None else model)
             settings = _settings(self._thinking, chosen, summarised=self._diagnostics is not None)
@@ -269,6 +263,67 @@ class PydanticAIToolCallingCompleter:
             raise
         await self._returned(offered_record, response, None)
         return read
+
+    async def replay_round(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[OfferedTool],
+        *,
+        model: models.Model | str,
+    ) -> ReplayedRound:
+        """Send one recorded round again, as :meth:`respond` sends it with the record on.
+
+        The owner's replay tool's seam (ADR-0335 §4:8): the request is built as
+        :meth:`respond` builds it, :data:`ROUND_TOOL` added beside ``tools``, and its
+        settings are the ones :meth:`respond` sends where it holds a sink, so a model
+        with Anthropic's adaptive thinking is asked for the thinking's summarised text.
+        Nothing is written, whether or not this completer holds a sink, and no activation
+        is bound (§4:9). It is sent once, to ``model`` alone (§4:7), and nothing is
+        continued: no further round, no repair and no tool's result (§4:10).
+
+        Args:
+            messages: The round's recorded request, oldest first, its system message the
+                candidate's.
+            tools: The capabilities the round offered, as planning's given entry records
+                them: :data:`ROUND_TOOL` is added here and may not be among them.
+            model: The one model the run names, as a ``"provider:model"`` string or a
+                pydantic-ai model. It replaces this completer's default model for this
+                call, and may not be a fallback model, wrapped or not.
+
+        Returns:
+            The provider's whole response, with the round it reads as or why it reads as
+            none.
+
+        Raises:
+            ModelError: The bare class, before any model is contacted, where
+                :meth:`respond` would refuse ``messages`` or ``tools``, or ``model`` is a
+                fallback model. A failure sending the request, where no response came
+                back, is narrowed as :meth:`respond` narrows it; a response that does not
+                read as a round is returned, not raised.
+        """
+        history, parameters = _round_request(messages, tools, caller="replay_round()")
+        try:
+            chosen = infer_model(model)
+        except Exception as exc:
+            # As in `respond`: resolving a string model may fail, and is classified.
+            raise _classify(exc) from exc
+        if _falls_back(chosen):
+            msg = "a replay sends to the one model it names, which a fallback model may not be"
+            raise ModelError(msg)
+        try:
+            settings = _settings(self._thinking, chosen, summarised=True)
+            response = await model_request(
+                chosen, history, model_settings=settings, model_request_parameters=parameters
+            )
+        except Exception as exc:
+            # Broad on purpose, as in `respond`: `_classify` is the taxonomy (ADR-0063).
+            raise _classify(exc) from exc
+        whole = ModelMessagesTypeAdapter.dump_python([response], mode="json")[0]
+        try:
+            read = _round(response)
+        except ModelResponseError as exc:
+            return ReplayedRound(response=whole, round=None, failure=exc)
+        return ReplayedRound(response=whole, round=read, failure=None)
 
     async def _returned(
         self,
@@ -311,6 +366,63 @@ class PydanticAIToolCallingCompleter:
         await write_diagnostic(
             self._diagnostics, DiagnosticSource.PLANNING, DiagnosticKind.RETURNED, body
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayedRound:
+    """What a replayed round got back (ADR-0335 §4:8): the whole response, and its reading.
+
+    Attributes:
+        response: The provider's whole response, every part in order, thinking included,
+            as pydantic-ai serialises it to JSON: the form planning's returned entry
+            keeps it in.
+        round: The response read as a round, or ``None`` where it reads as none.
+        failure: Why the response reads as no round, or ``None`` where it reads as one.
+    """
+
+    response: dict[str, Any]
+    round: RoundResponse | None
+    failure: ModelResponseError | None
+
+
+def _round_request(
+    messages: Sequence[Message], tools: Sequence[OfferedTool], *, caller: str
+) -> tuple[list[ModelMessage], ModelRequestParameters]:
+    """A round's request: the history, and the tools with :data:`ROUND_TOOL` beside them.
+
+    Built from one observation of each argument (ADR-0065): the history is translated and
+    the tools are rebuilt through validation.
+
+    Raises:
+        ModelError: The bare class if ``messages`` is empty, ends on a
+            ``Role.ASSISTANT`` turn or carries a ``Role.TOOL`` turn, or if two tools
+            share a name or one takes :data:`ROUND_TOOL`'s.
+    """
+    if not messages:
+        msg = f"{caller} requires at least one message"
+        raise ModelError(msg)
+    if messages[-1].role is Role.ASSISTANT:
+        msg = f"{caller} requires a conversation awaiting a reply"
+        raise ModelError(msg)
+    history = _to_model_messages(messages)
+    offered = [_native(OfferedTool.model_validate(tool.model_dump())) for tool in tools]
+    names = [tool.name for tool in offered]
+    if len(set(names)) != len(names):
+        msg = f"{caller} requires distinct tool names"
+        raise ModelError(msg)
+    if ROUND_TOOL in names:
+        msg = f"the tool name {ROUND_TOOL!r} is reserved for the round's notes"
+        raise ModelError(msg)
+    sent = [*offered, _round_tool()]
+    return history, ModelRequestParameters(function_tools=sent, allow_text_output=True)
+
+
+def _falls_back(model: models.Model) -> bool:
+    """Whether ``model``, under any wrappers, is a fallback model."""
+    inner = model
+    while isinstance(inner, WrapperModel):
+        inner = inner.wrapped
+    return isinstance(inner, FallbackModel)
 
 
 def _settings(
