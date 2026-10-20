@@ -99,6 +99,16 @@ in the values recorded with the question and names the part in
 :attr:`PlannedCall.approved_part`, so nothing planning sends beside the label changes
 them.
 
+**Candidates, behind the composition root's switch** (ADR-0329 §6). Where the stage is
+built to have ``remember`` record candidates, the instruction says what a candidate is
+for, how eager to be, when to name a memory, when to ask, and how to reply (§6:1-§6:5),
+and how to note reliance where that capability is offered (§6:8). A candidate's result
+says it is recorded and pending, with the memories similar to its fact each under its
+own M label, or that they could not be read (§4:1, §4:4, §6:5). An episode of the
+episode window the observer has not processed is shown with its pending candidates,
+each by its fact (§6:9), which the phases' glue reads and hands over. A memory's label
+carries each unresolved open question on it, in words, wherever it is shown (§6:6).
+
 **It logs stage and code-owned reason only**, never inputs, model output or arguments
 (ADR-0275 §8).
 """
@@ -145,6 +155,8 @@ from ai_assistant.core.types import (
     StoryRelation,
     label_prefix,
 )
+from ai_assistant.orchestration.reliance import NOTE_RELIANCE_CAPABILITY
+from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_calls import (
     STORY_CALL_CAPABILITIES,
@@ -194,6 +206,7 @@ __all__ = [
     "PlanningStage",
     "PlanningStories",
     "PlanningStory",
+    "RecordedCandidate",
     "RefusedCall",
     "RoundRecorder",
     "exact_line",
@@ -347,6 +360,22 @@ class CallOutcomeKind(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class RecordedCandidate:
+    """What a ``remember`` that recorded a candidate came back with (ADR-0329 §4, §6:5).
+
+    Planning's own shape, filled by the phases' glue from the call's result and the
+    memories it fetched by id (ADR-0282 §2:4).
+
+    Attributes:
+        similar: The memories similar to the candidate's fact, as planning fetched them,
+            each shown under its own M label; ``None`` where the lookup failed, and the
+            candidate is still recorded (§4:4).
+    """
+
+    similar: tuple[Memory, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
 class CallOutcome:
     """What came of one call of an earlier round, from acting's record.
 
@@ -373,6 +402,8 @@ class CallOutcome:
             digest, and ``digested`` says so.
         story: For a story read planning made (§6:6), the story's full view as it was
             read; ``None`` for any other call.
+        candidate: For a ``remember`` that recorded a candidate (ADR-0329 §4, §6:5),
+            what its lookup found; ``None`` for any other call.
         request: For a call that needs the user, the request as authorizing ruled on
             it, with the values the hub filled in and its binding (ADR-0321 §2:8): what
             a question about it shows and records. ``None`` on every other outcome, and
@@ -402,6 +433,7 @@ class CallOutcome:
     digested: bool = False
     records: tuple[Memory, ...] | None = None
     story: PlanningStory | None = None
+    candidate: RecordedCandidate | None = None
     request: ActionRequest | None = None
     deliberate_repeat: bool = False
     already_asked: QuestionPart | None = None
@@ -421,7 +453,7 @@ class CallOutcome:
         if self.replaces and self.request is None:
             msg = "the assertions a question shows replaced ride the request it shows"
             raise ValueError(msg)
-        looked_up = self.records is not None or self.story is not None
+        looked_up = self.records is not None or self.story is not None or self.candidate is not None
         if (self.result is not None or self.digested or looked_up) and self.result_id is None:
             msg = "a call's result carries the id acting minted for it (ADR-0308 §6:1)"
             raise ValueError(msg)
@@ -609,6 +641,10 @@ class PlanningInputs:
         approved: The actions this activation's yes approved (ADR-0321 §4:2), each
             shown under an A label and proposed by it; none where its input approved
             nothing.
+        pending: For an episode of the episode window the observer has not processed,
+            by its id, the facts of the candidates its own rounds recorded, in order
+            (ADR-0329 §6:9); none where nothing is pending or candidates are not
+            recorded.
     """
 
     activation_id: str
@@ -628,6 +664,7 @@ class PlanningInputs:
     outside_content_read: bool = False
     stories: PlanningStories | None = None
     approved: tuple[ApprovedAction, ...] = ()
+    pending: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 # --- the round's decision ----------------------------------------------------------------
@@ -1112,19 +1149,65 @@ _OLDER_NOTES: Final = (
 )
 
 
-def _instruction(
+#: ADR-0329 §6:1-§6:5 and §5:1: what a candidate is for, how eager to be, when to name a
+#: memory, when to ask, and how to reply, where ``remember`` records candidates. A prompt,
+#: owed to the owner's reading before the switch is turned on (§19:3).
+_CANDIDATES: Final = (
+    "Remember records a candidate for your long-term memory: one fact, in your own words, "
+    "what it rests on, and briefly why it is worth keeping. A candidate is not yet a "
+    "memory: it is reviewed once this episode is older, and kept only then. Record a "
+    "candidate for what would still be true and useful if this matter ended or were "
+    "forgotten, and write a story note for what matters to this matter; one thing may "
+    "deserve both, each written for its own purpose, with nothing copied from one to the "
+    "other. Record single observations as candidates too, such as a choice the user made, "
+    "a reaction or a detail of their world. Be eager for what is about the user and their "
+    "world, such as people, places, preferences, constraints and plans, and strict for "
+    "trivia.\n"
+    "\n"
+    "When using a memory reveals anything new about it, record a candidate naming it by "
+    "its M label, with a note on how the fact bears on it; otherwise record nothing about "
+    "it. A judgment that a memory is still true, or may not be, is never a candidate by "
+    "itself.\n"
+    "\n"
+    "A candidate's result shows the memories already held that are similar to its fact. "
+    "Ask the user about one in the moment only where it conflicts with the candidate and "
+    "the conflict matters to what is being done. Set confirm where you want the user's yes "
+    "to the fact's wording before it is kept, as in asking whether to remember that they "
+    "prefer window seats: the candidate then needs their yes, and is asked about as any "
+    "call that needs it is.\n"
+    "\n"
+    "When the user asks you to remember something, tell them you will remember it, as "
+    '"got it, I\'ll remember" does, and never that it is saved: it is recorded, and '
+    "pending.\n"
+    "\n"
+)
+
+#: ADR-0329 §6:8: when to note reliance, where the capability is offered.
+_RELIANCE: Final = (
+    f"Note the memories you relied on with {NOTE_RELIANCE_CAPABILITY}, naming each by its M "
+    "label and saying what the reliance shaped: for a memory that shaped a suggestion, an "
+    "answer or an action, and never for one only mentioned in passing.\n"
+    "\n"
+)
+
+
+def _instruction(  # noqa: PLR0913 — one keyword per paragraph an offer decides
     *,
     takes_message: bool,
     story_calls: bool = False,
     story_reads: bool = False,
     approved: bool = False,
+    candidates: bool = False,
+    reliance: bool = False,
 ) -> str:
     """The system message, with §3:8's paragraph where the place takes no message.
 
     The story calls' paragraph is there only where a story call is offered, and says
     a story read shows a story's older notes where a story read is offered too. The
     approved actions' paragraph is there only where the approved-action tool is offered
-    (ADR-0321 §4:2).
+    (ADR-0321 §4:2). The candidates' paragraphs are there only where ``remember`` is
+    offered recording candidates (ADR-0329 §6:1-§6:5), and the reliance paragraph only
+    where noting reliance is offered (§6:8).
     """
     return (
         _ROLE
@@ -1132,6 +1215,8 @@ def _instruction(
         + _CALLS
         + (_APPROVED if approved else "")
         + (_STORY_CALLS + (_OLDER_NOTES if story_reads else "") + "\n\n" if story_calls else "")
+        + (_CANDIDATES if candidates else "")
+        + (_RELIANCE if reliance else "")
         + (_MESSAGE if takes_message else _NO_MESSAGE)
         + _NOTES_AND_ROUNDS
     )
@@ -1225,6 +1310,18 @@ _STANDING_TEXT: Final = {
 
 #: A reading certainty no backing support carries (ADR-0328 §7:5).
 _NOT_JUDGED: Final = "not judged"
+
+#: ADR-0329 §6:5: what a candidate's result tells planning of the candidate.
+_CANDIDATE_PENDING: Final = (
+    "recorded as a candidate, and pending: it is not yet a memory, and is reviewed and "
+    "kept only later, so tell the user you will remember it, never that it is saved"
+)
+
+#: ADR-0329 §4:4: a lookup that failed leaves the candidate recorded, and says so.
+_SIMILAR_UNREAD: Final = "could not be read; the candidate is still recorded"
+
+#: ADR-0329 §6:9: how an unprocessed episode's candidate is marked in the episode window.
+_PENDING: Final = "pending: recorded for long-term memory, not yet kept"
 
 #: An instant nothing dates (ADR-0328 §7:3-§7:4): unknown, neither fresh nor stale.
 _UNKNOWN_INSTANT: Final = "unknown"
@@ -1465,6 +1562,8 @@ class _Request:
                 record,
                 excerpt_chars=self._excerpt_chars,
                 owner_records=self._inputs.owner_records,
+                # ADR-0329 §6:9: an unprocessed episode's pending candidates, here alone.
+                candidates=self._inputs.pending.get(record.id, ()),
             )
             label = self._book.label(LabelKind.EPISODE, record.id)
             shown.append(self._episode(label, projection, record))
@@ -1686,7 +1785,8 @@ class _Request:
         ADR-0328 §15:5's label: its standing in plain words, its age (as of and learned,
         each unknown where nothing dates it), its evidence summary where its standing is
         inference, its reading certainty where that is not ``sure``, and its track record
-        where it has one.
+        where it has one; and, beside it, each unresolved open question on it in words
+        (ADR-0329 §6:6), which nothing raises before the observer runs.
         """
         fact = record.content
         bound = self._excerpt_chars
@@ -1721,6 +1821,10 @@ class _Request:
                 "held_up": track.held_up,
                 "let_down": track.let_down,
             }
+        # ADR-0329 §6:6: each unresolved open question on it, in words, beside it.
+        questions = [one.asks for one in record.open_questions if not one.resolved]
+        if questions:
+            shown["open_questions"] = questions
         return shown
 
     def _episode(
@@ -1760,6 +1864,12 @@ class _Request:
             shown["rounds"] = [
                 self._episode_round(one, in_place=index in place.messages)
                 for index, one in enumerate(projection.rounds)
+            ]
+        if projection.candidates:
+            # ADR-0329 §6:9: an unprocessed episode's candidates, each by its fact and
+            # marked pending.
+            shown["candidates"] = [
+                {"fact": _text(one), "status": _PENDING} for one in projection.candidates
             ]
         if projection.evidence:
             # ADR-0308 §3:1, §5:5: the episode's evidence, each item's text and its mark
@@ -1840,6 +1950,8 @@ class _Request:
             result["value"] = self._story(outcome.story)
         elif outcome.records is not None:
             result["value"] = self._searched(outcome)
+        elif outcome.candidate is not None:
+            result["value"] = self._candidate(outcome.candidate)
         else:
             result["value"] = _DIGESTED_RESULT if outcome.digested else _thawed(outcome.result)
         shown["result"] = result
@@ -1926,6 +2038,26 @@ class _Request:
         shown: dict[str, object] = {"remembered": records or _NONE_FOUND}
         if outcome.digested:
             shown["resting_on_outside_content"] = _DIGESTED_RESULT
+        return shown
+
+    def _candidate(self, candidate: RecordedCandidate) -> dict[str, object]:
+        """A candidate's result: recorded and pending, with the memories like it.
+
+        ADR-0329 §6:5: it tells planning the candidate is recorded and pending. §4:1:
+        each similar memory not resting on outside content by its fact under its own M
+        label, as a found one is; one whose current version rests on outside content is
+        withheld, as a search's is (§4:2). §4:4: a lookup that failed says so.
+        """
+        shown: dict[str, object] = {"candidate": _CANDIDATE_PENDING}
+        if candidate.similar is None:
+            shown["similar_memories"] = _SIMILAR_UNREAD
+            return shown
+        similar = [
+            self._memory(record)
+            for record in candidate.similar
+            if not record.rests_on_outside_content
+        ]
+        shown["similar_memories"] = similar or _NONE_FOUND
         return shown
 
     def _evidence(self, one: DigestedEvidence) -> dict[str, object]:
@@ -2515,6 +2647,7 @@ class PlanningStage:
         timezone: str = "UTC",
         new_id: Callable[[], str] = _new_round_id,
         diagnostics: DiagnosticSink | None = None,
+        candidates: bool = False,
     ) -> None:
         """Wire the stage to its seams.
 
@@ -2532,6 +2665,10 @@ class PlanningStage:
                 rendered request and the offered tools before each round, and the
                 returned entry where no response came back (§5:2); ``None`` where the
                 record is off.
+            candidates: Whether ``remember`` records a candidate (ADR-0329 §6), the
+                composition root's switch: the instruction then says what a candidate
+                is for wherever ``remember`` is offered. Off by default, which keeps
+                today's instruction (ADR-0328 §13:6).
 
         Raises:
             ValueError: If ``excerpt_chars`` is below 1.
@@ -2550,6 +2687,7 @@ class PlanningStage:
         self._now = checked_clock(now, owner="PlanningStage")
         self._new_id = new_id
         self._diagnostics = diagnostics
+        self._candidates = candidates
 
     async def plan(self, inputs: PlanningInputs) -> PlannedRound:
         """Run one round over ``inputs``: ask, record, then judge its calls.
@@ -2586,6 +2724,10 @@ class PlanningStage:
                     story_calls=any(tool.name in STORY_CALL_CAPABILITIES for tool in offered),
                     story_reads=_offers_story_reads(offered),
                     approved=approved_tool is not None,
+                    candidates=self._candidates
+                    and any(tool.name == REMEMBER_CAPABILITY for tool in offered),
+                    reliance=self._candidates
+                    and any(tool.name == NOTE_RELIANCE_CAPABILITY for tool in offered),
                 ),
             ),
             Message(role=Role.USER, content=rendered),
