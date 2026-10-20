@@ -8,6 +8,7 @@ read a temporary data directory and open no store, save the one that builds an e
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 from importlib.resources import files
@@ -268,6 +269,59 @@ def test_a_directory_others_may_write_is_refused(tmp_path: Path, mode: int) -> N
     assert message == (
         f"the prompt override directory {directory} is writable by its group or by others; "
         "chmod go-w it"
+    )
+
+
+@pytest.mark.parametrize("overrides", [False, True])
+def test_an_empty_directory_others_may_write_is_refused_whatever_the_setting(
+    tmp_path: Path, *, overrides: bool
+) -> None:
+    """§5:1 makes the directory's mode a refusal of its own, not one of overrides on."""
+    _directory(tmp_path).chmod(0o777)
+
+    assert "is writable by its group or by others" in _refusal(tmp_path, overrides=overrides)
+
+
+@pytest.mark.parametrize("overrides", [False, True])
+def test_an_empty_directory_another_user_owns_is_refused_whatever_the_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, overrides: bool
+) -> None:
+    _directory(tmp_path)
+    owner = os.geteuid()
+    monkeypatch.setattr(os, "geteuid", lambda: owner + 1)
+
+    assert f"is owned by uid {owner}" in _refusal(tmp_path, overrides=overrides)
+
+
+def test_an_override_that_cannot_be_read_is_refused_naming_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    written = _write(_directory(tmp_path) / "understanding.txt", _OVERRIDE)
+
+    def failing(descriptor: int, size: int) -> bytes:
+        del descriptor, size
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(os, "read", failing)
+
+    assert _refusal(tmp_path) == (
+        f"the prompt override {written} could not be read: Input/output error"
+    )
+
+
+def test_a_directory_that_cannot_be_listed_is_refused_naming_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = _directory(tmp_path)
+
+    def failing(path: object) -> object:
+        del path
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(os, "scandir", failing)
+
+    assert _refusal(tmp_path) == (
+        f"the prompt override directory {directory} could not be listed: Input/output error"
     )
 
 

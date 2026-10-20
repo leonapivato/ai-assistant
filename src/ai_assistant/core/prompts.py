@@ -12,10 +12,11 @@ the value of that name, and ``$$`` by one ``$``. A line holding only ``$if name`
 ``$if not name``, ``$else`` or ``$end`` opens, divides or closes a block, which is
 included where the flag's value says; blocks nest. Nothing else is interpreted.
 
-**What a line is.** A line break ends a line, and the rendered text is the included
-lines joined by line breaks, so a template's final line break is no part of what is
-sent: the file's last line ends the text whether or not an editor added one. A directive
-line is removed whole, its line break with it.
+**What a line is.** A line break, LF or CR LF, ends a line, and the rendered text is the
+included lines joined by LF, so a template's final line break is no part of what is
+sent: the file's last line ends the text whether or not an editor added one, and a file
+saved with either line ending renders alike. A directive line is removed whole, its line
+break with it.
 
 **Flags and values are the code's** (§4:2, §4:3). A prompt declares the closed set of
 flags and values its template may name (:class:`PromptDeclaration`); a template may name
@@ -43,7 +44,7 @@ from typing import TYPE_CHECKING, Final, Never
 from ai_assistant.core.errors import ConfigurationError
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
 
 __all__ = [
     "PROMPT_OVERRIDE_DIRECTORY",
@@ -226,7 +227,7 @@ class PromptTemplate:
         if not text.strip():
             msg = "holds only whitespace"
             raise ConfigurationError(msg)
-        lines = text.split("\n")
+        lines = [line.removesuffix("\r") for line in text.split("\n")]
         if lines[-1] == "":
             lines.pop()
         nodes = _Parser(declaration).parse(lines)
@@ -265,11 +266,18 @@ class PromptTemplate:
 def _emit(
     nodes: tuple[_Node, ...], flags: Mapping[str, bool], values: Mapping[str, str], out: list[str]
 ) -> None:
-    """Append the text lines ``nodes`` include under ``flags``, values printed."""
-    for node in nodes:
-        if isinstance(node, _Block):
-            chosen = node.then if flags[node.flag] is node.wanted else node.otherwise
-            _emit(chosen, flags, values, out)
+    """Append the text lines ``nodes`` include under ``flags``, values printed.
+
+    Walked with a stack of its own rather than by recursion, so a template nested as
+    deeply as its file allows renders as it parsed, at start or on any later call.
+    """
+    pending: list[Iterator[_Node]] = [iter(nodes)]
+    while pending:
+        node = next(pending[-1], None)
+        if node is None:
+            pending.pop()
+        elif isinstance(node, _Block):
+            pending.append(iter(node.then if flags[node.flag] is node.wanted else node.otherwise))
         else:
             out.append(
                 "".join(values[one.name] if isinstance(one, _Value) else one for one in node)
