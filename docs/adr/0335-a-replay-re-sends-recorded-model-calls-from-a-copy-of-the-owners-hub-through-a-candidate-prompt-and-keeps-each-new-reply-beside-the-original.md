@@ -37,7 +37,8 @@ given entry before each model call. It holds the messages sent, the instruction 
 system message among them, and, for planning, the tools offered (ADR-0314 §4, ADR-0333 §2).
 ADR-0334 §8:2 adds the prompt's name, its version and its origin. No entry holds the flags the
 code computed for the call, so a candidate template with conditional blocks cannot be
-rendered for a recorded call with certainty. No entry names the model. The story tidy-up,
+rendered for a recorded call with certainty. No given entry names the model; only planning's
+returned entry does, inside the provider's whole response. The story tidy-up,
 the matters pass and the memory reconciler write no entries, so nothing of theirs can be
 replayed.
 
@@ -135,9 +136,12 @@ is a copy.
 > only under flags the run states, and marks each such result as rendered under stated
 > flags.
 
-> **Normative.** The tool sends each call through `ai_assistant`'s own model layer, with the
-> settings the stage that made it sends it with where the record is on, so that the request
-> differs from the recorded one in its system message alone.
+> **Normative.** The tool sends each call through `ai_assistant`'s own model layer, with its
+> recorded messages and tools, apart from the system message, and the settings the stage that
+> made it sends it with where the record is on.
+
+> **Normative.** A run sends every call to one model, which it names, and falls back to no
+> other: a call that model fails is recorded as failed.
 
 > **Normative.** For a planning call, the tool uses a seam of the concrete completer in
 > `models/` that sends a round as `PydanticAIToolCallingCompleter` sends it where the record
@@ -162,7 +166,10 @@ call is replayed on its own recorded request. A later planning round and a repai
 therefore carry what the original run produced, not what the candidate would have.
 Without the seam, the completer asks for summarised thinking and keeps the whole response
 only where it holds a sink (ADR-0314 §5:1–§5:2), so a sinkless replay of a planning call
-would change the request and lose the thinking.
+would change the request and lose the thinking. One model for a run means the candidates
+and the control are compared on the same model. A comparison with the hub's own reply may
+cross models, where a fallback answered the original or the configuration has changed since,
+and each result says which model the original used where the record knows it.
 
 ### 5. What it never does
 
@@ -195,9 +202,10 @@ reply, as it can steer the hub's, and the reply is only recorded and shown as te
 > **Normative.** Each result names the entry it replays, by its file, its line and its
 > instant; the run; the prompt's name; the recorded version and origin where the entry has
 > them; the candidate's version, its origin as `override`, `default` or `recorded`, and its
-> rendered instruction; the flags and whether they were recorded or stated; the model; and
-> the reply as text or the failure, with every part of a planning response, thinking
-> included.
+> rendered instruction; the flags and whether they were recorded or stated; the run's model,
+> and the original call's model where its returned entry names one, or else that it is
+> unknown; and the reply as text or the failure, with every part of a planning response,
+> thinking included.
 
 > **Normative.** A results file is a file of the copy's record: readable by the hub's user
 > alone, Tier 1, and deleted with the copy.
@@ -266,7 +274,7 @@ Superseded in part; every clause the middle column does not name stands:
 
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
-| ADR-0314 | §3:1, in the addition alone: the model calls the replay tool makes through `ai_assistant`'s model layer with a recorded request the tool hands it; §3:2, in the addition alone: a recorded call's request, read from a copy of the owner's hub's record, reaches a model in a replay the owner runs with the tool, and the reply is kept in the copy's record; §3:4, in the addition alone: the server's own tools include the replay tool, which reads a copy of the record on the owner's hub's server; §5:3, in the addition alone: the thinking a replayed planning call returns reaches that replay's results in the copy's record | §3:1, §4:1, §4:6, §4:7, §6:1, §6:2 |
+| ADR-0314 | §3:1, in the addition alone: the model calls the replay tool makes through `ai_assistant`'s model layer with a recorded request the tool hands it; §3:2, in the addition alone: a recorded call's request, read from a copy of the owner's hub's record, reaches a model in a replay the owner runs with the tool, and the reply is kept in the copy's record; §3:4, in the addition alone: the server's own tools include the replay tool, which reads a copy of the record on the owner's hub's server; §5:3, in the addition alone: the thinking a replayed planning call returns reaches that replay's results in the copy's record | §3:1, §4:1, §4:6, §4:8, §6:1, §6:2 |
 | ADR-0333 | §4:1, in the addition alone: a recorded observer call's request reaches a model in a replay the owner runs with the tool, as for ADR-0314 §3:2; the observer itself still reads no entry | §4:1 |
 | ADR-0316 | §3:1 and §3:3, in the addition alone: an activation's replay results marked in the list and shown beside the reply they replay; §5:1, in the addition alone: the results file's name | §6:4, §6:5 |
 | ADR-0334 | §8:2, in the addition alone: the `prompt` key also holds the flags the code computed for the call | §9:1 |
@@ -316,7 +324,7 @@ Read through and not superseded:
 **Lanes it implies**, each after this merges `Accepted`:
 1. §9's flags: carried by each ADR-0334 lane, not yet merged, that moves a prompt writing
    entries, and added in a follow-on for any already merged.
-2. The completer's seam (§4:7–§4:8), in `models/`, with its tests.
+2. The completer's seam (§4:8–§4:9), in `models/`, with its tests.
 3. After the second, the tool's copy and replay, and the viewer's display, with tests under
    `tests/scripts/`, touching nothing under `src/`.
 4. The rerun, in the same program. Where composing the observer alone needs a seam in `app/`,
