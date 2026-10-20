@@ -317,6 +317,28 @@ def test_an_add_or_a_recheck_another_episode_carries_is_refused() -> None:
     assert isinstance(added_here.primary, AddSupports)
 
 
+def test_evidence_the_leaving_episode_brings_against_a_memory_carries_a_recheck_or_an_add() -> None:
+    """§8:2, §13:1: an earlier or later backing of the memory does not outweigh doubt the
+    leaving episode raises; it is the context, or a qualification, of that doubt."""
+    held = memory("m-seat", "x", said_support(address("past")))
+    doubt = _support("P1", direction="against", backs_as_worded=False)
+    for other in ("past", "later"):
+        minutes = -5 if other == "past" else 5
+        view = _view(
+            _input("P1", "leaving"),
+            _input("P2", other, at_minutes=minutes),
+            similar=(_similar("M1", held),),
+        )
+
+        rechecked = _checked(
+            view, action="recheck", memory="M1", asks="Still?", supports=[doubt, _support("P2")]
+        )
+        added = _checked(view, action="add", memory="M1", supports=[doubt, _support("P2")])
+
+        assert isinstance(rechecked.primary, RaiseQuestion), other
+        assert isinstance(added.primary, AddSupports), other
+
+
 def test_an_earlier_message_of_the_assistant_is_carried_by_the_users_keep_in_the_leaving() -> None:
     """§8:2, §10:1: the user's keep in the leaving episode carries the message it admits."""
     message = _part(
@@ -377,6 +399,42 @@ def test_a_resolve_a_later_episode_answers_waits() -> None:
         wording="The user prefers window seats.",
         supports=[_support("P1"), _support("P2")],
         resolves={"memory": "M1", "question": "Q1", "part": "P2", "note": "now window"},
+    )
+
+    assert isinstance(decision.primary, Create)
+    assert decision.resolve is None
+
+
+def test_a_resolve_on_the_assistants_words_a_later_keep_admits_waits() -> None:
+    """§8:2, §13:2: the keep a resolve would rest on in the message's place is a later one's."""
+    open_question = OpenQuestion(
+        id="question:1",
+        kind=OpenQuestionKind.RECHECK,
+        asks="Still aisle?",
+        rests_on=(InputPart(episode=address("past")),),
+        raised_at=AT,
+        raised_by=MemoryWriterName.OBSERVER,
+    )
+    held = memory(
+        "m-seat", "The user likes aisle seats.", said_support(address("past"))
+    ).model_copy(update={"open_questions": (open_question,)})
+    message = _part(
+        "P1",
+        RoundMessagePart(episode=address("leaving"), round="r1"),
+        origin=SupportOrigin.ASSISTANT_MESSAGE,
+    )
+    view = _view(
+        message,
+        _input("P2", "later", at_minutes=5),
+        similar=(_similar("M1", held, questions={"Q1": "question:1"}),),
+    )
+
+    decision = _checked(
+        view,
+        action="create",
+        wording="The user prefers window seats.",
+        supports=[_support("P1"), _support("P2")],
+        resolves={"memory": "M1", "question": "Q1", "part": "P1", "note": "now window"},
     )
 
     assert isinstance(decision.primary, Create)
