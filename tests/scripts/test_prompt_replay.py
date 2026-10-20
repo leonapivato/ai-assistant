@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import FunctionModel
 
 import ai_assistant
@@ -641,7 +642,20 @@ def test_a_rerun_stops_where_the_budget_holds_it(tmp_path: Path) -> None:
     assert engine.closed
 
 
-def test_a_rerun_composes_the_real_package_over_a_copy(tmp_path: Path) -> None:
+def test_a_rerun_composes_the_real_package_over_a_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each model is built at composition, as the rerun counts its requests there; no
+    # episode is due, so no request is made and the key is never used.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-a-credential")
+    counted: list[Any] = []
+    real = replay_tool.CountedModel.__init__
+
+    def noting(self: Any, wrapped: Any, meter: Any) -> None:
+        counted.append(meter)
+        real(self, wrapped, meter)
+
+    monkeypatch.setattr(replay_tool.CountedModel, "__init__", noting)
     live = tmp_path / "live"
     (live / "prompts").mkdir(parents=True, mode=0o700)
     (live / "prompts" / "understanding.txt").write_text(TEMPLATE)
@@ -662,6 +676,11 @@ def test_a_rerun_composes_the_real_package_over_a_copy(tmp_path: Path) -> None:
 
     # No episode is due in this copy, so the observer makes no call and the run ends.
     assert "observer run 1: 0 processed, 0 skipped, 0 waiting, 0 stuck" in reports
+    # Every completion provider the composition built counts on the one meter: the
+    # conversation routes, consolidation's, the reconciler's and the observer's two.
+    assert len(counted) >= 4
+    assert len({id(one) for one in counted}) == 1
+    assert "0 model calls made (bound 100); 0 refused" in reports
     assert not any("narrowed" in one for one in reports)
 
 
@@ -738,7 +757,15 @@ def test_the_prompt_key_the_package_writes_is_read_for_its_flags(tmp_path: Path)
     assert bodies["digesting"]["candidate"]["instruction"] == "A candidate digest instruction."
 
 
-def _given(source: str, line: int, prompt: dict[str, Any] | None, **body: Any) -> Any:
+def _given(
+    source: str,
+    line: int,
+    prompt: dict[str, Any] | None,
+    *,
+    activation: str = ACT_A,
+    seconds: float = 0,
+    **body: Any,
+) -> Any:
     held = {
         "messages": [
             {"role": "system", "content": "told", "name": None},
@@ -749,19 +776,58 @@ def _given(source: str, line: int, prompt: dict[str, Any] | None, **body: Any) -
     if prompt is not None:
         held["prompt"] = prompt
     return replay_tool.Given(
-        file=f"{ACT_A}.observer.jsonl" if source == "observer" else f"{ACT_A}.jsonl",
-        activation_id=ACT_A,
+        file=f"{activation}.observer.jsonl" if source == "observer" else f"{activation}.jsonl",
+        activation_id=activation,
         line=line,
-        recorded_at="",
+        recorded_at=(now() + timedelta(seconds=seconds)).isoformat(),
         source=source,
         stage=body.get("stage"),
-        body=body | held,
+        body=held,
     )
 
 
-def test_entries_are_one_call_only_as_the_observers_same_call_with_the_same_prompt_key(
+def _calls(plan: Any) -> dict[tuple[str, tuple[tuple[str, int], ...]], Any]:
+    return {
+        (call.candidate.origin, tuple((one.activation_id, one.line) for one in call.givens)): call
+        for call in plan.calls
+    }
+
+
+def test_entries_are_one_call_only_as_copies_of_the_observers_call_under_other_activations(
     tmp_path: Path,
 ) -> None:
+    declared = replay_tool.declared_prompts()
+    scout = {"name": "observer_scout", "version": "v", "origin": "default", "flags": {}}
+    givens = [
+        # The scout's call, written under three activations at once: one call (§4:11).
+        _given("observer", 0, scout, stage="scout"),
+        _given("observer", 0, scout, activation=ACT_B, seconds=0.01, stage="scout"),
+        _given("observer", 0, scout, activation="act-c", seconds=0.02, stage="scout"),
+        # The same request retried in A's own file, fifteen minutes on: another call.
+        _given("observer", 1, scout, seconds=900, stage="scout"),
+        # And under B at that retry's time: a copy of the retry, not of the first call.
+        _given("observer", 1, scout, activation=ACT_B, seconds=900.01, stage="scout"),
+        # The same request with another prompt key: a call of its own.
+        _given("observer", 2, None, seconds=0.03, stage="scout"),
+        # Two understanding entries holding one request are two calls.
+        _given("understanding", 0, None),
+        _given("understanding", 0, None, activation=ACT_B),
+    ]
+    recorded = replay_tool.load_candidate("recorded", declared)
+
+    plan = replay_tool.plan_run(givens, [recorded], declared=declared, stated={})
+
+    assert set(_calls(plan)) == {
+        ("recorded", ((ACT_A, 0), (ACT_B, 0), ("act-c", 0))),
+        ("recorded", ((ACT_A, 1), (ACT_B, 1))),
+        ("recorded", ((ACT_A, 2),)),
+        ("recorded", ((ACT_A, 0),)),
+        ("recorded", ((ACT_B, 0),)),
+    }
+    assert plan.requests == 5
+
+
+def test_no_entry_is_rendered_from_another_entrys_flags(tmp_path: Path) -> None:
     declared = replay_tool.declared_prompts()
     flagged = {
         "name": "understanding",
@@ -769,35 +835,91 @@ def test_entries_are_one_call_only_as_the_observers_same_call_with_the_same_prom
         "origin": "default",
         "flags": {"recalled": False, "stories": True},
     }
-    scout = {"name": "observer_scout", "version": "v", "origin": "default", "flags": {}}
-    givens = [
-        # The same understanding request twice: one written before §9's flags, one after.
-        _given("understanding", 0, {"name": "understanding", "version": "v", "origin": "default"}),
-        _given("understanding", 1, flagged),
-        # The scout's call under two activations, and once more with another prompt key.
-        _given("observer", 0, scout, stage="scout"),
-        _given("observer", 1, scout, stage="scout"),
-        _given("observer", 2, None, stage="scout"),
-    ]
+    unflagged = {"name": "understanding", "version": "v", "origin": "default"}
+    givens = [_given("understanding", 0, unflagged), _given("understanding", 1, flagged)]
     template = replay_tool.load_candidate(str(_template(tmp_path)), declared)
-    recorded = replay_tool.load_candidate("recorded", declared)
 
-    plan = replay_tool.plan_run(givens, [template, recorded], declared=declared, stated={})
+    plan = replay_tool.plan_run(givens, [template], declared=declared, stated={})
 
-    by_lines = {
-        (call.candidate.origin, tuple(one.line for one in call.givens)): call for call in plan.calls
-    }
-    assert set(by_lines) == {
-        ("override", (1,)),
-        ("recorded", (0,)),
-        ("recorded", (1,)),
-        ("recorded", (0, 1)),
-        ("recorded", (2,)),
-    }
-    # The entry written before §9 is never rendered from its twin's flags.
-    assert by_lines[("override", (1,))].flags == {"recalled": False, "stories": True}
-    assert by_lines[("override", (1,))].flags_from == "recorded"
+    ((key, call),) = _calls(plan).items()
+    assert key == ("override", ((ACT_A, 1),))
+    assert call.flags == {"recalled": False, "stories": True}
+    assert call.flags_from == "recorded"
     assert plan.left_out == {"no flags recorded or stated": 1}
+
+
+def _empty_then_text(requests: list[int]) -> Any:
+    def answer(messages: list[Any], info: Any) -> Any:
+        del messages, info
+        requests.append(1)
+        return ModelResponse(parts=[TextPart("" if len(requests) == 1 else "a repair")])
+
+    return answer
+
+
+def test_a_replay_sends_no_repair_after_an_empty_reply(tmp_path: Path) -> None:
+    # pydantic-ai's agent asks again of its own accord after an empty reply; a replay sends
+    # each call once and no repair (§4:10), so the call is recorded as failed.
+    copy = make_copy(tmp_path)
+    requests: list[int] = []
+    caller = replay_tool.ModelCaller(FunctionModel(_empty_then_text(requests)), timeout=10)
+    reports: list[str] = []
+
+    asyncio.run(
+        replay_tool.replay(
+            replay_tool.ReplayOptions(
+                copy=copy, model="fake:model", sources=frozenset({"digesting"})
+            ),
+            report=reports.append,
+            caller=caller,
+            now=now,
+        )
+    )
+
+    assert len(requests) == 1
+    (only,) = _results(copy)[f"{ACT_A}.replay.jsonl"]
+    assert "reply" not in only["body"]
+    assert only["body"]["failure"]["class"] == "ModelError"
+    assert "failed: 1 (ModelError)" in reports
+
+
+def test_a_rerun_counts_the_agents_own_repair_against_its_bound(tmp_path: Path) -> None:
+    copy = make_copy(tmp_path)
+    requests: list[int] = []
+    failures: list[str] = []
+
+    class _Engine:
+        def __init__(self) -> None:
+            # Built inside the composition, as each of its providers is.
+            self.provider = replay_tool.composition.PydanticAIProvider(
+                FunctionModel(_empty_then_text(requests))
+            )
+
+        async def observe_episodes(self) -> RunOutcome:
+            try:
+                await self.provider.complete([Message(role=Role.USER, content="x")])
+            except ModelError as exc:
+                failures.append(type(exc).__name__)
+            return RunOutcome(processed=1)
+
+        async def aclose(self) -> None:
+            return None
+
+    reports: list[str] = []
+    asyncio.run(
+        replay_tool.rerun(
+            replay_tool.RerunOptions(copy=copy, model="anthropic:claude-test", bound=1),
+            report=reports.append,
+            build=lambda _: _Engine(),
+            check_model=lambda _: None,
+            now=now,
+        )
+    )
+
+    assert len(requests) == 1
+    assert failures == ["ModelError"]
+    assert "1 model calls made (bound 1); 1 refused" in reports
+    assert replay_tool.composition.PydanticAIProvider is PydanticAIProvider
 
 
 async def _no_wait(_: float) -> None:
@@ -810,7 +932,7 @@ class _Metering:
 
     def __init__(self, model: Any, calls: int) -> None:
         self.provider = RetryingProvider(
-            PydanticAIProvider(model),
+            replay_tool.composition.PydanticAIProvider(model),
             policy=RetryPolicy(max_attempts=3, backoff_base_seconds=0.001),
             sleep=_no_wait,
         )
@@ -842,15 +964,18 @@ def test_a_rerun_counts_every_model_request_retries_included_against_its_bound(
         requests.append(1)
         raise ModelHTTPError(status_code=429, model_name="fake")
 
-    engine = _Metering(FunctionModel(answer), calls=2)
-    original = PydanticAIProvider.complete
+    built: list[_Metering] = []
     reports: list[str] = []
+
+    def build(_: Any) -> _Metering:
+        built.append(_Metering(FunctionModel(answer), calls=2))
+        return built[0]
 
     asyncio.run(
         replay_tool.rerun(
             replay_tool.RerunOptions(copy=copy, model="anthropic:claude-test", bound=4),
             report=reports.append,
-            build=lambda _: engine,
+            build=build,
             check_model=lambda _: None,
             now=now,
         )
@@ -858,9 +983,9 @@ def test_a_rerun_counts_every_model_request_retries_included_against_its_bound(
 
     # Three attempts of the first call and one of the second are sent; the second's next
     # attempt is refused unsent, and the refusal is not retried.
+    (engine,) = built
     assert len(requests) == 4
     assert engine.failures == ["ModelRateLimitError", "ModelError"]
     assert engine.runs == 1
     assert "the bound of 4 model calls is reached" in reports
     assert "4 model calls made (bound 4); 1 refused" in reports
-    assert PydanticAIProvider.complete is original
