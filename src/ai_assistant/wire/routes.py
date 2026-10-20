@@ -89,7 +89,10 @@ class Route(StrEnum):
 #: ``add_story_note`` and ``move_story_members``, postdate the table and are placed
 #: in the command-or-query row by their class, beside ADR-0289's nine story methods:
 #: each is a command or a query on the assistant's own records, and none is input to
-#: the assistant or traffic of a conversation's or a spoke's.
+#: the assistant or traffic of a conversation's or a spoke's. ADR-0329 §18:2's
+#: ``pending_candidates`` is placed there by the same class, beside ``beliefs``: a
+#: query on the assistant's own records, which the command role scopes to the owner
+#: (§18:1).
 ROWS: Final[Mapping[Route, frozenset[str]]] = {
     Route.COMMAND: frozenset(
         {
@@ -118,6 +121,7 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
             "my_devices",
             "notification_preferences",
             "notifications",
+            "pending_candidates",
             "recent_connection_acts",
             "recent_decisions",
             "recent_grants",

@@ -402,6 +402,9 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "ChatChanges",
         "ConversationState",
         "ActivationEnding",
+        # ADR-0329 §18:2's read of the pending candidates, and the one type it returns:
+        # a candidate by its episode and its fact (§18:1), which is no memory.
+        "PendingCandidate",
     }
 )
 
@@ -846,8 +849,12 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     ``revoke_destination_trust`` with destination trust — so the count falls to
     fifty-eight. None was a browser operation, and their command-line commands leave in
     the same change.
+
+    **ADR-0329 §18:2 adds one**, ``pending_candidates``, the read the belief panel calls
+    to show the candidates the observer has not yet processed — so the count rises to
+    fifty-nine.
     """
-    assert len(_method_names()) == 58
+    assert len(_method_names()) == 59
     assert "converse_spoken" not in _method_names()
     for retired in (
         "converse",
@@ -1763,6 +1770,11 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ``Belief.supports``. A peer at 110 refuses the new member as unknown (ADR-0124
     §9:2). **The method set does not move and stays at 58.**
 
+    **112 is ADR-0329 §18:2, on the method set and a wire-carried core type.** The
+    promoted set gains ``pending_candidates``, and the wire carries the
+    ``PendingCandidate`` it returns. A hub at 111 does not route the method a peer at
+    112 calls (ADR-0124 §9:2). **The method set moves from 58 to 59.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1771,7 +1783,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (58, 111), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (59, 112), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

@@ -15724,6 +15724,28 @@ def episode_view(episode: EpisodicMemory) -> Belief:
     return Belief.model_validate(_episode_fields(episode))
 
 
+class PendingCandidate(BaseModel):
+    """A candidate the observer has not processed, as the panel shows it (ADR-0329 §18:1).
+
+    A candidate is a recorded ``remember`` call joined to the effect record that shows
+    it done (§3:3), and it is **pending** while its episode is not processed (§16:2).
+    It is no memory: nothing is kept until the observer commits what the episode shows,
+    so it carries no standing, band, status or support, and ``forget`` names nothing by
+    it. The panel shows it by its fact and marks it pending (§18:1); nothing more is
+    shown (§18:3).
+
+    Attributes:
+        episode_id: The episode whose rounds recorded the call, which is the episode the
+            observer processes it with.
+        fact: The fact planning wrote, in its own words (§3:1).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    episode_id: Identifier
+    fact: EncodableText
+
+
 class ConversationSummary(BaseModel):
     """One conversation, as a person choosing which to continue reads it (ADR-0074 §2).
 

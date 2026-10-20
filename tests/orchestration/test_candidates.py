@@ -24,6 +24,7 @@ from ai_assistant.core.types import (
     PlanningLabel,
     PlanningRound,
     ProposedCall,
+    QuestionPart,
     ToolOutcome,
 )
 from ai_assistant.orchestration.authorizer import values_digest
@@ -51,7 +52,12 @@ def _digest(**values: Any) -> str:
 
 
 async def _claimed(
-    plans: FakePlanStore, digest: str, outcome: ToolOutcome, *, effect_id: str = "effect-1"
+    plans: FakePlanStore,
+    digest: str,
+    outcome: ToolOutcome,
+    *,
+    effect_id: str = "effect-1",
+    part: QuestionPart | None = None,
 ) -> None:
     effect = ActivationEffect(
         id=effect_id,
@@ -61,6 +67,7 @@ async def _claimed(
         values_digest=digest,
         decision_id="decision-1",
         claimed_at=_AT,
+        part=part,
     )
     await plans.claim_activation_effect(effect, match=None)
     if outcome is ToolOutcome.FAILED:
@@ -85,6 +92,27 @@ async def test_a_call_its_record_shows_done_is_a_pending_candidate() -> None:
     )
 
     assert pending == {_EPISODE: ("prefers window seats",)}
+
+
+async def test_an_effect_spending_a_question_part_shows_no_recorded_call_done() -> None:
+    """§3:3: an approved run's record is that call's, not a same-valued call's of its round.
+
+    The round's own call needed the user's yes and was not done; the approved call is
+    shown in the question that asked it (§6:9), so the window shows nothing here.
+    """
+    plans = FakePlanStore(now=lambda: _AT)
+    await _claimed(
+        plans,
+        _digest(**_arguments()),
+        ToolOutcome.SUCCEEDED,
+        part=QuestionPart(round="round:asking", part=1),
+    )
+
+    pending = await pending_candidates(
+        plans, (_window(ProposedCall(call_id="c1", name="remember", arguments=_arguments())),)
+    )
+
+    assert pending == {}
 
 
 @pytest.mark.parametrize("outcome", [ToolOutcome.FAILED, ToolOutcome.INDETERMINATE])

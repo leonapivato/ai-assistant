@@ -102,6 +102,7 @@ from ai_assistant.core.types import (
     MemoryWriteMode,
     Modality,
     NotificationDelivery,
+    PendingCandidate,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -148,6 +149,7 @@ from ai_assistant.orchestration.activation_state import (
     admit_channel,
 )
 from ai_assistant.orchestration.activation_writer import capture_loss
+from ai_assistant.orchestration.candidates import held_candidates
 from ai_assistant.orchestration.change_stream import Activity, ChangeStream
 from ai_assistant.orchestration.channels import (
     UNCAPTURED,
@@ -1318,6 +1320,7 @@ class Engine:
         diagnostic_retention: DiagnosticRetention | None = None,
         diagnostic_window: timedelta | None = None,
         telegram: TelegramLineSeams | None = None,
+        candidates: bool = False,
     ) -> None:
         """Wire the façade from injected collaborators.
 
@@ -1659,6 +1662,12 @@ class Engine:
                 which is a directly built engine's and never the composition root's.
             diagnostic_window: ``Settings.diagnostic_retention``, the window the sweep
                 measures back from the engine's clock (§7:1).
+            candidates: Whether ``remember`` records a candidate for the observer
+                (ADR-0329 §§3-6), which the composition root hands on from the one
+                switch the phases are built by (§19:3). Only then does
+                :meth:`pending_candidates` read anything: off, the default, it answers
+                none, since ``remember`` then writes a memory under ADR-0328 §13's
+                interim and no call it recorded is a candidate.
 
         Raises:
             TypeError: If ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is
@@ -1694,6 +1703,7 @@ class Engine:
         # is not a laxer contract limit but no contract limit at all (#1686).
         _check_positive_int(max_payload_bytes, name="max_payload_bytes")
         self._plans = plans
+        self._candidates = candidates
         self._trail = trail
         self._spend = spend
         self._reads = reads
@@ -3107,6 +3117,37 @@ class Engine:
         finally:
             if conversation is not None:
                 self._count_change(conversation)
+
+    async def pending_candidates(self) -> tuple[PendingCandidate, ...]:
+        """The candidates the observer has not yet processed (ADR-0329 §18:2).
+
+        Lane 3's reading, not a second one, walked over every episode:
+        :func:`~ai_assistant.orchestration.candidates.held_candidates` joins each
+        unsettled episode's recorded ``remember`` calls to the effect records that show
+        them done (§3:3), adds the candidates recorded under an approval, which the
+        panel has no question to show in, and leaves out an episode the observer has
+        settled (§16:2).
+
+        **The switch decides before any read** (§19:3): where this engine was built
+        with ``candidates`` off, ``remember`` writes a memory under ADR-0328 §13's
+        interim and none of its calls is a candidate, so the answer is empty and no
+        store is touched.
+
+        Returns:
+            The pending candidates, the most recent episode's first.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            MemoryStoreError: If the episodes cannot be read.
+            PlanningError: If the plan store cannot be read.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._pending_candidates(), "pending_candidates", checked=True)
+
+    async def _pending_candidates(self) -> tuple[PendingCandidate, ...]:
+        if not self._candidates:
+            return ()
+        return await held_candidates(self._memory, self._plans)
 
     async def guard(self, record_id: Identifier) -> Placement | None:
         """Keep the record ``record_id`` names for the owner alone (ADR-0217 §7).

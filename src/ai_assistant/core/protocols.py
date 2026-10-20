@@ -178,6 +178,7 @@ if TYPE_CHECKING:
         NotificationPreferences,
         ObservationRecord,
         OfferedTool,
+        PendingCandidate,
         PermissionDecision,
         PermissionRuling,
         Placement,
@@ -8807,6 +8808,38 @@ class AssistantEngine(Protocol):
         Raises:
             ValueError: If ``record_id`` is blank.
             MemoryStoreError: If reading or writing memory failed.
+        """
+        ...
+
+    async def pending_candidates(self) -> tuple[PendingCandidate, ...]:
+        """Read the candidates the observer has not yet processed (ADR-0329 §18:2).
+
+        The read the belief panel calls to show the pending candidates, each by its
+        fact and marked pending (§18:1). A candidate is a ``remember`` call a round
+        recorded, joined to the effect record that shows it done (§3:3), and it is
+        pending while its episode has no observation record marked processed, skipped
+        or stuck (§16:2). None of them is a memory: ``belief`` and ``forget`` name
+        nothing by one.
+
+        **Where ``remember`` records no candidate, it returns none.** Until the
+        observer is wired, ``remember`` writes a memory under ADR-0328 §13's interim
+        (ADR-0329 §19:3-§19:4), and no call it recorded is presented as pending.
+
+        **Every pending candidate, whatever its age** (§18:1): a candidate recorded under
+        an approval as well as one an episode's own rounds recorded (§3:3). The cost
+        grows with the episode store, and an implementation keeps it small by reading
+        in full only an episode the observer has not settled whose activation has a
+        ``remember`` effect record done.
+
+        Returns:
+            The pending candidates, the most recent episode's first; within an
+            episode, those its own rounds recorded in the order recorded, then those
+            recorded under an approval in the order they ran. Empty where there are
+            none.
+
+        Raises:
+            MemoryStoreError: If the episodes cannot be read.
+            PlanningError: If the plan store cannot be read.
         """
         ...
 

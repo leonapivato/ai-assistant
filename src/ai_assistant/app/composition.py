@@ -1767,6 +1767,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # ADR-0323 §2:2: the line's spoke, where it is configured; the engine starts
             # its reader with the hub and stops it with it.
             telegram=telegram_line,
+            # ADR-0329 §18:2, §19:3: the same one switch the phases are built by, so the
+            # panel's read of the pending candidates answers none while `remember`
+            # writes memories under ADR-0328 §13's interim.
+            candidates=REMEMBER_RECORDS_CANDIDATES,
             # The capture/lifecycle stage, holding *both* durable stores — the same
             # `memory` again, so a captured turn is retrievable and destroyable
             # through the surfaces the user already has (ADR-0074 §9). Its
