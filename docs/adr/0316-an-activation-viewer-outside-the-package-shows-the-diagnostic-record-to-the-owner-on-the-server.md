@@ -1,6 +1,6 @@
 # 316. An activation viewer outside the package shows the diagnostic record to the owner on the server
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0333 (§3:2 and §5:1, each in the addition alone: a learning lane, and the observer file's name)
 - Date: 2026-10-13
 - Scope: the phases, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): an owner-run program that shows each activation's flow from [ADR-0314](0314-a-diagnostic-record-keeps-what-each-phase-was-given-and-returned-and-nothing-reads-it-back.md)'s diagnostic record, so the owner can watch activations being processed.
 - Authorization: the owner asked for it on 2026-10-13 and ruled its substance: flow first, decisions and content one click away, and separate from the hub. The dispatcher chose where it runs (on the server, on loopback, over an SSH tunnel), assigned 0316, and authorized ratifying it once its reviews are green.
@@ -8,6 +8,7 @@
 - **Partially supersedes**
   [ADR-0314](0314-a-diagnostic-record-keeps-what-each-phase-was-given-and-returned-and-nothing-reads-it-back.md)
   (§3:4, in the addition alone: the server's own tools include this viewer).
+- Partially superseded: 2026-10-20 by ADR-0333 — §3:2, in the addition alone: an activation's page also shows a learning lane, drawn over the observer's own instants (ADR-0333 §5:2–§5:3). §5:1, in the addition alone: the viewer also depends on the observer file's name, `<activation_id>.observer.jsonl` (ADR-0333 §3:1, §5:1). Every other clause stands. This replacement takes effect on ratification of ADR-0333. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
