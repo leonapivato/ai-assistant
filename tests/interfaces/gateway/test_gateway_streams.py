@@ -1114,8 +1114,10 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
     the changes after a cursor, and since ADR-0298 §7 built it the change stream itself.
     **ADR-0297 §6:4 rules that "the command line and the gateway's stop control land
     last"**, which places ``stop_activation`` here by the governing decision's own text;
-    the header record it owes ADR-0177 is issue #2714. Every other clause of §1 binds
-    each of them exactly as it binds §1's own.
+    the header record it owes ADR-0177 is issue #2714. **ADR-0329 §18:2's read "which the
+    panel calls"** places ``pending_candidates`` here the same way, and its header record
+    is issue #3201. Every other clause of §1 binds each of them exactly as it binds §1's
+    own.
 
     **What has left is named by the decision that took it.** ADR-0309 §5:4 retires the
     Ask panel's ``converse`` and ADR-0313 §3:4 push-to-talk's ``converse_spoken``; and
@@ -1182,6 +1184,9 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
         "follow_chat",
         # ADR-0297 §6:4: the gateway's stop control beside "working…" (#2714).
         "stop_activation",
+        # ADR-0329 §18:2: "AssistantEngine gains a read of the pending candidates,
+        # which the panel calls" places it here by the same route (#3201).
+        "pending_candidates",
         "delivery-stream",
     }
 

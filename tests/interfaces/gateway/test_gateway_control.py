@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     BeliefBand,
     GrantScope,
     MemoryKind,
+    PendingCandidate,
     ReportedExtent,
     belief_view,
 )
@@ -61,6 +62,8 @@ _ADDED: dict[str, str] = {
     "/beliefs": "beliefs",
     "/belief": "belief",
     "/belief/forget": "forget",
+    # ADR-0329 §18:2: the read the belief panel calls, which §18:1 has it make.
+    "/candidates/pending": "pending_candidates",
 }
 
 #: One well-formed body per path, so a case can drive any of them without inventing
@@ -76,6 +79,7 @@ _WELL_FORMED: dict[str, dict[str, Any]] = {
     "/beliefs": {},
     "/belief": {"record_id": "rec-1"},
     "/belief/forget": {"record_id": "rec-1"},
+    "/candidates/pending": {},
 }
 
 
@@ -880,3 +884,41 @@ class _WithEvidence(FakeAssistantEngine):
         )
         kept, lost = (support.points_at for support in held.supports)
         return belief_view(held, now=_INSTANT, contents={kept: "a run on Tuesday", lost: None})
+
+
+# --- ADR-0329 §18: the pending candidates -------------------------------------
+
+
+class _Pending(FakeAssistantEngine):
+    """A fake whose read answers two candidates of two episodes, as a hub would."""
+
+    async def pending_candidates(self) -> tuple[PendingCandidate, ...]:
+        self.calls.append(("pending_candidates", {}))
+        return (
+            PendingCandidate(episode_id="activation:newer", fact="has a dog"),
+            PendingCandidate(episode_id="activation:older", fact="lives in Lisbon"),
+        )
+
+
+async def test_the_pending_candidates_cross_by_episode_and_fact_in_the_hubs_order() -> None:
+    """§18:1 and §18:3: each candidate by its fact, and nothing more crosses."""
+    engine = _Pending()
+    async with _harness(engine) as one:
+        status, body = await one.whole("POST", "/candidates/pending", {})
+
+    assert status == 200
+    assert body == {
+        "candidates": [
+            {"episode_id": "activation:newer", "fact": "has a dog"},
+            {"episode_id": "activation:older", "fact": "lives in Lisbon"},
+        ]
+    }
+    assert _named(engine) == ["pending_candidates"]
+
+
+async def test_a_hub_whose_remember_writes_memories_shows_none_pending() -> None:
+    """§19:3: the empty answer is relayed as it came, with nothing synthesised."""
+    async with _harness(FakeAssistantEngine()) as one:
+        status, body = await one.whole("POST", "/candidates/pending", {})
+
+    assert (status, body) == (200, {"candidates": []})
