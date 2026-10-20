@@ -13,10 +13,19 @@ from datetime import UTC, datetime
 import structlog.testing
 from orchestration_held_episodes import held_episode
 
-from ai_assistant.core.types import MemoryDecisionKind, MemoryUpdateProposal
+from ai_assistant.core.types import (
+    Memory,
+    MemoryChange,
+    MemoryDecisionKind,
+    MemoryOperation,
+    MemoryOperationKind,
+    MemoryUpdateProposal,
+    MemoryWriterName,
+    TrackRecordEntry,
+)
 from ai_assistant.orchestration.writes import DEFERRED_EVENT, MemoryWriteStage
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore, FakeMemoryWriter
-from ai_assistant.testing.memories import memory, remembered_support
+from ai_assistant.testing.memories import memory, remembered_support, said_support
 
 _AT = datetime(2026, 3, 4, 10, 0, tzinfo=UTC)
 
@@ -101,3 +110,41 @@ async def test_a_committing_ruling_writes_and_logs_no_deferral() -> None:
     assert outcome.result.decision.kind is MemoryDecisionKind.ACCEPT
     assert await store.get("accepted-1") is not None
     assert [entry for entry in logs if entry["event"] == DEFERRED_EVENT] == []
+
+
+async def test_an_operation_and_an_entry_pass_through_to_the_writer() -> None:
+    """ADR-0329 §12:3, §14:4: ``apply`` and ``record_use`` take the stage's one route."""
+    store = FakeMemoryStore(now=_now)
+    await store.add(held_episode())
+    stage = _stage(store, MemoryDecisionKind.ACCEPT)
+    await stage.write(_proposal("kept-1"))
+    stored = await store.get("kept-1")
+    assert isinstance(stored, Memory)
+    support = said_support(added_at=_AT)
+    change = MemoryChange(
+        memory=stored,
+        operation=MemoryOperation(
+            kind=MemoryOperationKind.ADD_SUPPORT,
+            cites=support.points_at,
+            at=_AT,
+            by=MemoryWriterName.OBSERVER,
+        ),
+        support=support,
+    )
+
+    await stage.apply(change)
+    added = await store.get("kept-1")
+    assert isinstance(added, Memory)
+    entry = TrackRecordEntry(
+        episode=support.points_at.episode,  # type: ignore[union-attr]  # an input part's episode
+        relied_at=_AT,
+        held_up=True,
+        recorded_at=_AT,
+        recorded_by=MemoryWriterName.OBSERVER,
+    )
+    await stage.record_use(added, entry)
+
+    after = await store.get("kept-1")
+    assert isinstance(after, Memory)
+    assert after.support_at(support.points_at) is not None
+    assert after.track_record == (entry,)

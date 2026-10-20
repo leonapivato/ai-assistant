@@ -356,19 +356,15 @@ class Observer:
         if not isinstance(episode, EpisodicMemory):
             return None  # deleted since it was queued: nothing left to read
         started = self._now()
-        if _nothing_to_read(episode):
+        if held is None and _nothing_to_read(episode):
             skipped = ObservationRecord(
                 episode=episode_id,
                 state=ObservationState.SKIPPED,
                 attempts=(
-                    *(() if held is None else _closed(held.attempts)),
                     ObservationAttempt(started_at=started, end=ObservationAttemptEnd.FINISHED),
                 ),
-                findings=(),
             )
-            await self._plans.write_observation(
-                skipped, expected_revision=0 if held is None else held.revision
-            )
+            await self._plans.write_observation(skipped, expected_revision=0)
             return ObservationState.SKIPPED
         attempt = await self._open(episode_id, held, started)
         try:

@@ -484,7 +484,6 @@ class EpisodeReader:
         self._stories = stories
         self._story_episodes = story_episodes
         self._related = related
-        self._outside: dict[str, bool] = {}
 
     async def read(self, leaving: EpisodicMemory, window: Sequence[EpisodicMemory]) -> Reading:
         """Read around ``leaving``, with what came after it in ``window`` (§8:1).
@@ -665,13 +664,11 @@ class EpisodeReader:
             processing = record.processing_record
             if processing is None:  # pragma: no cover - only readable episodes are gathered
                 continue
-            if record.id not in self._outside:
-                # The stored record alone: no working set outlives its activation, and a
-                # mark the record cannot show fails closed, as authorizing's does.
-                self._outside[record.id] = await read_outside_content(
-                    self._memory, processing.activation_id, working=WorkingRecord()
-                )
-            outsides[record.id] = self._outside[record.id]
+            # The stored record alone: no working set outlives its activation, and a
+            # mark the record cannot show fails closed, as authorizing's does.
+            outsides[record.id] = await read_outside_content(
+                self._memory, processing.activation_id, working=WorkingRecord()
+            )
         return outsides
 
     async def _effects(self, episodes: Sequence[EpisodicMemory]) -> tuple[ActivationEffect, ...]:
