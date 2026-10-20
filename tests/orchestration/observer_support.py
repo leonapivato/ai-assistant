@@ -63,6 +63,7 @@ from ai_assistant.testing.activation import ended_pass
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from ai_assistant.core.protocols import DiagnosticSink
     from ai_assistant.core.types import ActivationUnderstanding, MemoryRecord
 
 #: The instant every case starts at: after §7:5's instant.
@@ -272,9 +273,10 @@ class Harness:
         scout: FakeModelProvider | None = None,
         commit: FakeModelProvider | None = None,
         window: int = WINDOW,
+        diagnostics: DiagnosticSink | None = None,
         **bounds: Any,
     ) -> Observer:
-        """The observer over these fakes, its routes scripted."""
+        """The observer over these fakes, its routes scripted, writing to ``diagnostics``."""
         return Observer(
             scout=scout or FakeModelProvider.scripted(),
             commit=commit or FakeModelProvider.scripted(),
@@ -286,4 +288,5 @@ class Harness:
             limits=limits(**bounds),
             now=self.clock,
             mint=self.mint,
+            diagnostics=diagnostics,
         )
