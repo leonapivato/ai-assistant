@@ -1074,6 +1074,39 @@ def _decoded_edge_key(text: str) -> bytes | None:
     return raw if len(raw) == _ED25519_PUBLIC_KEY_BYTES else None
 
 
+#: The armour a PEM certificate opens and closes with (RFC 7468 §2, §5.1).
+_PEM_CERTIFICATE_BEGIN: Final = "-----BEGIN CERTIFICATE-----"
+_PEM_CERTIFICATE_END: Final = "-----END CERTIFICATE-----"
+
+#: The base64 a PEM body is written in, padding included (RFC 4648 §4).
+_BASE64: Final = re.compile(r"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?")
+
+
+def _relay_certificate_body(text: str) -> str | None:
+    """One certificate's PEM text as the base64 of its DER, or ``None`` where it is not.
+
+    The form ``telegram_relay_certificates`` takes is one PEM certificate per element,
+    as ``relay cert show`` prints it, with or without its line breaks: an environment
+    variable holds one line, and Docker's ``--env-file`` cannot carry a newline at all.
+    So every space and line break is removed, the armour is required and removed, and
+    what remains must be non-empty base64.
+
+    Args:
+        text: One element of ``telegram_relay_certificates``.
+
+    Returns:
+        The certificate's body, the base64 of its DER, or ``None``.
+    """
+    compact = "".join(text.split())
+    begin, end = "".join(_PEM_CERTIFICATE_BEGIN.split()), "".join(_PEM_CERTIFICATE_END.split())
+    if not (compact.startswith(begin) and compact.endswith(end)):
+        return None
+    body = compact[len(begin) : len(compact) - len(end)]
+    if not body or not _BASE64.fullmatch(body):
+        return None
+    return body
+
+
 class EmbedderKind(StrEnum):
     """Which :class:`~ai_assistant.core.protocols.Embedder` the app wires (ADR-0006 §2).
 
@@ -4190,6 +4223,36 @@ class Settings(BaseSettings):
             "it replies to."
         ),
     )
+    # **Relayed mode** (ADR-0330 §3). The origin is the switch: unset, the line is in
+    # direct mode and reaches Telegram with the bot's own token, as ADR-0323 builds it;
+    # set, it reaches the relay on the box with the hub's relay credential, and trusts
+    # the relay by the certificates beside it and by nothing else (§7). The origin is
+    # checked here as text alone — the canonicaliser's rules stay at the seam
+    # (ADR-0231 §8:7, ADR-0330 §3:5), and the composition root refuses the hub's start
+    # on an origin that does not canonicalise or a certificate that does not load
+    # (§3:4, §3:8). Neither is a credential: the relay credential is the connection's,
+    # in the keyring (§6:4, §12:4).
+    telegram_relay_origin: str | None = Field(
+        default=None,
+        description=(
+            "The relay's HTTPS origin, https://host:port, for a hub whose Telegram line "
+            "runs through the relay on the box rather than to its own bot (ADR-0330 §3). "
+            "A host name, never an IP address, and no path. Unset, the line is in direct "
+            "mode. Set it only with telegram_connection and telegram_user_id, and with "
+            "telegram_relay_certificates."
+        ),
+    )
+    telegram_relay_certificates: _ConfiguredList = Field(
+        default=(),
+        description=(
+            "The certificates the hub trusts the relay by, and no others: not the "
+            "system's certificate authorities (ADR-0330 §7). Comma-separated, each one "
+            "certificate in PEM, its line breaks removed — the relay's CA certificate, "
+            "as `relay cert show` prints it. Rotation is adding the new one, restarting, "
+            "and removing the old one once the relay no longer presents it (§3:9). "
+            "Non-empty exactly when telegram_relay_origin is set."
+        ),
+    )
 
     # --- The simulated booking provider (ADR-0273 §1, §5) -----------------
     # **Absent by default, and absence is the whole-or-absent shape these settings
@@ -4713,6 +4776,7 @@ class Settings(BaseSettings):
         "forecast_connection",
         "forecast_origin",
         "telegram_connection",
+        "telegram_relay_origin",
     )
     @classmethod
     def _is_not_blank(cls, value: str | None) -> str | None:
@@ -4791,6 +4855,79 @@ class Settings(BaseSettings):
             f"as well or unset {set_one} to leave the line off"
         )
         raise ValueError(msg)
+
+    @field_validator("telegram_relay_certificates")
+    @classmethod
+    def _every_relay_certificate_is_one_pem_certificate(
+        cls, value: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Refuse an element that is not one certificate's PEM text (ADR-0330 §3:7).
+
+        :func:`_relay_certificate_body` holds the form. What is decidable from the text
+        alone is refused here; whether the octets are a certificate the TLS stack loads
+        as a trust anchor is the composition root's, at start (§3:8).
+
+        Args:
+            value: The configured certificates.
+
+        Returns:
+            Each certificate as the base64 of its DER: its armour and every space and
+            line break removed.
+
+        Raises:
+            ValueError: If an element is not one PEM certificate.
+        """
+        bodies: list[str] = []
+        for position, element in enumerate(value):
+            body = _relay_certificate_body(element)
+            if body is None:
+                msg = (
+                    f"telegram_relay_certificates[{position}] is not one certificate in "
+                    f"PEM, the form this setting takes (ADR-0330 §3:7): copy what `relay "
+                    f"cert show` prints, with its line breaks removed, and separate two "
+                    f"certificates with a comma"
+                )
+                raise ValueError(msg)
+            bodies.append(body)
+        return tuple(bodies)
+
+    @model_validator(mode="after")
+    def _relayed_mode_is_whole_or_absent(self) -> Settings:
+        """Refuse a relay named for no line, or one trusted by nothing (ADR-0330 §3:6-§3:7).
+
+        Each is something the operator wrote about a relay, so a value no reading
+        makes true is refused rather than ignored (ADR-0327 §6:13's reason): an origin
+        with no line to carry, an origin with no certificate to trust it by, and
+        certificates with no relay to trust.
+
+        Raises:
+            ValueError: If ``telegram_relay_origin`` is set while the line is not
+                configured, or ``telegram_relay_certificates`` is empty while the
+                origin is set, or non-empty while it is unset.
+        """
+        origin, certificates = self.telegram_relay_origin, self.telegram_relay_certificates
+        if origin is not None and self.telegram_connection is None:
+            msg = (
+                "telegram_relay_origin is set and the Telegram line is not: a relayed line "
+                "is a line first, so set telegram_connection and telegram_user_id as well, "
+                "or unset telegram_relay_origin (ADR-0330 §3:6)"
+            )
+            raise ValueError(msg)
+        if origin is not None and not certificates:
+            msg = (
+                "telegram_relay_origin is set and telegram_relay_certificates is empty: the "
+                "hub trusts the relay by those certificates and by no others, so set the "
+                "relay's CA certificate there (ADR-0330 §3:7, §7)"
+            )
+            raise ValueError(msg)
+        if origin is None and certificates:
+            msg = (
+                "telegram_relay_certificates is set and telegram_relay_origin is not: "
+                "certificates for no relay trust nothing, so set the relay's origin as "
+                "well or unset the certificates (ADR-0330 §3:7)"
+            )
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _the_telegram_poll_bound_exceeds_its_wait(self) -> Settings:

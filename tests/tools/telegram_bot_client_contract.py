@@ -17,12 +17,21 @@ is its own arrangement. So each hook returns a :class:`Prepared` client whose Te
 will answer the next call as the hook says, with a way to read back what reached
 Telegram — the method and the JSON body, as the Bot API names them.
 
+**The line's one origin is in here** (rule 5): every subject says which origin its
+line reaches, through :meth:`TelegramBotClientContract.line_origin`, and every harness
+reports the origin of each channel its client opened. **And so is relayed mode**
+(ADR-0330 §12:1, §12's table): :class:`RelayedTelegramBotClientContract` runs every
+case above against a subject in relayed mode — the relay serves the Bot API faithfully
+(§4), so each holds of the relay's answers unchanged — and adds the obligations only a
+relayed line has: no call to Telegram's own origin (§3:2), a credential carrying ``:``
+refused before anything is opened (§6:3), and a relay whose certificate is outside the
+configured set, or names another host, refused before any byte (§7).
+
 **What is deliberately not in here** is everything only the production client has:
-the token's read order and its absence from every log, record and error (§11:4,
-§11:9), the origin and the redirect (§11:5), the read bound (§11:13) and the one
-channel per call (§11:14). A suite cannot see a keyring or a socket through the
-contract, so those are the production client's own arms, in
-``test_telegram_bot_client.py``.
+the credential's read order and its absence from every log, record and error (§11:4,
+§11:9), the redirect (§11:5), the read bound (§11:13) and the one channel per call
+(§11:14). A suite cannot see a keyring or a socket through the contract, so those are
+the production client's own arms, in ``test_telegram_bot_client.py``.
 
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a ``Test``-prefixed
 subclass.
@@ -44,9 +53,10 @@ from ai_assistant.core.types import (
     TelegramMessage,
     TelegramUpdate,
 )
+from ai_assistant.testing.telegram import TELEGRAM_DIRECT_ORIGIN
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
 pytestmark = pytest.mark.anyio
 
@@ -89,10 +99,14 @@ class Prepared:
     Attributes:
         client: The subject.
         reached: Every request that reached Telegram so far, in order.
+        opened: The origin of every channel the client opened, or tried to, in
+            order and in canonical form, ``https://host:port`` — whether or not
+            anything was written on it.
     """
 
     client: TelegramBotClient
     reached: Callable[[], tuple[Reached, ...]]
+    opened: Callable[[], tuple[str, ...]]
 
 
 def an_update(update_id: int, *, text: str = "hello", sender: int | None = None) -> TelegramUpdate:
@@ -138,6 +152,14 @@ class TelegramBotClientContract:
     def client(self) -> TelegramBotClient:
         """Override in a subclass with any conforming subject."""
         raise NotImplementedError
+
+    def line_origin(self) -> str:
+        """The one origin the subject's line reaches, canonical (rule 5).
+
+        Telegram's in direct mode, which is the default; a relayed subject overrides it
+        with its relay's.
+        """
+        return TELEGRAM_DIRECT_ORIGIN
 
     async def accepting(self, *, message_id: int) -> Prepared:
         """Override: a client whose Telegram does the next call it is asked.
@@ -190,6 +212,20 @@ class TelegramBotClientContract:
         """The one chat is an id, the owner's (§3:2)."""
         assert type(client.chat_id) is int
         assert client.chat_id > 0
+
+    # --- the one origin (rule 5: §11:5, ADR-0330 §3:2) ----------------------
+
+    async def test_every_call_goes_to_the_lines_one_origin(self) -> None:
+        """A send, a typing indicator and a poll, each to the line's origin alone."""
+        prepared = await self.accepting(message_id=3)
+        chat = prepared.client.chat_id
+
+        await prepared.client.send(attempt=ATTEMPT, chat_id=chat, text="hi", timeout=A_BOUND)
+        await prepared.client.show_typing(attempt=ATTEMPT, chat_id=chat, timeout=A_BOUND)
+        await prepared.client.poll(attempt=ATTEMPT, offset=None, wait=A_WAIT, timeout=A_BOUND)
+
+        assert prepared.opened() == (self.line_origin(),) * 3
+        assert len(prepared.reached()) == 3
 
     # --- a send (§6) --------------------------------------------------------
 
@@ -561,3 +597,115 @@ class TelegramBotClientContract:
 
         with pytest.raises(asyncio.CancelledError):
             await call
+
+
+class RelayedTelegramBotClientContract(TelegramBotClientContract):
+    """What a line in relayed mode owes besides everything above (ADR-0330 §12:1).
+
+    A subclass's subject is in relayed mode: :meth:`line_origin` is its relay's origin,
+    and every hook above arranges its **relay**, which answers as Telegram would (§4).
+    The four hooks below arrange what only a relayed line can meet.
+    """
+
+    def line_origin(self) -> str:
+        """Override: the relay's canonical origin, which is never Telegram's."""
+        raise NotImplementedError
+
+    async def holding_a_bot_token(self) -> Prepared:
+        """Override: a relayed client whose connection's slot holds a bot token.
+
+        A credential carrying ``:``, the mark every Bot API token carries (§6:2).
+        """
+        raise NotImplementedError
+
+    async def unanchored(self) -> Prepared:
+        """Override: a relayed client whose relay presents a certificate chaining to
+        no certificate in the configured set (§7:1)."""
+        raise NotImplementedError
+
+    async def misnamed(self) -> Prepared:
+        """Override: a relayed client whose relay presents a certificate chaining to
+        the configured set, issued for another host (§7:1, §7:5)."""
+        raise NotImplementedError
+
+    async def refusing_the_credential(self) -> Prepared:
+        """Override: a relayed client whose relay does not know its credential.
+
+        The relay answers ``401``, as Telegram answers an unknown token (§4:14).
+        """
+        raise NotImplementedError
+
+    async def test_no_call_reaches_telegram_directly(self) -> None:
+        """Every call goes to the relay, and none to ``https://api.telegram.org`` (§3:2)."""
+        prepared = await self.accepting(message_id=8)
+        chat = prepared.client.chat_id
+
+        await prepared.client.send(attempt=ATTEMPT, chat_id=chat, text="hi", timeout=A_BOUND)
+        await prepared.client.show_typing(attempt=ATTEMPT, chat_id=chat, timeout=A_BOUND)
+        await prepared.client.poll(attempt=ATTEMPT, offset=None, wait=A_WAIT, timeout=A_BOUND)
+
+        assert self.line_origin() != TELEGRAM_DIRECT_ORIGIN
+        assert TELEGRAM_DIRECT_ORIGIN not in prepared.opened()
+        assert set(prepared.opened()) == {self.line_origin()}
+
+    async def test_a_bot_token_in_the_slot_reaches_no_relay(self) -> None:
+        """A credential carrying ``:`` is unavailable, and nothing is opened (§6:3)."""
+        prepared = await self.holding_a_bot_token()
+        chat = prepared.client.chat_id
+
+        sent = await prepared.client.send(attempt=ATTEMPT, chat_id=chat, text="hi", timeout=A_BOUND)
+        shown = await prepared.client.show_typing(attempt=ATTEMPT, chat_id=chat, timeout=A_BOUND)
+        polled = await prepared.client.poll(
+            attempt=ATTEMPT, offset=None, wait=A_WAIT, timeout=A_BOUND
+        )
+
+        assert sent.failure is shown.failure is polled.failure is TelegramFailure.UNAVAILABLE
+        assert not sent.failure.retryable
+        assert prepared.reached() == ()
+        assert prepared.opened() == ()
+
+    @pytest.mark.parametrize("arrangement", ["unanchored", "misnamed"])
+    async def test_a_relay_that_does_not_verify_is_written_nothing(self, arrangement: str) -> None:
+        """A certificate outside the set, or for another host: a channel never opened (§7:4).
+
+        Not written, so retryable, and nothing of the request — the credential
+        included — reached the relay (§7:2).
+        """
+        hook: Callable[[], Awaitable[Prepared]] = getattr(self, arrangement)
+        prepared = await hook()
+
+        outcome = await prepared.client.send(
+            attempt=ATTEMPT, chat_id=prepared.client.chat_id, text="hi", timeout=A_BOUND
+        )
+
+        assert outcome.failure is TelegramFailure.NOT_WRITTEN
+        assert outcome.failure.retryable
+        assert prepared.reached() == ()
+
+    @pytest.mark.parametrize("arrangement", ["unanchored", "misnamed"])
+    async def test_a_poll_to_a_relay_that_does_not_verify_takes_nothing(
+        self, arrangement: str
+    ) -> None:
+        """A poll whose channel was never opened is not written, and takes nothing in."""
+        hook: Callable[[], Awaitable[Prepared]] = getattr(self, arrangement)
+        prepared = await hook()
+
+        outcome = await prepared.client.poll(
+            attempt=ATTEMPT, offset=5, wait=A_WAIT, timeout=A_BOUND
+        )
+
+        assert outcome.failure is TelegramFailure.NOT_WRITTEN
+        assert outcome.updates == ()
+        assert prepared.reached() == ()
+
+    async def test_an_unknown_credential_is_refused_and_not_retried(self) -> None:
+        """The relay's ``401`` is a refusal: not done, and not retryable (§4's table)."""
+        prepared = await self.refusing_the_credential()
+
+        outcome = await prepared.client.send(
+            attempt=ATTEMPT, chat_id=prepared.client.chat_id, text="hi", timeout=A_BOUND
+        )
+
+        assert outcome.failure is TelegramFailure.REFUSED
+        assert not outcome.failure.retryable
+        assert len(prepared.reached()) == 1

@@ -262,9 +262,11 @@ class AnsweringTransport:
         self._answers = answers
         self._stall = stall
         self.channels: list[AnsweringChannel] = []
+        self.endpoints: list[TransportEndpoint] = []
 
     async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel:
         """Open an answering channel; the endpoint is the client's one origin."""
+        self.endpoints.append(endpoint)
         assert endpoint == TELEGRAM_ENDPOINT
         channel = AnsweringChannel(self._answers, stall=self._stall)
         self.channels.append(channel)
@@ -307,9 +309,17 @@ class Harness:
             reached.append(Reached(target.rsplit("/", 1)[1], json.loads(body)))
         return tuple(reached)
 
+    def opened(self) -> tuple[str, ...]:
+        """The origin of every channel the client opened or tried to, canonical."""
+        if isinstance(self.transport, FakeOutboundTransport):
+            endpoints = [attempt.endpoint for attempt in self.transport.attempts]
+        else:
+            endpoints = list(self.transport.endpoints)
+        return tuple(f"https://{one.host}:{one.port}" for one in endpoints)
+
     def prepared(self) -> Prepared:
         """The harness as the suite takes it."""
-        return Prepared(client=self.client, reached=self.reached)
+        return Prepared(client=self.client, reached=self.reached, opened=self.opened)
 
 
 async def harness(

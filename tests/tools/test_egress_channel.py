@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Final, cast, final
 
 import pytest
 import structlog
+from telegram_relay_harness import minted
 from transport_contract import (
     ENDPOINT,
     RELEASE_FAILURE_DETAIL,
@@ -44,7 +45,7 @@ from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.types import TRANSPORT_OCTET_CEILING, TransportEndpoint
 from ai_assistant.testing.cancellation import LoopSuspension, settle
 from ai_assistant.tools import egress
-from ai_assistant.tools.egress import StreamOutboundTransport
+from ai_assistant.tools.egress import StreamOutboundTransport, TrustAnchors
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -477,6 +478,7 @@ def _channel(*, secure: bool = False, ledger: _Sockets | None = None) -> ByteCha
             cast("asyncio.StreamWriter", _Writer(ledger=ledger)),
             host=ENDPOINT.host,
             secure=secure,
+            context=egress._tls_context,
         ),
     )
 
@@ -711,6 +713,34 @@ async def test_an_upgrade_endpoint_is_connected_in_the_clear(
     assert sockets.asked["ssl"] is None
     assert sockets.asked["server_hostname"] is None
     assert channel.is_secure is False
+
+
+async def test_an_anchored_transport_opens_under_its_anchors_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0330 §7:1, §7:3: the configured certificates, and not the system's store.
+
+    The context handed to the opener holds exactly the one anchor configured, and a
+    later upgrade on the channel is made under the same anchors, never under
+    :func:`~ai_assistant.tools.egress._tls_context`'s.
+    """
+    sockets = _Sockets()
+    monkeypatch.setattr(asyncio, "open_connection", sockets)
+    transport = StreamOutboundTransport(anchors=TrustAnchors((minted().configured(),)))
+
+    channel = await transport.open_channel(ENDPOINT)
+
+    context = sockets.asked["ssl"]
+    assert isinstance(context, ssl.SSLContext)
+    assert context.cert_store_stats()["x509_ca"] == 1
+    assert context.minimum_version is ssl.TLSVersion.TLSv1_3
+    assert sockets.asked["server_hostname"] == ENDPOINT.host
+    assert channel.is_secure is True
+    upgraded = await StreamOutboundTransport(
+        anchors=TrustAnchors((minted().configured(),))
+    ).open_channel(UPGRADE)
+    assert isinstance(upgraded, egress._StreamChannel)
+    assert upgraded._context().cert_store_stats()["x509_ca"] == 1
 
 
 @pytest.mark.parametrize(
@@ -1238,9 +1268,11 @@ def test_the_capability_holds_no_state_between_calls() -> None:
 
     A pooled capability is a long-lived connection owned by whoever opened it, and
     a subsystem keeping one across calls has a route that outlives the
-    authorisation that produced it. ``__slots__`` being empty is that property
-    stated where an edit would have to notice it.
+    authorisation that produced it. ``__slots__`` holding the trust anchors alone is
+    that property stated where an edit would have to notice it: the one thing the
+    capability may hold is what it trusts, fixed at construction (ADR-0330 §7:3), and
+    never a connection.
     """
-    assert StreamOutboundTransport.__slots__ == ()
+    assert StreamOutboundTransport.__slots__ == ("_anchors",)
     with pytest.raises(AttributeError):
         StreamOutboundTransport().anything = 1  # type: ignore[attr-defined]  # the point of the case
