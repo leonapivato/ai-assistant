@@ -1,0 +1,496 @@
+"""What the observer gives the diagnostic record (ADR-0333 §2, §4).
+
+Driven over the canonical fakes, with :class:`~ai_assistant.testing.FakeDiagnosticSink`
+as the record: its ``recorded`` is the test's window, and nothing the observer holds can
+read it (§4:1). The run's own behaviour is ``test_observer_stage.py``'s; these cases hold
+what each attempt writes, under which activation, and that writing changes nothing.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any
+
+import pytest
+import structlog.testing
+from observer_support import AT, Harness, address, episode, reply
+
+from ai_assistant.core.diagnostics import DIAGNOSTIC_NOT_WRITTEN
+from ai_assistant.core.types import (
+    DiagnosticEntry,
+    DiagnosticKind,
+    DiagnosticSource,
+    EpisodicMemory,
+    Memory,
+    MemorySource,
+    ObservationAttemptEnd,
+    ObservationState,
+    ObserverStep,
+    Provenance,
+    Role,
+)
+from ai_assistant.core.types import Message as MessageType
+from ai_assistant.orchestration.observer.entries import Diagnosed, ObserverEntries
+from ai_assistant.testing import FakeDiagnosticSink, FakeModelProvider
+from ai_assistant.testing.memories import memory, said_support
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+    from ai_assistant.core.types import Message
+
+_PREFERENCE = "I prefer window seats when I fly."
+_CLAIM = "The user prefers window seats."
+
+
+async def _three(harness: Harness, *, text: str = _PREFERENCE) -> None:
+    """Three episodes, a minute apart: with a window of two, the oldest has left it."""
+    await harness.hold(
+        episode("one", at=AT - timedelta(minutes=3), text=text),
+        episode("two", at=AT - timedelta(minutes=2), text="What time is it?"),
+        episode("three", at=AT - timedelta(minutes=1), text="Thanks."),
+    )
+
+
+def _scout(*parts: str, claim: str = _CLAIM) -> str:
+    return reply(findings=[{"claim": claim, "rests_on": list(parts)}])
+
+
+def _create(part: str = "P1") -> str:
+    return reply(
+        action="create",
+        wording=_CLAIM,
+        supports=[
+            {
+                "part": part,
+                "direction": "for",
+                "backs_as_worded": True,
+                "how_sure": "sure",
+                "note": "the user said so",
+            }
+        ],
+        note="a stated preference",
+    )
+
+
+def _failing(message: str = "the route is down") -> FakeModelProvider:
+    def fail(_messages: Sequence[Message]) -> str:
+        raise RuntimeError(message)
+
+    return FakeModelProvider(reply=fail)
+
+
+def _answering(decide: Callable[[dict[str, Any]], str]) -> FakeModelProvider:
+    """A commit route that answers from what it was shown."""
+
+    def answer(messages: Sequence[Message]) -> str:
+        return decide(json.loads(messages[-1].content))
+
+    return FakeModelProvider(reply=answer)
+
+
+def _body(entry: DiagnosticEntry) -> Any:
+    """An entry's body as plain JSON, as its line in the file holds it."""
+    return json.loads(entry.model_dump_json())["body"]
+
+
+def _stages(sink: FakeDiagnosticSink) -> list[tuple[str, str]]:
+    return [(str(_body(one)["stage"]), one.kind.value) for one in sink.recorded]
+
+
+async def test_a_processed_episode_writes_its_calls_findings_outcome_and_end() -> None:
+    """§2:1-§2:6: every entry, in order, as the observer, under the episode's activation."""
+    harness = Harness()
+    await _three(harness)
+    sink = FakeDiagnosticSink()
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")),
+        commit=FakeModelProvider.scripted(_create()),
+        diagnostics=sink,
+    )
+
+    await observer.run()
+
+    assert _stages(sink) == [
+        ("scout", "given"),
+        ("scout", "returned"),
+        ("findings", "step"),
+        ("commit", "given"),
+        ("commit", "returned"),
+        ("outcome", "step"),
+        ("end", "step"),
+    ]
+    assert {one.activation_id for one in sink.recorded} == {"one"}
+    assert {one.source for one in sink.recorded} == {DiagnosticSource.OBSERVER}
+    assert {one.recorded_at for one in sink.recorded} == {AT}
+    for one in sink.recorded:
+        assert _body(one)["episode"] == address("one")
+        assert _body(one)["attempt_started_at"] == AT.isoformat()
+
+
+async def test_a_calls_entries_hold_its_request_and_its_reply() -> None:
+    """§2:1's table: the rendered request naming its step, the finding, and the reply."""
+    harness = Harness()
+    await _three(harness)
+    sink = FakeDiagnosticSink()
+    scout, commit = FakeModelProvider.scripted(_scout("P1")), FakeModelProvider.scripted(_create())
+    observer = harness.observer(scout=scout, commit=commit, diagnostics=sink)
+
+    await observer.run()
+
+    given, returned, _findings, commit_given, commit_returned = sink.recorded[:5]
+    (call,) = scout.calls
+    assert given.kind is DiagnosticKind.GIVEN
+    assert _body(given)["messages"] == [one.model_dump(mode="json") for one in call.messages]
+    assert _body(returned)["reply"] == _scout("P1")
+    assert _body(commit_given)["finding"] == {
+        "id": "f1",
+        "claim": _CLAIM,
+        "rests_on": [{"part": "input", "episode": address("one"), "message": None}],
+        "candidate": None,
+        "relied_on": None,
+    }
+    (decided,) = commit.calls
+    messages = _body(commit_given)["messages"]
+    assert messages == [one.model_dump(mode="json") for one in decided.messages]
+    assert _body(commit_returned) == {
+        "episode": address("one"),
+        "attempt_started_at": AT.isoformat(),
+        "stage": "commit",
+        "finding": "f1",
+        "reply": _create(),
+    }
+
+
+async def test_the_findings_entry_holds_each_claim_its_parts_and_the_dropped_count() -> None:
+    """§2:4: each finding's id, claim, parts and origin, and how many were dropped."""
+    harness = Harness()
+    await _three(harness)
+    sink = FakeDiagnosticSink()
+    scouted = reply(
+        findings=[
+            {"claim": _CLAIM, "rests_on": ["P1"]},
+            {"claim": "Rests on nothing read.", "rests_on": ["P99"]},
+        ]
+    )
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(scouted),
+        commit=FakeModelProvider.scripted(_create()),
+        diagnostics=sink,
+    )
+
+    await observer.run()
+
+    (findings,) = [one for one in sink.recorded if _body(one)["stage"] == "findings"]
+    assert _body(findings)["dropped"] == 1
+    assert [one["claim"] for one in _body(findings)["findings"]] == [_CLAIM]
+    assert _body(findings)["findings"][0]["rests_on"] == [
+        {"part": "input", "episode": address("one"), "message": None}
+    ]
+
+
+async def test_an_outcome_entry_holds_the_outcome_and_the_words_the_commit_decided() -> None:
+    """§2:5: the record's outcome, the created memory's wording, and each support's words."""
+    harness = Harness()
+    await _three(harness)
+    sink = FakeDiagnosticSink()
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")),
+        commit=FakeModelProvider.scripted(_create()),
+        diagnostics=sink,
+    )
+
+    await observer.run()
+
+    (outcome,) = [one for one in sink.recorded if _body(one)["stage"] == "outcome"]
+    (record,) = await harness.plans.observations([address("one")])
+    (finding,) = record.findings
+    assert finding.outcome is not None
+    assert _body(outcome)["finding"] == "f1"
+    assert _body(outcome)["claim"] == _CLAIM
+    assert _body(outcome)["outcome"] == finding.outcome.model_dump(mode="json")
+    decided = _body(outcome)["decided"]
+    assert decided["action"] == "create"
+    assert decided["wording"] == _CLAIM
+    assert decided["note"] == "a stated preference"
+    assert decided["retiring"] is None
+    (support,) = decided["supports"]
+    assert support["part"] == {"part": "input", "episode": address("one"), "message": None}
+    assert (support["direction"], support["note"]) == ("for", "the user said so")
+    (write,) = finding.outcome.writes
+    assert decided["memory"] == write.memory
+    assert decided["asks_if_the_policy_asks"].endswith(_CLAIM)
+
+
+async def test_nothing_kept_says_why_in_the_commits_own_note() -> None:
+    """§2:5: an outcome that wrote nothing gives its reason, and the step's note."""
+    harness = Harness()
+    await _three(harness)
+    sink = FakeDiagnosticSink()
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")),
+        commit=FakeModelProvider.scripted(reply(action="nothing", note="said once, in passing")),
+        diagnostics=sink,
+    )
+
+    await observer.run()
+
+    (outcome,) = [one for one in sink.recorded if _body(one)["stage"] == "outcome"]
+    assert _body(outcome)["outcome"]["unwritten"] == "not_kept"
+    assert _body(outcome)["decided"] == {
+        "action": "nothing",
+        "reason": "not_kept",
+        "note": "said once, in passing",
+    }
+
+
+async def test_a_question_raised_carries_its_wording() -> None:
+    """§2:5: each question's wording, beside the memory it is raised on."""
+    harness = Harness()
+    await harness.hold(
+        episode("past", at=AT - timedelta(days=1), text="Aisle seats."),
+        Memory.model_validate(
+            memory(
+                "m-aisle", "The user likes aisle seats.", said_support(address("past"))
+            ).model_dump()
+        ),
+    )
+    await _three(harness)
+    sink = FakeDiagnosticSink()
+
+    def recheck(shown: dict[str, Any]) -> str:
+        (held,) = [one for one in shown["memories"] if "aisle" in one["claim"]]
+        return reply(
+            action="recheck",
+            memory=held["memory"],
+            asks="Still aisle?",
+            supports=[{"part": "P1", "direction": "against", "how_sure": "likely"}],
+        )
+
+    observer = harness.observer(
+        scout=FakeModelProvider(reply=_scout("P1")), commit=_answering(recheck), diagnostics=sink
+    )
+
+    await observer.run()
+
+    (outcome,) = [
+        one
+        for one in sink.recorded
+        if _body(one)["stage"] == "outcome" and one.activation_id == "one"
+    ]
+    decided = _body(outcome)["decided"]
+    assert decided["action"] == "raise_question"
+    assert (decided["memory"], decided["asks"]) == ("m-aisle", "Still aisle?")
+    assert decided["support"]["direction"] == "against"
+
+
+async def test_an_episode_skipped_by_rule_is_given_its_end_entry_alone() -> None:
+    """§2:6: nothing to read, no call, and one entry saying how the attempt ended."""
+    harness = Harness()
+    await _three(harness, text="")
+    sink = FakeDiagnosticSink()
+
+    await harness.observer(diagnostics=sink).run()
+
+    (end,) = [one for one in sink.recorded if one.activation_id == "one"]
+    assert end.kind is DiagnosticKind.STEP
+    assert _body(end) == {
+        "episode": address("one"),
+        "attempt_started_at": AT.isoformat(),
+        "stage": "end",
+        "end": ObservationAttemptEnd.FINISHED.value,
+        "state": ObservationState.SKIPPED.value,
+        "skipped": "nothing_to_read",
+    }
+
+
+async def test_an_episode_with_no_processing_record_writes_nothing() -> None:
+    """§2:8: no processing record, no activation, and so no entry."""
+    harness = Harness()
+    await harness.hold(
+        EpisodicMemory(
+            id="harness:bare",
+            content="the user said they like tea",
+            occurred_at=AT - timedelta(minutes=9),
+            provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
+        )
+    )
+    await _three(harness)
+    sink = FakeDiagnosticSink()
+    scout = FakeModelProvider.scripted(reply(findings=[]))
+
+    outcome = await harness.observer(scout=scout, diagnostics=sink).run()
+
+    assert (outcome.skipped, outcome.processed) == (1, 1)
+    assert {one.activation_id for one in sink.recorded} == {"one"}
+    assert all(_body(one)["episode"] != "harness:bare" for one in sink.recorded)
+
+
+async def test_a_failed_call_writes_the_failure_and_the_attempts_end() -> None:
+    """§2:2, §2:6: the returned entry is the failure; the end names its class and message."""
+    harness = Harness()
+    await _three(harness)
+    sink = FakeDiagnosticSink()
+
+    await harness.observer(scout=_failing(), diagnostics=sink).run()
+
+    given, returned, end = sink.recorded
+    assert (_body(given)["stage"], given.kind) == ("scout", DiagnosticKind.GIVEN)
+    assert _body(returned)["failure"]["class"] == "ModelError"
+    assert "reply" not in _body(returned)
+    assert _body(end)["end"] == "failed"
+    assert _body(end)["state"] == "waiting"
+    assert _body(end)["failure"]["class"] == "ModelError"
+
+
+async def test_a_reply_that_does_not_parse_ends_failed_naming_its_step() -> None:
+    """§2:6: an unparsed reply is a failure whose message says which step's it was."""
+    harness = Harness()
+    await _three(harness)
+    sink = FakeDiagnosticSink()
+
+    await harness.observer(
+        scout=FakeModelProvider.scripted("not json"), diagnostics=sink, stuck_after=1
+    ).run()
+
+    returned, end = sink.recorded[1:]
+    assert _body(returned)["reply"] == "not json"
+    assert _body(end)["state"] == "stuck"
+    assert _body(end)["failure"] == {
+        "class": "unparsed",
+        "message": "the scout step's reply did not parse",
+    }
+
+
+async def test_a_call_the_budget_holds_writes_no_given_entry_and_ends_held() -> None:
+    """§2:2: a given entry once the budget admits the call; none where it does not."""
+    harness = Harness()
+    await _three(harness)
+    sink = FakeDiagnosticSink()
+
+    outcome = await harness.observer(diagnostics=sink, daily_calls=0).run()
+
+    assert outcome.held
+    (end,) = sink.recorded
+    assert (_body(end)["end"], _body(end)["state"]) == ("held", "waiting")
+
+
+async def test_a_retry_names_its_own_attempts_start() -> None:
+    """§2:3: every body names the instant its attempt started."""
+    harness = Harness()
+    await _three(harness)
+    sink = FakeDiagnosticSink()
+    observer = harness.observer(scout=_failing(), diagnostics=sink)
+    await observer.run()
+    harness.clock.advance(timedelta(minutes=1))
+
+    await observer.run()
+
+    starts = [_body(one)["attempt_started_at"] for one in sink.recorded]
+    later = (AT + timedelta(minutes=1)).isoformat()
+    assert starts == [AT.isoformat()] * 3 + [later] * 3
+
+
+async def _run_with(sink: FakeDiagnosticSink | None) -> tuple[Any, ...]:
+    harness = Harness()
+    await _three(harness)
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")),
+        commit=FakeModelProvider.scripted(_create()),
+        diagnostics=sink,
+    )
+    outcome = await observer.run()
+    records = await harness.plans.observations([address("one")])
+    memories = sorted(
+        (one.content for one in await harness.memory.export() if isinstance(one, Memory)),
+    )
+    return outcome, [one.model_copy(update={"revision": 0}) for one in records], memories
+
+
+async def test_a_failing_record_changes_no_attempt_and_logs_no_content() -> None:
+    """§2:11, §4:2: the attempt runs as it would with the record off; one line per entry."""
+    failing = FakeDiagnosticSink()
+    failing.fail_write()
+
+    with structlog.testing.capture_logs() as captured:
+        written = await _run_with(failing)
+
+    assert written == await _run_with(None)
+    dropped = [one for one in captured if one["event"] == DIAGNOSTIC_NOT_WRITTEN]
+    assert len(dropped) == 7
+    assert {(one["activation_id"], one["source"]) for one in dropped} == {("one", "observer")}
+    assert _CLAIM not in repr(captured)
+    assert _PREFERENCE not in repr(captured)
+
+
+class _Raising:
+    """A sink that breaks its contract by raising, or is cancelled mid-write."""
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    async def write(self, entry: DiagnosticEntry) -> None:
+        raise self.error
+
+
+def _target(activation_id: str = "act", episode_id: str = "activation:act") -> Diagnosed:
+    return Diagnosed(activation_id=activation_id, episode=episode_id, started_at=AT)
+
+
+_ASKED = (MessageType(role=Role.USER, content="{}"),)
+
+
+async def test_one_call_over_several_episodes_writes_under_each_activation() -> None:
+    """§2:9: a call reading several due episodes is written under each of their activations."""
+    sink = FakeDiagnosticSink()
+    entries = ObserverEntries(sink, now=lambda: AT)
+    targets = (_target("a", "activation:a"), _target("b", "activation:b"))
+
+    await entries.given(targets, ObserverStep.SCOUT, _ASKED)
+    await entries.returned(targets, ObserverStep.SCOUT, reply="{}")
+
+    assert [(one.activation_id, one.kind.value) for one in sink.recorded] == [
+        ("a", "given"),
+        ("b", "given"),
+        ("a", "returned"),
+        ("b", "returned"),
+    ]
+    assert [_body(one)["episode"] for one in sink.recorded] == [
+        "activation:a",
+        "activation:b",
+    ] * 2
+
+
+async def test_with_the_record_off_nothing_is_built() -> None:
+    """§2:7: no sink, no entry, and no body built."""
+    entries = ObserverEntries(None, now=lambda: pytest.fail("no entry is stamped"))
+
+    await entries.given((_target(),), ObserverStep.SCOUT, _ASKED)
+    await entries.ended(_target(), ObservationAttemptEnd.FINISHED, ObservationState.PROCESSED)
+
+
+async def test_a_sink_that_raises_costs_only_the_entry() -> None:
+    """§2:11: logged by activation, source and class, and the caller goes on."""
+    entries = ObserverEntries(_Raising(RuntimeError("the user's words")), now=lambda: AT)
+
+    with structlog.testing.capture_logs() as captured:
+        await entries.ended(_target(), ObservationAttemptEnd.FINISHED, ObservationState.PROCESSED)
+
+    (line,) = captured
+    assert (line["event"], line["activation_id"], line["source"], line["error_class"]) == (
+        DIAGNOSTIC_NOT_WRITTEN,
+        "act",
+        "observer",
+        "RuntimeError",
+    )
+    assert "the user's words" not in repr(captured)
+
+
+async def test_a_cancellation_reaching_a_write_is_re_raised() -> None:
+    """§2:11, ADR-0314 §2:5: a cancellation is not a failure to write."""
+    entries = ObserverEntries(_Raising(asyncio.CancelledError()), now=lambda: AT)
+
+    with pytest.raises(asyncio.CancelledError):
+        await entries.ended(_target(), ObservationAttemptEnd.FINISHED, ObservationState.PROCESSED)

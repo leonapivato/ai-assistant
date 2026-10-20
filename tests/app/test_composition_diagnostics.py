@@ -86,6 +86,8 @@ async def test_off_the_sweep_alone_holds_the_record_and_nothing_is_created(
         assert built[0].directory == tmp_path / "diagnostics"
         assert built[0]._file_bytes == DIAGNOSTIC_FILE_BYTES
         assert _holders_of(engine, built[0]) == ["engine._diagnostic_retention"]
+        assert engine._observer is not None
+        assert engine._observer._entries._sink is None  # ADR-0333 §2:7
         assert engine._diagnostic_window == timedelta(days=30)
         assert not (tmp_path / "diagnostics").exists()
     finally:
@@ -113,6 +115,9 @@ async def test_on_each_emitter_holds_the_one_record_as_its_sink(
         assert phases._authorizing._diagnostics is record
         assert phases._digesting._diagnostics is record
         assert engine._diagnostic_retention is record
+        # ADR-0333 §2:7: the observer, a background stage, holds the same sink.
+        assert engine._observer is not None
+        assert engine._observer._entries._sink is record
     finally:
         await engine.aclose()
 
@@ -192,3 +197,14 @@ async def test_a_hub_with_a_sweep_starts_with_the_record_on(tmp_path: Path) -> N
         Settings(embedder=EmbedderKind.HASHING, diagnostic_record=True), data_dir=tmp_path
     )
     await engine.aclose()
+
+
+def test_an_observer_file_alone_still_refuses_a_start_without_a_sweep(tmp_path: Path) -> None:
+    """ADR-0333 §3:2: the observer's file is counted by the startup refusal like any other."""
+    directory = tmp_path / "diagnostics"
+    directory.mkdir(mode=0o700)
+    (directory / "3f2b8c4e-1d5a-4e7b-9c0d-2a6f8e1b7c35.observer.jsonl").write_text("{}\n")
+    settings = Settings(embedder=EmbedderKind.HASHING, retention_purge_interval=None)
+
+    with pytest.raises(ConfigurationError, match=str(directory)):
+        build_engine(settings, data_dir=tmp_path)
