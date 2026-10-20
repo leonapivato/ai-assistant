@@ -799,7 +799,7 @@ def test_every_row_of_the_listing_says_which_conversation_it_is() -> None:
     stylesheet = _asset("app.css")
     rendering = _functions(script)["renderConversation"]
 
-    assert 'line(item, chatTime(summary.started_at), "conversation-name");' in rendering
+    assert 'line(item, listedNames.get(summary.id), "conversation-name");' in rendering
     assert "item.dataset.conversation = summary.id;" in rendering
     assert "summary.id}" not in rendering
     # First, so the name is above the row rather than between its two facts.
@@ -858,7 +858,7 @@ def test_a_forget_states_what_the_hub_answered_rather_than_what_was_asked() -> N
     assert "no longer recalls them anywhere else" in stated
     assert "only deleting removes them." in stated
     confirming = functions["forgetConversation"]
-    assert "Forget the conversation from ${chatTime(held.started_at)}?" in confirming
+    assert "Forget the conversation from ${listedName(held)}?" in confirming
     assert "still reads it while you keep talking there" in confirming
 
 
@@ -3600,14 +3600,13 @@ def test_an_instant_is_shown_in_the_browsers_zone_through_one_helper() -> None:
     script = _code("app.js")
     functions = _functions(script)
 
-    helpers = ("instant", "localDay")
-    assert script.count("new Date(") == sum(functions[name].count("new Date(") for name in helpers)
+    assert script.count("new Date(") == functions["instant"].count("new Date(") == 1
     assert "new Date(iso)" in functions["instant"]
     assert "INSTANT_SHAPE.test(iso)" in functions["instant"]
     assert "(Z|[+-]\\d{2}:\\d{2})$/" in script  # an instant without an offset is not one
     for line in script.splitlines():
         if "Intl." in line:
-            assert line.startswith("const LOCAL_"), line
+            assert line.startswith(("const LOCAL_", "const CHAT_TIME")), line
     assert "toLocale" not in script
     assert "getTimezoneOffset" not in script
     # The instants the panels print, each through the helper rather than as written.

@@ -529,12 +529,25 @@ const LOCAL_DATE_TIME = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
   timeStyle: "short",
 });
-const LOCAL_TIME = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
-const LOCAL_DATE = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
-const LOCAL_DAY = new Intl.DateTimeFormat(undefined, {
+// A conversation's name and a message's time: always the whole date, so that a name
+// on screen never goes stale as the day turns, and the minute — or the second, where
+// two conversations would otherwise share a name (`conversationNames`).
+const CHAT_TIME = new Intl.DateTimeFormat(undefined, {
   weekday: "short",
-  day: "numeric",
+  year: "numeric",
   month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+const CHAT_TIME_SECONDS = new Intl.DateTimeFormat(undefined, {
+  weekday: "short",
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  second: "2-digit",
 });
 
 function instant(iso) {
@@ -548,21 +561,6 @@ function instant(iso) {
 function localTime(iso) {
   const at = instant(iso);
   return at === null ? iso : LOCAL_DATE_TIME.format(at);
-}
-
-// A day as a person names it: today, yesterday, a weekday and date this year, or the
-// date with its year.
-function localDay(at) {
-  const now = new Date();
-  const day = (when) => `${when.getFullYear()}-${when.getMonth()}-${when.getDate()}`;
-  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-  if (day(at) === day(now)) {
-    return "Today";
-  }
-  if (day(at) === day(yesterday)) {
-    return "Yesterday";
-  }
-  return at.getFullYear() === now.getFullYear() ? LOCAL_DAY.format(at) : LOCAL_DATE.format(at);
 }
 
 // The headline of each of the hub's three device refusals on the hosted door (below).
@@ -1773,6 +1771,7 @@ async function listConversations() {
     if (body.conversations.length === 0) {
       line(list, "No conversations yet.", "hint");
     }
+    listedNames = conversationNames(body.conversations);
     body.conversations.forEach((one) => renderConversation(list, one));
     show("conversations", true);
   } catch (_) {
@@ -1787,6 +1786,15 @@ async function listConversations() {
     }
   }
   return mine;
+}
+
+// What the Conversations panel's rows call each conversation (`conversationNames`), so
+// that the forget ceremony and its outcome name a conversation as its row did.
+let listedNames = new Map();
+
+// The name a row of the panel gave a conversation, or its start where none did.
+function listedName(held) {
+  return listedNames.get(held.id) || chatTime(held.started_at);
 }
 
 function renderConversation(list, summary) {
@@ -1805,7 +1813,7 @@ function renderConversation(list, summary) {
   // eye is looking for and a phone puts it behind two long instants otherwise. The name
   // is the one the chat gives it — when it started (`chatTime`) — rather than the hub's
   // id, which a person has never been shown anywhere else (#3209's follow-on).
-  line(item, chatTime(summary.started_at), "conversation-name");
+  line(item, listedNames.get(summary.id), "conversation-name");
   const when = localTime(summary.last_turn_at || summary.last_active_at);
   const active = localTime(summary.last_active_at);
   // Both instants cross and they are different facts (ADR-0074 §2): activity is
@@ -1863,7 +1871,7 @@ async function forgetConversation(id) {
     // conversation is still read while the owner talks there, and that only
     // deleting removes it.
     const asked = window.confirm(
-      `Forget the conversation from ${chatTime(held.started_at)}? It holds ` +
+      `Forget the conversation from ${listedName(held)}? It holds ` +
         `${held.recorded_turns} recorded ` +
         `turn(s), from ${localTime(held.started_at)} to ` +
         `${held.last_turn_at ? localTime(held.last_turn_at) : "no turn yet"}. ` +
@@ -1916,7 +1924,7 @@ function sayForgotten(text) {
 // **The count is the digest's, read before the forget**, which is the only moment it
 // was readable — after the forget there is nothing left to count.
 function statedForget(held, destroyed) {
-  const named = `the conversation from ${chatTime(held.started_at)}`;
+  const named = `the conversation from ${listedName(held)}`;
   if (!destroyed) {
     const nothing = "held nothing in the assistant's memory, so nothing was forgotten.";
     return `${capitalised(named)} ${nothing}`;
@@ -2776,19 +2784,48 @@ async function listChat(more) {
   }
 }
 
-// An instant in the chat, as a person reads one: the day — today, yesterday, or the
-// date — and the time, in this browser's own language and zone (`localTime`).
-function chatTime(iso) {
+// An instant in the chat, as a person reads one: the whole date and the time, in this
+// browser's own language and zone (`localTime`), to the second where asked.
+function chatTime(iso, seconds = false) {
   const at = instant(iso);
-  return at === null ? iso : `${localDay(at)}, ${LOCAL_TIME.format(at)}`;
+  return at === null ? iso : (seconds ? CHAT_TIME_SECONDS : CHAT_TIME).format(at);
 }
 
-// What a conversation is called (#3209's follow-on): when it started, as `chatTime`
-// says it, since the listing carries nothing a person wrote. The hub's id names it
-// nowhere on screen; a conversation not yet in the listing is "this conversation".
+// What each conversation of a listing is called (#3209's follow-on): when it started,
+// since the listing carries nothing a person wrote. Where two share a minute they are
+// named to the second, and where two share a second too they are numbered in the order
+// of their ids — so no two rows on one screen, and no confirmation taken from one, name
+// the same conversation. The hub's id is on no screen.
+function conversationNames(summaries) {
+  const grouped = (key) => {
+    const groups = new Map();
+    summaries.forEach((one) => {
+      const name = key(one);
+      groups.set(name, (groups.get(name) || []).concat([one.id]));
+    });
+    return groups;
+  };
+  const byMinute = grouped((one) => chatTime(one.started_at));
+  const bySecond = grouped((one) => chatTime(one.started_at, true));
+  const names = new Map();
+  summaries.forEach((one) => {
+    const minute = chatTime(one.started_at);
+    if (byMinute.get(minute).length === 1) {
+      names.set(one.id, minute);
+      return;
+    }
+    const second = chatTime(one.started_at, true);
+    const same = bySecond.get(second).slice().sort();
+    names.set(one.id, same.length === 1 ? second : `${second} (${same.indexOf(one.id) + 1})`);
+  });
+  return names;
+}
+
+// What the chat calls one conversation; one not yet in its listing is "this
+// conversation".
 function chatTitle(id) {
-  const summary = chat.listing.find((one) => one.id === id);
-  return summary === undefined ? "This conversation" : chatTime(summary.started_at);
+  const name = conversationNames(chat.listing).get(id);
+  return name === undefined ? "This conversation" : name;
 }
 
 // A sentence's first word, capitalised.
@@ -2798,10 +2835,8 @@ function capitalised(text) {
 
 // The same, inside a sentence.
 function chatName(id) {
-  const summary = chat.listing.find((one) => one.id === id);
-  return summary === undefined
-    ? "this conversation"
-    : `the conversation from ${chatTime(summary.started_at)}`;
+  const name = conversationNames(chat.listing).get(id);
+  return name === undefined ? "this conversation" : `the conversation from ${name}`;
 }
 
 function renderChatListing() {
@@ -2820,6 +2855,7 @@ function renderChatListing() {
   }
   // Each row is one control that opens its conversation (#3098). The open one is marked
   // as current and opening it again reads nothing: on a phone it only comes back to it.
+  const names = conversationNames(chat.listing);
   chat.listing.forEach((summary) => {
     const item = document.createElement("li");
     item.className = "chat-conversation-row";
@@ -2830,7 +2866,7 @@ function renderChatListing() {
     open.dataset.conversation = summary.id;
     const name = document.createElement("span");
     name.className = "chat-name";
-    name.textContent = chatTime(summary.started_at);
+    name.textContent = names.get(summary.id);
     open.appendChild(name);
     const when = `Last active ${chatTime(summary.last_active_at)}`;
     const said = document.createElement("span");
@@ -5668,6 +5704,19 @@ function offerConnectionActs(item, account) {
 // box beside it would show it too late to be that answer.
 function offerConnect(holder, account) {
   clearNode(holder);
+  if (HOSTED) {
+    // ADR-0327 §12:1's reason, which is not the remote listener's: this page is secure,
+    // and a credential typed here would still leave this device for the machine the
+    // assistant runs on.
+    line(
+      holder,
+      "Connecting an account is available on the machine your assistant runs on only, " +
+        "because a credential typed here would leave this device for that machine. " +
+        "Disconnecting and reading this list work here.",
+      "hint"
+    );
+    return;
+  }
   if (!ON_LOOPBACK) {
     line(
       holder,
@@ -6229,14 +6278,16 @@ if (HOSTED) {
   // but the person never meets its end — they meet their sign-in's.
   el("session-terms").hidden = true;
   el("hosted-terms").hidden = false;
-  // The panels a person on this door can neither use nor act on, out of its menu
-  // (#3209's follow-on). Grant history is a ledger of decisions for the owner auditing
-  // them, which "What I may read now" already answers in the form a person acts on. The
-  // two connection panels answer for accounts connected at the gateway's own machine:
-  // entering one is refused here (ADR-0327 §12:1) and the operator never acts as the
-  // person (§13), so on this door the list is empty and its log has nothing of theirs.
-  // The gateway still admits each read (§12:2); only the page stops offering them.
-  for (const control of ["history-button", "connections-button", "connection-log-button"]) {
+  // The panels a person on this door cannot act on, out of its menu (#3209's
+  // follow-on). Grant history is a ledger of decisions for auditing them, which "What I
+  // may read now" answers in the form a person acts on; the log of what was done to
+  // connections is the same kind of record, and offers no act at all. The gateway still
+  // admits each read (ADR-0327 §12:2); only the page stops offering them.
+  //
+  // **"Accounts I am connected to" stays**: an owner who connected an account at the
+  // gateway's own machine may come in through this door (§13:2), and its Disconnect is
+  // theirs to press here (§12:2).
+  for (const control of ["history-button", "connection-log-button"]) {
     el(control).hidden = true;
   }
 }

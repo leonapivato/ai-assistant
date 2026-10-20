@@ -652,6 +652,7 @@ async def test_a_conversation_is_named_by_its_start_in_the_browsers_own_zone(
         for said in (row, door.page.locator("#chat-heading"), door.page.locator(".chat-meta")):
             text = await said.inner_text()
             assert "Jan 1" in text, text
+            assert "2026" in text, text  # the whole date, so a name never goes stale
             assert "9:00" in text, text
             for raw in (conversation, "UTC", "12:00", "2026-01-01"):
                 assert raw not in text, (raw, text)
@@ -660,16 +661,17 @@ async def test_a_conversation_is_named_by_its_start_in_the_browsers_own_zone(
 async def test_the_door_offers_no_panel_its_person_cannot_use(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """Grant history and the two connection panels are the operator's: the person on
-    the door can enter no account (ADR-0327 §12:1), so the list is empty and its log
-    holds nothing of theirs. The menu keeps everything that is."""
+    """Grant history and the log of what was done to connections are records that offer
+    no act. The menu keeps everything that does — "Accounts I am connected to" among
+    them, whose Disconnect is the owner's to press through the door (ADR-0327 §12:2)."""
     async with through_the_door(gateway_browser, tmp_path) as door:
         await expect(door.page.locator("#console")).to_be_visible()
         await door.page.click("#menu > summary")
 
-        for gone in ("#history-button", "#connections-button", "#connection-log-button"):
+        for gone in ("#history-button", "#connection-log-button"):
             await expect(door.page.locator(gone)).to_be_hidden()
         for kept in (
+            "#connections-button",
             "#conversations-button",
             "#beliefs-button",
             "#sources-button",
@@ -678,6 +680,50 @@ async def test_the_door_offers_no_panel_its_person_cannot_use(
             "#tuning-button",
         ):
             await expect(door.page.locator(kept)).to_be_visible()
+
+
+async def test_the_connections_panel_says_why_connecting_is_not_offered_through_the_door(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """§12:1's reason on this door is that a credential would leave the person's device
+    for the box — not the remote listener's insecure page, which this one is not."""
+    async with through_the_door(gateway_browser, tmp_path) as door:
+        await expect(door.page.locator("#console")).to_be_visible()
+        await press(door.page, "#connections-button")
+
+        form = door.page.locator("#connect-form")
+        await expect(form).to_contain_text("would leave this device for that machine")
+        await expect(form).not_to_contain_text("no lock in the address bar")
+
+
+async def test_two_conversations_started_together_are_never_named_alike(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Names are when a conversation started, and the fake starts every one at the same
+    instant: each still gets a name of its own, in the chat and in the Conversations
+    panel, and the forget ceremony names the conversation its row named."""
+    async with through_the_door(gateway_browser, tmp_path, open_page=False) as door:
+        await door.engine.set_my_devices(
+            [ChatDevice(device_id=HOSTED_DEVICE, access=DeviceAccess.READ_WRITE)]
+        )
+        await door.engine.start_conversation()
+        await door.engine.start_conversation()
+        await door.page.goto(f"{DOOR_ORIGIN}/")
+        chat_names = door.page.locator("#chat-conversations .chat-name")
+        await expect(chat_names).to_have_count(2)
+        assert len(set(await chat_names.all_inner_texts())) == 2
+
+        await press(door.page, "#conversations-button")
+        rows = door.page.locator("#conversation-list .conversation-row")
+        await expect(rows).to_have_count(2)
+        named = await rows.locator(".conversation-name").all_inner_texts()
+        assert len(set(named)) == 2
+        async with door.page.expect_event("dialog") as asked:
+            await rows.nth(1).get_by_role("button", name="Forget").click()
+        dialog = await asked.value
+        message = dialog.message
+        await dialog.dismiss()
+        assert f"Forget the conversation from {named[1]}?" in message
 
 
 async def test_the_loopback_door_keeps_the_owners_press_and_the_whole_menu(
