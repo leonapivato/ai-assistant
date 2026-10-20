@@ -89,17 +89,26 @@ def diagnostic_entry(
     )
 
 
-def plain_file_name(activation_id: str) -> bool:
+def plain_file_name(activation_id: str, source: DiagnosticSource | None = None) -> bool:
     """Whether ``activation_id`` names a plain file, as the durable store decides it (§6:1).
 
-    Duplicated from the store, because ``ai_assistant.testing`` may not import
+    An observer entry's file is the activation's second one, ``<id>.observer.jsonl``
+    (ADR-0333 §3:1), and an id ending ``.observer`` names no file, so the two names never
+    meet. Duplicated from the store, because ``ai_assistant.testing`` may not import
     ``evaluation``; the shared suite holds the two to one answer.
+
+    Args:
+        activation_id: The id.
+        source: The source writing, where it decides the file; ``None`` asks about the
+            activation's own file.
     """
     separators = {os.sep, "\0"} | ({os.altsep} if os.altsep else set())
+    suffix = ".observer.jsonl" if source is DiagnosticSource.OBSERVER else ".jsonl"
     return (
         activation_id not in {"", ".", ".."}
         and not any(one in activation_id for one in separators)
-        and len(f"{activation_id}.jsonl".encode("utf-8", errors="replace")) <= _NAME_BYTES
+        and not activation_id.endswith(".observer")
+        and len(f"{activation_id}{suffix}".encode("utf-8", errors="replace")) <= _NAME_BYTES
     )
 
 
@@ -168,7 +177,7 @@ class FakeDiagnosticSink:
         except ValidationError as exc:
             _dropped(None, None, exc)
             return
-        if not plain_file_name(snapshot.activation_id):
+        if not plain_file_name(snapshot.activation_id, snapshot.source):
             _dropped(None, snapshot.source.value, DiagnosticRecordError("not a plain name"))
             return
         async with self._resource.held():

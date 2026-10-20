@@ -64,6 +64,12 @@ which a support's origin could be set (ADR-0328 §4:2), so it is skipped too.
 **It logs stage and code-owned reasons only** (§15:7): counts, states and the names of
 the steps, never a fact, a wording, a claim or an identifier that may carry personal
 data.
+
+**What it shows the owner goes to the diagnostic record** (ADR-0333 §2), where the record
+is on: each call's request and reply, the scout's findings, each finding's outcome with
+the words its commit decided, and how each attempt ended, under the leaving episode's
+activation (``entries``). A failure to write one changes nothing here (§2:11), and
+nothing here reads one back (§4:1).
 """
 
 from __future__ import annotations
@@ -77,6 +83,7 @@ from uuid import uuid4
 import structlog
 
 from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.diagnostics import failure_body
 from ai_assistant.core.errors import (
     MemoryStoreError,
     ModelError,
@@ -104,6 +111,7 @@ from ai_assistant.orchestration.observer.commit import (
     commit_messages,
     commit_view,
 )
+from ai_assistant.orchestration.observer.entries import Diagnosed, ObserverEntries
 from ai_assistant.orchestration.observer.reading import EpisodeReader, episode_text
 from ai_assistant.orchestration.observer.scout import (
     ScoutReply,
@@ -117,8 +125,15 @@ from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from ai_assistant.core.protocols import MemoryStore, ModelProvider, PlanStore, StoryStore
+    from ai_assistant.core.protocols import (
+        DiagnosticSink,
+        MemoryStore,
+        ModelProvider,
+        PlanStore,
+        StoryStore,
+    )
     from ai_assistant.core.types import Message, ObservationFinding
+    from ai_assistant.orchestration.observer.commit import Checked
     from ai_assistant.orchestration.observer.reading import Reading
     from ai_assistant.orchestration.understanding import EpisodeSelector
     from ai_assistant.orchestration.writes import MemoryWriteStage
@@ -220,11 +235,25 @@ class _Unparsed(Exception):  # noqa: N818 — a control-flow signal with a code-
 
 @dataclass(slots=True)
 class _Attempt:
-    """One attempt's record as it is built, and the revision it was last written at."""
+    """One attempt's record as it is built, and the revision it was last written at.
+
+    ``diagnosed`` is where its diagnostic entries go (ADR-0333 §2:8): set once the episode
+    is read, and ``None`` before then or where the episode has no processing record.
+    """
 
     record: ObservationRecord
     started_at: datetime
     calls: list[ObserverCall] = field(default_factory=list)
+    diagnosed: Diagnosed | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Decided:
+    """A commit's outcome, and the decision and note it came from where a call made one."""
+
+    outcome: FindingOutcome
+    checked: Checked | None = None
+    note: str | None = None
 
 
 class Observer:
@@ -249,6 +278,7 @@ class Observer:
         limits: ObserverLimits,
         now: Callable[[], datetime],
         mint: Callable[[], str] | None = None,
+        diagnostics: DiagnosticSink | None = None,
     ) -> None:
         """Wire the observer.
 
@@ -270,6 +300,8 @@ class Observer:
             now: The clock every record, call and write is stamped from.
             mint: Mints the fresh part of a new memory's and question's id; a random
                 one where ``None``.
+            diagnostics: The diagnostic record's write seam (ADR-0333 §2:7), or ``None``
+                where ``diagnostic_record`` is false and no entry is built.
         """
         self._scout = scout
         self._commit = commit
@@ -279,6 +311,7 @@ class Observer:
         self._limits = limits
         self._now = checked_clock(now, owner="Observer")
         self._mint = mint or _random_id
+        self._entries = ObserverEntries(diagnostics, now=self._now)
         self._reader = EpisodeReader(
             memory=memory,
             plans=plans,
@@ -411,12 +444,22 @@ class Observer:
                 ),
             )
             await self._record(skipped, expected_revision=0 if held is None else held.revision)
+            await self._entries.ended(
+                Diagnosed.of(episode, started),
+                ObservationAttemptEnd.FINISHED,
+                ObservationState.SKIPPED,
+                skipped=True,
+            )
             return ObservationState.SKIPPED
         attempt = await self._open(episode_id, held, started)
+        attempt.diagnosed = Diagnosed.of(episode, started)
         try:
             await self._processed(episode, attempt, window)
         except _Held:
             await self._close(attempt, ObservationAttemptEnd.HELD, ObservationState.WAITING)
+            await self._entries.ended(
+                attempt.diagnosed, ObservationAttemptEnd.HELD, ObservationState.WAITING
+            )
             raise
         except (
             ModelError,
@@ -429,6 +472,9 @@ class Observer:
             return await self._failed(attempt, exc)
         await self._close(attempt, ObservationAttemptEnd.FINISHED, ObservationState.PROCESSED)
         self._forget(episode_id)
+        await self._entries.ended(
+            attempt.diagnosed, ObservationAttemptEnd.FINISHED, ObservationState.PROCESSED
+        )
         return ObservationState.PROCESSED
 
     def _forget(self, episode_id: str) -> None:
@@ -504,9 +550,9 @@ class Observer:
         findings, dropped = proposed_findings(proposal, reading, numbered_from=_next_number(kept))
         supply = Placement.narrowest_of(reading.supplied)
         _log.info("observer_scout", stage="scout", findings=len(findings), dropped=dropped)
-        await self._save(
-            attempt, findings=(*kept, *(_updated(one, supply=supply) for one in findings))
-        )
+        proposed = tuple(_updated(one, supply=supply) for one in findings)
+        await self._save(attempt, findings=(*kept, *proposed))
+        await self._entries.findings(attempt.diagnosed, proposed, dropped)
 
     async def _committed(
         self, finding_id: str, reading: Reading, attempt: _Attempt
@@ -521,7 +567,8 @@ class Observer:
         earlier = await self._recovered(finding.written)
         if earlier != finding.written:
             _set(attempt, _updated(finding, written=earlier))
-        outcome = await self._decision(finding_id, reading, attempt, earlier)
+        decided = await self._decision(finding_id, reading, attempt, earlier)
+        outcome = decided.outcome
         if earlier:
             outcome = _with_writes(outcome, earlier)
         _log.info(
@@ -530,6 +577,13 @@ class Observer:
             ruling=None if outcome.ruling is None else outcome.ruling.value,
             unwritten=None if outcome.unwritten is None else outcome.unwritten.value,
             writes=len(outcome.writes),
+        )
+        await self._entries.outcome(
+            attempt.diagnosed,
+            _finding(attempt, finding_id),
+            outcome,
+            decided=decided.checked,
+            note=decided.note,
         )
         return _updated(_finding(attempt, finding_id), written=(), outcome=outcome)
 
@@ -563,7 +617,7 @@ class Observer:
         reading: Reading,
         attempt: _Attempt,
         earlier: tuple[ObservationWrite, ...],
-    ) -> FindingOutcome:
+    ) -> _Decided:
         """This commit's call, checks and writes: what it wrote, or why nothing was.
 
         Every write that lands is put in the finding's ``written`` beside ``earlier``
@@ -578,10 +632,16 @@ class Observer:
             similar=self._limits.similar,
         )
         if view is None:
-            return _check_failed(self._now())
+            return _Decided(outcome=_check_failed(self._now()))
         _narrow(attempt, view.supplied)
         supply = _finding(attempt, finding_id).supply
-        reply = await self._call(attempt, ObserverStep.COMMIT, self._commit, commit_messages(view))
+        reply = await self._call(
+            attempt,
+            ObserverStep.COMMIT,
+            self._commit,
+            commit_messages(view),
+            finding=_finding(attempt, finding_id),
+        )
         decision = parsed(reply, CommitReply)
         if decision is None:
             raise _Unparsed(ObserverStep.COMMIT)
@@ -602,9 +662,10 @@ class Observer:
             self._unsaved[key] = updated
             await self._save(attempt, findings=attempt.record.findings)
 
-        return await self._writer.write(
+        outcome = await self._writer.write(
             verdict, shown=[one.memory for one in view.similar], landed=landed
         )
+        return _Decided(outcome=outcome, checked=verdict, note=decision.note)
 
     async def _call(
         self,
@@ -612,8 +673,15 @@ class Observer:
         step: ObserverStep,
         route: ModelProvider,
         messages: list[Message],
+        *,
+        finding: ObservationFinding | None = None,
     ) -> str:
-        """One model call, inside the daily budget (§16:9), recorded on the attempt."""
+        """One model call, inside the daily budget (§16:9), recorded on the attempt.
+
+        Its given entry is written once the budget admits it and before it is made, and
+        its returned entry once it returns or fails (ADR-0333 §2:2); a failure is
+        re-raised unchanged.
+        """
         at = self._now()
         made = await self._plans.observer_calls_since(at - _A_DAY)
         if made >= self._limits.daily_calls:
@@ -622,7 +690,15 @@ class Observer:
         # Recorded before the call is made, so a call cancelled or lost with the process
         # mid-flight still counts against the budget (§16:9).
         await self._save(attempt, findings=attempt.record.findings)
-        reply = await route.complete(messages)
+        targets = () if attempt.diagnosed is None else (attempt.diagnosed,)
+        await self._entries.given(targets, step, messages, finding=finding)
+        named = None if finding is None else finding.id
+        try:
+            reply = await route.complete(messages)
+        except Exception as exc:
+            await self._entries.returned(targets, step, failure=exc, finding=named)
+            raise
+        await self._entries.returned(targets, step, reply=reply.content, finding=named)
         return reply.content
 
     async def _save(self, attempt: _Attempt, *, findings: tuple[ObservationFinding, ...]) -> None:
@@ -680,6 +756,9 @@ class Observer:
                 {**record.model_dump(), "next_attempt_at": self._now() + backoff}
             )
         await self._carried(attempt, record)
+        await self._entries.ended(
+            attempt.diagnosed, ObservationAttemptEnd.FAILED, state, failure=_failure_of(exc)
+        )
         _log.info(
             "observer_attempt",
             stage=exc.step.value if isinstance(exc, _Unparsed) else "attempt",
@@ -733,6 +812,17 @@ def _narrow(attempt: _Attempt, supplied: Sequence[Placement]) -> None:
     for one in attempt.record.findings:
         if one.outcome is None and one.supply is not None:
             _set(attempt, _updated(one, supply=Placement.narrowest_of([one.supply, *supplied])))
+
+
+def _failure_of(exc: Exception) -> dict[str, object]:
+    """A failed attempt's class and message, as its end entry gives them (ADR-0333 §2:6).
+
+    The record is Tier 1, so the message is kept; an unparsed reply, which carries no
+    message of its own, says which step's reply did not parse.
+    """
+    if isinstance(exc, _Unparsed):
+        return {"class": "unparsed", "message": f"the {exc.step.value} step's reply did not parse"}
+    return failure_body(exc)
 
 
 def _reason(exc: Exception) -> str:

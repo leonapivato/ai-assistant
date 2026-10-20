@@ -27,7 +27,7 @@ from ai_assistant.core.errors import DiagnosticRecordError
 from ai_assistant.core.types import DiagnosticEntry, DiagnosticKind, DiagnosticSource
 from ai_assistant.evaluation import FileDiagnosticRecord
 from ai_assistant.evaluation import diagnostic_record as store_module
-from ai_assistant.evaluation.diagnostic_record import MIN_FILE_BYTES, SUFFIX
+from ai_assistant.evaluation.diagnostic_record import MIN_FILE_BYTES, OBSERVER_SUFFIX, SUFFIX
 from ai_assistant.testing import diagnostic_entry
 from ai_assistant.testing.cancellation import (
     ResourceLog,
@@ -462,3 +462,127 @@ async def test_a_directory_that_cannot_be_narrowed_leaks_no_descriptor(
         await record.write(diagnostic_entry())
 
     assert _open_descriptors() == before
+
+
+# --- ADR-0333 §3: the observer's file beside the activation's ---------------------
+
+
+def _observed(activation_id: str = DEFAULT_DIAGNOSED_ACTIVATION, **body: object) -> DiagnosticEntry:
+    """An entry the observer writes about ``activation_id``."""
+    return diagnostic_entry(
+        activation_id,
+        source=DiagnosticSource.OBSERVER,
+        kind=DiagnosticKind.STEP,
+        body={"stage": "end", **body},
+    )
+
+
+async def test_an_observer_entry_goes_to_its_own_file_and_never_the_activations(
+    tmp_path: Path,
+) -> None:
+    """§3:1: ``<id>.observer.jsonl``; nothing the observer writes reaches ``<id>.jsonl``."""
+    directory = tmp_path / "diagnostics"
+    record = FileDiagnosticRecord(directory=directory, file_bytes=_BOUND)
+    own = diagnostic_entry(body={"n": 1})
+
+    await record.write(own)
+    await record.write(_observed(n=2))
+    await record.write(diagnostic_entry(kind=DiagnosticKind.RETURNED, body={"n": 3}))
+
+    assert OBSERVER_SUFFIX == ".observer.jsonl"
+    assert sorted(one.name for one in directory.iterdir()) == [
+        f"{DEFAULT_DIAGNOSED_ACTIVATION}.jsonl",
+        f"{DEFAULT_DIAGNOSED_ACTIVATION}.observer.jsonl",
+    ]
+    assert [one.body["n"] for one in _entries(directory, DEFAULT_DIAGNOSED_ACTIVATION)] == [1, 3]
+    observed = _lines(directory / f"{DEFAULT_DIAGNOSED_ACTIVATION}{OBSERVER_SUFFIX}")
+    assert [(one["source"], one["body"]["n"]) for one in observed] == [("observer", 2)]
+    assert [list(one) for one in observed] == [
+        ["activation_id", "source", "kind", "recorded_at", "body"]
+    ]
+
+
+async def test_the_observer_file_is_the_owners_alone(tmp_path: Path) -> None:
+    """§3:2, ADR-0314 §2:3: ``0600`` whatever the umask, as the activation's own file."""
+    previous = os.umask(0)
+    try:
+        record = FileDiagnosticRecord(directory=tmp_path / "diagnostics", file_bytes=_BOUND)
+        await record.write(_observed())
+    finally:
+        os.umask(previous)
+
+    path = tmp_path / "diagnostics" / f"{DEFAULT_DIAGNOSED_ACTIVATION}{OBSERVER_SUFFIX}"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
+async def test_each_of_an_activations_two_files_has_its_own_bound_and_marker(
+    tmp_path: Path,
+) -> None:
+    """§3:2: the observer's file stops at its bound alone, and the activation's goes on."""
+    directory = tmp_path / "diagnostics"
+    record = FileDiagnosticRecord(directory=directory, file_bytes=MIN_FILE_BYTES)
+    observed = directory / f"{DEFAULT_DIAGNOSED_ACTIVATION}{OBSERVER_SUFFIX}"
+
+    await record.write(_observed(text="x" * (MIN_FILE_BYTES * 2)))
+    await record.write(_observed(n=1))
+    await record.write(diagnostic_entry(body={"n": 2}))
+
+    assert observed.stat().st_size <= MIN_FILE_BYTES
+    assert _lines(observed) == [
+        {
+            "activation_id": DEFAULT_DIAGNOSED_ACTIVATION,
+            "truncated": True,
+            "truncated_at": "2026-10-13T12:00:00.000000+00:00",
+        }
+    ]
+    assert [one.body for one in _entries(directory, DEFAULT_DIAGNOSED_ACTIVATION)] == [{"n": 2}]
+
+
+async def test_an_activations_marked_file_bars_no_observer_entry(tmp_path: Path) -> None:
+    """§3:2: an activation's own file at its bound still leaves room for what was learned."""
+    directory = tmp_path / "diagnostics"
+    record = FileDiagnosticRecord(directory=directory, file_bytes=MIN_FILE_BYTES)
+    await record.write(diagnostic_entry(body={"text": "x" * (MIN_FILE_BYTES * 2)}))
+
+    await record.write(_observed(n=1))
+
+    observed = _lines(directory / f"{DEFAULT_DIAGNOSED_ACTIVATION}{OBSERVER_SUFFIX}")
+    assert [one["body"]["n"] for one in observed] == [1]
+
+
+@pytest.mark.parametrize("stale", [SUFFIX, OBSERVER_SUFFIX])
+async def test_each_file_is_swept_by_its_own_last_write(tmp_path: Path, stale: str) -> None:
+    """§3:2, ADR-0314 §7:2: either file may outlive the other; each ages from its own write."""
+    directory = tmp_path / "diagnostics"
+    record = FileDiagnosticRecord(directory=directory, file_bytes=_BOUND)
+    await record.write(diagnostic_entry())
+    await record.write(_observed())
+    old = (DEFAULT_RECORDED_AT - timedelta(days=40)).timestamp()
+    os.utime(directory / f"{DEFAULT_DIAGNOSED_ACTIVATION}{stale}", (old, old))
+
+    deleted = await record.purge_before(DEFAULT_RECORDED_AT - timedelta(days=30))
+
+    assert deleted == 1
+    kept = OBSERVER_SUFFIX if stale == SUFFIX else SUFFIX
+    assert [one.name for one in directory.iterdir()] == [f"{DEFAULT_DIAGNOSED_ACTIVATION}{kept}"]
+
+
+async def test_an_id_too_long_for_the_observer_file_is_refused_for_it_alone(
+    tmp_path: Path,
+) -> None:
+    """§6:1 over the second name: the bound on a name holds for the longer suffix too."""
+    directory = tmp_path / "diagnostics"
+    record = FileDiagnosticRecord(directory=directory, file_bytes=_BOUND)
+    long_id = "e" * (255 - len(SUFFIX))
+
+    with structlog.testing.capture_logs() as captured:
+        await record.write(diagnostic_entry(long_id))
+        await record.write(_observed(long_id))
+
+    assert [one.name for one in directory.iterdir()] == [f"{long_id}{SUFFIX}"]
+    assert [one["source"] for one in captured if one["event"] == DIAGNOSTIC_NOT_WRITTEN] == [
+        "observer"
+    ]
+    assert plain_file_name(long_id)
+    assert not plain_file_name(long_id, DiagnosticSource.OBSERVER)
