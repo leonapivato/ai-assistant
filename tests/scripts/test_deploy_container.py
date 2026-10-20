@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -138,9 +139,10 @@ class FakeBox:
 
     def hold(self, argv: Sequence[str]) -> Any:
         argv = self._sent(argv)
-        assert argv[0] == "flock"
-        assert argv[-6:-1] == ["sh", "-c", dc.HOLDER, "sh", str(PERSON.owner)]
-        path = argv[argv.index("--") + 1]
+        assert argv[:-1] == ["sh", "-c", dc.HOLDER, "sh", str(PERSON.lock), str(PERSON.owner)]
+        path = argv[4]
+        if path in self.files and self.files[path].directory:
+            return dc.Result(78, "", "")
         if path in self.locks or path in self.mine:
             return dc.Result(75, "", "")
         self.owner = argv[-1]
@@ -223,6 +225,8 @@ class FakeBox:
         return (0, "iptables v1.8\n", "") if argv[1] == "--version" else (0, self.raw_rules, "")
 
     def cmd_sh(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
+        if argv[2] == dc.UNIT_INSTALL:
+            return self._install_unit(argv[4:])
         assert "route_localnet" in argv[2]
         return 0, self.localnet, ""
 
@@ -248,15 +252,14 @@ class FakeBox:
         self.files.pop(argv[-1], None)
         return 0, "", ""
 
-    def cmd_flock(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
-        """``UNIT_INSTALL`` under the box's lock, as its shell would run it."""
-        path = argv[argv.index("--") + 1]
-        if path in self.locks:
+    def _install_unit(self, args: list[str]) -> tuple[int, str, str]:
+        """``UNIT_INSTALL``, as its shell would run it."""
+        lock, wait, unit, root, _partial, wanted, *reload = args
+        assert (lock, wait) == (dc.UNIT_LOCK, "60")
+        if lock in self.files and self.files[lock].directory:
+            return 78, "", ""
+        if lock in self.locks:
             return 75, "", ""
-        sh, flag, script, _name, unit, root, _partial, wanted, *reload = argv[
-            argv.index("--") + 2 :
-        ]
-        assert (sh, flag, script) == ("sh", "-c", dc.UNIT_INSTALL)
         installed = self.files.get(unit)
         if installed is not None:
             lines = installed.data.decode().splitlines()
@@ -708,9 +711,9 @@ def _sends(*head: str, last: str | None = None) -> Callable[[list[str]], bool]:
 #: install. Once the record is gone the volumes count as served, and the run again backs
 #: them up with the image unit.env names before installing, as for any served hub.
 _FIRST_INSTALL_KILLS: dict[str, tuple[Callable[[list[str]], bool], bool]] = {
-    "before the lock": (_sends("flock"), True),
+    "before the lock": (_sends("sh", "-c", dc.HOLDER), True),
     "holding the person's lock": (_sends(dc.DOCKER, "build"), True),
-    "before the unit's install": (_sends("flock", "--conflict-exit-code=75", "--wait=60"), True),
+    "before the unit's install": (_sends("sh", "-c", dc.UNIT_INSTALL), True),
     "after the unit's install": (
         lambda argv: argv[0] == "install" and argv[-1].startswith(str(PERSON.first_install)),
         True,
@@ -875,7 +878,9 @@ def test_main_reports_a_lost_lock(monkeypatch: pytest.MonkeyPatch, capsys: Any) 
 
 def _install(unit: Path, root: str, wanted: str) -> subprocess.CompletedProcess[str]:
     """Run ``UNIT_INSTALL`` itself, with ``echo reloaded`` for systemd's reload."""
-    argv = ["sh", "-c", dc.UNIT_INSTALL, "sh", str(unit), root, f"{unit}.t.partial", wanted]
+    lock = unit.parent / "unit.lock"
+    argv = ["sh", "-c", dc.UNIT_INSTALL, "sh", str(lock), "1", str(unit), root]
+    argv += [f"{unit}.t.partial", wanted]
     return subprocess.run(  # noqa: S603  # a fixed argv
         [*argv, "echo", "reloaded"], capture_output=True, text=True, check=False
     )
@@ -943,9 +948,22 @@ def test_a_lock_is_one_holders_until_released(tmp_path: Path) -> None:
 
 
 @needs_flock
+def test_an_earlier_versions_lock_directory_is_never_locked(tmp_path: Path) -> None:
+    deploy = _here(tmp_path, "now")
+    Path(deploy.person.lock).mkdir()
+    (tmp_path / "unit.lock").mkdir()
+
+    refused = deploy._lock()
+    installed = _install(tmp_path / "hub@.service", "EnvironmentFile=/x", "x\n")
+
+    assert isinstance(refused, dc.Result)
+    assert refused.code == installed.returncode == 78
+    assert not (tmp_path / "hub@.service").exists()
+
+
+@needs_flock
 def test_a_lock_is_released_when_its_deploy_is_killed(tmp_path: Path) -> None:
     Path(tmp_path / "a").mkdir()
-    Path(tmp_path / "a" / ".deploy-lock").mkdir()  # an earlier deploy's lock directory
     holder = subprocess.Popen(  # noqa: S603  # a fixed argv
         [
             sys.executable,
@@ -997,41 +1015,65 @@ def test_a_command_that_arrives_after_another_deploy_took_the_lock_is_refused(
     taken.release()
 
 
+def _waiting_on_the_owner(lock: Path) -> bool:
+    """Whether a holder of ``lock`` has it and waits on the owner file's ``flock``.
+
+    Read from the process tree, taking no lock: ``HOLDER`` runs ``flock 9`` for the owner
+    file only once it holds the person's lock.
+    """
+    for entry in Path("/proc").iterdir():
+        try:
+            if not entry.name.isdigit() or (entry / "cmdline").read_bytes() != b"flock\x009\x00":
+                continue
+            parent = (entry / "stat").read_text().rsplit(")", 1)[1].split()[1]
+            if str(lock).encode() in Path(f"/proc/{parent}/cmdline").read_bytes():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _until(condition: Callable[[], bool]) -> None:
+    """Wait for ``condition``, which an event the test caused will make true."""
+    give_up = time.monotonic() + 30
+    while not condition():
+        assert time.monotonic() < give_up, "the event never came"
+        time.sleep(0.02)
+
+
 @needs_flock
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="no /proc")
 def test_a_deploy_takes_the_lock_only_once_a_running_command_ends(tmp_path: Path) -> None:
     old, new = _here(tmp_path, "old"), _here(tmp_path, "new")
     lease = old._lock()
     assert isinstance(lease, dc.ProcessLease)
     owner = str(old.person.owner)
-    command = ["sh", "-c", "echo started; sleep 2"]
+    fenced = [str(shutil.which("flock")), "--", owner, "sh", "-c", dc.FENCE, "sh", owner, "old"]
     running = subprocess.Popen(  # noqa: S603  # a fixed argv
-        [
-            str(shutil.which("flock")),
-            "--",
-            owner,
-            "sh",
-            "-c",
-            dc.FENCE,
-            "sh",
-            owner,
-            "old",
-            *command,
-        ],
+        [*fenced, "sh", "-c", "echo started && read -r _"],
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
     )
-    assert running.stdout is not None
-    assert running.stdout.readline() == b"started\n"
-    lease.release()  # the old deploy's holder ends while its command still runs
+    taken: list[object] = []
+    try:
+        assert running.stdout is not None
+        assert running.stdout.readline() == b"started\n"
+        lease.release()  # the old deploy's holder ends while its command still runs
+        taker = threading.Thread(target=lambda: taken.append(new._lock()), daemon=True)
+        taker.start()
+        _until(lambda: _waiting_on_the_owner(Path(old.person.lock)))
 
-    began = time.monotonic()
-    taken = _take(new)
-    waited = time.monotonic() - began
+        assert Path(owner).read_text() == "old\n", "it waits on the command still running"
+        assert not taken
+    finally:
+        running.communicate(b"\n")  # the command ends
+    taker.join(timeout=30)
 
-    assert isinstance(taken, dc.ProcessLease)
-    assert running.poll() == 0, "the new deploy held the lock only once the command ended"
-    assert waited > 0.5
-    running.stdout.close()
-    taken.release()
+    assert running.returncode == 0
+    lease_now = taken[0]
+    assert isinstance(lease_now, dc.ProcessLease)
+    assert Path(owner).read_text() == "new\n"
+    lease_now.release()
 
 
 def test_deploy_reads_a_quoted_comment_as_one_argument() -> None:
@@ -1325,9 +1367,14 @@ def test_deploy_waits_for_the_box_lock_and_then_refuses() -> None:
 
     _refused_untouched(box, "installing the unit, for\n60s")
 
-    taken = next(argv for argv in box.ran if dc.UNIT_LOCK in argv)
-    assert taken[:3] == ["flock", "--conflict-exit-code=75", "--wait=60"]
     assert box.locks == {dc.UNIT_LOCK}, "another deploy's lock is not touched"
+
+
+def test_deploy_refuses_an_earlier_versions_unit_lock() -> None:
+    box = served_box()
+    box.files[dc.UNIT_LOCK] = File(0, 0o700, directory=True)
+
+    _refused_untouched(box, f"rmdir {dc.UNIT_LOCK}")
 
 
 def test_deploy_keeps_an_installed_unit_of_the_same_root() -> None:
@@ -1372,8 +1419,19 @@ def test_deploy_refuses_while_another_deploy_holds_the_lock() -> None:
         deployment(box).run()
     assert f"fuser -v {PERSON.lock}" in str(caught.value)
     assert box.locks == {str(PERSON.lock)}, "someone else's lock is not touched"
-    assert box.ran[-1][:3] == ["flock", "--conflict-exit-code=75", "--nonblock"]
-    assert len(box.ran) == 2  # the directory's stat, and the mkdir
+    assert box.ran[-1][:3] == ["sh", "-c", dc.HOLDER]
+    assert len(box.ran) == 2  # the directory's stat, and the lock
+
+
+def test_deploy_refuses_an_earlier_versions_lock_directory() -> None:
+    box = served_box()
+    box.files[str(PERSON.lock)] = File(0, 0o700, directory=True)
+
+    with pytest.raises(dc.DeployError, match=f"rmdir {PERSON.lock}") as caught:
+        deployment(box).run()
+
+    assert "deploy with this version alone" in str(caught.value)
+    assert len(box.ran) == 2
 
 
 def _line(tmp_path: Path) -> tuple[Path, str, str]:
