@@ -324,19 +324,21 @@ settings and not `hub.env`, because the data directory and every exclusion follo
 `/data` alone.
 
 **One deploy per person runs at a time, and one unit install per box.** Each is a
-`flock`, on `/srv/hubs/<person>/.deploy-lock` for the whole deploy and on
-`/run/hub-deploy-unit.lock` while the unit is installed. The lock is held on the box by
-one more ssh session, which lasts exactly as long as the deploy: when the deploy ends,
-however it ends, the session ends and the kernel releases the lock. A deploy that was
-killed holds nothing, and there is nothing to remove. A second deploy to the same person
-refuses at once; one installing the unit waits up to a minute for another. To see who
-holds a lock, run `fuser -v /srv/hubs/<person>/.deploy-lock` on the box.
+`flock`, which the kernel releases when its holder ends, so a deploy that was killed
+holds nothing and there is nothing to remove. `/run/hub-deploy-unit.lock` is held by the
+one command that installs the unit, which checks its root, writes it and reloads systemd
+under the lock; a deploy installing it waits up to a minute for another.
+`/srv/hubs/<person>/.deploy-lock` is held for the whole deploy, by one more ssh session
+that lasts exactly as long as the deploy does; a second deploy to the same person refuses
+at once. To see who holds a lock, run `fuser -v` on its file on the box.
 
-If the ssh link drops under that session alone, the deploy changes nothing more: it
-looks before it installs the unit, before it stops the hub for the backup and before it
-names the new image, and refuses from there. The box may take until its TCP keepalive
-gives up, about two hours, to see the link gone and release the lock; until then a
-second deploy refuses, and `fuser` shows the session's process, which you may kill.
+If the ssh link drops under that session alone, the deploy stops before its next command
+to the box, as if it had been killed there, and starts, stops or disables nothing more:
+another deploy may hold the lock by then. Run it again once the link is back; wherever a
+deploy stopped, killed or not, running it again finishes it or refuses. The box may take
+until its TCP keepalive gives up, about two hours, to see a silent drop and release the
+lock; until then a second deploy refuses, and `fuser` shows the session's process, which
+you may kill.
 
 **A first install that ends early is resumed.** It records itself in
 `/srv/hubs/<person>/.first-install` before it makes the volumes, and removes the record
