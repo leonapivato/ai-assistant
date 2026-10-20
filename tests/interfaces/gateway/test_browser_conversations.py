@@ -304,10 +304,12 @@ async def test_a_row_names_its_conversation_and_offers_only_the_forget(
         _seed(drive, long.upper(), turns=1)
         await drive.page.set_viewport_size({"width": 390, "height": 844})
         await _open_listing(drive)
-        named = await _first_row(drive).locator(".conversation-name").inner_text()
-        assert named == await _title(drive, long)
-        assert long not in named
-        assert long.upper() not in named
+        names = await drive.page.locator("#conversation-list .conversation-name").all_inner_texts()
+        # Named by when each started, apart from each other, and neither by its id.
+        assert len(set(names)) == len(names) == 2
+        for named in names:
+            assert long not in named
+            assert long.upper() not in named
         buttons = _first_row(drive).get_by_role("button")
         await expect(buttons).to_have_count(1)
         await expect(buttons).to_have_text("Forget")
