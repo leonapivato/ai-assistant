@@ -42,6 +42,8 @@ from _learning_record import (
     write_learning,
 )
 from _model_call_record import ADDED, CALLS, LABELS, ODD, ROUND_1_INPUT, write_calls
+from _replay_record import ACT_A, PLANNING_TOLD, Model, make_copy, replay_tool
+from _replay_record import now as replay_now
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -546,4 +548,62 @@ async def test_the_overview_reads_at_a_phones_width_with_no_sideways_scroll(
         wide = await page.evaluate(
             "document.documentElement.scrollWidth - document.documentElement.clientWidth"
         )
+        assert wide <= 0
+
+
+# --- ADR-0335 §6:4-§6:5: a replay's results beside the call they replay ------------------
+
+
+@pytest.fixture
+def replayed(tmp_path: Path) -> Iterator[Any]:
+    """The viewer over a copy whose planning round a replay sent again, as recorded."""
+    copy = make_copy(tmp_path)
+    status = asyncio.run(
+        replay_tool.replay(
+            replay_tool.ReplayOptions(
+                copy=copy, model="fake:model", sources=frozenset({"planning"})
+            ),
+            report=lambda _: None,
+            caller=Model().caller(),
+            now=replay_now,
+        )
+    )
+    assert status == 0
+    with serving(copy / "diagnostics") as bound:
+        yield bound
+
+
+async def test_a_replayed_activation_is_marked_and_its_call_shows_the_result(
+    replayed: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser) as page:
+        await page.goto(f"http://127.0.0.1:{replayed.port}/")
+        marked = page.locator("#list li", has=page.locator(".badge.b-replayed"))
+        await expect(marked).to_have_count(1, timeout=_SHOWN)
+        await _open(page, replayed.port, ACT_A)
+        await page.locator(".round").first.click()
+        readable = page.locator("#drawer-read")
+        await expect(readable.locator("#call-replays .replay")).to_have_count(1, timeout=_SHOWN)
+        await expect(readable.locator(".call-nav button", has_text="Replays")).to_be_visible()
+        one = readable.locator("#call-replays .replay")
+        await expect(one.locator("h4")).to_have_text("planning · 0123456789ab · recorded")
+        await expect(one).to_contain_text("claude-original")
+        # The candidate's instruction is one click away (§6:4).
+        told = one.locator("details.part")
+        await expect(told.locator(".part-text")).to_be_hidden()
+        await told.locator("summary").click()
+        await expect(told.locator(".part-text")).to_have_text(PLANNING_TOLD)
+        await expect(one.locator(".part-head .name", has_text="Text")).to_be_visible()
+
+
+async def test_a_replayed_call_reads_at_a_phones_width_with_no_sideways_scroll(
+    replayed: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser, width=390) as page:
+        await _open(page, replayed.port, ACT_A)
+        await page.locator(".round").first.click()
+        readable = page.locator("#drawer-read")
+        await expect(readable.locator("#call-replays .replay")).to_have_count(1, timeout=_SHOWN)
+        await readable.locator("#call-replays details.part summary").click()
+        wide = await readable.evaluate("node => node.scrollWidth - node.clientWidth")
         assert wide <= 0

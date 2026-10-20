@@ -45,6 +45,13 @@ timeline; an activation whose own file is gone is shown with that lane alone. Th
 Learning view lists every activation the observer wrote about, its latest work first:
 each finding's claim and outcome in short, a click from the scout's and the commit step's
 prompt and reply behind it (§5).
+
+What a replay sent again over a copy of the hub's record is in a third file beside the
+activation's, ``<activation_id>.replay.jsonl``, written by ``prompt_replay.py`` (ADR-0335
+§6), and never listed as an activation of its own name. An activation with results is
+marked in the list, and a model call's readable view shows each result that replays it
+beside the original reply, headed by its prompt's name, version and origin, with the
+candidate's instruction one click away (§6:4-§6:5).
 """
 
 from __future__ import annotations
@@ -84,6 +91,10 @@ SUFFIX: Final = ".jsonl"
 #: The suffix of the file beside it holding what the observer learned from it (ADR-0333
 #: §3:1). Never listed as an activation of its own name (§5:6).
 OBSERVER_SUFFIX: Final = ".observer" + SUFFIX
+
+#: The suffix of the file beside it holding what a replay sent again and got back (ADR-0335
+#: §6:1). Never listed as an activation of its own name (§6:5).
+REPLAY_SUFFIX: Final = ".replay" + SUFFIX
 
 #: The record's directory's name in a data directory (ADR-0314 §6:1).
 RECORD_DIRECTORY: Final = "diagnostics"
@@ -1293,14 +1304,20 @@ class Record:
         """Every observer file in the directory, by its activation's id (ADR-0333 §5:1)."""
         return self._scan()[1]
 
-    def _scan(self) -> tuple[dict[str, Path], dict[str, Path]]:
-        """The directory's activations' own files and their observer files, each by id.
+    def replay_listing(self) -> dict[str, Path]:
+        """Every replay's results file in the directory, by its activation's id (ADR-0335 §6:1)."""
+        return self._scan()[2]
 
-        An observer file is joined to its activation by name alone, and is never taken
-        for an activation of its own name (ADR-0333 §5:1, §5:6).
+    def _scan(self) -> tuple[dict[str, Path], dict[str, Path], dict[str, Path]]:
+        """The directory's activations' own files, observer files and results files, by id.
+
+        An observer file or a results file is joined to its activation by name alone, and
+        is never taken for an activation of its own name (ADR-0333 §5:1, §5:6; ADR-0335
+        §6:5).
         """
         own: dict[str, Path] = {}
         learned: dict[str, Path] = {}
+        replayed: dict[str, Path] = {}
         directory = self.directory
         try:
             with os.scandir(directory) as entries:
@@ -1309,15 +1326,20 @@ class Record:
                         continue
                     if one.name.endswith(OBSERVER_SUFFIX):
                         learned[one.name[: -len(OBSERVER_SUFFIX)]] = directory / one.name
+                    elif one.name.endswith(REPLAY_SUFFIX):
+                        replayed[one.name[: -len(REPLAY_SUFFIX)]] = directory / one.name
                     else:
                         own[one.name[: -len(SUFFIX)]] = directory / one.name
         except _NO_DIRECTORY:
-            return {}, {}
-        return own, learned
+            return {}, {}, {}
+        return own, learned, replayed
 
     def activations(self) -> dict[str, object]:
-        """The list: every activation's summary, newest first, and a version for polling."""
-        listing = self.listing()
+        """The list: every activation's summary, newest first, and a version for polling.
+
+        An activation with a replay's results file is marked ``replayed`` (ADR-0335 §6:5).
+        """
+        listing, _, replayed = self._scan()
         with self._lock:
             for gone in set(self._watched) - set(listing):
                 del self._watched[gone]
@@ -1329,7 +1351,9 @@ class Record:
                     self._watched.pop(activation_id, None)
                     continue
                 versions.append(f"{activation_id}\0{status.st_size}\0{status.st_mtime_ns}")
-            summaries = [one.tally.summary() for one in self._watched.values()]
+                if activation_id in replayed:
+                    versions.append(f"{activation_id}\0replayed")
+            summaries = [_marked(one.tally.summary(), replayed) for one in self._watched.values()]
         summaries.sort(key=lambda one: _sort_key(one.get("start")), reverse=True)
         version = hashlib.blake2b("\n".join(versions).encode(), digest_size=12).hexdigest()
         return {
@@ -1384,6 +1408,18 @@ class Record:
         """
         return _whole(self.learned_listing().get(activation_id))
 
+    def replay_lines(self, activation_id: str) -> tuple[list[Line], str] | None:
+        """An activation's results file's complete lines, read, and a version.
+
+        Args:
+            activation_id: An id, looked up in the directory's listing and never used
+                as a path.
+
+        Returns:
+            ``None`` where no results file in the listing has that id.
+        """
+        return _whole(self.replay_listing().get(activation_id))
+
     def learning(self) -> dict[str, object]:
         """The learning overview: every activation with an observer file (ADR-0333 §5:4).
 
@@ -1395,7 +1431,7 @@ class Record:
             Each activation's learning summary, newest observer entry first, and a
             version for polling.
         """
-        own, learned = self._scan()
+        own, learned, _ = self._scan()
         with self._lock:
             for gone in set(self._learned) - set(learned):
                 del self._learned[gone]
@@ -1446,6 +1482,15 @@ class Record:
         watched.offset += taken
         watched.lines += len(read)
         return status
+
+
+def _marked(summary: dict[str, object], replayed: Mapping[str, Path]) -> dict[str, object]:
+    """An activation's summary, marked where a replay's results file is beside it (§6:5)."""
+    if summary.get("id") not in replayed:
+        return {**summary, "replayed": False}
+    badges = summary.get("badges")
+    listed = list(badges) if isinstance(badges, list) else []
+    return {**summary, "replayed": True, "badges": [*listed, "replayed"]}
 
 
 def _whole(path: Path | None) -> tuple[list[Line], str] | None:
@@ -2168,6 +2213,66 @@ def _changes(built: _Timeline, given: Entry) -> dict[str, object] | None:
     }
 
 
+# --- a replay's results, beside the call they replay ----------------------------------
+# What ``prompt_replay.py`` sent again over a copy of the record and got back, one line of
+# the activation's results file for each call and candidate (ADR-0335 §6:1). A result names
+# the given entry it replays by its file and its line, from 0 as this viewer numbers lines
+# (§6:2). Every key read here is a hint, as an entry's are (ADR-0316 §5:2).
+
+
+def replays_of(
+    lines: Sequence[Line], file: str, given: int, source: str
+) -> list[dict[str, object]]:
+    """Each result that replays the given entry at line ``given`` of ``file`` (§6:4).
+
+    Args:
+        lines: The activation's results file's complete lines.
+        file: The name of the file the given entry is in: the activation's own, or its
+            observer file.
+        given: The given entry's line.
+        source: Who wrote the given entry, which says how a reply reads.
+
+    Returns:
+        Each result, in the order written: its prompt's name, version and origin, the
+        candidate's instruction, and what the model did, read as the original's is.
+    """
+    shown: list[dict[str, object]] = []
+    for line in lines:
+        if not isinstance(line, Entry) or line.source != "replay":
+            continue
+        body = _mapping(line.body)
+        replays = _mapping(body.get("replays"))
+        number = replays.get("line")
+        if replays.get("file") == file and type(number) is int and number == given:
+            shown.append(_replay_result(line, body, source))
+    return shown
+
+
+def _replay_result(line: Entry, body: Mapping[str, object], source: str) -> dict[str, object]:
+    """One result as the call's view shows it, headed by its prompt (§6:4)."""
+    candidate = _mapping(body.get("candidate"))
+    recorded = _mapping(body.get("recorded_prompt"))
+    instruction = _text(candidate.get("instruction"))
+    flags = _mapping(body.get("flags"))
+    return {
+        "line": line.line,
+        "at": _ms(line.at),
+        "run": _text(body.get("run")),
+        "prompt": _text(body.get("prompt")),
+        "version": _text(candidate.get("version")),
+        "origin": _text(candidate.get("origin")),
+        "file": _text(candidate.get("file")),
+        "recorded_version": _text(recorded.get("version")),
+        "recorded_origin": _text(recorded.get("origin")),
+        "flags": [f"{name}={value}" for name, value in flags.items()],
+        "flags_from": _text(body.get("flags_from")),
+        "model": _text(body.get("model")),
+        "original_model": _text(body.get("original_model")),
+        "instruction": None if instruction is None else _sized(instruction),
+        "did": _did(source, body),
+    }
+
+
 # --- the server ------------------------------------------------------------------------
 
 
@@ -2344,7 +2449,19 @@ class ViewerHandler(BaseHTTPRequestHandler):
         if shown is None:
             self._json({"error": "no such model call"}, HTTPStatus.NOT_FOUND)
             return
-        self._json(shown)
+        self._json({**shown, "replays": self._replays(query, shown)})
+
+    def _replays(self, query: Mapping[str, str], shown: Mapping[str, object]) -> list[object]:
+        """The results that replay the call's given entry, from its activation's results file."""
+        given, source = shown.get("given"), shown.get("source")
+        if type(given) is not int or not isinstance(source, str):
+            return []
+        activation_id = query.get("id", "")
+        read = self.server.record.replay_lines(activation_id)
+        if read is None:
+            return []
+        suffix = OBSERVER_SUFFIX if query.get("file") == "observer" else SUFFIX
+        return list(replays_of(read[0], activation_id + suffix, given, source))
 
     def _entry(self, query: Mapping[str, str]) -> None:
         read = self._lines_of(query)
@@ -2541,7 +2658,7 @@ body {
 .b-needs_you { color: var(--needs); } .b-outside_content { color: var(--outside); }
 .b-could_not_finish { color: var(--failed); } .b-digest_failed { color: var(--digesting); }
 .b-refused { color: var(--refused); } .b-truncated, .b-unreadable { color: var(--muted); }
-.b-open { color: var(--accent); }
+.b-open { color: var(--accent); } .b-replayed { color: var(--accent); }
 .back { display: none; }
 h1.input {
   font-size: 18px;
@@ -2787,6 +2904,10 @@ button { font: inherit; }
   border-radius: 999px; padding: 1px 10px; cursor: pointer;
 }
 .call-sec { margin-top: 18px; scroll-margin-top: 8px; }
+.replay { border-left: 3px solid var(--accent); padding: 2px 0 6px 10px; margin: 12px 0; }
+.replay-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.replay-head h4 { margin: 0; font-size: 13px; font-family: var(--mono); overflow-wrap: anywhere; }
+.replay-head .m { color: var(--muted); font-size: 12px; }
 .call-sec > .sec-head {
   display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
   border-bottom: 1px solid var(--line); padding-bottom: 4px; margin-bottom: 6px;
@@ -2952,7 +3073,7 @@ SCRIPT: Final = r"""
   const BADGES = {
     needs_you: "needs you", outside_content: "outside content read",
     could_not_finish: "couldn't finish", digest_failed: "digest failed",
-    refused: "refused", truncated: "truncated",
+    refused: "refused", truncated: "truncated", replayed: "replayed",
   };
   const ENDINGS = {
     nothing_due: "finished", round_limit_reached: "round limit reached",
@@ -3905,6 +4026,7 @@ SCRIPT: Final = r"""
     const nav = el("nav", "call-nav");
     const keys = [["told", "Told"], ["given", "Given"], ["tools", "Could do"], ["did", "Did"]];
     if (v.source === "planning") keys.push(["changes", "Changed"]);
+    if (v.replays && v.replays.length) keys.push(["replays", "Replays"]);
     for (const [key, label] of keys) {
       const go = el("button", null, label);
       go.type = "button";
@@ -3920,6 +4042,7 @@ SCRIPT: Final = r"""
     renderTools(holder, v);
     renderDid(holder, v);
     if (v.source === "planning") renderChanges(holder, v);
+    if (v.replays && v.replays.length) renderReplays(holder, v);
   }
 
   // Why a request's part is not shown, where the record does not hold it to read.
@@ -4046,6 +4169,10 @@ SCRIPT: Final = r"""
         "No returned entry was recorded, so what it did is not here."));
       return;
     }
+    didInto(box, did);
+  }
+  // What a model did, part by part: an original call's, or a replay's (ADR-0335 \u00a76:4).
+  function didInto(box, did) {
     if (did.failure) box.appendChild(el("p", "fail", "failed: " + did.failure));
     if (did.odd) box.appendChild(el("p", "note", did.odd));
     if (did.usage) {
@@ -4070,6 +4197,42 @@ SCRIPT: Final = r"""
         prose(one, p.text || "(no text returned)", p.kind === "thinking" ? "thinking" : null);
       }
     });
+  }
+
+  // Each replay of this call beside the original reply, headed by its prompt's name, version
+  // and origin, the candidate's instruction one click away (ADR-0335 \u00a76:4).
+  function renderReplays(holder, v) {
+    const box = callSec(holder, "replays", "Replayed",
+      plural(v.replays.length, "result", "results") + " of a replay over a copy of the record");
+    for (const r of v.replays) {
+      const one = el("div", "replay");
+      const head = el("div", "replay-head");
+      const named = [r.prompt || "prompt not named", r.version || "no version",
+        r.origin || "origin not named"];
+      head.appendChild(el("h4", null, named.join(" \u00b7 ")));
+      head.appendChild(el("span", "m", clock(r.at, true)));
+      one.appendChild(head);
+      const flags = r.flags && r.flags.length ? r.flags.join(", ") : "none";
+      kv(one, [["run", r.run], ["model", r.model],
+        ["original model", r.original_model || "unknown"],
+        ["recorded prompt", r.recorded_version
+          ? r.recorded_version + " \u00b7 " + (r.recorded_origin || "origin not named")
+          : "not recorded"],
+        ["flags", r.flags_from ? flags + " (" + r.flags_from + ")" : flags],
+        ["candidate file", r.file || undefined]]);
+      if (r.flags_from === "stated") {
+        one.appendChild(el("p", "note",
+          "Rendered under flags the run stated: the entry records none."));
+      }
+      if (r.instruction) {
+        const told = part(one, { name: "Candidate\u2019s instruction", collapsed: true,
+          size: size(r.instruction.chars, r.instruction.tokens), copy: r.instruction.text,
+          what: "the candidate\u2019s instruction" });
+        prose(told, r.instruction.text);
+      }
+      if (r.did) didInto(one, r.did);
+      box.appendChild(one);
+    }
   }
 
   function diffText(d) { return d.lines.join("\n"); }
