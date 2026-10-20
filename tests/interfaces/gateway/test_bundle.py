@@ -790,16 +790,19 @@ def test_every_row_of_the_listing_says_which_conversation_it_is() -> None:
     three send the owner to named none of them. Three rows of two timestamps, and
     the sentence that appears after a tap names an id that had never been on screen.
 
-    Its own full-width line rather than a clause of the instants: an id is a hub
-    value of no bounded length, and a row that makes it compete for horizontal space
-    with two timestamps is one long id away from #1385's "Remo ve".
+    Its own full-width line rather than a clause of the instants. The name is the one
+    the chat gives a conversation — when it started — rather than the hub's id, which
+    the chat no longer shows anywhere (#3209's follow-on); the id stays on the row for
+    nothing on screen, as the chat's own rows carry it.
     """
     script = _code("app.js")
     stylesheet = _asset("app.css")
     rendering = _functions(script)["renderConversation"]
 
-    assert 'line(item, `Conversation ${summary.id}`, "conversation-name");' in rendering
-    # First, so the id is above the row rather than between its two facts.
+    assert 'line(item, chatTime(summary.started_at), "conversation-name");' in rendering
+    assert "item.dataset.conversation = summary.id;" in rendering
+    assert "summary.id}" not in rendering
+    # First, so the name is above the row rather than between its two facts.
     assert rendering.index("conversation-name") < rendering.index("Last turn")
     assert "flex: 1 1 100%;" in _rule(stylesheet, ".conversation-name")
 
@@ -848,16 +851,14 @@ def test_a_forget_states_what_the_hub_answered_rather_than_what_was_asked() -> N
     functions = _functions(_code("app.js"))
 
     assert '<p class="notice" id="forget-outcome" hidden></p>' in document
-    assert (
-        "sayForgotten(statedForget(id, held, done.destroyed));" in (functions["forgetConversation"])
-    )
+    assert "sayForgotten(statedForget(held, done.destroyed));" in functions["forgetConversation"]
     stated = functions["statedForget"]
     assert "if (!destroyed)" in stated
     assert "so nothing was forgotten." in stated
     assert "no longer recalls them anywhere else" in stated
     assert "only deleting removes them." in stated
     confirming = functions["forgetConversation"]
-    assert "Forget conversation" in confirming
+    assert "Forget the conversation from ${chatTime(held.started_at)}?" in confirming
     assert "still reads it while you keep talking there" in confirming
 
 
@@ -2901,8 +2902,8 @@ def test_the_panel_shows_what_adr_0328_s15_4_requires() -> None:
     functions = _functions(_code("app.js"))
     lines = functions["beliefLines"]
 
-    assert '`Learned: ${belief.learned === null ? "unknown" : belief.learned}`' in lines
-    assert '`As of: ${belief.as_of === null ? "unknown" : belief.as_of}`' in lines
+    assert '`Learned: ${belief.learned === null ? "unknown" : localTime(belief.learned)}`' in lines
+    assert '`As of: ${belief.as_of === null ? "unknown" : localTime(belief.as_of)}`' in lines
     assert 'if (belief.reading_certainty !== "sure") {' in lines
     assert "if (track.let_down > 0) {" in lines
     assert "if (belief.legacy) {" in lines
@@ -3576,23 +3577,48 @@ def test_every_connection_condition_the_gateway_writes_is_a_condition_the_page_r
 # --- ADR-0194 §5 and §6: the page shifts no instant -----------------------------
 
 
-def test_the_page_shifts_no_instant_and_reaches_for_no_zone_database() -> None:
-    """ADR-0194 §5 and §6: a period bound is read "from the value's **own**
+def test_the_page_renders_no_spend_bound_so_adr_0194_s6_has_no_renderer_here() -> None:
+    """ADR-0194 §5 and §6: a spend period's bound is read "from the value's **own**
     ``start_offset``/``end_offset``… never from the client's zone and never through
     the client's ``tzdata``".
 
-    So the arithmetic is the gateway's and the page renders what it is handed. This
-    is asserted over the whole script rather than over one function, because the
-    thing being ruled out is a *reach* — a ``Date`` constructed to shift an instant,
-    or a formatter that consults the browser's zone — and it would be as wrong in a
-    helper as in the renderer.
+    The page renders no ``SpendTotal`` any more, so that clause has no renderer here,
+    and the page-wide ban that stood for it gave way to #1392's ruling: an instant is
+    shown in this browser's own zone (below). Should a spend bound come back to the
+    page, this fails, so that its renderer is held to §6 rather than to the helper.
     """
     script = _code("app.js")
 
-    assert "new Date(" not in script
-    assert "Intl." not in script
+    for field in ("start_offset", "end_offset", "period_start", "period_end"):
+        assert field not in script, field
+
+
+def test_an_instant_is_shown_in_the_browsers_zone_through_one_helper() -> None:
+    """#1392, ruled on #3209's follow-on: every instant the page prints is said in the
+    browser's own language and zone — through one set of helpers, so a zone is reached
+    for in one place, and only for a value that carries its own offset."""
+    script = _code("app.js")
+    functions = _functions(script)
+
+    helpers = ("instant", "localDay")
+    assert script.count("new Date(") == sum(functions[name].count("new Date(") for name in helpers)
+    assert "new Date(iso)" in functions["instant"]
+    assert "INSTANT_SHAPE.test(iso)" in functions["instant"]
+    assert "(Z|[+-]\\d{2}:\\d{2})$/" in script  # an instant without an offset is not one
+    for line in script.splitlines():
+        if "Intl." in line:
+            assert line.startswith("const LOCAL_"), line
     assert "toLocale" not in script
     assert "getTimezoneOffset" not in script
+    # The instants the panels print, each through the helper rather than as written.
+    for shown in (
+        "localTime(grant.decided_at)",
+        "localTime(record.noticed_at)",
+        "localTime(record.expires_at)",
+        "localTime(belief.attestation.reported_at)",
+        "chatTime(message.written_at)",
+    ):
+        assert shown in script, shown
 
 
 # --- ADR-0296 §4: the chat and the devices it reaches ----------------------------
