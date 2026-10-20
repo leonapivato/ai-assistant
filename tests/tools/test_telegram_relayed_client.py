@@ -46,6 +46,7 @@ from telegram_relay_harness import (
     FakeRelay,
     Presenting,
     RecordingTransport,
+    SilentRelayTransport,
     bot_api,
     closed_port,
     done,
@@ -219,9 +220,28 @@ class TestRelayedHttpsTelegramBotClientContract(RelayedTelegramBotClientContract
         return await self._prepared()
 
     async def silent(self) -> Prepared:
-        """The relay reads the request and never answers."""
-        self.relay.script.append("stall")
-        return await self._prepared()
+        """The relay takes the request and never answers.
+
+        Over :class:`SilentRelayTransport` rather than real TLS, so the request is
+        written before any bound can fall: whether a cut-off send is *unknown* turns on
+        that order, and a handshake's duration is the machine's. The real relay's own
+        stall is driven in the leak case below.
+        """
+        configuration = relay_of(self.relay.origin)
+        transport = SilentRelayTransport()
+        client = HttpsTelegramBotClient(
+            reference=REFERENCE,
+            chat_id=CHAT,
+            records=Records(entry()),
+            secrets=await keyring(holds=RELAY_CREDENTIAL),
+            exchange=HttpsExchange(transport=transport, max_response_bytes=BOUND_BYTES),
+            relay=configuration,
+        )
+
+        def reached() -> tuple[Reached, ...]:
+            return tuple(Reached(one.method, dict(one.body)) for one in transport.requests())
+
+        return Prepared(client=client, reached=reached, opened=transport.origins)
 
     async def disconnected(self) -> Prepared:
         """A connection whose record is a removal."""
