@@ -158,6 +158,7 @@ if TYPE_CHECKING:
         GrantScope,
         HeldNotification,
         Identifier,
+        Memory,
         MemoryChange,
         MemoryDecision,
         MemoryIngestResult,
@@ -234,6 +235,7 @@ if TYPE_CHECKING:
         ToolResult,
         TraceChunk,
         TracePosition,
+        TrackRecordEntry,
         TranscriptMessage,
         TranscriptPage,
         TransportEndpoint,
@@ -1929,10 +1931,21 @@ class MemoryWriter(Protocol):
     writes to must be the one its caller retrieves from** — a composition-root
     obligation, unenforceable here because no store is on this seam (ADR-0028 §4).
 
-    Two members: :meth:`ingest` creates a memory under the policy (ADR-0328 §11:4),
-    and :meth:`apply` applies one operation to one stored memory (§11:3). Every change
-    to a memory's supports, status, validity or open questions is an operation citing
-    the support that caused it (§5:1), and no write changes a memory's wording (§3:2).
+    Three members: :meth:`ingest` creates a memory under the policy (ADR-0328 §11:4),
+    retiring at most one stored memory with it (ADR-0329 §12:4); :meth:`apply` applies
+    one operation to one stored memory (§11:3); and :meth:`record_use` records one
+    track-record entry (ADR-0329 §14:4). Every change to a memory's supports, status,
+    validity or open questions is an operation citing the support that caused it
+    (§5:1), and no write changes a memory's wording (§3:2).
+
+    **An observer's inference** (ADR-0329 §9:7) is admitted only as that clause has
+    it: ``for`` and backing the claim as worded only on a memory whose other supports
+    added with it are all ``for`` and none backs the claim as worded, and ``against``
+    only on a memory the ingest creating its memory retires, its ``when`` that
+    episode's ``occurred_at``. A writer refuses every other inference support with
+    nothing written: one :meth:`ingest`'s memory carries that breaks the first rule,
+    one ``against`` on it, one whose ``when`` is not its episode's, and any one
+    :meth:`apply` would add, since an operation adds one support alone.
 
     How :meth:`ingest` and :meth:`apply` observe what they are handed is governed by
     this module's input-observation clause (ADR-0065).
@@ -1960,6 +1973,31 @@ class MemoryWriter(Protocol):
           that support points at, refuses the whole ingest with nothing written.
         - **``REJECT`` and ``ASK_USER`` write nothing** (§11:8); a
           ``STORE_TEMPORARY`` ruling is refused, with nothing written (§10:3).
+
+        **A proposal carrying a retiring operation** (``proposal.retiring``, ADR-0329
+        §12:4) is ruled on over every conflict but the memory it retires: that memory
+        is withheld from the conflicts the policy is handed and from the ids the
+        proposal it sees carries, so the policy never rules on it. The operation cites
+        a support of the new memory, added to the retired memory as an ``against``
+        support, and is applied only as the ruling allows:
+
+        - **``ACCEPT``** installs the new memory and applies the operation in one atomic
+          write, each naming the other: the operation names the new memory as its
+          successor, and the new memory's create names the retired one among those it
+          replaces (ADR-0328 §5:6).
+        - **``REINFORCE`` of an end or a mark wrong** adds the supports to the target as
+          above and applies the operation naming no successor, in one atomic write.
+        - **``REINFORCE`` of a replace**, which must name its replacement, and **every
+          other ruling** write nothing, and the result says what was ruled.
+
+        The retired memory's write is conditional on the revision it was read at. The
+        writer refuses, with nothing written, a retirement whose cited support is not a
+        counted ``for`` support of the new memory backing it as worded (§12:5); one
+        whose cited support ranks below the retired memory's standing (ADR-0328 §6:5);
+        one citing a confirmation where ADR-0328 §4:6 does not let this ingest retire
+        that memory — an ``ASSERTED`` memory only where the proposal's confirmation
+        genuinely covers it (ADR-0078 §5b), a ``DERIVED`` or ``ATTESTED`` one always
+        (ADR-0079 §3); and one §5 refuses on the retired memory as :meth:`apply` would.
 
         **What a ``SUPERSEDE`` retires** is the write path's law read through
         ADR-0328 §12: the target and every other conflict whose band is retirable —
@@ -2042,6 +2080,32 @@ class MemoryWriter(Protocol):
             MemoryStoreConflictError: If the successor's id names a stored record.
             MemoryStoreError: If any other rule refuses the operation, or a store
                 failure. Nothing is written.
+        """
+        ...
+
+    async def record_use(self, memory: Memory, entry: TrackRecordEntry) -> None:
+        """Record one track-record entry on one stored memory (ADR-0329 §14:4).
+
+        Writes ``memory`` with ``entry`` added to its track record, conditionally on
+        the revision ``memory`` was read at (ADR-0219 §2), so a memory another writer
+        moved in between is refused rather than overwritten. Where ``memory`` already
+        carries an entry for ``entry``'s episode, nothing changes and it is not an error
+        (ADR-0328 §8:3), the entry already there keeping its fields.
+
+        An entry is not an operation and not a support (ADR-0328 §5:2, §8:4): nothing
+        but the track record changes — no support, operation, status, validity, open
+        question, placement or topic — so the memory's standing is what it was.
+
+        Args:
+            memory: The stored memory, as read, revision and all.
+            entry: The entry to record.
+
+        Raises:
+            MemoryStoreStaleError: If the stored memory is not the one read: its
+                revision moved, or it is gone. Nothing is written; re-read and
+                re-decide.
+            MemoryStoreError: If ``memory`` is not one a store returned (it carries
+                no revision), or a store failure. Nothing is written.
         """
         ...
 

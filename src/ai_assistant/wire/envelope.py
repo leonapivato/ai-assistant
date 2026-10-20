@@ -2655,7 +2655,13 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``EpisodicMemory.processing_record`` name the ``memory`` kind (§2:5). A peer at
 #:     109 refuses the new fields as extra and the new member as unknown (ADR-0124
 #:     §9:2).
-PROTOCOL_VERSION: Final[int] = 110
+#: 111: ADR-0329 §9:7 advances the version once for the observer's inference, on this
+#:     ground: ``SupportOrigin`` gains ``observer_inference`` and ``SupportView.part``
+#:     the part of that name, carried on ``Belief.supports`` by ``belief``. A peer at 110
+#:     refuses the new member as unknown (ADR-0124 §9:2). ``MemoryWriterName`` gains
+#:     ``observer`` and ``MemoryUpdateProposal`` ``retiring``, neither carried by the
+#:     wire, and the method set does not move.
+PROTOCOL_VERSION: Final[int] = 111
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

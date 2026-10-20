@@ -4311,6 +4311,7 @@ const ORIGIN_WORDS = {
   remembered_over_outside: "something I chose to remember, over outside content",
   legacy: "a record kept before memories had supports",
   legacy_outside: "a record kept before memories had supports, resting on outside content",
+  observer_inference: "my inference from the other supports",
 };
 
 // That some of its warrant came from outside, or nothing (ADR-0189 §4, ADR-0328 §12).

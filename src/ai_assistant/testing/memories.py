@@ -28,6 +28,7 @@ from ai_assistant.core.types import (
     MemoryOperationKind,
     MemorySupport,
     MemoryWriterName,
+    ObserverInferencePart,
     QuestionPart,
     ReadingCertainty,
     RememberCallPart,
@@ -43,6 +44,7 @@ __all__ = [
     "AT",
     "HELD_EPISODE",
     "confirmed_support",
+    "inference_support",
     "legacy_support",
     "memory",
     "memory_in_band",
@@ -264,6 +266,42 @@ def legacy_support(
     )
 
 
+def inference_support(
+    episode: str = HELD_EPISODE,
+    *,
+    when: datetime | None = AT,
+    added_at: datetime = AT,
+    direction: SupportDirection = SupportDirection.FOR,
+    how_sure: ReadingCertainty | None = ReadingCertainty.LIKELY,
+) -> MemorySupport:
+    """A support that is an observer's inference: "inference", not outside (ADR-0329 §9:7).
+
+    Added by the observer, carrying no source details. ``when`` stands for the
+    ``occurred_at`` of the episode whose processing drew it, which the writer checks
+    against the stored episode.
+
+    Args:
+        episode: The episode whose processing drew it.
+        when: That episode's ``occurred_at``.
+        added_at: When the support was added.
+        direction: ``for``, backing the claim as worded, or ``against``.
+        how_sure: How sure the commit step's reading was.
+
+    Returns:
+        The support.
+    """
+    return MemorySupport(
+        points_at=ObserverInferencePart(episode=episode),
+        origin=SupportOrigin.OBSERVER_INFERENCE,
+        direction=direction,
+        backs_as_worded=direction is SupportDirection.FOR,
+        how_sure=how_sure,
+        when=when,
+        added_at=added_at,
+        added_by=MemoryWriterName.OBSERVER,
+    )
+
+
 def support_with_origin(  # noqa: PLR0911 — one arm per part §4's origin table names
     origin: SupportOrigin,
     *,
@@ -331,6 +369,8 @@ def support_with_origin(  # noqa: PLR0911 — one arm per part §4's origin tabl
                 when=when,
                 added_at=added_at,
             )
+        case SupportOrigin.OBSERVER_INFERENCE:
+            return inference_support(episode, when=when, added_at=added_at)
         case _:  # pragma: no cover - exhaustive
             assert_never(origin)
 

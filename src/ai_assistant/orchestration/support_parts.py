@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     InputPart,
     LegacyPart,
     Memory,
+    ObserverInferencePart,
     PlanningRound,
     RecordedSpeechInput,
     RecordedTextInput,
@@ -54,10 +55,17 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "INFERENCE_CONTENT",
     "episodes_to_read",
     "part_content",
     "remember_activations",
 ]
+
+
+#: What an observer's inference resolves to while its episode is held (ADR-0329 §9:7).
+#: The part points at no text of the episode — the inference is the observer's reading
+#: of the other supports added with it — so it is said for what it is, never as gone.
+INFERENCE_CONTENT: Final = "my reading of the supports beside it, drawn looking back"
 
 
 def episodes_to_read(memories: Iterable[Memory]) -> tuple[str, ...]:
@@ -111,7 +119,7 @@ def remember_activations(
     return tuple(wanted)
 
 
-def part_content(  # noqa: PLR0911 — one arm per part §4's part table names
+def part_content(  # noqa: C901, PLR0911 — one arm per part §4's table names, and §9:7's
     part: SupportPart,
     *,
     episodes: Mapping[str, EpisodicMemory],
@@ -153,6 +161,8 @@ def part_content(  # noqa: PLR0911 — one arm per part §4's part table names
             if effect.activation_id != processing.activation_id or effect.round is None:
                 return None
             return _remembered(_round(processing, effect.round), effect)
+        case ObserverInferencePart():
+            return None if episodes.get(part.episode) is None else INFERENCE_CONTENT
         case _:  # pragma: no cover - exhaustive over the discriminated union
             assert_never(part)
 
