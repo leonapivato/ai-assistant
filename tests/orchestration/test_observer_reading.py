@@ -47,6 +47,7 @@ from ai_assistant.core.types import (
     StoryActor,
     StoryMember,
     StoryMemberKind,
+    StoryNoteAuthor,
     StorySummaryDraft,
     StorySummaryLine,
     SupportOrigin,
@@ -136,6 +137,75 @@ async def test_a_round_message_is_outside_where_the_activation_read_outside_cont
     assert written.origin is SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE
     assert evidence.part == EvidenceItemPart(episode=address("read"), digest=0, item=0)
     assert (evidence.origin, evidence.question) == (SupportOrigin.EVIDENCE, "What does it say?")
+
+
+async def _note(harness: Harness, story_id: str, *, outside: bool) -> str:
+    """A note planning wrote on ``story_id``, marked or not; its label's id."""
+    written = await harness.stories.append_note(
+        story_id,
+        "Pack light.",
+        author=StoryNoteAuthor.PLANNING,
+        written_during="writer",
+        outside=outside,
+    )
+    assert written.note is not None
+    return str(written.note.note_id)
+
+
+def _shown_note(activation_id: str, note_id: str, *, minutes: int) -> EpisodicMemory:
+    """An episode whose one round was shown one story note, under ``N1``."""
+    return episode(
+        activation_id,
+        at=AT - timedelta(minutes=minutes),
+        rounds=(said("r1", "Noted."),),
+        labels=(PlanningLabel(label="N1", kind=LabelKind.NOTE, id=note_id),),
+    )
+
+
+async def test_a_story_note_shown_is_outside_content_only_where_its_mark_says() -> None:
+    """ADR-0303 §3:1, ADR-0306 §4:5, §8:5: a shown note is read by its own mark.
+
+    The mark is read from the story store wherever the note is held now, in a story the
+    activation belongs to or not, and only a note the store holds nowhere fails closed.
+    """
+    harness = Harness()
+    own = await harness.stories.create(
+        [StoryMember(kind=StoryMemberKind.ACTIVATION, id=one) for one in ("plain", "marked")],
+        actor=StoryActor.OWNER,
+    )
+    other = await harness.stories.create(
+        [StoryMember(kind=StoryMemberKind.ACTIVATION, id="trip")], actor=StoryActor.OWNER
+    )
+    assert own.story_id is not None
+    assert other.story_id is not None
+    await harness.hold(
+        episode("trip", at=AT - timedelta(minutes=9)),
+        _shown_note("plain", await _note(harness, own.story_id, outside=False), minutes=8),
+        _shown_note("marked", await _note(harness, own.story_id, outside=True), minutes=7),
+        _shown_note("elsewhere", await _note(harness, other.story_id, outside=False), minutes=6),
+        _shown_note("gone", "999", minutes=5),
+    )
+    names = ("plain", "marked", "elsewhere", "gone")
+
+    origins = {}
+    for name in names:
+        (_, message) = (await _read(harness, name)).leaving.parts
+        origins[name] = message.origin
+    again = await _reader(harness).parts_at(
+        [RoundMessagePart(episode=address(name), round="r1") for name in names]
+    )
+    payload = json.dumps((await _read(harness, "plain")).payload()["leaving"])
+
+    assert origins == {
+        "plain": SupportOrigin.ASSISTANT_MESSAGE,
+        "marked": SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE,
+        "elsewhere": SupportOrigin.ASSISTANT_MESSAGE,
+        "gone": SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE,
+    }
+    assert {one.episode: one.origin for one in again.parts.values()} == {
+        address(name): origin for name, origin in origins.items()
+    }
+    assert '"outside": true' not in payload
 
 
 async def test_the_later_episodes_are_those_still_in_the_window_after_it() -> None:
