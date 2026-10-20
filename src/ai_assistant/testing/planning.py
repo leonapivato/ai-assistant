@@ -8,7 +8,8 @@ internals*
 
 It holds the seven members the phases use, and none that ADR-0309 §5 retires: the
 stop record (ADR-0297 §1), acting's effect records (ADR-0306 §6) and their read by
-question part (ADR-0321 §4:9), ``export`` and ``clear``. It deliberately
+question part (ADR-0321 §4:9), ``export`` and ``clear``; and the observer's three,
+over its observation records (ADR-0329 §16:9). It deliberately
 re-implements their rules rather than importing ``ai_assistant.planning``: importing
 it would defeat the purpose, since a consumer's tests would then pull in the very
 subsystem the fake stands in for.
@@ -37,9 +38,11 @@ from ai_assistant.core.types import (
     ActivationEffect,
     ActivationEffectClaim,
     Identifier,
+    ObservationRecord,
     PlanExport,
     QuestionPart,
     ToolOutcome,
+    UtcInstant,
 )
 from ai_assistant.testing.cancellation import SuspendableResource
 
@@ -51,6 +54,12 @@ if TYPE_CHECKING:
 #: Mirror of :data:`ai_assistant.planning.stops._ACTIVATION_ID`; see the module docstring
 #: on duplication.
 _ACTIVATION_ID: Final[TypeAdapter[Identifier]] = TypeAdapter(Identifier)
+
+#: Mirror of :data:`ai_assistant.planning.observations._INSTANT`.
+_INSTANT: Final[TypeAdapter[datetime]] = TypeAdapter(UtcInstant)
+
+#: Mirror of :data:`ai_assistant.planning.observations._REVISION_BOUND`.
+_REVISION_BOUND: Final = 2**63
 
 
 def _revalidated_activation_id(activation_id: object) -> Identifier:
@@ -179,6 +188,41 @@ def _finished_effect(
         raise PlanningError(msg) from exc
 
 
+def _written_observation(record: object, expected: object) -> tuple[ObservationRecord, int]:
+    """Return the fake's own copy of a record to write and its expectation, or refuse them.
+
+    Re-implemented here rather than imported from ``ai_assistant.planning``, for the
+    reason this module's docstring gives (ADR-0329 §16:9).
+
+    Raises:
+        PlanningError: If the record is not a valid ``ObservationRecord``, or the
+            expectation is not a non-negative integer.
+    """
+    if not isinstance(record, ObservationRecord):
+        msg = f"write_observation writes an ObservationRecord, not {type(record).__name__}"
+        raise PlanningError(msg)
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+        msg = f"expected_revision is 0 or a revision the store issued, not {expected!r}"
+        raise PlanningError(msg)
+    try:
+        return ObservationRecord.model_validate(record.model_dump()), expected
+    except ValidationError as exc:
+        msg = f"the observation record to write does not validate: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def _named_episodes(episode_ids: object) -> tuple[str, ...]:
+    """Return the episodes a read names, each once in the order named, or refuse them."""
+    if (
+        not isinstance(episode_ids, Sequence)
+        or isinstance(episode_ids, (str, bytes))
+        or not all(isinstance(one, str) for one in episode_ids)
+    ):
+        msg = "observations reads a sequence of episode ids (ADR-0329 §16:9)"
+        raise PlanningError(msg)
+    return tuple(dict.fromkeys(episode_ids))
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
@@ -202,6 +246,10 @@ class FakePlanStore:
         self._stopped: set[str] = set()
         # ADR-0306 §6: acting's effect records by id, in claim order.
         self._activation_effects: dict[str, ActivationEffect] = {}
+        # ADR-0329 §16:1: one observation record per episode, and the last revision
+        # issued, which `clear` never resets.
+        self._observations: dict[str, ObservationRecord] = {}
+        self._issued = 0
         self._clock = checked_clock(now, owner="FakePlanStore")
         self._resource = SuspendableResource()
 
@@ -351,6 +399,64 @@ class FakePlanStore:
                 if held.part is not None and held.part in named
             )
 
+    async def write_observation(
+        self, record: ObservationRecord, /, *, expected_revision: int
+    ) -> ObservationRecord:
+        """Write an episode's observation record whole, conditionally (ADR-0329 §16:9).
+
+        The held revision and the write are decided under the modelled resource, with
+        no ``await`` between.
+
+        Raises:
+            PlanningError: If the record is not valid, the expectation is not a
+                revision, or the held record does not match it.
+        """
+        written, expected = _written_observation(record, expected_revision)
+        async with self._resource.held():
+            held = self._observations.get(written.episode)
+            if (0 if held is None else held.revision) != expected:
+                found = "no record" if held is None else f"revision {held.revision}"
+                msg = (
+                    f"the plan store holds {found} for episode {written.episode!r}, and the "
+                    f"write expected {expected}; nothing is written"
+                )
+                raise PlanningError(msg)
+            if self._issued + 1 >= _REVISION_BOUND:
+                msg = "the plan store has issued every observation revision it can"
+                raise PlanningError(msg)
+            self._issued += 1
+            stored = written.model_copy(update={"revision": self._issued})
+            self._observations[stored.episode] = stored
+            return stored.model_copy(deep=True)
+
+    async def observations(self, episode_ids: Sequence[str], /) -> tuple[ObservationRecord, ...]:
+        """Return the named episodes' observation records, in the order named.
+
+        Raises:
+            PlanningError: If ``episode_ids`` is not a sequence of strings.
+        """
+        named = _named_episodes(episode_ids)
+        async with self._resource.held():
+            return tuple(
+                self._observations[one].model_copy(deep=True)
+                for one in named
+                if one in self._observations
+            )
+
+    async def observer_calls_since(self, since: datetime, /) -> int:
+        """Count the model calls the observation records hold at or after ``since``.
+
+        Raises:
+            PlanningError: If ``since`` is not a timezone-aware instant.
+        """
+        try:
+            start = _INSTANT.validate_python(since, strict=True)
+        except ValidationError as exc:
+            msg = f"observer_calls_since counts from a timezone-aware instant, not {since!r}"
+            raise PlanningError(msg) from exc
+        async with self._resource.held():
+            return sum(record.call_count(start) for record in self._observations.values())
+
     async def export(self) -> PlanExport:
         """Return a portable, internally consistent snapshot — under the resource (#397).
 
@@ -366,18 +472,24 @@ class FakePlanStore:
                 activation_effects=tuple(
                     held.model_copy(deep=True) for held in self._activation_effects.values()
                 ),
+                # ADR-0329 §16:9: every observation record, by episode id.
+                observations=tuple(
+                    self._observations[one].model_copy(deep=True)
+                    for one in sorted(self._observations)
+                ),
             )
 
     async def clear(self) -> int:
-        """Delete every stop and effect record, returning the number removed.
+        """Delete every stop, effect and observation record, returning the number removed.
 
         This store holds no execution, so no step is ever live and nothing refuses
-        the erase.
+        the erase. The revision issuer is kept (ADR-0329 §16:9).
         """
         async with self._resource.held():
-            removed = len(self._stopped) + len(self._activation_effects)
+            removed = len(self._stopped) + len(self._activation_effects) + len(self._observations)
             self._stopped.clear()
             self._activation_effects.clear()
+            self._observations.clear()
         return removed
 
 

@@ -7,7 +7,8 @@ be built against a real store without a data directory.
 It implements the seven members the phases use, and none that ADR-0309 §5 retires: the
 stop record (ADR-0297 §1), the activation effect records (ADR-0306 §6) and their read
 by question part (ADR-0321 §4:9), and the ADR-0004 data-rights operations
-(``export``/``clear``). It is **not persistent**: the contract is resumable, this
+(``export``/``clear``); and the observer's three, over its observation records
+(ADR-0329 §16:9). It is **not persistent**: the contract is resumable, this
 implementation is not, and that gap is named in ADR-0014 §5 rather than hidden.
 :class:`~ai_assistant.planning.sqlite_store.SqlitePlanStore` is the durable one.
 """
@@ -19,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import PlanningError
-from ai_assistant.core.types import ActivationEffectClaim, PlanExport
+from ai_assistant.core.types import ActivationEffectClaim, ObservationRecord, PlanExport
 from ai_assistant.planning.activation_effects import (
     checked_effect_id,
     decide_activation_claim,
@@ -28,6 +29,14 @@ from ai_assistant.planning.activation_effects import (
     requested_activations,
     requested_parts,
     revalidated_claim,
+)
+from ai_assistant.planning.observations import (
+    checked_expected_revision,
+    checked_observation,
+    checked_since,
+    decide_observation_write,
+    requested_episodes,
+    stamped,
 )
 from ai_assistant.planning.stops import revalidated_activation_id
 
@@ -63,6 +72,11 @@ class InMemoryPlanStore:
         # ADR-0306 §6: acting's effect records by id. A dict keeps insertion order,
         # which is claim order, and nothing removes one but `clear`.
         self._activation_effects: dict[str, ActivationEffect] = {}
+        # ADR-0329 §16:1: one observation record per episode, by its id.
+        self._observations: dict[str, ObservationRecord] = {}
+        # The last revision issued. Never reset, `clear` included: an issuer reset by
+        # it would reissue a stamp a writer may still hold (ADR-0329 §16:9).
+        self._issued = 0
         self._clock = checked_clock(now, owner="InMemoryPlanStore")
 
     def _now(self) -> datetime:
@@ -172,12 +186,57 @@ class InMemoryPlanStore:
             if held.part is not None and held.part in named
         )
 
+    async def write_observation(
+        self, record: ObservationRecord, /, *, expected_revision: int
+    ) -> ObservationRecord:
+        """Write an episode's observation record whole, conditionally (ADR-0329 §16:9).
+
+        Decided and written with no ``await`` between, which is this store's
+        indivisible step.
+
+        Raises:
+            PlanningError: If the record is not valid, the expectation is not a
+                revision, or the held record does not match it.
+        """
+        written = checked_observation(record)
+        expected = checked_expected_revision(expected_revision)
+        held = self._observations.get(written.episode)
+        decide_observation_write(
+            written.episode, held=None if held is None else held.revision, expected=expected
+        )
+        stored = stamped(written, self._issued + 1)
+        self._issued = stored.revision
+        self._observations[stored.episode] = stored
+        return stored.model_copy(deep=True)
+
+    async def observations(self, episode_ids: Sequence[str], /) -> tuple[ObservationRecord, ...]:
+        """Return the named episodes' observation records, in the order named.
+
+        Raises:
+            PlanningError: If ``episode_ids`` is not a sequence of strings.
+        """
+        return tuple(
+            self._observations[one].model_copy(deep=True)
+            for one in requested_episodes(episode_ids)
+            if one in self._observations
+        )
+
+    async def observer_calls_since(self, since: datetime, /) -> int:
+        """Count the model calls the observation records hold at or after ``since``.
+
+        Raises:
+            PlanningError: If ``since`` is not a timezone-aware instant.
+        """
+        start = checked_since(since)
+        return sum(record.call_count(start) for record in self._observations.values())
+
     async def export(self) -> PlanExport:
         """Return a portable, internally consistent snapshot (ADR-0004 §6).
 
-        It carries what this store holds: the stop records and the activation effect
-        records. The sections ADR-0309 §5 retired (goals, plans, executions,
-        attempts, questions, evidence and effect rows) left the document with them.
+        It carries what this store holds: the stop records, the activation effect
+        records and the observation records. The sections ADR-0309 §5 retired (goals,
+        plans, executions, attempts, questions, evidence and effect rows) left the
+        document with them.
 
         Raises:
             PlanningError: If the injected clock's reading is not conforming
@@ -192,15 +251,20 @@ class InMemoryPlanStore:
             activation_effects=tuple(
                 held.model_copy(deep=True) for held in self._activation_effects.values()
             ),
+            # ADR-0329 §16:9: every observation record, by episode id.
+            observations=tuple(
+                self._observations[one].model_copy(deep=True) for one in sorted(self._observations)
+            ),
         )
 
     async def clear(self) -> int:
-        """Delete every stop and effect record, returning the number removed.
+        """Delete every stop, effect and observation record, returning the number removed.
 
         This store holds no execution, so no step is ever live and nothing refuses
-        the erase.
+        the erase. The revision issuer is kept (ADR-0329 §16:9).
         """
-        removed = len(self._stopped) + len(self._activation_effects)
+        removed = len(self._stopped) + len(self._activation_effects) + len(self._observations)
         self._stopped.clear()
         self._activation_effects.clear()
+        self._observations.clear()
         return removed

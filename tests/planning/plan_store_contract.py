@@ -10,8 +10,9 @@ records (ADR-0306 §6) independently — the fake cannot import the subsystem it
 in for — so this is what stops them drifting. It asserts only behaviour the
 *contract* guarantees, never how a given store keys its ids.
 
-It pins the members the phases use. The members ADR-0309 §5 retired have left the
-Protocol and every store, so nothing here pins them.
+It pins the members the phases use, and the observer's three over its observation
+records (ADR-0329 §16:9). The members ADR-0309 §5 retired have left the Protocol and
+every store, so nothing here pins them.
 
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 ``Test``-prefixed subclass, never the abstract base directly.
@@ -20,7 +21,7 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
@@ -29,6 +30,20 @@ from ai_assistant.core.errors import ClaimStopped, PlanningError
 from ai_assistant.core.types import (
     ActivationEffect,
     ActivationEffectClaim,
+    EvidenceItemPart,
+    FindingOutcome,
+    FindingUnwritten,
+    InputPart,
+    MemoryDecisionKind,
+    MemoryOperationKind,
+    ObservationAttempt,
+    ObservationAttemptEnd,
+    ObservationFinding,
+    ObservationRecord,
+    ObservationState,
+    ObservationWrite,
+    ObserverCall,
+    ObserverStep,
     QuestionPart,
     ToolOutcome,
 )
@@ -93,6 +108,69 @@ def _message(effect_id: str, *, activation: str = "act-1") -> ActivationEffect:
     """A message's effect record as claimed, with no outcome and no position."""
     return ActivationEffect(
         id=effect_id, activation_id=activation, round="r1", place="c-1", claimed_at=_WHEN
+    )
+
+
+def _observation(
+    episode: str = "activation:act-1",
+    *,
+    calls: tuple[datetime, ...] = (_WHEN,),
+    state: ObservationState = ObservationState.PROCESSED,
+) -> ObservationRecord:
+    """An observation record as the observer writes one (ADR-0329 §16:1).
+
+    One attempt, which made a scout call and a commit call per later instant in
+    ``calls``, and two findings: one written, creating a memory and adding a support,
+    and one that wrote nothing. A waiting record's second finding has no outcome yet.
+    """
+    first, *rest = calls or (_WHEN,)
+    made = tuple(
+        ObserverCall(step=ObserverStep.SCOUT if index == 0 else ObserverStep.COMMIT, at=at)
+        for index, at in enumerate(calls)
+    )
+    done = state is not ObservationState.WAITING
+    return ObservationRecord(
+        episode=episode,
+        state=state,
+        attempts=(
+            ObservationAttempt(
+                started_at=min((first, *rest)),
+                calls=made,
+                end=ObservationAttemptEnd.FINISHED if done else ObservationAttemptEnd.FAILED,
+            ),
+        ),
+        next_attempt_at=None if done else _WHEN + timedelta(minutes=5),
+        findings=(
+            ObservationFinding(
+                id="f1",
+                episode=episode,
+                claim="The user's sister is called Ada.",
+                rests_on=(InputPart(episode=episode, message=0),),
+                candidate="effect-remember",
+                outcome=FindingOutcome(
+                    at=_WHEN,
+                    ruling=MemoryDecisionKind.ACCEPT,
+                    writes=(
+                        ObservationWrite(
+                            memory="memory-ada",
+                            operations=(
+                                MemoryOperationKind.CREATE,
+                                MemoryOperationKind.ADD_SUPPORT,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            ObservationFinding(
+                id="f2",
+                episode=episode,
+                claim="The report said the flight is delayed.",
+                rests_on=(EvidenceItemPart(episode=episode, digest=0, item=1),),
+                outcome=(
+                    FindingOutcome(at=_WHEN, unwritten=FindingUnwritten.NOT_KEPT) if done else None
+                ),
+            ),
+        ),
     )
 
 
@@ -291,6 +369,70 @@ class _FinishActivationEffectOp:
         assert held.outcome is ToolOutcome.FAILED
 
 
+class _WriteObservationOp:
+    """The ``write_observation`` write (ADR-0329 §16:9), on two episodes."""
+
+    name = "write_observation"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Nothing: a first write names no record the store must already hold."""
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Write episode A's record — the call that is cancelled."""
+        return store.write_observation(_observation("episode-A"), expected_revision=0)
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Write episode B's record concurrently."""
+        return store.write_observation(_observation("episode-B"), expected_revision=0)
+
+    async def verify(self, store: PlanStore) -> None:
+        """Episode B's record landed whole; the store still serves reads."""
+        (held,) = await store.observations(["episode-B"])
+        assert held.findings == _observation("episode-B").findings
+
+
+class _ObservationReadOp(_ReadOp):
+    """A read of the observation records, seeded with one beside the effect records."""
+
+    async def prepare(self, store: PlanStore) -> None:
+        """The effect records and stop the other reads see, and one observation record."""
+        await super().prepare(store)
+        await store.write_observation(_observation("episode-A"), expected_revision=0)
+
+    async def verify(self, store: PlanStore) -> None:
+        """The observation record is still whole, and so is the rest."""
+        await super().verify(store)
+        assert [one.episode for one in await store.observations(["episode-A"])] == ["episode-A"]
+
+
+class _ObservationsOp(_ObservationReadOp):
+    """``observations`` — the read by episode id, its own lock site (ADR-0329 §16:9)."""
+
+    name = "observations"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read the record — the call that is cancelled."""
+        return store.observations(["episode-A"])
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read it again concurrently."""
+        return store.observations(["episode-A"])
+
+
+class _ObserverCallsSinceOp(_ObservationReadOp):
+    """``observer_calls_since`` — the budget's count, its own lock site (ADR-0329 §16:9)."""
+
+    name = "observer_calls_since"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Count the calls — the call that is cancelled."""
+        return store.observer_calls_since(_WHEN)
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Count them again concurrently."""
+        return store.observer_calls_since(_WHEN)
+
+
 class _ActivationEffectsOp(_ReadOp):
     """``activation_effects`` — a read of acting's records, its own lock site."""
 
@@ -322,6 +464,10 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _ActivationEffectsOp,
     # ADR-0321 §4:9's read by question part: one more read that acquires the resource.
     _PartEffectsOp,
+    # ADR-0329 §16:9's three members: the conditional write, and two reads.
+    _WriteObservationOp,
+    _ObservationsOp,
+    _ObserverCallsSinceOp,
 )
 
 
@@ -407,13 +553,14 @@ class PlanStoreContract:
         await store.record_stop("act-1")
 
         export = await store.export()
-        assert export.schema_version == 20
+        assert export.schema_version == 21
         # ADR-0309 §5: the old path's sections left the document.
         assert set(export.model_dump()) == {
             "schema_version",
             "exported_at",
             "stopped_activations",
             "activation_effects",
+            "observations",
         }
         assert sorted(export.stopped_activations) == ["act-1", "act-2"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
@@ -846,7 +993,7 @@ class PlanStoreContract:
         await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
 
         export = await store.export()
-        assert export.schema_version == 20
+        assert export.schema_version == 21
         assert [one.id for one in export.activation_effects] == ["e1", "m1"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -862,6 +1009,246 @@ class PlanStoreContract:
 
         assert (await store.activation_effects(["act-1"]))[0].capability == "book_stay"
         assert (await store.export()).activation_effects[0].capability == "book_stay"
+
+    # --- ADR-0329 §16: the observation record ------------------------------
+
+    async def test_a_first_write_stores_the_record_whole_at_a_fresh_revision(
+        self, store: PlanStore
+    ) -> None:
+        """§16:9: the record is written whole, and the store stamps its revision."""
+        record = _observation().model_copy(update={"revision": 999})
+
+        stored = await store.write_observation(record, expected_revision=0)
+
+        assert stored.revision > 0
+        assert stored.revision != 999, "a submitted revision is discarded"
+        assert stored == record.model_copy(update={"revision": stored.revision})
+        assert await store.observations([record.episode]) == (stored,)
+
+    async def test_a_store_holding_none_reads_no_record(self, store: PlanStore) -> None:
+        """An episode never attempted has no record, and the read says so by omission."""
+        assert await store.observations(["activation:never"]) == ()
+        assert await store.observations([]) == ()
+
+    async def test_a_write_under_the_held_revision_replaces_the_record(
+        self, store: PlanStore
+    ) -> None:
+        """The writer's expectation met: the new record lands at a new revision."""
+        waiting = await store.write_observation(
+            _observation(state=ObservationState.WAITING), expected_revision=0
+        )
+
+        processed = await store.write_observation(
+            _observation(), expected_revision=waiting.revision
+        )
+
+        assert processed.revision not in {0, waiting.revision}
+        assert processed.state is ObservationState.PROCESSED
+        assert await store.observations([processed.episode]) == (processed,)
+
+    @pytest.mark.parametrize(
+        "expectation",
+        ["none-where-one-is-held", "a-stale-revision", "one-where-none-is-held"],
+    )
+    async def test_a_write_whose_expectation_does_not_hold_writes_nothing(
+        self, store: PlanStore, expectation: str
+    ) -> None:
+        """§16:6's backstop: a writer that read another state lands nothing."""
+        held = await store.write_observation(
+            _observation(state=ObservationState.WAITING), expected_revision=0
+        )
+        episode, expected = {
+            "none-where-one-is-held": (held.episode, 0),
+            "a-stale-revision": (held.episode, held.revision + 1),
+            "one-where-none-is-held": ("activation:other", held.revision),
+        }[expectation]
+
+        with pytest.raises(PlanningError):
+            await store.write_observation(_observation(episode), expected_revision=expected)
+
+        assert await store.observations([held.episode, "activation:other"]) == (held,)
+
+    async def test_two_writes_on_one_expectation_admit_one(self, store: PlanStore) -> None:
+        """Two writers that read one state: exactly one lands, the other is refused."""
+        held = await store.write_observation(
+            _observation(state=ObservationState.WAITING), expected_revision=0
+        )
+
+        results = await asyncio.gather(
+            store.write_observation(_observation(), expected_revision=held.revision),
+            store.write_observation(
+                _observation(state=ObservationState.STUCK), expected_revision=held.revision
+            ),
+            return_exceptions=True,
+        )
+
+        landed = [one for one in results if isinstance(one, ObservationRecord)]
+        refused = [one for one in results if isinstance(one, PlanningError)]
+        assert len(landed) == 1
+        assert len(refused) == 1
+        assert await store.observations([held.episode]) == (landed[0],)
+
+    async def test_no_revision_is_issued_twice_across_a_clear(self, store: PlanStore) -> None:
+        """A clear erases the records and keeps the issuer, so a stale read stays stale."""
+        before = await store.write_observation(_observation(), expected_revision=0)
+        await store.clear()
+
+        after = await store.write_observation(_observation(), expected_revision=0)
+
+        assert after.revision != before.revision
+        with pytest.raises(PlanningError):
+            await store.write_observation(_observation(), expected_revision=before.revision)
+
+    async def test_revisions_differ_across_episodes(self, store: PlanStore) -> None:
+        """The issuer is the store's, not a per-episode count."""
+        one = await store.write_observation(_observation("activation:a"), expected_revision=0)
+        two = await store.write_observation(_observation("activation:b"), expected_revision=0)
+
+        assert one.revision != two.revision
+
+    async def test_the_read_answers_in_the_order_named_each_once(self, store: PlanStore) -> None:
+        """Records come back in the order their episodes are named, and a repeat once."""
+        a = await store.write_observation(_observation("activation:a"), expected_revision=0)
+        b = await store.write_observation(_observation("activation:b"), expected_revision=0)
+
+        read = await store.observations(
+            ["activation:b", "activation:none", "activation:a", "activation:b"]
+        )
+
+        assert read == (b, a)
+
+    async def test_the_read_answers_however_many_episodes_it_names(self, store: PlanStore) -> None:
+        """The observer may ask after every due episode at once: no count is refused."""
+        held = await store.write_observation(_observation("activation:2999"), expected_revision=0)
+        named = [f"activation:{index}" for index in range(3000)]
+
+        assert await store.observations(named) == (held,)
+
+    @pytest.mark.parametrize(
+        "episodes", ["activation:a", [1], b"activation:a"], ids=["str", "not-str", "bytes"]
+    )
+    async def test_the_read_takes_a_sequence_of_episode_ids(
+        self, store: PlanStore, episodes: object
+    ) -> None:
+        """A bare string is not a sequence of episode ids, and nor is anything else."""
+        with pytest.raises(PlanningError):
+            await store.observations(episodes)  # type: ignore[arg-type]  # the refusal under test
+
+    @pytest.mark.parametrize(
+        "record",
+        [
+            "not a record",
+            ObservationRecord.model_construct(episode="", state=ObservationState.PROCESSED),
+        ],
+        ids=["not-a-record", "unvalidated"],
+    )
+    async def test_a_write_of_no_valid_record_is_refused(
+        self, store: PlanStore, record: object
+    ) -> None:
+        """The record is validated, not trusted, and nothing is written."""
+        with pytest.raises(PlanningError):
+            await store.write_observation(record, expected_revision=0)  # type: ignore[arg-type]  # the refusal under test
+
+        assert (await store.export()).observations == ()
+
+    @pytest.mark.parametrize("expected", [-1, True, "0", None])
+    async def test_a_write_takes_a_revision_as_its_expectation(
+        self, store: PlanStore, expected: object
+    ) -> None:
+        """``expected_revision`` is 0 or an issued revision, and nothing else."""
+        with pytest.raises(PlanningError):
+            await store.write_observation(_observation(), expected_revision=expected)  # type: ignore[arg-type]  # the refusal under test
+
+        assert (await store.export()).observations == ()
+
+    async def test_the_budget_counts_every_call_at_or_after_the_instant(
+        self, store: PlanStore
+    ) -> None:
+        """§16:9: the calls each attempt made, across records, from ``since`` inclusive."""
+        later = _WHEN + timedelta(hours=1)
+        await store.write_observation(
+            _observation("activation:a", calls=(_WHEN, later)), expected_revision=0
+        )
+        await store.write_observation(
+            _observation(
+                "activation:b",
+                calls=(later, later + timedelta(seconds=1)),
+                state=ObservationState.WAITING,
+            ),
+            expected_revision=0,
+        )
+        await store.write_observation(
+            ObservationRecord(episode="activation:c", state=ObservationState.SKIPPED),
+            expected_revision=0,
+        )
+
+        assert await store.observer_calls_since(_WHEN) == 4
+        assert await store.observer_calls_since(later) == 3
+        assert await store.observer_calls_since(later + timedelta(microseconds=1)) == 1
+        assert await store.observer_calls_since(later + timedelta(days=1)) == 0
+
+    async def test_a_rewritten_record_counts_only_the_calls_it_now_holds(
+        self, store: PlanStore
+    ) -> None:
+        """The count reads the records as they stand, not every write ever made."""
+        held = await store.write_observation(
+            _observation(calls=(_WHEN, _WHEN + timedelta(hours=2))), expected_revision=0
+        )
+        await store.write_observation(_observation(calls=(_WHEN,)), expected_revision=held.revision)
+
+        assert await store.observer_calls_since(_WHEN + timedelta(hours=1)) == 0
+        assert await store.observer_calls_since(_WHEN) == 1
+
+    @pytest.mark.parametrize(
+        "since",
+        [_WHEN.replace(tzinfo=None), "2026-01-01T00:00:00Z", None],
+        ids=["naive", "text", "none"],
+    )
+    async def test_the_budget_counts_from_an_aware_instant(
+        self, store: PlanStore, since: object
+    ) -> None:
+        """A naive instant names no moment, so the count refuses it."""
+        with pytest.raises(PlanningError):
+            await store.observer_calls_since(since)  # type: ignore[arg-type]  # the refusal under test
+
+    async def test_the_export_carries_the_observations_and_clear_erases_them(
+        self, store: PlanStore
+    ) -> None:
+        """§16:9: the export carries every record by episode id; clear erases and counts them."""
+        b = await store.write_observation(_observation("activation:b"), expected_revision=0)
+        a = await store.write_observation(_observation("activation:a"), expected_revision=0)
+        await store.record_stop("act-stopped")
+
+        export = await store.export()
+        assert export.schema_version == 21
+        assert export.observations == (a, b)
+        assert type(export).model_validate_json(export.model_dump_json()) == export
+
+        assert await store.clear() == 3
+        assert (await store.export()).observations == ()
+        assert await store.observations(["activation:a", "activation:b"]) == ()
+        assert await store.observer_calls_since(_WHEN) == 0
+
+    async def test_a_record_read_or_returned_cannot_edit_stored_state(
+        self, store: PlanStore
+    ) -> None:
+        """Every record handed out is a snapshot, the write's own answer included."""
+        stored = await store.write_observation(_observation(), expected_revision=0)
+        stored.__dict__["state"] = ObservationState.STUCK
+        (read,) = await store.observations([stored.episode])
+        read.__dict__["state"] = ObservationState.STUCK
+        (await store.export()).observations[0].__dict__["state"] = ObservationState.STUCK
+
+        (again,) = await store.observations([stored.episode])
+        assert again.state is ObservationState.PROCESSED
+
+    async def test_a_record_handed_in_cannot_edit_what_was_written(self, store: PlanStore) -> None:
+        """The store writes its own copy of the record it was handed."""
+        record = _observation()
+        stored = await store.write_observation(record, expected_revision=0)
+        record.__dict__["state"] = ObservationState.STUCK
+
+        assert (await store.observations([stored.episode]))[0].state is ObservationState.PROCESSED
 
     # --- cancellation (ADR-0060) -------------------------------------------
 
