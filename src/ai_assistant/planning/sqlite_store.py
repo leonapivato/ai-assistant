@@ -107,13 +107,23 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: transaction, carrying every stop and effect record as it stands (§4:3, §4:4). The
 #: refusal of 0 to 11 stands under ADR-0326 §5:1, as a refusal of files written before
 #: that deploy.
-_SCHEMA_VERSION = 13
+#:
+#: **Version 14 is ADR-0329 §16:1's carry across a restart** (#3205): an observation
+#: record's findings gain ``supply`` and ``written``, the placement meet of what the runs
+#: over a finding were supplied (§12:6) and what a commit of it wrote before it failed
+#: (§16:4). No column changes, since the record is the blob, but the label moves all
+#: the same: a build reading 13 refuses the fields as extra, so it must refuse a file
+#: that may hold them at the open (ADR-0326 §5:3) rather than at the first read. **A
+#: version 13 file is upgraded in place** (ADR-0326 §4:1), and every finding it holds
+#: reads back with both fields empty, which is what they are on a finding recorded
+#: before them.
+_SCHEMA_VERSION = 14
 
 #: The labels :meth:`SqlitePlanStore._verify_or_init_meta` upgrades from, each to the
 #: next, in order (ADR-0326 §4:5). Every label from ADR-0309 §6:1's deploy to the one
 #: before :data:`_SCHEMA_VERSION` is here, and none is removed without the owner's
 #: ruling (§4:6).
-_UPGRADABLE: tuple[int, ...] = (12,)
+_UPGRADABLE: tuple[int, ...] = (12, 13)
 
 #: The ``meta`` key holding the last observation revision issued (ADR-0329 §16:9). It
 #: lives beside the records rather than being derived from them, because a revision is
@@ -514,6 +524,11 @@ class SqlitePlanStore:
         the open's ``CREATE TABLE IF NOT EXISTS`` creates, empty, in this same
         transaction; no stop or effect record changes, and the observation issuer is
         absent, which reads as nothing issued. So the step is the label alone.
+
+        **13 → 14** (ADR-0329 §16:1, #3205): a finding gains ``supply`` and ``written``,
+        each with an empty default, and the record is its blob, so every record the file
+        holds reads back as it was with both empty. No row is rewritten, and the step is
+        the label alone again.
         """
         for step in range(held, _SCHEMA_VERSION):
             conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(step + 1),))

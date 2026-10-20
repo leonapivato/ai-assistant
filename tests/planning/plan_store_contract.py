@@ -44,6 +44,9 @@ from ai_assistant.core.types import (
     ObservationWrite,
     ObserverCall,
     ObserverStep,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     QuestionPart,
     ToolOutcome,
 )
@@ -553,7 +556,7 @@ class PlanStoreContract:
         await store.record_stop("act-1")
 
         export = await store.export()
-        assert export.schema_version == 21
+        assert export.schema_version == 22
         # ADR-0309 §5: the old path's sections left the document.
         assert set(export.model_dump()) == {
             "schema_version",
@@ -993,7 +996,7 @@ class PlanStoreContract:
         await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
 
         export = await store.export()
-        assert export.schema_version == 21
+        assert export.schema_version == 22
         assert [one.id for one in export.activation_effects] == ["e1", "m1"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -1220,7 +1223,7 @@ class PlanStoreContract:
         await store.record_stop("act-stopped")
 
         export = await store.export()
-        assert export.schema_version == 21
+        assert export.schema_version == 22
         assert export.observations == (a, b)
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -1228,6 +1231,62 @@ class PlanStoreContract:
         assert (await store.export()).observations == ()
         assert await store.observations(["activation:a", "activation:b"]) == ()
         assert await store.observer_calls_since(_WHEN) == 0
+
+    async def test_a_findings_carry_between_attempts_is_stored_and_read_back_whole(
+        self, store: PlanStore
+    ) -> None:
+        """§12:6, §16:4: a pending finding's supply and partial writes survive the store.
+
+        What the observer needs to commit a finding in a later attempt — the placement
+        meet of what it was supplied and what a failed commit wrote — is on the record,
+        so a store that kept the record whole keeps them for a process that never saw
+        the earlier attempt, and the export carries them (ADR-0004 §6).
+        """
+        narrowed = Placement(
+            reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=_WHEN
+        )
+        base = _observation(state=ObservationState.WAITING)
+        first, pending = base.findings
+        carried = pending.model_copy(
+            update={
+                "supply": narrowed,
+                "written": (
+                    ObservationWrite(
+                        memory="memory-partial",
+                        operations=(
+                            MemoryOperationKind.CREATE,
+                            MemoryOperationKind.RAISE_QUESTION,
+                        ),
+                    ),
+                ),
+            }
+        )
+        record = ObservationRecord.model_validate(
+            {
+                **base.model_dump(),
+                "findings": (first.model_copy(update={"supply": narrowed}), carried),
+            }
+        )
+
+        stored = await store.write_observation(record, expected_revision=0)
+
+        (read,) = await store.observations([record.episode])
+        assert read == stored == record.model_copy(update={"revision": stored.revision})
+        assert read.findings[1].supply == narrowed
+        assert read.findings[1].written == carried.written
+        export = await store.export()
+        assert export.observations == (stored,)
+        assert type(export).model_validate_json(export.model_dump_json()) == export
+
+    async def test_a_finding_with_no_carry_reads_back_with_none(self, store: PlanStore) -> None:
+        """A finding written with no supply reads back with none: never the empty meet."""
+        stored = await store.write_observation(
+            _observation(state=ObservationState.WAITING), expected_revision=0
+        )
+
+        (read,) = await store.observations([stored.episode])
+        assert [one.supply for one in read.findings] == [None, None]
+        assert [one.written for one in read.findings] == [(), ()]
 
     async def test_a_record_read_or_returned_cannot_edit_stored_state(
         self, store: PlanStore

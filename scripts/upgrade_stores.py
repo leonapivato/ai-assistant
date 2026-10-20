@@ -82,11 +82,15 @@ from ai_assistant.core.types import (
     ObservationFinding,
     ObservationRecord,
     ObservationState,
+    ObservationWrite,
     ObserverCall,
     ObserverStep,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     ProcessingReason,
     ProcessingStatus,
     Provenance,
@@ -794,6 +798,25 @@ async def _write_plans(directory: Path, moment: Moment) -> None:
                         claim="The user prefers window seats.",
                         rests_on=(InputPart(episode="activation:act-upgrade-1"),),
                     ),
+                    # §12:6, §16:4: a finding whose commit failed part-way, carrying the
+                    # supply's placement meet and what the commit wrote before failing.
+                    ObservationFinding(
+                        id="finding-upgrade-2",
+                        episode="activation:act-upgrade-1",
+                        claim="The user's sister is called Ada.",
+                        rests_on=(InputPart(episode="activation:act-upgrade-1", message=0),),
+                        supply=Placement(
+                            reach=PlacementReach.OWNER,
+                            set_by=PlacementSetter.DERIVED,
+                            set_at=moment.ago(minutes=10),
+                        ),
+                        written=(
+                            ObservationWrite(
+                                memory="memory-upgrade-ada",
+                                operations=(MemoryOperationKind.CREATE,),
+                            ),
+                        ),
+                    ),
                 ),
             ),
             expected_revision=0,
@@ -823,6 +846,35 @@ def _plans_observations_carry(records: Records) -> Records:
     record beside it.
     """
     return {**records, "observations": []}
+
+
+def _plans_finding_carry(records: Records) -> Records:
+    """What a plan store read back before #3205 reads back after it (ADR-0329 §16:1).
+
+    The upgrade from label 13 rewrites no row: every finding a record holds reads back
+    as it was, with ``supply`` and ``written`` empty, since nothing was recorded of
+    either before the fields existed. Saying so here, rather than leaning on the
+    comparison letting the head read back more, holds the head to reading them back
+    *empty* and not to whatever it might invent.
+    """
+    observations = records.get("observations")
+    if not isinstance(observations, list):
+        return records
+    return {**records, "observations": [_with_empty_carry(one) for one in observations]}
+
+
+def _with_empty_carry(record: Json) -> Json:
+    """One observation record's read-back, each finding given the empty new fields."""
+    if not isinstance(record, dict) or not isinstance(record.get("findings"), list):
+        return record
+    findings = cast("list[Json]", record["findings"])
+    return {
+        **record,
+        "findings": [
+            {**one, "supply": None, "written": []} if isinstance(one, dict) else one
+            for one in findings
+        ],
+    }
 
 
 # --- conversations.db -----------------------------------------------------------------
@@ -1296,8 +1348,8 @@ STORES: Final[tuple[Store, ...]] = (
         ("plans.db",),
         _write_plans,
         _read_plans,
-        shape=2,
-        carries={1: _plans_observations_carry},
+        shape=3,
+        carries={1: _plans_observations_carry, 2: _plans_finding_carry},
     ),
     Store("conversations", ("conversations.db",), _write_conversations, _read_conversations),
     Store("grants", ("grants.db",), _write_grants, _read_grants),

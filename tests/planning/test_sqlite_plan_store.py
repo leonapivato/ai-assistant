@@ -436,15 +436,16 @@ async def test_a_fresh_file_is_labelled_version_13_and_holds_only_its_three_tabl
 ) -> None:
     """The absolute figure's home, and the shape it labels (ADR-0329 §16).
 
-    Version 13 is the store ADR-0309 §5 leaves, its effect records carrying the question
-    part ADR-0321 §4:9 promotes, with the observation records ADR-0329 §16 adds: three
-    record tables beside ``meta``, and no table of the old path.
+    Version 14 is the store ADR-0309 §5 leaves, its effect records carrying the question
+    part ADR-0321 §4:9 promotes, with the observation records ADR-0329 §16 adds, whose
+    findings carry their supply and their writes before an outcome (#3205): three record
+    tables beside ``meta``, and no table of the old path.
     """
     path = tmp_path / "plans.db"
     SqlitePlanStore(path=path, now=_fixed_now).close()
 
-    assert sqlite_store._SCHEMA_VERSION == 13
-    assert _meta(path, "schema_version") == "13"
+    assert sqlite_store._SCHEMA_VERSION == 14
+    assert _meta(path, "schema_version") == "14"
     assert _tables(path) == {"meta", *_RECORD_TABLES}
 
 
@@ -478,7 +479,7 @@ async def test_an_older_on_disk_schema_is_refused(tmp_path: Path, version: str) 
 
 @pytest.mark.parametrize(
     "label",
-    ["10", None, "12", "13"],
+    ["10", None, "12", "14"],
     ids=[
         "as-written",
         "its-marker-deleted",

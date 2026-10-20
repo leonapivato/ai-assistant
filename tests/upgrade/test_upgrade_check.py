@@ -393,12 +393,66 @@ def test_the_plan_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> None:
         }
     (plans,) = [one for one in STORES if one.name == "plans"]
 
-    carried = plans.carries[1](base)
+    carried = plans.carries[2](plans.carries[1](base))
     head = asyncio.run(plans.read(tmp_path))
 
-    assert plans.shape == 2
+    assert plans.shape == 3
     assert carried["observations"] == []
     assert upgrade_check.compare_records("plans", carried, head) == []
+
+
+@pytest.mark.integration
+def test_the_plan_stores_finding_carry_is_what_its_upgrade_does(tmp_path: Path) -> None:
+    """#3205 (ADR-0329 §16:1): the carry from shape 2 says what the head's upgrade reads back.
+
+    Taken over the file the previous release wrote with observation records in it
+    (``tests/planning/legacy``). The base's read-back is the stop record, the effect
+    record and each observation record as that release exported them, which is the
+    stored blob; carried to shape 3, every finding gains ``supply`` and ``written``
+    empty, and every record of it is read back by this build after the upgrade — the
+    carry's empty values held to what the head actually reads, not just tolerated.
+    """
+    import shutil  # noqa: PLC0415
+
+    legacy = Path(__file__).resolve().parents[1] / "planning" / "legacy"
+    shutil.copyfile(legacy / "plans-before-observation-carry.db", tmp_path / "plans.db")
+    with sqlite3.connect(tmp_path / "plans.db") as conn:
+        base: Records = {
+            "stopped": [
+                str(one) for (one,) in conn.execute("SELECT activation_id FROM stopped_activations")
+            ],
+            **{
+                f"effect/{effect_id}": json.loads(data)
+                for effect_id, data in conn.execute("SELECT id, data FROM activation_effects")
+            },
+            "observations": [
+                json.loads(data)
+                for (data,) in conn.execute("SELECT data FROM observations ORDER BY episode_id")
+            ],
+        }
+    (plans,) = [one for one in STORES if one.name == "plans"]
+
+    carried = plans.carries[2](base)
+    head = asyncio.run(plans.read(tmp_path))
+
+    observations = carried["observations"]
+    assert isinstance(observations, list)
+    findings = [
+        one
+        for record in observations
+        if isinstance(record, dict) and isinstance(record["findings"], list)
+        for one in record["findings"]
+    ]
+    assert findings
+    assert all(isinstance(one, dict) and one["supply"] is None for one in findings)
+    assert all(isinstance(one, dict) and one["written"] == [] for one in findings)
+    assert upgrade_check.compare_records("plans", carried, head) == []
+    # And it is the carry that holds the head to empty values: a head inventing a supply
+    # differs from the carried read-back where it would pass the bare base's.
+    invented = json.loads(json.dumps(head))
+    invented["observations"][0]["findings"][0]["supply"] = {"reach": "owner"}
+    assert upgrade_check.compare_records("plans", base, invented) == []
+    assert upgrade_check.compare_records("plans", carried, invented) != []
 
 
 def test_a_snapshot_format_the_head_does_not_know_fails_the_check() -> None:

@@ -4,7 +4,9 @@ What a record holds, and the rules the type keeps so that no store can hold a re
 the observer could not have written: a finding resting on parts of episodes, from the
 episode whose record holds it; an outcome naming what was written or why nothing was;
 a processed episode whose findings each have an outcome; a skipped one with no model
-call; and the values the queue and the budget read off a record (§16:2, §16:9).
+call; what a finding carries between attempts, its supply's placement and what a failed
+commit wrote (§12:6, §16:4); and the values the queue and the budget read off a record
+(§16:2, §16:9).
 """
 
 from __future__ import annotations
@@ -32,6 +34,9 @@ from ai_assistant.core.types import (
     ObservationWrite,
     ObserverCall,
     ObserverStep,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     QuestionPart,
     RememberCallPart,
     RoundMessagePart,
@@ -114,6 +119,82 @@ def test_a_track_record_entry_belongs_to_a_reliance_finding_on_its_memory() -> N
         _finding(outcome=entry)
     with pytest.raises(ValidationError, match="reliance finding"):
         _finding(relied_on="memory-2", outcome=entry)
+
+
+# --- what a finding carries between attempts (§12:6, §16:1, §16:4) ----------------
+
+#: A supply narrowed by the derivation, as a finding's scout may have read one.
+_NARROWED = Placement(
+    reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=_AT - timedelta(hours=1)
+)
+
+
+def _partial(memory: str = "memory-1", **fields: Any) -> ObservationWrite:
+    return ObservationWrite(memory=memory, operations=(MemoryOperationKind.CREATE,), **fields)
+
+
+def test_a_finding_recorded_before_its_carry_reads_back_with_none() -> None:
+    """A finding the store held before the fields reads them empty, and the supply unknown.
+
+    ``None`` is not the meet over no record (``Placement()``): it says nothing was
+    recorded, which is what the plan store's upgrade gives a finding written before.
+    """
+    legacy = _finding().model_dump(mode="json")
+    del legacy["supply"], legacy["written"]
+
+    read = ObservationFinding.model_validate(legacy)
+
+    assert read.supply is None
+    assert read.written == ()
+
+
+def test_a_pending_finding_carries_its_supply_and_its_partial_writes() -> None:
+    """A commit that failed part-way leaves what it wrote on the finding, beside the meet."""
+    finding = _finding(supply=_NARROWED, written=(_partial(), _partial("memory-2")))
+
+    assert finding.supply == _NARROWED
+    assert [write.memory for write in finding.written] == ["memory-1", "memory-2"]
+    assert finding.outcome is None
+
+
+def test_a_finding_with_an_outcome_carries_no_partial_writes() -> None:
+    """The commit that records the outcome merges what came before into it (§16:1)."""
+    assert _finding(supply=_NARROWED, outcome=_written()).written == ()
+    with pytest.raises(ValidationError, match="merged into the outcome"):
+        _finding(written=(_partial(),), outcome=_written())
+    with pytest.raises(ValidationError, match="merged into the outcome"):
+        _finding(
+            written=(_partial(),),
+            outcome=FindingOutcome(at=_AT, unwritten=FindingUnwritten.NOT_KEPT),
+        )
+
+
+def test_a_findings_partial_writes_name_each_memory_once() -> None:
+    with pytest.raises(ValidationError, match="each memory a failed commit wrote on once"):
+        _finding(written=(_partial(), _partial()))
+
+
+def test_a_partial_track_record_entry_belongs_to_a_reliance_finding_on_its_memory() -> None:
+    """§14:1 holds of what a failed commit wrote as of what an outcome records."""
+    entry = ObservationWrite(memory="memory-1", track_record=False)
+
+    assert _finding(relied_on="memory-1", written=(entry,)).written == (entry,)
+    with pytest.raises(ValidationError, match="reliance finding"):
+        _finding(written=(entry,))
+    with pytest.raises(ValidationError, match="reliance finding"):
+        _finding(relied_on="memory-2", written=(entry,))
+
+
+def test_a_stuck_episode_keeps_what_its_failed_commits_wrote() -> None:
+    """Set aside, a pending finding's partial writes stay on the record (§16:5)."""
+    record = ObservationRecord(
+        episode=_EPISODE,
+        state=ObservationState.STUCK,
+        attempts=(_attempt(_AT, end=ObservationAttemptEnd.FAILED),),
+        findings=(_finding(supply=_NARROWED, written=(_partial(),)),),
+    )
+
+    assert record.findings[0].written == (_partial(),)
 
 
 # --- an outcome --------------------------------------------------------------------
@@ -349,8 +430,19 @@ def test_a_record_round_trips_through_json() -> None:
         ),
         revision=7,
     )
+    waiting = ObservationRecord(
+        episode=_EPISODE,
+        state=ObservationState.WAITING,
+        attempts=(_attempt(_AT, end=ObservationAttemptEnd.FAILED),),
+        findings=(
+            _finding(supply=_NARROWED, outcome=_written()),
+            _finding(id="f2", supply=Placement(), written=(_partial("memory-2"),)),
+            _finding(id="f3"),
+        ),
+    )
 
     assert ObservationRecord.model_validate_json(record.model_dump_json()) == record
+    assert ObservationRecord.model_validate_json(waiting.model_dump_json()) == waiting
 
 
 def test_a_revision_is_never_negative() -> None:
