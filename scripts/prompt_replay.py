@@ -72,9 +72,11 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast, override
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast, override
 
 from pydantic import ValidationError
+from pydantic_ai.models import infer_model
+from pydantic_ai.models.wrapper import WrapperModel
 
 from ai_assistant.app import build_engine, composition
 from ai_assistant.core.config import EmbedderKind, Settings
@@ -93,9 +95,12 @@ from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME, SOCKET_FILENAME
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable, Coroutine, Iterator, Mapping, Sequence
 
-    from pydantic_ai import models
+    from pydantic_ai import RunContext, models
+    from pydantic_ai.messages import ModelMessage, ModelResponse
+    from pydantic_ai.models import ModelRequestParameters, StreamedResponse
+    from pydantic_ai.settings import ModelSettings
     from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 
     from ai_assistant.core.prompts import PromptDeclaration
@@ -776,7 +781,7 @@ class Planned:
     """One call a run will send: one request and one candidate (§4:10).
 
     Attributes:
-        givens: The given entries it replays: one, or each entry of a call the observer
+        givens: The given entries it replays: one, or each copy of a call the observer
             wrote under several activations (§4:11).
         candidate: The candidate.
         prompt: The prompt's name, or ``None`` where the entry's cannot be named.
@@ -830,11 +835,9 @@ def plan_run(
     is one call, whose result is written under each (§4:11).
     """
     plan = Plan(entries=len(givens))
-    groups: dict[str, list[Given]] = {}
-    for given in givens:
-        groups.setdefault(_request_key(given), []).append(given)
+    groups = _calls_of(givens)
     plan.requests = len(groups)
-    for group in groups.values():
+    for group in groups:
         first = group[0]
         request = _request(first)
         if request is None:
@@ -852,17 +855,40 @@ def plan_run(
     return plan
 
 
-def _request_key(given: Given) -> str:
-    """What makes entries one call: the observer's same call under several activations.
+#: How far apart the copies of one observer call may be written: the observer writes them
+#: one after another before it sends the call, and retries an attempt no sooner than its
+#: backoff allows, which is minutes (ADR-0329 §16:4).
+COPIES_WITHIN: Final = timedelta(seconds=60)
 
-    Only the observer writes one call's given entry under several activations (ADR-0333
-    §2:9), each body naming its own episode and attempt beside the same step, request,
-    finding and prompt. Every other entry is a call of its own, and so is an observer
-    entry whose prompt key differs, so no entry is rendered from another's flags.
+
+def _calls_of(givens: Sequence[Given]) -> list[list[Given]]:
+    """The given entries grouped into the calls they record, in the order first read.
+
+    An entry is a call of its own, except that the observer writes its one call's given
+    entry under each activation it read for (ADR-0333 §2:9): those copies hold the same
+    step, request, finding and prompt key, each under a different activation, written
+    within :data:`COPIES_WITHIN` of one another. Two entries in one activation's file are
+    always two calls, as a retried attempt is.
     """
-    body = given.body
+    calls: list[list[Given]] = []
+    by_key: dict[str, list[list[Given]]] = {}
+    for given in givens:
+        key = _observer_key(given)
+        group = None if key is None else _copy_of(given, by_key.get(key, ()))
+        if group is not None:
+            group.append(given)
+            continue
+        calls.append([given])
+        if key is not None:
+            by_key.setdefault(key, []).append(calls[-1])
+    return calls
+
+
+def _observer_key(given: Given) -> str | None:
+    """What the copies of one observer call share, or ``None`` for any other entry."""
     if given.source != "observer":
-        return json.dumps([given.file, given.line])
+        return None
+    body = given.body
     held = {
         "stage": given.stage,
         "messages": body.get("messages"),
@@ -870,6 +896,30 @@ def _request_key(given: Given) -> str:
         "prompt": body.get("prompt"),
     }
     return json.dumps(held, sort_keys=True, ensure_ascii=True)
+
+
+def _copy_of(given: Given, groups: Sequence[list[Given]]) -> list[Given] | None:
+    """The call ``given`` is another activation's copy of, where there is one."""
+    at = _instant(given.recorded_at)
+    if at is None:
+        return None
+    for group in groups:
+        first = _instant(group[0].recorded_at)
+        if (
+            first is not None
+            and abs(at - first) <= COPIES_WITHIN
+            and all(one.activation_id != given.activation_id for one in group)
+        ):
+            return group
+    return None
+
+
+def _instant(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _request(given: Given) -> _Request | None:
@@ -980,13 +1030,96 @@ class Caller(Protocol):
         ...
 
 
+@dataclass(slots=True)
+class CallMeter:
+    """Model requests counted against a bound, at the request itself (§4:10, §8:2).
+
+    Counted where a model is asked, beneath every wrapper: a retry is a request, and so
+    is a repair pydantic-ai's agent sends of its own accord after an empty reply. One past
+    the bound is refused before it is sent.
+    """
+
+    bound: int
+    refusal: str
+    made: int = 0
+    refused: int = 0
+
+    def take(self) -> None:
+        """Count one request, or refuse it where the bound is reached.
+
+        Raises:
+            ModelError: The bare class, neither retryable nor routable, so no wrapper
+                tries again.
+        """
+        if self.made >= self.bound:
+            self.refused += 1
+            raise ModelError(self.refusal)
+        self.made += 1
+
+    @property
+    def spent(self) -> bool:
+        """Whether the bound is reached."""
+        return self.made >= self.bound
+
+
+class CountedModel(WrapperModel):
+    """A model whose every request is counted on a meter, which refuses one past its bound.
+
+    It changes nothing in what is sent: the package's model layer builds the request, and
+    the wrapped model sends it.
+    """
+
+    def __init__(self, wrapped: models.Model | str, meter: CallMeter) -> None:
+        """Wrap a model, or the model a ``"provider:model"`` spec names.
+
+        Args:
+            wrapped: The model.
+            meter: Where its requests are counted.
+        """
+        super().__init__(infer_model(wrapped))
+        self.meter = meter
+
+    @override
+    async def request(
+        self,
+        messages: list[ModelMessage],
+        model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+    ) -> ModelResponse:
+        """Count the request, then send it."""
+        self.meter.take()
+        return await super().request(messages, model_settings, model_request_parameters)
+
+    @override
+    @contextlib.asynccontextmanager
+    async def request_stream(
+        self,
+        messages: list[ModelMessage],
+        model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+        run_context: RunContext[Any] | None = None,
+    ) -> AsyncIterator[StreamedResponse]:
+        """Count the request, then stream it."""
+        self.meter.take()
+        async with super().request_stream(
+            messages, model_settings, model_request_parameters, run_context
+        ) as streamed:
+            yield streamed
+
+
+#: Why a replay refuses a second request for one call (§4:10).
+_ONE_REQUEST: Final = "a replay sends each call once and sends no repair (ADR-0335 §4:10)"
+
+
 class ModelCaller:
     """The package's model layer, sending every call to one named model (§4:6-§4:8).
 
     A completion goes through :class:`PydanticAIProvider`, as understanding's, a digest
     part's and the observer's calls go, with no routing and no retry; a planning round
     goes through the completer's replay seam, which sends it as it is sent with the record
-    on. Neither is handed a sink, and nothing binds an activation (§4:12).
+    on. Neither is handed a sink, and nothing binds an activation (§4:12). Each call may
+    make one request: a repair the agent would send after an empty reply is refused, and
+    the call is recorded as failed (§4:10).
     """
 
     def __init__(self, model: models.Model | str, *, timeout: float) -> None:
@@ -996,28 +1129,33 @@ class ModelCaller:
             model: The one model every call goes to, which nothing falls back from.
             timeout: Seconds a call may take before it is recorded as failed.
         """
-        self._model = model
+        self._name = model if isinstance(model, str) else model.model_name
+        self._model = infer_model(model)
         self._timeout = timeout
-        self._provider = PydanticAIProvider(model)
-        self._completer = PydanticAIToolCallingCompleter(model)
 
     @property
     def model_name(self) -> str:
         """The run's model, as named."""
-        return self._model if isinstance(self._model, str) else self._model.model_name
+        return self._name
+
+    def _once(self) -> CountedModel:
+        return CountedModel(self._model, CallMeter(1, _ONE_REQUEST))
 
     async def complete(self, messages: Sequence[Message]) -> str:
         """Send a completion once, to the run's model alone."""
         async with asyncio.timeout(self._timeout):
-            reply = await self._provider.complete(messages)
+            reply = await PydanticAIProvider(self._once()).complete(messages)
         return reply.content
 
     async def replay_round(
         self, messages: Sequence[Message], tools: Sequence[OfferedTool]
     ) -> ReplayedRound:
         """Send a planning round once, to the run's model alone, as recorded."""
+        once = self._once()
         async with asyncio.timeout(self._timeout):
-            return await self._completer.replay_round(messages, tools, model=self._model)
+            return await PydanticAIToolCallingCompleter(once).replay_round(
+                messages, tools, model=once
+            )
 
 
 @dataclass(slots=True)
@@ -1282,74 +1420,6 @@ class _StatedSettings(Settings):
         return (init_settings,)
 
 
-@dataclass(slots=True)
-class CallMeter:
-    """Every model request a rerun's composition makes, counted against its bound (§8:2).
-
-    The observer's daily budget counts its own calls (§8:4), but a write it makes may
-    reach the memory reconciler, whose calls, and their retries, are not the observer's.
-    So every request through the package's two request paths is counted here, and one
-    past the bound is refused before it is sent.
-    """
-
-    bound: int
-    made: int = 0
-    refused: int = 0
-
-    def take(self) -> None:
-        """Count one request, or refuse it where the bound is reached.
-
-        Raises:
-            ModelError: The bare class, neither retryable nor routable, so no wrapper
-                tries again: the bound is reached.
-        """
-        if self.made >= self.bound:
-            self.refused += 1
-            msg = f"the rerun's bound of {self.bound} model calls is reached"
-            raise ModelError(msg)
-        self.made += 1
-
-    @property
-    def spent(self) -> bool:
-        """Whether the bound is reached."""
-        return self.made >= self.bound
-
-
-#: The package's request paths: every completion, and every planning round.
-_METERED: Final = (
-    (PydanticAIProvider, "complete"),
-    (PydanticAIToolCallingCompleter, "respond"),
-)
-
-
-@contextlib.contextmanager
-def metered(bound: int) -> Iterator[CallMeter]:
-    """Count every model request made inside against ``bound``, for the rerun's run alone.
-
-    Yields:
-        The meter.
-    """
-    meter = CallMeter(bound)
-    originals = [(cls, name, vars(cls)[name]) for cls, name in _METERED]
-    for cls, name, original in originals:
-        setattr(cls, name, _metered_method(original, meter))
-    try:
-        yield meter
-    finally:
-        for cls, name, original in originals:
-            setattr(cls, name, original)
-
-
-def _metered_method(
-    original: Callable[..., Awaitable[object]], meter: CallMeter
-) -> Callable[..., Awaitable[object]]:
-    async def counted(self: object, *args: object, **kwargs: object) -> object:
-        meter.take()
-        return await original(self, *args, **kwargs)
-
-    return counted
-
-
 @dataclass(frozen=True, slots=True)
 class RerunOptions:
     """What a rerun was asked for."""
@@ -1407,6 +1477,30 @@ def narrowed_episode_window(limit: int | None) -> Iterator[int]:
         held[name] = original
 
 
+@contextlib.contextmanager
+def counted_models(meter: CallMeter) -> Iterator[None]:
+    """Every completion provider the composition builds inside counts on ``meter`` (§8:2).
+
+    The observer's daily budget counts its own calls (§8:4), but a write it makes may
+    reach the memory reconciler, whose calls and retries are not the observer's. So each
+    :class:`PydanticAIProvider` the composition builds, the observer's routes and the
+    reconciler's among them, is built over a :class:`CountedModel`. A rerun runs no
+    planning round, so the completer is left as it is.
+    """
+    held = vars(composition)
+    name = "PydanticAIProvider"
+    original = held[name]
+
+    def built(spec: models.Model | str) -> PydanticAIProvider:
+        return PydanticAIProvider(CountedModel(spec, meter))
+
+    held[name] = built
+    try:
+        yield
+    finally:
+        held[name] = original
+
+
 async def rerun(
     options: RerunOptions,
     *,
@@ -1432,15 +1526,15 @@ async def rerun(
         settings = rerun_settings(options)
         report(f"the observer's daily budget is set to the bound, {options.bound} calls")
         original = composition.UNDERSTANDING_EPISODE_LIMIT
-        with narrowed_episode_window(options.episode_limit) as limit:
+        meter = CallMeter(options.bound, f"the rerun's bound of {options.bound} calls is reached")
+        with narrowed_episode_window(options.episode_limit) as limit, counted_models(meter):
             if limit != original:
                 report(f"the episode selector's bound is narrowed from {original} to {limit}")
             engine = build(settings)
-        with metered(options.bound) as meter:
-            try:
-                await _observe(engine, meter, report)
-            finally:
-                await engine.aclose()
+        try:
+            await _observe(engine, meter, report)
+        finally:
+            await engine.aclose()
         report(f"{meter.made} model calls made (bound {options.bound}); {meter.refused} refused")
     return 0
 
