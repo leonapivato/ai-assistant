@@ -40,9 +40,18 @@ from ai_assistant.memory import (
     ModelBackedReconciler,
     SqliteMemoryStore,
 )
-from ai_assistant.memory._reconciler import ReconcilerOutcome, ReconcilerReport
+from ai_assistant.memory._reconciler import (
+    MEMORY_RECONCILER_PROMPT,
+    ReconcilerOutcome,
+    ReconcilerReport,
+)
 from ai_assistant.models import HashingEmbedder
-from ai_assistant.testing import FakeMemoryPolicy, FakeModelProvider, FakeTraceSink
+from ai_assistant.testing import (
+    FakeMemoryPolicy,
+    FakeModelProvider,
+    FakeTraceSink,
+    default_prompt,
+)
 from ai_assistant.testing.memories import (
     legacy_support,
     memory,
@@ -2320,6 +2329,7 @@ async def test_a_one_token_correction_still_defers_end_to_end() -> None:
 # passes whether or not tier-0 content was sent.
 
 _ROUTE = "anthropic:claude-x"
+_PROMPT = default_prompt(MEMORY_RECONCILER_PROMPT)
 
 
 def _observed(record_id: str, content: str) -> Memory:
@@ -2346,7 +2356,7 @@ class _CountingReconciler:
     def __init__(self, reply: str = '{"relations": []}', *, max_conflicts: int = 3) -> None:
         self.model = FakeModelProvider(reply=reply)
         self._inner = ModelBackedReconciler(
-            model=self.model, route=_ROUTE, max_conflicts=max_conflicts
+            model=self.model, route=_ROUTE, prompt=_PROMPT, max_conflicts=max_conflicts
         )
         self.calls = 0
 

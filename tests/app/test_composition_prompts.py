@@ -23,6 +23,7 @@ from ai_assistant.app.composition import PROMPTS, read_prompts
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.prompts import PromptDeclaration, PromptOrigin
+from ai_assistant.memory._reconciler import MEMORY_RECONCILER_PROMPT
 from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
 from ai_assistant.orchestration.matters_pass import MATTERS_PASS_PROMPT
 from ai_assistant.orchestration.observer.prompts import (
@@ -100,8 +101,8 @@ def test_each_default_ships_in_the_wheel_beside_its_module() -> None:
         assert f"{declaration.package.replace('.', '/')}/{declaration.filename}" in shipped
 
 
-def test_the_prompts_moved_so_far_carry_their_flags_and_values() -> None:
-    """§1:2, §2:1: the prompts moved so far, each with §2's flags and values; later lanes add."""
+def test_the_eight_prompts_carry_their_flags_and_values() -> None:
+    """§2:1: all eight of §2's prompts, each with §2's flags and values."""
     assert PROMPTS == (
         UNDERSTANDING_PROMPT,
         PLANNING_PROMPT,
@@ -110,6 +111,7 @@ def test_the_prompts_moved_so_far_carry_their_flags_and_values() -> None:
         MATTERS_PASS_PROMPT,
         OBSERVER_SCOUT_PROMPT,
         OBSERVER_COMMIT_PROMPT,
+        MEMORY_RECONCILER_PROMPT,
     )
     assert UNDERSTANDING_PROMPT.flags == frozenset({"recalled", "stories"})
     assert UNDERSTANDING_PROMPT.values == frozenset()
@@ -127,6 +129,7 @@ def test_the_prompts_moved_so_far_carry_their_flags_and_values() -> None:
         MATTERS_PASS_PROMPT,
         OBSERVER_SCOUT_PROMPT,
         OBSERVER_COMMIT_PROMPT,
+        MEMORY_RECONCILER_PROMPT,
     ):
         assert declaration.values == frozenset()
 
@@ -231,10 +234,10 @@ def test_a_prompts_path_that_is_a_link_is_refused(tmp_path: Path, *, overrides: 
 
 @pytest.mark.parametrize(
     "name",
-    ["memory_reconciler.txt", "understanding", "understanding.txt.bak", ".understanding.txt.swp"],
+    ["no_such_prompt.txt", "understanding", "understanding.txt.bak", ".understanding.txt.swp"],
 )
-def test_a_file_that_names_no_moved_prompt_is_refused(tmp_path: Path, name: str) -> None:
-    """A prompt not yet moved has no template, so its file names no prompt either."""
+def test_a_file_that_names_no_prompt_is_refused(tmp_path: Path, name: str) -> None:
+    """§5:1: an entry whose name is no prompt's `<name>.txt` names no prompt."""
     _write(_directory(tmp_path) / name, _OVERRIDE)
 
     message = _refusal(tmp_path)

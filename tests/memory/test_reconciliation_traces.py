@@ -46,11 +46,17 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor, traces
 from ai_assistant.memory._reconciler import (
+    MEMORY_RECONCILER_PROMPT,
     ModelBackedReconciler,
     ReconcilerOutcome,
     ReconcilerReport,
 )
-from ai_assistant.testing import FakeMemoryPolicy, FakeModelProvider, FakeTraceSink
+from ai_assistant.testing import (
+    FakeMemoryPolicy,
+    FakeModelProvider,
+    FakeTraceSink,
+    default_prompt,
+)
 from ai_assistant.testing.memories import memory, remembered_support, said_support
 
 if TYPE_CHECKING:
@@ -62,6 +68,7 @@ if TYPE_CHECKING:
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 _EPISODE = "episode-1"
 _ROUTE = "anthropic:claude-x"
+_PROMPT = default_prompt(MEMORY_RECONCILER_PROMPT)
 
 #: The contents these cases plant. Kept together because every case depends on
 #: them landing in one conflict set at :data:`_THRESHOLD`, and a content edited in
@@ -415,7 +422,7 @@ async def test_an_empty_conflict_set_is_reconciled_offers_no_pair_and_asks_nothi
     """
     store = await _planted()
     model = FakeModelProvider()
-    reconciler = ModelBackedReconciler(model=model, route=_ROUTE)
+    reconciler = ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT)
 
     await _writer(store, sink, reconciler=reconciler).ingest(_proposal(_belief("new", _MORNING)))
 
@@ -484,7 +491,7 @@ async def test_a_provider_that_raises_is_counted_through_the_real_reconciler(
     """
     store = await _planted(_belief("stale", _MORNING))
     provider = _RaisingProvider()
-    reconciler = ModelBackedReconciler(model=provider, route=_ROUTE)  # type: ignore[arg-type]
+    reconciler = ModelBackedReconciler(model=provider, route=_ROUTE, prompt=_PROMPT)  # type: ignore[arg-type]
 
     await _writer(store, sink, reconciler=reconciler).ingest(_proposal(_belief("new", _AFTERNOON)))
 
@@ -508,7 +515,7 @@ async def test_a_readable_empty_answer_carries_no_qualifier_at_all(sink: FakeTra
     """
     store = await _planted(_belief("stale", _MORNING))
     model = FakeModelProvider(reply='{"relations": []}')
-    reconciler = ModelBackedReconciler(model=model, route=_ROUTE)
+    reconciler = ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT)
 
     await _writer(store, sink, reconciler=reconciler).ingest(_proposal(_belief("new", _AFTERNOON)))
 
@@ -533,7 +540,7 @@ async def test_a_set_the_certain_rung_settled_counts_unconsulted_with_no_request
     """
     store = await _planted(_belief("same", _MORNING), _belief("twin", _MORNING))
     model = FakeModelProvider()
-    reconciler = ModelBackedReconciler(model=model, route=_ROUTE)
+    reconciler = ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT)
 
     await _writer(store, sink, reconciler=reconciler).ingest(_proposal(_belief("new", _MORNING)))
 

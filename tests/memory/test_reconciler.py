@@ -25,6 +25,7 @@ import pytest
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ModelError
+from ai_assistant.core.prompts import PromptDeclaration
 from ai_assistant.core.types import (
     ConflictRelation,
     Memory,
@@ -34,12 +35,13 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory._reconciler import (
     DEFAULT_RECONCILER_MAX_CONFLICTS,
+    MEMORY_RECONCILER_PROMPT,
     ModelBackedReconciler,
     ReconcilerOutcome,
     _quoted_span,
     _render,
 )
-from ai_assistant.testing import FakeModelProvider
+from ai_assistant.testing import FakeModelProvider, default_prompt, prompt_from
 from ai_assistant.testing.memories import memory, remembered_support
 
 if TYPE_CHECKING:
@@ -48,6 +50,7 @@ if TYPE_CHECKING:
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 _ROUTE = "anthropic:claude-x"
+_PROMPT = default_prompt(MEMORY_RECONCILER_PROMPT)
 
 
 def _record(record_id: str, content: str | None = None) -> Memory:
@@ -84,7 +87,7 @@ async def test_the_agrees_rung_labels_restates_with_no_model_call() -> None:
     costs nothing and the model is never asked about it.
     """
     model = FakeModelProvider()
-    reconciler = ModelBackedReconciler(model=model, route=_ROUTE)
+    reconciler = ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT)
     identical = _record("identical", "I prefer window seats")
 
     report = await reconciler.reconcile(
@@ -105,7 +108,7 @@ async def test_one_request_covers_every_member_it_consults_about() -> None:
     latency statement a statement: one request under one deadline.
     """
     model = _answering({"a": "adds", "b": "contradicts", "c": "adds"})
-    reconciler = ModelBackedReconciler(model=model, route=_ROUTE, max_conflicts=3)
+    reconciler = ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT, max_conflicts=3)
     conflicts = [_record("a"), _record("b"), _record("c")]
 
     report = await reconciler.reconcile(_proposal(_record("new")), conflicts)
@@ -123,7 +126,7 @@ async def test_the_route_is_named_on_every_request() -> None:
     """ADR-0159 §3: a reconciler names the route it calls rather than inheriting it."""
     model = _answering({"a": "adds"})
 
-    await ModelBackedReconciler(model=model, route=_ROUTE).reconcile(
+    await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new")), [_record("a")]
     )
 
@@ -141,11 +144,11 @@ async def test_only_kind_and_content_reach_the_prompt() -> None:
     model = _answering({"a": "adds"})
     conflict = _record("a", "Jon lost his job shortly before 21 June 2023")
 
-    await ModelBackedReconciler(model=model, route=_ROUTE).reconcile(
+    await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new", "Jon took a temporary job around mid-July 2023")), [conflict]
     )
 
-    sent = "\n".join(m.content for m in model.calls[0].messages)
+    sent = _user_turn(model)
     assert conflict.content in sent
     assert "0.6" not in sent  # the confidence
     assert "episode-1" not in sent  # the evidence
@@ -156,11 +159,11 @@ async def test_the_request_covers_no_member_beyond_the_bound() -> None:
     model = _answering({"a": "adds"})
     conflicts = [_record("a"), _record("b"), _record("c"), _record("beyond")]
 
-    await ModelBackedReconciler(model=model, route=_ROUTE, max_conflicts=3).reconcile(
-        _proposal(_record("new")), conflicts
-    )
+    await ModelBackedReconciler(
+        model=model, route=_ROUTE, prompt=_PROMPT, max_conflicts=3
+    ).reconcile(_proposal(_record("new")), conflicts)
 
-    sent = "\n".join(m.content for m in model.calls[0].messages)
+    sent = _user_turn(model)
     assert "beyond" not in sent
     assert sent.count("STORED BELIEF") == 3
 
@@ -178,9 +181,9 @@ async def test_a_volunteered_label_for_a_beyond_bound_member_is_discarded() -> N
     model = _answering({"a": "restates", "beyond": "contradicts"})
     conflicts = [_record("a"), _record("b"), _record("c"), _record("beyond")]
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE, max_conflicts=3).reconcile(
-        _proposal(_record("new")), conflicts
-    )
+    report = await ModelBackedReconciler(
+        model=model, route=_ROUTE, prompt=_PROMPT, max_conflicts=3
+    ).reconcile(_proposal(_record("new")), conflicts)
     relations = report.relations
 
     assert "beyond" not in relations
@@ -197,23 +200,20 @@ async def test_a_label_for_a_member_the_rung_already_settled_is_discarded() -> N
     identical = _record("identical", "I prefer window seats")
     proposal = _proposal(_record("new", "I prefer window seats"))
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE).reconcile(
+    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         proposal, [identical, _record("other")]
     )
     relations = report.relations
 
     assert relations["identical"] is ConflictRelation.RESTATES
     assert relations["other"] is ConflictRelation.ADDS
-    assert (
-        "identical"
-        not in "\n".join(m.content for m in model.calls[0].messages).split("STORED BELIEF")[1]
-    )
+    assert "identical" not in _user_turn(model).split("STORED BELIEF")[1]
 
 
 async def test_a_label_naming_no_member_at_all_is_discarded() -> None:
     model = _answering({"ghost": "contradicts"})
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE).reconcile(
+    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new")), [_record("a")]
     )
     relations = report.relations
@@ -226,7 +226,7 @@ async def test_no_request_is_made_where_the_rung_settled_everything() -> None:
     model = FakeModelProvider()
     same = "I prefer window seats"
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE).reconcile(
+    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new", same)), [_record("a", same), _record("b", same)]
     )
     relations = report.relations
@@ -238,7 +238,7 @@ async def test_no_request_is_made_where_the_rung_settled_everything() -> None:
 async def test_no_request_is_made_for_an_empty_conflict_set() -> None:
     model = FakeModelProvider()
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE).reconcile(
+    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new")), []
     )
     relations = report.relations
@@ -277,9 +277,9 @@ async def test_a_failed_request_yields_unlabelled_and_never_raises(error: Except
     identical = _record("identical", "I prefer window seats")
     conflicts = [identical, _record("other")]
 
-    report = await ModelBackedReconciler(model=_RaisingProvider(error), route=_ROUTE).reconcile(
-        _proposal(_record("new", "I prefer window seats")), conflicts
-    )
+    report = await ModelBackedReconciler(
+        model=_RaisingProvider(error), route=_ROUTE, prompt=_PROMPT
+    ).reconcile(_proposal(_record("new", "I prefer window seats")), conflicts)
     relations = report.relations
 
     assert relations == {"identical": ConflictRelation.RESTATES}
@@ -295,7 +295,7 @@ async def test_a_cancellation_from_outside_is_delivered_onward() -> None:
     except" would break.
     """
     reconciler = ModelBackedReconciler(
-        model=_RaisingProvider(asyncio.CancelledError()), route=_ROUTE
+        model=_RaisingProvider(asyncio.CancelledError()), route=_ROUTE, prompt=_PROMPT
     )
 
     with pytest.raises(asyncio.CancelledError):
@@ -316,7 +316,7 @@ async def test_a_cancellation_from_outside_is_delivered_onward() -> None:
 )
 async def test_an_unreadable_reply_leaves_every_member_unlabelled(content: str) -> None:
     report = await ModelBackedReconciler(
-        model=FakeModelProvider(reply=content), route=_ROUTE
+        model=FakeModelProvider(reply=content), route=_ROUTE, prompt=_PROMPT
     ).reconcile(_proposal(_record("new")), [_record("a")])
     relations = report.relations
 
@@ -328,7 +328,7 @@ async def test_an_envelope_wrapped_in_prose_and_a_fence_is_still_read() -> None:
     wrapped = 'Here you go {"note": "ignore me"} ```json\n' + _reply(a="adds") + "\n``` done"
 
     report = await ModelBackedReconciler(
-        model=FakeModelProvider(reply=wrapped), route=_ROUTE
+        model=FakeModelProvider(reply=wrapped), route=_ROUTE, prompt=_PROMPT
     ).reconcile(_proposal(_record("new")), [_record("a")])
     relations = report.relations
 
@@ -351,7 +351,7 @@ async def test_a_repeated_entry_takes_the_first_answer() -> None:
     )
 
     report = await ModelBackedReconciler(
-        model=FakeModelProvider(reply=doubled), route=_ROUTE
+        model=FakeModelProvider(reply=doubled), route=_ROUTE, prompt=_PROMPT
     ).reconcile(_proposal(_record("new")), [_record("a")])
     relations = report.relations
 
@@ -390,11 +390,11 @@ async def test_the_default_bound_reaching_a_request_is_the_one_settings_carries(
     beyond = conflicts[-1].id
 
     # Constructed with **no** ``max_conflicts``, which is the whole point.
-    await ModelBackedReconciler(model=model, route=_ROUTE).reconcile(
+    await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new")), conflicts
     )
 
-    sent = "\n".join(message.content for message in model.calls[0].messages)
+    sent = _user_turn(model)
     assert sent.count("STORED BELIEF") == bound
     assert beyond not in sent
 
@@ -403,18 +403,49 @@ async def test_the_default_bound_reaching_a_request_is_the_one_settings_carries(
 def test_a_non_positive_bound_is_refused_at_construction(bound: int) -> None:
     """ADR-0022 §4a: a bound the caller got wrong fails where it was set."""
     with pytest.raises(ValueError, match="at least 1"):
-        ModelBackedReconciler(model=FakeModelProvider(), route=_ROUTE, max_conflicts=bound)
+        ModelBackedReconciler(
+            model=FakeModelProvider(), route=_ROUTE, prompt=_PROMPT, max_conflicts=bound
+        )
 
 
 def test_a_boolean_bound_is_refused_at_construction() -> None:
     with pytest.raises(TypeError, match="must be an integer"):
-        ModelBackedReconciler(model=FakeModelProvider(), route=_ROUTE, max_conflicts=True)
+        ModelBackedReconciler(
+            model=FakeModelProvider(), route=_ROUTE, prompt=_PROMPT, max_conflicts=True
+        )
 
 
 def test_a_blank_route_is_refused_at_construction() -> None:
     """A reconciler *names* its route (ADR-0159 §3), so a blank one is not one."""
     with pytest.raises(ValueError, match="provider:model"):
-        ModelBackedReconciler(model=FakeModelProvider(), route="  ")
+        ModelBackedReconciler(model=FakeModelProvider(), route="  ", prompt=_PROMPT)
+
+
+def test_a_template_of_another_prompt_is_refused_at_construction() -> None:
+    """ADR-0334 §2: the reconciler renders its own prompt, and no other one's."""
+    other = prompt_from(PromptDeclaration(name="other", package="ai_assistant.memory"), "Other.")
+
+    with pytest.raises(ValueError, match="memory_reconciler"):
+        ModelBackedReconciler(model=FakeModelProvider(), route=_ROUTE, prompt=other)
+
+
+async def test_the_system_message_is_the_template_it_was_handed() -> None:
+    """ADR-0334 §3:5, §9:2: the instruction is the template's rendering, whichever it is.
+
+    A template of the test's own stands in for an override, so the case reads no word
+    of the shipped default and still sees the request carry what it was handed, ahead
+    of the rendered request.
+    """
+    model = _answering({"a": "adds"})
+    template = prompt_from(MEMORY_RECONCILER_PROMPT, "A stand-in instruction.")
+
+    await ModelBackedReconciler(model=model, route=_ROUTE, prompt=template).reconcile(
+        _proposal(_record("new")), [_record("a")]
+    )
+
+    roles = [message.role for message in model.calls[0].messages]
+    assert roles == [Role.SYSTEM, Role.USER]
+    assert model.calls[0].messages[0].content == template.render()
 
 
 # --- ADR-0164 §3's outcome report ---------------------------------------------
@@ -429,9 +460,11 @@ async def test_every_call_reports_exactly_one_outcome() -> None:
     one is non-conforming in whole at the writer, and this is the guarantee that
     keeps the conforming implementation out of that arm.
     """
-    answering = ModelBackedReconciler(model=_answering({"a": "adds"}), route=_ROUTE)
-    silent = ModelBackedReconciler(model=FakeModelProvider(), route=_ROUTE)
-    failing = ModelBackedReconciler(model=_RaisingProvider(ModelError("down")), route=_ROUTE)
+    answering = ModelBackedReconciler(model=_answering({"a": "adds"}), route=_ROUTE, prompt=_PROMPT)
+    silent = ModelBackedReconciler(model=FakeModelProvider(), route=_ROUTE, prompt=_PROMPT)
+    failing = ModelBackedReconciler(
+        model=_RaisingProvider(ModelError("down")), route=_ROUTE, prompt=_PROMPT
+    )
     proposal = _proposal(_record("new"))
 
     reports = [
@@ -459,7 +492,7 @@ async def test_a_settled_set_reports_unconsulted_rather_than_answered() -> None:
     model = FakeModelProvider()
     same = "I prefer window seats"
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE).reconcile(
+    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new", same)), [_record("a", same), _record("b", same)]
     )
 
@@ -472,7 +505,7 @@ async def test_an_empty_conflict_set_reports_unconsulted_too() -> None:
     """The path ADR-0164 §3 says dominates the population, reported as what it is."""
     model = FakeModelProvider()
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE).reconcile(
+    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new")), []
     )
 
@@ -491,7 +524,7 @@ async def test_a_readable_reply_naming_nothing_reports_answered() -> None:
     """
     model = FakeModelProvider(reply='{"relations": []}')
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE).reconcile(
+    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new")), [_record("a")]
     )
 
@@ -526,7 +559,7 @@ async def test_an_unreadable_reply_is_failed_and_a_readable_one_is_not(
     reconciler only in the cases the reconciler is actually the place to look.
     """
     report = await ModelBackedReconciler(
-        model=FakeModelProvider(reply=content), route=_ROUTE
+        model=FakeModelProvider(reply=content), route=_ROUTE, prompt=_PROMPT
     ).reconcile(_proposal(_record("new")), [_record("a")])
 
     assert report.relations == {}
@@ -551,9 +584,9 @@ async def test_a_failed_request_reports_failed_and_keeps_the_certain_rung(
     """
     identical = _record("identical", "I prefer window seats")
 
-    report = await ModelBackedReconciler(model=_RaisingProvider(error), route=_ROUTE).reconcile(
-        _proposal(_record("new", "I prefer window seats")), [identical, _record("other")]
-    )
+    report = await ModelBackedReconciler(
+        model=_RaisingProvider(error), route=_ROUTE, prompt=_PROMPT
+    ).reconcile(_proposal(_record("new", "I prefer window seats")), [identical, _record("other")])
 
     assert report.relations == {"identical": ConflictRelation.RESTATES}
     assert report.outcomes == frozenset({ReconcilerOutcome.FAILED})
@@ -569,7 +602,11 @@ async def test_a_failed_request_reports_failed_and_keeps_the_certain_rung(
 
 
 def _user_turn(model: FakeModelProvider) -> str:
-    """The one user message of the one request, which is where `_render`'s output goes."""
+    """The one user message of the one request, which is where `_render`'s output goes.
+
+    Every check on what a request carries reads this turn and never the system message,
+    which is a template's rendering whose words no test reads (ADR-0334 §9:1).
+    """
     messages = model.calls[0].messages
     user = [message for message in messages if message.role is Role.USER]
     assert len(user) == 1
@@ -593,7 +630,7 @@ def _belief_lines(prompt: str) -> list[str]:
 async def _turn_for(proposal_content: str, *conflicts: tuple[str, str]) -> str:
     """The user turn one `reconcile` actually sent, for the given proposal and members."""
     model = _answering({record_id: "adds" for record_id, _ in conflicts})
-    await ModelBackedReconciler(model=model, route=_ROUTE).reconcile(
+    await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new", proposal_content)),
         [_record(record_id, content) for record_id, content in conflicts],
     )
@@ -730,7 +767,7 @@ async def test_an_id_needing_an_escape_is_labelled_from_the_value_not_the_displa
     awkward = 'a"b'
     model = _answering({awkward: "adds"})
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE).reconcile(
+    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new", "Jon eats early")), [_record(awkward, "Jon eats late")]
     )
 
@@ -749,7 +786,7 @@ async def test_an_id_returned_with_its_display_quotes_is_discarded() -> None:
     """
     model = _answering({'"a"': "contradicts"})
 
-    report = await ModelBackedReconciler(model=model, route=_ROUTE).reconcile(
+    report = await ModelBackedReconciler(model=model, route=_ROUTE, prompt=_PROMPT).reconcile(
         _proposal(_record("new", "Jon eats early")), [_record("a", "Jon eats late")]
     )
 

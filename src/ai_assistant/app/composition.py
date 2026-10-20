@@ -51,6 +51,7 @@ from ai_assistant.memory import (
     SqliteStoryStore,
     SqliteTelegramIntakeRecord,
 )
+from ai_assistant.memory._reconciler import MEMORY_RECONCILER_PROMPT
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.memory.health import DEFAULT_K, DEFAULT_SAMPLE, MAX_K, StoreHealthReader
 from ai_assistant.memory.notification_store import check_notification_tuning
@@ -205,6 +206,7 @@ PROMPTS: Final[tuple[PromptDeclaration, ...]] = (
     MATTERS_PASS_PROMPT,
     OBSERVER_SCOUT_PROMPT,
     OBSERVER_COMMIT_PROMPT,
+    MEMORY_RECONCILER_PROMPT,
 )
 
 #: What a template file read from the override directory may not be: writable by
@@ -1630,6 +1632,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             reconciler=ModelBackedReconciler(
                 model=reconciler_model,
                 route=reconciler_route,
+                # ADR-0334 §3:5: its instruction, as read at start, default or override.
+                prompt=prompts[MEMORY_RECONCILER_PROMPT.name],
                 max_conflicts=settings.reconciler_max_conflicts,
             ),
         )
