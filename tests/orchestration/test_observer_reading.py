@@ -293,7 +293,11 @@ async def test_a_candidate_under_an_approval_rests_on_the_users_yes() -> None:
     )
     part = QuestionPart(round="r-ask", part=1)
     await remembered(
-        harness.plans, "yes", "r-yes", {"fact": "x", "why": "y", "rests_on_input": True}, part=part
+        harness.plans,
+        "yes",
+        "r-yes",
+        {"fact": fact, "why": "travel", "rests_on_input": True, "confirm": True},
+        part=part,
     )
 
     reading = await _read(harness, "yes")
@@ -431,7 +435,7 @@ async def test_an_asking_episode_read_for_its_wording_joins_the_supply() -> None
         harness.plans,
         "yes",
         "r-yes",
-        {"fact": "x", "why": "y", "rests_on_input": True},
+        {"fact": "The user prefers window seats.", "why": "travel", "rests_on_input": True},
         part=QuestionPart(round="r-ask", part=1),
     )
 

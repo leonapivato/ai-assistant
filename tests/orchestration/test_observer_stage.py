@@ -467,7 +467,7 @@ async def _confirmed_case(harness: Harness) -> str:
         harness.plans,
         "yes",
         "r-yes",
-        {"fact": "x", "why": "y", "rests_on_input": True},
+        {"fact": fact, "why": "travel", "rests_on_input": True, "confirm": True},
         part=QuestionPart(round="r-ask", part=1),
     )
     return fact
