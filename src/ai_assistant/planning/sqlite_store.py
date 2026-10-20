@@ -1055,9 +1055,7 @@ class SqlitePlanStore:
             decide_observation_write(
                 record.episode, held=None if held is None else held.revision, expected=expected
             )
-            issued = self._read_meta(conn, _OBSERVATION_ISSUER)
-            last = self._meta_int(_OBSERVATION_ISSUER, issued[0]) if issued else 0
-            stored = stamped(record, last + 1)
+            stored = stamped(record, self._last_issued(conn) + 1)
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1071,6 +1069,30 @@ class SqlitePlanStore:
                 (stored.episode, stored.revision, _last_call_us(stored), stored.model_dump_json()),
             )
         return stored
+
+    def _last_issued(self, conn: sqlite3.Connection) -> int:
+        """The last observation revision issued, read on the write's own transaction.
+
+        Absent on a file no observation was written to, which reads as nothing issued.
+        A value no issuer could have written is corruption, refused rather than counted
+        on: a negative one would stamp a revision a writer that read no record expects,
+        and one below a revision a record carries would issue that revision again — each
+        defeating the conditional write it exists for (ADR-0329 §16:6).
+
+        Raises:
+            PlanningError: If the issuer is not an integer, is negative, or is below the
+                revision a held record carries.
+        """
+        issued = self._read_meta(conn, _OBSERVATION_ISSUER)
+        last = self._meta_int(_OBSERVATION_ISSUER, issued[0]) if issued else 0
+        (highest,) = conn.execute("SELECT COALESCE(MAX(revision), 0) FROM observations").fetchone()
+        if last < 0 or last < highest:
+            msg = (
+                f"the plan store at {self._path!r} records {last} as the last observation "
+                f"revision issued, below a revision it has issued; the store is corrupt"
+            )
+            raise PlanningError(msg)
+        return last
 
     async def observations(self, episode_ids: Sequence[str], /) -> tuple[ObservationRecord, ...]:
         """Return the named episodes' observation records, in the order named.

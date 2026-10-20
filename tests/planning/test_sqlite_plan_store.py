@@ -1496,3 +1496,36 @@ async def test_the_budget_decodes_only_the_records_with_a_call_since(tmp_path: P
             await store.observer_calls_since(_AT)
     finally:
         store.close()
+
+
+@pytest.mark.parametrize(
+    "issuer",
+    ["-1", "0", "not-a-number"],
+    ids=["negative", "below-a-held-revision", "non-numeric"],
+)
+async def test_an_issuer_no_store_could_have_written_refuses_the_write(
+    tmp_path: Path, issuer: str
+) -> None:
+    """A tampered issuer is corruption, and the write it would stamp lands nothing.
+
+    A negative issuer would stamp ``0``, the revision a writer that read no record
+    expects, so a second writer could overwrite the record; one below a held revision
+    would issue that revision again. Either defeats ADR-0329 §16:6's backstop, so the
+    write is refused and the record and the issuer are left as they were.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        held = await store.write_observation(_observed(), expected_revision=0)
+        with sqlite3.connect(path) as conn:
+            conn.execute("UPDATE meta SET value = ? WHERE key = 'observation_revision'", (issuer,))
+
+        with pytest.raises(PlanningError, match=r"corrupt|non-numeric"):
+            await store.write_observation(_observed(), expected_revision=held.revision)
+        with pytest.raises(PlanningError, match=r"corrupt|non-numeric"):
+            await store.write_observation(_observed("activation:other"), expected_revision=0)
+
+        assert await store.observations([held.episode, "activation:other"]) == (held,)
+        assert _meta(path, "observation_revision") == issuer
+    finally:
+        store.close()
