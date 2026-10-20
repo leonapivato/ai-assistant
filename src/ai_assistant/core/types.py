@@ -8694,6 +8694,13 @@ _FINDING_PARTS: Final[frozenset[str]] = frozenset(
 class ObservationFinding(BaseModel):
     """One thing the scout proposed about one episode, and its outcome (ADR-0329 §9:1).
 
+    **What a commit in a later attempt needs is on the finding** (§12:6, §16:1, §16:4),
+    so it survives the hub stopping between attempts: :attr:`supply`, the placement meet
+    of what the runs over it were supplied, and :attr:`written`, what a commit of it
+    wrote before it failed. Both are empty on a finding the plan store held before they
+    existed, and its upgrade gives them nothing: such a finding's supply is unknown, so
+    nothing may treat ``None`` as the meet over no record.
+
     Attributes:
         id: The finding's id, unique on its record, so a retry finds the findings
             that already have an outcome and commits only the rest (§16:4).
@@ -8708,6 +8715,18 @@ class ObservationFinding(BaseModel):
             from the record alone.
         relied_on: Where the finding is about a reliance (§14:1), the id of the
             memory a reliance call in the episode named; ``None`` otherwise.
+        supply: The meet (ADR-0217 §3, :meth:`Placement.narrowest_of`) of the
+            placements of every record the observer's runs over this finding were
+            supplied, the scout's that proposed it included (§12:6). A commit takes
+            the meet of this and its own run's supply, so a finding committed in a
+            later attempt keeps the narrowing its proposal read; a run that reads more
+            before it records the outcome narrows this, never widens it. ``None``
+            where none was recorded, on a finding the plan store held before the
+            field, and then the supply is unknown.
+        written: What a commit of this finding wrote before it failed, while it has
+            no outcome (§16:1, §16:4): each memory once, its operations in the order
+            applied. The commit that records the outcome merges these into it, so a
+            finding with an outcome carries none here.
         outcome: What its commit did, or ``None`` while it has not been committed.
     """
 
@@ -8718,6 +8737,8 @@ class ObservationFinding(BaseModel):
     rests_on: tuple[SupportPart, ...] = Field(min_length=1)
     candidate: Identifier | None = None
     relied_on: NonBlankEncodableText | None = None
+    supply: Placement | None = None
+    written: tuple[ObservationWrite, ...] = ()
     outcome: FindingOutcome | None = None
 
     @model_validator(mode="after")
@@ -8729,9 +8750,27 @@ class ObservationFinding(BaseModel):
         if len(set(self.rests_on)) != len(self.rests_on):
             msg = "a finding names each part it rests on once"
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _written_until_its_outcome(self) -> Self:
+        if self.written and self.outcome is not None:
+            msg = (
+                "what a commit wrote before it failed is merged into the outcome a later "
+                "commit records, so a finding with an outcome carries none (ADR-0329 §16:1)"
+            )
+            raise ValueError(msg)
+        memories = [write.memory for write in self.written]
+        if len(set(memories)) != len(memories):
+            msg = "a finding names each memory a failed commit wrote on once"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _track_record_on_its_reliance(self) -> Self:
         recorded = [
             write.memory
-            for write in (() if self.outcome is None else self.outcome.writes)
+            for write in (*self.written, *(() if self.outcome is None else self.outcome.writes))
             if write.track_record is not None
         ]
         if recorded and (self.relied_on is None or recorded != [self.relied_on]):
@@ -8871,7 +8910,14 @@ class ObservationRecord(BaseModel):
 class PlanExport(BaseModel):
     """A portable snapshot of planning state (see ADR-0014 §5, ADR-0004 §6).
 
-    **``schema_version`` is 21 because the document gained ``observations``**
+    **``schema_version`` is 22 because an observation record's findings gained
+    ``supply`` and ``written``** (ADR-0329 §12:6, §16:1, §16:4): the placement meet of
+    what the runs over a finding were supplied, and what a commit of it wrote before it
+    failed, so the observer carries both across a restart. A reader of 21 refuses the
+    fields as extra. The closure rule is extended by nothing: a write names a memory,
+    which the document does not carry.
+
+    **It was 21 because the document gained ``observations``**
     (ADR-0329 §16:9): the observer's record of each episode it processed or attempted,
     so ADR-0004 §6's export reaches it. A record names an episode, which the document
     does not carry, so ADR-0014 §5's closure rule is extended by nothing; the only
@@ -8918,12 +8964,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[21] = Field(
-        default=21,
+    schema_version: Literal[22] = Field(
+        default=22,
         description=(
-            "Shape of this export, pinned to exactly 21 (ADR-0039 §10, ADR-0329 §16:9): an "
+            "Shape of this export, pinned to exactly 22 (ADR-0039 §10, ADR-0329 §16:1): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[21]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[22]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
