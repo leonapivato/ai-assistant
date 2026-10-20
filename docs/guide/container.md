@@ -152,6 +152,8 @@ every person on the box at once), owned by root and writable by root alone:
 | `backup-passphrase` | The operator, the same way: the key to every backup | uid 10001, `0400` |
 | `unit.env` | The deploy alone: the image id the unit runs, the port, and a relayed hub's `--add-host` | root, `0644` |
 | `backups/` | The deploy: one artifact per deploy, never deleted | uid 10001, `0700` |
+| `.deploy-lock` | The deploy: the file it holds its lock on; its existence means nothing | root |
+| `.first-install` | The deploy: present only while a first install has run nothing on its volumes | root, `0600` |
 
 The deploy never creates, reads or prints a passphrase. It refuses, before it stops
 anything, a passphrase file that is missing, empty, owned by another uid or readable by
@@ -319,9 +321,36 @@ same way against its marker, with the same flag.
 The backup copies the data volume as the image pins it, `/data`, with the exclusions the
 tool makes and no others (ADR-0123 §3, ADR-0314 §7:5). It runs with the image's own
 settings and not `hub.env`, because the data directory and every exclusion follow from
-`/data` alone. One deploy per person runs at a time: a second refuses while
-`/srv/hubs/<person>/.deploy-lock` exists, and a deploy killed outright leaves it for
-you to remove.
+`/data` alone.
+
+**One deploy per person runs at a time, and one unit install per box.** Each is a
+`flock`, on `/srv/hubs/<person>/.deploy-lock` for the whole deploy and on
+`/run/hub-deploy-unit.lock` while the unit is installed. The lock is held on the box by
+one more ssh session, which lasts exactly as long as the deploy: when the deploy ends,
+however it ends, the session ends and the kernel releases the lock. A deploy that was
+killed holds nothing, and there is nothing to remove. A second deploy to the same person
+refuses at once; one installing the unit waits up to a minute for another. To see who
+holds a lock, run `fuser -v /srv/hubs/<person>/.deploy-lock` on the box.
+
+If the ssh link drops under that session alone, the deploy changes nothing more: it
+looks before it installs the unit, before it stops the hub for the backup and before it
+names the new image, and refuses from there. The box may take until its TCP keepalive
+gives up, about two hours, to see the link gone and release the lock; until then a
+second deploy refuses, and `fuser` shows the session's process, which you may kill.
+
+**A first install that ends early is resumed.** It records itself in
+`/srv/hubs/<person>/.first-install` before it makes the volumes, and removes the record
+once `unit.env` is written and before the unit is enabled or started. While the record
+stands nothing has run on the volumes, so a deploy that finds it keeps them and installs
+again. Run the deploy again with the same `--port`, whether the first one failed or was
+killed. Once the record is gone the volumes are treated as served, and a deploy backs
+them up first, as for any hub.
+
+Volumes with neither the record nor `unit.env` are refused: they may hold a person's
+data, with nothing to say which image wrote it. If you know no hub ever ran on them,
+because a first install by a deploy older than the record was interrupted, remove both
+volumes and deploy again; otherwise back the data volume up by hand and write `unit.env`
+naming the image that wrote it.
 
 ## When it does not work
 
@@ -355,7 +384,7 @@ The image is proven by the `container` workflow on GitHub's runners, which build
 it and drives every step above on a fresh volume: readiness, the door, the setup
 acts, a restart and a replacement carrying the data, a clean stop, and each
 refusal. Its `deploy` job proves the deploy path the same way, with the runner as the
-box: a first install, an upgrade that backs up and carries the data, a failed backup
+box: a first install killed outright and run again, an upgrade that backs up and carries the data, a failed backup
 that leaves the earlier image running, and the unit restarting a killed container and
 leaving a `78` down. It is built with Docker; `CONTAINER_RUNTIME=podman just
 container-image` builds the same file, and nothing on this page is proven with Podman.

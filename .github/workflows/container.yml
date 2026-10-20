@@ -4,11 +4,11 @@ name: container
 # end: readiness on a fresh volume, the gateway answering on the published port, the
 # admin acts through exec, a restart carrying the data, and the deployment faults
 # exiting 78. Beside it, `deploy` proves the deploy path (#3160) by deploying one person
-# to the runner itself under the shipped systemd unit: a first install, an upgrade that
-# backs up and carries the data, a failed backup that leaves the earlier image running,
-# and the unit restarting a crash and leaving a 78 down. Neither the development machine
-# nor the box has a container runtime; GitHub's runners do, so this is where both are
-# proven.
+# to the runner itself under the shipped systemd unit: a first install killed outright and
+# run again (#3185), an upgrade that backs up and carries the data, a failed backup that
+# leaves the earlier image running, and the unit restarting a crash and leaving a 78 down.
+# Neither the development machine nor the box has a container runtime; GitHub's runners
+# do, so this is where both are proven.
 #
 # **Not part of `gate`**, deliberately. `gate` is the one check branch protection
 # requires (ADR-0167 §1:1), and neither of this workflow's jobs is named `gate` or is

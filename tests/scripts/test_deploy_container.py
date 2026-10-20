@@ -12,6 +12,8 @@ import io
 import json
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 import tarfile
 from dataclasses import dataclass, field
@@ -56,6 +58,24 @@ class File:
     directory: bool = False
 
 
+class Killed(BaseException):
+    """The deploy was killed outright: nothing it would have run next runs."""
+
+
+@dataclass
+class FakeLease:
+    """A lock the deploy holds on a :class:`FakeBox`."""
+
+    box: FakeBox
+    path: str
+
+    def held(self) -> bool:
+        return self.path in self.box.mine
+
+    def release(self) -> None:
+        self.box.mine.discard(self.path)
+
+
 @dataclass
 class FakeBox:
     """A box: what is on it, and what it answers. Every argv it ran is in ``ran``."""
@@ -91,13 +111,48 @@ class FakeBox:
     enabled: bool = False
     #: The next write of unit.env fails, once.
     fail_unit_env_write: bool = False
+    #: Locks another deploy holds, and the locks this one does.
+    locks: set[str] = field(default_factory=set)
+    mine: set[str] = field(default_factory=set)
+    #: The deploy is killed outright just before it sends the first argv this matches.
+    kill_at: Callable[[list[str]], bool] | None = None
+    killed: bool = False
+    #: The link under the deploy's locks drops just before the first argv this matches.
+    drop_locks_at: Callable[[list[str]], bool] | None = None
 
     def run(self, argv: Sequence[str], *, stdin: IO[bytes] | None = None) -> Any:
-        argv = list(argv)
-        self.ran.append(argv)
+        argv = self._sent(argv)
         handler = self._handler(argv)
         code, out, err = handler(argv, stdin.read() if stdin is not None else b"")
         return dc.Result(code, out, err)
+
+    def hold(self, argv: Sequence[str]) -> Any:
+        argv = self._sent(argv)
+        assert argv[0] == "flock"
+        assert argv[-3:] == ["sh", "-c", "echo held && exec cat"]
+        path = argv[argv.index("--") + 1]
+        if path in self.locks | self.mine:
+            return dc.Result(75, "", "")
+        self.mine.add(path)
+        return FakeLease(self, path)
+
+    def _sent(self, argv: Sequence[str]) -> list[str]:
+        """Record an argv, unless the deploy is dead or dies before sending it."""
+        if self.killed:
+            raise Killed
+        argv = list(argv)
+        if self.kill_at is not None and self.kill_at(argv):
+            # The kernel releases every lock a dead deploy's holders held.
+            self.killed, self.mine = True, set()
+            raise Killed
+        if self.drop_locks_at is not None and self.drop_locks_at(argv):
+            self.mine = set()
+        self.ran.append(argv)
+        return argv
+
+    def revive(self) -> None:
+        """Make the next deploy one that is not killed."""
+        self.killed, self.kill_at = False, None
 
     # -- dispatch -------------------------------------------------------------
 
@@ -169,12 +224,12 @@ class FakeBox:
         self.files[path] = File(0, 0o700, directory=True)
         return 0, "", ""
 
-    def cmd_rmdir(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
+    def cmd_rm(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
         self.files.pop(argv[-1], None)
         return 0, "", ""
 
-    def cmd_rm(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
-        self.files.pop(argv[-1], None)
+    def cmd_sync(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
+        assert argv[1] == "--"
         return 0, "", ""
 
     def cmd_tar(self, argv: list[str], data: bytes) -> tuple[int, str, str]:
@@ -393,7 +448,7 @@ def test_deploy_upgrade_backs_up_with_the_earlier_image_before_the_new_one_runs(
     assert env.image == box.images[f"ai-assistant-hub:{NEW_COMMIT[:12]}"][0]
     assert env.port == 8501
     assert box.container_image == env.image
-    assert str(PERSON.lock) not in box.files
+    assert not box.mine, "every lock is released"
 
 
 def test_deploy_upgrade_keeps_the_artifact_outside_the_data_volume() -> None:
@@ -468,7 +523,7 @@ def test_deploy_failed_backup_restarts_the_earlier_image(outcome: str, said: str
     assert box.files[str(PERSON.unit_env)].data == env_before
     assert box.container_image == OLD_ID
     assert "unit.env" not in verbs(box)
-    assert str(PERSON.lock) not in box.files
+    assert not box.mine, "every lock is released"
 
 
 def test_deploy_says_when_the_earlier_image_does_not_come_back() -> None:
@@ -537,7 +592,7 @@ def test_deploy_interrupted_while_starting_is_checked_before_it_is_left() -> Non
     assert message.startswith("interrupted once the new image")
     assert "hub@alice.service is stopped and disabled" in message
     assert box.active == "inactive"
-    assert str(PERSON.lock) not in box.files
+    assert not box.mine, "every lock is released"
 
 
 def test_deploy_recovery_start_is_held_to_the_same_checks() -> None:
@@ -568,27 +623,205 @@ def test_deploy_recovery_door_that_does_not_refuse_is_stopped() -> None:
     assert not box.enabled
 
 
-def test_deploy_first_install_interrupted_after_its_record_is_undone_whole() -> None:
+def test_deploy_first_install_interrupted_after_unit_env_is_resumed() -> None:
     box = FakeBox(files=person_files(served=False), interrupt_after_rename=True)
 
     with pytest.raises(KeyboardInterrupt):
         deployment(box, port=8501).run()
 
-    assert ["systemctl", "enable", PERSON.unit] in box.ran
     created = [argv[-1] for argv in box.ran if argv[:3] == [dc.DOCKER, "volume", "create"]]
     assert created == [PERSON.data_volume, PERSON.keyring_volume]
     assert verbs(box)[-1] == "unit.env", "interrupted on unit.env's rename, and nothing after"
-    assert str(PERSON.unit_env) not in box.files
-    assert box.volumes == set()
+    assert str(PERSON.first_install) in box.files, "the record stands: nothing ran"
+    assert box.volumes == {PERSON.data_volume, PERSON.keyring_volume}
     assert not box.enabled
-    assert str(PERSON.lock) not in box.files
+    assert not box.mine, "every lock is released"
 
     box.interrupt_after_rename = False
-    deployment(box, port=8501).run()
+    report = deployment(box, port=8501, stamp="20261018T130000Z").run()
 
-    assert box.volumes == {PERSON.data_volume, PERSON.keyring_volume}
+    assert "backup: none, a first install has served no data" in report
+    assert "20261018T130000Z" in box.files[str(PERSON.unit_env)].data.decode()
+    assert str(PERSON.first_install) not in box.files
     assert box.active == "active"
     assert box.enabled  # last: mypy reads the earlier `not box.enabled` as still holding
+
+
+# --------------------------------------------------------------------------- #
+# A deploy killed outright, and run again (#3185)                              #
+# --------------------------------------------------------------------------- #
+
+
+#: When a deploy run again after a killed one runs, and its run's name: a killed build
+#: leaves its staging directory, which a run of the same name would collide with.
+LATER = "20261018T130000Z"
+RERUN = "r3run"
+
+
+def _sends(*head: str, last: str | None = None) -> Callable[[list[str]], bool]:
+    """Match an argv that starts with ``head`` and, if given, ends with ``last``."""
+    return lambda argv: argv[: len(head)] == list(head) and last in {None, argv[-1]}
+
+
+#: Where a first install is killed, and whether the run again resumes it as a first
+#: install. Once the record is gone the volumes count as served, and the run again backs
+#: them up with the image unit.env names before installing, as for any served hub.
+_FIRST_INSTALL_KILLS: dict[str, tuple[Callable[[list[str]], bool], bool]] = {
+    "before the lock": (_sends("flock"), True),
+    "holding the person's lock": (_sends(dc.DOCKER, "build"), True),
+    "holding the unit's lock": (_sends("systemctl", "daemon-reload"), True),
+    "recorded, before the volumes": (
+        _sends(dc.DOCKER, "volume", "create", last=PERSON.data_volume),
+        True,
+    ),
+    "between the volumes": (
+        _sends(dc.DOCKER, "volume", "create", last=PERSON.keyring_volume),
+        True,
+    ),
+    "after the volumes, before unit.env": (
+        lambda argv: argv[0] == "install" and argv[-1].startswith(str(PERSON.unit_env)),
+        True,
+    ),
+    "after unit.env, before the record goes": (
+        _sends("rm", last=str(PERSON.first_install)),
+        True,
+    ),
+    "after the record, before the unit is enabled": (_sends("systemctl", "enable"), False),
+    "before the start": (_sends("systemctl", "start"), False),
+    "while it becomes healthy": (_sends(dc.DOCKER, "container", "inspect"), False),
+}
+
+
+@pytest.mark.parametrize(
+    ("kill", "resumed"), _FIRST_INSTALL_KILLS.values(), ids=_FIRST_INSTALL_KILLS
+)
+def test_deploy_first_install_killed_anywhere_finishes_when_run_again(
+    kill: Callable[[list[str]], bool], resumed: bool
+) -> None:
+    box = FakeBox(files=person_files(served=False), kill_at=kill)
+
+    with pytest.raises(Killed):
+        deployment(box, port=8501).run()
+    assert not box.mine, "the kernel released every lock the dead deploy held"
+
+    box.revive()
+    report = deployment(box, port=8501, stamp=LATER, token=RERUN).run()
+
+    assert box.active == "active"
+    assert box.enabled
+    assert box.volumes == {PERSON.data_volume, PERSON.keyring_volume}
+    assert str(PERSON.first_install) not in box.files
+    assert not box.mine
+    env = dc.parse_unit_env(box.files[str(PERSON.unit_env)].data.decode())
+    assert box.container_image == env.image
+    if resumed:
+        assert report[-1] == "backup: none, a first install has served no data"
+    else:
+        assert report[-1].endswith(f"pre-deploy-{LATER}-{RERUN}.age (verified, and kept)")
+
+
+_UPGRADE_KILLS = {
+    "holding the person's lock": _sends(dc.DOCKER, "build"),
+    "the hub stopped for its backup": _sends(dc.DOCKER, "run"),
+    "before unit.env names the new image": lambda argv: (
+        argv[0] == "install" and argv[-1].startswith(str(PERSON.unit_env))
+    ),
+    "before the new image starts": _sends("systemctl", "start"),
+}
+
+
+@pytest.mark.parametrize("kill", _UPGRADE_KILLS.values(), ids=_UPGRADE_KILLS)
+def test_deploy_upgrade_killed_anywhere_finishes_when_run_again(
+    kill: Callable[[list[str]], bool],
+) -> None:
+    box = served_box(kill_at=kill)
+
+    with pytest.raises(Killed):
+        deployment(box).run()
+    assert not box.mine
+
+    box.revive()
+    report = deployment(box, stamp=LATER, token=RERUN).run()
+
+    assert report[-1].startswith("backup: ")
+    assert report[-1].endswith(f"pre-deploy-{LATER}-{RERUN}.age (verified, and kept)")
+    new = box.images[f"ai-assistant-hub:{NEW_COMMIT[:12]}"][0]
+    assert box.container_image == new
+    assert box.active == "active"
+
+
+def test_deploy_whose_lock_is_lost_before_the_backup_stops_nothing() -> None:
+    box = served_box(drop_locks_at=_sends(dc.DOCKER, "build"))
+
+    with pytest.raises(dc.DeployError, match="the link to the box dropped") as caught:
+        deployment(box).run()
+
+    assert caught.value.args[0].endswith("Nothing has been stopped or changed.")
+    assert not {"systemctl stop", "docker run", "unit.env"} & set(verbs(box))
+    assert box.active == "active"
+
+
+def test_deploy_whose_lock_is_lost_during_the_backup_installs_nothing() -> None:
+    box = served_box(drop_locks_at=_sends(dc.DOCKER, "run"))
+
+    with pytest.raises(dc.DeployError, match="the link to the box dropped") as caught:
+        deployment(box).run()
+
+    assert "Nothing was installed." in str(caught.value)
+    assert "started again on its earlier image" in str(caught.value)
+    assert "unit.env" not in verbs(box)
+    assert box.container_image == OLD_ID
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="util-linux's flock is not here")
+def test_a_lock_is_one_holders_until_released(tmp_path: Path) -> None:
+    taker = dc.Deployment(box=dc.LocalBox(root=True), person=PERSON)
+    path = tmp_path / ".deploy-lock"
+
+    lease = taker._lock(path, wait=0)
+    assert isinstance(lease, dc.ProcessLease)
+    assert lease.held()
+    refused = taker._lock(path, wait=0)
+    assert isinstance(refused, dc.Result)
+    assert refused.code == 75
+    lease.release()
+    assert not lease.held()
+    again = taker._lock(path, wait=0)
+    assert isinstance(again, dc.ProcessLease)
+    again.release()
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="util-linux's flock is not here")
+def test_a_lock_is_released_when_its_deploy_is_killed(tmp_path: Path) -> None:
+    path = tmp_path / ".deploy-lock"
+    path.mkdir()  # an earlier deploy's lock directory serves as the file
+    holder = subprocess.Popen(  # noqa: S603  # a fixed argv
+        [
+            sys.executable,
+            "-c",
+            "import sys, time; sys.path.insert(0, sys.argv[1]);"
+            "import deploy_container as dc;"
+            "person = dc.Person('a', dc.PurePosixPath('/'));"
+            "d = dc.Deployment(box=dc.LocalBox(root=True), person=person);"
+            "lease = d._lock(sys.argv[2], wait=0);"
+            "print(type(lease).__name__, flush=True); time.sleep(600)",
+            str(SCRIPTS),
+            str(path),
+        ],
+        stdout=subprocess.PIPE,
+    )
+    assert holder.stdout is not None
+    assert holder.stdout.readline() == b"ProcessLease\n"
+    taker = dc.Deployment(box=dc.LocalBox(root=True), person=PERSON)
+    assert isinstance(taker._lock(path, wait=0), dc.Result), "the live deploy holds it"
+
+    holder.kill()  # outright: no finally, no release
+    holder.wait()
+    holder.stdout.close()
+
+    lease = taker._lock(path, wait=10)
+    assert isinstance(lease, dc.ProcessLease), "the kernel released the dead deploy's lock"
+    lease.release()
 
 
 def test_deploy_reads_a_quoted_comment_as_one_argument() -> None:
@@ -650,11 +883,14 @@ def test_deploy_first_install_that_fails_can_be_retried() -> None:
 
     with pytest.raises(dc.DeployError, match="No space left"):
         deployment(box, port=8501).run()
-    assert box.volumes == set(), "volumes made for a start that never came are removed"
+    assert box.volumes == {PERSON.data_volume, PERSON.keyring_volume}
+    assert str(PERSON.first_install) in box.files, "volumes nothing ran on are recorded"
+    assert not box.enabled
 
     deployment(box, port=8501).run()
 
-    assert box.volumes == {PERSON.data_volume, PERSON.keyring_volume}
+    assert not [argv for argv in box.ran if argv[:3] == [dc.DOCKER, "volume", "rm"]]
+    assert str(PERSON.first_install) not in box.files
     assert box.active == "active"
 
 
@@ -706,7 +942,7 @@ def _refused_untouched(box: FakeBox, match: str, **overrides: object) -> None:
     assert "Nothing has been stopped or changed." in str(caught.value)
     touched = {"systemctl stop", "docker run", "unit.env", "systemctl start"}
     assert not touched & set(verbs(box))
-    assert str(PERSON.lock) not in box.files
+    assert not box.mine, "every lock is released"
 
 
 def test_deploy_refuses_a_missing_backup_passphrase() -> None:
@@ -839,6 +1075,9 @@ def test_deploy_refuses_a_served_volume_with_no_record_of_its_image() -> None:
     box = served_box()
     del box.files[str(PERSON.unit_env)]
     _refused_untouched(box, "nothing says which image wrote it", port=8501)
+    _refused_untouched(
+        box, re.escape(f"than {PERSON.first_install}), remove {PERSON.data_volume}"), port=8501
+    )
 
 
 def test_deploy_refuses_a_record_with_no_volume() -> None:
@@ -867,16 +1106,18 @@ def test_deploy_rechecks_the_root_under_the_box_lock() -> None:
     _refused_untouched(box, "one root per box")
 
     assert box.files[dc.UNIT_PATH].data == other.encode()
-    assert dc.UNIT_LOCK not in box.files
+    assert not box.mine, "every lock is released"
 
 
 def test_deploy_waits_for_the_box_lock_and_then_refuses() -> None:
     box = served_box()
-    box.files[dc.UNIT_LOCK] = File(0, 0o700, directory=True)
+    box.locks.add(dc.UNIT_LOCK)
 
-    _refused_untouched(box, "installing\nthe unit")
+    _refused_untouched(box, "installing the unit, for\n60s")
 
-    assert dc.UNIT_LOCK in box.files, "another deploy's lock is not removed"
+    taken = next(argv for argv in box.ran if dc.UNIT_LOCK in argv)
+    assert taken[:3] == ["flock", "--conflict-exit-code=75", "--wait=60"]
+    assert box.locks == {dc.UNIT_LOCK}, "another deploy's lock is not touched"
 
 
 def test_deploy_keeps_an_installed_unit_of_the_same_root() -> None:
@@ -916,10 +1157,12 @@ def test_deploy_refuses_a_box_that_routes_localnet() -> None:
 
 def test_deploy_refuses_while_another_deploy_holds_the_lock() -> None:
     box = served_box()
-    box.files[str(PERSON.lock)] = File(0, 0o700, directory=True)
-    with pytest.raises(dc.DeployError, match="another deploy to alice"):
+    box.locks.add(str(PERSON.lock))
+    with pytest.raises(dc.DeployError, match="another deploy to alice holds") as caught:
         deployment(box).run()
-    assert str(PERSON.lock) in box.files, "someone else's lock is not removed"
+    assert f"fuser -v {PERSON.lock}" in str(caught.value)
+    assert box.locks == {str(PERSON.lock)}, "someone else's lock is not touched"
+    assert box.ran[-1][:3] == ["flock", "--conflict-exit-code=75", "--nonblock"]
     assert len(box.ran) == 2  # the directory's stat, and the mkdir
 
 
@@ -955,7 +1198,7 @@ def test_deploy_refuses_an_earlier_build_before_the_unit_is_touched(tmp_path: Pa
     assert message.endswith("Nothing has been stopped or changed.")
     assert not {"systemctl stop", "docker run", "unit.env", "systemctl start"} & set(verbs(box))
     assert dc.UNIT_PATH not in box.files, "the unit is installed only once the commit is ruled"
-    assert str(PERSON.lock) not in box.files
+    assert not box.mine, "every lock is released"
 
 
 def test_deploy_refuses_over_an_image_with_no_commit_label() -> None:
