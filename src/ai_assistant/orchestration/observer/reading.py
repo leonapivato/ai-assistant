@@ -35,6 +35,7 @@ read as an id with no record (ADR-0286 §6:4).
 
 from __future__ import annotations
 
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
@@ -84,7 +85,7 @@ from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.support_parts import part_content
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import AsyncGenerator, Mapping, Sequence, Set
     from datetime import datetime
 
     from ai_assistant.core.protocols import MemoryStore, PlanStore, StoryStore
@@ -92,6 +93,7 @@ if TYPE_CHECKING:
         ActivationEffect,
         EpisodeProcessingRecord,
         FrozenJson,
+        StoryNote,
         SupportPart,
     )
 
@@ -640,14 +642,15 @@ class EpisodeReader:
         found = without_open_episodes(await self._memory.get_many(list(addresses)))
         episodes = {key: one for key, one in found.items() if isinstance(one, EpisodicMemory)}
         read: dict[SupportPart, ReadPart] = {}
-        outsides: dict[str, bool] = {}
+        said = {part.episode for part in wanted if isinstance(part, RoundMessagePart)}
+        outsides = await self._outsides_of([one for key, one in episodes.items() if key in said])
         supplied: list[Placement] = []
         for index, part in enumerate(wanted, start=1):
             record = episodes.get(part_episode(part) or "")
             text = part_content(part, episodes=episodes, effects={}, carried=None)
             if record is None or record.processing_record is None or not text:
                 continue
-            facts = await self._facts(part, record, outsides)
+            facts = _facts_at(part, record, outsides)
             if facts is None:
                 continue
             answers, answered = await self._answered(part, record)
@@ -719,41 +722,6 @@ class EpisodeReader:
                 break
             cursor = page.next_cursor
         return None, None
-
-    async def _facts(  # noqa: PLR0911 — one arm per part a finding may rest on (§9:6)
-        self, part: SupportPart, record: EpisodicMemory, outsides: dict[str, bool]
-    ) -> tuple[SupportOrigin, datetime | None] | None:
-        """The origin and ``when`` code sets on a support pointing at ``part`` (§9:5)."""
-        processing = record.processing_record
-        if processing is None:  # pragma: no cover - checked by the caller
-            return None
-        match part:
-            case InputPart(message=None):
-                return input_origin(processing.trigger, None), record.occurred_at
-            case InputPart(message=int() as message) if message < len(processing.trigger.messages):
-                sent = processing.trigger.messages[message].sent_at
-                return input_origin(processing.trigger, message), sent
-            case RoundMessagePart():
-                round_ = next((one for one in processing.rounds if one.id == part.round), None)
-                if round_ is None:
-                    return None
-                if record.id not in outsides:
-                    outsides[record.id] = await read_outside_content(
-                        self._memory, processing.activation_id, working=WorkingRecord()
-                    )
-                over = outsides[record.id]
-                origin = (
-                    SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE
-                    if over
-                    else SupportOrigin.ASSISTANT_MESSAGE
-                )
-                return origin, round_.recorded_at
-            case EvidenceItemPart() if part.digest < len(processing.digests):
-                return SupportOrigin.EVIDENCE, processing.digests[part.digest].recorded_at
-            case ConfirmationPart():
-                return SupportOrigin.CONFIRMATION, approval_instant(record)
-            case _:
-                return None
 
     async def _gather(
         self,
@@ -888,17 +856,39 @@ class EpisodeReader:
         """Whether each read activation had read outside content (ADR-0328 §4:3)."""
         records = (leaving, *gathered.later, *gathered.past)
         records += tuple(one for _, _, fresh in gathered.stories for one in fresh)
-        outsides: dict[str, bool] = {}
-        for record in records:
-            processing = record.processing_record
-            if processing is None:  # pragma: no cover - only readable episodes are gathered
-                continue
-            # The stored record alone: no working set outlives its activation, and a
-            # mark the record cannot show fails closed, as authorizing's does.
-            outsides[record.id] = await read_outside_content(
-                self._memory, processing.activation_id, working=WorkingRecord()
+        return await self._outsides_of(records)
+
+    async def _outsides_of(self, records: Sequence[EpisodicMemory]) -> dict[str, bool]:
+        """Whether each record's activation had read outside content, by the record's id.
+
+        Read as authorizing reads it (ADR-0306 §4:5), over the stored record: no working
+        set outlives its activation. What the working set held of the story notes
+        planning was shown is read again from the story store, where each note's mark
+        was set when it was written and never changes (ADR-0303 §3:1), so a note is read
+        as outside content exactly where it is marked. A note the store no longer shows
+        has a mark nothing can read, and fails closed, as authorizing's does.
+        """
+        held = [
+            (record.id, processing)
+            for record in records
+            if (processing := record.processing_record) is not None
+        ]
+        wanted = {
+            label.id
+            for _, processing in held
+            for label in processing.labels
+            if label.kind is LabelKind.NOTE
+        }
+        notes = await _shown_notes(
+            self._stories, wanted, [processing.activation_id for _, processing in held]
+        )
+        working = WorkingRecord(notes=notes)
+        return {
+            record_id: await read_outside_content(
+                self._memory, processing.activation_id, working=working
             )
-        return outsides
+            for record_id, processing in held
+        }
 
     async def _effects(self, episodes: Sequence[EpisodicMemory]) -> tuple[ActivationEffect, ...]:
         activations = [
@@ -1097,6 +1087,109 @@ def _asked(
         if digest == effect.values_digest:
             return activation_id, fact
     return None
+
+
+async def _shown_notes(
+    stories: StoryStore, wanted: Set[str], activations: Sequence[str]
+) -> tuple[StoryNote, ...]:
+    """The story notes whose ids ``wanted`` names, as the story store holds them.
+
+    A note label's id is its note's id (``PlanningLabel.id``). A note moves with a merge,
+    a split or a move but is never removed and its mark never changes (ADR-0303 §3:1),
+    so it is found wherever it is held now: first among the notes of the stories the
+    ``activations`` belong to, where a note planning was shown is most often held, then,
+    for any still not found, among every story's, newest first, stopping once all are.
+    A label whose note is in none of them is left out, and fails closed where it is
+    read (:func:`~ai_assistant.orchestration.authorizer.read_outside_content`).
+
+    Raises:
+        StoryStoreError: If the story store cannot be read.
+    """
+    wanted = {one for one in wanted if one.isdecimal()}
+    found: dict[str, StoryNote] = {}
+    if not wanted:
+        return ()
+    read: set[str] = set()
+    async with aclosing(_stories_to_search(stories, activations)) as story_ids:
+        async for story_id in story_ids:
+            if story_id in read:
+                continue
+            read.add(story_id)
+            found.update(
+                (str(note.note_id), note)
+                for note in await _story_notes(stories, story_id)
+                if str(note.note_id) in wanted
+            )
+            if wanted <= found.keys():
+                break
+    return tuple(found.values())
+
+
+async def _stories_to_search(
+    stories: StoryStore, activations: Sequence[str]
+) -> AsyncGenerator[str]:
+    """The stories ``activations`` belong to, then every story, newest first, by id."""
+    for activation_id in dict.fromkeys(activations):
+        member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation_id)
+        for header in await stories.stories_of(member):
+            yield header.story_id
+    cursor: int | None = None
+    while True:
+        page = await stories.stories(cursor=cursor, limit=MAX_STORY_PAGE)
+        for header in page.stories:
+            yield header.story_id
+        if page.next_cursor is None or page.next_cursor == cursor:
+            return
+        cursor = page.next_cursor
+
+
+async def _story_notes(stories: StoryStore, story_id: str) -> list[StoryNote]:
+    """Every note a story holds now, every page read; none where it holds no such story."""
+    held: list[StoryNote] = []
+    cursor: int | None = None
+    while True:
+        page = await stories.notes(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
+        if page is None:
+            return held
+        held.extend(page.notes)
+        if page.next_cursor is None or page.next_cursor == cursor:
+            return held
+        cursor = page.next_cursor
+
+
+def _facts_at(  # noqa: PLR0911 — one arm per part a finding may rest on (§9:6)
+    part: SupportPart, record: EpisodicMemory, outsides: Mapping[str, bool]
+) -> tuple[SupportOrigin, datetime | None] | None:
+    """The origin and ``when`` code sets on a support pointing at ``part`` (§9:5).
+
+    A round's message takes its outside origin from ``outsides``, and where that holds
+    no answer for its episode, it is read as outside, failing closed.
+    """
+    processing = record.processing_record
+    if processing is None:  # pragma: no cover - checked by the caller
+        return None
+    match part:
+        case InputPart(message=None):
+            return input_origin(processing.trigger, None), record.occurred_at
+        case InputPart(message=int() as message) if message < len(processing.trigger.messages):
+            sent = processing.trigger.messages[message].sent_at
+            return input_origin(processing.trigger, message), sent
+        case RoundMessagePart():
+            round_ = next((one for one in processing.rounds if one.id == part.round), None)
+            if round_ is None:
+                return None
+            origin = (
+                SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE
+                if outsides.get(record.id, True)
+                else SupportOrigin.ASSISTANT_MESSAGE
+            )
+            return origin, round_.recorded_at
+        case EvidenceItemPart() if part.digest < len(processing.digests):
+            return SupportOrigin.EVIDENCE, processing.digests[part.digest].recorded_at
+        case ConfirmationPart():
+            return SupportOrigin.CONFIRMATION, approval_instant(record)
+        case _:
+            return None
 
 
 def _readable(record: EpisodicMemory) -> bool:
