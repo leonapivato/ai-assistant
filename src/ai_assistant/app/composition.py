@@ -85,7 +85,15 @@ from ai_assistant.orchestration.matters_pass import MattersPass
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, StoryReads
 from ai_assistant.orchestration.recall import RecallStage
-from ai_assistant.orchestration.remembering import REMEMBER, REMEMBER_CAPABILITY, RememberCalls
+from ai_assistant.orchestration.reliance import NOTE_RELIANCE, RELIANCE_LABEL_ARGUMENTS
+from ai_assistant.orchestration.remembering import (
+    CANDIDATE_LABEL_ARGUMENTS,
+    REMEMBER,
+    REMEMBER_CANDIDATE,
+    REMEMBER_CAPABILITY,
+    CandidateCalls,
+    RememberCalls,
+)
 from ai_assistant.orchestration.selection import Preference
 from ai_assistant.orchestration.story_calls import (
     STORY_CALL_CAPABILITIES,
@@ -407,6 +415,19 @@ PHASES_STORY_EPISODES: Final = STORY_SHORT_VIEW_EPISODES + 1
 #: routed by source (ADR-0307 §6:6, ADR-0306 §5:16). **Provisional (#2589).** As many as
 #: recall's second run keeps in all, so an asked-for search reaches no fewer than recall.
 PHASES_MEMORY_SEARCH_LIMIT: Final = RECALL_SECOND_RUN_CAP
+
+#: Whether planning's ``remember`` records a candidate for the observer (ADR-0329 §§3-6)
+#: rather than writing a memory through ``MemoryPolicy`` (ADR-0328 §13's interim). **Off,
+#: and a constant of this module, never a setting** (§19:3): no build in which
+#: ``remember`` records candidates while the observer does not run is deployed to a
+#: person's hub, so nothing a hub reads can turn it on. The lane that wires the observer
+#: turns it on, in that change, by setting this to ``True``.
+REMEMBER_RECORDS_CANDIDATES: Final = False
+
+#: How many similar memories a candidate's lookup returns at most (ADR-0329 §4:1).
+#: **Provisional (#2589).** A handful: enough to show planning a conflict that matters,
+#: few enough that a result stays short.
+CANDIDATE_LOOKUP_LIMIT: Final = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -2217,6 +2238,13 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
     :class:`LookUps` over the one memory store and the story views' reads. The forecast
     read is kept out of every registry (ADR-0260 §1), so it is not offered.
 
+    **Candidates, behind one switch** (ADR-0329 §19:3): where
+    :data:`REMEMBER_RECORDS_CANDIDATES` is on, ``remember`` is offered recording a
+    candidate, run by a :class:`CandidateCalls` whose lookup is the look-ups' (§4:1),
+    authorizing and planning are built to treat it so (§5, §6), and noting reliance is
+    offered (§6:7). Off, as it is until the observer is wired, every one of them is as
+    ADR-0328 §13's interim has it.
+
     **The policy is the deployment's thresholds and configured providers, with no
     goal authorizations, no goal quotes and no grant seam** (ADR-0306 §4:11, §6;
     ADR-0321 §7:1): a ``ThresholdActionPolicy`` built from the settings, so no ruling
@@ -2274,10 +2302,14 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
     look_ups = LookUps(
         memory=seams.memory, views=story_reads, search_limit=PHASES_MEMORY_SEARCH_LIMIT
     )
+    # ADR-0329 §19:3: one switch, off until the observer is wired, decides whether
+    # `remember` records candidates, with its lookup, its confirm and noting reliance.
+    candidates = REMEMBER_RECORDS_CANDIDATES
     tools = PhaseTools(
         registry=seams.registry,
         invoker=seams.registry,
-        own_records=(REMEMBER, *STORY_CALLS, *LOOK_UPS),
+        own_records=(REMEMBER_CANDIDATE if candidates else REMEMBER, *STORY_CALLS, *LOOK_UPS),
+        reliance=NOTE_RELIANCE if candidates else None,
         searcher=seams.searcher,
         search_query=SEARCH_QUERY_ARGUMENT,
         # Both of the simulated provider's capabilities are offered (ADR-0309 §4:2), and
@@ -2317,6 +2349,7 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
             ),
             now=_utcnow,
             diagnostics=seams.diagnostics,
+            candidates=candidates,
         ),
         acting=ActingStage(
             plans=seams.plans,
@@ -2325,8 +2358,11 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
                 {
                     # ADR-0321 §5:5: the store the writer writes to, read for the
                     # assertions a write-time conflict's question shows replaced.
-                    REMEMBER_CAPABILITY: RememberCalls(
-                        writer=seams.writer, memory=seams.memory, now=_utcnow
+                    REMEMBER_CAPABILITY: (
+                        # ADR-0329 §4:1: a candidate's lookup, under the look-ups' scope.
+                        CandidateCalls(similar=look_ups, limit=CANDIDATE_LOOKUP_LIMIT)
+                        if candidates
+                        else RememberCalls(writer=seams.writer, memory=seams.memory, now=_utcnow)
                     ),
                     **dict.fromkeys(STORY_CALL_CAPABILITIES, story_calls),
                     **dict.fromkeys(LOOK_UP_CAPABILITIES, look_ups),
@@ -2338,7 +2374,11 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
         tools=tools,
         plans=seams.plans,
         writer=ChatWriter(conversations=seams.chat, max_payload_bytes=seams.max_payload_bytes),
-        label_arguments={**STORY_LABEL_ARGUMENTS, **LOOK_UP_LABEL_ARGUMENTS},
+        label_arguments={
+            **STORY_LABEL_ARGUMENTS,
+            **LOOK_UP_LABEL_ARGUMENTS,
+            **({**CANDIDATE_LABEL_ARGUMENTS, **RELIANCE_LABEL_ARGUMENTS} if candidates else {}),
+        },
         # ADR-0307 §5:3-§5:4: the hub's check of a move or a split before authorizing,
         # against the stories as they stand then, by the same runner acting reaches.
         story_calls=story_calls,
@@ -2360,6 +2400,7 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
         # the spend and notification policies read, validated at load.
         timezone=settings.timezone,
         diagnostics=seams.diagnostics,
+        candidates=candidates,
     )
 
 
