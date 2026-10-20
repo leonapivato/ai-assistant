@@ -352,16 +352,12 @@ you may kill.
 
 **A first install that ends early is resumed.** It records itself in
 `/srv/hubs/<person>/.first-install` before it makes the volumes, and removes the record
-once `unit.env` is written and before the unit is enabled or started. While the record
-stands nothing has run on the volumes, so a deploy that finds it keeps them and installs
-again. Run the deploy again with the same `--port`, whether the first one failed or was
-killed. Once the record is gone the volumes are treated as served, and a deploy backs
-them up first, as for any hub.
-
-If the unit is enabled or has started while the record stands, which only a hand could
-have done, a hub may have run on the volumes, and the deploy refuses to resume. Disable
-and stop the unit, remove the record, and deploy again: the volumes are then backed up
-as served data first.
+once `unit.env` is written. The unit cannot start without `unit.env`, so while the
+record stands without it nothing has run on the volumes, and a deploy that finds it
+keeps them and installs again. Run the deploy again with the same `--port`, whether the
+first one failed or was killed. Once `unit.env` is written the volumes are treated as
+served, record or not: a deploy backs them up first, as for any hub, and removes the
+record.
 
 Volumes with neither the record nor `unit.env` are refused: they may hold a person's
 data, with nothing to say which image wrote it. Back the data volume up by hand and
