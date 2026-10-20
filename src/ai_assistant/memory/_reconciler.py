@@ -46,12 +46,14 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Final, Protocol
 
+from ai_assistant.core.prompts import PromptDeclaration
 from ai_assistant.core.types import ConflictRelation, Message, Role
 from ai_assistant.memory._agreement import agrees
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from ai_assistant.core.prompts import PromptTemplate
     from ai_assistant.core.protocols import ModelProvider
     from ai_assistant.core.types import MemoryRecord, MemoryUpdateProposal
 
@@ -77,50 +79,26 @@ _MAX_EXTRACTION_MISSES: Final = 64
 #: instead of raising inside a component that ADR-0159 §3 forbids to raise.
 _RELATIONS: Final = {relation.value: relation for relation in ConflictRelation}
 
-_SYSTEM_PROMPT: Final = """\
-You are the conflict reconciler of an AI assistant's memory. You are shown one \
-PROPOSED belief and a numbered list of STORED beliefs that a similarity search \
-surfaced beside it. Similarity is all that put them together: it is not evidence \
-that they say the same thing, and it is not evidence that they disagree.
-
-For each stored belief you are asked about, say how the proposed belief stands to \
-THAT belief, and to that belief alone:
-
-- "restates" — the proposed belief says what the stored belief already says. Same \
-claim, whatever the wording.
-- "adds" — the proposed belief says something the stored belief does not say and \
-does not deny. Two different true facts about the same person or topic are this. \
-So is a belief that is merely more specific, or about a different aspect.
-- "contradicts" — the proposed belief and the stored belief cannot both be true of \
-the same subject at the same time.
-
-"adds" is the common answer and it is the one to reach for when you are unsure. \
-Two beliefs being about the same person, the same topic or the same part of their \
-life is not a reason to call either of the other two.
-
-TIME MATTERS, and it is the mistake to avoid. Where both beliefs state when \
-something happened, and those times differ, they do not contradict unless the two \
-claims are incompatible AT ONE TIME. "Lost his job shortly before 21 June 2023" \
-and "took a temporary job around mid-July 2023" are two true facts in sequence: \
-that is "adds", not "contradicts". A state that changed is not a contradiction; a \
-claim about one instant that cannot hold at that instant is.
-
-Judge only what the two sentences say. You know nothing else about the user, and \
-you may not use how similar the wordings are as evidence either way."""
-
-_ENVELOPE: Final = """\
-
-Reply with a single JSON object and nothing else — no prose, no code fence:
-
-{"relations": [{"id": "<stored belief id, exactly as given>",
-                "relation": "restates" | "adds" | "contradicts"}]}
-
-Each stored belief above shows its id as a JSON string. Give the id back as a JSON \
-string too, carrying the same value: the quotation marks around it are how it is \
-displayed and are not part of it. \
-Give one entry for each stored belief listed above and none for anything else. \
-Omit an entry you cannot decide; an omission is a valid answer and is better than \
-a guess."""
+#: The reconciler's prompt (ADR-0334 §2): the system message of its one request is the
+#: template ``memory_reconciler.txt`` shipped beside this module, or the owner's override
+#: of it, which the composition root reads and hands the reconciler (§3:5). It names no
+#: flag and no value. The rendered request, the reply's reading and both halves of the
+#: bound stay here, whatever a template says (§1:3, §7:2). The reconciler writes no
+#: diagnostic entry, so the version its requests sent is the one the start's line names
+#: (§8:3).
+#:
+#: **What the instruction must say**, which binds the default and every override alike
+#: (ADR-0334 §7:1), and which a promotion's review reads it against (§7:3): the three
+#: relations, each a statement about the proposed belief and one named stored belief
+#: (ADR-0159 §1:1); that a relation rests on what the two beliefs say and on nothing
+#: else, similarity included (§1:3); and that two times which differ make no
+#: contradiction unless the claims are incompatible at one time (§3:5). ADR-0159 leaves
+#: the wording itself to the implementing lane. The reply's envelope — one ``relations``
+#: entry per stored belief asked about, named by its id — is what :func:`_read` parses,
+#: and a template that asks for another shape leaves every member unlabelled.
+MEMORY_RECONCILER_PROMPT: Final = PromptDeclaration(
+    name="memory_reconciler", package="ai_assistant.memory"
+)
 
 
 class ReconcilerOutcome(Enum):
@@ -281,6 +259,7 @@ class ModelBackedReconciler:
         *,
         model: ModelProvider,
         route: str,
+        prompt: PromptTemplate,
         max_conflicts: int = DEFAULT_RECONCILER_MAX_CONFLICTS,
     ) -> None:
         """Create the reconciler.
@@ -296,13 +275,16 @@ class ModelBackedReconciler:
                 root resolves ``Settings.reconciler_model``'s ``None`` into the
                 configured default route before it reaches here, so this is never
                 empty.
+            prompt: The template of :data:`MEMORY_RECONCILER_PROMPT`, default or
+                override, as the composition root read it at start (ADR-0334 §3:5).
             max_conflicts: ADR-0159 §3's bound — how many members of the conflict
                 set, in rank order, may be consulted about. Members beyond it are
                 left unlabelled.
 
         Raises:
             TypeError: If ``max_conflicts`` is not an integer (``bool`` included).
-            ValueError: If ``max_conflicts`` is below 1, or ``route`` is blank.
+            ValueError: If ``max_conflicts`` is below 1, ``route`` is blank, or
+                ``prompt`` is not a template of :data:`MEMORY_RECONCILER_PROMPT`.
                 Refused at construction rather than at first use, for ADR-0022
                 §4a's reason: a bound the caller got wrong should fail where it was
                 set, not on the first ingest that silently labels nothing.
@@ -316,6 +298,10 @@ class ModelBackedReconciler:
         if not route.strip():
             msg = "route must name a 'provider:model' spec, not a blank string"
             raise ValueError(msg)
+        if prompt.declaration != MEMORY_RECONCILER_PROMPT:
+            msg = "the reconciler renders the memory_reconciler prompt (ADR-0334 §2)"
+            raise ValueError(msg)
+        self._prompt = prompt
         self._model = model
         self._route = route
         self._max_conflicts = max_conflicts
@@ -377,7 +363,7 @@ class ModelBackedReconciler:
             # of certainty and must be read beside ``relations_offered``.
             return _report(labelled, ReconcilerOutcome.UNCONSULTED)
         conversation = [
-            Message(role=Role.SYSTEM, content=_SYSTEM_PROMPT + _ENVELOPE),
+            Message(role=Role.SYSTEM, content=self._prompt.render()),
             Message(role=Role.USER, content=_render(record, consulted)),
         ]
         try:
