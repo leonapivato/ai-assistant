@@ -73,14 +73,25 @@ paraphrase claiming their standing (ADR-0098 §4).
   is the asked call's, and the asked call is a remember stating exactly the call's
   statement. Otherwise none is, and the writer rules as it would on any call.
 
+**Candidates, once the observer runs** (ADR-0329 §§3-5). Behind the composition root's
+switch, which stays off until the observer is wired (§19:3), ``remember`` records a
+**candidate** instead: :data:`REMEMBER_CANDIDATE` is its declaration, :func:`candidate_of`
+reads a call's arguments, and :class:`CandidateCalls` is its runner. A candidate is the
+call as its round records it, joined to its effect record (§3:3), so the runner writes
+no memory, builds no :class:`~ai_assistant.core.types.UserConfirmation` and passes no
+``MemoryPolicy`` (§5:6-§5:7): it looks up the memories similar to the fact and returns
+their ids for planning (§4). With the switch off, everything above holds unchanged
+(ADR-0328 §13).
+
 **It logs stage and code-owned reason only**, never the statement (ADR-0275 §8).
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
@@ -94,6 +105,7 @@ from ai_assistant.core.types import (
     CostBasis,
     DataTier,
     Idempotency,
+    LabelKind,
     Memory,
     MemoryDecisionKind,
     MemoryOperation,
@@ -123,20 +135,38 @@ from ai_assistant.orchestration.activation_state import active_state
 from ai_assistant.orchestration.stories import episode_address
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.protocols import MemoryStore, MemoryWriter
     from ai_assistant.core.types import AskedCall, FrozenJson, ToolCall
 
 __all__ = [
+    "ASSISTANT_MESSAGES_ARGUMENT",
+    "CANDIDATE_LABEL_ARGUMENTS",
+    "CONFIRM_ARGUMENT",
     "EPISODE_ARGUMENT",
+    "FACT_ARGUMENT",
+    "INPUT_ARGUMENT",
+    "MEMORY_ARGUMENT",
+    "NOTE_ARGUMENT",
     "OUTSIDE_CONTENT_ARGUMENT",
     "REMEMBER",
+    "REMEMBER_CANDIDATE",
     "REMEMBER_CAPABILITY",
+    "RESULTS_ARGUMENT",
+    "SIMILAR_KEY",
     "STATEMENT_ARGUMENT",
     "STATEMENT_MAX_CHARS",
+    "USER_MESSAGES_ARGUMENT",
+    "WHY_ARGUMENT",
+    "Candidate",
+    "CandidateCalls",
     "NeedsYou",
     "RememberCalls",
+    "SimilarMemories",
+    "candidate_of",
+    "candidate_similar",
+    "is_candidate_result",
     "remembered_proposal",
     "remembered_record_id",
 ]
@@ -218,6 +248,277 @@ REMEMBER: Final = ToolDefinition(
   nothing is spent.
 - ``system_supplied`` names the two arguments the hub fills (module docstring).
 """
+
+
+#: A candidate's fact (ADR-0329 §3:1): one thing, self-contained, in planning's words.
+FACT_ARGUMENT: Final = "fact"
+
+#: Whether a candidate rests on the activation's input.
+INPUT_ARGUMENT: Final = "rests_on_input"
+
+#: The earlier exchanges, by their episodes' ``E`` labels, whose user's message it rests on.
+USER_MESSAGES_ARGUMENT: Final = "rests_on_user_messages"
+
+#: The earlier exchanges, by their episodes' ``E`` labels, whose assistant's message it
+#: rests on.
+ASSISTANT_MESSAGES_ARGUMENT: Final = "rests_on_assistant_messages"
+
+#: The results, by their ``R`` labels, it rests on.
+RESULTS_ARGUMENT: Final = "rests_on_results"
+
+#: A short why.
+WHY_ARGUMENT: Final = "why"
+
+#: One memory planning was shown, by its ``M`` label, that the fact bears on.
+MEMORY_ARGUMENT: Final = "memory"
+
+#: How the fact bears on that memory, in words.
+NOTE_ARGUMENT: Final = "note"
+
+#: Whether planning wants the user's yes to the fact's wording first (ADR-0329 §5:1).
+CONFIRM_ARGUMENT: Final = "confirm"
+
+#: The longest why or note a candidate carries.
+_REASON_MAX_CHARS: Final = 500
+
+#: The key a candidate's result lists the similar memories' ids under (ADR-0329 §4:1),
+#: ``null`` where the lookup failed (§4:4).
+SIMILAR_KEY: Final = "similar"
+
+_LABELS_SCHEMA_ITEMS: Final[dict[str, FrozenJson]] = {"type": "string", "minLength": 1}
+
+_CANDIDATE_SCHEMA: Final[dict[str, FrozenJson]] = {
+    "type": "object",
+    "properties": {
+        FACT_ARGUMENT: {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": STATEMENT_MAX_CHARS,
+            "description": (
+                "One fact, in your own words, that will still make sense on its own later."
+            ),
+        },
+        INPUT_ARGUMENT: {
+            "type": "boolean",
+            "description": "True where the fact rests on this activation's input.",
+        },
+        USER_MESSAGES_ARGUMENT: {
+            "type": "array",
+            "items": _LABELS_SCHEMA_ITEMS,
+            "description": (
+                "The earlier exchanges, by their E labels, whose user's message the fact rests on."
+            ),
+        },
+        ASSISTANT_MESSAGES_ARGUMENT: {
+            "type": "array",
+            "items": _LABELS_SCHEMA_ITEMS,
+            "description": (
+                "The earlier exchanges, by their E labels, whose assistant's message the "
+                "fact rests on."
+            ),
+        },
+        RESULTS_ARGUMENT: {
+            "type": "array",
+            "items": _LABELS_SCHEMA_ITEMS,
+            "description": "The results, by their R labels, the fact rests on.",
+        },
+        WHY_ARGUMENT: {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": _REASON_MAX_CHARS,
+            "description": "Why it is worth keeping, in a few words.",
+        },
+        MEMORY_ARGUMENT: {
+            "type": "string",
+            "minLength": 1,
+            "description": "A memory you were shown that the fact bears on, by its M label.",
+        },
+        NOTE_ARGUMENT: {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": _REASON_MAX_CHARS,
+            "description": "With memory: how the fact bears on that memory, in words.",
+        },
+        CONFIRM_ARGUMENT: {
+            "type": "boolean",
+            "description": ("True to ask the user's yes to the fact's wording before it is kept."),
+        },
+        EPISODE_ARGUMENT: {"type": "string", "minLength": 1},
+        OUTSIDE_CONTENT_ARGUMENT: {"type": "boolean"},
+    },
+    "required": [FACT_ARGUMENT, WHY_ARGUMENT, EPISODE_ARGUMENT, OUTSIDE_CONTENT_ARGUMENT],
+    "additionalProperties": False,
+}
+
+REMEMBER_CANDIDATE: Final = ToolDefinition.model_validate(
+    REMEMBER.model_dump()
+    | {
+        "description": (
+            "Record a candidate for long-term memory: one fact about the user or their "
+            "world, what it rests on, and why it is worth keeping. It is reviewed later "
+            "and kept only then; the result shows the memories already held that are "
+            "similar to it."
+        ),
+        "result": CapabilityResult.NO_OUTSIDE_TEXT,
+        "parameters_schema": _CANDIDATE_SCHEMA,
+    }
+)
+"""``remember`` once it records a candidate (ADR-0329 §3, §4:3, §5:1).
+
+The same declaration as :data:`REMEMBER` in every property but three: its description,
+its arguments (§3:1, §5:1), and ``result=NO_OUTSIDE_TEXT``, since its result lists the
+similar memories that do not rest on outside content, by id, and carries no outside
+text (§4:2-§4:3), so it goes to planning whole (ADR-0306 §5:14). Its effect is still
+the assistant's own records, it is not safe to repeat, never leaves the hub and never
+has an unknown outcome (§3:7). The hub fills ``episode`` and
+``rests_on_outside_content`` as for :data:`REMEMBER` (§3:4).
+
+A copy, validated as it is built, so no property it shares with :data:`REMEMBER` can
+drift from it.
+"""
+
+#: Which of a candidate's arguments name things by label (ADR-0307 §5:2), which
+#: planning's check maps to ids or refuses whole (§5:3, ADR-0329 §3:4).
+CANDIDATE_LABEL_ARGUMENTS: Final[Mapping[str, Mapping[str, LabelKind]]] = {
+    REMEMBER_CAPABILITY: {
+        USER_MESSAGES_ARGUMENT: LabelKind.EPISODE,
+        ASSISTANT_MESSAGES_ARGUMENT: LabelKind.EPISODE,
+        RESULTS_ARGUMENT: LabelKind.RESULT,
+        MEMORY_ARGUMENT: LabelKind.MEMORY,
+    }
+}
+
+
+@dataclass(frozen=True, slots=True)
+class Candidate:
+    """One candidate, as a ``remember`` call records it (ADR-0329 §3:1, §5:1).
+
+    Attributes:
+        fact: The fact, in planning's words.
+        why: Why it is worth keeping.
+        rests_on_input: Whether it rests on the activation's input.
+        user_messages: The episodes whose user's message it rests on, by id.
+        assistant_messages: The episodes whose assistant's message it rests on, by id.
+        results: The results it rests on, by id.
+        memory: The memory it bears on, by id, or ``None``.
+        note: How it bears on that memory, or ``None``.
+        confirm: Whether planning wants the user's yes to its wording first.
+    """
+
+    fact: str
+    why: str
+    rests_on_input: bool = False
+    user_messages: tuple[str, ...] = ()
+    assistant_messages: tuple[str, ...] = ()
+    results: tuple[str, ...] = ()
+    memory: str | None = None
+    note: str | None = None
+    confirm: bool = False
+
+
+def candidate_of(parameters: Mapping[str, FrozenJson], /) -> Candidate:
+    """The candidate a ``remember`` call records, its labels already mapped to ids.
+
+    Args:
+        parameters: The call's arguments, the hub-filled ones included or not.
+
+    Returns:
+        The candidate.
+
+    Raises:
+        ValueError: If the fact or the why is missing or blank, an argument is of the
+            wrong type, it rests on nothing (§3:1's "one or more"), or it carries a
+            note without the memory the note is about.
+    """
+    fact = parameters.get(FACT_ARGUMENT)
+    why = parameters.get(WHY_ARGUMENT)
+    if not isinstance(fact, str) or not fact.strip():
+        msg = "a candidate states one non-blank fact"
+        raise ValueError(msg)
+    if not isinstance(why, str) or not why.strip():
+        msg = "a candidate says why it is worth keeping"
+        raise ValueError(msg)
+    rests_on_input = _flag(parameters, INPUT_ARGUMENT)
+    user = _ids(parameters, USER_MESSAGES_ARGUMENT)
+    assistant = _ids(parameters, ASSISTANT_MESSAGES_ARGUMENT)
+    results = _ids(parameters, RESULTS_ARGUMENT)
+    if not (rests_on_input or user or assistant or results):
+        msg = "a candidate rests on the input, an earlier message or a result"
+        raise ValueError(msg)
+    memory = _optional_text(parameters, MEMORY_ARGUMENT)
+    note = _optional_text(parameters, NOTE_ARGUMENT)
+    if note is not None and memory is None:
+        msg = "a candidate's note is about the memory it names"
+        raise ValueError(msg)
+    return Candidate(
+        fact=fact,
+        why=why,
+        rests_on_input=rests_on_input,
+        user_messages=user,
+        assistant_messages=assistant,
+        results=results,
+        memory=memory,
+        note=note,
+        confirm=_flag(parameters, CONFIRM_ARGUMENT),
+    )
+
+
+def _flag(parameters: Mapping[str, FrozenJson], name: str) -> bool:
+    value = parameters.get(name, False)
+    if not isinstance(value, bool):
+        msg = f"a candidate's {name} is true or false"
+        raise ValueError(msg)
+    return value
+
+
+def _ids(parameters: Mapping[str, FrozenJson], name: str) -> tuple[str, ...]:
+    value = parameters.get(name, ())
+    if not isinstance(value, list | tuple) or not all(
+        isinstance(one, str) and one.strip() for one in value
+    ):
+        msg = f"a candidate's {name} names things by label"
+        raise ValueError(msg)
+    return tuple(str(one) for one in value)
+
+
+def _optional_text(parameters: Mapping[str, FrozenJson], name: str) -> str | None:
+    value = parameters.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        msg = f"a candidate's {name} is non-blank text"
+        raise ValueError(msg)
+    return value
+
+
+def is_candidate_result(output: object, /) -> bool:
+    """Whether ``output`` is what a ``remember`` that recorded a candidate returned.
+
+    Args:
+        output: What a done call returned.
+
+    Returns:
+        Whether it carries :data:`SIMILAR_KEY`, as a candidate's result always does.
+    """
+    return isinstance(output, Mapping) and SIMILAR_KEY in output
+
+
+def candidate_similar(output: object, /) -> tuple[str, ...] | None:
+    """The similar memories' ids a candidate's result lists, or ``None`` where it lists none.
+
+    Args:
+        output: What a ``remember`` call that recorded a candidate returned.
+
+    Returns:
+        The ids, in the order the lookup ranked them; ``None`` where the lookup failed
+        (ADR-0329 §4:4) or ``output`` is not a candidate's result.
+    """
+    if not isinstance(output, Mapping):
+        return None
+    ids = output.get(SIMILAR_KEY)
+    if not isinstance(ids, list | tuple):
+        return None
+    return tuple(one for one in ids if isinstance(one, str))
 
 
 def remembered_record_id(effect_id: str, /) -> str:
@@ -591,3 +892,99 @@ class RememberCalls:
                 continue
             replaced.append(record)
         return tuple(replaced)
+
+
+class SimilarMemories(Protocol):
+    """The lookup a candidate's runner reads (ADR-0329 §4:1-§4:2).
+
+    Structurally :class:`~ai_assistant.orchestration.lookups.LookUps`, which searches
+    under the round's audience: this module may not import it, because the authorizing
+    phase imports this module and the look-ups import acting and planning (ADR-0309
+    §2:3).
+    """
+
+    async def similar(self, fact: str, *, limit: int) -> tuple[Memory, ...] | None:
+        """The memories most similar to ``fact``, by relevance alone, or ``None``.
+
+        Only memories that do not rest on outside content, and only those the round's
+        audience admits, at most ``limit`` of them, best first; ``None`` where they could
+        not be read.
+        """
+        ...
+
+
+class CandidateCalls:
+    """Record a candidate, and look up the memories similar to it (ADR-0329 §3-§4).
+
+    Structurally acting's ``OwnRecordsCalls`` and its ``ApprovedOwnRecordsCalls``. A
+    candidate is the call as its round records it, joined to the effect record acting
+    claimed it under (§3:3), so recording it is that record finished done: this runner
+    writes nothing, passes no ``MemoryPolicy`` and builds no
+    :class:`~ai_assistant.core.types.UserConfirmation` (§5:6-§5:7). It answers
+    ``succeeded`` with the similar memories' ids under :data:`SIMILAR_KEY`, ``null``
+    where the lookup failed, which leaves the candidate recorded (§4:4); ``failed``
+    with a code-owned kind where the call is not a claimed ``remember`` or is malformed;
+    never ``indeterminate``.
+    """
+
+    def __init__(self, *, similar: SimilarMemories, limit: int) -> None:
+        """Wire the runner to the lookup.
+
+        Args:
+            similar: The lookup, searching under the round's audience.
+            limit: How many similar memories a lookup returns at most: the composition
+                root's constant (§4:1).
+
+        Raises:
+            ValueError: If ``limit`` is below 1.
+        """
+        if limit < 1:
+            msg = "a candidate's lookup returns at least one memory"
+            raise ValueError(msg)
+        self._similar = similar
+        self._limit = limit
+
+    async def run(self, call: ToolCall) -> ToolResult:
+        """Record the candidate ``call`` carries, and return the similar memories' ids.
+
+        Args:
+            call: The authorized remember call.
+
+        Returns:
+            ``succeeded``, its output the similar memories' ids or ``null``; ``failed``
+            where the call is not a claimed remember call or is malformed.
+        """
+        if call.request.tool.capability != REMEMBER_CAPABILITY or call.decision.effect is None:
+            _log.info("candidate_not_done", stage="acting", reason="not_a_remember_call")
+            return _not_done(ToolFailureKind.INVALID_REQUEST, "not a claimed remember call")
+        try:
+            candidate = candidate_of(call.request.parameters)
+        except ValueError:
+            _log.info("candidate_not_done", stage="acting", reason="malformed")
+            return _not_done(ToolFailureKind.INVALID_REQUEST, "the call's arguments are malformed")
+        found = await self._similar.similar(candidate.fact, limit=self._limit)
+        if found is None:
+            _log.info("candidate_recorded", stage="acting", reason="lookup_failed")
+            return ToolResult(outcome=ToolOutcome.SUCCEEDED, output={SIMILAR_KEY: None})
+        _log.info("candidate_recorded", stage="acting", similar=len(found))
+        return ToolResult(
+            outcome=ToolOutcome.SUCCEEDED,
+            output={SIMILAR_KEY: [record.id for record in found]},
+        )
+
+    async def run_approved(self, call: ToolCall, asked: AskedCall) -> ToolResult:
+        """Record a candidate a yes approved, and nothing else (ADR-0329 §5:3).
+
+        The yes's activation records it, under the approval its effect record spends;
+        the confirmation it carries is read from those records later (§5:5), so nothing
+        is built from ``asked`` here.
+
+        Args:
+            call: The authorized remember call, its decision naming the approval.
+            asked: The asked call the yes approved.
+
+        Returns:
+            What :meth:`run` answers.
+        """
+        del asked
+        return await self.run(call)

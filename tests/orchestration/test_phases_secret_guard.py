@@ -381,7 +381,8 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     tool returned, as frozen JSON. Its type admits no carrier, and a string inside it is
     text an integration answered, which residency keeps free of the credential the tool
     read to ask: the type check stops at that string, as test 13's did at the user's own
-    words.
+    words. ``RecordedCandidate`` (ADR-0329 §4:1, §4:4), on ``CallOutcome.candidate``, is
+    a candidate's lookup: the ``Memory`` records judged above, or none where it failed.
 
     **The story views** (ADR-0300 §6, §8; ADR-0307 §6:1). ``ShortView`` and
     ``Candidates``, with ``StoryNote``, ``StorySummaryLine``, ``StoryStanding``,
@@ -496,6 +497,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "Provenance",
         "QuestionPart",
         "RecalledItem",
+        "RecordedCandidate",
         "RecordedChannelTrigger",
         "RecordedInputMessage",
         "RecordedSpeechInput",

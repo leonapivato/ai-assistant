@@ -39,6 +39,14 @@ no binding to carry the fact gets the rule here, with no exception: it needs the
 allowed call's capability is not safe to repeat, the activations of the episodes in this
 activation's stories are read from the story store as they stand now, and handed on.
 
+**A candidate, behind the composition root's switch** (ADR-0329 §5, §19:3). Where the
+stage is built to have ``remember`` record candidates, a ``remember`` call passes no
+``MemoryPolicy`` (§5:6): the observer's writes do. Authorizing rules by rule, with no
+model, that one with *confirm* set needs you (§5:2), and under a yes it runs as any
+approved call does, the policy's recorded allow its deciding decision (§5:3). A candidate
+it cannot read is not done. With the switch off, remembering passes ``MemoryPolicy`` as
+above (ADR-0328 §13).
+
 **It logs stage and code-owned reason only**, never arguments or rulings' text (ADR-0275
 §8).
 
@@ -109,9 +117,11 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.channel_kinds import users_place
 from ai_assistant.orchestration.outside_content import from_outside, is_outside_episode
 from ai_assistant.orchestration.remembering import (
+    CONFIRM_ARGUMENT,
     EPISODE_ARGUMENT,
     OUTSIDE_CONTENT_ARGUMENT,
     REMEMBER_CAPABILITY,
+    candidate_of,
     remembered_proposal,
     remembered_record_id,
 )
@@ -185,6 +195,8 @@ _STAND_IN: Final = (
 _UNCLAIMED_MEMORY: Final = "remembering is claimed under an effect record, and this is not"
 _MEMORY_ASK: Final = "the memory policy asks the user about remembering this"
 _MEMORY_REJECT: Final = "the memory policy rejects remembering this"
+#: ADR-0329 §5:2: a candidate whose wording planning asked the user to confirm.
+_CONFIRM_WORDING: Final = "the user is asked to confirm this wording before it is kept"
 _ELSEWHERE: Final = "a round's message goes only into the place its input came from"
 _UNKNOWN_REPEAT: Final = (
     "a deliberate repeat of a call whose earlier outcome is unknown or not yet written "
@@ -985,6 +997,7 @@ class AuthorizingStage:
         new_decision_id: Callable[[], str] = _new_decision_id,
         new_effect_id: Callable[[], str] = _new_effect_id,
         diagnostics: DiagnosticSink | None = None,
+        candidates: bool = False,
     ) -> None:
         """Wire the stage to its seams.
 
@@ -1014,6 +1027,10 @@ class AuthorizingStage:
             new_effect_id: Mints an effect record's id, before the ruling.
             diagnostics: The diagnostic record's write seam (ADR-0314 §4:4), or
                 ``None`` where the record is off.
+            candidates: Whether ``remember`` records a candidate (ADR-0329 §3, §5),
+                the composition root's switch: it then passes no ``MemoryPolicy``, and
+                one with *confirm* set needs you. Off by default, which keeps
+                ADR-0328 §13's interim.
         """
         self._registry = registry
         self._policy = policy
@@ -1030,6 +1047,7 @@ class AuthorizingStage:
         self._new_decision_id = new_decision_id
         self._new_effect_id = new_effect_id
         self._diagnostics = diagnostics
+        self._candidates = candidates
 
     async def authorize(self, given: RoundToAuthorize) -> RoundAuthorization:
         """Check every call of ``given`` in the round's order, and its message.
@@ -1404,11 +1422,39 @@ class AuthorizingStage:
         if tool.leaves_hub:
             state.note(call, "stand_in", "passed", None)
         if tool.capability == REMEMBER_CAPABILITY:
-            remembered = await self._remembering(ruled, call, state)
+            remembered = (
+                self._candidate(ruled, call, state)
+                if self._candidates
+                else await self._remembering(ruled, call, state)
+            )
             if remembered is not None:
                 kind, reason = remembered
                 return verdict(kind, reason)
         return verdict(Verdict.ALLOWED)
+
+    @staticmethod
+    def _candidate(
+        ruled: _Ruled, call: ProposedCall, state: _Round, *, approved: bool = False
+    ) -> tuple[Verdict, str] | None:
+        """Where a ``remember`` that records a candidate stops (ADR-0329 §5:2-§5:3, §5:6).
+
+        No ``MemoryPolicy``: a candidate writes no memory. It is claimed under an effect
+        record, which is what a candidate is joined to (§3:3), and read as a candidate,
+        or it is not done. Where *confirm* is set it needs you, by rule and with no
+        model, unless it runs under a yes (``approved``), which is that confirmation.
+        """
+        if ruled.effect_id is None:
+            state.note(call, "candidate", Verdict.NOT_DONE.value, _UNCLAIMED_MEMORY)
+            return Verdict.NOT_DONE, _UNCLAIMED_MEMORY
+        try:
+            candidate = candidate_of(ruled.request.parameters)
+        except ValueError:
+            state.note(call, "candidate", Verdict.NOT_DONE.value, _MALFORMED)
+            return Verdict.NOT_DONE, _MALFORMED
+        if candidate.confirm and not approved:
+            state.note(call, CONFIRM_ARGUMENT, Verdict.NEEDS_YOU.value, _CONFIRM_WORDING)
+            return Verdict.NEEDS_YOU, _CONFIRM_WORDING
+        return None
 
     async def _remembering(
         self, ruled: _Ruled, call: ProposedCall, state: _Round
@@ -1700,7 +1746,11 @@ class AuthorizingStage:
             state.note(call, "stand_in", "lifted", None)
         if tool.capability == REMEMBER_CAPABILITY:
             ruled = _Ruled(request=request, decision=decision, effect_id=effect_id)
-            remembered = await self._remembering(ruled, call, state)
+            remembered = (
+                self._candidate(ruled, call, state, approved=True)
+                if self._candidates
+                else await self._remembering(ruled, call, state)
+            )
             if remembered is not None and remembered[0] is Verdict.NOT_DONE:
                 state.verdicts.append(
                     _ruled_verdict(call, Verdict.NOT_DONE, remembered[1], decision)

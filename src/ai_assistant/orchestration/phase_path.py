@@ -168,6 +168,17 @@ for the owner alone where it is ``True``. Before each round is planned the value
 what planning has been given so far is set on the activation's state, so a belief that
 round remembers is placed by the supply it was produced over.
 
+**Candidates, behind the composition root's switch** (ADR-0329 §§3-6, §19:3). Where the
+path is built to have ``remember`` record candidates, a candidate's result lists the
+memories similar to its fact by id, which are fetched by id before the next round as a
+memory search's are, the audience predicate applied again, and handed planning with the
+outcome (§4:1); one whose lookup failed is handed on saying so (§4:4). Before the first
+round, the episode window's episodes the observer has not processed are read with
+:func:`~ai_assistant.orchestration.candidates.pending_candidates`, and each one's
+pending candidates are handed planning by its fact (§6:9). A call noting reliance has no
+effect, so it reaches :class:`PhaseTools`, which answers it done and reaches nothing
+(§6:7). With the switch off, none of this is reached.
+
 **Left to later lanes:** pulls (ADR-0292 §13:3), which nothing builds yet.
 
 **It logs stage and code-owned reason only** (ADR-0275 §8), and a defect by its class
@@ -251,6 +262,7 @@ from ai_assistant.orchestration.authorizer import (
     WorkingRecord,
     YesContext,
 )
+from ai_assistant.orchestration.candidates import pending_candidates
 from ai_assistant.orchestration.channel_kinds import place_of
 from ai_assistant.orchestration.chat import couldnt_finish
 from ai_assistant.orchestration.controller import (
@@ -285,9 +297,16 @@ from ai_assistant.orchestration.planning import (
     PlanningStage,
     PlanningStories,
     PlanningStory,
+    RecordedCandidate,
     RefusedCall,
 )
 from ai_assistant.orchestration.recall import Recalled
+from ai_assistant.orchestration.reliance import noted
+from ai_assistant.orchestration.remembering import (
+    REMEMBER_CAPABILITY,
+    candidate_similar,
+    is_candidate_result,
+)
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_calls import TIDY_STORY_CAPABILITY
 from ai_assistant.orchestration.story_links import admitted_episodes
@@ -665,6 +684,7 @@ class PhaseTools:
         searcher: WebSearcher | None = None,
         search_query: str = "query",
         fills: Mapping[str, Mapping[str, FrozenJson]] | None = None,
+        reliance: ToolDefinition | None = None,
     ) -> None:
         """Wire the pair over the deployment's.
 
@@ -678,6 +698,9 @@ class PhaseTools:
                 fills every other from the searcher's own proposal.
             fills: For a registered capability, the arguments the hub fills and their
                 configured values, such as a connected account's destination.
+            reliance: The declaration of noting reliance (ADR-0329 §6:7), advertised
+                beside the own records' and answered done here, reaching nothing; or
+                ``None`` where it is not declared.
         """
         self._registry = registry
         self._invoker = invoker
@@ -687,6 +710,7 @@ class PhaseTools:
         self._fills = {
             capability: dict(arguments) for capability, arguments in (fills or {}).items()
         }
+        self._reliance = reliance
         self._search: ToolDefinition | None = None
 
     async def search_declaration(self) -> ToolDefinition | None:
@@ -703,7 +727,8 @@ class PhaseTools:
 
     async def _extra(self) -> list[ToolDefinition]:
         search = await self.search_declaration()
-        return [*self._own_records, *(() if search is None else (search,))]
+        reliance = () if self._reliance is None else (self._reliance,)
+        return [*self._own_records, *reliance, *(() if search is None else (search,))]
 
     async def get(self, tool_id: str) -> ToolDefinition | None:
         """The definition registered as ``tool_id``, the added ones included."""
@@ -798,8 +823,11 @@ class PhaseTools:
 
         A search's records are memory records the call returned, so they are handed to
         the activation running it, where a :meth:`holding` scope is open, before they
-        become the result's texts.
+        become the result's texts. A call noting reliance is answered done and reaches
+        nothing: the round records it, and nothing else does (ADR-0329 §6:7).
         """
+        if self._reliance is not None and call.request.tool == self._reliance:
+            return noted()
         search = await self.search_declaration()
         if search is None or self._searcher is None or call.request.tool != search:
             return await self._invoker.invoke(call, timeout=timeout)
@@ -1346,6 +1374,9 @@ class PhaseWorking:
         # the next round (ADR-0282 §2:4), and a story's full view, as its call read it.
         self.searched: dict[str, tuple[Memory, ...]] = {}
         self.search_fetches: list[Fetched] = []
+        # ADR-0329 §6:9: the episode window's pending candidates, by episode id, read
+        # once before the first round where candidates are recorded.
+        self.pending: dict[str, tuple[str, ...]] | None = None
         self.pages: dict[str, PlanningStory] = {}
         self._rounds: list[_Round] = []
 
@@ -1507,19 +1538,42 @@ class PhaseWorking:
         searched = self.searched.get(result_id)
         if searched is not None and capability == SEARCH_MEMORY_CAPABILITY:
             return replace(outcome, result=None, records=searched)
+        if capability == REMEMBER_CAPABILITY and is_candidate_result(outcome.result):
+            # ADR-0329 §4:1, §4:4: a candidate's similar memories as fetched, or that its
+            # lookup failed, which leaves it recorded.
+            similar = (
+                None
+                if candidate_similar(outcome.result) is None
+                else self.searched.get(result_id, ())
+            )
+            return replace(outcome, result=None, candidate=RecordedCandidate(similar=similar))
         return outcome
 
     def unfetched_searches(self) -> dict[str, tuple[str, ...]]:
-        """Each done memory search's ids for planning, by result id, not yet fetched."""
-        return {
-            one.result_id: searched_ids(one.output)
-            for acted in self.acted_rounds()
-            for one in acted.calls
-            if one.outcome is ActedOutcome.DONE
-            and one.result_id is not None
-            and one.result_id not in self.searched
-            and str(one.call.call.request.tool.capability) == SEARCH_MEMORY_CAPABILITY
-        }
+        """Each done look-up's ids for planning, by result id, not yet fetched.
+
+        A memory search's records whose source is not outside (ADR-0307 §6:6), and a
+        recorded candidate's similar memories (ADR-0329 §4:1); a candidate whose lookup
+        failed lists none to fetch.
+        """
+        unfetched: dict[str, tuple[str, ...]] = {}
+        for acted in self.acted_rounds():
+            for one in acted.calls:
+                result_id = one.result_id
+                if (
+                    one.outcome is not ActedOutcome.DONE
+                    or result_id is None
+                    or result_id in self.searched
+                ):
+                    continue
+                capability = str(one.call.call.request.tool.capability)
+                if capability == SEARCH_MEMORY_CAPABILITY:
+                    unfetched[result_id] = searched_ids(one.output)
+                elif capability == REMEMBER_CAPABILITY:
+                    similar = candidate_similar(one.output)
+                    if similar is not None:
+                        unfetched[result_id] = similar
+        return unfetched
 
     def planning_rounds(self) -> tuple[PlanningRound, ...]:
         """Every round, as planning recorded it or as it would have been."""
@@ -2143,6 +2197,7 @@ class PhasePath:
         timezone: str = "UTC",
         new_effect_id: Callable[[], str] = _new_effect_id,
         diagnostics: DiagnosticSink | None = None,
+        candidates: bool = False,
     ) -> None:
         """Wire the path.
 
@@ -2192,6 +2247,10 @@ class PhasePath:
             diagnostics: The diagnostic record's write seam, handed on to planning
                 and digesting, which this path builds (ADR-0314 §4:4); ``None`` where
                 the record is off. The path itself writes no entry (§4:2).
+            candidates: Whether ``remember`` records a candidate (ADR-0329 §§3-6), the
+                composition root's switch, handed on to planning: the episode window's
+                pending candidates are then read and shown (§6:9). Off by default, which
+                keeps ADR-0328 §13's interim.
 
         Raises:
             ValueError: If ``round_limit`` is below 1, ``round_wait`` or
@@ -2219,7 +2278,9 @@ class PhasePath:
             now=now,
             timezone=timezone,
             diagnostics=diagnostics,
+            candidates=candidates,
         )
+        self._candidates = candidates
         self._digesting = DigestingStage(
             provider=provider,
             recorder=_DigestRecorder(self),
@@ -2720,6 +2781,7 @@ class PhasePath:
                 # The yes's records are read inside the activation's deadline, as
                 # every read before the round is (ADR-0280 §5).
                 approved = await self._approved(given, working)
+                pending = await self._pending(given, working)
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
         outside = (
@@ -2757,6 +2819,7 @@ class PhasePath:
             outside_content_read=working.read_outside_content,
             stories=stories,
             approved=approved,
+            pending=pending,
         )
         # The round is recorded inside planning's call, so the recorder reads what it
         # needs of this activation from here (ADR-0321 §4:4: a question cut to fit).
@@ -2773,6 +2836,28 @@ class PhasePath:
         if whole is not planned.round:
             planned = replace(planned, round=whole)
         working.planned(planned)
+
+    async def _pending(
+        self, given: PhasePass, working: PhaseWorking
+    ) -> Mapping[str, tuple[str, ...]]:
+        """The episode window's pending candidates, read once (ADR-0329 §6:9).
+
+        Only where candidates are recorded: each episode the window shows that the
+        observer has not processed, with the facts of the candidates its own rounds
+        recorded, read from the plan store as it stands before the first round. A plan
+        store that cannot be read shows none, and planning goes on.
+        """
+        if not self._candidates:
+            return {}
+        if working.pending is None:
+            fetched = given.understanding_fetch
+            episodes = () if fetched is None or fetched.episodes is None else fetched.episodes
+            try:
+                working.pending = await pending_candidates(self._plans, episodes)
+            except PlanningError:
+                _log.warning("planning_candidates_unread", stage="planning")
+                working.pending = {}
+        return working.pending
 
     async def _offered(self) -> tuple[ToolDefinition, ...]:
         """The declarations this round offers planning (ADR-0306 §2:7), the clock apart.

@@ -63,6 +63,13 @@ pass's audience, which a call does not carry, so the phases' glue opens a
 :meth:`LookUps.scope` around acting for the round. A look-up run outside one reads
 nothing and is not done.
 
+**A candidate's lookup** (ADR-0329 §4:1-§4:2). Where ``remember`` records a candidate,
+its runner asks :meth:`LookUps.similar` for the memories similar to the fact: one search
+by relevance alone, no band searched on its own, under the same scope and the same
+audience predicate as a memory search, keeping only the memories that do not rest on
+outside content, which reach planning only through a digest and this lookup digests
+nothing.
+
 **It logs stage and code-owned reason only**, never a query, a record or a story
 (ADR-0275 §8).
 """
@@ -484,6 +491,38 @@ class LookUps:
                 if isinstance(record, Memory) and record.id not in kept:
                     kept[record.id] = record
         return list(kept.values())
+
+    async def similar(self, fact: str, *, limit: int) -> tuple[Memory, ...] | None:
+        """The memories most similar to ``fact``, for a candidate's lookup (ADR-0329 §4).
+
+        One search by relevance alone (ADR-0328 §7:12), with no band searched on its own,
+        under the round's scope: of what it returns, the memories the audience admits
+        (ADR-0282 §2:8) that do not rest on outside content (ADR-0329 §4:2), best first.
+        They are at most ``limit``, and fewer where the search's best include records it
+        does not keep.
+
+        Args:
+            fact: The candidate's fact.
+            limit: How many the search returns at most.
+
+        Returns:
+            The memories kept, or ``None`` where they could not be read: no scope is
+            open, or the store could not be searched.
+        """
+        scope = _SCOPE.get()
+        if scope is None:
+            _log.warning("look_up_not_done", stage="acting", reason="no_scope")
+            return None
+        try:
+            found = await self._memory.search(fact, limit=limit, kinds=(MemoryKind.MEMORY,))
+        except MemoryStoreError:
+            _log.warning("look_up_not_done", stage="acting", reason="search_failed")
+            return None
+        return tuple(
+            record
+            for record in admitted_to_understanding(scope.audience, found.records)
+            if isinstance(record, Memory) and not record.rests_on_outside_content
+        )[:limit]
 
     async def _read(self, story_id: object, older_page: object, decision_id: str) -> ToolResult:
         """Read one story's full view under the scope, and hold it for the glue."""
