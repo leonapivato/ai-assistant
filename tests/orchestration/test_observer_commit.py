@@ -805,3 +805,38 @@ def test_a_derived_supply_narrows_an_owner_placed_memory_of_the_same_reach() -> 
 
     assert isinstance(added.primary, Create)
     assert added.primary.memory.placement.set_by is PlacementSetter.DERIVED
+
+
+def test_three_parts_of_one_episode_are_one_occasion() -> None:
+    """§11:5: the floor counts distinct episodes, never parts."""
+    one_sitting = [
+        _part(f"P{index}", InputPart(episode=address("sitting"), message=index - 1))
+        for index in (1, 2, 3)
+    ]
+
+    assert _inferred(one_sitting).primary == Unwritten(FindingUnwritten.BELOW_FLOOR)
+
+
+def test_the_floor_needs_fewer_against_than_for() -> None:
+    """§11:5: equal counts fall short; one fewer against clears it."""
+
+    def inferred(against: int) -> Memory:
+        return memory(
+            "n",
+            "x",
+            inference_support(address("leaving")),
+            *(
+                said_support(address(name), direction=SupportDirection.FOR, note="").model_copy(
+                    update={"backs_as_worded": False}
+                )
+                for name in ("a", "b", "c")
+            ),
+            *(
+                said_support(address(f"no-{index}"), direction=SupportDirection.AGAINST)
+                for index in range(against)
+            ),
+        )
+
+    assert meets_floor(inferred(3))  # four for (the inference among them), three against
+    assert not meets_floor(inferred(4))
+    assert not meets_floor(inferred(5))

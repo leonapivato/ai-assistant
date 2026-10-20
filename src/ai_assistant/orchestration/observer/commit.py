@@ -419,15 +419,9 @@ async def commit_view(  # noqa: PLR0913 — the finding, what it is read against
     )
     found = await memory.search(finding.claim, limit=similar, kinds=(MemoryKind.MEMORY,))
     memories = [one for one in found.records if isinstance(one, Memory)]
+    # §9:3: the memories the search finds, and for a reliance the memory it named (§14:2);
+    # a candidate's named memory reaches the step only where the search finds it too.
     named = [] if reliance is None else [reliance.memory]
-    if finding.candidate is not None:
-        named.extend(
-            one.memory
-            for hint in reading.hints
-            if hint.effect == finding.candidate and hint.memory is not None
-            for one in reading.memories
-            if one.handle == hint.memory
-        )
     for one in named:
         if all(present.id != one.id for present in memories):
             memories.append(one)

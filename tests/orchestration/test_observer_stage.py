@@ -877,3 +877,41 @@ async def test_a_failing_read_of_the_episode_is_an_attempt_and_later_episodes_pr
     assert one.attempts[-1].end is ObservationAttemptEnd.FAILED
     assert one.next_attempt_at == AT + timedelta(minutes=1)
     assert two.state is ObservationState.SKIPPED
+
+
+async def test_an_episode_with_nothing_to_read_is_skipped_after_a_failed_read() -> None:
+    """§16:4, §16:7: a read outage first, then the skip rule, never a crash."""
+    harness = Harness()
+    bare = EpisodicMemory(
+        id="harness:bare",
+        content="the user said they like tea",
+        occurred_at=AT - timedelta(minutes=9),
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
+    )
+    await harness.hold(bare)
+    await _three(harness, text="")
+    get = harness.memory.get
+    down = True
+
+    async def flaky(record_id: str) -> object:
+        if down and record_id == "harness:bare":
+            msg = "the store could not read"
+            raise MemoryStoreError(msg)
+        return await get(record_id)
+
+    harness.memory.get = flaky  # type: ignore[method-assign,assignment]  # one outage
+    observer = harness.observer()
+
+    first = await observer.run()
+    down = False
+    harness.clock.advance(timedelta(minutes=1))
+    second = await observer.run()
+
+    assert first.waiting == 1
+    assert second.skipped == 1
+    (record,) = await harness.plans.observations(["harness:bare"])
+    assert record.state is ObservationState.SKIPPED
+    assert [one.end for one in record.attempts] == [
+        ObservationAttemptEnd.FAILED,
+        ObservationAttemptEnd.FINISHED,
+    ]

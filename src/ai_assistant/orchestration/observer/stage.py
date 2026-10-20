@@ -370,15 +370,19 @@ class Observer:
             return await self._failed(await self._open(episode_id, held, started), exc)
         if not isinstance(episode, EpisodicMemory):
             return None  # deleted since it was queued: nothing left to read
-        if held is None and _nothing_to_read(episode):
+        if _nothing_to_read(episode) and (
+            held is None or (held.call_count() == 0 and not held.findings)
+        ):
+            # §16:7, after any earlier attempt that failed before reading anything.
             skipped = ObservationRecord(
                 episode=episode_id,
                 state=ObservationState.SKIPPED,
                 attempts=(
+                    *(() if held is None else _closed(held.attempts)),
                     ObservationAttempt(started_at=started, end=ObservationAttemptEnd.FINISHED),
                 ),
             )
-            await self._record(skipped, expected_revision=0)
+            await self._record(skipped, expected_revision=0 if held is None else held.revision)
             return ObservationState.SKIPPED
         attempt = await self._open(episode_id, held, started)
         try:
