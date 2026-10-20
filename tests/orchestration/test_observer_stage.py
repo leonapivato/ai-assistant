@@ -1055,6 +1055,68 @@ async def test_a_landed_write_whose_record_failed_to_be_written_reaches_the_outc
     ]
 
 
+async def test_a_kept_finding_never_widens_a_supply_a_later_attempt_recorded() -> None:
+    """§12:6: once a later attempt's record carries the finding, the kept copy is gone.
+
+    The first attempt's checkpoint is refused, so the process keeps the finding as it
+    built it, over a supply open to anyone. The second reads an owner-only episode
+    after it, records the narrower supply and fails on an unparsable reply. By the
+    third that episode has left the window, and the memory it creates is still the
+    owner's alone.
+    """
+    harness = Harness()
+    owner_only = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
+    await _three(harness)
+    write_observation = harness.plans.write_observation
+    refused = False
+
+    async def failing_checkpoint(record: Any, *, expected_revision: int) -> Any:
+        nonlocal refused
+        if not refused and any(one.written for one in record.findings):
+            refused = True
+            msg = "the plan store could not write"
+            raise PlanningError(msg)
+        return await write_observation(record, expected_revision=expected_revision)
+
+    harness.plans.write_observation = failing_checkpoint  # type: ignore[method-assign]  # one outage
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")),
+        commit=FakeModelProvider.scripted(_create(), "not a decision", _create()),
+        related=0,
+        per_run=1,
+    )
+    await observer.run()
+    await harness.hold(
+        episode("four", at=AT + timedelta(minutes=1), text="ok").model_copy(
+            update={"placement": owner_only}
+        )
+    )
+
+    await observer.run()
+    (record,) = await harness.plans.observations(["activation:one"])
+    (finding,) = record.findings
+    assert finding.supply is not None
+    assert finding.supply.reach is PlacementReach.OWNER
+    assert [one.operations for one in finding.written] == [(MemoryOperationKind.CREATE,)]
+
+    await harness.hold(
+        episode("five", at=AT + timedelta(minutes=2), text="ok"),
+        episode("six", at=AT + timedelta(minutes=3), text="ok"),
+    )
+    harness.clock.advance(timedelta(minutes=5))
+    await observer.run()
+
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.state is ObservationState.PROCESSED
+    outcome = record.findings[0].outcome
+    assert outcome is not None
+    first, second = (one.memory for one in outcome.writes)
+    kept = await harness.memory.get(second)
+    assert isinstance(kept, Memory)
+    assert kept.placement.reach is PlacementReach.OWNER
+    assert first != second
+
+
 async def test_a_supersession_whose_retirements_were_unread_records_them_on_the_retry() -> None:
     """§16:1: every operation a landed supersession made is on the finding's outcome."""
     harness = Harness(ruling=MemoryDecisionKind.SUPERSEDE)

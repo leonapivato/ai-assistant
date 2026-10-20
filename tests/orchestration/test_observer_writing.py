@@ -669,3 +669,30 @@ async def test_retirements_are_read_from_a_replacement_retired_since() -> None:
     ends = await _writer(harness).retirements([installed])
 
     assert [(one.memory, one.operations) for one in ends] == [("m-old", (MemoryOperationKind.END,))]
+
+
+async def test_a_recovered_retirement_stands_beside_an_earlier_operation_on_its_memory() -> None:
+    """§16:1: an end read off a replacement joins whatever else ``written`` holds there.
+
+    A memory is retired once, so only one already shown retired gains nothing: the
+    end recovered from a replacement's create stands beside an add support the same
+    finding wrote on that memory earlier.
+    """
+    harness = await _harness(MemoryDecisionKind.SUPERSEDE)
+    await _stored(harness, memory("m-old", _CLAIM, sourced_support(episode=address("past"))))
+    installed = (
+        (await _writer(harness).write(Checked(primary=Create(memory=_new())))).writes[0].memory
+    )
+    observer = harness.observer()
+    created = ObservationWrite(memory=installed, operations=(MemoryOperationKind.CREATE,))
+
+    def written(*kinds: MemoryOperationKind) -> tuple[ObservationWrite, ...]:
+        return (ObservationWrite(memory="m-old", operations=kinds), created)
+
+    beside = await observer._recovered(written(MemoryOperationKind.ADD_SUPPORT))
+    assert [(one.memory, one.operations) for one in beside] == [
+        ("m-old", (MemoryOperationKind.ADD_SUPPORT, MemoryOperationKind.END)),
+        (installed, (MemoryOperationKind.CREATE,)),
+    ]
+    for retired in (MemoryOperationKind.END, MemoryOperationKind.MARK_WRONG):
+        assert await observer._recovered(written(retired)) == written(retired)

@@ -84,6 +84,7 @@ from ai_assistant.core.errors import (
     StoryStoreError,
 )
 from ai_assistant.core.types import (
+    RETIRING_OPERATIONS,
     EpisodicMemory,
     FindingOutcome,
     FindingUnwritten,
@@ -447,7 +448,14 @@ class Observer:
             findings=() if held is None else held.findings,
         )
         stored = await self._record(record, expected_revision=0 if held is None else held.revision)
-        return _Attempt(record=stored, started_at=started)
+        attempt = _Attempt(record=stored, started_at=started)
+        # What this process built of a finding that the plan store never took is where
+        # this attempt starts from, before anything can fail it (§16:1).
+        for one in stored.findings:
+            unsaved = self._unsaved.get((episode_id, one.id))
+            if one.outcome is None and unsaved is not None:
+                _set(attempt, _restored(unsaved, one))
+        return attempt
 
     async def _processed(
         self, episode: EpisodicMemory, attempt: _Attempt, window: Sequence[EpisodicMemory]
@@ -467,10 +475,6 @@ class Observer:
             self._forget(episode.id)
             await self._scouted(reading, attempt, kept)
         else:
-            for one in findings:
-                unsaved = self._unsaved.get((episode.id, one.id))
-                if one.outcome is None and unsaved is not None:
-                    _set(attempt, unsaved)
             _narrow(attempt, reading.supplied)
         for finding_id in [one.id for one in attempt.record.findings if one.outcome is None]:
             key = (episode.id, finding_id)
@@ -484,7 +488,6 @@ class Observer:
                 current if one.id == finding_id else one for one in attempt.record.findings
             )
             await self._save(attempt, findings=done)
-            del self._unsaved[key]
 
     async def _scouted(
         self, reading: Reading, attempt: _Attempt, kept: tuple[ObservationFinding, ...]
@@ -536,9 +539,10 @@ class Observer:
         """``written``, with the end on each memory a replacement there retired (§16:1).
 
         A supersession lands whole, so what it retired is on its replacement's create
-        however the replacement stands now. A memory ``written`` already names — the
-        retirement read when it landed, or the one a proposal's own retiring operation
-        made — is not named again.
+        however the replacement stands now. A memory is retired once, so one ``written``
+        already shows retired — by the retirement read when it landed, or by a
+        proposal's own retiring operation — gains nothing; any other operation on it
+        stands beside the end recovered.
 
         Raises:
             MemoryStoreError: Where a replacement cannot be read: the attempt fails,
@@ -547,9 +551,11 @@ class Observer:
         created = [one.memory for one in written if MemoryOperationKind.CREATE in one.operations]
         if not created:
             return written
-        named = {one.memory for one in written}
+        retired = {
+            one.memory for one in written if RETIRING_OPERATIONS.intersection(one.operations)
+        }
         ends = await self._writer.retirements(created)
-        return _joined(written, [one for one in ends if one.memory not in named])
+        return _joined(written, [one for one in ends if one.memory not in retired])
 
     async def _decision(
         self,
@@ -595,7 +601,6 @@ class Observer:
             # record loses no landed write to the next attempt in this process (§16:1).
             self._unsaved[key] = updated
             await self._save(attempt, findings=attempt.record.findings)
-            del self._unsaved[key]
 
         return await self._writer.write(
             verdict, shown=[one.memory for one in view.similar], landed=landed
@@ -623,13 +628,23 @@ class Observer:
     async def _save(self, attempt: _Attempt, *, findings: tuple[ObservationFinding, ...]) -> None:
         """Write the record with the findings and the calls so far, the attempt still open."""
         record = _with_attempt(attempt, findings=findings, end=None, state=ObservationState.WAITING)
-        attempt.record = await self._record(record, expected_revision=attempt.record.revision)
+        await self._carried(attempt, record)
 
     async def _close(
         self, attempt: _Attempt, end: ObservationAttemptEnd, state: ObservationState
     ) -> None:
         record = _with_attempt(attempt, findings=attempt.record.findings, end=end, state=state)
+        await self._carried(attempt, record)
+
+    async def _carried(self, attempt: _Attempt, record: ObservationRecord) -> None:
+        """Write ``record``, built from the attempt's findings, and drop what it carries.
+
+        Every finding this process kept unsaved for the episode was put on the attempt's
+        record when the attempt began, or as it was built, so once a record built from
+        those findings is written none is unsaved any more.
+        """
         attempt.record = await self._record(record, expected_revision=attempt.record.revision)
+        self._forget(record.episode)
 
     async def _record(
         self, record: ObservationRecord, *, expected_revision: int
@@ -664,7 +679,7 @@ class Observer:
             record = ObservationRecord.model_validate(
                 {**record.model_dump(), "next_attempt_at": self._now() + backoff}
             )
-        attempt.record = await self._record(record, expected_revision=attempt.record.revision)
+        await self._carried(attempt, record)
         _log.info(
             "observer_attempt",
             stage=exc.step.value if isinstance(exc, _Unparsed) else "attempt",
@@ -678,6 +693,17 @@ class Observer:
 def _updated(finding: ObservationFinding, **fields: object) -> ObservationFinding:
     """``finding`` with ``fields`` replaced, validated whole (§16:1)."""
     return type(finding).model_validate({**dict(finding), **fields})
+
+
+def _restored(unsaved: ObservationFinding, recorded: ObservationFinding) -> ObservationFinding:
+    """The finding this process kept unsaved, never wider than the record's (§12:6).
+
+    It was built after the recorded one and carries every write it does; the supply is
+    the meet of the two all the same, so a restore can only narrow a placement.
+    """
+    if unsaved.supply is None or recorded.supply is None:
+        return unsaved
+    return _updated(unsaved, supply=Placement.narrowest_of([unsaved.supply, recorded.supply]))
 
 
 def _finding(attempt: _Attempt, finding_id: str) -> ObservationFinding:
