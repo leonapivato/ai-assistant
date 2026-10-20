@@ -134,10 +134,18 @@ class _Channel:
 
 @final
 class _Telegram:
-    """An outbound transport whose far end is a scripted Telegram."""
+    """An outbound transport whose far end is a scripted Telegram, or a relay serving it."""
 
-    def __init__(self, *, polls_answered: int | None = None) -> None:
-        """Answer as Telegram does; after ``polls_answered`` polls, answer none of them."""
+    def __init__(
+        self, *, polls_answered: int | None = None, endpoint: TransportEndpoint = TELEGRAM
+    ) -> None:
+        """Answer as Telegram does; after ``polls_answered`` polls, answer none of them.
+
+        Args:
+            polls_answered: How many polls are answered before none is.
+            endpoint: The one endpoint the line may reach: Telegram's, or a relay's.
+        """
+        self._endpoint = endpoint
         self.channels: list[_Channel] = []
         self.sent: list[str] = []
         self.polls: list[dict[str, Any]] = []
@@ -145,7 +153,7 @@ class _Telegram:
         self._polls_answered = polls_answered
 
     async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel:
-        assert endpoint == TELEGRAM, "the line reaches one origin, fixed in code"
+        assert endpoint == self._endpoint, "the line reaches its one origin, and no other"
         channel = _Channel(self)
         self.channels.append(channel)
         await asyncio.sleep(0.001)  # a real poll holds the loop's attention elsewhere
@@ -173,20 +181,21 @@ class _Telegram:
         ]
 
 
-def _settings(reference: str | None = None) -> Settings:
+def _settings(reference: str | None = None, **relayed: Any) -> Settings:
     lined: dict[str, Any] = (
         {} if reference is None else {"telegram_connection": reference, "telegram_user_id": CHAT}
     )
-    return Settings(embedder=EmbedderKind.HASHING, **lined)
+    return Settings(embedder=EmbedderKind.HASHING, **lined, **relayed)
 
 
-async def _connected(tmp_path: Path, backing: Backing) -> str:
-    """The bot connected through the shipped act, its token in the keyring (§3:1-§3:2)."""
+async def _connected(tmp_path: Path, backing: Backing, credential: str = TOKEN) -> str:
+    """The line's credential connected through the shipped act, in the keyring (§3:1-§3:2)."""
     composition = build_composition(_settings(), data_dir=tmp_path, transport=None)
     point_the_keyring_at(composition, backing)
     try:
         account = await composition.engine.connect_account(
-            identity="my-assistant-bot", credential=SecretStr(TOKEN)
+            identity="telegram-relay" if credential != TOKEN else "my-assistant-bot",
+            credential=SecretStr(credential),
         )
     finally:
         await composition.engine.aclose()
@@ -288,3 +297,68 @@ async def test_another_bot_on_the_same_data_directory_starts_its_own_record(
     assert telegram_intake_path(tmp_path, reference=first, chat_id=CHAT) != telegram_intake_path(
         tmp_path, reference=second, chat_id=CHAT
     )
+
+
+# --- relayed mode (ADR-0330) -------------------------------------------------------
+
+#: The relay credential the relay minted for this hub, connected as a connection of its
+#: own (§6:4, §6:7): ``<16 hex>_<43 base64url>``, with no ``:``.
+RELAY_CREDENTIAL: Final = "0123456789abcdef_Zm9vYmFyLXJlbGF5LXNlY3JldC1wYXJ0LW9mLWNyZWQtMA"
+RELAY_SECRET_PART: Final = RELAY_CREDENTIAL.split("_", 1)[1]
+
+#: What every hosted hub writes, and where it pins (§3:4).
+RELAY_ORIGIN: Final = "https://telegram-relay:8443"
+RELAY: Final = TransportEndpoint(host="telegram-relay", port=8443, implicit_tls=True)
+
+#: A relay's CA certificate, as ``relay cert show`` prints it, its line breaks removed.
+#: Minted for these cases with its private key discarded, so no relay presents it.
+RELAY_CA: Final = (
+    "-----BEGIN CERTIFICATE-----"
+    "MIIBfTCCASOgAwIBAgIUVBNdEQURzbiRkUNtd9FKXpiqROkwCgYIKoZIzj0EAwIw"
+    "GzEZMBcGA1UEAwwQRXhhbXBsZSBSZWxheSBDQTAeFw0yNjEwMTkwMDAwMDBaFw0z"
+    "NjEwMTYwMDAwMDBaMBsxGTAXBgNVBAMMEEV4YW1wbGUgUmVsYXkgQ0EwWTATBgcq"
+    "hkjOPQIBBggqhkjOPQMBBwNCAATLIYTcOBiLZXvnSdy9Ce/9GnVvplpNdlezdpAM"
+    "bcben+U/yVbz+KAWeaeHaVN3AI6iseuT/BwUAeh710TXUWnWo0UwQzASBgNVHRMB"
+    "Af8ECDAGAQH/AgEAMA4GA1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUrhyCO524DfbQ"
+    "rJ+pjaVMzcCtBpcwCgYIKoZIzj0EAwIDSAAwRQIgIHw06X8kxeupJqfPwjMzL7l0"
+    "qogQOM3T9lHgnxRu7mQCIQCY4s5g3sYKk3LN4ToEodOoIUGyONE0iAJYZVNdlhG6"
+    "JA=="
+    "-----END CERTIFICATE-----"
+)
+
+
+async def test_a_relayed_line_runs_through_the_root_to_the_relay_alone(tmp_path: Path) -> None:
+    """The whole route in relayed mode: the relay's origin, the relay credential, no leak.
+
+    The connect act stores the relay credential as the line's connection, the root
+    builds the relayed client from the four settings, and the reader and the writer run
+    unchanged against a relay that serves the Bot API faithfully (§4). Every channel is
+    to the relay and none to Telegram (§3:2), the credential is in the token's place
+    (§4:1), and no log line or record carries it (§6:6).
+    """
+    backing = Backing()
+    reference = await _connected(tmp_path, backing, RELAY_CREDENTIAL)
+    relay = _Telegram(endpoint=RELAY)
+    settings = _settings(
+        reference,
+        telegram_relay_origin=RELAY_ORIGIN,
+        telegram_relay_certificates=(RELAY_CA,),
+    )
+    composition = build_composition(settings, data_dir=tmp_path, transport=relay)
+    point_the_keyring_at(composition, backing)
+    reader = _reader(composition)
+    assert repr(reader._client).endswith("mode='relayed')")
+
+    with structlog.testing.capture_logs() as logs:
+        await composition.engine.start()
+        async with asyncio.timeout(10):
+            while not (relay.sent and len(relay.targets()) >= 4):  # noqa: ASYNC110 — the fake answers at once
+                await asyncio.sleep(0.005)
+        exported = await reader._intake.export()
+        await composition.engine.aclose()
+
+    assert relay.sent == [NON_TEXT_LINE], "the user's photo answered, the stranger not"
+    assert all(target.startswith(f"/bot{RELAY_CREDENTIAL}/") for target in relay.targets())
+    rendered = json.dumps(logs, default=str) + exported.model_dump_json()
+    assert RELAY_SECRET_PART not in rendered
+    assert "/bot" not in rendered
