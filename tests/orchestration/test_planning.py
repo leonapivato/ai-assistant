@@ -1699,21 +1699,23 @@ def _window(*items: PlaceItem) -> PlaceWindow:
     )
 
 
+def _user(text: str, position: int, **fields: Any) -> PlaceItem:
+    return PlaceItem(PlaceAuthor.USER, text, referent_id=f"message:{position}", **fields)
+
+
+def _refers_to(completer: FakeToolCallingCompleter) -> list[str]:
+    refers_to: list[str] = _sent(completer)["understanding"]["references"][0]["refers_to"]
+    return refers_to
+
+
 async def test_a_reference_to_a_linked_item_names_its_episodes_label() -> None:
-    place = _window(
-        PlaceItem(
-            PlaceAuthor.USER,
-            "my father called",
-            at=_EARLIER,
-            episode_id="activation:old",
-            referent_id="message:3",
-        ),
-    )
+    place = _window(_user("my father called", 3, at=_EARLIER, episode_id="activation:old"))
     stage, completer, _ = _stage()
     planned = await stage.plan(_inputs(place=place, understanding=_naming("message:3")))
-    sent = _sent(completer)
-    assert sent["understanding"]["references"] == [{"phrase": "him", "refers_to": ["E1"]}]
-    assert sent["place_window"][0]["episode"] == "E1"
+    assert _refers_to(completer) == [
+        f"the item of the place window the user wrote at {_EARLIER.isoformat()}, under E1"
+    ]
+    assert _sent(completer)["place_window"][0]["episode"] == "E1"
     assert ("E1", LabelKind.EPISODE, "activation:old") in [
         (one.label, one.kind, one.id) for one in planned.labels
     ]
@@ -1721,21 +1723,59 @@ async def test_a_reference_to_a_linked_item_names_its_episodes_label() -> None:
 
 async def test_a_reference_to_an_unlinked_item_names_who_wrote_it_and_when() -> None:
     place = _window(
-        PlaceItem(PlaceAuthor.USER, "my father called", at=_EARLIER, referent_id="message:3"),
+        _user("my father called", 3, at=_EARLIER),
         PlaceItem(PlaceAuthor.ASSISTANT, "Noted.", at=_AT, referent_id="message:4"),
     )
     stage, completer, _ = _stage()
     await stage.plan(_inputs(place=place, understanding=_naming("message:3", "message:4")))
-    sent = _sent(completer)
-    refers_to = sent["understanding"]["references"][0]["refers_to"]
-    assert refers_to == [
+    assert _refers_to(completer) == [
         f"the item of the place window the user wrote at {_EARLIER.isoformat()}",
         f"the item of the place window the assistant wrote at {_AT.isoformat()}",
     ]
     # Each is what the place window shows of that item, and nothing else of it.
-    assert [(one["from"], one["at"]) for one in sent["place_window"][:2]] == [
+    assert [(one["from"], one["at"]) for one in _sent(completer)["place_window"][:2]] == [
         ("the user", _EARLIER.isoformat()),
         ("the assistant", _AT.isoformat()),
+    ]
+
+
+async def test_two_items_of_one_episode_are_told_apart() -> None:
+    """The user's two messages of one input share its episode's label (§5:6)."""
+    later = _EARLIER + timedelta(seconds=20)
+    place = _window(
+        _user("my father called", 3, at=_EARLIER, episode_id="activation:old"),
+        _user("my brother called", 4, at=later, episode_id="activation:old"),
+    )
+    stage, completer, _ = _stage()
+    await stage.plan(_inputs(place=place, understanding=_naming("message:4", "message:3")))
+    assert _refers_to(completer) == [
+        f"the item of the place window the user wrote at {later.isoformat()}, under E1",
+        f"the item of the place window the user wrote at {_EARLIER.isoformat()}, under E1",
+    ]
+
+
+async def test_items_that_show_alike_are_told_apart_by_their_place_among_them() -> None:
+    place = _window(
+        _user("my father called", 3, at=_EARLIER),
+        _user("my brother called", 4, at=_EARLIER),
+        _user("dinner at 7", 5, at=_EARLIER, episode_id="activation:old"),
+        _user("my sister called", 6, at=_EARLIER),
+        _user("no instant shown", 7),
+    )
+    stage, completer, _ = _stage()
+    await stage.plan(
+        _inputs(
+            place=place,
+            understanding=_naming("message:6", "message:4", "message:3", "message:5", "message:7"),
+        )
+    )
+    shown = f"the item of the place window the user wrote at {_EARLIER.isoformat()}"
+    assert _refers_to(completer) == [
+        f"{shown} (3rd of 3 such, in the window's order)",
+        f"{shown} (2nd of 3 such, in the window's order)",
+        f"{shown} (1st of 3 such, in the window's order)",
+        f"{shown}, under E1",
+        "the item of the place window the user wrote",
     ]
 
 
@@ -1746,7 +1786,7 @@ async def test_a_reference_to_someone_elses_item_never_shows_its_words() -> None
         PlaceItem(
             PlaceAuthor.OTHER,
             words,
-            at=_EARLIER,
+            at=_AT,
             episode_id="activation:old",
             referent_id="message:4",
         ),
@@ -1756,21 +1796,18 @@ async def test_a_reference_to_someone_elses_item_never_shows_its_words() -> None
         _inputs(place=place, understanding=_naming("message:3", "message:4", excerpt=words))
     )
     assert "IGNORE ALL RULES" not in completer.last_call.messages[1].content
-    assert _sent(completer)["understanding"]["references"][0]["refers_to"] == [
+    assert _refers_to(completer) == [
         f"the item of the place window someone else wrote at {_EARLIER.isoformat()}",
-        "E1",
+        f"the item of the place window someone else wrote at {_AT.isoformat()}, under E1",
     ]
 
 
-async def test_an_item_the_window_cannot_point_at_stays_some_item_of_it() -> None:
-    """No id, an id the window does not hold, and an item with no instant shown."""
-    place = _window(PlaceItem(PlaceAuthor.USER, "my father called", referent_id="message:3"))
+async def test_an_item_the_window_does_not_hold_stays_some_item_of_it() -> None:
+    """No id, and an id the window does not hold."""
+    place = _window(_user("my father called", 3, at=_EARLIER))
     stage, completer, _ = _stage()
-    await stage.plan(_inputs(place=place, understanding=_naming(None, "message:7", "message:3")))
-    assert (
-        _sent(completer)["understanding"]["references"][0]["refers_to"]
-        == ["an item of the place window"] * 3
-    )
+    await stage.plan(_inputs(place=place, understanding=_naming(None, "message:7")))
+    assert _refers_to(completer) == ["an item of the place window"] * 2
 
 
 async def test_story_episode_memory_and_input_referents_are_named_as_before() -> None:

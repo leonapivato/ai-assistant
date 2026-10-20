@@ -1065,6 +1065,19 @@ _PENDING: Final = "pending: recorded for long-term memory, not yet kept"
 _UNKNOWN_INSTANT: Final = "unknown"
 
 
+def _looks(item: PlaceItem) -> tuple[PlaceAuthor, datetime | None, str | None]:
+    """What the place window shows of an item that a reference to it can name."""
+    return item.author, item.at, item.episode_id
+
+
+def _ordinal(number: int) -> str:
+    """``number`` as an English ordinal: 1st, 2nd, 3rd, 4th, 11th, 21st."""
+    suffix = (
+        "th" if number % 100 in {11, 12, 13} else {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    )
+    return f"{number}{suffix}"
+
+
 def _instant_or_unknown(instant: datetime | None) -> str:
     """An instant as planning reads instants, or that it is unknown."""
     return _UNKNOWN_INSTANT if instant is None else instant.isoformat()
@@ -1174,11 +1187,20 @@ class _Request:
         # the assistant's, each in the window's order (ADR-0276 §3, ADR-0307 §5:6). An
         # item someone else wrote is never shown, so it shows nothing of an episode.
         self._in_place: dict[str, _PlaceTexts] = {}
-        # The place window's items by the id understanding's referents name them by, so
-        # a reference to one is shown as that item (ADR-0307 §5:6).
-        self._by_referent: dict[str, PlaceItem] = {
-            item.referent_id: item for item in inputs.place.items if item.referent_id is not None
-        }
+        # The place window's items by the id understanding's referents name them by, each
+        # with its place among the items the window shows alike and how many those are, so
+        # a reference to one is shown as that item and no other (ADR-0307 §5:6).
+        self._by_referent: dict[str, tuple[PlaceItem, int, int]] = {}
+        alike = Counter(_looks(item) for item in inputs.place.items)
+        seen: Counter[tuple[PlaceAuthor, datetime | None, str | None]] = Counter()
+        for item in inputs.place.items:
+            seen[_looks(item)] += 1
+            if item.referent_id is not None:
+                self._by_referent[item.referent_id] = (
+                    item,
+                    seen[_looks(item)],
+                    alike[_looks(item)],
+                )
         for item in inputs.place.items:
             if item.episode_id is None or item.author is PlaceAuthor.OTHER:
                 continue
@@ -1288,21 +1310,25 @@ class _Request:
     def _channel_item(self, referent: UnderstandingReferent) -> str:
         """A channel item understanding named, as the place window shows that item.
 
-        An item linked to an activation by that activation's episode label, which the
-        window shows it under (ADR-0307 §5:6); any other by who wrote it and when, as
-        the window shows those. Never by its words, which may be what someone other
-        than the user wrote (§9:2): an item the window does not hold, or one it shows
-        no instant for, is named only as an item of the window.
+        By what the window shows of it: who wrote it, when, and the episode label of
+        the activation it links to, which the window shows it under (ADR-0307 §5:6);
+        where other items show alike, by its place among them in the window's order, so
+        it names that item and no other. Never by its words, which may be what someone
+        other than the user wrote (§9:2): an item the window does not hold is named
+        only as an item of the window.
         """
-        item = None if referent.id is None else self._by_referent.get(referent.id)
-        if item is None:
+        found = None if referent.id is None else self._by_referent.get(referent.id)
+        if found is None:
             return _SOME_ITEM
+        item, place, alike = found
+        shown = f"the item of the place window {_AUTHOR_TEXT[item.author]} wrote"
+        if item.at is not None:
+            shown += f" at {item.at.isoformat()}"
         if item.episode_id is not None:
-            return self._book.label(LabelKind.EPISODE, item.episode_id)
-        if item.at is None:
-            return _SOME_ITEM
-        author = _AUTHOR_TEXT[item.author]
-        return f"the item of the place window {author} wrote at {item.at.isoformat()}"
+            shown += f", under {self._book.label(LabelKind.EPISODE, item.episode_id)}"
+        if alike > 1:
+            shown += f" ({_ordinal(place)} of {alike} such, in the window's order)"
+        return shown
 
     def _item(self, item: PlaceItem) -> dict[str, object]:
         shown: dict[str, object] = {"from": _AUTHOR_TEXT[item.author]}
