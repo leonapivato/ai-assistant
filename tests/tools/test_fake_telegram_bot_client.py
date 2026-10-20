@@ -22,25 +22,33 @@ from telegram_bot_client_contract import (
     SHORT_BOUND,
     Prepared,
     Reached,
+    RelayedTelegramBotClientContract,
     TelegramBotClientContract,
     an_update,
 )
 
 from ai_assistant.core.types import TelegramFailure, TelegramUpdate
 from ai_assistant.testing import FakeTelegramBotClient
+from ai_assistant.testing.telegram import TELEGRAM_DIRECT_ORIGIN
 
 pytestmark = pytest.mark.anyio
 
+#: The relay a relayed fake stands for, in canonical form.
+RELAY_ORIGIN = "https://telegram-relay:8443"
+
 
 def _prepared(fake: FakeTelegramBotClient) -> Prepared:
-    """The fake with its record of what reached Telegram."""
+    """The fake with its record of what reached Telegram, and where."""
 
     def reached() -> tuple[Reached, ...]:
         return tuple(
             Reached(call.method, dict(call.parameters)) for call in fake.calls if call.reached
         )
 
-    return Prepared(client=fake, reached=reached)
+    def opened() -> tuple[str, ...]:
+        return tuple(call.origin for call in fake.calls if call.reached)
+
+    return Prepared(client=fake, reached=reached, opened=opened)
 
 
 class TestFakeTelegramBotClientContract(TelegramBotClientContract):
@@ -91,6 +99,96 @@ class TestFakeTelegramBotClientContract(TelegramBotClientContract):
         fake = FakeTelegramBotClient()
         fake.disconnect()
         return _prepared(fake)
+
+
+class TestRelayedFakeTelegramBotClientContract(
+    TestFakeTelegramBotClientContract, RelayedTelegramBotClientContract
+):
+    """Binds a fake standing for a relayed line to the suite and its relayed obligations.
+
+    Every hook builds its fake through :meth:`_fake`, so each is relayed; the relay's
+    own conditions are the fake's ordinary arrangements (the fake's module docstring).
+    """
+
+    @pytest.fixture
+    def client(self) -> FakeTelegramBotClient:
+        """A relayed fake over a healthy relay."""
+        return FakeTelegramBotClient(origin=RELAY_ORIGIN)
+
+    def line_origin(self) -> str:
+        """The relay's."""
+        return RELAY_ORIGIN
+
+    async def accepting(self, *, message_id: int) -> Prepared:
+        """A relayed fake whose next message gets ``message_id``."""
+        return _prepared(FakeTelegramBotClient(first_message_id=message_id, origin=RELAY_ORIGIN))
+
+    async def holding(self, *updates: TelegramUpdate) -> Prepared:
+        """A relayed fake holding ``updates``."""
+        return _prepared(FakeTelegramBotClient(origin=RELAY_ORIGIN).hold(*updates))
+
+    async def rate_limiting(self, *, retry_after: int | None) -> Prepared:
+        """A relayed fake whose relay rate-limits the next call."""
+        fake = FakeTelegramBotClient(origin=RELAY_ORIGIN).fail_next(
+            TelegramFailure.RATE_LIMITED, retry_after_seconds=retry_after
+        )
+        return _prepared(fake)
+
+    async def refusing(self) -> Prepared:
+        """A relayed fake whose relay refuses the next call."""
+        return _prepared(
+            FakeTelegramBotClient(origin=RELAY_ORIGIN).fail_next(TelegramFailure.REFUSED)
+        )
+
+    async def failing_inside(self) -> Prepared:
+        """A relayed fake whose relay passed it on and heard nothing: unknown."""
+        return _prepared(
+            FakeTelegramBotClient(origin=RELAY_ORIGIN).fail_next(TelegramFailure.UNKNOWN)
+        )
+
+    async def unreachable(self) -> Prepared:
+        """A relayed fake whose next call never leaves."""
+        return _prepared(
+            FakeTelegramBotClient(origin=RELAY_ORIGIN).fail_next(TelegramFailure.NOT_WRITTEN)
+        )
+
+    async def garbled(self) -> Prepared:
+        """A relayed fake whose next call is answered with no answer: unknown."""
+        return _prepared(
+            FakeTelegramBotClient(origin=RELAY_ORIGIN).fail_next(TelegramFailure.UNKNOWN)
+        )
+
+    async def silent(self) -> Prepared:
+        """A relayed fake whose next call is written and never answered."""
+        return _prepared(FakeTelegramBotClient(origin=RELAY_ORIGIN).hang_next())
+
+    async def disconnected(self) -> Prepared:
+        """A relayed fake whose line is not connected."""
+        fake = FakeTelegramBotClient(origin=RELAY_ORIGIN)
+        fake.disconnect()
+        return _prepared(fake)
+
+    async def holding_a_bot_token(self) -> Prepared:
+        """A bot token in the slot is the fake's *unavailable*, every call (§6:3)."""
+        return await self.disconnected()
+
+    async def unanchored(self) -> Prepared:
+        """An unverified relay is a channel never opened: not written."""
+        return await self.unreachable()
+
+    async def misnamed(self) -> Prepared:
+        """As :meth:`unanchored`."""
+        return await self.unreachable()
+
+    async def refusing_the_credential(self) -> Prepared:
+        """The relay's ``401`` is a refusal."""
+        return await self.refusing()
+
+
+def test_a_fake_is_a_direct_line_unless_told_otherwise() -> None:
+    """Built with no origin, every call goes to Telegram's own (ADR-0330 §3:1)."""
+    assert FakeTelegramBotClient().origin == TELEGRAM_DIRECT_ORIGIN
+    assert FakeTelegramBotClient(origin=RELAY_ORIGIN).origin == RELAY_ORIGIN
 
 
 async def test_an_offset_forgets_what_it_confirms_and_nothing_else() -> None:

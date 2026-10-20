@@ -11803,15 +11803,24 @@ class OutboundTransport(Protocol):
 
 @runtime_checkable
 class TelegramBotClient(Protocol):
-    """The owner's bot on Telegram, as the line's reader and writer reach it (ADR-0323).
+    """The line's bot on Telegram, as the line's reader and writer reach it (ADR-0323).
+
+    **The line's bot** is the owner's own in direct mode, and in relayed mode the
+    shared bot the relay on the box holds, which the user linked their account to
+    (ADR-0330 §2, §12:1). Which mode a line is in is configuration of the one
+    production implementation at its construction, fixed for its life (ADR-0330 §3:3,
+    §12:2): no member, argument or result here says or changes it. **In relayed mode
+    the relay stands in Telegram's place** in what this contract says the calls reach
+    (ADR-0330 §4:16): it serves the Bot API faithfully, so every rule below about
+    what Telegram answered holds of the relay's answers unchanged (§4).
 
     **The line's one route to Telegram** (§11). Every Bot API call the line makes —
     a poll for new messages, a message sent, the typing indicator renewed — is made
     by the one production implementation of this contract, in
-    ``ai_assistant.tools.egress`` and in no other module (§11:1), and the line's
-    reader and writer in ``orchestration`` reach it through this Protocol alone
-    (§15). Named for the thing it talks to, as :class:`OutboundTransport` is: what a
-    caller holds is the bot, and what it can ask of it is these three calls.
+    ``ai_assistant.tools.egress`` and in no other module (§11:1, ADR-0330 §9:1), and
+    the line's reader and writer in ``orchestration`` reach it through this Protocol
+    alone (§15). Named for the thing it talks to, as :class:`OutboundTransport` is:
+    what a caller holds is the bot, and what it can ask of it is these three calls.
 
     **These are not egress calls in ADR-0148's sense** (§11:2): no ``ActionRequest``,
     binding or ruling exists for them, and the approval that covers what they carry
@@ -11825,18 +11834,30 @@ class TelegramBotClient(Protocol):
     2. **A chat other than the one the line's settings name is refused** before
        anything else is read (§6:1, §12:1) — :attr:`TelegramFailure.OTHER_CHAT`.
        Nothing a caller passes can name a chat the owner did not.
-    3. **Only then is the token read**, through the ``INTEGRATION``-scoped
-       ``Secrets`` face, once per call, with the connection record read before it and
-       again before any byte is sent (§11:4, ADR-0148 §6). A record that is not
-       active, that moved across the read, or that names a slot holding nothing, is
-       :attr:`TelegramFailure.UNAVAILABLE`, and nothing is written.
-    4. **The token is bound into the request target inside the implementation**, and
-       no caller ever holds the target (§11:8). Nothing this contract returns or
-       raises, and nothing an implementation logs, carries the target or any part of
-       the token (§11:9).
-    5. **One request, to the one origin** ``https://api.telegram.org``, fixed in code,
-       on a channel opened for this call and closed by it, with no redirect followed
-       (§11:5, §11:14). Every call is a ``POST`` with a JSON body (§11:7).
+    3. **Only then is the line's credential read** — the bot's token in direct mode,
+       the hub's relay credential in relayed mode (ADR-0330 §6:4) — through the
+       ``INTEGRATION``-scoped ``Secrets`` face, once per call, with the connection
+       record read before it and again before any byte is sent (§11:4, ADR-0148 §6,
+       ADR-0330 §6:5). A record that is not active, that moved across the read, or
+       that names a slot holding nothing, is :attr:`TelegramFailure.UNAVAILABLE`, and
+       nothing is written. **In relayed mode a credential containing ``:``** — the
+       mark every Bot API token carries — **is refused the same way**, before any
+       byte is written, so a bot token in the hub's keyring never reaches a relay
+       (ADR-0330 §6:3).
+    4. **The credential is bound into the request target inside the implementation**,
+       in the token's place, and no caller ever holds the target (§11:8, ADR-0330
+       §6:6). Nothing this contract returns or raises, and nothing an implementation
+       logs, carries the target or any part of the credential (§11:9).
+    5. **One request, to the line's one origin**: ``https://api.telegram.org``, fixed
+       in code, in direct mode; in relayed mode the configured relay origin, in its
+       canonical form, verified against the configured certificates alone and never
+       against the system's authorities, and no call to ``https://api.telegram.org``
+       at all (§11:5, ADR-0330 §3:2, §3:4, §7). A relay whose certificate does not
+       verify is a channel that could not be opened —
+       :attr:`TelegramFailure.NOT_WRITTEN`, nothing written (ADR-0330 §7:4). Either
+       way the request is on a channel opened for this call and closed by it, with no
+       redirect followed (§11:5, §11:14), and every call is a ``POST`` with a JSON
+       body (§11:7).
 
     **The claim is the caller's, and the contract makes naming it unavoidable.**
     §11:3 and §13:2 make every call wait for a durable record claimed before it is
@@ -11871,12 +11892,14 @@ class TelegramBotClient(Protocol):
 
     **A BREAKING contract change under golden rule 5**, decided by ADR-0323 §15 and
     landing with its conformance suite and canonical fake in
-    :mod:`ai_assistant.testing` (``CONTRIBUTING.md`` → "Adding a Protocol").
+    :mod:`ai_assistant.testing` (``CONTRIBUTING.md`` → "Adding a Protocol"). Rules 3
+    and 5 are restated for relayed mode by ADR-0330 §12:1, again with the suite, and
+    with no member, argument, result or ``TelegramFailure`` member changed (§12:2).
     """
 
     @property
     def chat_id(self) -> int:
-        """The one chat this client writes to: the owner's private chat with the bot.
+        """The one chat this client writes to: the user's private chat with the bot.
 
         Telegram identifies a private chat by the other account's id, so this is
         ``Settings.telegram_user_id`` (§3:2). Fixed for the client's life. A send or

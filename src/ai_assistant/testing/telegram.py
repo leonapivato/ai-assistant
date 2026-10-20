@@ -23,6 +23,15 @@ it is decided by the arguments, here as in production.
 case asserting that something was *not* sent reads a record rather than an absence.
 It holds no token and records no target: there is none to record.
 
+**It stands for a line in either mode** (ADR-0330 §3). Built with no ``origin`` it is a
+direct line, whose every request reaches :data:`TELEGRAM_DIRECT_ORIGIN`; built with a
+relay's canonical origin, every request reaches that one instead and none reaches
+Telegram's (§3:2). The relay serves the Bot API faithfully (§4), so nothing else about
+the fake changes with the mode: a relay's refusal, silence or unverified certificate is
+arranged with the same :meth:`~FakeTelegramBotClient.fail_next` and
+:meth:`~FakeTelegramBotClient.hang_next` as Telegram's, and a relayed line holding a bot
+token in its slot is :meth:`~FakeTelegramBotClient.disconnect`'s *unavailable* (§6:3).
+
 **It checks its arguments exactly as the production client does**, written out rather
 than imported — ``ai_assistant.testing`` imports ``core`` and nothing else — because a
 fake that answered a call production refuses would let a consumer's test pass over an
@@ -56,6 +65,10 @@ if TYPE_CHECKING:
 #: The owner's account, and so their private chat with the bot, unless a case names
 #: another.
 DEFAULT_TELEGRAM_CHAT_ID: Final = 424242
+
+#: The origin a line in direct mode reaches, in the canonical form the seam pins it in
+#: (ADR-0323 §11:5, ADR-0231 §8): ``https://api.telegram.org`` with its port written.
+TELEGRAM_DIRECT_ORIGIN: Final = "https://api.telegram.org:443"
 
 #: The Bot API methods, by the names Telegram gives them and the production client
 #: calls.
@@ -95,6 +108,8 @@ class TelegramCall:
             before anything was written.
         failure: How it ended, or ``None`` where it was done. ``None`` too while a
             held call is still open.
+        origin: The origin the call was made to: the line's one origin, Telegram's
+            in direct mode and the relay's in relayed mode (ADR-0330 §3:2).
     """
 
     attempt: str
@@ -102,6 +117,7 @@ class TelegramCall:
     parameters: Mapping[str, object]
     reached: bool
     failure: TelegramFailure | None
+    origin: str = TELEGRAM_DIRECT_ORIGIN
 
 
 @final
@@ -132,19 +148,27 @@ class FakeTelegramBotClient:
         "_held",
         "_messages",
         "_next_message_id",
+        "_origin",
         "_typing",
     )
 
     def __init__(
-        self, *, chat_id: int = DEFAULT_TELEGRAM_CHAT_ID, first_message_id: int = 1
+        self,
+        *,
+        chat_id: int = DEFAULT_TELEGRAM_CHAT_ID,
+        first_message_id: int = 1,
+        origin: str = TELEGRAM_DIRECT_ORIGIN,
     ) -> None:
-        """Open a line to the owner's chat, with nothing held and nothing sent.
+        """Open a line to the user's chat, with nothing held and nothing sent.
 
         Args:
-            chat_id: The owner's account id, so the one chat the fake writes to.
+            chat_id: The user's account id, so the one chat the fake writes to.
             first_message_id: The id the first accepted message gets; each later one
                 gets the next.
+            origin: The line's one origin: :data:`TELEGRAM_DIRECT_ORIGIN` for a direct
+                line, or a relay's canonical origin for a relayed one (ADR-0330 §3).
         """
+        self._origin = origin
         self._chat_id = chat_id
         self._next_message_id = first_message_id
         self._held: list[TelegramUpdate] = []
@@ -274,6 +298,11 @@ class FakeTelegramBotClient:
     def typing_shown(self) -> int:
         """How many typing indicators Telegram showed."""
         return self._typing
+
+    @property
+    def origin(self) -> str:
+        """The line's one origin, which every call it makes is made to."""
+        return self._origin
 
     # --- the contract -------------------------------------------------------
 
@@ -484,6 +513,7 @@ class FakeTelegramBotClient:
                 parameters=MappingProxyType(dict(parameters)),
                 reached=reached,
                 failure=failure,
+                origin=self._origin,
             )
         )
         return len(self._calls) - 1
@@ -502,6 +532,7 @@ class FakeTelegramBotClient:
             parameters=call.parameters,
             reached=call.reached,
             failure=failure,
+            origin=call.origin,
         )
 
     def _confirm(self, offset: int | None) -> None:
@@ -581,6 +612,7 @@ __all__ = [
     "GET_UPDATES",
     "SEND_CHAT_ACTION",
     "SEND_MESSAGE",
+    "TELEGRAM_DIRECT_ORIGIN",
     "FakeTelegramBotClient",
     "TelegramCall",
 ]

@@ -129,6 +129,8 @@ from ai_assistant.tools.egress import (
     HttpsExchange,
     HttpsTelegramBotClient,
     StreamOutboundTransport,
+    TelegramRelay,
+    TelegramRelayError,
 )
 from ai_assistant.tools.egress_binder import EgressBindingSeam, canonical_destination
 from ai_assistant.tools.forecast import FORECAST_READ_ID
@@ -455,6 +457,37 @@ def telegram_intake_path(directory: Path, *, reference: str, chat_id: int) -> Pa
     """
     key = hashlib.sha256(f"{reference}\x00{chat_id}".encode()).hexdigest()[:24]
     return directory / f"telegram-{key}.db"
+
+
+def _configured_telegram_relay(settings: Settings) -> TelegramRelay | None:
+    """The relay a relayed Telegram line reaches, or ``None`` in direct mode (ADR-0330 §3).
+
+    ``Settings`` checked the two fields as text and refused every combination no
+    reading makes true (§3:5 to §3:7). What it cannot decide is here: the origin goes
+    through the seam's canonicaliser (§3:4), and each certificate is loaded as a trust
+    anchor (§3:8). Either failing refuses the hub's start, before any call and before
+    anything is opened.
+
+    Args:
+        settings: The loaded settings.
+
+    Returns:
+        The relay, or ``None`` where ``telegram_relay_origin`` is unset.
+
+    Raises:
+        ConfigurationError: If the origin has no canonical form at the seam, or a
+            certificate cannot be loaded as a trust anchor.
+    """
+    if settings.telegram_relay_origin is None:
+        return None
+    try:
+        return TelegramRelay(
+            origin=settings.telegram_relay_origin,
+            certificates=settings.telegram_relay_certificates,
+        )
+    except TelegramRelayError as exc:
+        msg = f"the Telegram line's relay cannot be reached as configured: {exc}"
+        raise ConfigurationError(msg) from exc
 
 
 def _search_destinations(origin: str | None) -> tuple[CanonicalDestination, ...]:
@@ -835,6 +868,11 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     # may construct one directly, and a guard that only fires when a caller
     # remembered to ask is not a guard.
     check_notification_tuning(settings.notification_retention, settings.notification_queue_limit)
+    # The Telegram line's relay, where its line is relayed (ADR-0330 §3:4, §3:8): the
+    # origin canonicalised through the seam and the certificates loaded as trust
+    # anchors, each refusing the hub's start on a failure — and above the data
+    # directory, because neither opens anything (#372).
+    telegram_relay = _configured_telegram_relay(settings)
     # The keyword still wins over the setting when it is given (ADR-0083 §2), so
     # every existing caller — and the hub, handing over the directory it resolved
     # and locked before any store was opened — keeps its injection seam. What
@@ -1526,6 +1564,15 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # settings name is not active, every call is refused before a byte is
         # written (§3:3, §12:3), and the reader rests until it is.
         #
+        # **Relayed mode is configuration of that one client** (ADR-0330 §3, §12:2).
+        # With `telegram_relay_origin` set, the client reaches the relay's canonical
+        # origin and no other, and its exchange's transport is a capability of its own,
+        # **anchored on the relay's certificates alone** (§7:3): never the one every
+        # integration is handed, which trusts the system's authorities. An injected
+        # transport stands for the network whole, as it does for every integration,
+        # so a case that hands one in is its relay; the anchors are loaded above even
+        # then, so a certificate that does not load refuses the build either way.
+        #
         # **The intake record is a Tier 1 store on its own file** (ADR-0155 §1:2),
         # opened here, closed in the ordered shutdown below and on a failed build,
         # for the other stores' reasons. **One file per line** (§2:3): the record keys
@@ -1544,6 +1591,13 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 )
             )
             opened.append(telegram_intake.close)
+            line_transport: OutboundTransport
+            if transport is not None:
+                line_transport = transport
+            elif telegram_relay is None:
+                line_transport = StreamOutboundTransport()
+            else:
+                line_transport = StreamOutboundTransport(anchors=telegram_relay.anchors)
             telegram_line = TelegramLineSeams(
                 client=HttpsTelegramBotClient(
                     reference=settings.telegram_connection,
@@ -1551,9 +1605,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                     records=connections,
                     secrets=integration_secrets,
                     exchange=HttpsExchange(
-                        transport=StreamOutboundTransport() if transport is None else transport,
+                        transport=line_transport,
                         max_response_bytes=settings.telegram_max_response_bytes,
                     ),
+                    relay=telegram_relay,
                 ),
                 intake=telegram_intake,
                 reference=settings.telegram_connection,

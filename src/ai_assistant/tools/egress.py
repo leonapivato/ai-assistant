@@ -359,7 +359,7 @@ class _StreamChannel:
     refusals — lives in :class:`SmtpEgressTransport` where it is testable.
     """
 
-    __slots__ = ("_host", "_reader", "_secure", "_writer")
+    __slots__ = ("_context", "_host", "_reader", "_secure", "_writer")
 
     def __init__(
         self,
@@ -368,6 +368,7 @@ class _StreamChannel:
         *,
         host: str,
         secure: bool,
+        context: Callable[[], ssl.SSLContext],
     ) -> None:
         """Wrap an open pair of streams.
 
@@ -378,11 +379,16 @@ class _StreamChannel:
                 certificate is verified against the endpoint rather than against
                 anything the far end says about itself.
             secure: Whether TLS was established before the greeting.
+            context: Builds the TLS context a later upgrade is made under: the
+                transport's own, so a channel from a transport anchored on
+                configured certificates (ADR-0330 §7:3) upgrades under those
+                anchors and never under the system's.
         """
         self._reader = reader
         self._writer = writer
         self._host = host
         self._secure = secure
+        self._context = context
 
     @property
     def is_secure(self) -> bool:
@@ -479,7 +485,7 @@ class _StreamChannel:
                 credential on (ADR-0191 §4).
         """
         try:
-            await self._writer.start_tls(_tls_context(), server_hostname=self._host)
+            await self._writer.start_tls(self._context(), server_hostname=self._host)
         except OSError as exc:
             raise self._failed("upgrading to TLS") from exc
         self._secure = True
@@ -616,6 +622,119 @@ def _tls_context() -> ssl.SSLContext:
     return context
 
 
+class TrustAnchorError(ToolError):
+    """A configured certificate could not be loaded as a trust anchor (ADR-0330 §3:8).
+
+    Raised at construction, by the composition root's call, so a relayed line whose
+    certificates the transport cannot load refuses the hub's start before any call
+    (§3:8). The message names the certificate's position in the configured list and
+    never its text.
+    """
+
+
+@final
+class TrustAnchors:
+    """The certificates a channel is verified against, and nothing else (ADR-0330 §7).
+
+    **The system's certificate authorities are not among them.** A context built
+    here loads these certificates and no others: :func:`ssl.create_default_context`
+    loads the default verify paths only when it is handed no ``cadata``, and this
+    always hands it some. So a peer whose chain ends at a publicly trusted root,
+    and not at one of these, does not verify (§7:1).
+
+    **What stays the same as :func:`_tls_context`**: the chain and the hostname are
+    both verified (ADR-0191 §4:2, kept by ADR-0330 §7), under the standard library's
+    default flags, its strict X.509 checks included. **What is added**: TLS 1.3 at
+    the least, which the relay speaks; there is no older peer on the box to admit.
+
+    **Fixed when it is built.** It holds the certificates' DER octets in a tuple and
+    builds a fresh context per channel from them, so no holder of the transport it
+    is handed to can add to, remove from or replace the set (§7:3).
+
+    Built from ``Settings.telegram_relay_certificates``, which holds each one as the
+    base64 of its DER — a PEM certificate's body — with its armour and its line
+    breaks already removed at load.
+    """
+
+    __slots__ = ("_certificates",)
+
+    def __init__(self, certificates: Sequence[str]) -> None:
+        """Decode and load each certificate, refusing one that does not load.
+
+        Args:
+            certificates: Each certificate as the base64 of its DER, in the order
+                configured. At least one.
+
+        Raises:
+            TrustAnchorError: If there is none, or one is not base64, or its octets
+                are not a certificate the TLS stack will load as a trust anchor.
+        """
+        if not certificates:
+            msg = "a channel anchored on configured certificates needs at least one (ADR-0330 §3:7)"
+            raise TrustAnchorError(msg)
+        decoded: list[bytes] = []
+        for position, text in enumerate(certificates):
+            try:
+                octets = base64.b64decode(text, validate=True)
+            except (TypeError, ValueError) as exc:
+                msg = f"certificate {position} is not base64 (ADR-0330 §3:8)"
+                raise TrustAnchorError(msg) from exc
+            try:
+                _anchored_context(octets)
+            except (OSError, ValueError) as exc:
+                # `ssl.SSLError` is an `OSError`; `ValueError` is the empty-input
+                # refusal. Neither message is rendered: it can quote the octets.
+                msg = (
+                    f"certificate {position} could not be loaded as a trust anchor "
+                    f"(ADR-0330 §3:8): it is not an X.509 certificate this TLS stack reads"
+                )
+                raise TrustAnchorError(msg) from exc
+            decoded.append(octets)
+        self._certificates = tuple(decoded)
+
+    def __repr__(self) -> str:
+        """Count the certificates; they are not secret, and the count is what matters."""
+        return f"TrustAnchors(certificates={len(self._certificates)})"
+
+    def context(self) -> ssl.SSLContext:
+        """A fresh TLS context trusting these certificates alone.
+
+        Returns:
+            A context verifying the chain against these anchors and the hostname,
+            at TLS 1.3 or above.
+
+        Raises:
+            OSError: If the context could not be built — ``SSLKEYLOGFILE`` naming an
+                unusable path is the one route — which the transport converts.
+        """
+        return _anchored_context(b"".join(self._certificates))
+
+
+def _anchored_context(certificates: bytes) -> ssl.SSLContext:
+    """A client context trusting ``certificates`` alone, at TLS 1.3 or above.
+
+    Args:
+        certificates: One or more DER certificates, concatenated.
+
+    Returns:
+        The context.
+
+    Raises:
+        ssl.SSLError: If the octets are not certificates the stack loads.
+        ValueError: If there are none.
+    """
+    if not certificates:
+        msg = "no certificate to anchor on"
+        raise ValueError(msg)
+    # ``cadata`` given, so the default verify paths are never loaded: these are the
+    # only anchors the context has (ADR-0330 §7:1).
+    context = ssl.create_default_context(cadata=certificates)
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    return context
+
+
 @final
 class StreamOutboundTransport:
     """The one :class:`~ai_assistant.core.protocols.OutboundTransport` that connects.
@@ -639,12 +758,40 @@ class StreamOutboundTransport:
     differs — and ``tests/tools/test_egress_seam.py`` holds the tree to there being
     exactly one such function to find.
 
-    **It is stateless and holds no pool.** A pooled capability is a long-lived
+    **It holds no pool and no connection.** A pooled capability is a long-lived
     connection owned by whoever opened it, and a subsystem keeping one across calls
     has a route that outlives the authorisation that produced it (ADR-0191 §3).
+
+    **What it may hold is its trust anchors, fixed at construction** (ADR-0330 §7:3).
+    Built with none, it verifies every channel against the system's certificate
+    authorities, as it always has. Built with :class:`TrustAnchors`, it verifies
+    every channel against those certificates alone — the relayed Telegram line's
+    transport, which the composition root builds from
+    ``Settings.telegram_relay_certificates``. Neither
+    :class:`~ai_assistant.core.protocols.OutboundTransport` nor
+    :class:`~ai_assistant.core.protocols.ByteChannel` gains a member for it: no
+    holder of the capability can supply, read or change what it trusts, which is
+    ADR-0191 §4:2's "no caller-supplied trust configuration" kept.
     """
 
-    __slots__ = ()
+    __slots__ = ("_anchors",)
+
+    def __init__(self, *, anchors: TrustAnchors | None = None) -> None:
+        """Build the capability, trusting the system's authorities or ``anchors`` alone.
+
+        Args:
+            anchors: The certificates every channel is verified against, in place of
+                the system's, or ``None`` for the system's (ADR-0330 §7:1, §7:3).
+        """
+        self._anchors = anchors
+
+    def _context(self) -> ssl.SSLContext:
+        """The TLS context a channel of this transport is made under.
+
+        Returns:
+            :func:`_tls_context`'s, or one trusting this transport's anchors alone.
+        """
+        return _tls_context() if self._anchors is None else self._anchors.context()
 
     async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel:
         """Open a channel to ``endpoint``, and to nothing else.
@@ -701,7 +848,7 @@ class StreamOutboundTransport:
         # `_release_orphaned_streams` below. Adversarial and architecture review
         # both pressed on this window across rounds 2 to 4.
         try:
-            context = _tls_context() if endpoint.implicit_tls else None
+            context = self._context() if endpoint.implicit_tls else None
         except OSError as exc:
             # **Inside the taxonomy, because building the context touches the
             # file system.** ``ssl.create_default_context`` loads the trust store
@@ -802,7 +949,13 @@ class StreamOutboundTransport:
             msg = f"the endpoint {endpoint.host}:{endpoint.port} could not be connected"
             raise TransportError(msg) from exc
         try:
-            return _StreamChannel(reader, writer, host=endpoint.host, secure=endpoint.implicit_tls)
+            return _StreamChannel(
+                reader,
+                writer,
+                host=endpoint.host,
+                secure=endpoint.implicit_tls,
+                context=self._context,
+            )
         except BaseException:
             # **The release obligation, and it is not theatre.** No channel
             # reached the caller, so nothing else can ever release these streams
@@ -3748,7 +3901,9 @@ class HttpsEgressTransport:
 # here too: the line's reader and writer, in `orchestration`, hold the contract and
 # never this class.
 
-#: The one origin the line reaches, fixed in code and never configured (§11:5).
+#: The one origin a line in direct mode reaches, fixed in code and never configured
+#: (§11:5). A line in relayed mode reaches its relay's origin instead, and never this
+#: one (ADR-0330 §3:2).
 TELEGRAM_BOT_API_ORIGIN: Final = "https://api.telegram.org"
 
 #: What a bot token may be spelled in before it is bound into a request target.
@@ -3758,6 +3913,12 @@ TELEGRAM_BOT_API_ORIGIN: Final = "https://api.telegram.org"
 #: method, or which request, the target names — a value read off a keyring choosing
 #: what the line does.
 _TELEGRAM_TOKEN_CHARACTERS: Final = frozenset(string.ascii_letters + string.digits + ":_-")
+
+#: What a relay credential may be spelled in: a bot token's path-segment characters
+#: **without the colon** every Bot API token carries (ADR-0330 §6:2). A relayed line
+#: refuses a credential holding one before any byte is written, so a bot token left
+#: in the hub's keyring never reaches a relay (§6:3).
+_RELAY_CREDENTIAL_CHARACTERS: Final = _TELEGRAM_TOKEN_CHARACTERS - {":"}
 
 #: The Bot API methods the line calls, and nothing else (§11, §15's table row).
 _GET_UPDATES: Final = "getUpdates"
@@ -3819,9 +3980,73 @@ class _Written:
         self.written = True
 
 
+class TelegramRelayError(ToolError):
+    """A relayed line's configuration names no relay this seam will reach (ADR-0330 §3).
+
+    Raised at construction, by the composition root's call, so the hub's start is
+    refused before any call (§3:4, §3:8). The message states the rule that was broken
+    and never a certificate's text.
+    """
+
+
+@final
+class TelegramRelay:
+    """Where a relayed line goes, and what it trusts there (ADR-0330 §3, §7).
+
+    **The origin is canonical by construction.** It is put through the seam's one
+    canonicaliser (ADR-0231 §8), so it names a host, never an IP literal, and carries
+    no path (§3:4); the canonical form is the one origin the line's client reaches.
+
+    **The anchors are the relayed transport's, not the client's.** The composition root
+    builds that transport's :class:`StreamOutboundTransport` from :attr:`anchors`
+    (§7:3), and hands :class:`HttpsTelegramBotClient` this object for the origin and
+    the credential rule. Both come from the settings loaded at start, so the mode is
+    fixed for the client's life (§3:3).
+    """
+
+    __slots__ = ("_anchors", "_origin")
+
+    def __init__(self, *, origin: str, certificates: Sequence[str]) -> None:
+        """Canonicalise the relay's origin and load its certificates.
+
+        Args:
+            origin: ``Settings.telegram_relay_origin``, as configured.
+            certificates: ``Settings.telegram_relay_certificates``: each the base64 of
+                a certificate's DER.
+
+        Raises:
+            TelegramRelayError: If the origin has no canonical form at this seam, or a
+                certificate cannot be loaded as a trust anchor.
+        """
+        try:
+            self._origin = canonicalise(SeamProtocol.HTTPS, origin).canonical
+        except DestinationCanonicalisationError as exc:
+            msg = f"telegram_relay_origin has no canonical form at this seam (ADR-0330 §3:4): {exc}"
+            raise TelegramRelayError(msg) from exc
+        try:
+            self._anchors = TrustAnchors(certificates)
+        except TrustAnchorError as exc:
+            msg = f"telegram_relay_certificates: {exc}"
+            raise TelegramRelayError(msg) from exc
+
+    def __repr__(self) -> str:
+        """Name the origin; it is configuration, and no secret."""
+        return f"TelegramRelay(origin={self._origin!r}, anchors={self._anchors!r})"
+
+    @property
+    def origin(self) -> str:
+        """The relay's canonical origin, ``https://host:port``: the one a relayed line reaches."""
+        return self._origin
+
+    @property
+    def anchors(self) -> TrustAnchors:
+        """The certificates the relayed transport verifies the relay against, alone."""
+        return self._anchors
+
+
 @final
 class HttpsTelegramBotClient:
-    """The owner's bot on Telegram, reached through this seam (ADR-0323 §11).
+    """The line's bot on Telegram, reached through this seam (ADR-0323 §11, ADR-0330).
 
     :class:`HttpsEgressTransport`'s order for the line's route, with no binding in
     it, because the line's calls are not egress calls (§11:2). Every call, after its
@@ -3846,11 +4071,30 @@ class HttpsTelegramBotClient:
     and ``Settings.telegram_user_id`` (§3:3), over an :class:`HttpsExchange` built
     with ``Settings.telegram_max_response_bytes`` (§11:13) and its own injected
     transport (ADR-0191 §3).
+
+    **Two modes, fixed at construction** (ADR-0330 §3). Built with no ``relay``, the
+    line is in **direct** mode: every call goes to :data:`TELEGRAM_BOT_API_ORIGIN` with
+    the bot's token, as ADR-0323 builds it. Built with a :class:`TelegramRelay`, it is
+    in **relayed** mode: every call goes to the relay's canonical origin and none to
+    Telegram's (§3:2), the credential bound into the target is the relay credential
+    (§6:4), and a credential holding a ``:`` — a bot token's mark — is refused as
+    :attr:`TelegramFailure.UNAVAILABLE` before any byte is written (§6:3). Nothing
+    else differs: the relay serves the Bot API faithfully (§4), so every answer is
+    read by the rules below whichever mode the line is in. No call, request or answer
+    selects or changes the mode (§3:3).
     """
 
-    __slots__ = ("_chat_id", "_exchange", "_records", "_reference", "_secrets")
+    __slots__ = (
+        "_chat_id",
+        "_exchange",
+        "_origin",
+        "_records",
+        "_reference",
+        "_relayed",
+        "_secrets",
+    )
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one keyword per part the line is built from
         self,
         *,
         reference: str,
@@ -3858,39 +4102,52 @@ class HttpsTelegramBotClient:
         records: ConnectionRecords,
         secrets: Secrets,
         exchange: HttpsExchange,
+        relay: TelegramRelay | None = None,
     ) -> None:
-        """Bind a client to the line's connection and its one chat.
+        """Bind a client to the line's connection, its one chat and its one origin.
 
         Args:
             reference: ``Settings.telegram_connection``: the connection whose
-                credential is the bot's token. Compared byte for byte against the
+                credential is the line's — the bot's token in direct mode, the
+                relay credential in relayed mode. Compared byte for byte against the
                 store, as every reference is.
-            chat_id: ``Settings.telegram_user_id``: the owner's account, which is the
+            chat_id: ``Settings.telegram_user_id``: the user's account, which is the
                 id of their private chat with the bot.
             records: The connection records this client reads, twice per call.
             secrets: The ``INTEGRATION``-scoped reading face (ADR-0125 §8), never a
                 ``SecretStore``.
-            exchange: The HTTPS exchange, holding the line's read bound.
+            exchange: The HTTPS exchange, holding the line's read bound. In relayed
+                mode its transport is the one anchored on the relay's certificates
+                (ADR-0330 §7:3).
+            relay: The relay a relayed line reaches, or ``None`` for direct mode.
 
         Raises:
-            ValueError: If ``reference`` is blank or ``chat_id`` is not a positive
-                ``int``. ``Settings`` refuses both at load.
+            ValueError: If ``reference`` is blank, ``chat_id`` is not a positive
+                ``int``, or ``relay`` is neither ``None`` nor a
+                :class:`TelegramRelay`. ``Settings`` refuses the first two at load.
         """
         if type(reference) is not str or not reference.strip():
             msg = "reference is the line's connection reference, a non-blank string"
             raise ValueError(msg)
         if type(chat_id) is not int or chat_id < 1:
-            msg = "chat_id is the owner's Telegram account id, a positive int"
+            msg = "chat_id is the user's Telegram account id, a positive int"
+            raise ValueError(msg)
+        given: object = relay
+        if given is not None and not isinstance(given, TelegramRelay):
+            msg = "relay is None, for direct mode, or the TelegramRelay a relayed line reaches"
             raise ValueError(msg)
         self._reference = reference
         self._chat_id = chat_id
         self._records = records
         self._secrets = secrets
         self._exchange = exchange
+        self._relayed = relay is not None
+        self._origin = TELEGRAM_BOT_API_ORIGIN if relay is None else relay.origin
 
     def __repr__(self) -> str:
-        """Name the connection, never the token and never a target."""
-        return f"HttpsTelegramBotClient(reference={self._reference!r})"
+        """Name the connection and the mode, never the credential and never a target."""
+        mode = "relayed" if self._relayed else "direct"
+        return f"HttpsTelegramBotClient(reference={self._reference!r}, mode={mode!r})"
 
     @property
     def chat_id(self) -> int:
@@ -4121,7 +4378,7 @@ class HttpsTelegramBotClient:
             return secret
         try:
             response = await self._exchange.post_json(
-                origin=TELEGRAM_BOT_API_ORIGIN,
+                origin=self._origin,
                 target=f"/bot{secret}/{method}",
                 payload=payload,
                 on_written=written,
@@ -4140,12 +4397,16 @@ class HttpsTelegramBotClient:
         return value
 
     async def _token(self) -> str | _Failed:
-        """Read the bot's token under the record that names it (§11:4, ADR-0148 §6).
+        """Read the line's credential under the record that names it (§11:4, ADR-0148 §6).
+
+        The bot's token in direct mode, the relay credential in relayed mode, read by
+        the same rules (ADR-0330 §6:5).
 
         Returns:
-            The token, or :attr:`TelegramFailure.UNAVAILABLE` where the record is not
-            active, moved across the read, or names a slot holding no token this
-            seam will write into a path.
+            The credential, or :attr:`TelegramFailure.UNAVAILABLE` where the record is
+            not active, moved across the read, or names a slot holding no credential
+            this seam will write into a path — in relayed mode, one holding a ``:``
+            among them (ADR-0330 §6:3).
         """
         try:
             before = await self._records.latest(self._reference)
@@ -4161,8 +4422,9 @@ class HttpsTelegramBotClient:
         if not _unchanged(before, await self._reread()):
             return self._unavailable("record_changed")
         secret = None if token is None else token.get_secret_value()
-        if not secret or any(character not in _TELEGRAM_TOKEN_CHARACTERS for character in secret):
-            return self._unavailable("token_absent" if token is None else "token_unwritable")
+        refused = _unwritable_credential(secret, relayed=self._relayed)
+        if refused is not None or secret is None:
+            return self._unavailable(refused or "token_absent")
         return secret
 
     def _slot_of(self, stored: StoredEntry | None) -> SecretName | None:
@@ -4215,6 +4477,32 @@ class HttpsTelegramBotClient:
             error_type=error_type,
         )
         return _Failed(TelegramFailure.UNAVAILABLE)
+
+
+def _unwritable_credential(secret: str | None, *, relayed: bool) -> str | None:
+    """Why the line's credential will not be bound into a target, or ``None``.
+
+    Args:
+        secret: The credential read off the keyring, or ``None`` where the slot held
+            nothing.
+        relayed: Whether the line is in relayed mode.
+
+    Returns:
+        ``None`` for a credential this mode writes. Otherwise the fixed word the
+        refusal is logged under: ``token_absent`` for an empty slot;
+        ``bot_token_on_a_relayed_line`` for a relayed line's credential holding a
+        ``:``, a bot token's mark, which a relay is never handed (ADR-0330 §6:3); and
+        ``token_unwritable`` for one empty or spelled outside the path segment's
+        characters (§11:8).
+    """
+    if secret is None:
+        return "token_absent"
+    if relayed and ":" in secret:
+        return "bot_token_on_a_relayed_line"
+    allowed = _RELAY_CREDENTIAL_CHARACTERS if relayed else _TELEGRAM_TOKEN_CHARACTERS
+    if not secret or any(character not in allowed for character in secret):
+        return "token_unwritable"
+    return None
 
 
 def _unchanged(before: StoredEntry | None, after: StoredEntry | None) -> bool:
@@ -4636,7 +4924,11 @@ __all__ = [
     "OutboundEmail",
     "SmtpEgressTransport",
     "StreamOutboundTransport",
+    "TelegramRelay",
+    "TelegramRelayError",
     "TransportPinError",
+    "TrustAnchorError",
+    "TrustAnchors",
     "parse_https_origin",
     "parse_smtp_endpoint",
     "smtp_message",
