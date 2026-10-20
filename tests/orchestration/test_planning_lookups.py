@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from test_planning import _earlier, _inputs, _instruction, _remembered, _sent, _stage
+from test_planning import FLAG_ECHO, _earlier, _flags, _inputs, _remembered, _sent, _stage
 from test_planning_stories import _note, _story
 from test_story_tidy_up import _note as _tidy_note
 from test_story_tidy_up import _reply, _summary, _tidy_up, _trip
@@ -304,30 +304,20 @@ async def test_the_view_planning_is_given_each_round_shows_no_older_notes() -> N
 
 
 @pytest.mark.parametrize("reads", [True, False], ids=["read_offered", "no_read"])
-async def test_planning_is_told_a_story_read_shows_older_notes_where_it_can_read_one(
+async def test_the_template_is_handed_story_reads_where_a_story_read_is_offered(
     reads: bool,
 ) -> None:
-    """#2893, #2944: said beside the story calls, only where a story read is offered too.
+    """ADR-0334 §4:2; #2893, #2944: the code computes it from what the round offers.
 
-    With it, the procedure for moving what a summary holds: read the story, name the note
-    the line came from rather than restating it, then note on the story it left where it
-    went and tidy that story.
+    ``story_calls`` beside it, since the story calls are offered either way, so the
+    template can say a story read shows older notes beside them.
     """
-    stage, completer, _ = _stage()
+    stage, completer, _ = _stage(prompt=FLAG_ECHO)
 
     await stage.plan(_inputs(capabilities=(*STORY_CALLS, *((READ_STORY,) if reads else ()))))
 
-    instruction = _instruction(completer)
-    assert "Stories are yours to keep" in instruction
-    assert ("read the story to see its older notes too" in instruction) is reads
-    procedure = (
-        "To move or split something a story's summary holds, read the story and find the "
-        "note it came from, if one did, and name that note by its label in the move or the "
-        "split rather than restating it as a new note. Then note on the story it left where "
-        "that went, and tidy that story so its summary drops it: a tidy-up reads only what "
-        "came since the last, and a note moved away is not that."
-    )
-    assert (procedure in instruction) is reads
+    assert "story_calls" in _flags(completer)
+    assert ("story_reads" in _flags(completer)) is reads
 
 
 async def test_a_note_moved_away_leaves_the_story_it_left_nothing_to_tidy_until_noted() -> None:

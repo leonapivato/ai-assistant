@@ -57,6 +57,7 @@ from ai_assistant.orchestration.acting import (
 from ai_assistant.orchestration.held_results import HeldResults
 from ai_assistant.orchestration.planning import (
     DELIBERATE_REPEAT,
+    PLANNING_PROMPT,
     PlaceWindow,
     PlanningInputs,
     PlanningStage,
@@ -97,6 +98,7 @@ from ai_assistant.testing import (
     FakePlanStore,
     FakeStoryStore,
     FakeToolCallingCompleter,
+    default_prompt,
 )
 
 if TYPE_CHECKING:
@@ -737,7 +739,13 @@ async def test_a_story_label_planning_was_never_shown_refuses_the_call_whole() -
             )
         )
     )
-    stage = PlanningStage(completer=completer, recorder=_Recorder(), excerpt_chars=200, now=_now)
+    stage = PlanningStage(
+        prompt=default_prompt(PLANNING_PROMPT),
+        completer=completer,
+        recorder=_Recorder(),
+        excerpt_chars=200,
+        now=_now,
+    )
 
     planned = await stage.plan(
         PlanningInputs(
@@ -757,8 +765,6 @@ async def test_a_story_label_planning_was_never_shown_refuses_the_call_whole() -
     assert all(isinstance(one, RefusedCall) for one in refused.values())
     assert refused["c2"].reason == "'S9' names nothing you were shown"
     assert refused["c3"].reason == "'S1' names a story, not an episode"
-    # The story calls' paragraph is in the instruction where they are offered.
-    assert "Stories are yours to keep" in completer.last_call.messages[0].content
 
 
 def _proposed(call_id: str, name: str, **arguments: Any) -> ProposedCall:
@@ -773,7 +779,13 @@ async def test_an_earlier_tidy_up_is_shown_as_started_and_nothing_more() -> None
         calls=(_proposed("c0", "tidy_story", story="story:trip"),),
     )
     completer = FakeToolCallingCompleter.scripted(RoundResponse(text="ok"))
-    stage = PlanningStage(completer=completer, recorder=_Recorder(), excerpt_chars=200, now=_now)
+    stage = PlanningStage(
+        prompt=default_prompt(PLANNING_PROMPT),
+        completer=completer,
+        recorder=_Recorder(),
+        excerpt_chars=200,
+        now=_now,
+    )
 
     await stage.plan(
         PlanningInputs(
@@ -1336,7 +1348,13 @@ async def test_planning_refuses_a_note_label_it_was_never_shown() -> None:
             )
         )
     )
-    stage = PlanningStage(completer=completer, recorder=_Recorder(), excerpt_chars=200, now=_now)
+    stage = PlanningStage(
+        prompt=default_prompt(PLANNING_PROMPT),
+        completer=completer,
+        recorder=_Recorder(),
+        excerpt_chars=200,
+        now=_now,
+    )
 
     planned = await stage.plan(
         PlanningInputs(
@@ -1357,4 +1375,3 @@ async def test_planning_refuses_a_note_label_it_was_never_shown() -> None:
     assert list(notes) == ["7"]
     (refused,) = planned.refused
     assert refused.reason == "'N4' names nothing you were shown"
-    assert "Reorganise stories" in completer.last_call.messages[0].content

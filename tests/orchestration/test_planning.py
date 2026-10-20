@@ -72,8 +72,10 @@ from ai_assistant.core.types import (
     band_of,
 )
 from ai_assistant.orchestration.planning import (
+    APPROVED_ACTION_TOOL,
     DELIBERATE_REPEAT,
     LOOKING_FOR,
+    PLANNING_PROMPT,
     CallOutcome,
     CallOutcomeKind,
     DigestedEvidence,
@@ -87,7 +89,14 @@ from ai_assistant.orchestration.planning import (
     RefusedCall,
     offered_tools,
 )
-from ai_assistant.testing import FakeDiagnosticSink, FakeToolCallingCompleter
+from ai_assistant.orchestration.reliance import NOTE_RELIANCE_CAPABILITY
+from ai_assistant.orchestration.understanding import UNDERSTANDING_PROMPT
+from ai_assistant.testing import (
+    FakeDiagnosticSink,
+    FakeToolCallingCompleter,
+    default_prompt,
+    prompt_from,
+)
 from ai_assistant.testing.memories import (
     confirmed_support,
     memory,
@@ -99,6 +108,8 @@ from ai_assistant.testing.memories import (
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from ai_assistant.core.prompts import PromptTemplate
 
 _AT: Final = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
 _CHAT: Final = PlaceWindow(takes_message=True, description="the kitchen chat")
@@ -193,13 +204,25 @@ class _Recorder:
         self.recorded.append((planning_round, labels))
 
 
+#: ADR-0334 §9:2: a template of the test's own that prints each flag the stage set, one
+#: per line, so a test reads which flags the code computed for a round without reading
+#: the default's words.
+FLAG_ECHO: Final = prompt_from(
+    PLANNING_PROMPT,
+    "".join(f"$if {flag}\n{flag}\n$end\n" for flag in sorted(PLANNING_PROMPT.flags)),
+)
+
+
 def _stage(
-    *responses: RoundResponse, recorder: _Recorder | None = None
+    *responses: RoundResponse,
+    recorder: _Recorder | None = None,
+    prompt: PromptTemplate | None = None,
 ) -> tuple[PlanningStage, FakeToolCallingCompleter, _Recorder]:
     completer = FakeToolCallingCompleter.scripted(*(responses or (RoundResponse(text="ok"),)))
     recording = recorder or _Recorder()
     ids = iter(f"round:{n}" for n in range(100))
     stage = PlanningStage(
+        prompt=default_prompt(PLANNING_PROMPT) if prompt is None else prompt,
         completer=completer,
         recorder=recording,
         excerpt_chars=200,
@@ -226,8 +249,9 @@ def _sent(completer: FakeToolCallingCompleter) -> dict[str, Any]:
     return rendered
 
 
-def _instruction(completer: FakeToolCallingCompleter) -> str:
-    return completer.last_call.messages[0].content
+def _flags(completer: FakeToolCallingCompleter) -> set[str]:
+    """The flags the last round set, where its stage was built over :data:`FLAG_ECHO`."""
+    return set(completer.last_call.messages[0].content.split("\n")) - {""}
 
 
 def _understanding(**fields: Any) -> ActivationUnderstanding:
@@ -362,6 +386,7 @@ async def test_the_request_is_asked_afresh_as_two_messages() -> None:
 def _zoned(timezone: str, at: datetime) -> tuple[PlanningStage, FakeToolCallingCompleter]:
     completer = FakeToolCallingCompleter.scripted(RoundResponse(text="ok"))
     stage = PlanningStage(
+        prompt=default_prompt(PLANNING_PROMPT),
         completer=completer,
         recorder=_Recorder(),
         excerpt_chars=200,
@@ -423,7 +448,10 @@ async def test_a_model_failure_propagates_and_nothing_is_recorded() -> None:
 
     recorder = _Recorder()
     stage = PlanningStage(
-        completer=FakeToolCallingCompleter(fails), recorder=recorder, excerpt_chars=50
+        prompt=default_prompt(PLANNING_PROMPT),
+        completer=FakeToolCallingCompleter(fails),
+        recorder=recorder,
+        excerpt_chars=50,
     )
     with pytest.raises(ModelError):
         await stage.plan(_inputs())
@@ -450,122 +478,55 @@ async def test_an_empty_text_writes_no_message() -> None:
     assert (await stage.plan(_inputs())).message is None
 
 
-async def test_a_place_that_takes_no_message_is_told_so_up_front_and_gets_none() -> None:
-    stage, completer, _ = _stage(RoundResponse(text="Noted the delivery."))
+async def test_a_place_that_takes_no_message_gets_none() -> None:
+    stage, _, _ = _stage(RoundResponse(text="Noted the delivery."))
     planned = await stage.plan(_inputs(place=PlaceWindow(takes_message=False)))
     assert planned.message is None
     assert planned.round.text == "Noted the delivery."
-    assert "takes no message" in _instruction(completer)
-    assert "written nowhere" in _instruction(completer)
-
-
-async def test_the_instruction_states_the_rounds_rules() -> None:
-    stage, completer, _ = _stage()
-    await stage.plan(_inputs())
-    instruction = _instruction(completer)
-    assert "never says how its own calls went" in instruction
-    assert "report an unknown outcome as unknown" in instruction
-    assert "Their yes in reply lets that exact action run, once." in instruction
-    assert "never permit" in instruction
-    assert "never substitute" in instruction
-    assert "takes no message" not in instruction
-    assert "cite" not in instruction.lower()
 
 
 @pytest.mark.parametrize("takes_message", [True, False], ids=["message", "no-message"])
-async def test_the_instruction_says_a_round_with_a_call_brings_another_and_names_no_mark(
+async def test_the_template_is_handed_takes_message_as_the_place_has_it(
     takes_message: bool,
 ) -> None:
-    """ADR-0315 §4:3: a call other than a tidy-up brings a round; no calls end the work."""
-    stage, completer, _ = _stage()
+    """ADR-0334 §4:2, ADR-0307 §3:8: the code computes whether the place takes a message."""
+    stage, completer, _ = _stage(prompt=FLAG_ECHO)
     await stage.plan(_inputs(place=PlaceWindow(takes_message=takes_message)))
-    instruction = _instruction(completer)
-    assert (
-        "Once every call of this round has finished, another round follows whenever this "
-        "round made a call other than a tidy-up, whatever its calls brought back, and shows "
-        "you what came of them."
-    ) in instruction
-    assert (
-        "A round with no calls, or whose only calls are tidy-ups, ends the work after its message."
-    ) in instruction
-    assert (
-        "writes what is new and the user will want to hear: a result or a confirmation they "
-        "asked for, a call that came back needing their yes, and always a call that was not "
-        "done or whose outcome is unknown."
-    ) in instruction
-    assert (
-        "A call that did just what an earlier message said you would do is not new to them."
-    ) in instruction
-    assert (
-        "Where there is nothing new for them, because an earlier message already said what "
-        "you are doing and nothing came of the calls that they will want to hear, write no "
-        "text"
-    ) in instruction
-    assert "never write that there is nothing to add" in instruction
-    assert "ask for another round" not in instruction
-    assert "ask for one" not in instruction
-    assert "mark" not in instruction.replace("marked", "")
+    assert ("takes_message" in _flags(completer)) is takes_message
 
 
-async def test_the_instruction_has_the_whole_message_written_before_notes_and_calls() -> None:
-    """#2851: a provider's turn ends at its first tool call, so nothing after it is written."""
-    stage, completer, _ = _stage()
-    await stage.plan(_inputs())
-    instruction = _instruction(completer)
-    assert (
-        "Write the whole message first, before you propose any call or keep notes: your "
-        "response ends there, and anything you would write after them is lost."
-    ) in instruction
-    assert "the answer itself is the message, never a line saying that one follows" in (instruction)
-
-
-async def test_the_instruction_makes_the_message_the_assistants_own_words_to_the_user() -> None:
-    """#2852: no compose step (ADR-0307 §3:3), so the instruction gives the voice."""
-    stage, completer, _ = _stage()
-    await stage.plan(_inputs())
-    instruction = _instruction(completer)
-    assert instruction.startswith("You are the assistant, working for the user")
-    assert "plan for an assistant" not in instruction
-    assert "your own words to the user" in instruction
-    assert "Speak to them directly, as you, and of yourself as I; never call them the user" in (
-        instruction
+async def test_the_template_is_handed_every_value_the_code_owns() -> None:
+    """ADR-0334 §4:2: the code supplies every value its prompt declares."""
+    echo = prompt_from(
+        PLANNING_PROMPT, "$approved_action_tool\n$note_reliance_capability\n$needs_your_yes\n"
     )
-    assert (
-        "Labels such as S1, E1, N1, M1 and R1, rounds, episode notes, digests, tools and "
-        "calls are your own working vocabulary and never appear in a message"
-    ) in instruction
-    assert "never how you are working it out" in instruction
-
-
-async def test_a_round_that_acts_on_the_request_is_instructed_to_reply() -> None:
-    """#2864, #3094: acting is always said, by the round after the one that proposed it."""
-    stage, completer, _ = _stage()
+    stage, completer, _ = _stage(prompt=echo)
     await stage.plan(_inputs())
-    instruction = _instruction(completer)
-    assert (
-        "When you act on what the user asked, a message tells them so, even in one short line"
-    ) in instruction
-    assert (
-        "it may be the only reply they get. That is the message of the round after the one "
-        "that proposed the action, from how it came back."
-    ) in instruction
-    assert (
-        "A round whose only calls are tidy-ups brings no round after, so its own message "
-        "tells them, never saying how the calls went."
-    ) in instruction
-    assert "this round's message tells them so" not in instruction
-    assert "Empty text writes no message" in instruction
-    assert (
-        "leave the text empty only where the user asked nothing of you, where this round "
-        "proposes the action and has nothing else to tell them, or where an earlier round"
-    ) in instruction
-    assert "Write no text where you have nothing to say" not in instruction
+    assert completer.last_call.messages[0].content.split("\n") == [
+        APPROVED_ACTION_TOOL,
+        NOTE_RELIANCE_CAPABILITY,
+        "Needs your yes:",
+    ]
 
 
-async def test_a_place_that_takes_no_message_is_not_told_to_reply() -> None:
-    stage, completer, _ = _stage()
-    await stage.plan(_inputs(place=PlaceWindow(takes_message=False)))
-    assert "a message tells them so" not in _instruction(completer)
+async def test_every_round_renders_its_system_message_from_the_template() -> None:
+    """ADR-0334 §3:1: the stage sends what its template renders, and keeps no text of its own."""
+    template = prompt_from(PLANNING_PROMPT, "an instruction of the owner's own")
+    stage, completer, _ = _stage(prompt=template)
+    await stage.plan(_inputs())
+    (system, _) = completer.last_call.messages
+    assert (system.role, system.content) == (Role.SYSTEM, "an instruction of the owner's own")
+
+
+def test_the_stage_refuses_another_prompts_template() -> None:
+    """ADR-0334 §2: planning renders the planning prompt and no other."""
+    with pytest.raises(ValueError, match="planning prompt"):
+        PlanningStage(
+            prompt=default_prompt(UNDERSTANDING_PROMPT),
+            completer=FakeToolCallingCompleter(),
+            recorder=_Recorder(),
+            excerpt_chars=200,
+        )
 
 
 # --- the offered capabilities ----------------------------------------------------------------
@@ -891,7 +852,12 @@ async def test_the_diagnostic_record_keeps_the_request_with_the_exchange_shown_o
     completer = FakeToolCallingCompleter(RoundResponse(text="On it."))
     sink = FakeDiagnosticSink()
     stage = PlanningStage(
-        completer=completer, recorder=_Recorder(), excerpt_chars=200, now=_now, diagnostics=sink
+        prompt=default_prompt(PLANNING_PROMPT),
+        completer=completer,
+        recorder=_Recorder(),
+        excerpt_chars=200,
+        now=_now,
+        diagnostics=sink,
     )
     with diagnosed_activation("a1", clock=_now):
         await stage.plan(

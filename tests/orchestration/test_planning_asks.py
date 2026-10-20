@@ -11,10 +11,11 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from test_planning import (
+    FLAG_ECHO,
     _call,
     _earlier,
+    _flags,
     _inputs,
-    _instruction,
     _remembered,
     _sent,
     _stage,
@@ -113,107 +114,7 @@ async def _asked(
     return planned, completer
 
 
-# --- the standing instructions (§2:9, §2:11, §3) -----------------------------------------------
-
-
-async def test_the_instruction_says_how_approval_works_and_retires_no_route() -> None:
-    """§2:9: the yes path, said plainly; #2853's "no answer can let it run" is gone."""
-    stage, completer, _ = _stage()
-    await stage.plan(_inputs())
-    instruction = _instruction(completer)
-    assert (
-        "How approval works here: some actions need the user's yes before they run. When one "
-        "does, you ask them, and the system shows them the action's exact details. Their yes "
-        "in reply lets that exact action run, once. You never approve anything on the user's "
-        "behalf, and there is no other route: no confirmation emails, no links or codes, and "
-        "no steps on the user's end."
-    ) in instruction
-    for retired in (
-        "cannot be done yet",
-        "there is no way yet for them to approve it",
-        "Never ask them to confirm, approve or say go ahead",
-    ):
-        assert retired not in instruction
-
-
-async def test_the_instruction_carries_the_line_of_care() -> None:
-    """§2:11: one line of care, which grants and withholds nothing."""
-    stage, completer, _ = _stage()
-    await stage.plan(_inputs())
-    assert (
-        "Check with the user first when you are unsure what they meant, or when a mistake "
-        "would be costly, even where their authority already covers the action. Checking is "
-        "care: it grants nothing and withholds nothing."
-    ) in _instruction(completer)
-
-
-#: #3088: the line of care is met by proposing, said right after it.
-_PROPOSE_DONT_PREASK: Final = (
-    "Checking is care: it grants nothing and withholds nothing.\n"
-    "\n"
-    "When the user has asked for an action, propose it as soon as you know its details, "
-    "rather than first asking them in words whether to do it. If it needs their yes, it "
-    "runs only once the system has asked them with its exact details and they have said "
-    "yes, so that question is the check, even where a mistake would be costly. Asking in "
-    "words first makes them say yes twice, once to you and again to the system. What you "
-    "found out on the way, such as a price or a time, goes in that question's explanation, "
-    "in the round after the one that proposes the action, and is no reason to ask first. "
-    "Check in words before proposing only when you are unsure what they meant, such as "
-    "which date or which place, or when you know that a costly action would run without "
-    "their yes.\n"
-    "\n"
-    "Whether a call needs the user's yes is known only once it comes back"
-)
-
-
-async def test_an_asked_for_action_is_proposed_and_not_asked_about_in_words_first() -> None:
-    """#3088: the system's question with the exact line is the check, not a prose round."""
-    stage, completer, _ = _stage()
-    await stage.plan(_inputs())
-    assert _PROPOSE_DONT_PREASK in _instruction(completer)
-
-
-async def test_a_place_that_takes_no_message_is_not_told_to_propose_instead_of_asking() -> None:
-    """§7:3: where no message goes, no question is the check, so the paragraph is left out."""
-    stage, completer, _ = _stage()
-    await stage.plan(_inputs(place=PlaceWindow(takes_message=False)))
-    instruction = _instruction(completer)
-    assert "Checking is care: it grants nothing and withholds nothing." in instruction
-    assert "rather than first asking them in words" not in instruction
-
-
-async def test_the_instruction_says_how_to_ask_and_how_answers_go() -> None:
-    """§2:1-§2:4, §2:12; planning's side of §3:5, §3:8-§3:9."""
-    stage, completer, _ = _stage()
-    await stage.plan(_inputs())
-    instruction = _instruction(completer)
-    assert "a call no message asks about is dropped" in instruction
-    assert "explain the action in your own words, with the details that matter" in instruction
-    assert "name the call in asks by the reference shown with its outcome" in instruction
-    assert "The system adds the exact details below your message" in instruction
-    assert 'under its own "Needs your yes:" line, which you never write yourself' in instruction
-    assert "numbered where there are several" in instruction
-    assert "no buttons and no options" in instruction
-    assert "ask which they mean, and never guess" in instruction
-    assert "ask again, with the new values where they changed them" in instruction
-
-
-async def test_the_round_that_proposes_a_call_says_nothing_about_it() -> None:
-    """#3071, #3094: a call needs the user only once it comes back, and that round tells them."""
-    stage, completer, _ = _stage()
-    await stage.plan(_inputs())
-    instruction = _instruction(completer)
-    assert (
-        "Whether a call needs the user's yes is known only once it comes back, in the round "
-        "after the one that proposed it, and that round tells the user. So, other than for "
-        "a tidy-up, which brings no round after, a round says nothing to them about an "
-        'action it proposes itself: not that you are doing it, such as "Let me book that", '
-        "not that it is done, and not that details will follow. It does not ask them to "
-        "confirm it or name it in asks, and writes text only for something else they need "
-        "to hear. The same round still asks about an earlier call that came back needing a "
-        "yes."
-    ) in instruction
-    assert "It may say what you are doing" not in instruction
+# --- asking (§2, §3) ---------------------------------------------------------------------------
 
 
 async def test_a_round_that_proposes_a_call_still_asks_about_an_earlier_one() -> None:
@@ -238,70 +139,13 @@ async def test_a_round_that_proposes_a_call_still_asks_about_an_earlier_one() ->
     assert planned.round.text.endswith(f'book — slot: "{_SLOT}"')
 
 
-async def test_a_call_that_needs_a_yes_is_always_asked_and_only_the_exact_line_asks() -> None:
-    """#3071: §2:1-§2:2's only reason not to ask; §4:11's "asked" is a shown exact line."""
-    stage, completer, _ = _stage()
-    await stage.plan(_inputs())
-    instruction = _instruction(completer)
-    assert (
-        "When a call comes back needing the user's yes, this round's message asks them about "
-        "it, unless they no longer want it"
-    ) in instruction
-    assert "decide whether this round's message asks" not in instruction
-    assert (
-        "Only a message that showed a call's exact details asked about it, so a call that "
-        "needs a yes is new to the user and not yet asked, even where an earlier message "
-        "mentioned it or asked about it in words."
-    ) in instruction
-    # Neither "nothing new" rule silences it.
-    assert "A call that came back needing their yes is always new." in instruction
-    assert "a call that came back needing their yes, and always a call that was not" in (
-        instruction
-    )
-
-
-async def test_a_question_always_carries_the_explanation() -> None:
-    """§2:4, #3072: the exact line never goes out as the whole question."""
-    stage, completer, _ = _stage()
-    await stage.plan(_inputs())
-    assert "Always write the explanation: the exact details never go out alone." in (
-        _instruction(completer)
-    )
-
-
-async def test_a_call_waiting_on_the_user_is_never_said_to_be_going_through() -> None:
-    """#3072: already asked is waiting, not approved."""
-    stage, completer, _ = _stage()
-    await stage.plan(_inputs())
-    assert (
-        "A call shown as already asked about is waiting on the user's answer to a question "
-        "that showed its exact details, and is not asked about again. It is not approved "
-        "unless it is shown to you as an approved action, so never say it is going through "
-        "or being done: say you are waiting on their answer to that question, and where "
-        "they seem to have said yes, ask which question they meant."
-    ) in _instruction(completer)
-
-
-async def test_a_place_that_takes_no_message_is_not_told_how_to_ask() -> None:
-    """§7:3: the asking rules ride only where a message goes."""
-    stage, completer, _ = _stage()
-    await stage.plan(_inputs(place=PlaceWindow(takes_message=False)))
-    instruction = _instruction(completer)
-    assert "a round says nothing to them about an" not in instruction
-    assert "A call shown as already asked about" not in instruction
-
-
 async def test_a_deny_is_never_asked_about_and_is_said_plainly() -> None:
-    """§2:10, §8:7: the instruction and the refused outcome both say so."""
+    """§2:10, §8:7: the refused outcome says so."""
     earlier = _proposed(_SLOT)
     refused = CallOutcome(
         earlier.id, "c1", CallOutcomeKind.REFUSED, reason="the permission policy denies it"
     )
     planned, completer = await _asked(asks=("1.1",), outcomes=(refused,), rounds=(earlier,))
-    assert (
-        "where it was refused because the user's settings do not allow it, tell them "
-        "plainly that it is not allowed"
-    ) in _instruction(completer)
     shown = _sent(completer)["rounds"][0]["calls"][0]
     assert shown["outcome"].startswith(
         "refused before it ran, so nothing in it ran, and no yes lets it run: never ask the "
@@ -310,18 +154,6 @@ async def test_a_deny_is_never_asked_about_and_is_said_plainly() -> None:
     assert "ask_as" not in shown
     assert planned.round.asked == ()
     assert planned.message == "Shall I book it?"
-
-
-async def test_a_place_that_takes_no_message_is_told_nothing_is_asked() -> None:
-    """§7:3: a timer's or an event's activation asks nothing, and the call will not run."""
-    stage, completer, _ = _stage()
-    await stage.plan(_inputs(place=PlaceWindow(takes_message=False)))
-    instruction = _instruction(completer)
-    assert "How approval works here" in instruction
-    assert "This activation cannot message the user, so a call that needs them is not" in (
-        instruction
-    )
-    assert "name the call in asks" not in instruction
 
 
 # --- the per-call notes (§2:10, §4:11) -----------------------------------------------------------
@@ -902,7 +734,14 @@ async def test_an_approved_action_is_shown_under_an_a_label_with_its_details() -
     assert parameters["properties"][APPROVED_ACTION_ARGUMENT]["enum"] == ["A1"]
     assert parameters["required"] == [APPROVED_ACTION_ARGUMENT]
     assert LOOKING_FOR not in parameters["properties"]
-    assert f"propose {APPROVED_ACTION_TOOL} naming its label" in _instruction(completer)
+
+
+async def test_the_template_is_handed_approved_exactly_where_an_action_was_approved() -> None:
+    """ADR-0334 §4:2, ADR-0321 §4:2: the code computes it from the tool it offers."""
+    for approved, handed in (((_approved(),), True), ((), False)):
+        stage, completer, _ = _stage(prompt=FLAG_ECHO)
+        await stage.plan(_inputs(capabilities=_TOOLS, approved=approved))
+        assert ("approved" in _flags(completer)) is handed
 
 
 async def test_nothing_approved_offers_no_tool_and_no_section() -> None:
@@ -911,7 +750,6 @@ async def test_nothing_approved_offers_no_tool_and_no_section() -> None:
     )
     assert "approved_actions" not in _sent(completer)
     assert all(one.name != APPROVED_ACTION_TOOL for one in completer.last_call.tools)
-    assert APPROVED_ACTION_TOOL not in _instruction(completer)
     (refused,) = planned.refused
     assert refused.reason == "no capability of that name was offered"
 

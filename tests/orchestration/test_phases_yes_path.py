@@ -93,7 +93,7 @@ from ai_assistant.orchestration.phase_path import (
     PlaceTarget,
     place_window,
 )
-from ai_assistant.orchestration.planning import APPROVED_ACTION_TOOL, PlaceAuthor
+from ai_assistant.orchestration.planning import APPROVED_ACTION_TOOL, PLANNING_PROMPT, PlaceAuthor
 from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
 from ai_assistant.orchestration.telegram import TelegramLineSeams, line_channel
@@ -488,6 +488,7 @@ class _Hub:
             store=harness.memory, policy=DefaultMemoryPolicy(), now=lambda: AT
         )
         return PhasePath(
+            planning_prompt=default_prompt(PLANNING_PROMPT),
             completer=self.planner,
             provider=FakeModelProvider(reply=_DIGESTED),
             authorizing=AuthorizingStage(

@@ -129,6 +129,7 @@ from ai_assistant.orchestration.held_results import HeldResult, HeldResults
 from ai_assistant.orchestration.observer import Observer, ObserverLimits
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, PhaseWorking
 from ai_assistant.orchestration.planning import (
+    PLANNING_PROMPT,
     PlaceWindow,
     PlannedRound,
     PlanningInputs,
@@ -175,6 +176,7 @@ from ai_assistant.testing import (
     FakeToolRegistry,
     FakeTraceRetention,
     FakeTraceSink,
+    default_prompt,
     source_grant,
 )
 from ai_assistant.testing.memories import HELD_EPISODE, memory
@@ -462,7 +464,11 @@ async def _planning_stage(now: Clock) -> None:
             raise AssertionError
 
     await PlanningStage(
-        completer=FakeToolCallingCompleter(), recorder=_Unreached(), excerpt_chars=50, now=now
+        prompt=default_prompt(PLANNING_PROMPT),
+        completer=FakeToolCallingCompleter(),
+        recorder=_Unreached(),
+        excerpt_chars=50,
+        now=now,
     ).plan(PlanningInputs(activation_id="act-1", place=PlaceWindow(takes_message=True)))
 
 
@@ -496,6 +502,7 @@ async def _phase_path(now: Clock) -> None:
             raise AssertionError
 
     path = PhasePath(
+        planning_prompt=default_prompt(PLANNING_PROMPT),
         completer=FakeToolCallingCompleter(),
         provider=FakeModelProvider(),
         authorizing=_Unreached(),  # type: ignore[arg-type]  # never reached
