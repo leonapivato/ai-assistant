@@ -157,10 +157,16 @@ class _Failing:
 
 
 @pytest.mark.parametrize("step", ["scout", "commit"])
-async def test_only_the_named_route_is_reached_when_a_step_fails(
+async def test_only_the_named_route_is_reached_once_when_a_step_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str
 ) -> None:
-    """§9:9: the named spec fails, and no other provider is called in its place."""
+    """§9:9, §16:9: the named spec fails, once, and nothing is called in its place.
+
+    Once although the deployment retries three times elsewhere: the observer records
+    each call against its daily budget before making it, so a retry inside the call
+    would send requests the budget never counted. Its own retry is the attempt's
+    recorded backoff (§16:4).
+    """
     built: dict[str, _Failing] = {}
     monkeypatch.setattr(
         composition, "PydanticAIProvider", lambda spec: built.setdefault(spec, _Failing(spec))
@@ -172,12 +178,15 @@ async def test_only_the_named_route_is_reached_when_a_step_fails(
         fallback_models=("openai:gpt-5",),
         observer_scout_model="anthropic:scout",
         observer_commit_model="anthropic:commit",
-        model_max_attempts=1,
     )
+    assert settings.model_max_attempts > 1
     engine = build_engine(settings, data_dir=tmp_path)
     try:
         observer = _observer(engine)
         route = observer._scout if step == "scout" else observer._commit
+        assert isinstance(route, RetryingProvider)
+        assert route._policy.max_attempts == 1
+        assert route._policy.timeout_seconds == settings.model_timeout_seconds
         with pytest.raises(ModelError):
             await route.complete(_PROMPT)
     finally:

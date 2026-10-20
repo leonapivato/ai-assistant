@@ -287,11 +287,15 @@ class Observer:
         )
         self._writer = FindingWriter(writes=writes, memory=memory, now=self._now, mint=self._mint)
         self._lock = asyncio.Lock()
-        # An outcome decided whose record could not be written, so this process records
-        # it as decided rather than committing the finding again. Every write it made is
-        # already on the record's ``written``, so a process that no longer holds it
-        # decides the finding again with those writes merged in (§12:7, §16:1).
-        self._decided: dict[tuple[str, str], ObservationFinding] = {}
+        # A finding as this process last built it, while the plan store has not taken
+        # the write carrying it: an outcome decided, or a write landed on a memory and
+        # put in ``written``. A write of the record that fails ends the run (§16:6's
+        # backstop), so the next attempt in this process starts from these rather than
+        # from the record — never committing a decided finding again, and never losing
+        # a landed write the record missed (§16:1). Only a process that stops while the
+        # plan store is failing loses one, and then a landed write is still on its
+        # memory's own operation log.
+        self._unsaved: dict[tuple[str, str], ObservationFinding] = {}
 
     async def run(self) -> RunOutcome:
         """One run over the queue, unless a run is already running (§16:6).
@@ -427,9 +431,9 @@ class Observer:
         return ObservationState.PROCESSED
 
     def _forget(self, episode_id: str) -> None:
-        """Drop the outcomes this process kept beside an episode processed or read afresh."""
-        for key in [key for key in self._decided if key[0] == episode_id]:
-            del self._decided[key]
+        """Drop the findings this process kept beside an episode processed or read afresh."""
+        for key in [key for key in self._unsaved if key[0] == episode_id]:
+            del self._unsaved[key]
 
     async def _open(
         self, episode_id: str, held: ObservationRecord | None, started: datetime
@@ -463,18 +467,24 @@ class Observer:
             self._forget(episode.id)
             await self._scouted(reading, attempt, kept)
         else:
+            for one in findings:
+                unsaved = self._unsaved.get((episode.id, one.id))
+                if one.outcome is None and unsaved is not None:
+                    _set(attempt, unsaved)
             _narrow(attempt, reading.supplied)
         for finding_id in [one.id for one in attempt.record.findings if one.outcome is None]:
             key = (episode.id, finding_id)
+            current = _finding(attempt, finding_id)
             # An outcome decided before its record failed to be written is recorded as
             # decided, never committed again over writes that already landed (§16:1).
-            outcome = self._decided.get(key) or await self._committed(finding_id, reading, attempt)
-            self._decided[key] = outcome
+            if current.outcome is None:
+                current = await self._committed(finding_id, reading, attempt)
+            self._unsaved[key] = current
             done = tuple(
-                outcome if one.id == finding_id else one for one in attempt.record.findings
+                current if one.id == finding_id else one for one in attempt.record.findings
             )
             await self._save(attempt, findings=done)
-            del self._decided[key]
+            del self._unsaved[key]
 
     async def _scouted(
         self, reading: Reading, attempt: _Attempt, kept: tuple[ObservationFinding, ...]
@@ -578,9 +588,14 @@ class Observer:
         )
 
         async def landed(writes: tuple[ObservationWrite, ...]) -> None:
-            current = _finding(attempt, finding_id)
-            _set(attempt, _updated(current, written=_joined(earlier, writes)))
+            key = (attempt.record.episode, finding_id)
+            updated = _updated(_finding(attempt, finding_id), written=_joined(earlier, writes))
+            _set(attempt, updated)
+            # Kept until the record carrying it is written, so a failing write of the
+            # record loses no landed write to the next attempt in this process (§16:1).
+            self._unsaved[key] = updated
             await self._save(attempt, findings=attempt.record.findings)
+            del self._unsaved[key]
 
         return await self._writer.write(
             verdict, shown=[one.memory for one in view.similar], landed=landed
