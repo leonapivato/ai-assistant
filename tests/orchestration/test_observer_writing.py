@@ -511,3 +511,38 @@ async def test_another_writer_between_a_fold_and_a_resolution_fails_the_attempt(
             ),
             shown=[held],
         )
+
+
+async def test_a_write_that_lands_is_kept_though_its_verification_fails() -> None:
+    """§16:1: the support is written, so the ledger the stage keeps names it."""
+    harness = await _harness()
+    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
+    get_many = harness.memory.get_many
+    apply = harness.writes.apply
+    landed = False
+
+    async def landing(change: MemoryChange) -> None:
+        nonlocal landed
+        await apply(change)
+        landed = True
+
+    async def failing_after_write(ids: list[str]) -> object:
+        if landed:
+            msg = "the store could not read"
+            raise MemoryStoreError(msg)
+        return await get_many(ids)
+
+    harness.writes.apply = landing  # type: ignore[method-assign]  # notes when the write lands
+    harness.memory.get_many = failing_after_write  # type: ignore[method-assign,assignment]  # then an outage
+    writer = _writer(harness)
+
+    with pytest.raises(MemoryStoreError):
+        await writer.write(Checked(primary=AddSupports(target=held, supports=(_said(),))))
+
+    assert [(one.memory, one.operations) for one in writer.partial] == [
+        ("m-seat", (MemoryOperationKind.ADD_SUPPORT,))
+    ]
+    landed = False
+    after = await harness.memory.get(held.id)
+    assert isinstance(after, Memory)
+    assert after.support_at(InputPart(episode=address("leaving"))) is not None

@@ -230,13 +230,13 @@ class FindingWriter:
             case AddSupports():
                 target = await self._fresh(primary.target)
                 for support in primary.supports:
-                    await self._apply(target, MemoryOperationKind.ADD_SUPPORT, support)
-                    ledger.wrote(target.id, MemoryOperationKind.ADD_SUPPORT)
+                    await self._apply(target, MemoryOperationKind.ADD_SUPPORT, support, ledger)
                     target = await self._fresh(primary.target)
                 return None
             case RaiseQuestion():
-                await self._raise(primary.target, primary.kind, primary.asks, primary.support)
-                ledger.wrote(primary.target.id, MemoryOperationKind.RAISE_QUESTION)
+                await self._raise(
+                    primary.target, primary.kind, primary.asks, primary.support, ledger
+                )
                 return None
             case RecordUse():
                 memory = await self._fresh(primary.memory)
@@ -244,12 +244,14 @@ class FindingWriter:
                 held = next(
                     (one for one in memory.track_record if one.episode == entry.episode), None
                 )
-                if held is None:
-                    await self._guarded(
-                        self._writes.record_use(memory, entry),
-                        {memory.id: (memory, lambda after: _recorded(memory, after, entry))},
-                    )
-                ledger.recorded(memory.id, held_up=entry.held_up if held is None else held.held_up)
+                if held is not None:
+                    ledger.recorded(memory.id, held_up=held.held_up)
+                    return None
+                await self._guarded(
+                    self._writes.record_use(memory, entry),
+                    {memory.id: (memory, lambda after: _recorded(memory, after, entry))},
+                    lambda: ledger.recorded(memory.id, held_up=entry.held_up),
+                )
                 return None
 
     async def _create(self, create: Create, ledger: _Ledger) -> FindingUnwritten | None:
@@ -269,15 +271,17 @@ class FindingWriter:
         if retiring is not None:
             before = retiring.memory
             checks[before.id] = (before, lambda after: _retired(before, after, retiring.kind))
-        outcome = await self._guarded(self._writes.write(proposal), checks)
+        outcome = await self._guarded(self._writes.write(proposal), {})
         result = outcome.result
         ledger.ruling = result.decision.kind
+        # What the ruling wrote is in the ledger before anything is verified, so a
+        # verification that fails still leaves it to be recorded (§16:1).
+        unwritten = await self._ruled(create, retiring, result, ledger)
         target = None if result.record_id is None else self._shown.get(result.record_id)
         if target is not None and result.decision.kind is MemoryDecisionKind.REINFORCE:
-            await self._verified(
-                {target.id: (target, lambda after: _reinforced(target, after, create.memory))}
-            )
-        return await self._ruled(create, retiring, result, ledger)
+            checks[target.id] = (target, lambda after: _reinforced(target, after, create.memory))
+        await self._verified(checks)
+        return unwritten
 
     async def _ruled(
         self,
@@ -330,12 +334,17 @@ class FindingWriter:
                 OpenQuestionKind.POLICY_ASK,
                 _ASK_ASKS + create.memory.content,
                 create.asked_on,
+                ledger,
             )
-            ledger.wrote(memory.id, MemoryOperationKind.RAISE_QUESTION)
         return None
 
     async def _raise(
-        self, target: Memory, kind: OpenQuestionKind, asks: str, support: MemorySupport
+        self,
+        target: Memory,
+        kind: OpenQuestionKind,
+        asks: str,
+        support: MemorySupport,
+        ledger: _Ledger,
     ) -> None:
         """Raise one open question on ``target``, resting on ``support`` (§13:1-§13:2)."""
         memory = await self._fresh(target)
@@ -366,6 +375,7 @@ class FindingWriter:
         await self._guarded(
             self._writes.apply(change),
             {memory.id: (memory, lambda after: _applied(memory, after, operation))},
+            lambda: ledger.wrote(memory.id, MemoryOperationKind.RAISE_QUESTION),
         )
 
     async def _resolve(self, resolve: Resolve, ledger: _Ledger) -> None:
@@ -391,11 +401,11 @@ class FindingWriter:
         await self._guarded(
             self._writes.apply(change),
             {memory.id: (memory, lambda after: _applied(memory, after, operation))},
+            lambda: ledger.wrote(memory.id, MemoryOperationKind.RESOLVE_QUESTION),
         )
-        ledger.wrote(memory.id, MemoryOperationKind.RESOLVE_QUESTION)
 
     async def _apply(
-        self, memory: Memory, kind: MemoryOperationKind, support: MemorySupport
+        self, memory: Memory, kind: MemoryOperationKind, support: MemorySupport, ledger: _Ledger
     ) -> None:
         """One add support citing ``support`` (§12:3), a no-op where it is carried (§4:8)."""
         operation = MemoryOperation(
@@ -412,6 +422,7 @@ class FindingWriter:
         await self._guarded(
             self._writes.apply(change),
             {memory.id: (memory, lambda after: _applied(memory, after, operation))},
+            lambda: ledger.wrote(memory.id, kind),
         )
 
     async def _fresh(self, memory: Memory) -> Memory:
@@ -437,8 +448,13 @@ class FindingWriter:
         self,
         write: Awaitable[T],
         checks: Mapping[str, tuple[Memory, Callable[[Memory], bool]]],
+        written: Callable[[], None] | None = None,
     ) -> T:
-        """Await one write, then verify what it left on the memories it touched.
+        """Await one write, note it in the ledger, then verify what it left.
+
+        ``written`` notes the write in the finding's ledger as soon as it lands, before
+        the verification, which may fail: what was written is recorded either way
+        (§16:1).
 
         Raises:
             _Refusal: ``check_failed`` for a support whose episode the store does not
@@ -454,6 +470,8 @@ class FindingWriter:
             raise _Refusal(FindingUnwritten.CHECK_FAILED) from exc
         except SelfConsumingWriteError as exc:
             raise _Refusal(FindingUnwritten.REFUSED) from exc
+        if written is not None:
+            written()
         await self._verified(checks)
         return done
 
