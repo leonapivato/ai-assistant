@@ -41,7 +41,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.types import ActivationDigest, PlanningRound
 
@@ -229,6 +229,7 @@ def project_episode(
     excerpt_chars: int,
     admit_outside_input: bool = False,
     owner_records: bool = False,
+    candidates: Sequence[str] = (),
 ) -> EpisodeProjection:
     """Project an episode onto what a model is shown of it (ADR-0284 §8:1-§8:2).
 
@@ -254,6 +255,12 @@ def project_episode(
     own evidence by the planning stage, never through this (ADR-0312 §4:1, §4:3).
     Each item is cut to ``excerpt_chars``.
 
+    **An episode's pending candidates** (ADR-0329 §6:9) are the facts the caller
+    hands in ``candidates``: which of the episode's ``remember`` calls are candidates
+    still pending is read from the plan store, which this module does not reach, so
+    the phases' glue selects them for planning's episode window and every other caller
+    passes none. Each is cut to ``excerpt_chars``.
+
     The input is shown where the trigger's ``origin`` is ``user``, or where it is
     ``outside`` and ``admit_outside_input`` is set — which the understanding stage's
     episode window and its recalled episodes alone do (§8:5). An episode with no
@@ -267,14 +274,18 @@ def project_episode(
         admit_outside_input: Whether an ``outside`` input's text is shown.
         owner_records: Whether a record placed for the owner alone may be shown to
             this reader, which decides the episode notes and the evidence.
+        candidates: The facts of the episode's pending candidates, in the order its
+            rounds record them, or none.
 
     Returns:
         The projection.
 
     Raises:
-        ValueError: If ``excerpt_chars`` is not an integer of at least 1, or the
+        ValueError: If ``excerpt_chars`` is not an integer of at least 1, the
             episode is open: an open episode is never a model input (ADR-0286 §6),
-            so a reader that feeds a model passes over it before it projects.
+            so a reader that feeds a model passes over it before it projects; or
+            ``candidates`` are given for an episode with no processing record, which
+            records no round.
     """
     if type(excerpt_chars) is not int or excerpt_chars < 1:
         msg = "the episode excerpt bound must be an integer of at least 1"
@@ -286,6 +297,9 @@ def project_episode(
     external = rests_on_recorded_external_content(record.provenance)
     processing = record.processing_record
     if processing is None:
+        if candidates:
+            msg = "an episode with no processing record records no candidate"
+            raise ValueError(msg)
         return EpisodeProjection(
             occurred_at=record.occurred_at,
             capture_modality=record.capture.modality,
@@ -311,6 +325,9 @@ def project_episode(
         derived_from_external=external,
         rounds=_projected_rounds(processing.rounds, excerpt_chars, owner_records=owner_records),
         evidence=_projected_evidence(processing.digests, excerpt_chars) if owner_records else (),
+        candidates=tuple(
+            ProjectedText(text=fact[:excerpt_chars], full_chars=len(fact)) for fact in candidates
+        ),
     )
 
 

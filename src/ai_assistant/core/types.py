@@ -4687,6 +4687,12 @@ class EpisodeProjection(BaseModel):
         evidence: The items of the episode's digests, in the order they were
             recorded, where the reader may be shown a record placed for the owner
             alone (ADR-0308 §5:5 to §5:6).
+        candidates: The facts of the candidates its own rounds record as ``remember``
+            calls, each pending, in the order recorded and cut to the excerpt bound
+            (ADR-0329 §6:9, §20's addition to ADR-0284 §8:1). Only planning's episode
+            window is handed them, and only for an episode the observer has not
+            processed; every other rendering carries none. Only an episode with a
+            processing record carries them.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -4704,6 +4710,7 @@ class EpisodeProjection(BaseModel):
     derived_from_external: bool = False
     rounds: tuple[ProjectedRound, ...] = ()
     evidence: tuple[ProjectedEvidence, ...] = ()
+    candidates: tuple[ProjectedText, ...] = ()
 
     @model_validator(mode="after")
     def _one_of_the_two_shapes(self) -> Self:
@@ -4725,6 +4732,7 @@ class EpisodeProjection(BaseModel):
                 or self.meaning is not None
                 or self.rounds
                 or self.evidence
+                or self.candidates
             ):
                 msg = "a projection without a processing record carries its content alone"
                 raise ValueError(msg)
