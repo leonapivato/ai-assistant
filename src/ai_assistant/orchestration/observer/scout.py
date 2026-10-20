@@ -121,6 +121,14 @@ def proposed_findings(
     for proposed in reply.findings:
         parts = _parts(proposed.rests_on, reading)
         relied_on = None if proposed.relied_on is None else reliances.get(proposed.relied_on)
+        candidate = None if proposed.candidate is None else hints.get(proposed.candidate)
+        if (proposed.relied_on is not None and relied_on is None) or (
+            proposed.candidate is not None and candidate is None
+        ):
+            # A label naming nothing shown is a malformed finding, never an ordinary one:
+            # a reliance that resolves to none would otherwise be committed as a claim.
+            dropped += 1
+            continue
         if relied_on is None:
             kept_parts = bool(parts) and not leaving.isdisjoint(parts)
         else:
@@ -139,7 +147,7 @@ def proposed_findings(
                     episode=episode,
                     claim=proposed.claim,
                     rests_on=parts,
-                    candidate=None if proposed.candidate is None else hints.get(proposed.candidate),
+                    candidate=candidate,
                     relied_on=relied_on,
                 )
             )

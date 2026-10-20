@@ -188,6 +188,35 @@ async def test_a_story_is_read_with_its_summary_and_recent_episodes() -> None:
     assert [one.record.id for one in story.recent] == [address("trip-1"), address("trip-2")]
 
 
+async def test_a_summary_read_supplies_a_record_for_the_owner_alone() -> None:
+    """ADR-0304 §4:1, §12:6: a summary is placed for the owner alone, whoever wrote it."""
+    harness = Harness()
+    await harness.hold(
+        episode("one", at=AT - timedelta(minutes=3)),
+        episode("two", at=AT - timedelta(minutes=2)),
+        episode("three", at=AT - timedelta(minutes=1)),
+    )
+    created = await harness.stories.create(
+        [StoryMember(kind=StoryMemberKind.ACTIVATION, id="one")], actor=StoryActor.OWNER
+    )
+    assert created.story_id is not None
+
+    unwritten = await _read(harness, "one")
+    assert Placement.narrowest_of(unwritten.supplied).reach is PlacementReach.ANYONE
+
+    state = await harness.stories.current_summary(created.story_id)
+    assert state is not None
+    await harness.stories.write_summary(
+        created.story_id,
+        StorySummaryDraft(lines=(StorySummaryLine(text="A trip to Lisbon."),), outside=False),
+        as_of=state.as_of,
+    )
+
+    reading = await _read(harness, "one")
+
+    assert Placement.narrowest_of(reading.supplied).reach is PlacementReach.OWNER
+
+
 async def test_past_episodes_and_memories_are_found_by_relevance() -> None:
     """§8:1: related past episodes, their candidates, and related memories."""
     harness = Harness()

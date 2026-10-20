@@ -124,6 +124,7 @@ def test_a_reliance_finding_rests_on_what_later_episodes_show() -> None:
             findings=[
                 {"claim": "The seat held up.", "rests_on": ["P2"], "relied_on": "M1"},
                 {"claim": "Another.", "rests_on": ["P2"], "relied_on": "M7"},
+                {"claim": "From the leaving one.", "rests_on": ["P1"], "relied_on": "M7"},
             ]
         ),
         ScoutReply,
@@ -133,7 +134,7 @@ def test_a_reliance_finding_rests_on_what_later_episodes_show() -> None:
     kept, dropped = proposed_findings(proposal, reading)
 
     assert [(one.claim, one.relied_on) for one in kept] == [("The seat held up.", "m-seat")]
-    assert dropped == 1
+    assert dropped == 2, "a label naming no reliance shown drops the finding, never widens it"
 
 
 def test_a_candidate_is_named_by_its_effect_record() -> None:
@@ -147,6 +148,17 @@ def test_a_candidate_is_named_by_its_effect_record() -> None:
     (finding,), _ = proposed_findings(proposal, reading)
 
     assert finding.candidate == "effect-1"
+
+
+def test_a_candidate_label_naming_nothing_shown_drops_the_finding() -> None:
+    """A malformed label is never read as a finding from the record alone."""
+    reading = _reading(hints=(Hint(handle="C1", effect="effect-1", fact="x"),))
+    proposal = parsed(
+        reply(findings=[{"claim": "x", "rests_on": ["P1"], "candidate": "C7"}]), ScoutReply
+    )
+    assert proposal is not None
+
+    assert proposed_findings(proposal, reading) == ((), 1)
 
 
 def test_a_candidate_the_user_confirmed_always_gives_a_finding() -> None:

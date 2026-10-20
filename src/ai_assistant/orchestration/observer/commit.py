@@ -66,6 +66,7 @@ from ai_assistant.core.types import (
     part_episode,
     standing_rank,
 )
+from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.observer.prompts import COMMIT_INSTRUCTION
 from ai_assistant.orchestration.observer.reading import ORIGIN_WORDS, STANDING_WORDS
 from ai_assistant.orchestration.support_parts import (
@@ -450,7 +451,8 @@ async def _resolved(
     """
     if not memories:
         return (), ()
-    found = await memory.get_many(list(episodes_to_read(memories)))
+    # ADR-0286 §6:4: an open episode, an asking one among them, has no readable record.
+    found = without_open_episodes(await memory.get_many(list(episodes_to_read(memories))))
     episodes = {key: one for key, one in found.items() if isinstance(one, EpisodicMemory)}
     activations = remember_activations(memories, episodes)
     effects: dict[str, ActivationEffect] = {}

@@ -266,9 +266,13 @@ class Observer:
         self._writer = FindingWriter(writes=writes, memory=memory, now=self._now, mint=self._mint)
         self._lock = asyncio.Lock()
         # What this process keeps beside an episode between its attempts: the supply its
-        # findings were proposed over (§12:6), and what a failed commit wrote (§16:1).
+        # findings were proposed over (§12:6); what a failed commit wrote, with each
+        # replacement whose retirements were not yet read (§16:1); and an outcome decided
+        # whose record could not be written, so the finding is not committed again.
         self._supplies: dict[str, list[Placement]] = {}
         self._progress: dict[tuple[str, str], tuple[ObservationWrite, ...]] = {}
+        self._unread: dict[tuple[str, str], tuple[str, ...]] = {}
+        self._decided: dict[tuple[str, str], ObservationFinding] = {}
 
     async def run(self) -> RunOutcome:
         """One run over the queue, unless a run is already running (§16:6).
@@ -404,10 +408,15 @@ class Observer:
         return ObservationState.PROCESSED
 
     def _forget(self, episode_id: str) -> None:
-        """Drop what this process kept beside an episode no longer attempted."""
+        """Drop what this process kept beside an episode processed or read afresh.
+
+        A stuck episode keeps it: an explicit re-run in this process commits its pending
+        findings with what their failed commits wrote (§16:1, §16:5).
+        """
         self._supplies.pop(episode_id, None)
-        for key in [key for key in self._progress if key[0] == episode_id]:
-            del self._progress[key]
+        for held in (self._progress, self._unread, self._decided):
+            for key in [key for key in held if key[0] == episode_id]:
+                del held[key]
 
     async def _open(
         self, episode_id: str, held: ObservationRecord | None, started: datetime
@@ -440,8 +449,7 @@ class Observer:
         pending = [one for one in findings if one.outcome is None]
         if not findings or (pending and carried is None):
             kept = tuple(one for one in findings if one.outcome is not None)
-            for one in pending:
-                self._progress.pop((episode.id, one.id), None)
+            self._forget(episode.id)
             carried = []
             await self._scouted(reading, attempt, kept)
         supplied = [] if carried is None else carried
@@ -450,11 +458,18 @@ class Observer:
         for finding in attempt.record.findings:
             if finding.outcome is not None:
                 continue  # §16:4: a finding whose outcome is recorded is not committed again
-            outcome = await self._committed(finding, reading, attempt, supplied)
+            key = (episode.id, finding.id)
+            # An outcome decided before its record failed to be written is recorded as
+            # decided, never committed again over writes that already landed (§16:1).
+            outcome = self._decided.get(key) or await self._committed(
+                finding, reading, attempt, supplied
+            )
+            self._decided[key] = outcome
             done = tuple(
                 outcome if one.id == finding.id else one for one in attempt.record.findings
             )
             await self._save(attempt, findings=done)
+            del self._decided[key]
 
     async def _scouted(
         self, reading: Reading, attempt: _Attempt, kept: tuple[ObservationFinding, ...]
@@ -475,7 +490,38 @@ class Observer:
         attempt: _Attempt,
         supplied: list[Placement],
     ) -> ObservationFinding:
-        """One finding's commit call, code's checks, and its writes (§9:3-§9:5, §12)."""
+        """One finding's commit call, code's checks, and its writes (§9:3-§9:5, §12).
+
+        What an earlier, failed commit of the finding wrote joins the outcome, whatever
+        this one decides (§16:1).
+        """
+        key = (finding.episode, finding.id)
+        unread = self._unread.get(key)
+        if unread:
+            ends = await self._writer.retirements(unread)
+            self._progress[key] = _joined(self._progress.get(key, ()), ends)
+            del self._unread[key]
+        outcome = await self._decision(finding, reading, attempt, supplied)
+        earlier = self._progress.pop(key, ())
+        if earlier:
+            outcome = _with_writes(outcome, earlier)
+        _log.info(
+            "observer_commit",
+            stage="commit",
+            ruling=None if outcome.ruling is None else outcome.ruling.value,
+            unwritten=None if outcome.unwritten is None else outcome.unwritten.value,
+            writes=len(outcome.writes),
+        )
+        return _with_outcome(finding, outcome)
+
+    async def _decision(
+        self,
+        finding: ObservationFinding,
+        reading: Reading,
+        attempt: _Attempt,
+        supplied: list[Placement],
+    ) -> FindingOutcome:
+        """This commit's call, checks and writes: what it wrote, or why nothing was."""
         view = await commit_view(
             finding,
             reading,
@@ -485,7 +531,7 @@ class Observer:
             similar=self._limits.similar,
         )
         if view is None:
-            return _with_outcome(finding, _check_failed(self._now()))
+            return _check_failed(self._now())
         supplied.extend(view.supplied)
         reply = await self._call(attempt, ObserverStep.COMMIT, self._commit, commit_messages(view))
         decision = parsed(reply, CommitReply)
@@ -500,23 +546,14 @@ class Observer:
         )
         key = (finding.episode, finding.id)
         try:
-            outcome = await self._writer.write(verdict, shown=[one.memory for one in view.similar])
+            return await self._writer.write(verdict, shown=[one.memory for one in view.similar])
         except MemoryStoreError, WriteBlocked:
             # §16:1: what the commit wrote before it failed is kept, and merged into the
             # outcome the finding is given when it is decided again.
             self._progress[key] = _joined(self._progress.get(key, ()), self._writer.partial)
+            if self._writer.unread:
+                self._unread[key] = (*self._unread.get(key, ()), *self._writer.unread)
             raise
-        earlier = self._progress.pop(key, ())
-        if earlier:
-            outcome = _with_writes(outcome, earlier)
-        _log.info(
-            "observer_commit",
-            stage="commit",
-            ruling=None if outcome.ruling is None else outcome.ruling.value,
-            unwritten=None if outcome.unwritten is None else outcome.unwritten.value,
-            writes=len(outcome.writes),
-        )
-        return _with_outcome(finding, outcome)
 
     async def _call(
         self,
@@ -582,8 +619,6 @@ class Observer:
                 {**record.model_dump(), "next_attempt_at": self._now() + backoff}
             )
         attempt.record = await self._record(record, expected_revision=attempt.record.revision)
-        if stuck:
-            self._forget(attempt.record.episode)
         _log.info(
             "observer_attempt",
             stage=exc.step.value if isinstance(exc, _Unparsed) else "attempt",
