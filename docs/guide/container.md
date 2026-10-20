@@ -358,11 +358,14 @@ again. Run the deploy again with the same `--port`, whether the first one failed
 killed. Once the record is gone the volumes are treated as served, and a deploy backs
 them up first, as for any hub.
 
+If the unit is enabled or has started while the record stands, which only a hand could
+have done, a hub may have run on the volumes, and the deploy refuses to resume. Disable
+and stop the unit, remove the record, and deploy again: the volumes are then backed up
+as served data first.
+
 Volumes with neither the record nor `unit.env` are refused: they may hold a person's
-data, with nothing to say which image wrote it. If you know no hub ever ran on them,
-because a first install by a deploy older than the record was interrupted, remove both
-volumes and deploy again; otherwise back the data volume up by hand and write `unit.env`
-naming the image that wrote it.
+data, with nothing to say which image wrote it. Back the data volume up by hand and
+write `unit.env` naming the image that wrote it.
 
 ## When it does not work
 

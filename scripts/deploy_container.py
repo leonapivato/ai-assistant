@@ -153,7 +153,9 @@ another deploy refuses, told how to find the holder.
 ``unit.env`` is written and before the unit is enabled or started, each step synced to
 the box's disk. While the record stands nothing can have run on the volumes, so the next
 deploy finds the record, keeps the volumes, and installs again, writing ``unit.env``
-over any the interrupted run wrote. Volumes with neither a record nor ``unit.env`` are
+over any the interrupted run wrote. It checks first that the unit is neither enabled
+nor started, as only a hand could have made it while the record stood; if it is, a hub
+may have run there, and it refuses. Volumes with neither a record nor ``unit.env`` are
 still refused: that may be a person's data with nothing to say which image wrote it
 (ADR-0326 §6:1).
 """
@@ -1183,7 +1185,7 @@ class Deployment:
                 "systemctl",
                 "show",
                 self.person.unit,
-                "--property=ActiveState,SubState,ExecMainStatus,NRestarts",
+                "--property=ActiveState,SubState,ExecMainStatus,NRestarts,UnitFileState",
             ],
             f"reading {self.person.unit}'s state",
         )
@@ -1263,6 +1265,7 @@ class Deployment:
         # hub wrote, whatever unit.env says, and the install is resumed.
         resumed = self._stat(person.first_install) is not None
         if resumed:
+            self._check_nothing_ran()
             say(f"{person.first_install}: a first install that ran nothing; resuming it")
         text = None if resumed else self._read(person.unit_env)
         installed = None if text is None else parse_unit_env(text)
@@ -1272,10 +1275,7 @@ class Deployment:
                 f"the volume {person.data_volume} exists but {person.unit_env} does not, so a\n"
                 "hub has served data here and nothing says which image wrote it: no backup can\n"
                 "be taken with that image before installing (ADR-0326 §6:1). Back the volume\n"
-                "up by hand, write unit.env naming that image, and deploy again. Only if you\n"
-                "know no hub ever ran on it (a first install interrupted by a deploy older\n"
-                f"than {person.first_install}), remove {person.data_volume} and\n"
-                f"{person.keyring_volume} instead, and deploy again.\n{_UNTOUCHED}"
+                f"up by hand, write unit.env naming that image, and deploy again.\n{_UNTOUCHED}"
             )
         if installed is not None and not served:
             raise DeployError(
@@ -1311,6 +1311,30 @@ class Deployment:
         installed = self._read(PurePosixPath(UNIT_PATH))
         if installed is not None and self._unit_root() not in installed.splitlines():
             raise self._other_root(installed)
+
+    def _check_nothing_ran(self) -> None:
+        """Refuse to resume a first install whose unit could have started on its volumes.
+
+        This deploy enables the unit only once the record is gone, so a unit enabled or
+        started while it stands was made so by hand, and a boot may have run a hub on
+        the volumes: they are then treated as served, backed up first, never resumed.
+
+        Raises:
+            DeployError: If the unit is enabled, or has started since the box booted.
+        """
+        unit = self.person.unit
+        state = self._unit_state()
+        enabled = state.get("UnitFileState", "")
+        active = state.get("ActiveState", "")
+        if enabled in {"", "disabled"} and active == "inactive":
+            return
+        raise DeployError(
+            f"{self.person.first_install} records a first install that ran nothing, but\n"
+            f"{unit} is {enabled or 'not installed'} and {active}, so a hub may have run on\n"
+            f"its volumes. Run `systemctl disable --now {unit}`, remove\n"
+            f"{self.person.first_install}, and deploy again: the volumes are then treated\n"
+            f"as served, and backed up before anything is installed.\n{_UNTOUCHED}"
+        )
 
     def _unit_root(self) -> str:
         """The line of the unit that names this deploy's person-directory root."""
