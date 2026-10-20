@@ -303,8 +303,11 @@ def test_each_result_names_the_entry_it_replays_and_what_the_original_used(
     assert understood["reply"].startswith("a replayed reply")
     assert understood["original_model"] is None
     assert understood["original_model_known"] is False
-    # A digest part's entry predates its prompt's template: no prompt is named for it.
-    assert by_source["digesting"]["prompt"] is None
+    # A digest part's entry predates ADR-0334's key: its prompt is the one the package
+    # declares under its source's name, and no recorded version is claimed for it.
+    assert by_source["digesting"]["prompt"] == "digesting"
+    assert by_source["digesting"]["recorded_prompt"] is None
+    assert by_source["digesting"]["candidate"]["version"] is None
 
 
 def test_a_call_the_observer_wrote_under_two_activations_is_sent_once_and_written_under_each(
