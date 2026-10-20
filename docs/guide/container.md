@@ -153,6 +153,7 @@ every person on the box at once), owned by root and writable by root alone:
 | `unit.env` | The deploy alone: the image id the unit runs, the port, and a relayed hub's `--add-host` | root, `0644` |
 | `backups/` | The deploy: one artifact per deploy, never deleted | uid 10001, `0700` |
 | `.deploy-lock` | The deploy: the file it holds its lock on; its existence means nothing | root |
+| `.deploy-owner` | The deploy: which run holds the lock, so a late command of another is refused | root, `0644` |
 | `.first-install` | The deploy: present only while a first install has run nothing on its volumes | root, `0600` |
 
 The deploy never creates, reads or prints a passphrase. It refuses, before it stops
@@ -330,11 +331,14 @@ one command that installs the unit, which checks its root, writes it and reloads
 under the lock; a deploy installing it waits up to a minute for another.
 `/srv/hubs/<person>/.deploy-lock` is held for the whole deploy, by one more ssh session
 that lasts exactly as long as the deploy does; a second deploy to the same person refuses
-at once. To see who holds a lock, run `fuser -v` on its file on the box.
+at once. To see who holds a lock, run `fuser -v` on its file on the box. Every command
+the deploy sends the box runs only while `.deploy-owner` names its run, so a deploy that
+takes the lock waits for a command the last one left running, and refuses one it sent
+that arrives late.
 
 If the ssh link drops under that session alone, the deploy stops before its next command
-to the box, as if it had been killed there, and starts, stops or disables nothing more:
-another deploy may hold the lock by then. Run it again once the link is back; wherever a
+to the box, or the box refuses that command once another deploy holds the lock, and it
+starts, stops or disables nothing more. Run it again once the link is back; wherever a
 deploy stopped, killed or not, running it again finishes it or refuses. The box may take
 until its TCP keepalive gives up, about two hours, to see a silent drop and release the
 lock; until then a second deploy refuses, and `fuser` shows the session's process, which
