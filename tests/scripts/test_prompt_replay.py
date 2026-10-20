@@ -9,6 +9,7 @@ own model layer, so no call leaves the machine and nothing contacts a hub.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import sqlite3
@@ -675,3 +676,57 @@ def test_nothing_in_the_package_names_the_tool() -> None:
     ]
 
     assert naming == []
+
+
+def test_the_prompt_key_the_package_writes_is_read_for_its_flags(tmp_path: Path) -> None:
+    # ADR-0335 §9:1's key as the package itself builds it, for a prompt with flags and
+    # for one that declares none, which records an empty object.
+    declared = replay_tool.declared_prompts()
+    shipped = {
+        name: replay_tool.load_candidate(
+            str(Path(planning.__file__).parent / f"{name}.txt"), declared
+        ).template
+        for name in ("understanding", "digesting")
+    }
+    understood = shipped["understanding"].rendered(flags={"recalled": True, "stories": False})
+    digested = shipped["digesting"].rendered()
+    live = write_live(tmp_path)
+    record = live / "diagnostics" / f"{ACT_A}.jsonl"
+    text = record.read_text()
+    text = text.replace(
+        '"prompt":{"name":"understanding","version":"0123456789ab","origin":"default"}',
+        '"prompt":' + json.dumps(understood.provenance(), separators=(",", ":")),
+    )
+    text = text.replace(
+        '"part":1,"parts":1,',
+        '"part":1,"parts":1,"prompt":'
+        + json.dumps(digested.provenance(), separators=(",", ":"))
+        + ",",
+    )
+    record.write_text(text)
+    copy = tmp_path / "copy"
+    replay_tool.copy_data_dir(live, copy, retention=timedelta(days=1), now=now)
+    understanding = _template(tmp_path)
+    digesting = _template(tmp_path, "A candidate digest instruction.\n", name="digesting.txt")
+    model = Model()
+
+    _replay(
+        copy,
+        model,
+        candidates=(str(understanding), str(digesting)),
+        activations=frozenset({ACT_A}),
+    )
+
+    bodies = {one["body"]["prompt"]: one["body"] for one in _results(copy)[f"{ACT_A}.replay.jsonl"]}
+    assert bodies["understanding"]["flags"] == {"recalled": True, "stories": False}
+    assert bodies["understanding"]["flags_from"] == "recorded"
+    assert bodies["understanding"]["candidate"]["instruction"] == (
+        "Candidate understanding instruction.\nRecalled memories are shown.\nNo stories are shown."
+    )
+    assert bodies["understanding"]["recorded_prompt"] == {
+        "version": understood.template.version,
+        "origin": "default",
+    }
+    assert bodies["digesting"]["flags"] == {}
+    assert bodies["digesting"]["flags_from"] == "recorded"
+    assert bodies["digesting"]["candidate"]["instruction"] == "A candidate digest instruction."
