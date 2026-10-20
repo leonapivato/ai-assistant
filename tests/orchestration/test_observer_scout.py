@@ -241,3 +241,39 @@ def test_a_finding_naming_a_confirmed_candidate_rests_on_its_yes() -> None:
     (finding,), _ = proposed_findings(proposal, reading)
 
     assert finding.rests_on == (InputPart(episode=address("leaving")), yes.part)
+
+
+def test_a_reliance_finding_never_stands_in_for_a_confirmation() -> None:
+    """§5:5, §14:2: the confirmed candidate still gets its own finding resting on the yes."""
+    held = memory("m-seat", "The user prefers window seats.", said_support(address("past")))
+    yes = ReadPart(
+        handle="P3",
+        part=ConfirmationPart(
+            episode=address("leaving"),
+            asking_activation="asking",
+            question=QuestionPart(round="r", part=1),
+        ),
+        episode=address("leaving"),
+        occurred_at=AT,
+        text="The user prefers window seats.",
+        origin=SupportOrigin.CONFIRMATION,
+        when=AT,
+    )
+    reading = _reading(
+        hints=(Hint(handle="C1", effect="effect-1", fact=yes.text, confirmation=yes),),
+        reliances=(Reliance(handle="M1", memory=held, shaped="the seat", relied_at=AT),),
+    )
+    proposal = parsed(
+        reply(
+            findings=[
+                {"claim": "Held up.", "rests_on": ["P2"], "relied_on": "M1", "candidate": "C1"}
+            ]
+        ),
+        ScoutReply,
+    )
+    assert proposal is not None
+
+    relied, confirmed = proposed_findings(proposal, reading)[0]
+
+    assert (relied.relied_on, relied.rests_on) == ("m-seat", (InputPart(episode=address("later")),))
+    assert (confirmed.rests_on, confirmed.candidate) == ((yes.part,), "effect-1")

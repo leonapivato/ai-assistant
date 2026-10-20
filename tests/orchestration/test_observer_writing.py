@@ -46,7 +46,7 @@ from ai_assistant.orchestration.observer.commit import (
     Resolve,
     Unwritten,
 )
-from ai_assistant.orchestration.observer.writing import FindingWriter
+from ai_assistant.orchestration.observer.writing import FindingWriter, WriteBlocked
 from ai_assistant.testing.memories import memory, said_support, sourced_support
 
 _NOW = AT + timedelta(hours=1)
@@ -402,19 +402,23 @@ async def test_a_failing_store_fails_the_attempt_rather_than_refusing_the_findin
         await _writer(harness).write(Checked(primary=Create(memory=_new())))
 
 
-async def test_an_ask_raises_no_question_on_a_memory_wider_than_the_supply() -> None:
-    """§12:6: a question would carry the owner-only supply onto an ``anyone`` memory."""
+async def test_an_ask_on_a_memory_wider_than_the_supply_is_blocked_not_dropped() -> None:
+    """§12:6, §13:6: no question carries the owner-only supply onto an ``anyone`` memory,
+    and the ask is retried rather than recorded as asked.
+    """
     harness = await _harness(MemoryDecisionKind.ASK_USER)
     held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
     narrow = _new().model_copy(
         update={"placement": Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)}
     )
 
-    outcome = await _writer(harness).write(
-        Checked(primary=Create(memory=narrow, asked_on=_said(direction=SupportDirection.AGAINST)))
-    )
+    with pytest.raises(WriteBlocked):
+        await _writer(harness).write(
+            Checked(
+                primary=Create(memory=narrow, asked_on=_said(direction=SupportDirection.AGAINST))
+            )
+        )
 
-    assert outcome.unwritten is FindingUnwritten.ASKED
     after = await harness.memory.get(held.id)
     assert isinstance(after, Memory)
     assert after.open_questions == ()
@@ -446,4 +450,64 @@ async def test_another_writer_between_two_own_writes_fails_the_attempt_as_stale(
     with pytest.raises(MemoryStoreStaleError):
         await _writer(harness).write(
             Checked(primary=AddSupports(target=held, supports=(_said(), _said("past"))))
+        )
+
+
+async def test_another_writer_between_a_fold_and_a_resolution_fails_the_attempt() -> None:
+    """ADR-0219 §2-§3: a fold's result is adopted only as the fold makes it."""
+    harness = await _harness(MemoryDecisionKind.REINFORCE)
+    raised = OpenQuestion(
+        id="question:old",
+        kind=OpenQuestionKind.RECHECK,
+        asks="Still?",
+        rests_on=(InputPart(episode=address("past")),),
+        raised_at=AT,
+        raised_by=MemoryWriterName.OBSERVER,
+    )
+    base = memory("m-seat", _CLAIM, said_support(address("past")))
+    record = Memory.model_validate(
+        {
+            **base.model_dump(),
+            "open_questions": (raised,),
+            "operations": (
+                *base.operations,
+                MemoryOperation(
+                    kind=MemoryOperationKind.RAISE_QUESTION,
+                    cites=InputPart(episode=address("past")),
+                    at=AT,
+                    by=MemoryWriterName.OBSERVER,
+                    question="question:old",
+                ),
+            ),
+        }
+    )
+    held = await _stored(harness, record)
+    write = harness.writes.write
+
+    async def interleaved(proposal: MemoryUpdateProposal) -> object:
+        done = await write(proposal)
+        moved = await harness.memory.get(held.id)
+        assert isinstance(moved, Memory)
+        await harness.writer.record_use(
+            moved,
+            TrackRecordEntry(
+                episode=address("past"),
+                relied_at=AT,
+                held_up=True,
+                recorded_at=_NOW,
+                recorded_by=MemoryWriterName.OBSERVER,
+            ),
+        )
+        return done
+
+    harness.writes.write = interleaved  # type: ignore[method-assign,assignment]  # another writer
+    against = _said(direction=SupportDirection.AGAINST)
+
+    with pytest.raises(MemoryStoreStaleError):
+        await _writer(harness).write(
+            Checked(
+                primary=Create(memory=_new()),
+                resolve=Resolve(target=held, question="question:old", support=against, note="n"),
+            ),
+            shown=[held],
         )

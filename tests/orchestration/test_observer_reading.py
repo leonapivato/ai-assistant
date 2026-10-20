@@ -469,3 +469,23 @@ async def _held(harness: Harness, name: str) -> EpisodicMemory:
     record = await harness.memory.get(address(name))
     assert isinstance(record, EpisodicMemory)
     return record
+
+
+async def test_an_input_answers_the_question_just_before_it_though_the_reading_left_it_out() -> (
+    None
+):
+    """§9:3: a reply's context is the channel's own history, not what was read."""
+    harness = Harness()
+    await harness.hold(
+        episode("ask-a", at=AT - timedelta(minutes=10), rounds=(said("r1", "Remember that?"),)),
+        episode("ask-b", at=AT - timedelta(minutes=8), rounds=(said("r2", "Cancel the booking?"),)),
+        episode("silent", at=AT - timedelta(minutes=6), text="hmm"),
+        episode("one", at=AT - timedelta(minutes=3), text="Yes, please."),
+        episode("two", at=AT - timedelta(minutes=2), text="ok"),
+        episode("three", at=AT - timedelta(minutes=1), text="ok"),
+    )
+
+    reading = await _read(harness, "one")
+
+    (yes,) = reading.leaving.parts
+    assert yes.answers == "Cancel the booking?"

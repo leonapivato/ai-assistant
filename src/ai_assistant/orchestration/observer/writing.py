@@ -60,6 +60,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.observer.commit import (
     AddSupports,
+    Blocked,
     Checked,
     Create,
     RaiseQuestion,
@@ -74,13 +75,31 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from ai_assistant.core.protocols import MemoryStore
-    from ai_assistant.core.types import MemoryIngestResult, MemorySupport, TrackRecordEntry
+    from ai_assistant.core.types import (
+        MemoryIngestResult,
+        MemorySupport,
+        Placement,
+        TrackRecordEntry,
+    )
     from ai_assistant.orchestration.writes import MemoryWriteStage
 
-__all__ = ["FindingWriter"]
+__all__ = ["FindingWriter", "WriteBlocked"]
 
 #: What a ``policy_ask`` question asks, in words, before the claim the policy asked about.
 _ASK_ASKS: Final = "The write path asked before keeping this beside this memory: "
+
+
+class WriteBlocked(Exception):  # noqa: N818 — a control-flow signal the stage turns into a retry
+    """A write the supply's placement keeps off a wider memory (§12:6): retried until stuck.
+
+    Attributes:
+        partial: What the finding wrote before it was blocked.
+    """
+
+    def __init__(self, partial: tuple[ObservationWrite, ...] = ()) -> None:
+        """Carry what was written before the block."""
+        super().__init__("placement")
+        self.partial = partial
 
 
 class _Refusal(Exception):  # noqa: N818 — a control-flow signal carrying a code-owned reason
@@ -103,6 +122,17 @@ class _Ledger:
     def recorded(self, memory: str, *, held_up: bool) -> None:
         self.operations.setdefault(memory, [])
         self.track_record[memory] = held_up
+
+    def writes(self) -> tuple[ObservationWrite, ...]:
+        """What was written so far, by memory."""
+        return tuple(
+            ObservationWrite(
+                memory=memory,
+                operations=tuple(kinds),
+                track_record=self.track_record.get(memory),
+            )
+            for memory, kinds in self.operations.items()
+        )
 
     def outcome(self, at: datetime, unwritten: FindingUnwritten | None) -> FindingOutcome:
         writes = tuple(
@@ -145,6 +175,7 @@ class FindingWriter:
         self._mint = mint
         self._expected: dict[str, int] = {}
         self._shown: dict[str, Memory] = {}
+        self.partial: tuple[ObservationWrite, ...] = ()
 
     async def write(self, checked: Checked, *, shown: Sequence[Memory] = ()) -> FindingOutcome:
         """Write ``checked`` and return the finding's outcome (§16:1).
@@ -166,26 +197,34 @@ class FindingWriter:
         ledger = _Ledger()
         self._expected = {}
         self._shown = {one.id: one for one in shown}
+        self.partial = ()
         unwritten: FindingUnwritten | None = None
         try:
-            unwritten = await self._primary(checked.primary, ledger)
-        except _Refusal as refusal:
-            unwritten = refusal.reason
-        if checked.resolve is not None:
             try:
-                await self._resolve(checked.resolve, ledger)
+                unwritten = await self._primary(checked.primary, ledger)
             except _Refusal as refusal:
-                unwritten = unwritten or refusal.reason
+                unwritten = refusal.reason
+            if checked.resolve is not None:
+                try:
+                    await self._resolve(checked.resolve, ledger)
+                except _Refusal as refusal:
+                    unwritten = unwritten or refusal.reason
+        except BaseException:
+            # What was written before the failure is the caller's to keep (§16:1).
+            self.partial = ledger.writes()
+            raise
         return ledger.outcome(self._now(), unwritten)
 
     async def _primary(
         self,
-        primary: Create | AddSupports | RaiseQuestion | RecordUse | Unwritten,
+        primary: Create | AddSupports | RaiseQuestion | RecordUse | Unwritten | Blocked,
         ledger: _Ledger,
     ) -> FindingUnwritten | None:
         match primary:
             case Unwritten(reason=reason):
                 return reason
+            case Blocked():
+                raise WriteBlocked
             case Create():
                 return await self._create(primary, ledger)
             case AddSupports():
@@ -277,13 +316,12 @@ class FindingWriter:
     ) -> FindingUnwritten | None:
         """§13:1, §13:3: a ``policy_ask`` on each stored memory the ruling names, or none."""
         named = await self._memory.get_many(list(result.conflicts)) if result.conflicts else {}
-        # §12:6: a question carries the supply onto the memory it is raised on, which an
-        # operation cannot narrow (ADR-0328 §5:2), so none is raised on a wider memory.
-        memories = [
-            one
-            for one in named.values()
-            if isinstance(one, Memory) and not narrows(create.memory.placement, one)
-        ]
+        memories = [one for one in named.values() if isinstance(one, Memory)]
+        if any(narrows(create.memory.placement, one) for one in memories):
+            # §12:6: a question carries the supply onto the memory it is raised on, which
+            # an operation cannot narrow (ADR-0328 §5:2): nothing is raised, and the
+            # finding is retried rather than its ask dropped (§13:6).
+            raise WriteBlocked
         if not memories or create.asked_on is None:
             return FindingUnwritten.ASKED
         for memory in memories:
@@ -445,18 +483,23 @@ class FindingWriter:
             self._expected[memory_id] = after.revision
 
 
-def _extends(before: Memory, after: Memory, added: int) -> bool:
-    """Whether ``after`` is ``before`` with ``added`` operations appended, by the observer."""
-    head, tail = (
-        after.operations[: len(before.operations)],
-        after.operations[len(before.operations) :],
-    )
+def _extends(
+    before: Memory, after: Memory, added: int, *, placement: Placement | None = None
+) -> bool:
+    """Whether ``after`` is ``before`` with ``added`` observer operations appended.
+
+    The track record and the placement stay as they were (the placement becomes
+    ``placement`` where a fold's meet is expected): a change to either is another
+    writer's, since no operation writes them (ADR-0328 §5:2).
+    """
+    head = after.operations[: len(before.operations)]
+    tail = after.operations[len(before.operations) :]
     return (
         head == before.operations
         and len(tail) == added
         and all(one.by is MemoryWriterName.OBSERVER for one in tail)
         and after.track_record == before.track_record
-        and after.placement == before.placement
+        and after.placement == (before.placement if placement is None else placement)
     )
 
 
@@ -471,10 +514,18 @@ def _retired(before: Memory, after: Memory, kind: MemoryOperationKind) -> bool:
 
 
 def _reinforced(before: Memory, after: Memory, proposed: Memory) -> bool:
-    """The proposal's supports added, each by one add support (ADR-0328 §11:6)."""
+    """The proposal's supports added by one add support each, and the fold's meet alone.
+
+    A ``REINFORCE`` adds each support the target did not carry by one add support, takes
+    the placement's fold (ADR-0217 §3:3) and the union of topics (ADR-0213 §8), and
+    changes nothing else (ADR-0328 §11:6, §11:9).
+    """
     added = sum(1 for one in proposed.supports if before.support_at(one.points_at) is None)
-    head = after.operations[: len(before.operations)]
-    return head == before.operations and len(after.operations) == len(before.operations) + added
+    return (
+        _extends(before, after, added, placement=before.placement.folded_with(proposed.placement))
+        and all(after.support_at(one.points_at) is not None for one in proposed.supports)
+        and set(after.topics) == set(before.topics) | set(proposed.topics)
+    )
 
 
 def _recorded(before: Memory, after: Memory, entry: TrackRecordEntry) -> bool:

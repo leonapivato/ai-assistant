@@ -66,7 +66,6 @@ from ai_assistant.core.types import (
     FindingOutcome,
     FindingUnwritten,
     MemoryOperationKind,
-    MemoryWriterName,
     ObservationAttempt,
     ObservationAttemptEnd,
     ObservationRecord,
@@ -75,12 +74,9 @@ from ai_assistant.core.types import (
     ObserverCall,
     ObserverStep,
     Placement,
-    PlacementReach,
-    PlacementSetter,
 )
 from ai_assistant.orchestration.observer.commit import (
     CommitReply,
-    CommitView,
     checked,
     commit_messages,
     commit_view,
@@ -92,7 +88,7 @@ from ai_assistant.orchestration.observer.scout import (
     proposed_findings,
     scout_messages,
 )
-from ai_assistant.orchestration.observer.writing import FindingWriter
+from ai_assistant.orchestration.observer.writing import FindingWriter, WriteBlocked
 from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY
 
 if TYPE_CHECKING:
@@ -269,6 +265,10 @@ class Observer:
         )
         self._writer = FindingWriter(writes=writes, memory=memory, now=self._now, mint=self._mint)
         self._lock = asyncio.Lock()
+        # What this process keeps beside an episode between its attempts: the supply its
+        # findings were proposed over (§12:6), and what a failed commit wrote (§16:1).
+        self._supplies: dict[str, list[Placement]] = {}
+        self._progress: dict[tuple[str, str], tuple[ObservationWrite, ...]] = {}
 
     async def run(self) -> RunOutcome:
         """One run over the queue, unless a run is already running (§16:6).
@@ -386,10 +386,24 @@ class Observer:
         except _Held:
             await self._close(attempt, ObservationAttemptEnd.HELD, ObservationState.WAITING)
             raise
-        except (ModelError, MemoryStoreError, StoryStoreError, PlanningError, _Unparsed) as exc:
+        except (
+            ModelError,
+            MemoryStoreError,
+            StoryStoreError,
+            PlanningError,
+            WriteBlocked,
+            _Unparsed,
+        ) as exc:
             return await self._failed(attempt, exc)
         await self._close(attempt, ObservationAttemptEnd.FINISHED, ObservationState.PROCESSED)
+        self._forget(episode_id)
         return ObservationState.PROCESSED
+
+    def _forget(self, episode_id: str) -> None:
+        """Drop what this process kept beside an episode no longer attempted."""
+        self._supplies.pop(episode_id, None)
+        for key in [key for key in self._progress if key[0] == episode_id]:
+            del self._progress[key]
 
     async def _open(
         self, episode_id: str, held: ObservationRecord | None, started: datetime
@@ -408,39 +422,47 @@ class Observer:
     async def _processed(
         self, episode: EpisodicMemory, attempt: _Attempt, window: Sequence[EpisodicMemory]
     ) -> None:
-        """Read, scout where no finding is recorded yet, and commit each finding left."""
+        """Read, scout where no finding is pending yet, and commit each finding left.
+
+        The findings an earlier attempt proposed are committed over the supply the scout
+        that proposed them read, which this process keeps beside the episode, joined with
+        this attempt's (§12:6). Where the process no longer holds it, having restarted
+        since, the findings with no outcome are proposed again over this attempt's
+        reading, and those with an outcome stay as recorded (§16:4).
+        """
         reading = await self._reader.read(episode, window)
-        supplied = list(reading.supplied)
-        retry_since = _retried_since(attempt.record)
-        if attempt.record.findings:
-            # §12:6: the findings were proposed over an earlier attempt's supply, which
-            # this attempt can no longer read whole, so the meet is taken as narrow as
-            # the derivation's own route makes it: owner-only, derived.
-            supplied.append(_NARROWEST)
-        else:
-            reply = await self._call(
-                attempt, ObserverStep.SCOUT, self._scout, scout_messages(reading)
-            )
-            proposal = parsed(reply, ScoutReply)
-            if proposal is None:
-                raise _Unparsed(ObserverStep.SCOUT)
-            findings, dropped = proposed_findings(proposal, reading)
-            _log.info(
-                "observer_scout",
-                stage="scout",
-                findings=len(findings),
-                dropped=dropped,
-            )
-            await self._save(attempt, findings=findings)
+        findings = attempt.record.findings
+        carried = self._supplies.get(episode.id)
+        pending = [one for one in findings if one.outcome is None]
+        if not findings or (pending and carried is None):
+            kept = tuple(one for one in findings if one.outcome is not None)
+            for one in pending:
+                self._progress.pop((episode.id, one.id), None)
+            carried = []
+            await self._scouted(reading, attempt, kept)
+        supplied = [] if carried is None else carried
+        supplied.extend(reading.supplied)
+        self._supplies[episode.id] = supplied
         for finding in attempt.record.findings:
             if finding.outcome is not None:
                 continue  # §16:4: a finding whose outcome is recorded is not committed again
-            outcome = await self._committed(finding, reading, attempt, supplied, retry_since)
-            retry_since = None  # only the finding in flight when an attempt failed wrote
+            outcome = await self._committed(finding, reading, attempt, supplied)
             done = tuple(
                 outcome if one.id == finding.id else one for one in attempt.record.findings
             )
             await self._save(attempt, findings=done)
+
+    async def _scouted(
+        self, reading: Reading, attempt: _Attempt, kept: tuple[ObservationFinding, ...]
+    ) -> None:
+        """The scout's one call, and its findings recorded after those kept (§9:1-§9:2)."""
+        reply = await self._call(attempt, ObserverStep.SCOUT, self._scout, scout_messages(reading))
+        proposal = parsed(reply, ScoutReply)
+        if proposal is None:
+            raise _Unparsed(ObserverStep.SCOUT)
+        findings, dropped = proposed_findings(proposal, reading, numbered_from=_next_number(kept))
+        _log.info("observer_scout", stage="scout", findings=len(findings), dropped=dropped)
+        await self._save(attempt, findings=(*kept, *findings))
 
     async def _committed(
         self,
@@ -448,7 +470,6 @@ class Observer:
         reading: Reading,
         attempt: _Attempt,
         supplied: list[Placement],
-        retry_since: datetime | None,
     ) -> ObservationFinding:
         """One finding's commit call, code's checks, and its writes (§9:3-§9:5, §12)."""
         view = await commit_view(
@@ -473,9 +494,17 @@ class Observer:
             mint=self._mint,
             placement=Placement.narrowest_of(supplied),
         )
-        outcome = await self._writer.write(verdict, shown=[one.memory for one in view.similar])
-        if retry_since is not None:
-            outcome = _with_earlier_writes(outcome, finding, view, attempt.record, retry_since)
+        key = (finding.episode, finding.id)
+        try:
+            outcome = await self._writer.write(verdict, shown=[one.memory for one in view.similar])
+        except MemoryStoreError, WriteBlocked:
+            # §16:1: what the commit wrote before it failed is kept, and merged into the
+            # outcome the finding is given when it is decided again.
+            self._progress[key] = _joined(self._progress.get(key, ()), self._writer.partial)
+            raise
+        earlier = self._progress.pop(key, ())
+        if earlier:
+            outcome = _with_writes(outcome, earlier)
         _log.info(
             "observer_commit",
             stage="commit",
@@ -549,11 +578,13 @@ class Observer:
                 {**record.model_dump(), "next_attempt_at": self._now() + backoff}
             )
         attempt.record = await self._record(record, expected_revision=attempt.record.revision)
+        if stuck:
+            self._forget(attempt.record.episode)
         _log.info(
             "observer_attempt",
             stage=exc.step.value if isinstance(exc, _Unparsed) else "attempt",
             result=state.value,
-            reason="unparsed" if isinstance(exc, _Unparsed) else type(exc).__name__,
+            reason=_reason(exc),
             failures=failures,
         )
         return state
@@ -564,56 +595,42 @@ def _with_outcome(finding: ObservationFinding, outcome: FindingOutcome) -> Obser
     return type(finding).model_validate({**finding.model_dump(), "outcome": outcome})
 
 
-#: §12:6: the narrowest placement the derivation's own route writes, taken where an
-#: attempt cannot read again the whole supply its findings were proposed over.
-_NARROWEST: Final = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
+def _reason(exc: Exception) -> str:
+    """A failed attempt's code-owned reason: never an error's message (§15:7)."""
+    if isinstance(exc, _Unparsed):
+        return "unparsed"
+    if isinstance(exc, WriteBlocked):
+        return "placement"
+    return type(exc).__name__
 
 
-def _retried_since(record: ObservationRecord) -> datetime | None:
-    """When the failed attempt this one retries started, or ``None`` if it retries none."""
-    if len(record.attempts) < 2:  # noqa: PLR2004 — this attempt and the one before it
-        return None
-    before = record.attempts[-2]
-    return before.started_at if before.end is ObservationAttemptEnd.FAILED else None
+def _next_number(findings: Sequence[ObservationFinding]) -> int:
+    """The number the next finding's id takes, past every id on the record (``f1``...)."""
+    numbers = [int(one.id[1:]) for one in findings if one.id[1:].isdigit()]
+    return max(numbers, default=0) + 1
 
 
-def _with_earlier_writes(
-    outcome: FindingOutcome,
-    finding: ObservationFinding,
-    view: CommitView,
-    record: ObservationRecord,
-    since: datetime,
-) -> FindingOutcome:
-    """``outcome`` with what the failed attempt's commit of ``finding`` wrote before failing.
+def _joined(
+    earlier: Sequence[ObservationWrite], later: Sequence[ObservationWrite]
+) -> tuple[ObservationWrite, ...]:
+    """Two runs of writes as one, each memory once, its operations in the order written."""
+    operations: dict[str, list[MemoryOperationKind]] = {}
+    entries: dict[str, bool | None] = {}
+    for write in (*earlier, *later):
+        operations.setdefault(write.memory, []).extend(write.operations)
+        if write.track_record is not None or write.memory not in entries:
+            entries[write.memory] = write.track_record
+    return tuple(
+        ObservationWrite(memory=memory, operations=tuple(kinds), track_record=entries[memory])
+        for memory, kinds in operations.items()
+    )
 
-    The finding in flight when an attempt failed may have written a support before a
-    later write of its own failed, and its outcome was never recorded (§16:1). The
-    memories the commit step is shown now carry those supports: one added by the
-    observer since the failed attempt started, pointing at a part the finding rests on,
-    on a memory no other finding's outcome names since then, is this finding's.
-    """
-    others = {
-        write.memory
-        for one in record.findings
-        if one.id != finding.id and one.outcome is not None and one.outcome.at >= since
-        for write in one.outcome.writes
-    }
-    named = {write.memory for write in outcome.writes}
-    rests_on = set(finding.rests_on)
-    earlier = [
-        ObservationWrite(memory=one.memory.id, operations=(MemoryOperationKind.ADD_SUPPORT,))
-        for one in view.similar
-        if one.memory.id not in others | named
-        and any(
-            support.points_at in rests_on
-            and support.added_by is MemoryWriterName.OBSERVER
-            and support.added_at >= since
-            for support in one.memory.supports
-        )
-    ]
-    if not earlier:
-        return outcome
-    return FindingOutcome(at=outcome.at, ruling=outcome.ruling, writes=(*outcome.writes, *earlier))
+
+def _with_writes(outcome: FindingOutcome, earlier: Sequence[ObservationWrite]) -> FindingOutcome:
+    """``outcome`` with what an earlier, failed commit of the same finding wrote (§16:1)."""
+    return FindingOutcome(
+        at=outcome.at, ruling=outcome.ruling, writes=_joined(earlier, outcome.writes)
+    )
 
 
 def _random_id() -> str:
