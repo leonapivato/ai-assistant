@@ -71,10 +71,13 @@ class FakeLease:
     path: str
 
     def held(self) -> bool:
-        return self.path in self.box.mine
+        if self.box.killed:
+            raise Killed  # a dead deploy asks nothing more
+        return self.box.mine.get(self.path) is self
 
     def release(self) -> None:
-        self.box.mine.discard(self.path)
+        if self.held():
+            del self.box.mine[self.path]
 
 
 @dataclass
@@ -112,14 +115,14 @@ class FakeBox:
     enabled: bool = False
     #: The next write of unit.env fails, once.
     fail_unit_env_write: bool = False
-    #: Locks another deploy holds, and the locks this one does.
+    #: Locks another deploy holds, and the leases deploys driven here hold.
     locks: set[str] = field(default_factory=set)
-    mine: set[str] = field(default_factory=set)
+    mine: dict[str, FakeLease] = field(default_factory=dict)
     #: The deploy is killed outright just before it sends the first argv this matches.
     kill_at: Callable[[list[str]], bool] | None = None
     killed: bool = False
-    #: The link under the deploy's locks drops just before the first argv this matches.
-    drop_locks_at: Callable[[list[str]], bool] | None = None
+    #: Called with every argv as it is sent, before it runs.
+    on_send: Callable[[list[str]], None] | None = None
 
     def run(self, argv: Sequence[str], *, stdin: IO[bytes] | None = None) -> Any:
         argv = self._sent(argv)
@@ -132,10 +135,10 @@ class FakeBox:
         assert argv[0] == "flock"
         assert argv[-3:] == ["sh", "-c", "echo held && exec cat"]
         path = argv[argv.index("--") + 1]
-        if path in self.locks | self.mine:
+        if path in self.locks or path in self.mine:
             return dc.Result(75, "", "")
-        self.mine.add(path)
-        return FakeLease(self, path)
+        lease = self.mine[path] = FakeLease(self, path)
+        return lease
 
     def _sent(self, argv: Sequence[str]) -> list[str]:
         """Record an argv, unless the deploy is dead or dies before sending it."""
@@ -144,10 +147,10 @@ class FakeBox:
         argv = list(argv)
         if self.kill_at is not None and self.kill_at(argv):
             # The kernel releases every lock a dead deploy's holders held.
-            self.killed, self.mine = True, set()
+            self.killed, self.mine = True, {}
             raise Killed
-        if self.drop_locks_at is not None and self.drop_locks_at(argv):
-            self.mine = set()
+        if self.on_send is not None:
+            self.on_send(argv)
         self.ran.append(argv)
         return argv
 
@@ -228,6 +231,27 @@ class FakeBox:
     def cmd_rm(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
         self.files.pop(argv[-1], None)
         return 0, "", ""
+
+    def cmd_flock(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
+        """``UNIT_INSTALL`` under the box's lock, as its shell would run it."""
+        path = argv[argv.index("--") + 1]
+        if path in self.locks:
+            return 75, "", ""
+        sh, flag, script, _name, unit, root, _partial, wanted, *reload = argv[
+            argv.index("--") + 2 :
+        ]
+        assert (sh, flag, script) == ("sh", "-c", dc.UNIT_INSTALL)
+        installed = self.files.get(unit)
+        if installed is not None:
+            lines = installed.data.decode().splitlines()
+            if root not in lines:
+                named = [line for line in lines if line.startswith("EnvironmentFile=")]
+                return 3, "".join(f"{line}\n" for line in named), ""
+            if installed.data == wanted.encode():
+                return 0, "unchanged\n", ""
+        self.files[unit] = File(0, 0o644, wanted.encode())
+        self.ran.append(reload)
+        return 0, "installed\n", ""
 
     def cmd_sync(self, argv: list[str], _: bytes) -> tuple[int, str, str]:
         assert argv[1] == "--"
@@ -670,7 +694,11 @@ def _sends(*head: str, last: str | None = None) -> Callable[[list[str]], bool]:
 _FIRST_INSTALL_KILLS: dict[str, tuple[Callable[[list[str]], bool], bool]] = {
     "before the lock": (_sends("flock"), True),
     "holding the person's lock": (_sends(dc.DOCKER, "build"), True),
-    "holding the unit's lock": (_sends("systemctl", "daemon-reload"), True),
+    "before the unit's install": (_sends("flock", "--conflict-exit-code=75", "--wait=60"), True),
+    "after the unit's install": (
+        lambda argv: argv[0] == "install" and argv[-1].startswith(str(PERSON.first_install)),
+        True,
+    ),
     "recorded, before the volumes": (
         _sends(dc.DOCKER, "volume", "create", last=PERSON.data_volume),
         True,
@@ -751,27 +779,115 @@ def test_deploy_upgrade_killed_anywhere_finishes_when_run_again(
     assert box.active == "active"
 
 
-def test_deploy_whose_lock_is_lost_before_the_backup_stops_nothing() -> None:
-    box = served_box(drop_locks_at=_sends(dc.DOCKER, "build"))
+def _lose_lock_at(box: FakeBox, match: Callable[[list[str]], bool]) -> list[list[str]]:
+    """Drop the link under the deploy's lock just before it sends what ``match`` matches.
 
-    with pytest.raises(dc.DeployError, match="the link to the box dropped") as caught:
+    Returns:
+        Every argv sent from then on, the one on its way first.
+    """
+    sent: list[list[str]] = []
+
+    def lose(argv: list[str]) -> None:
+        if sent or match(argv):
+            box.mine = {}
+            sent.append(argv)
+
+    box.on_send = lose
+    return sent
+
+
+def test_deploy_that_loses_its_lock_before_the_backup_stops_nothing() -> None:
+    box = served_box()
+    sent = _lose_lock_at(box, _sends(dc.DOCKER, "build"))
+
+    with pytest.raises(dc.LockLost, match="the link to the box\ndropped"):
         deployment(box).run()
 
-    assert caught.value.args[0].endswith("Nothing has been stopped or changed.")
-    assert not {"systemctl stop", "docker run", "unit.env"} & set(verbs(box))
+    assert sent == [sent[0]], "nothing after the build already on its way"
     assert box.active == "active"
+    assert box.container_image == OLD_ID
 
 
-def test_deploy_whose_lock_is_lost_during_the_backup_installs_nothing() -> None:
-    box = served_box(drop_locks_at=_sends(dc.DOCKER, "run"))
+def test_deploy_that_loses_its_lock_during_the_backup_restarts_nothing() -> None:
+    box = served_box(enabled=True)
+    sent = _lose_lock_at(box, _sends(dc.DOCKER, "run"))
 
-    with pytest.raises(dc.DeployError, match="the link to the box dropped") as caught:
+    with pytest.raises(dc.LockLost):
         deployment(box).run()
 
-    assert "Nothing was installed." in str(caught.value)
-    assert "started again on its earlier image" in str(caught.value)
-    assert "unit.env" not in verbs(box)
-    assert box.container_image == OLD_ID
+    assert sent == [sent[0]], "no recovery: another deploy may hold the lock"
+    assert box.active == "inactive", "left stopped for its backup, as a kill leaves it"
+    assert box.enabled
+    assert dc.parse_unit_env(box.files[str(PERSON.unit_env)].data.decode()).image == OLD_ID
+
+
+def test_deploy_that_loses_its_lock_leaves_the_deploy_that_takes_it_alone() -> None:
+    box = served_box(enabled=True)
+    after: list[list[str]] = []
+    reports: list[list[str]] = []
+
+    def take_over(argv: list[str]) -> None:
+        if reports:
+            after.append(argv)
+        elif argv[0] == "stat" and "pre-deploy-" in argv[-1]:
+            # The first deploy's link drops as its backup ends, and a second takes the
+            # lock and deploys, all before the first's next command reaches the box.
+            box.mine = {}
+            box.on_send = None
+            reports.append(deployment(box, stamp=LATER, token=RERUN).run())
+            box.on_send = take_over
+
+    box.on_send = take_over
+
+    with pytest.raises(dc.LockLost):
+        deployment(box).run()
+
+    assert reports, "the second deploy ran"
+    assert after == [], "the first deploy sent nothing after the second took over"
+    new = box.images[f"ai-assistant-hub:{NEW_COMMIT[:12]}"][0]
+    assert box.container_image == new
+    assert box.active == "active"
+    assert box.enabled
+
+
+def test_main_reports_a_lost_lock(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
+    def lost(_self: object) -> list[str]:
+        raise dc.LockLost("the session holding /srv/hubs/alice/.deploy-lock ended")
+
+    monkeypatch.setattr(dc.Deployment, "run", lost)
+
+    assert dc.main(["alice", "--local"]) == 1
+    assert "deploy-container: the session holding" in capsys.readouterr().err
+
+
+def _install(unit: Path, root: str, wanted: str) -> subprocess.CompletedProcess[str]:
+    """Run ``UNIT_INSTALL`` itself, with ``echo reloaded`` for systemd's reload."""
+    argv = ["sh", "-c", dc.UNIT_INSTALL, "sh", str(unit), root, f"{unit}.t.partial", wanted]
+    return subprocess.run(  # noqa: S603  # a fixed argv
+        [*argv, "echo", "reloaded"], capture_output=True, text=True, check=False
+    )
+
+
+def test_unit_install_writes_once_and_refuses_another_root(tmp_path: Path) -> None:
+    unit = tmp_path / "hub@.service"
+    root = "EnvironmentFile=/srv/hubs/%i/unit.env"
+    wanted = f"[Service]\n{root}\nExecStart=/x\n\n"
+
+    first = _install(unit, root, wanted)
+    assert (first.returncode, first.stdout) == (0, "reloaded\ninstalled\n")
+    assert unit.read_text() == wanted, "trailing blank lines and all"
+    assert (unit.stat().st_mode & 0o777) == 0o644
+    assert not list(tmp_path.glob("*.partial"))
+
+    again = _install(unit, root, wanted)
+    assert (again.returncode, again.stdout) == (0, "unchanged\n")
+
+    changed = _install(unit, root, wanted + "# more\n")
+    assert changed.stdout == "reloaded\ninstalled\n"
+
+    other = _install(unit, "EnvironmentFile=/opt/x/%i/unit.env", wanted)
+    assert (other.returncode, other.stdout) == (3, f"{root}\n")
+    assert unit.read_text() == wanted + "# more\n", "another root's unit is not written"
 
 
 @pytest.mark.skipif(shutil.which("flock") is None, reason="util-linux's flock is not here")

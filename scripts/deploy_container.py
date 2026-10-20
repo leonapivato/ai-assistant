@@ -119,23 +119,29 @@ since it would start only to fail at its first poll. A hub that sets no origin i
 direct mode, and its run is as it was: ``--relay-address`` is not used for it.
 
 **One deploy per person at a time, and one unit install per box.** Each is a ``flock``
-on a box file, ``<person>/.deploy-lock`` for the whole deploy and
-``/run/hub-deploy-unit.lock`` while the unit is installed, which every person's deploy
-writes. The box commands are separate ssh sessions, so the lock is held by one more: a
-``flock`` on the box whose holder reads its standard input, a pipe from this process
-alone, to its end. The deploy releases it by closing the pipe; a deploy killed outright
-closes it by dying, the holder ends, and the kernel releases the lock with its
-descriptor. So no run ever finds a dead deploy's lock, and the files themselves mean
-nothing: an earlier deploy's lock directory serves as the file.
+on a box file, so the kernel releases it when its holder ends, and no run ever finds a
+dead deploy's lock; the files themselves mean nothing, and an earlier deploy's lock
+directory serves as one.
 
-The ssh link can drop under the holder alone. Its ssh then exits, and the deploy refuses
-to change anything more: it looks before it installs the unit, before it stops the hub
-for the backup, and before it names the new image. On the box, sshd ends the holder
-when it sees the link gone, which may be the TCP keepalive's two hours, and until then
-another deploy refuses and is told how to find the holder. A box command already running
-when its own link drops runs to its end unwatched, as one always has; the next deploy's
-checks are what meet it: a backup container still mounting the data volume is refused by
-the check that the volume is still.
+* ``/run/hub-deploy-unit.lock``, which every person's deploy shares, is held by the one
+  box command that installs the unit, :data:`UNIT_INSTALL`: it checks the root, writes
+  the unit and reloads systemd under the lock, so nothing writes the unit but its holder.
+* ``<person>/.deploy-lock`` is held for the whole deploy, whose box commands are
+  separate ssh sessions, so it is held by one more: a ``flock`` on the box whose holder
+  reads its standard input, a pipe from this process alone, to its end. The deploy
+  releases it by closing the pipe; a deploy killed outright closes it by dying, the
+  holder ends, and the lock is released.
+
+The ssh link can drop under that holder alone, and its ssh then exits. Every box command
+the deploy sends checks first that it has not, and once it has the deploy stops there, as
+if killed: :class:`LockLost` escapes every handler that would otherwise start, stop or
+disable something, because another deploy may hold the lock by then. Wherever a deploy
+stops, killed or not, running it again finishes it or refuses. Two things are left open.
+One box command may already be on its way when the holder ends, and runs to its end, as a
+command whose own link drops always has; the next deploy's checks are what meet it, as a
+backup container still mounting the data volume is refused by the check that the volume
+is still. And sshd may take the TCP keepalive's two hours to see a silent drop and end
+the holder on the box; until then another deploy refuses, told how to find the holder.
 
 **A first install that ends early is resumed** (#3185). It records itself in
 ``<person>/.first-install`` before it makes the volumes and removes the record once
@@ -206,6 +212,31 @@ HELD = b"held\n"
 _BUSY = 75
 #: How long a released holder has to end before it is killed.
 _RELEASE_SECONDS = 30
+#: Installs the unit under ``flock``, as one command: ``sh -c UNIT_INSTALL sh <unit>
+#: <the root's EnvironmentFile line> <partial path> <the unit's text> <reload argv…>``.
+#: It refuses with :data:`_OTHER_ROOT` and the unit's ``EnvironmentFile`` lines when the
+#: installed unit reads another root, and prints ``unchanged`` or ``installed``. The text
+#: is an argument, not standard input, so a link that drops cannot install half of it.
+UNIT_INSTALL = """set -eu
+unit=$1 root=$2 partial=$3 wanted=$4
+shift 4
+if [ -e "$unit" ]; then
+  if ! grep -qxF -e "$root" -- "$unit"; then
+    grep -e '^EnvironmentFile=' -- "$unit" || :
+    exit 3
+  fi
+  if [ "$(cat -- "$unit"; echo x)" = "${wanted}x" ]; then
+    echo unchanged
+    exit 0
+  fi
+fi
+printf '%s' "$wanted" > "$partial"
+chmod 0644 -- "$partial"
+mv -f -- "$partial" "$unit"
+"$@"
+echo installed
+"""
+_OTHER_ROOT = 3
 DOCKER = "/usr/bin/docker"
 #: Where a staged build context is unpacked on the box, root's alone.
 BOX_STAGE_PARENT = "/var/tmp"  # noqa: S108  # root-owned staging, made 0700 per run
@@ -430,6 +461,78 @@ def _hold(argv: Sequence[str]) -> ProcessLease | Result:
         (said + out).decode("utf-8", "replace"),
         err.decode("utf-8", "replace"),
     )
+
+
+class LockLost(BaseException):
+    """This deploy no longer holds the person's lock: it stops, as if killed there.
+
+    A ``BaseException``, so no handler of a failure catches it and goes on to start,
+    stop or disable anything: another deploy may hold the lock now, and whatever this
+    one did next could undo that one's work.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class LeasedBox:
+    """A box whose every command first checks that this deploy still holds its lock."""
+
+    box: Box
+    lease: Lease
+    path: PurePosixPath
+
+    def _check(self) -> None:
+        if not self.lease.held():
+            raise LockLost(
+                f"the session holding {self.path} on the box ended: the link to the box\n"
+                "dropped, and another deploy may hold the lock now. This deploy stopped\n"
+                "before its next command, as one killed there would, and changes nothing\n"
+                "more; the lines above say where. Deploy again once the link is back."
+            )
+
+    def run(self, argv: Sequence[str], *, stdin: IO[bytes] | None = None) -> Result:
+        """Run one command, while the lock is held.
+
+        Args:
+            argv: The command.
+            stdin: What to feed it.
+
+        Returns:
+            Its exit status and output.
+
+        Raises:
+            LockLost: If the lock's holder has ended.
+        """
+        self._check()
+        return self.box.run(argv, stdin=stdin)
+
+    def hold(self, argv: Sequence[str]) -> Lease | Result:
+        """Take another lock, while this one is held.
+
+        Args:
+            argv: The holder.
+
+        Returns:
+            Its lease, or how it ended.
+
+        Raises:
+            LockLost: If this lock's holder has ended.
+        """
+        self._check()
+        return self.box.hold(argv)
+
+
+def _flock(path: str | PurePosixPath, *, wait: int) -> list[str]:
+    """``flock`` on a box file, refusing with :data:`_BUSY` when another holds it.
+
+    Args:
+        path: The file, made if missing.
+        wait: Seconds to wait for another holder, or ``0`` not to wait.
+
+    Returns:
+        The argv up to the command it runs while holding the lock.
+    """
+    waits = "--nonblock" if wait == 0 else f"--wait={wait}"
+    return ["flock", f"--conflict-exit-code={_BUSY}", waits, "--", str(path)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1164,16 +1267,28 @@ class Deployment:
         one person would move it for all of them.
         """
         installed = self._read(PurePosixPath(UNIT_PATH))
-        if installed is None:
-            return
-        wanted = f"EnvironmentFile={self.person.hubs_dir}/%i/unit.env"
-        if wanted not in installed.splitlines():
-            named = [line for line in installed.splitlines() if line.startswith("EnvironmentFile=")]
-            raise DeployError(
-                f"{UNIT_PATH} reads {', '.join(named) or 'no EnvironmentFile'}, not\n"
-                f"{wanted}. The unit serves every person on this box, so the person\n"
-                f"directories have one root per box: pass that --hubs-dir.\n{_UNTOUCHED}"
-            )
+        if installed is not None and self._unit_root() not in installed.splitlines():
+            raise self._other_root(installed)
+
+    def _unit_root(self) -> str:
+        """The line of the unit that names this deploy's person-directory root."""
+        return f"EnvironmentFile={self.person.hubs_dir}/%i/unit.env"
+
+    def _other_root(self, installed: str) -> DeployError:
+        """The refusal of a unit that reads another root.
+
+        Args:
+            installed: The unit's text, or the lines of it that name a root.
+
+        Returns:
+            The error to raise.
+        """
+        named = [line for line in installed.splitlines() if line.startswith("EnvironmentFile=")]
+        return DeployError(
+            f"{UNIT_PATH} reads {', '.join(named) or 'no EnvironmentFile'}, not\n"
+            f"{self._unit_root()}. The unit serves every person on this box, so the person\n"
+            f"directories have one root per box: pass that --hubs-dir.\n{_UNTOUCHED}"
+        )
 
     def _check_person_dir(self) -> None:
         path = self.person.dir
@@ -1441,32 +1556,40 @@ class Deployment:
     def install_unit(self) -> None:
         """Install the unit as this tree has it, reloading systemd when it changed.
 
-        The unit is every person's, so it is installed under a lock of the box's, and
-        its root is checked again inside it: two deploys to two people cannot both pass
-        the preflight and then each install a different root.
+        The unit is every person's, so it is installed by one box command that holds
+        the box's lock throughout, :data:`UNIT_INSTALL`, which checks the root again
+        inside it: two deploys to two people cannot both pass the preflight and then
+        each install a different root, and nothing writes the unit but the lock's
+        holder, whatever becomes of the deploy that started it.
 
         Raises:
             DeployError: If the lock cannot be had, the root differs, or the unit cannot
                 be written or systemd cannot reload.
         """
         wanted = render_unit(UNIT_SOURCE.read_text(encoding="utf-8"), self.person.hubs_dir)
-        lease = self._lock(UNIT_LOCK, wait=_UNIT_LOCK_SECONDS)
-        if isinstance(lease, Result):
+        partial = f"{UNIT_PATH}.{self.token}.partial"
+        result = self.box.run(
+            [
+                *_flock(UNIT_LOCK, wait=_UNIT_LOCK_SECONDS),
+                *("sh", "-c", UNIT_INSTALL, "sh", UNIT_PATH, self._unit_root(), partial),
+                *(wanted, "systemctl", "daemon-reload"),
+            ]
+        )
+        if result.code == _BUSY:
             raise DeployError(
                 f"another deploy on this box held {UNIT_LOCK}, installing the unit, for\n"
-                f"{_UNIT_LOCK_SECONDS}s. {_holder_hint(UNIT_LOCK, lease)}\n{_UNTOUCHED}"
+                f"{_UNIT_LOCK_SECONDS}s. {_holder_hint(UNIT_LOCK, result)}\n{_UNTOUCHED}"
             )
-        try:
-            self._check_unit_root()
-            if self._read(PurePosixPath(UNIT_PATH)) == wanted:
-                return
-            self._write(PurePosixPath(UNIT_PATH), wanted)
-            self._ok(["systemctl", "daemon-reload"], "reloading systemd")
+        if result.code == _OTHER_ROOT:
+            raise self._other_root(result.out)
+        if not result.ok or result.out.strip() not in {"installed", "unchanged"}:
+            raise DeployError(
+                f"installing {UNIT_PATH} failed (exit {result.code}):\n{result.said()}"
+            )
+        if result.out.strip() == "installed":
             say(f"installed {UNIT_PATH}")
-        finally:
-            lease.release()
 
-    def _lock(self, path: str | PurePosixPath, *, wait: int) -> Lease | Result:
+    def _lock(self, path: str | PurePosixPath, *, wait: int = 0) -> Lease | Result:
         """Take a ``flock`` on a box file, held until released or this deploy ends.
 
         Args:
@@ -1476,11 +1599,9 @@ class Deployment:
         Returns:
             The lease, or how the holder ended: exit :data:`_BUSY` when another holds it.
         """
-        argv = ["flock", f"--conflict-exit-code={_BUSY}"]
-        argv += ["--nonblock"] if wait == 0 else [f"--wait={wait}"]
         # The holder prints once it holds the lock and then reads its standard input to
         # its end, which comes when this deploy releases it or ends, however it ends.
-        return self.box.hold([*argv, "--", str(path), "sh", "-c", "echo held && exec cat"])
+        return self.box.hold([*_flock(path, wait=wait), "sh", "-c", "echo held && exec cat"])
 
     # -- 2. the backup --------------------------------------------------------
 
@@ -1907,12 +2028,14 @@ class Deployment:
                 f"another deploy to {person.name} holds {person.lock}.\n"
                 f"{_holder_hint(str(person.lock), lease)}\n{_UNTOUCHED}"
             )
+        unguarded, self.box = self.box, LeasedBox(self.box, lease, person.lock)
         try:
-            return self._run(lease)
+            return self._run()
         finally:
+            self.box = unguarded
             lease.release()
 
-    def _run(self, lease: Lease) -> list[str]:
+    def _run(self) -> list[str]:
         installed = self.preflight()
         image = self.prepare_image()
         before = "none, a first install"
@@ -1921,12 +2044,9 @@ class Deployment:
             commit = earlier.commit if earlier is not None else ""
             self.rule_on_history(commit, image.commit)
             before = f"{installed.image} (commit {commit or 'unlabelled'})"
-        _still_held(lease, self.person.lock, _UNTOUCHED)
         self.install_unit()
-        _still_held(lease, self.person.lock, "Nothing has been stopped.")
         artifact = None if installed is None else self.back_up(installed)
         try:
-            _still_held(lease, self.person.lock, "Nothing was installed.")
             self.name_new_image(image, first=installed is None)
         except (DeployError, KeyboardInterrupt) as exc:
             if installed is None:
@@ -1971,27 +2091,6 @@ def _holder_hint(path: str, refused: Result) -> str:
         "deploy ends, however it ends, so a deploy that was killed holds nothing. Wait for\n"
         f"the one running, or find it on the box with `fuser -v {path}`."
     )
-
-
-def _still_held(lease: Lease, path: PurePosixPath, untouched: str) -> None:
-    """Refuse to go on once the person's lock has been lost.
-
-    Its holder ends early only when its link to the box drops, and then another deploy
-    may take the lock: so this deploy changes nothing more.
-
-    Args:
-        lease: The person's lock.
-        path: Its file, for the message.
-        untouched: What has not been changed, for the message.
-
-    Raises:
-        DeployError: If the lock is no longer held.
-    """
-    if not lease.held():
-        raise DeployError(
-            f"the session holding {path} on the box ended, so another deploy may now hold\n"
-            f"it: the link to the box dropped. Deploy again once it is back.\n{untouched}"
-        )
 
 
 def _reason(exc: BaseException) -> str:
@@ -2117,7 +2216,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             relay_address=args.relay_address,
         )
         report = deployment.run()
-    except (DeployError, HubDeployError) as exc:
+    except (DeployError, HubDeployError, LockLost) as exc:
         print(f"deploy-container: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
