@@ -6,7 +6,7 @@
 - Dependency: [ADR-0314](0314-a-diagnostic-record-keeps-what-each-phase-was-given-and-returned-and-nothing-reads-it-back.md), [ADR-0316](0316-an-activation-viewer-outside-the-package-shows-the-diagnostic-record-to-the-owner-on-the-server.md), [ADR-0333](0333-the-observer-writes-diagnostic-entries-in-a-file-of-its-own-beside-the-activation-it-learned-from-and-the-viewer-shows-what-was-learned.md) and [ADR-0334](0334-a-prompt-is-a-template-the-hub-loads-at-start-the-owners-hub-may-override-it-from-its-data-directory-and-each-model-call-records-the-version-it-sent.md), as their status lines leave them.
 - Authorization: on 2026-10-20 the owner and the dispatcher began reviewing the hub's prompts in the activation viewer, and ADR-0334 left replay as "the next decision" (Consequences). Everything below is the dispatcher's and this lane's recommendation, not an owner ruling. The dispatcher assigned 0335. The owner reads it before it is ratified (§1:1).
 - Changes no Protocol and no type in `core/protocols.py` or `core/types.py`, no `Settings` field, and nothing the wire carries; `PROTOCOL_VERSION` does not move.
-- **Partially supersedes**, in the clauses §10's first table names: ADR-0314, ADR-0316 and ADR-0334.
+- **Partially supersedes**, in the clauses §10's first table names: ADR-0314, ADR-0316, ADR-0333 and ADR-0334.
 
 ## Context
 
@@ -98,6 +98,9 @@ ADR-0316 §2 found.
 > **Normative.** The copy step writes a marker file into each copy, and the tool's replay
 > and rerun refuse a directory that does not carry one, naming the directory.
 
+> **Normative.** A replay and a rerun each hold the copy's instance lock (ADR-0083 §1) for
+> the whole run, and refuse where another holds it.
+
 > **Normative.** A copy is Tier 1 under ADR-0004 §1, and stays on the owner's hub's
 > server: nothing copies it, or anything in it, to another machine.
 
@@ -105,7 +108,10 @@ ADR-0316 §2 found.
 > `diagnostic_retention` after it was made.
 
 A copy holds raw outside text that the live record's window would have deleted. The second
-deadline bounds how long it survives: at most twice the window after the hub wrote it.
+deadline bounds how long it survives: at most twice the window after the hub wrote it. The
+viewer's page reaching the owner's browser through the tunnel is reading, as ADR-0316 §8 has
+it, and a replayed request reaching the provider is the egress the hub's own call made; neither
+is a copy.
 
 ### 4. Replaying a recorded call
 
@@ -129,9 +135,16 @@ deadline bounds how long it survives: at most twice the window after the hub wro
 > only under flags the run states, and marks each such result as rendered under stated
 > flags.
 
-> **Normative.** The tool sends each call through `ai_assistant`'s own model layer, as the
-> stage that made it sends it, so that the request differs from the recorded one in its
-> system message alone.
+> **Normative.** The tool sends each call through `ai_assistant`'s own model layer, with the
+> settings the stage that made it sends it with where the record is on, so that the request
+> differs from the recorded one in its system message alone.
+
+> **Normative.** For a planning call, the tool uses a seam of the concrete completer in
+> `models/` that sends a round as `PydanticAIToolCallingCompleter` sends it where the record
+> is on, summarised thinking included, and returns the provider's whole response.
+
+> **Normative.** That seam writes no entry, binds no activation and is on no Protocol, and no
+> stage calls it.
 
 > **Normative.** Each call is sent once for each candidate, and its one response recorded.
 > The tool continues nothing: it sends no further round, no repair and no tool's result.
@@ -140,13 +153,16 @@ deadline bounds how long it survives: at most twice the window after the hub wro
 > (ADR-0333 §2:9) is sent once for each candidate, and its result is written under each of
 > them.
 
-> **Normative.** The package code the tool calls is handed no `DiagnosticSink` and runs
-> with no activation bound (ADR-0314 §5:4), so a replay writes no diagnostic entry.
+> **Normative.** A replay writes no diagnostic entry: the package code it calls is handed no
+> `DiagnosticSink`, and no activation is bound while it runs (ADR-0314 §5:4).
 
 The recorded instruction as a candidate is the control: it shows how far the reply moves
 with the prompt unchanged, which is the noise any other candidate is read against. Each
 call is replayed on its own recorded request. A later planning round and a repair call
 therefore carry what the original run produced, not what the candidate would have.
+Without the seam, the completer asks for summarised thinking and keeps the whole response
+only where it holds a sink (ADR-0314 §5:1–§5:2), so a sinkless replay of a planning call
+would change the request and lose the thinking.
 
 ### 5. What it never does
 
@@ -160,8 +176,11 @@ therefore carry what the original run produced, not what the candidate would hav
 > **Normative.** Nothing the tool prints is taken from an entry or a reply. It prints
 > counts, file names, prompt names, versions and failures by class.
 
-> **Normative.** No candidate carries text taken from a diagnostic entry, as ADR-0334 §6:3
-> has no override carry any.
+> **Normative.** No template file a replay sends carries text taken from a diagnostic entry,
+> as ADR-0334 §6:3 has no override carry any.
+
+> **Normative.** The recorded instruction is a candidate only unchanged and only for its own
+> call: the tool sends no instruction assembled from an entry's text.
 
 Acting and the message writes write no entry (ADR-0314 §4:3), so no effect and no message
 is ever a call the tool could replay. Outside content in a replayed request can steer a
@@ -171,7 +190,7 @@ reply, as it can steer the hub's, and the reply is only recorded and shown as te
 
 > **Normative.** A replay writes its results to the file `<activation_id>.replay.jsonl` in
 > the copy's record directory, one line for each call and candidate, in ADR-0314 §6:2's line
-> form with the source `replay` and the kind `returned`.
+> form with the source `replay` and the kind `returned`, each line appended whole.
 
 > **Normative.** Each result names the entry it replays, by its file, its line and its
 > instant; the run; the prompt's name; the recorded version and origin where the entry has
@@ -204,9 +223,6 @@ started over the copy's record on the server, as over any record (ADR-0316 §2:5
 
 > **Normative.** A rerun writes only to the copy: its memory store, its plan store and its
 > record.
-
-> **Normative.** A rerun holds the copy's instance lock (ADR-0083 §1) for its whole run, and
-> refuses where another holds it.
 
 > **Normative.** A rerun runs the observer alone. It starts no hub, listener, line, reader
 > or scheduled job, and calls no tool.
@@ -250,7 +266,8 @@ Superseded in part; every clause the middle column does not name stands:
 
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
-| ADR-0314 | §3:1, in the addition alone: the model calls the replay tool makes through `ai_assistant`'s model layer with a recorded request the tool hands it; §3:2, in the addition alone: a recorded call's request, read from a copy of the owner's hub's record, reaches a model in a replay the owner runs with the tool, and the reply is kept in the copy's record; §3:4, in the addition alone: the server's own tools include the replay tool, which reads a copy of the record on the owner's hub's server | §3:1, §4:1, §4:6, §6:1 |
+| ADR-0314 | §3:1, in the addition alone: the model calls the replay tool makes through `ai_assistant`'s model layer with a recorded request the tool hands it; §3:2, in the addition alone: a recorded call's request, read from a copy of the owner's hub's record, reaches a model in a replay the owner runs with the tool, and the reply is kept in the copy's record; §3:4, in the addition alone: the server's own tools include the replay tool, which reads a copy of the record on the owner's hub's server; §5:3, in the addition alone: the thinking a replayed planning call returns reaches that replay's results in the copy's record | §3:1, §4:1, §4:6, §4:7, §6:1, §6:2 |
+| ADR-0333 | §4:1, in the addition alone: a recorded observer call's request reaches a model in a replay the owner runs with the tool, as for ADR-0314 §3:2; the observer itself still reads no entry | §4:1 |
 | ADR-0316 | §3:1 and §3:3, in the addition alone: an activation's replay results marked in the list and shown beside the reply they replay; §5:1, in the addition alone: the results file's name | §6:4, §6:5 |
 | ADR-0334 | §8:2, in the addition alone: the `prompt` key also holds the flags the code computed for the call | §9:1 |
 
@@ -258,17 +275,17 @@ Read through and not superseded:
 
 | Earlier decision | What changes |
 | --- | --- |
-| ADR-0314 §2:3, §6, §7 | Nothing: a copy's files are owner-only, the hub's store and sweep are as they were, and a copy is deleted on §3:5's deadline rather than kept like a backup |
+| ADR-0314 §2:3, §6, §7 | Nothing: a copy's files are owner-only, the hub's store and sweep are as they were, and a copy is deleted on §3:6's deadline rather than kept like a backup |
 | ADR-0314 §3:3 | Nothing: the store is handed to nothing, and the tool reads the copy's files |
 | ADR-0316 §2, §4, §6 | Nothing: the viewer imports the standard library alone, follows the directory, binds loopback and writes nothing |
-| ADR-0333 §4:1 | Nothing: the observer reads no entry, in a rerun too |
-| ADR-0334 §1:3, §6:2, §6:3 | Nothing: the request and the tools stay in code and are re-sent as recorded; overrides apply over a copy as §6:2 allows; no candidate carries an entry's text (§5:4) |
+| ADR-0333 §2, §3 | Nothing: a rerun's observer writes its entries as these sections have it, into the copy's record |
+| ADR-0334 §1:3, §6:2, §6:3 | Nothing: the request and the tools stay in code and are re-sent as recorded; overrides apply over a copy as §6:2 allows; no template file carries an entry's text (§5:4) |
 | ADR-0329 §7:1, §12:7, §16:9 | Nothing: a rerun processes episodes as these clauses have the observer do |
 | ADR-0276 §4:4 | Nothing: a narrower bound in a rerun's composition is the composition's choice |
 | ADR-0004 §2 | Nothing: a replay's calls go to the provider the hub's calls go to |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
-> dated header note of ADR-0314, ADR-0316 and ADR-0334, atomically with this ADR under
+> dated header note of ADR-0314, ADR-0316, ADR-0333 and ADR-0334, atomically with this ADR under
 > ADR-0070 and ADR-0082, preserving their ratified bodies. The replacements take effect on
 > this ADR's ratification.
 
@@ -289,6 +306,8 @@ Read through and not superseded:
 - A rerun loads the package beside the live hub on the same server.
 - A replay re-sends one call on its recorded request, so it shows how a candidate reads an
   input, not how a whole activation would have gone under it.
+- A candidate naming a flag or value the installed package does not declare is refused until
+  a package declaring it is deployed.
 - Entries written before §9's key carry no flags, so a candidate with conditional blocks is
   rendered over them only under flags the owner states.
 - Work done on another computer, as on 2026-10-20, stays outside what this decision
@@ -297,11 +316,12 @@ Read through and not superseded:
 **Lanes it implies**, each after this merges `Accepted`:
 1. §9's flags: carried by each ADR-0334 lane, not yet merged, that moves a prompt writing
    entries, and added in a follow-on for any already merged.
-2. The tool's copy and replay, and the viewer's display, with tests under `tests/scripts/`,
-   touching nothing under `src/`.
-3. The rerun, in the same program. Where composing the observer alone needs a seam in `app/`,
+2. The completer's seam (§4:7–§4:8), in `models/`, with its tests.
+3. After the second, the tool's copy and replay, and the viewer's display, with tests under
+   `tests/scripts/`, touching nothing under `src/`.
+4. The rerun, in the same program. Where composing the observer alone needs a seam in `app/`,
    that seam is a change of its own under `src/`. The dispatcher may fold this lane into the
-   second.
+   third.
 
 **What stays open.**
 - Replays on the owner's computer.
