@@ -31,6 +31,8 @@ from ai_assistant.core.types import (
     OpenQuestion,
     OpenQuestionKind,
     Placement,
+    PlacementReach,
+    PlacementSetter,
     QuestionPart,
     ReadingCertainty,
     RoundMessagePart,
@@ -53,7 +55,13 @@ from ai_assistant.orchestration.observer.commit import (
     commit_view,
     meets_floor,
 )
-from ai_assistant.orchestration.observer.reading import ReadEpisode, Reading, ReadPart, Reliance
+from ai_assistant.orchestration.observer.reading import (
+    EpisodeReader,
+    ReadEpisode,
+    Reading,
+    ReadPart,
+    Reliance,
+)
 from ai_assistant.testing.memories import (
     inference_support,
     memory,
@@ -91,7 +99,10 @@ def _input(handle: str, name: str, *, at_minutes: int = 0) -> ReadPart:
 
 
 def _view(
-    *parts: ReadPart, similar: tuple[Similar, ...] = (), reliance: Reliance | None = None
+    *parts: ReadPart,
+    similar: tuple[Similar, ...] = (),
+    reliance: Reliance | None = None,
+    yes: ReadPart | None = None,
 ) -> CommitView:
     finding = ObservationFinding(
         id="f1",
@@ -101,7 +112,12 @@ def _view(
         relied_on=None if reliance is None else reliance.memory.id,
     )
     return CommitView(
-        finding=finding, leaving=_LEAVING, parts=parts, similar=similar, reliance=reliance
+        finding=finding,
+        leaving=_LEAVING,
+        parts=parts,
+        similar=similar,
+        reliance=reliance,
+        yes_inputs={} if yes is None else {yes.episode: yes},
     )
 
 
@@ -350,7 +366,7 @@ def test_a_recheck_raises_a_question_never_resting_on_a_confirmation() -> None:
         ),
         origin=SupportOrigin.CONFIRMATION,
     )
-    view = _view(yes, _input("P2", "leaving"), similar=(_similar("M1", held),))
+    view = _view(yes, similar=(_similar("M1", held),), yes=_input("P9", "leaving"))
 
     decision = _checked(
         view,
@@ -541,12 +557,20 @@ async def test_the_view_shows_only_the_claim_its_parts_and_similar_memories() ->
         candidate="effect-1",
     )
 
+    reader = EpisodeReader(
+        memory=harness.memory,
+        plans=harness.plans,
+        stories=harness.stories,
+        story_episodes=0,
+        related=0,
+    )
     view = await commit_view(
-        finding, reading, memory=harness.memory, plans=harness.plans, similar=5
+        finding, reading, reader=reader, memory=harness.memory, plans=harness.plans, similar=5
     )
     gone = await commit_view(
         finding.model_copy(update={"rests_on": (InputPart(episode=address("nowhere")),)}),
         reading,
+        reader=reader,
         memory=harness.memory,
         plans=harness.plans,
         similar=5,
@@ -560,3 +584,146 @@ async def test_the_view_shows_only_the_claim_its_parts_and_similar_memories() ->
     rendered = json.loads(json.dumps(payload))
     assert rendered["memories"][0]["supports"][0]["text"] == "Window seats please."
     assert "effect-1" not in json.dumps(payload)
+
+
+_OWNER_ONLY = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
+
+
+def _narrow(view: CommitView, **fields: Any) -> Checked:
+    """A decision whose run was supplied a record placed for the owner alone (§12:6)."""
+    return checked(
+        CommitReply.model_validate(fields), view, now=_NOW, mint=lambda: "1", placement=_OWNER_ONLY
+    )
+
+
+def test_a_narrower_supply_never_widens_onto_a_stored_memory() -> None:
+    """§12:6: an operation writes no placement, so an add folds through ``ingest`` instead."""
+    held = memory("m-seat", "The user prefers window seats.", said_support(address("past")))
+    view = _view(_input("P1", "leaving"), similar=(_similar("M1", held),))
+
+    added = _narrow(view, action="add", memory="M1", supports=[_support("P1")])
+    recheck = _narrow(
+        view,
+        action="recheck",
+        memory="M1",
+        asks="Still?",
+        supports=[_support("P1", direction="against", backs_as_worded=False)],
+    )
+    retired = _narrow(
+        view, action="end", memory="M1", wording="x", supports=[_support("P1")], cites="P1"
+    )
+
+    assert isinstance(added.primary, Create)
+    assert added.primary.memory.content == held.content
+    assert added.primary.memory.placement.reach is PlacementReach.OWNER
+    assert recheck.primary == Unwritten(FindingUnwritten.CHECK_FAILED)
+    assert isinstance(retired.primary, Create)
+    assert retired.primary.retiring is None
+
+
+def test_a_narrower_supply_records_no_entry_and_resolves_nothing_on_a_wider_memory() -> None:
+    """§12:6: neither an entry nor a resolution carries the supply onto the memory."""
+    held = memory("m-seat", "The user prefers window seats.", said_support(address("past")))
+    reliance = Reliance(handle="M1", memory=held, shaped="the seat", relied_at=AT)
+    relied = _view(
+        _input("P1", "later", at_minutes=5), similar=(_similar("M1", held),), reliance=reliance
+    )
+
+    assert _narrow(relied, track_record="held_up").primary == Unwritten(
+        FindingUnwritten.CHECK_FAILED
+    )
+
+
+def test_a_confirmation_is_added_only_to_a_memory_its_wording_agrees_with() -> None:
+    """ADR-0328 §4:6: agreement under ADR-0121 §1's predicate, or nothing."""
+    yes = _part(
+        "P1",
+        ConfirmationPart(
+            episode=address("leaving"),
+            asking_activation="asking",
+            question=QuestionPart(round="r", part=1),
+        ),
+        origin=SupportOrigin.CONFIRMATION,
+        text="the USER  prefers window seats.",
+    )
+    agreeing = memory("m-seat", "The user prefers window seats.", said_support(address("past")))
+    other = memory("m-aisle", "The user prefers aisle seats.", said_support(address("past")))
+
+    kept = _checked(
+        _view(yes, similar=(_similar("M1", agreeing),)),
+        action="add",
+        memory="M1",
+        supports=[_support("P1")],
+    )
+    refused = _checked(
+        _view(yes, similar=(_similar("M1", other),)),
+        action="add",
+        memory="M1",
+        supports=[_support("P1")],
+    )
+
+    assert isinstance(kept.primary, AddSupports)
+    assert refused.primary == Unwritten(FindingUnwritten.CHECK_FAILED)
+
+
+def test_a_confirmed_memory_asks_on_the_yes_input() -> None:
+    """§13:2: a ``policy_ask`` rests on the yes's input in the confirmation's place."""
+    yes = _part(
+        "P1",
+        ConfirmationPart(
+            episode=address("leaving"),
+            asking_activation="asking",
+            question=QuestionPart(round="r", part=1),
+        ),
+        origin=SupportOrigin.CONFIRMATION,
+    )
+    view = _view(yes, yes=_input("P9", "leaving"))
+
+    decision = _checked(view, action="create", wording="x", supports=[_support("P1")])
+
+    assert isinstance(decision.primary, Create)
+    asked_on = decision.primary.asked_on
+    assert asked_on is not None
+    assert asked_on.points_at == InputPart(episode=address("leaving"))
+    assert asked_on.direction is SupportDirection.AGAINST
+
+
+async def test_a_part_the_reading_no_longer_holds_is_read_again_by_its_address() -> None:
+    """§16:4: a recorded finding keeps what it rests on however the window moved."""
+    harness = Harness()
+    leaving = episode("leaving", text="Window seats please.")
+    gone_from_window = episode("later", at=AT + timedelta(minutes=1), text="Yes, always window.")
+    owner_only = memory(
+        "m-seat", "The user prefers window seats.", said_support(address("private"))
+    )
+    private = episode("private", at=AT - timedelta(days=1), text="secret").model_copy(
+        update={"placement": _OWNER_ONLY}
+    )
+    await harness.hold(leaving, gone_from_window, owner_only, private)
+    reading = Reading(leaving=ReadEpisode(handle="E1", record=leaving, parts=()))
+    finding = ObservationFinding(
+        id="f1",
+        episode=address("leaving"),
+        claim="The user prefers window seats.",
+        rests_on=(InputPart(episode=address("later")),),
+    )
+    reader = EpisodeReader(
+        memory=harness.memory,
+        plans=harness.plans,
+        stories=harness.stories,
+        story_episodes=0,
+        related=0,
+    )
+
+    view = await commit_view(
+        finding, reading, reader=reader, memory=harness.memory, plans=harness.plans, similar=5
+    )
+
+    assert view is not None
+    (part,) = view.parts
+    assert (part.handle, part.text, part.origin) == (
+        "P1",
+        "Yes, always window.",
+        SupportOrigin.USER_MESSAGE,
+    )
+    assert _OWNER_ONLY in view.supplied, "the episode a similar memory's support resolved from"

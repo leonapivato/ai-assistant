@@ -196,3 +196,19 @@ def test_each_instruction_names_every_field_code_reads_of_its_reply() -> None:
         assert f'"{name}"' in COMMIT_INSTRUCTION
     for name in ("part", "direction", "backs_as_worded", "how_sure", "about_when", "note"):
         assert f'"{name}"' in COMMIT_INSTRUCTION
+
+
+def test_a_reliance_finding_resting_on_the_leaving_episode_is_dropped() -> None:
+    """§14:2: a reliance is judged on what later episodes show, never on its own episode."""
+    held = memory("m-seat", "The user prefers window seats.", said_support(address("past")))
+    reading = _reading(
+        reliances=(Reliance(handle="M1", memory=held, shaped="the seat", relied_at=AT),)
+    )
+
+    claims, dropped = _scouted(
+        reading,
+        {"claim": "Held up.", "rests_on": ["P1"], "relied_on": "M1"},
+        {"claim": "Held up too.", "rests_on": ["P1", "P2"], "relied_on": "M1"},
+    )
+
+    assert (claims, dropped) == ([], 2)

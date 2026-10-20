@@ -12,8 +12,8 @@ read drops the finding, since no support may point at a part no stored episode h
 (§9:5). A finding that rests on no part of the leaving episode is dropped: the observer
 commits only findings that come from the leaving episode (§8:2). A reliance finding is
 the one exception, since what it rests on is what later episodes show of a reliance in
-the leaving one (§14:1-§14:2), and it is kept only where it names a memory a reliance
-call in the leaving episode named.
+the leaving one (§14:1-§14:2): it is kept only where it names a memory a reliance call
+in the leaving episode named, and rests on parts of later episodes alone.
 
 **A candidate recorded under an approval is never left out** (§5:5, §11:1). The user's
 yes to its wording is the strongest warrant there is, so where the scout proposed no
@@ -117,10 +117,19 @@ def proposed_findings(
     reliances = {one.handle: one.memory.id for one in reading.reliances}
     kept: list[ObservationFinding] = []
     dropped = 0
+    after = reading.leaving.record.occurred_at
     for proposed in reply.findings:
         parts = _parts(proposed.rests_on, reading)
         relied_on = None if proposed.relied_on is None else reliances.get(proposed.relied_on)
-        if not parts or (relied_on is None and leaving.isdisjoint(parts)):
+        if relied_on is None:
+            kept_parts = bool(parts) and not leaving.isdisjoint(parts)
+        else:
+            # §14:2: what later episodes show of the reliance, and nothing else.
+            kept_parts = bool(parts) and all(
+                (read := reading.at(part)) is not None and read.occurred_at > after
+                for part in parts
+            )
+        if not kept_parts:
             dropped += 1
             continue
         try:

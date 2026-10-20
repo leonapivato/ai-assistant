@@ -51,6 +51,7 @@ from ai_assistant.core.types import (
     MemoryStanding,
     Placement,
     QuestionPart,
+    RecordedChannelTrigger,
     RecordedTextInput,
     RoundMessagePart,
     StoryMember,
@@ -58,6 +59,7 @@ from ai_assistant.core.types import (
     SupportOrigin,
     ToolOutcome,
     origin_is_outside,
+    part_episode,
 )
 from ai_assistant.orchestration.authorizer import WorkingRecord, read_outside_content
 from ai_assistant.orchestration.candidates import done_candidates
@@ -74,6 +76,7 @@ from ai_assistant.orchestration.remembering import (
     candidate_of,
 )
 from ai_assistant.orchestration.stories import episode_address
+from ai_assistant.orchestration.support_parts import part_content
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
@@ -97,9 +100,11 @@ __all__ = [
     "ReadPart",
     "ReadStory",
     "Reading",
+    "Rehydrated",
     "Reliance",
     "approval_instant",
     "episode_text",
+    "input_origin",
 ]
 
 #: Whose words a part is, as the record says (§8:5): the attribution a rendering
@@ -387,6 +392,19 @@ class Reading:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class Rehydrated:
+    """Parts read again from the store by their addresses, and what that read supplied.
+
+    Attributes:
+        parts: Each part that still resolves in a stored episode, by its address.
+        supplied: The placement of every episode the read was supplied (§12:6).
+    """
+
+    parts: dict[SupportPart, ReadPart]
+    supplied: tuple[Placement, ...]
+
+
 def episode_text(record: EpisodicMemory) -> str:
     """An episode's input as its record holds it: the text, or the messages joined.
 
@@ -406,6 +424,28 @@ def episode_text(record: EpisodicMemory) -> str:
     if isinstance(payload, RecordedTextInput):
         return payload.text
     return payload.transcript or ""
+
+
+def input_origin(trigger: RecordedChannelTrigger, message: int | None) -> SupportOrigin:
+    """The origin of a support pointing at an input, or one of its messages (ADR-0328 §4:4).
+
+    The input takes ``outside_input`` where its origin is outside; a message carrying
+    ``forwarded_from`` takes it too, and the input as a whole takes it where any of its
+    messages does. Everything else the user wrote is ``user_message``.
+
+    Args:
+        trigger: The episode's recorded trigger.
+        message: The message's position, or ``None`` for the input as a whole.
+
+    Returns:
+        The origin.
+    """
+    if trigger.origin is InputOrigin.OUTSIDE:
+        return SupportOrigin.OUTSIDE_INPUT
+    messages = trigger.messages if message is None else trigger.messages[message : message + 1]
+    if any(one.forwarded_from is not None for one in messages):
+        return SupportOrigin.OUTSIDE_INPUT
+    return SupportOrigin.USER_MESSAGE
 
 
 def approval_instant(record: EpisodicMemory) -> datetime:
@@ -542,6 +582,91 @@ class EpisodeReader:
             reliances=reliances,
             supplied=tuple(supplied),
         )
+
+    async def parts_at(self, parts: Sequence[SupportPart]) -> Rehydrated:
+        """Read ``parts`` again from the store, by their addresses (§9:5, §16:4).
+
+        A finding recorded in an earlier attempt names parts by address, and the episodes
+        they are parts of may have left this attempt's reading since, as the window
+        moved: they are read again here, each with the facts code sets on a support
+        pointing at it, so a retry commits what the finding rests on rather than losing
+        it. A part that no longer resolves in a stored episode is left out.
+
+        Args:
+            parts: The parts' addresses.
+
+        Returns:
+            The parts that resolve, and the placements of the episodes read.
+
+        Raises:
+            MemoryStoreError: If the memory store cannot be read.
+        """
+        wanted = list(dict.fromkeys(parts))
+        addresses: dict[str, None] = {}
+        for part in wanted:
+            if (episode := part_episode(part)) is not None:
+                addresses[episode] = None
+            if isinstance(part, ConfirmationPart):
+                addresses[episode_address(part.asking_activation)] = None
+        if not addresses:
+            return Rehydrated(parts={}, supplied=())
+        found = without_open_episodes(await self._memory.get_many(list(addresses)))
+        episodes = {key: one for key, one in found.items() if isinstance(one, EpisodicMemory)}
+        read: dict[SupportPart, ReadPart] = {}
+        outsides: dict[str, bool] = {}
+        for index, part in enumerate(wanted, start=1):
+            record = episodes.get(part_episode(part) or "")
+            text = part_content(part, episodes=episodes, effects={}, carried=None)
+            if record is None or record.processing_record is None or not text:
+                continue
+            facts = await self._facts(part, record, outsides)
+            if facts is None:
+                continue
+            read[part] = ReadPart(
+                handle=f"P{index}",
+                part=part,
+                episode=record.id,
+                occurred_at=record.occurred_at,
+                text=text,
+                origin=facts[0],
+                when=facts[1],
+            )
+        return Rehydrated(parts=read, supplied=tuple(one.placement for one in episodes.values()))
+
+    async def _facts(  # noqa: PLR0911 — one arm per part a finding may rest on (§9:6)
+        self, part: SupportPart, record: EpisodicMemory, outsides: dict[str, bool]
+    ) -> tuple[SupportOrigin, datetime | None] | None:
+        """The origin and ``when`` code sets on a support pointing at ``part`` (§9:5)."""
+        processing = record.processing_record
+        if processing is None:  # pragma: no cover - checked by the caller
+            return None
+        match part:
+            case InputPart(message=None):
+                return input_origin(processing.trigger, None), record.occurred_at
+            case InputPart(message=int() as message) if message < len(processing.trigger.messages):
+                sent = processing.trigger.messages[message].sent_at
+                return input_origin(processing.trigger, message), sent
+            case RoundMessagePart():
+                round_ = next((one for one in processing.rounds if one.id == part.round), None)
+                if round_ is None:
+                    return None
+                if record.id not in outsides:
+                    outsides[record.id] = await read_outside_content(
+                        self._memory, processing.activation_id, working=WorkingRecord()
+                    )
+                over = outsides[record.id]
+                origin = (
+                    SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE
+                    if over
+                    else SupportOrigin.ASSISTANT_MESSAGE
+                )
+                return origin, round_.recorded_at
+            case EvidenceItemPart() if part.digest < len(processing.digests):
+                return SupportOrigin.EVIDENCE, processing.digests[part.digest].recorded_at
+            case ConfirmationPart():
+                return SupportOrigin.CONFIRMATION, approval_instant(record)
+            case _:
+                return None
 
     async def _gather(
         self,
@@ -957,18 +1082,13 @@ class _Shown:
     ) -> list[ReadPart]:
         """The input, or each message it took in (ADR-0328 §4:4, §4:12)."""
         trigger = processing.trigger
-        outside = trigger.origin is InputOrigin.OUTSIDE
         if trigger.messages:
             return [
                 self._part(
                     InputPart(episode=record.id, message=index),
                     episode=record,
                     text=one.text,
-                    origin=(
-                        SupportOrigin.OUTSIDE_INPUT
-                        if outside or one.forwarded_from is not None
-                        else SupportOrigin.USER_MESSAGE
-                    ),
+                    origin=input_origin(trigger, index),
                     when=one.sent_at,
                     answers=answers,
                 )
@@ -983,7 +1103,7 @@ class _Shown:
                 InputPart(episode=record.id),
                 episode=record,
                 text=text,
-                origin=SupportOrigin.OUTSIDE_INPUT if outside else SupportOrigin.USER_MESSAGE,
+                origin=input_origin(trigger, None),
                 when=record.occurred_at,
                 answers=answers,
             )

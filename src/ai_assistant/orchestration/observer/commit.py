@@ -33,7 +33,8 @@ keep or confirmed what the message said. Without one, the decision is refused wh
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import unicodedata
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Final, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, ValidationError
@@ -55,6 +56,7 @@ from ai_assistant.core.types import (
     Message,
     ObserverInferencePart,
     OpenQuestionKind,
+    Placement,
     ReadingCertainty,
     Role,
     SupportDirection,
@@ -81,10 +83,14 @@ if TYPE_CHECKING:
         ActivationEffect,
         FrozenJson,
         ObservationFinding,
-        Placement,
         SupportPart,
     )
-    from ai_assistant.orchestration.observer.reading import Reading, ReadPart, Reliance
+    from ai_assistant.orchestration.observer.reading import (
+        EpisodeReader,
+        Reading,
+        ReadPart,
+        Reliance,
+    )
 
 __all__ = [
     "INFERENCE_FLOOR",
@@ -231,6 +237,11 @@ class CommitView:
         parts: The parts the finding rests on, as read.
         similar: The memories shown.
         reliance: The reliance call a reliance finding is about.
+        yes_inputs: For each yes a confirmation part names, the yes's input, which a
+            question rests on in the confirmation's place (§13:2). Not shown.
+        supplied: The placement of every record the call is supplied beyond the
+            reading: the memories, the episodes their supports were resolved from, and
+            any part read again (§12:6).
     """
 
     finding: ObservationFinding
@@ -238,6 +249,8 @@ class CommitView:
     parts: tuple[ReadPart, ...]
     similar: tuple[Similar, ...]
     reliance: Reliance | None = None
+    yes_inputs: dict[str, ReadPart] = field(default_factory=dict)
+    supplied: tuple[Placement, ...] = ()
 
     def part(self, handle: str) -> ReadPart | None:
         """The part a label names, among those shown."""
@@ -334,35 +347,62 @@ class Checked:
     resolve: Resolve | None = None
 
 
-async def commit_view(
+async def commit_view(  # noqa: PLR0913 — the finding, what it is read against, and the stores
     finding: ObservationFinding,
     reading: Reading,
     *,
+    reader: EpisodeReader,
     memory: MemoryStore,
     plans: PlanStore,
     similar: int,
 ) -> CommitView | None:
     """What one commit call is shown for ``finding`` (§9:3).
 
+    Each part the finding rests on is taken from the reading, or read again from the
+    store by its address where the reading no longer holds it: a finding recorded in an
+    earlier attempt keeps what it rests on however the window has moved since (§16:4).
+    The parts are labelled afresh for the call, ``P1`` to ``Pn``, since the call sees
+    only them.
+
     Args:
         finding: The finding.
-        reading: The reading its parts were read in.
+        reading: This attempt's reading.
+        reader: Reads a part again by its address.
         memory: The memory store the similar memories are searched in.
         plans: The plan store a remember call's effect record is read from.
         similar: The most memories the search returns.
 
     Returns:
-        The view, or ``None`` where a part it rests on is no longer read, or the memory
-        a reliance finding names is not: either fails §9:5's check.
+        The view, or ``None`` where a part it rests on no longer resolves in a stored
+        episode, or the memory a reliance finding names is not read: either fails
+        §9:5's check.
 
     Raises:
         MemoryStoreError: If the memory store cannot be read.
         PlanningError: If the plan store cannot be read.
     """
-    parts = [reading.at(part) for part in finding.rests_on]
     reliance = None if finding.relied_on is None else reading.reliance(finding.relied_on)
-    if any(one is None for one in parts) or (finding.relied_on is not None and reliance is None):
+    if finding.relied_on is not None and reliance is None:
         return None
+    yes_inputs = {
+        part.episode: InputPart(episode=part.episode)
+        for part in finding.rests_on
+        if isinstance(part, ConfirmationPart)
+    }
+    wanted = (*finding.rests_on, *yes_inputs.values())
+    held = {part: read for part in wanted if (read := reading.at(part)) is not None}
+    supplied: list[Placement] = []
+    missing = [part for part in wanted if part not in held]
+    if missing:
+        again = await reader.parts_at(missing)
+        held.update(again.parts)
+        supplied.extend(again.supplied)
+    if any(part not in held for part in finding.rests_on):
+        return None
+    parts = tuple(
+        replace(held[part], handle=f"P{index}")
+        for index, part in enumerate(finding.rests_on, start=1)
+    )
     found = await memory.search(finding.claim, limit=similar, kinds=(MemoryKind.MEMORY,))
     memories = [one for one in found.records if isinstance(one, Memory)]
     named = [] if reliance is None else [reliance.memory]
@@ -375,24 +415,33 @@ async def commit_view(
             if one.handle == hint.memory
         )
     for one in named:
-        if all(held.id != one.id for held in memories):
+        if all(present.id != one.id for present in memories):
             memories.append(one)
-    shown = await _resolved(memories, memory=memory, plans=plans)
+    shown, episodes = await _resolved(memories, memory=memory, plans=plans)
+    supplied.extend(one.memory.placement for one in shown)
+    supplied.extend(episodes)
     return CommitView(
         finding=finding,
         leaving=reading.leaving.record,
-        parts=tuple(one for one in parts if one is not None),
+        parts=parts,
         similar=shown,
         reliance=reliance,
+        yes_inputs={episode: held[part] for episode, part in yes_inputs.items() if part in held},
+        supplied=tuple(supplied),
     )
 
 
 async def _resolved(
     memories: Sequence[Memory], *, memory: MemoryStore, plans: PlanStore
-) -> tuple[Similar, ...]:
-    """Each memory with its supports' parts resolved to readable content (ADR-0328 §15:2)."""
+) -> tuple[tuple[Similar, ...], tuple[Placement, ...]]:
+    """Each memory with its supports' parts resolved to readable content (ADR-0328 §15:2).
+
+    Returns:
+        The memories as shown, and the placement of every episode read to resolve their
+        supports, which the commit call is supplied with them (§12:6).
+    """
     if not memories:
-        return ()
+        return (), ()
     found = await memory.get_many(list(episodes_to_read(memories)))
     episodes = {key: one for key, one in found.items() if isinstance(one, EpisodicMemory)}
     activations = remember_activations(memories, episodes)
@@ -423,7 +472,7 @@ async def _resolved(
                 questions=questions,
             )
         )
-    return tuple(shown)
+    return tuple(shown), tuple(one.placement for one in episodes.values())
 
 
 def commit_messages(view: CommitView) -> list[Message]:
@@ -525,6 +574,8 @@ def _track_record(reply: CommitReply, context: _Context) -> _Primary:
     reliance = context.view.reliance
     if reliance is None or reply.track_record in {None, "neither"}:
         return Unwritten(FindingUnwritten.NOT_KEPT)
+    if _narrows(context.placement, reliance.memory):
+        return Unwritten(FindingUnwritten.CHECK_FAILED)
     entry = TrackRecordEntry(
         episode=context.view.leaving.id,
         relied_at=reliance.relied_at,
@@ -607,7 +658,11 @@ def _primary(reply: CommitReply, supports: dict[str, MemorySupport], context: _C
             return Unwritten(FindingUnwritten.SINGLE_OBSERVATION)
         case "recheck":
             target = _target(reply, context)
-            if not supports or not (reply.asks or "").strip():
+            if (
+                not supports
+                or not (reply.asks or "").strip()
+                or _narrows(context.placement, target)
+            ):
                 raise _Refused(FindingUnwritten.CHECK_FAILED)
             first = next(iter(supports.values()))
             return RaiseQuestion(
@@ -616,19 +671,18 @@ def _primary(reply: CommitReply, supports: dict[str, MemorySupport], context: _C
                 asks=reply.asks or "",
                 support=_question_support(first, first.direction, supports, context),
             )
-        case "add" if reply.inference is None:
-            target = _target(reply, context)
-            if not supports or any(
-                one.origin is SupportOrigin.CONFIRMATION and not one.backs_as_worded
-                for one in supports.values()
-            ):
-                raise _Refused(FindingUnwritten.CHECK_FAILED)
-            return AddSupports(target=target, supports=tuple(supports.values()))
         case "add":
-            # An inference about a stored claim is a create the policy may reinforce:
-            # one operation adds one support, so it is never applied (§12:3, §9:7).
             target = _target(reply, context)
-            return _created(reply, supports, context, wording=target.content)
+            if not supports or not _confirms_only_as_worded(supports, target, context):
+                raise _Refused(FindingUnwritten.CHECK_FAILED)
+            if reply.inference is not None or _narrows(context.placement, target):
+                # An inference about a stored claim is a create the policy may reinforce,
+                # since one operation adds one support (§12:3, §9:7); and so is an add
+                # whose supply is placed narrower than the memory, since a fold takes
+                # the meet (§12:6) where an operation writes no placement (ADR-0328
+                # §5:2).
+                return _created(reply, supports, context, wording=target.content)
+            return AddSupports(target=target, supports=tuple(supports.values()))
         case _:
             return _created(reply, supports, context, wording=reply.wording)
 
@@ -763,6 +817,11 @@ def _retiring(
     """
     target = _target(reply, context)
     memory = created.memory
+    if _narrows(context.placement, target):
+        # §12:6: the retired memory would carry what the supply placed narrower, and an
+        # operation writes no placement (ADR-0328 §5:2): the new memory is proposed alone,
+        # and the policy rules over the conflict as over any other.
+        return created
     if reply.cites == "inference":
         cited = next(
             (one for one in memory.supports if one.origin is SupportOrigin.OBSERVER_INFERENCE),
@@ -828,15 +887,7 @@ def _question_support(
     origin = support.origin
     when = support.when
     if isinstance(part, ConfirmationPart):
-        read = next(
-            (
-                one
-                for one in context.view.parts
-                if one.part == InputPart(episode=part.episode)
-                or (isinstance(one.part, InputPart) and one.part.episode == part.episode)
-            ),
-            None,
-        )
+        read = context.view.yes_inputs.get(part.episode)
         if read is None:
             raise _Refused(FindingUnwritten.CHECK_FAILED)
         part, origin, when = read.part, read.origin, read.when
@@ -875,8 +926,48 @@ def _resolve(
     question = None if shown is None else shown.questions.get(proposed.question)
     if shown is None or support is None or question is None or not proposed.note.strip():
         return None
+    if _narrows(context.placement, shown.memory):
+        return None
     try:
         added = _question_support(support, support.direction, supports, context)
     except _Refused:
         return None
     return Resolve(target=shown.memory, question=question, support=added, note=proposed.note)
+
+
+def _narrows(supply: Placement, target: Memory) -> bool:
+    """Whether the run's supply is placed narrower than a stored memory (§12:6).
+
+    An operation on a stored memory writes no placement (ADR-0328 §5:2), so a write
+    resting on a supply narrower than the memory's placement would widen what that
+    supply reaches. Such a write is proposed through ``ingest``, whose fold takes the
+    meet, or not made.
+    """
+    return Placement.narrowest_of((supply, target.placement)).reach is not target.placement.reach
+
+
+def _agreement_form(content: str) -> str:
+    """ADR-0121 §1's comparison form: NFC, case folded, whitespace runs collapsed, stripped."""
+    return " ".join(unicodedata.normalize("NFC", content).casefold().split())
+
+
+def _confirms_only_as_worded(
+    supports: dict[str, MemorySupport], target: Memory, context: _Context
+) -> bool:
+    """ADR-0328 §4:6: a confirmation is added only where its wording agrees, backing it.
+
+    A confirmation backs a stored memory as worded only where the statement the approved
+    part showed agrees with the memory's wording under ADR-0121 §1's predicate, and it is
+    added to no memory where it does not.
+    """
+    for handle, support in supports.items():
+        if support.origin is not SupportOrigin.CONFIRMATION:
+            continue
+        read = context.view.part(handle)
+        if (
+            read is None
+            or not support.backs_as_worded
+            or _agreement_form(read.text) != _agreement_form(target.content)
+        ):
+            return False
+    return True
