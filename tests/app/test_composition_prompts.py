@@ -23,7 +23,14 @@ from ai_assistant.app.composition import PROMPTS, read_prompts
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.prompts import PromptDeclaration, PromptOrigin
+from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
+from ai_assistant.orchestration.matters_pass import MATTERS_PASS_PROMPT
+from ai_assistant.orchestration.observer.prompts import (
+    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_SCOUT_PROMPT,
+)
 from ai_assistant.orchestration.planning import PLANNING_PROMPT
+from ai_assistant.orchestration.story_tidy_up import STORY_TIDY_UP_PROMPT
 from ai_assistant.orchestration.understanding import UNDERSTANDING_PROMPT
 from ai_assistant.testing import default_prompt, flag_combinations
 
@@ -93,9 +100,17 @@ def test_each_default_ships_in_the_wheel_beside_its_module() -> None:
         assert f"{declaration.package.replace('.', '/')}/{declaration.filename}" in shipped
 
 
-def test_understanding_and_planning_are_the_prompts_moved_so_far() -> None:
+def test_the_prompts_moved_so_far_carry_their_flags_and_values() -> None:
     """§1:2, §2:1: the prompts moved so far, each with §2's flags and values; later lanes add."""
-    assert PROMPTS == (UNDERSTANDING_PROMPT, PLANNING_PROMPT)
+    assert PROMPTS == (
+        UNDERSTANDING_PROMPT,
+        PLANNING_PROMPT,
+        DIGESTING_PROMPT,
+        STORY_TIDY_UP_PROMPT,
+        MATTERS_PASS_PROMPT,
+        OBSERVER_SCOUT_PROMPT,
+        OBSERVER_COMMIT_PROMPT,
+    )
     assert UNDERSTANDING_PROMPT.flags == frozenset({"recalled", "stories"})
     assert UNDERSTANDING_PROMPT.values == frozenset()
     assert PLANNING_PROMPT.flags == frozenset(
@@ -104,6 +119,16 @@ def test_understanding_and_planning_are_the_prompts_moved_so_far() -> None:
     assert PLANNING_PROMPT.values == frozenset(
         {"approved_action_tool", "note_reliance_capability", "needs_your_yes"}
     )
+    assert STORY_TIDY_UP_PROMPT.values == frozenset({"story_summary_cap_chars"})
+    for declaration in PROMPTS[2:]:
+        assert declaration.flags == frozenset()
+    for declaration in (
+        DIGESTING_PROMPT,
+        MATTERS_PASS_PROMPT,
+        OBSERVER_SCOUT_PROMPT,
+        OBSERVER_COMMIT_PROMPT,
+    ):
+        assert declaration.values == frozenset()
 
 
 def test_with_no_override_directory_every_prompt_runs_its_default(tmp_path: Path) -> None:
@@ -205,7 +230,8 @@ def test_a_prompts_path_that_is_a_link_is_refused(tmp_path: Path, *, overrides: 
 
 
 @pytest.mark.parametrize(
-    "name", ["digesting.txt", "understanding", "understanding.txt.bak", ".understanding.txt.swp"]
+    "name",
+    ["memory_reconciler.txt", "understanding", "understanding.txt.bak", ".understanding.txt.swp"],
 )
 def test_a_file_that_names_no_moved_prompt_is_refused(tmp_path: Path, name: str) -> None:
     """A prompt not yet moved has no template, so its file names no prompt either."""

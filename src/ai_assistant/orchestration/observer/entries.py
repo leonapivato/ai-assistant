@@ -18,7 +18,9 @@ second file, so the activation's own file still ages from its run (§3:1).
 **Every body names the episode and its attempt** (§2:3): ``episode`` is the leaving
 episode's id and ``attempt_started_at`` the instant its attempt started, and ``stage``
 says which entry it is: ``scout`` or ``commit`` for a call's given and returned entries,
-and ``findings``, ``outcome`` or ``end`` for the three step entries.
+and ``findings``, ``outcome`` or ``end`` for the three step entries. A call's given entry
+also names, as ``prompt``, the template its system message was rendered from (ADR-0334
+§8:2).
 
 **Subordinate to the work** (§2:11, §4:2). A failure to build or write an entry is logged
 as ADR-0314 §2:4 logs one, naming the activation, the source and the failure's class and
@@ -55,6 +57,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from datetime import datetime
 
+    from ai_assistant.core.prompts import PromptTemplate
     from ai_assistant.core.protocols import DiagnosticSink
     from ai_assistant.core.types import (
         EpisodicMemory,
@@ -135,6 +138,7 @@ class ObserverEntries:
         step: ObserverStep,
         messages: Sequence[Message],
         *,
+        prompt: PromptTemplate,
         finding: ObservationFinding | None = None,
     ) -> None:
         """A call's given entry, under each activation its episodes name (§2:2, §2:9).
@@ -143,6 +147,8 @@ class ObserverEntries:
             targets: The attempts the call reads for, one per episode it reads.
             step: The step making it.
             messages: Its rendered request.
+            prompt: The template its system message was rendered from, which the entry
+                names (ADR-0334 §8:2).
             finding: The finding a commit call decides.
         """
 
@@ -150,6 +156,7 @@ class ObserverEntries:
             built: dict[str, object] = {
                 "stage": step.value,
                 "messages": [one.model_dump(mode="json") for one in messages],
+                "prompt": prompt.provenance(),
             }
             if finding is not None:
                 built["finding"] = _finding(finding)

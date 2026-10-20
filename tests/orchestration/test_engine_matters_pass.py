@@ -28,8 +28,12 @@ from ai_assistant.core.types import (
     StorySummaryDraft,
     StorySummaryLine,
 )
-from ai_assistant.orchestration.matters_pass import MattersPass, MattersPassReport
-from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, FakeStoryStore
+from ai_assistant.orchestration.matters_pass import (
+    MATTERS_PASS_PROMPT,
+    MattersPass,
+    MattersPassReport,
+)
+from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, FakeStoryStore, default_prompt
 
 _BUDGET: Final = timedelta(seconds=10)
 
@@ -52,6 +56,7 @@ def _pass(
         episodes=6,
         notes=5,
         budget=_BUDGET,
+        prompt=default_prompt(MATTERS_PASS_PROMPT),
     )
 
 

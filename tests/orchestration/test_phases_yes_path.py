@@ -82,6 +82,7 @@ from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapabilit
 from ai_assistant.orchestration.activation_state import active_state
 from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.chat import ChatWriter
+from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import (
@@ -530,6 +531,7 @@ class _Hub:
             recall_cap=6,
             recall_digest_wait=timedelta(seconds=5),
             now=lambda: AT,
+            digesting_prompt=default_prompt(DIGESTING_PROMPT),
         )
 
     async def turn(

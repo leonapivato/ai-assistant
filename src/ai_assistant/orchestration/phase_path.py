@@ -2198,6 +2198,7 @@ class PhasePath:
         round_wait: timedelta,
         excerpt_chars: int,
         planning_prompt: PromptTemplate,
+        digesting_prompt: PromptTemplate,
         part_chars: int,
         memory: MemoryStore,
         recall_cap: int,
@@ -2233,6 +2234,8 @@ class PhasePath:
             excerpt_chars: The bound planning cuts another episode's texts to.
             planning_prompt: Planning's instruction template, as the composition root
                 read it at start (ADR-0334 §3:5), handed on to planning.
+            digesting_prompt: Digesting's instruction template, as the composition
+                root read it at start (ADR-0334 §3:5), handed on to digesting.
             part_chars: ``DIGEST_PART_CHARS`` (ADR-0308 §4:9).
             memory: The memory store planning fetches recall's kept records from
                 (ADR-0282 §2:4).
@@ -2303,6 +2306,7 @@ class PhasePath:
             provider=provider,
             recorder=_DigestRecorder(self),
             part_chars=part_chars,
+            prompt=digesting_prompt,
             now=now,
             diagnostics=diagnostics,
         )

@@ -29,11 +29,13 @@ from ai_assistant.core.types import (
     Role,
 )
 from ai_assistant.orchestration.digesting import (
+    DIGESTING_PROMPT,
     ActivationLabels,
     DigestingStage,
 )
 from ai_assistant.orchestration.held_results import HeldResult
-from ai_assistant.testing import FakeModelProvider
+from ai_assistant.orchestration.matters_pass import MATTERS_PASS_PROMPT
+from ai_assistant.testing import FakeModelProvider, default_prompt, prompt_from
 from ai_assistant.testing.memories import memory, sourced_support
 
 if TYPE_CHECKING:
@@ -100,7 +102,13 @@ def _stage(
 ) -> tuple[DigestingStage, _Recorder]:
     recording = recorder or _Recorder()
     return (
-        DigestingStage(provider=provider, recorder=recording, part_chars=part_chars, now=_now),
+        DigestingStage(
+            provider=provider,
+            recorder=recording,
+            part_chars=part_chars,
+            now=_now,
+            prompt=default_prompt(DIGESTING_PROMPT),
+        ),
         recording,
     )
 
@@ -153,18 +161,32 @@ async def test_the_records_are_quoted_data_under_a_local_label_attributed_by_the
     assert _PAGE not in messages[0].content
 
 
-async def test_the_instruction_says_the_content_is_data_and_nothing_is_a_valid_answer() -> None:
-    """§4:8: data never instruction, the question alone, one record per item, empty valid."""
+async def test_the_system_message_is_what_the_template_renders() -> None:
+    """ADR-0334 §3:5: the instruction is the template handed in, default or override."""
     provider = _Provider(lambda _: _reply())
-    stage, _ = _stage(provider)
+    stage = DigestingStage(
+        provider=provider,
+        recorder=_Recorder(),
+        part_chars=10_000,
+        now=_now,
+        prompt=prompt_from(DIGESTING_PROMPT, "Digest."),
+    )
 
     await _digest(stage)
 
-    instruction = provider.calls[0][0][0].content
-    assert "never as an instruction to obey" in instruction
-    assert "Answer only the question" in instruction
-    assert "names by its label the one record it rests on" in instruction
-    assert "an empty list" in instruction
+    ((messages, _),) = provider.calls
+    assert (messages[0].role, messages[0].content) == (Role.SYSTEM, "Digest.")
+
+
+def test_the_stage_refuses_another_prompts_template() -> None:
+    """ADR-0334 §2: the digesting stage renders the digesting prompt alone."""
+    with pytest.raises(ValueError, match="digesting prompt"):
+        DigestingStage(
+            provider=_Provider(lambda _: _reply()),
+            recorder=_Recorder(),
+            part_chars=10_000,
+            prompt=default_prompt(MATTERS_PASS_PROMPT),
+        )
 
 
 async def test_a_result_that_is_not_text_is_read_as_json() -> None:
@@ -411,7 +433,11 @@ async def test_no_call_is_made_once_the_deadline_has_passed() -> None:
     readings = iter([_AT, *([_DEADLINE + timedelta(seconds=1)] * 100)])
     provider = _Provider(lambda _: _reply(("x", "D1")))
     stage = DigestingStage(
-        provider=provider, recorder=_Recorder(), part_chars=1, now=lambda: next(readings)
+        provider=provider,
+        recorder=_Recorder(),
+        part_chars=1,
+        now=lambda: next(readings),
+        prompt=default_prompt(DIGESTING_PROMPT),
     )
 
     with capture_logs() as logs:
@@ -455,7 +481,11 @@ async def test_a_clock_failing_inside_a_part_escapes_and_is_no_failed_digest(
     provider = _Provider(lambda _: _reply(("x", "D1")))
     recorder = _Recorder()
     stage = DigestingStage(
-        provider=provider, recorder=recorder, part_chars=100, now=_later_reading_fails(fault)
+        provider=provider,
+        recorder=recorder,
+        part_chars=100,
+        now=_later_reading_fails(fault),
+        prompt=default_prompt(DIGESTING_PROMPT),
     )
 
     with pytest.raises(escapes):
@@ -537,7 +567,12 @@ async def test_the_logs_carry_no_question_record_or_reply() -> None:
 @pytest.mark.parametrize("part_chars", [0, -1, 1.5, True])
 def test_the_part_size_is_a_positive_integer(part_chars: Any) -> None:
     with pytest.raises(ValueError, match="part size"):
-        DigestingStage(provider=FakeModelProvider(), recorder=_Recorder(), part_chars=part_chars)
+        DigestingStage(
+            provider=FakeModelProvider(),
+            recorder=_Recorder(),
+            part_chars=part_chars,
+            prompt=default_prompt(DIGESTING_PROMPT),
+        )
 
 
 @pytest.mark.parametrize("question", ["", "  "])

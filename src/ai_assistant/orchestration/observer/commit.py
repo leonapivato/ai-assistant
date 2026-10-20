@@ -68,7 +68,6 @@ from ai_assistant.core.types import (
     standing_rank,
 )
 from ai_assistant.orchestration.episode_reads import without_open_episodes
-from ai_assistant.orchestration.observer.prompts import COMMIT_INSTRUCTION
 from ai_assistant.orchestration.observer.reading import ORIGIN_WORDS, STANDING_WORDS
 from ai_assistant.orchestration.support_parts import (
     episodes_to_read,
@@ -80,6 +79,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
     from datetime import datetime
 
+    from ai_assistant.core.prompts import PromptTemplate
     from ai_assistant.core.protocols import MemoryStore, PlanStore
     from ai_assistant.core.types import (
         ActivationEffect,
@@ -162,7 +162,7 @@ class _ProposedResolve(BaseModel):
 
 
 class CommitReply(BaseModel):
-    """The commit step's whole reply (``COMMIT_INSTRUCTION``'s shape).
+    """The commit step's whole reply (its instruction's shape).
 
     A key this shape, or a shape nested in it, does not name is dropped, as the scout's
     reply drops one: the fields it names are validated as before, so a missing required
@@ -491,17 +491,19 @@ async def _resolved(
     return tuple(shown), tuple(one.placement for one in episodes.values())
 
 
-def commit_messages(view: CommitView) -> list[Message]:
+def commit_messages(view: CommitView, prompt: PromptTemplate) -> list[Message]:
     """The commit step's one call for a finding: its instruction and what it is shown.
 
     Args:
         view: What the call is shown.
+        prompt: The template of ``OBSERVER_COMMIT_PROMPT``, default or override, as the
+            composition root read it at start (ADR-0334 §3:5).
 
     Returns:
         The conversation the commit step's route completes.
     """
     return [
-        Message(role=Role.SYSTEM, content=COMMIT_INSTRUCTION),
+        Message(role=Role.SYSTEM, content=prompt.render()),
         Message(role=Role.USER, content=json.dumps(view.payload(), ensure_ascii=True)),
     ]
 

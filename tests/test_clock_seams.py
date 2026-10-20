@@ -123,10 +123,14 @@ from ai_assistant.orchestration.authorizer import (
     RoundToAuthorize,
     WorkingRecord,
 )
-from ai_assistant.orchestration.digesting import ActivationLabels, DigestingStage
+from ai_assistant.orchestration.digesting import DIGESTING_PROMPT, ActivationLabels, DigestingStage
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
 from ai_assistant.orchestration.observer import Observer, ObserverLimits
+from ai_assistant.orchestration.observer.prompts import (
+    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_SCOUT_PROMPT,
+)
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, PhaseWorking
 from ai_assistant.orchestration.planning import (
     PLANNING_PROMPT,
@@ -443,7 +447,11 @@ async def _digesting_stage(now: Clock) -> None:
             raise AssertionError
 
     await DigestingStage(
-        provider=FakeModelProvider(), recorder=_Unreached(), part_chars=50, now=now
+        provider=FakeModelProvider(),
+        recorder=_Unreached(),
+        part_chars=50,
+        now=now,
+        prompt=default_prompt(DIGESTING_PROMPT),
     ).digest_result(
         HeldResult(result_id="result:1", round_id="r-1", decision_id="d-1", content="a page"),
         question="hours",
@@ -519,6 +527,7 @@ async def _phase_path(now: Clock) -> None:
         recall_cap=1,
         recall_digest_wait=timedelta(seconds=5),
         now=now,
+        digesting_prompt=default_prompt(DIGESTING_PROMPT),
     )
     working = PhaseWorking(
         activation_id="act-1",
@@ -627,6 +636,8 @@ async def _observer(now: Clock) -> None:
             daily_calls=1,
         ),
         now=now,
+        scout_prompt=default_prompt(OBSERVER_SCOUT_PROMPT),
+        commit_prompt=default_prompt(OBSERVER_COMMIT_PROMPT),
     ).run()
 
 

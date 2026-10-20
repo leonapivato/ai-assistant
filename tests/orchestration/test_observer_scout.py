@@ -3,27 +3,35 @@
 Driven on values. A finding names parts by label and code maps each back; a label
 naming nothing read, or a finding resting on no part of the leaving episode, is dropped
 (§8:2, §9:5); a reliance finding rests on what later episodes show (§14:1); and a
-candidate recorded under an approval always gives a finding (§5:5, §11:1). The two
-instructions and the replies code parses are held to one shape.
+candidate recorded under an approval always gives a finding (§5:5, §11:1). Each step's
+system message is whatever its template renders (ADR-0334 §3:5), and a step refuses
+another prompt's template.
 """
 
 from __future__ import annotations
 
 import json
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
-from observer_support import AT, Harness, address, episode, reply
+import pytest
+from observer_support import AT, Harness, address, episode, limits, reply
 
 from ai_assistant.core.types import (
     ConfirmationPart,
     InputPart,
     ObservationAttemptEnd,
+    ObservationFinding,
     QuestionPart,
     Role,
     SupportOrigin,
 )
-from ai_assistant.orchestration.observer.commit import CommitReply
-from ai_assistant.orchestration.observer.prompts import COMMIT_INSTRUCTION, SCOUT_INSTRUCTION
+from ai_assistant.orchestration.observer import Observer
+from ai_assistant.orchestration.observer.commit import CommitView, commit_messages
+from ai_assistant.orchestration.observer.prompts import (
+    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_SCOUT_PROMPT,
+)
 from ai_assistant.orchestration.observer.reading import (
     Hint,
     ReadEpisode,
@@ -37,8 +45,12 @@ from ai_assistant.orchestration.observer.scout import (
     proposed_findings,
     scout_messages,
 )
-from ai_assistant.testing import FakeDiagnosticSink, FakeModelProvider
+from ai_assistant.orchestration.understanding import RecentEpisodes
+from ai_assistant.testing import FakeDiagnosticSink, FakeModelProvider, default_prompt, prompt_from
 from ai_assistant.testing.memories import memory, said_support
+
+if TYPE_CHECKING:
+    from ai_assistant.core.prompts import PromptDeclaration
 
 _CLAIM = "The user prefers window seats."
 
@@ -281,22 +293,60 @@ def test_a_candidate_the_user_confirmed_always_gives_a_finding() -> None:
 
 
 def test_the_scout_is_shown_its_instruction_and_the_reading_as_data() -> None:
-    """§8:5: the reading reaches the model as one JSON object of quoted source data."""
-    system, user = scout_messages(_reading())
+    """§8:5: the reading reaches the model as one JSON object of quoted source data.
 
-    assert (system.role, system.content) == (Role.SYSTEM, SCOUT_INSTRUCTION)
+    The system message is whatever the scout's template renders (ADR-0334 §3:5).
+    """
+    system, user = scout_messages(_reading(), prompt_from(OBSERVER_SCOUT_PROMPT, "Scout."))
+
+    assert (system.role, system.content) == (Role.SYSTEM, "Scout.")
     assert user.role is Role.USER
     assert json.loads(user.content) == _reading().payload()
 
 
-def test_each_instruction_names_every_field_code_reads_of_its_reply() -> None:
-    """The prompts and the parsed replies are one shape: no field code reads goes unasked."""
-    for name in ("findings", "claim", "rests_on", "candidate", "relied_on"):
-        assert f'"{name}"' in SCOUT_INSTRUCTION
-    for name in CommitReply.model_fields:
-        assert f'"{name}"' in COMMIT_INSTRUCTION
-    for name in ("part", "direction", "backs_as_worded", "how_sure", "about_when", "note"):
-        assert f'"{name}"' in COMMIT_INSTRUCTION
+def test_the_commit_step_is_shown_its_instruction_and_its_view_as_data() -> None:
+    """§9:3: the view reaches the model as one JSON object; the system message is its template's."""
+    leaving, read = episode("leaving"), _input("P1", "leaving")
+    finding = ObservationFinding(
+        id="f1", episode=leaving.id, claim="The user prefers window seats.", rests_on=(read.part,)
+    )
+    view = CommitView(finding=finding, leaving=leaving, parts=(read,), similar=())
+
+    system, user = commit_messages(view, prompt_from(OBSERVER_COMMIT_PROMPT, "Commit."))
+
+    assert (system.role, system.content) == (Role.SYSTEM, "Commit.")
+    assert user.role is Role.USER
+    assert json.loads(user.content) == view.payload()
+
+
+@pytest.mark.parametrize(
+    ("scout_prompt", "commit_prompt"),
+    [
+        (OBSERVER_COMMIT_PROMPT, OBSERVER_COMMIT_PROMPT),
+        (OBSERVER_SCOUT_PROMPT, OBSERVER_SCOUT_PROMPT),
+    ],
+    ids=["scout", "commit"],
+)
+def test_the_observer_refuses_another_prompts_template(
+    scout_prompt: PromptDeclaration, commit_prompt: PromptDeclaration
+) -> None:
+    """ADR-0334 §2: each step renders its own prompt, never the other's."""
+    harness = Harness()
+
+    with pytest.raises(ValueError, match="renders the observer_"):
+        Observer(
+            scout=FakeModelProvider.scripted(),
+            commit=FakeModelProvider.scripted(),
+            memory=harness.memory,
+            writes=harness.writes,
+            plans=harness.plans,
+            stories=harness.stories,
+            episodes=RecentEpisodes(memory=harness.memory, limit=1),
+            limits=limits(),
+            scout_prompt=default_prompt(scout_prompt),
+            commit_prompt=default_prompt(commit_prompt),
+            now=harness.clock,
+        )
 
 
 def test_a_reliance_finding_resting_on_the_leaving_episode_is_dropped() -> None:

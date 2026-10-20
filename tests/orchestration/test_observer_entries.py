@@ -34,7 +34,11 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.core.types import Message as MessageType
 from ai_assistant.orchestration.observer.entries import Diagnosed, ObserverEntries
-from ai_assistant.testing import FakeDiagnosticSink, FakeModelProvider
+from ai_assistant.orchestration.observer.prompts import (
+    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_SCOUT_PROMPT,
+)
+from ai_assistant.testing import FakeDiagnosticSink, FakeModelProvider, default_prompt
 from ai_assistant.testing.memories import memory, said_support
 
 if TYPE_CHECKING:
@@ -132,7 +136,10 @@ async def test_a_processed_episode_writes_its_calls_findings_outcome_and_end() -
 
 
 async def test_a_calls_entries_hold_its_request_and_its_reply() -> None:
-    """§2:1's table: the rendered request naming its step, the finding, and the reply."""
+    """§2:1's table: the rendered request naming its step and its prompt, the finding, the reply.
+
+    The prompt is the template the system message was rendered from (ADR-0334 §8:2).
+    """
     harness = Harness()
     await _three(harness)
     sink = FakeDiagnosticSink()
@@ -145,6 +152,8 @@ async def test_a_calls_entries_hold_its_request_and_its_reply() -> None:
     (call,) = scout.calls
     assert given.kind is DiagnosticKind.GIVEN
     assert _body(given)["messages"] == [one.model_dump(mode="json") for one in call.messages]
+    assert _body(given)["prompt"] == default_prompt(OBSERVER_SCOUT_PROMPT).provenance()
+    assert _body(commit_given)["prompt"] == default_prompt(OBSERVER_COMMIT_PROMPT).provenance()
     assert _body(returned)["reply"] == _scout("P1")
     assert _body(commit_given)["finding"] == {
         "id": "f1",
@@ -441,6 +450,7 @@ def _target(activation_id: str = "act", episode_id: str = "activation:act") -> D
 
 
 _ASKED = (MessageType(role=Role.USER, content="{}"),)
+_SCOUT_PROMPT = default_prompt(OBSERVER_SCOUT_PROMPT)
 
 
 async def test_one_call_over_several_episodes_writes_under_each_activation() -> None:
@@ -449,7 +459,7 @@ async def test_one_call_over_several_episodes_writes_under_each_activation() -> 
     entries = ObserverEntries(sink, now=lambda: AT)
     targets = (_target("a", "activation:a"), _target("b", "activation:b"))
 
-    await entries.given(targets, ObserverStep.SCOUT, _ASKED)
+    await entries.given(targets, ObserverStep.SCOUT, _ASKED, prompt=_SCOUT_PROMPT)
     await entries.returned(targets, ObserverStep.SCOUT, reply="{}")
 
     assert [(one.activation_id, one.kind.value) for one in sink.recorded] == [
@@ -468,7 +478,7 @@ async def test_with_the_record_off_nothing_is_built() -> None:
     """§2:7: no sink, no entry, and no body built."""
     entries = ObserverEntries(None, now=lambda: pytest.fail("no entry is stamped"))
 
-    await entries.given((_target(),), ObserverStep.SCOUT, _ASKED)
+    await entries.given((_target(),), ObserverStep.SCOUT, _ASKED, prompt=_SCOUT_PROMPT)
     await entries.ended(_target(), ObservationAttemptEnd.FINISHED, ObservationState.PROCESSED)
 
 

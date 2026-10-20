@@ -4,8 +4,8 @@ When an episode leaves the episode window, the observer reads it with what came 
 (``reading``), proposes findings in one broad call (``scout``), decides each in a narrow
 call that sees only what the finding rests on (``commit``), writes what it decides
 through the write stage (``writing``), and records what it did beside the episode on
-the plan store's observation record (``stage``). Its two instructions are in
-``prompts``, whole, for the owner to read.
+the plan store's observation record (``stage``). Its two instructions are templates
+shipped beside ``prompts``, which declares them (ADR-0334).
 
 **A background stage, not an activation** (§7:4, §15:1). It records no episode, links
 nothing to a story and adds nothing the episode selector reads. Its writes are

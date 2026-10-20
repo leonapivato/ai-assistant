@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.chat import ChatWriter
+from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
 from ai_assistant.orchestration.lookups import LookUps
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools
@@ -83,6 +84,7 @@ def _phases(
         )
         return PhasePath(
             planning_prompt=default_prompt(PLANNING_PROMPT),
+            digesting_prompt=default_prompt(DIGESTING_PROMPT),
             completer=completer,
             provider=FakeModelProvider(reply=_DIGESTED),
             authorizing=AuthorizingStage(

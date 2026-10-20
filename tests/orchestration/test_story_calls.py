@@ -91,7 +91,7 @@ from ai_assistant.orchestration.story_calls import (
     StartUnfinishedError,
     StoryCalls,
 )
-from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
+from ai_assistant.orchestration.story_tidy_up import STORY_TIDY_UP_PROMPT, StoryTidyUp
 from ai_assistant.testing import (
     FakeMemoryStore,
     FakeModelProvider,
@@ -663,6 +663,7 @@ async def test_a_tidy_up_writes_the_story_s_version_log() -> None:
         decisions=0,
         budget=timedelta(seconds=5),
         threshold=0.0,
+        prompt=default_prompt(STORY_TIDY_UP_PROMPT),
     )
     calls = StoryCalls(stories=stories, memory=memory, tidy_up=tidy_up)
 
@@ -696,6 +697,7 @@ async def test_a_tidy_up_with_none_wired_or_a_refused_reply_is_not_done() -> Non
             decisions=0,
             budget=timedelta(seconds=5),
             threshold=0.0,
+            prompt=default_prompt(STORY_TIDY_UP_PROMPT),
         ),
     )
 

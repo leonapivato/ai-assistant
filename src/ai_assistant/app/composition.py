@@ -82,14 +82,19 @@ from ai_assistant.orchestration import (
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.chat import ChatWriter
+from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
 from ai_assistant.orchestration.lookups import (
     LOOK_UP_CAPABILITIES,
     LOOK_UP_LABEL_ARGUMENTS,
     LOOK_UPS,
     LookUps,
 )
-from ai_assistant.orchestration.matters_pass import MattersPass
+from ai_assistant.orchestration.matters_pass import MATTERS_PASS_PROMPT, MattersPass
 from ai_assistant.orchestration.observer import Observer, ObserverLimits
+from ai_assistant.orchestration.observer.prompts import (
+    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_SCOUT_PROMPT,
+)
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, StoryReads
 from ai_assistant.orchestration.planning import PLANNING_PROMPT
@@ -111,7 +116,7 @@ from ai_assistant.orchestration.story_calls import (
     StoryCalls,
 )
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
-from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
+from ai_assistant.orchestration.story_tidy_up import STORY_TIDY_UP_PROMPT, StoryTidyUp
 from ai_assistant.orchestration.telegram import TelegramLineSeams
 from ai_assistant.orchestration.understanding import (
     UNDERSTANDING_PROMPT,
@@ -192,7 +197,15 @@ _log = structlog.get_logger(__name__)
 #: declaration here and hands the module ``prompts[<declaration>.name]``; nothing else
 #: in this layer changes. An override is read only for a prompt listed here, so a file
 #: naming a prompt not yet moved names no prompt and refuses the start (§5:1).
-PROMPTS: Final[tuple[PromptDeclaration, ...]] = (UNDERSTANDING_PROMPT, PLANNING_PROMPT)
+PROMPTS: Final[tuple[PromptDeclaration, ...]] = (
+    UNDERSTANDING_PROMPT,
+    PLANNING_PROMPT,
+    DIGESTING_PROMPT,
+    STORY_TIDY_UP_PROMPT,
+    MATTERS_PASS_PROMPT,
+    OBSERVER_SCOUT_PROMPT,
+    OBSERVER_COMMIT_PROMPT,
+)
 
 #: What a template file read from the override directory may not be: writable by
 #: anyone but its owner (ADR-0334 §5:1).
@@ -1636,6 +1649,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             decisions=STORY_TIDY_UP_DECISIONS,
             budget=STORY_TIDY_UP_BUDGET,
             threshold=RECALL_THRESHOLDS[settings.embedder],
+            # ADR-0334 §3:5: its instruction, as read at start, default or override.
+            prompt=prompts[STORY_TIDY_UP_PROMPT.name],
         )
         # ADR-0276 §4's episode selector, **one object** handed to the windows stage that
         # shows understanding the episode window and to the observer that tests which
@@ -1667,6 +1682,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 per_run=OBSERVER_PER_RUN,
                 daily_calls=settings.observer_daily_calls,
             ),
+            # ADR-0334 §3:5: the two steps' instructions, as read at start.
+            scout_prompt=prompts[OBSERVER_SCOUT_PROMPT.name],
+            commit_prompt=prompts[OBSERVER_COMMIT_PROMPT.name],
             now=_utcnow,
             # ADR-0333 §2:7: the record's write seam where it is on, ``None`` where off.
             diagnostics=diagnostics,
@@ -1693,6 +1711,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 tidy_up=tidy_up,
             ),
             planning_prompt=prompts[PLANNING_PROMPT.name],
+            digesting_prompt=prompts[DIGESTING_PROMPT.name],
         )
         # --- the Telegram line (ADR-0323 §3, §11, §15) --------------------------
         #
@@ -1834,6 +1853,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 episodes=MATTERS_PASS_EPISODES,
                 notes=MATTERS_PASS_NOTES,
                 budget=settings.scheduler_run_budget,
+                # ADR-0334 §3:5: its instruction, as read at start, default or override.
+                prompt=prompts[MATTERS_PASS_PROMPT.name],
             ),
             # The two speech seams, each under the deadline decorator ADR-0200 §1
             # puts on the *wrapper* rather than in the seam, "so that it composes
@@ -2353,7 +2374,11 @@ class _PhaseSeams:
 
 
 def _build_phase_path(
-    settings: Settings, seams: _PhaseSeams, *, planning_prompt: PromptTemplate
+    settings: Settings,
+    seams: _PhaseSeams,
+    *,
+    planning_prompt: PromptTemplate,
+    digesting_prompt: PromptTemplate,
 ) -> PhasePath:
     """The phases, which plan every activation (ADR-0309 §2:6, §4).
 
@@ -2526,6 +2551,7 @@ def _build_phase_path(
         excerpt_chars=PHASES_EXCERPT_CHARS,
         # ADR-0334 §3:5: planning's instruction, as read at start, default or override.
         planning_prompt=planning_prompt,
+        digesting_prompt=digesting_prompt,
         part_chars=PHASES_DIGEST_PART_CHARS,
         # ADR-0308 §3, §4:4: planning and recall's digest fetch recall's kept records
         # from the one memory store recall searched; the second run itself is the
