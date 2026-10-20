@@ -632,3 +632,29 @@ async def test_a_question_already_raised_is_recorded_rather_than_raised_twice() 
     assert isinstance(after, Memory)
     assert len(after.open_questions) == 1
     assert after.revision == raised.revision
+
+
+async def test_retirements_are_read_from_a_replacement_retired_since() -> None:
+    """§16:1: a replacement a later write retired still names what it replaced."""
+    harness = await _harness(MemoryDecisionKind.SUPERSEDE)
+    await _stored(harness, memory("m-old", _CLAIM, sourced_support(episode=address("past"))))
+    first = await _writer(harness).write(Checked(primary=Create(memory=_new())))
+    installed = first.writes[0].memory
+    replacement = await harness.memory.get(installed)
+    assert isinstance(replacement, Memory)
+    await harness.writes.apply(
+        MemoryChange(
+            memory=replacement,
+            operation=MemoryOperation(
+                kind=MemoryOperationKind.END,
+                cites=replacement.supports[0].points_at,
+                at=_NOW,
+                by=MemoryWriterName.OBSERVER,
+            ),
+        )
+    )
+    assert await harness.memory.get(installed) is None
+
+    ends = await _writer(harness).retirements([installed])
+
+    assert [(one.memory, one.operations) for one in ends] == [("m-old", (MemoryOperationKind.END,))]

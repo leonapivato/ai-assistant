@@ -328,6 +328,10 @@ class FindingWriter:
         Args:
             installed: The ids of replacements a supersession installed.
 
+        A replacement no longer current — retired itself since, by a later write — is
+        read from the store's whole export, which holds every memory whatever its
+        status: what the supersession retired is on its create however it stands now.
+
         Returns:
             An end on each memory their creates name as replaced, in the order named.
 
@@ -335,7 +339,16 @@ class FindingWriter:
             MemoryStoreError: Where a replacement cannot be read: the caller keeps the
                 ids and reads them again on a retry (§16:1).
         """
-        found = await self._memory.get_many(list(installed)) if installed else {}
+        found: dict[str, object] = (
+            dict(await self._memory.get_many(list(installed))) if installed else {}
+        )
+        if any(not isinstance(found.get(one), Memory) for one in installed):
+            wanted = set(installed)
+            found.update(
+                (record.id, record)
+                for record in await self._memory.export()
+                if record.id in wanted and record.id not in found
+            )
         ends: dict[str, None] = {}
         for one in installed:
             record = found.get(one)
