@@ -20,9 +20,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.models.function import FunctionModel
 
 import ai_assistant
 from ai_assistant.core.config import EmbedderKind
+from ai_assistant.core.errors import ModelError
+from ai_assistant.core.types import Message, Role
+from ai_assistant.models import PydanticAIProvider, RetryingProvider
+from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.orchestration import planning
 from ai_assistant.orchestration.observer.stage import RunOutcome
 from ai_assistant.service.lock import InstanceLock
@@ -730,3 +736,131 @@ def test_the_prompt_key_the_package_writes_is_read_for_its_flags(tmp_path: Path)
     assert bodies["digesting"]["flags"] == {}
     assert bodies["digesting"]["flags_from"] == "recorded"
     assert bodies["digesting"]["candidate"]["instruction"] == "A candidate digest instruction."
+
+
+def _given(source: str, line: int, prompt: dict[str, Any] | None, **body: Any) -> Any:
+    held = {
+        "messages": [
+            {"role": "system", "content": "told", "name": None},
+            {"role": "user", "content": "the same request", "name": None},
+        ],
+        **body,
+    }
+    if prompt is not None:
+        held["prompt"] = prompt
+    return replay_tool.Given(
+        file=f"{ACT_A}.observer.jsonl" if source == "observer" else f"{ACT_A}.jsonl",
+        activation_id=ACT_A,
+        line=line,
+        recorded_at="",
+        source=source,
+        stage=body.get("stage"),
+        body=body | held,
+    )
+
+
+def test_entries_are_one_call_only_as_the_observers_same_call_with_the_same_prompt_key(
+    tmp_path: Path,
+) -> None:
+    declared = replay_tool.declared_prompts()
+    flagged = {
+        "name": "understanding",
+        "version": "v",
+        "origin": "default",
+        "flags": {"recalled": False, "stories": True},
+    }
+    scout = {"name": "observer_scout", "version": "v", "origin": "default", "flags": {}}
+    givens = [
+        # The same understanding request twice: one written before §9's flags, one after.
+        _given("understanding", 0, {"name": "understanding", "version": "v", "origin": "default"}),
+        _given("understanding", 1, flagged),
+        # The scout's call under two activations, and once more with another prompt key.
+        _given("observer", 0, scout, stage="scout"),
+        _given("observer", 1, scout, stage="scout"),
+        _given("observer", 2, None, stage="scout"),
+    ]
+    template = replay_tool.load_candidate(str(_template(tmp_path)), declared)
+    recorded = replay_tool.load_candidate("recorded", declared)
+
+    plan = replay_tool.plan_run(givens, [template, recorded], declared=declared, stated={})
+
+    by_lines = {
+        (call.candidate.origin, tuple(one.line for one in call.givens)): call for call in plan.calls
+    }
+    assert set(by_lines) == {
+        ("override", (1,)),
+        ("recorded", (0,)),
+        ("recorded", (1,)),
+        ("recorded", (0, 1)),
+        ("recorded", (2,)),
+    }
+    # The entry written before §9 is never rendered from its twin's flags.
+    assert by_lines[("override", (1,))].flags == {"recalled": False, "stories": True}
+    assert by_lines[("override", (1,))].flags_from == "recorded"
+    assert plan.left_out == {"no flags recorded or stated": 1}
+
+
+async def _no_wait(_: float) -> None:
+    return None
+
+
+class _Metering:
+    """An engine whose observer run makes completions through the package's own provider,
+    behind a retrying wrapper as the reconciler's route is, past the bound."""
+
+    def __init__(self, model: Any, calls: int) -> None:
+        self.provider = RetryingProvider(
+            PydanticAIProvider(model),
+            policy=RetryPolicy(max_attempts=3, backoff_base_seconds=0.001),
+            sleep=_no_wait,
+        )
+        self.calls = calls
+        self.failures: list[str] = []
+        self.runs = 0
+
+    async def observe_episodes(self) -> RunOutcome:
+        self.runs += 1
+        for _ in range(self.calls):
+            try:
+                await self.provider.complete([Message(role=Role.USER, content="x")])
+            except ModelError as exc:
+                self.failures.append(type(exc).__name__)
+        return RunOutcome(processed=1)
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_a_rerun_counts_every_model_request_retries_included_against_its_bound(
+    tmp_path: Path,
+) -> None:
+    copy = make_copy(tmp_path)
+    requests: list[int] = []
+
+    def answer(messages: list[Any], info: Any) -> Any:
+        del messages, info
+        requests.append(1)
+        raise ModelHTTPError(status_code=429, model_name="fake")
+
+    engine = _Metering(FunctionModel(answer), calls=2)
+    original = PydanticAIProvider.complete
+    reports: list[str] = []
+
+    asyncio.run(
+        replay_tool.rerun(
+            replay_tool.RerunOptions(copy=copy, model="anthropic:claude-test", bound=4),
+            report=reports.append,
+            build=lambda _: engine,
+            check_model=lambda _: None,
+            now=now,
+        )
+    )
+
+    # Three attempts of the first call and one of the second are sent; the second's next
+    # attempt is refused unsent, and the refusal is not retried.
+    assert len(requests) == 4
+    assert engine.failures == ["ModelRateLimitError", "ModelError"]
+    assert engine.runs == 1
+    assert "the bound of 4 model calls is reached" in reports
+    assert "4 model calls made (bound 4); 1 refused" in reports
+    assert PydanticAIProvider.complete is original
