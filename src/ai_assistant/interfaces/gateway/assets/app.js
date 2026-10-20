@@ -4264,6 +4264,77 @@ async function readBeliefs(more, run) {
   }
 }
 
+// --- the pending candidates (ADR-0329 §18) -------------------------------------
+//
+// What `remember` has noted and the observer has not yet processed, shown in the belief
+// panel each by its fact and marked pending (§18:1), and nothing more (§18:3): no band,
+// no standing and no `Forget`, because a candidate is no belief and `forget` names
+// nothing by one. The section stays hidden while there is none, which is what a hub
+// whose `remember` still writes memories always answers.
+//
+// Read when the panel is opened, and not from the band checkboxes: a band says nothing
+// about a candidate, so a filter changed would only read the same answer again.
+const candidateRuns = { current: 0 };
+
+// The panel's own entry: the listing from its first page, then the pending candidates.
+//
+// **The candidates are read only for the session that opened the panel** (adversarial
+// review, round 1, `major`): a listing whose session ended while it was in flight, and
+// another began, retires its own answer, and this must not then start a read under the
+// new session, whose fault would put the panel on screen though nobody opened it there.
+async function openBeliefs() {
+  const half = headerHalf();
+  const era = sessionEra;
+  await listBeliefs();
+  if (half === null || !sameSession(half, era)) {
+    return;
+  }
+  await listCandidates();
+}
+
+// One read of the pending candidates, rendered whole in place of the last.
+//
+// The run check retires an answer a later open has overtaken, as the listing's does,
+// and the session check one that belongs to a session this page no longer holds.
+async function listCandidates() {
+  candidateRuns.current += 1;
+  const run = candidateRuns.current;
+  const half = headerHalf();
+  if (half === null) {
+    return;
+  }
+  const era = sessionEra;
+  try {
+    const body = await relay(half, "/candidates/pending", {}, "beliefs");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null || run !== candidateRuns.current) {
+      return;
+    }
+    const held = Array.isArray(body.candidates) ? body.candidates : [];
+    const list = el("pending-list");
+    clearNode(list);
+    held.forEach((one) => renderCandidate(list, one));
+    el("pending-candidates").hidden = held.length === 0;
+  } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    fault(GATEWAY_GONE, "beliefs");
+  }
+}
+
+// One candidate: the mark first, so it is never read as a belief, then its fact.
+function renderCandidate(list, candidate) {
+  const item = document.createElement("div");
+  line(item, "Pending: not remembered yet", "hint");
+  line(item, candidate.fact, "reply");
+  list.appendChild(item);
+}
+
 // The band's own name, in the words a person reads it in. Every memory carries one
 // and it is never left to be implied by position (ADR-0073 §4); the panel's three
 // filter checkboxes are labelled with the same words.
@@ -5976,7 +6047,7 @@ window.addEventListener("online", chatOnline);
 el("sources-button").addEventListener("click", fromMenu("sources", listSources));
 el("standing-button").addEventListener("click", fromMenu("standing", listStanding));
 el("history-button").addEventListener("click", fromMenu("history", listGrantHistory));
-el("beliefs-button").addEventListener("click", fromMenu("beliefs", listBeliefs));
+el("beliefs-button").addEventListener("click", fromMenu("beliefs", openBeliefs));
 // A band changed is a different question, so it starts the listing again rather than
 // filtering what is already on screen: this page holds no beliefs of its own and the
 // hub is what answers which ones match.

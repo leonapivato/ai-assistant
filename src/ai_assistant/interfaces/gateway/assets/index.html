@@ -358,6 +358,20 @@
       <section id="beliefs" class="panel" hidden>
         <h3>What I believe</h3>
         <!--
+          ADR-0329 §18:1: what I have noted to remember and not yet kept, each by its fact
+          and marked pending. Above the listing, so a page of beliefs does not push it out
+          of sight, and outside the band filter, which says nothing about it: a candidate
+          is no belief, so it carries no band and no Forget. Hidden while there is none.
+        -->
+        <div id="pending-candidates" hidden>
+          <h4>Noted, not yet remembered</h4>
+          <p class="hint">
+            I decide whether to keep each once I have looked back over the conversation
+            it came from.
+          </p>
+          <div id="pending-list"></div>
+        </div>
+        <!--
           Three bands, three pairs, and each pair is one element (#1440). Flat, a wrap
           at 390px put a band's own words on the line below its box and against the
           band above it — which on this panel is not a cosmetic fault: the three bands

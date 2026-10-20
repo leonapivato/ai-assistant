@@ -67,7 +67,8 @@ and push-to-talk; this gateway serves none of the three). Among those served her
 ``recent_conversations``, ``conversation`` and ``forget_conversation``, together
 with the grant surface — ``grantable_sources``, ``grant``, ``revoke``,
 ``recent_grants``, ``standing_grants`` — the belief surface — ``beliefs``,
-``belief``, ``forget`` — the notification *review* surface — ``notifications``,
+``belief``, ``forget``, and ADR-0329 §18:2's ``pending_candidates``, which the belief
+panel calls — the notification *review* surface — ``notifications``,
 ``dismiss_notification``, ``forget_notification``, ``notification_preferences``,
 ``set_notification_preferences`` — and the connection surface —
 ``connect_account``, ``reprovision_account``, ``disconnect_account``,
@@ -201,6 +202,7 @@ from ai_assistant.core.types import (
     MessageReceipt,
     NotificationPreferences,
     NotificationReach,
+    PendingCandidate,
     QuietWindow,
     SourceGrant,
     SupportView,
@@ -414,6 +416,12 @@ _BELIEFS_PATH: Final = "/beliefs"
 _BELIEF_PATH: Final = "/belief"
 _FORGET_BELIEF_PATH: Final = "/belief/forget"
 
+#: ADR-0329 §18:1-§18:2's read for the same panel: the candidates the observer has not
+#: yet processed, which the page shows each by its fact and marks pending. A path of its
+#: own rather than a member of the listing's answer, because a candidate is no memory —
+#: it has no band, standing or support, and ``forget`` names nothing by it.
+_PENDING_CANDIDATES_PATH: Final = "/candidates/pending"
+
 #: ADR-0177 §10's notification review surface. Five paths for five operations, and
 #: **none of them is** :data:`_DELIVERIES_PATH`: what these operate on is the
 #: notification *record* (ADR-0130), where a delivery is what the gateway's own poll
@@ -480,6 +488,7 @@ _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _BELIEFS_PATH): "beliefs",
     ("POST", _BELIEF_PATH): "belief",
     ("POST", _FORGET_BELIEF_PATH): "forget",
+    ("POST", _PENDING_CANDIDATES_PATH): "pending_candidates",
     ("POST", _NOTIFICATIONS_PATH): "notifications",
     ("POST", _DISMISS_NOTIFICATION_PATH): "dismiss_notification",
     ("POST", _FORGET_NOTIFICATION_PATH): "forget_notification",
@@ -1440,6 +1449,7 @@ class Gateway:
             _BELIEFS_PATH: self._beliefs,
             _BELIEF_PATH: self._belief,
             _FORGET_BELIEF_PATH: self._forget_belief,
+            _PENDING_CANDIDATES_PATH: self._pending_candidates,
             _NOTIFICATIONS_PATH: self._notifications,
             _DISMISS_NOTIFICATION_PATH: self._dismiss_notification,
             _FORGET_NOTIFICATION_PATH: self._forget_notification,
@@ -3632,6 +3642,27 @@ class Gateway:
         destroyed = await self._relayed(partial(self._engine.forget, named))
         return _rendered({"destroyed": destroyed})
 
+    async def _pending_candidates(
+        self,
+        request: Request,  # noqa: ARG002 — one signature per entry in `_unary`
+    ) -> Response:
+        """Relay the candidates the observer has not yet processed (ADR-0329 §18:2).
+
+        **It takes no argument and is not paged**, and this handler adds neither: the
+        read is bounded by the hub, and an adapter that offered a page would be
+        inventing a surface §18:2 does not have. Nothing is joined to it and nothing
+        is dropped; a hub whose ``remember`` writes memories answers none, and that
+        empty answer is relayed as it came.
+
+        Args:
+            request: The admitted request, which carries no argument.
+
+        Returns:
+            Each pending candidate by its episode and its fact, in the hub's order.
+        """
+        held = await self._relayed(self._engine.pending_candidates)
+        return _rendered({"candidates": [_pending_candidate_view(one) for one in held]})
+
     # --- ADR-0078 §8: the deferred-question surface -----------------------
 
     async def _notifications(self, request: Request) -> Response:
@@ -5056,6 +5087,11 @@ def _belief_summary_view(summary: BeliefSummary) -> dict[str, Any]:
     :class:`~ai_assistant.core.types.BeliefSummary` has nowhere to put a support.
     """
     return _belief_fields(summary)
+
+
+def _pending_candidate_view(candidate: PendingCandidate) -> dict[str, Any]:
+    """One pending candidate: its episode and its fact, and nothing more (ADR-0329 §18:3)."""
+    return {"episode_id": candidate.episode_id, "fact": candidate.fact}
 
 
 def _belief_view(belief: Belief) -> dict[str, Any]:

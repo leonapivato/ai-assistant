@@ -2275,6 +2275,7 @@ def test_the_page_reaches_what_the_gateway_serves_and_nothing_beyond_it() -> Non
         '"/beliefs"',
         '"/belief"',
         '"/belief/forget"',
+        '"/candidates/pending"',
         '"/notifications"',
         '"/notification/dismiss"',
         '"/notification/forget"',
@@ -2464,6 +2465,7 @@ _RELAY_ENTRIES: Final = (
     "listGrantHistory",
     "readBeliefs",
     "forgetBelief",
+    "listCandidates",
     "readNotifications",
     "dismissNotification",
     "forgetNotification",
@@ -3841,3 +3843,43 @@ def test_a_session_replaced_through_the_door_re_issues_nothing() -> None:
 
     assert resumed.index("return;") < resumed.index("watchDeliveries();")
     assert resumed.index("return;") < resumed.index("openChat();")
+
+
+def test_a_pending_candidate_is_shown_by_its_fact_marked_pending_and_nothing_more() -> None:
+    """ADR-0329 §18:1 and §18:3: each pending candidate by its fact, marked pending.
+
+    The mark is a line of its own, before the fact, so no candidate reads as a belief;
+    and a candidate carries no control, since ``forget`` names nothing by one. The
+    section sits inside the belief panel and is hidden until a read finds one.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+    document = _markup("index.html")
+
+    rendering = functions["renderCandidate"]
+    assert rendering.index('"Pending: not remembered yet"') < rendering.index("candidate.fact")
+    assert "button" not in rendering
+    assert "candidate.episode_id" not in rendering
+    assert 'relay(half, "/candidates/pending", {}, "beliefs")' in functions["listCandidates"]
+    assert 'el("pending-candidates").hidden = held.length === 0;' in functions["listCandidates"]
+    assert functions["openBeliefs"].index("listBeliefs()") < functions["openBeliefs"].index(
+        "listCandidates()"
+    )
+    assert 'fromMenu("beliefs", openBeliefs)' in script
+    panel = document[document.index('<section id="beliefs"') :]
+    panel = panel[: panel.index("</section>")]
+    assert '<div id="pending-candidates" hidden>' in panel
+    assert '<div id="pending-list"></div>' in panel
+
+
+def test_no_top_level_function_is_declared_twice() -> None:
+    """A second declaration of one name replaces the first silently, page-wide.
+
+    A script's function declarations are hoisted and the last one wins, so a panel that
+    reuses a name another panel already declared breaks that other panel with no error
+    anywhere — which is what a ``renderPending`` for the pending candidates did to the
+    chat's own before it was renamed.
+    """
+    declared = re.findall(r"^(?:async )?function (\w+)\(", _code("app.js"), flags=re.MULTILINE)
+
+    assert sorted(name for name in set(declared) if declared.count(name) > 1) == []
