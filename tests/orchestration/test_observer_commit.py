@@ -788,6 +788,47 @@ async def test_a_part_the_reading_no_longer_holds_is_read_again_by_its_address()
     assert _OWNER_ONLY in view.supplied, "the episode a similar memory's support resolved from"
 
 
+async def test_a_similar_memorys_support_in_an_open_episode_is_not_shown() -> None:
+    """ADR-0286 §6:4: an open episode has no readable record for a model-facing read."""
+    harness = Harness()
+    leaving = episode("leaving", text="Window seats please.")
+    running = episode("running", at=AT + timedelta(minutes=9), text="unfinished words", open_=True)
+    held = memory("m-seat", "The user prefers window seats.", said_support(address("running")))
+    await harness.hold(leaving, running, held)
+    part = ReadPart(
+        handle="P1",
+        part=InputPart(episode=address("leaving")),
+        episode=address("leaving"),
+        occurred_at=AT,
+        text="Window seats please.",
+        origin=SupportOrigin.USER_MESSAGE,
+        when=AT,
+    )
+    reading = Reading(leaving=ReadEpisode(handle="E1", record=leaving, parts=(part,)))
+    finding = ObservationFinding(
+        id="f1",
+        episode=address("leaving"),
+        claim="The user prefers window seats.",
+        rests_on=(part.part,),
+    )
+    reader = EpisodeReader(
+        memory=harness.memory,
+        plans=harness.plans,
+        stories=harness.stories,
+        story_episodes=0,
+        related=0,
+    )
+
+    view = await commit_view(
+        finding, reading, reader=reader, memory=harness.memory, plans=harness.plans, similar=5
+    )
+
+    assert view is not None
+    assert [one.memory.id for one in view.similar] == ["m-seat"]
+    assert "unfinished words" not in json.dumps(view.payload())
+    assert running.placement not in view.supplied
+
+
 def test_a_derived_supply_narrows_an_owner_placed_memory_of_the_same_reach() -> None:
     """ADR-0217 §3:3: the meet keeps the stronger setter, so the owner's lift lifts nothing."""
     owner_placed = Placement(

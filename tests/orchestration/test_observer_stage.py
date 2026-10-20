@@ -53,7 +53,7 @@ from ai_assistant.orchestration.observer import RunOutcome
 from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.orchestration.understanding import RecentEpisodes
 from ai_assistant.testing import FakeModelProvider
-from ai_assistant.testing.memories import memory, said_support
+from ai_assistant.testing.memories import memory, said_support, sourced_support
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -914,4 +914,162 @@ async def test_an_episode_with_nothing_to_read_is_skipped_after_a_failed_read() 
     assert [one.end for one in record.attempts] == [
         ObservationAttemptEnd.FAILED,
         ObservationAttemptEnd.FINISHED,
+    ]
+
+
+async def test_an_outcome_whose_record_failed_to_be_written_is_not_committed_again() -> None:
+    """§16:1, §16:4: the memory written stays the finding's outcome, never decided anew."""
+    harness = Harness()
+    await _three(harness)
+    write_observation = harness.plans.write_observation
+    refused = False
+
+    async def failing_outcome(record: Any, *, expected_revision: int) -> Any:
+        nonlocal refused
+        if not refused and any(one.outcome is not None for one in record.findings):
+            refused = True
+            msg = "the plan store could not write"
+            raise PlanningError(msg)
+        return await write_observation(record, expected_revision=expected_revision)
+
+    harness.plans.write_observation = failing_outcome  # type: ignore[method-assign]  # one outage
+    commit = FakeModelProvider.scripted(_create(), reply(action="nothing"))
+    observer = harness.observer(scout=FakeModelProvider.scripted(_scout("P1")), commit=commit)
+
+    await observer.run()
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.findings[0].outcome is None
+
+    await observer.run()
+
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.state is ObservationState.PROCESSED
+    outcome = record.findings[0].outcome
+    assert outcome is not None
+    assert [one.operations for one in outcome.writes] == [(MemoryOperationKind.CREATE,)]
+    assert len(commit.calls) == 1, "the finding is not committed again"
+    created = [one for one in await harness.memory.export() if isinstance(one, Memory)]
+    assert len(created) == 1
+
+
+async def test_a_supersession_whose_retirements_were_unread_records_them_on_the_retry() -> None:
+    """§16:1: every operation a landed supersession made is on the finding's outcome."""
+    harness = Harness(ruling=MemoryDecisionKind.SUPERSEDE)
+    await _three(harness)
+    await harness.hold(
+        episode("past", at=SINCE - timedelta(days=1), text="Window seats."),
+        Memory.model_validate(
+            memory(
+                "m-old",
+                "The user prefers window seats.",
+                sourced_support(episode=address("past")),
+            ).model_dump()
+        ),
+    )
+    write = harness.writes.write
+    get_many = harness.memory.get_many
+    failing = False
+
+    async def landing(proposal: Any) -> Any:
+        nonlocal failing
+        done = await write(proposal)
+        failing = True
+        return done
+
+    async def failing_once(ids: list[str]) -> Any:
+        nonlocal failing
+        if failing:
+            failing = False
+            msg = "the store could not read"
+            raise MemoryStoreError(msg)
+        return await get_many(ids)
+
+    harness.writes.write = landing  # type: ignore[method-assign]  # notes the landing
+    harness.memory.get_many = failing_once  # type: ignore[method-assign,assignment]  # then one outage
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")),
+        commit=FakeModelProvider.scripted(_create(), reply(action="nothing")),
+    )
+
+    await observer.run()
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.findings[0].outcome is None
+
+    harness.writes.write = write  # type: ignore[method-assign]  # the outage is over
+    harness.clock.advance(timedelta(minutes=1))
+    await observer.run()
+
+    (record,) = await harness.plans.observations(["activation:one"])
+    outcome = record.findings[0].outcome
+    assert outcome is not None
+    assert [one.operations for one in outcome.writes] == [
+        (MemoryOperationKind.CREATE,),
+        (MemoryOperationKind.END,),
+    ]
+    assert outcome.writes[1].memory == "m-old"
+
+
+async def test_a_stuck_episode_keeps_what_its_failed_commit_wrote_for_a_re_run() -> None:
+    """§16:1, §16:5: set aside, a re-run in this process records what had been written."""
+    harness = Harness()
+    await _three(harness)
+    await harness.hold(
+        episode("past", at=SINCE - timedelta(days=1), text="Window seats."),
+        Memory.model_validate(
+            memory(
+                "m-seat", "The user prefers window seats.", said_support(address("past"))
+            ).model_dump()
+        ),
+    )
+    apply = harness.writes.apply
+    calls = 0
+
+    async def failing_second(change: MemoryChange) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            msg = "database temporarily unavailable"
+            raise MemoryStoreError(msg)
+        await apply(change)
+
+    harness.writes.apply = failing_second  # type: ignore[method-assign]  # an outage midway
+    decided = 0
+
+    def add_both_then_nothing(shown: dict[str, Any]) -> str:
+        nonlocal decided
+        decided += 1
+        if decided > 1:
+            return reply(action="nothing")
+        (held,) = [one for one in shown["memories"] if one["claim"].startswith("The user")]
+        return reply(
+            action="add",
+            memory=held["memory"],
+            supports=[
+                {"part": one["part"], "direction": "for", "backs_as_worded": True}
+                | {"how_sure": "sure"}
+                for one in shown["parts"]
+            ],
+        )
+
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1", "P2")),
+        commit=_answering(add_both_then_nothing),
+        per_run=1,
+        stuck_after=1,
+    )
+    assert (await observer.run()).stuck == 1
+    (record,) = await harness.plans.observations(["activation:one"])
+    # The explicit re-run §16:5 names, as the composition root will make it.
+    await harness.plans.write_observation(
+        record.model_copy(update={"state": ObservationState.WAITING}),
+        expected_revision=record.revision,
+    )
+
+    await observer.run()
+
+    (record,) = await harness.plans.observations(["activation:one"])
+    outcome = record.findings[0].outcome
+    assert outcome is not None
+    assert [(one.memory, one.operations) for one in outcome.writes] == [
+        ("m-seat", (MemoryOperationKind.ADD_SUPPORT,))
     ]

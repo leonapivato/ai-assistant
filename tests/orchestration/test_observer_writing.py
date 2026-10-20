@@ -546,3 +546,89 @@ async def test_a_write_that_lands_is_kept_though_its_verification_fails() -> Non
     after = await harness.memory.get(held.id)
     assert isinstance(after, Memory)
     assert after.support_at(InputPart(episode=address("leaving"))) is not None
+
+
+async def test_a_supersession_records_the_end_of_each_memory_it_replaced() -> None:
+    """§12:2, §16:1: a ``SUPERSEDE`` installs the replacement and ends what it replaced."""
+    harness = await _harness(MemoryDecisionKind.SUPERSEDE)
+    await _stored(harness, memory("m-old", _CLAIM, sourced_support(episode=address("past"))))
+    writer = _writer(harness)
+
+    outcome = await writer.write(Checked(primary=Create(memory=_new())))
+
+    assert outcome.ruling is MemoryDecisionKind.SUPERSEDE
+    assert [one.operations for one in outcome.writes] == [
+        (MemoryOperationKind.CREATE,),
+        (MemoryOperationKind.END,),
+    ]
+    assert outcome.writes[1].memory == "m-old"
+
+
+async def test_a_supersession_whose_replacement_cannot_be_read_keeps_it_to_read_again() -> None:
+    """§16:1: the supersession landed whole, so what it retired is recovered on a retry."""
+    harness = await _harness(MemoryDecisionKind.SUPERSEDE)
+    await _stored(harness, memory("m-old", _CLAIM, sourced_support(episode=address("past"))))
+    get_many = harness.memory.get_many
+    write = harness.writes.write
+    failing = False
+
+    async def landing(proposal: MemoryUpdateProposal) -> object:
+        nonlocal failing
+        done = await write(proposal)
+        failing = True
+        return done
+
+    async def failing_replacement(ids: list[str]) -> object:
+        if failing:
+            msg = "the store could not read"
+            raise MemoryStoreError(msg)
+        return await get_many(ids)
+
+    harness.writes.write = landing  # type: ignore[method-assign,assignment]  # notes the landing
+    harness.memory.get_many = failing_replacement  # type: ignore[method-assign,assignment]  # an outage
+    writer = _writer(harness)
+
+    with pytest.raises(MemoryStoreError):
+        await writer.write(Checked(primary=Create(memory=_new())))
+
+    (installed,) = writer.unread
+    assert [(one.memory, one.operations) for one in writer.partial] == [
+        (installed, (MemoryOperationKind.CREATE,))
+    ]
+    failing = False
+    assert [(one.memory, one.operations) for one in await writer.retirements([installed])] == [
+        ("m-old", (MemoryOperationKind.END,))
+    ]
+
+
+async def test_a_question_already_raised_is_recorded_rather_than_raised_twice() -> None:
+    """§16:4: a retry of a decision whose question landed raises no second question."""
+    harness = await _harness()
+    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
+    against = _said(direction=SupportDirection.AGAINST)
+    question = Checked(
+        primary=RaiseQuestion(
+            target=held, kind=OpenQuestionKind.RECHECK, asks="Check the seat.", support=against
+        )
+    )
+
+    await _writer(harness).write(question)
+    raised = await harness.memory.get(held.id)
+    assert isinstance(raised, Memory)
+    again = await _writer(harness).write(
+        Checked(
+            primary=RaiseQuestion(
+                target=raised,
+                kind=OpenQuestionKind.RECHECK,
+                asks="Check the seat.",
+                support=against,
+            )
+        )
+    )
+
+    (write,) = again.writes
+    assert write.operations == (MemoryOperationKind.RAISE_QUESTION,)
+    after = await harness.memory.get(held.id)
+    assert isinstance(after, Memory)
+    assert len(after.open_questions) == 1
+    assert after.revision == raised.revision

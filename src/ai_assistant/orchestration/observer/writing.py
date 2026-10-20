@@ -115,6 +115,7 @@ class _Ledger:
         self.operations: dict[str, list[MemoryOperationKind]] = {}
         self.track_record: dict[str, bool] = {}
         self.ruling: MemoryDecisionKind | None = None
+        self.unread: list[str] = []
 
     def wrote(self, memory: str, *kinds: MemoryOperationKind) -> None:
         self.operations.setdefault(memory, []).extend(kinds)
@@ -176,6 +177,7 @@ class FindingWriter:
         self._expected: dict[str, int] = {}
         self._shown: dict[str, Memory] = {}
         self.partial: tuple[ObservationWrite, ...] = ()
+        self.unread: tuple[str, ...] = ()
 
     async def write(self, checked: Checked, *, shown: Sequence[Memory] = ()) -> FindingOutcome:
         """Write ``checked`` and return the finding's outcome (§16:1).
@@ -198,6 +200,7 @@ class FindingWriter:
         self._expected = {}
         self._shown = {one.id: one for one in shown}
         self.partial = ()
+        self.unread = ()
         unwritten: FindingUnwritten | None = None
         try:
             try:
@@ -210,8 +213,10 @@ class FindingWriter:
                 except _Refusal as refusal:
                     unwritten = unwritten or refusal.reason
         except BaseException:
-            # What was written before the failure is the caller's to keep (§16:1).
+            # What was written before the failure is the caller's to keep (§16:1), with
+            # each installed replacement whose retirements were not yet read.
             self.partial = ledger.writes()
+            self.unread = tuple(ledger.unread)
             raise
         return ledger.outcome(self._now(), unwritten)
 
@@ -309,11 +314,37 @@ class FindingWriter:
         if retiring is not None:
             ledger.wrote(retiring.memory.id, retiring.kind)
         if kind is MemoryDecisionKind.SUPERSEDE:
-            installed = await self._memory.get(written)
-            if isinstance(installed, Memory):
-                for retired in installed.operations[0].replaces:
-                    ledger.wrote(retired, MemoryOperationKind.END)
+            # The supersession landed whole, so what it retired is read off the installed
+            # replacement; until that read succeeds the caller holds its id to read again.
+            ledger.unread.append(written)
+            for retired in await self.retirements([written]):
+                ledger.wrote(retired.memory, *retired.operations)
+            ledger.unread.remove(written)
         return None
+
+    async def retirements(self, installed: Sequence[str]) -> tuple[ObservationWrite, ...]:
+        """The end on each memory the replacements ``installed`` retired (ADR-0328 §5:6).
+
+        Args:
+            installed: The ids of replacements a supersession installed.
+
+        Returns:
+            An end on each memory their creates name as replaced, in the order named.
+
+        Raises:
+            MemoryStoreError: Where a replacement cannot be read: the caller keeps the
+                ids and reads them again on a retry (§16:1).
+        """
+        found = await self._memory.get_many(list(installed)) if installed else {}
+        ends: dict[str, None] = {}
+        for one in installed:
+            record = found.get(one)
+            if isinstance(record, Memory):
+                ends.update(dict.fromkeys(record.operations[0].replaces))
+        return tuple(
+            ObservationWrite(memory=retired, operations=(MemoryOperationKind.END,))
+            for retired in ends
+        )
 
     async def _asked(
         self, create: Create, result: MemoryIngestResult, ledger: _Ledger
@@ -346,8 +377,23 @@ class FindingWriter:
         support: MemorySupport,
         ledger: _Ledger,
     ) -> None:
-        """Raise one open question on ``target``, resting on ``support`` (§13:1-§13:2)."""
+        """Raise one open question on ``target``, resting on ``support`` (§13:1-§13:2).
+
+        A question the observer already raised on it, open, of the same kind, asking the
+        same and resting on the same part, is the one held: a retry of a decision whose
+        question landed records it rather than raising it twice.
+        """
         memory = await self._fresh(target)
+        if any(
+            not one.resolved
+            and one.kind is kind
+            and one.asks == asks
+            and one.rests_on == (support.points_at,)
+            and one.raised_by is MemoryWriterName.OBSERVER
+            for one in memory.open_questions
+        ):
+            ledger.wrote(memory.id, MemoryOperationKind.RAISE_QUESTION)
+            return
         now = self._now()
         question = OpenQuestion(
             id=f"question:{self._mint()}",

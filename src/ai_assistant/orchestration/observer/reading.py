@@ -50,6 +50,8 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemoryStanding,
     Placement,
+    PlacementReach,
+    PlacementSetter,
     RecordedChannelTrigger,
     RecordedTextInput,
     RoundMessagePart,
@@ -497,6 +499,7 @@ class _Gathered:
 
     later: tuple[EpisodicMemory, ...]
     stories: tuple[tuple[tuple[str, ...], bool, tuple[EpisodicMemory, ...]], ...]
+    summaries: tuple[Placement, ...]
     past: tuple[EpisodicMemory, ...]
     memories: tuple[Memory, ...]
     effects: tuple[ActivationEffect, ...]
@@ -591,6 +594,7 @@ class EpisodeReader:
         supplied = [
             one.placement for one in (leaving, *gathered.later, *gathered.past, *stories_read)
         ]
+        supplied.extend(gathered.summaries)
         supplied.extend(one.memory.placement for one in memories)
         supplied.extend(one.memory.placement for one in reliances)
         supplied.extend(asking_supply)
@@ -770,7 +774,7 @@ class EpisodeReader:
             )
         )
         held = {leaving.id, *(one.id for one in later)}
-        stories = await self._story_reads(processing.activation_id, held)
+        stories, summaries = await self._story_reads(processing.activation_id, held)
         held.update(one.id for _, _, fresh in stories for one in fresh)
         effects = await self._plans.activation_effects([processing.activation_id])
         query = " ".join(
@@ -786,6 +790,7 @@ class EpisodeReader:
         return _Gathered(
             later=later,
             stories=stories,
+            summaries=summaries,
             past=past,
             memories=memories,
             effects=tuple(effects),
@@ -793,14 +798,30 @@ class EpisodeReader:
 
     async def _story_reads(
         self, activation_id: str, held: set[str]
-    ) -> tuple[tuple[tuple[str, ...], bool, tuple[EpisodicMemory, ...]], ...]:
-        """For each story the activation belongs to: its summary and recent episodes."""
+    ) -> tuple[
+        tuple[tuple[tuple[str, ...], bool, tuple[EpisodicMemory, ...]], ...],
+        tuple[Placement, ...],
+    ]:
+        """For each story the activation belongs to: its summary and recent episodes.
+
+        Each summary read supplies a record placed for the owner alone, whoever wrote it
+        (ADR-0304 §4:1), so what is written over it inherits that reach (§12:6).
+        """
         member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation_id)
         headers = await self._stories.stories_of(member)
         read: list[tuple[tuple[str, ...], bool, tuple[EpisodicMemory, ...]]] = []
+        summaries: list[Placement] = []
         for header in headers:
             state = await self._stories.current_summary(header.story_id)
             summary = None if state is None else state.summary
+            if summary is not None:
+                summaries.append(
+                    Placement(
+                        reach=PlacementReach.OWNER,
+                        set_by=PlacementSetter.DERIVED,
+                        set_at=summary.written_at,
+                    )
+                )
             lines = () if summary is None else tuple(line.text for line in summary.lines)
             outside = summary is not None and summary.outside
             recent = await self._recent(header.story_id, activation_id)
@@ -815,7 +836,7 @@ class EpisodeReader:
             )
             held.update(one.id for one in fresh)
             read.append((lines, outside, fresh))
-        return tuple(read)
+        return tuple(read), tuple(summaries)
 
     async def _recent(self, story_id: str, activation_id: str) -> tuple[str, ...]:
         """A story's most recent activation members but ``activation_id``, newest last."""
