@@ -804,11 +804,23 @@ def _reinforced(target: MemoryRecord, incoming: Memory, *, now: datetime) -> Mem
     Each add support is written at ``now`` by the writer that wrote the incoming
     memory's create, and each added support is stamped as added at ``now``.
 
+    An observer's inference among the supports is admitted only as ADR-0329 §9:7 has
+    it among those the fold **actually adds**: a companion the target carries already
+    is not added with it, so an inference whose companions are all carried would be
+    added alone, and the whole fold is refused.
+
     Raises:
-        MemoryStoreError: If ``target`` is not a memory, or an add support is refused.
+        MemoryStoreError: If ``target`` is not a memory, the supports it would add
+            break §9:7, or an add support is refused.
     """
     if not isinstance(target, Memory):
         msg = f"cannot reinforce {target.id!r}: a reinforcement adds supports to a memory only"
+        raise MemoryStoreError(msg)
+    fault = inference_fault(
+        [one for one in incoming.supports if target.support_at(one.points_at) is None]
+    )
+    if fault is not None:
+        msg = f"cannot reinforce {target.id!r}: {fault}"
         raise MemoryStoreError(msg)
     writer = incoming.operations[0].by
     folded = target

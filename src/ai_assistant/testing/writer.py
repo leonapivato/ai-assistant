@@ -441,11 +441,21 @@ def _ended(target: MemoryRecord, successor: Memory, now: datetime) -> Memory:
 def _reinforced(target: MemoryRecord, incoming: Memory, *, now: datetime) -> Memory:
     """``target`` with ``incoming``'s supports added, one add support each (§11:6).
 
+    An observer's inference is admitted among the supports the fold actually adds
+    (ADR-0329 §9:7), as ``MemoryIngestor``'s.
+
     Raises:
-        MemoryStoreError: If ``target`` is not a memory, or an add support is refused.
+        MemoryStoreError: If ``target`` is not a memory, the supports it would add
+            break §9:7, or an add support is refused.
     """
     if not isinstance(target, Memory):
         msg = f"cannot reinforce {target.id!r}: not a memory"
+        raise MemoryStoreError(msg)
+    fault = inference_fault(
+        [one for one in incoming.supports if target.support_at(one.points_at) is None]
+    )
+    if fault is not None:
+        msg = f"cannot reinforce {target.id!r}: {fault}"
         raise MemoryStoreError(msg)
     folded = target
     for support in incoming.supports:

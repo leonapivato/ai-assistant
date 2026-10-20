@@ -4635,6 +4635,39 @@ class MemoryWriterContract:
 
         assert await _snapshot(store) == before
 
+    @pytest.mark.parametrize("carried", ["every-companion", "no-companion"])
+    async def test_a_reinforce_admits_an_inference_among_the_supports_it_adds(
+        self, make_writer: WriterFactory, carried: str
+    ) -> None:
+        """§9:7 holds over what a fold actually adds, after ADR-0328 §4:8's deduplication.
+
+        Where the target already carries every companion, the fold would add the
+        inference alone, and the whole write is refused; where it carries none of them,
+        the inference arrives with the supports it reads and is added with them.
+        """
+        store = await self._observer_store()
+        new = _inferred("new")
+        companions = new.supports[1:]
+        base = remembered_support(_THIRD_CITED, effect="effect-target", when=_WHEN, added_at=_WHEN)
+        held = (*companions,) if carried == "every-companion" else ()
+        target = memory("target", _DISAGREEING, base, *held)
+        await store.add(target)
+        before = await _snapshot(store)
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
+
+        if carried == "every-companion":
+            with pytest.raises(MemoryStoreError, match="§9:7"):
+                await writer.ingest(_proposal(new))
+            assert await _snapshot(store) == before
+            return
+        result = await writer.ingest(_proposal(new))
+        assert result.record_id == "target"
+        written = await store.get("target")
+        assert isinstance(written, Memory)
+        assert {one.points_at for one in new.supports} <= {
+            one.points_at for one in written.supports
+        }
+
     @pytest.mark.parametrize("direction", list(SupportDirection), ids=str)
     async def test_apply_never_adds_an_inference(
         self, make_writer: WriterFactory, direction: SupportDirection
