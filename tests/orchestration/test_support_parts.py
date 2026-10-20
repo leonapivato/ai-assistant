@@ -24,6 +24,7 @@ from ai_assistant.core.types import (
     InputPart,
     LegacyPart,
     MemorySource,
+    ObserverInferencePart,
     PlanningRound,
     ProposedCall,
     Provenance,
@@ -41,6 +42,7 @@ from ai_assistant.orchestration.remembering import (
     REMEMBER_CAPABILITY,
 )
 from ai_assistant.orchestration.support_parts import (
+    INFERENCE_CONTENT,
     episodes_to_read,
     part_content,
     remember_activations,
@@ -294,6 +296,15 @@ def test_two_remember_calls_saying_the_same_statement_resolve_to_it() -> None:
     effects = {"effect-1": _effect("effect-1", "a", "r-1")}
 
     assert _content(part, {record.id: record}, effects=effects) == "likes tea"
+
+
+def test_an_observers_inference_reads_as_what_it_is_while_its_episode_is_held() -> None:
+    """ADR-0329 §9:7: the part names no text of the episode, and is gone with it."""
+    record = _held(episode("a"))
+    part = ObserverInferencePart(episode=record.id)
+
+    assert _content(part, {record.id: record}) == INFERENCE_CONTENT
+    assert _content(part, {}) is None
 
 
 def test_a_legacy_part_reads_as_the_record_it_carries() -> None:

@@ -38,6 +38,8 @@ from ai_assistant.core.types import (
     Memory,
     MemoryDecisionKind,
     MemoryKind,
+    MemoryOperationKind,
+    MemoryRetirement,
     MemorySource,
     MemoryUpdateProposal,
     Provenance,
@@ -693,6 +695,39 @@ async def test_a_supersede_files_the_correction_written_and_the_target_supersede
     assert trace.metrics["decisions_supersede"] == 1
     assert trace.records[TraceRecordSet.SUPERSEDED].ids == ("stale",)
     assert trace.records[TraceRecordSet.WRITTEN].ids == (result.record_id,)
+
+
+async def test_a_retiring_proposal_files_the_memory_it_retired_as_superseded(
+    sink: FakeTraceSink,
+) -> None:
+    """ADR-0329 §12:4: the retired memory is filed beside the one written.
+
+    A correction measure tells a retired id from a reinforced one by this set (ADR-0119
+    §8), and a retirement a proposal carries closes a memory's window as a supersession
+    does, so it is filed there.
+    """
+    store = await _store()
+    await store.add(_preference("stale", "the office is on the third floor"))
+    stale = await store.get("stale")
+    assert isinstance(stale, Memory)
+    correction = _asserted("correction", "the office is on the fifth floor")
+    writer = _writer(store, sink, policy=FakeMemoryPolicy(MemoryDecisionKind.ACCEPT))
+
+    result = await writer.ingest(
+        _proposal(correction).model_copy(
+            update={
+                "retiring": MemoryRetirement(
+                    memory=stale,
+                    kind=MemoryOperationKind.END,
+                    cites=correction.supports[0].points_at,
+                )
+            }
+        )
+    )
+
+    trace = _only(sink, TraceKind.MEMORY_WRITE)
+    assert trace.records[TraceRecordSet.WRITTEN].ids == (result.record_id,)
+    assert trace.records[TraceRecordSet.SUPERSEDED].ids == ("stale",)
 
 
 async def test_an_inadmissible_proposal_traces_as_a_refusal_and_not_a_fault(
