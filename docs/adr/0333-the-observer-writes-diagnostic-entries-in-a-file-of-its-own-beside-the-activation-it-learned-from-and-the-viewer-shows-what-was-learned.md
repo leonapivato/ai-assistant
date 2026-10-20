@@ -1,12 +1,13 @@
 # 333. The observer writes diagnostic entries in a file of its own beside the activation it learned from, and the viewer shows what was learned
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0334 (§2's table, in the addition alone: the observer's given entries also carry their prompt's name, version and origin)
 - Date: 2026-10-20
 - Scope: milestone 3, "Learning v1: the observer" (acceptance [#3154](https://github.com/leonapivato/ai-assistant/issues/3154)): what the observer gives [ADR-0314](0314-a-diagnostic-record-keeps-what-each-phase-was-given-and-returned-and-nothing-reads-it-back.md)'s diagnostic record, where those entries live and how they age, and how [ADR-0316](0316-an-activation-viewer-outside-the-package-shows-the-diagnostic-record-to-the-owner-on-the-server.md)'s activation viewer shows them.
 - Dependency: ADR-0314, ADR-0316 and ADR-0329, as their status lines leave them.
 - Authorization: on 2026-10-20 the owner asked for "something similar to the activation viewer that's also viewing the learning", on the same platform, because the prompts are easier to evaluate "when I see it in action", and agreed the dispatcher's proposal: the same viewer, a learning lane, and a dry run on a copy of the live data before going live. Everything else below is the dispatcher's and this lane's recommendation, not an owner ruling. The dispatcher assigned 0333. The owner reads it before it is ratified (§1:1).
 - **Changes `core`, so it is a contract-surface decision.** `DiagnosticSource` gains one member, `observer` (§2:1). No Protocol changes, nothing the wire carries changes, and `PROTOCOL_VERSION` does not move.
 - **Partially supersedes**, in the clauses §6's first table names: ADR-0314, ADR-0316 and ADR-0329.
+- Partially superseded: 2026-10-20 by ADR-0334 — §2's table, which §2:1 binds, in the addition alone: each given entry the observer writes for a model call also carries `prompt`, the prompt's name, its template's version, and `default` or `override` (ADR-0334 §8:2). Every other clause stands. This replacement takes effect on ratification of ADR-0334. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
