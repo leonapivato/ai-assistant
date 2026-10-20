@@ -59,9 +59,10 @@ from episode_inspection_contract import (
     INSPECTION_LIMIT,
     EpisodeInspectionSubject,
 )
+from pending_candidates_contract import PENDING_AT, PENDING_LIMIT, PendingCandidatesSubject
 from story_surface_contract import STORY_LIMIT, STORY_SURFACE_AT, StorySurfaceSubject
 
-from ai_assistant.testing import FakeMemoryStore
+from ai_assistant.testing import FakeMemoryStore, FakePlanStore
 
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "orchestration"))
 
@@ -213,6 +214,21 @@ async def serving(
         await hub.aclose()
 
 
+@contextlib.asynccontextmanager
+async def _pending(tmp_path: Path, *, candidates: bool) -> AsyncIterator[PendingCandidatesSubject]:
+    """A client of a hub whose fake engine reads the injected stores at the bound."""
+    memory = FakeMemoryStore(now=lambda: PENDING_AT)
+    plans = FakePlanStore(now=lambda: PENDING_AT)
+    backing = FakeAssistantEngine(max_payload_bytes=PENDING_LIMIT)
+    backing.episode_memory = memory
+    backing.plan_store = plans
+    backing.candidates = candidates
+    async with serving(
+        backing, tmp_path / "hub.sock", max_frame_bytes=PENDING_LIMIT + ENVELOPE_RESERVE_BYTES
+    ) as client:
+        yield PendingCandidatesSubject(engine=client, memory=memory, plans=plans)
+
+
 class TestHubEngineClientContract(AssistantEngineContract):
     """The client, held to the shared contract over a real socket."""
 
@@ -278,6 +294,22 @@ class TestHubEngineClientContract(AssistantEngineContract):
             max_frame_bytes=INSPECTION_LIMIT + ENVELOPE_RESERVE_BYTES,
         ) as client:
             yield EpisodeInspectionSubject(engine=client, memory=memory)
+
+    @pytest.fixture
+    async def pending_candidates_subject(
+        self, tmp_path: Path
+    ) -> AsyncIterator[PendingCandidatesSubject]:
+        """The panel's read over an authenticated local socket, candidates on."""
+        async with _pending(tmp_path, candidates=True) as subject:
+            yield subject
+
+    @pytest.fixture
+    async def pending_candidates_off(
+        self, tmp_path: Path
+    ) -> AsyncIterator[PendingCandidatesSubject]:
+        """The same, the hub's switch off: the client has no switch of its own."""
+        async with _pending(tmp_path, candidates=False) as subject:
+            yield subject
 
     @pytest.fixture
     async def engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:

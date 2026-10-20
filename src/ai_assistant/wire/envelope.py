@@ -2661,7 +2661,12 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     refuses the new member as unknown (ADR-0124 §9:2). ``MemoryWriterName`` gains
 #:     ``observer`` and ``MemoryUpdateProposal`` ``retiring``, neither carried by the
 #:     wire, and the method set does not move.
-PROTOCOL_VERSION: Final[int] = 111
+#: 112: ADR-0329 §18:2 advances the version once for the panel's read of the pending
+#:     candidates, on these grounds: the promoted method set gains
+#:     ``pending_candidates``, and the wire carries ``PendingCandidate``, which it
+#:     returns. A hub at 111 does not route the method a peer at 112 calls
+#:     (ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 112
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

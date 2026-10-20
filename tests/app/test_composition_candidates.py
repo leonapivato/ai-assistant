@@ -1,7 +1,8 @@
 """The composition root's switch for planning's side of the observer (ADR-0329 §19:3).
 
 Off, every deployment's ``remember`` is the interim's (ADR-0328 §13): it writes through
-``MemoryPolicy``, nothing records a candidate, and reliance is not offered. Turned on —
+``MemoryPolicy``, nothing records a candidate, reliance is not offered, and the panel's
+read of the pending candidates answers none (ADR-0329 §18:2). Turned on —
 the one line the lane wiring the observer changes — ``remember`` records a candidate,
 its lookup is the look-ups', and reliance is offered. No setting reads it, so no
 person's hub can turn it on by itself.
@@ -66,6 +67,9 @@ async def test_off_remember_is_the_interims_and_reliance_is_not_offered(tmp_path
         assert phases._authorizing._candidates is False
         assert phases._planning._candidates is False
         assert phases._candidates is False
+        # ADR-0329 §18:2: the panel's read honours the same switch, so it answers none.
+        assert engine._candidates is False
+        assert await engine.pending_candidates() == ()
         assert REMEMBER_CAPABILITY not in phases._label_arguments
     finally:
         await engine.aclose()
@@ -90,6 +94,7 @@ async def test_on_remember_records_candidates_and_reliance_is_offered(
         assert phases._authorizing._candidates is True
         assert phases._planning._candidates is True
         assert phases._candidates is True
+        assert engine._candidates is True
         assert set(phases._label_arguments[REMEMBER_CAPABILITY]) == {
             "rests_on_user_messages",
             "rests_on_assistant_messages",

@@ -70,6 +70,7 @@ from episode_inspection_contract import (
     INSPECTION_LIMIT,
     EpisodeInspectionSubject,
 )
+from pending_candidates_contract import PENDING_AT, PENDING_LIMIT, PendingCandidatesSubject
 from phases_support import phase_path
 from story_surface_contract import STORY_LIMIT, STORY_SURFACE_AT, StorySurfaceSubject
 from understanding_support import VERSION_LIMIT, understanding_stage, windows_stage
@@ -315,6 +316,8 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     chat_reader: bool = True,
     conversation_store: FakeConversationStore | None = None,
     phases: Mapping[str, Any] | None = None,
+    plans: FakePlanStore | None = None,
+    candidates: bool = False,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -358,6 +361,10 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     phases' acting over this subject's invoker. Given, the path also holds this
     subject's egress binder, as the composition root's does; ``None`` builds the path
     every shared case runs on, unchanged.
+
+    ``plans`` is the plan store, a knob so a case can seed the effect records and
+    observation records the pending candidates' read joins; ``candidates`` is the
+    composition root's switch that read honours (ADR-0329 §19:3), off as it is there.
     """
     # **The conversation store's clock advances**, because ADR-0074 §2's sort key
     # is activity and a frozen clock cannot express "more recently active" at all —
@@ -366,7 +373,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     # is about ordering in time.
     ticks = count(1)
     conversation_clock = lambda: AT + timedelta(seconds=next(ticks))  # noqa: E731
-    store = FakePlanStore(now=lambda: AT)
+    store = FakePlanStore(now=lambda: AT) if plans is None else plans
     audit: ConsumingTrail = FakeAuditTrail() if trail is None else trail
     read_trail: SourceReadTrail = FakeSourceReadTrail() if reads is None else reads
     confirmable = _confirmable()
@@ -452,6 +459,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         max_payload_bytes=max_payload_bytes,
         stories=stories,
         chat_reader=chat_reader,
+        candidates=candidates,
         # ADR-0309 §2:6: the phases plan what the chat's reader takes in and every event,
         # as they will on every deployment once the switch lane lands; they are wired
         # only beside the reader, so a subject with it off has none. Over the same
@@ -469,6 +477,20 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
             else None
         ),
     )
+
+
+async def _pending(*, candidates: bool) -> AsyncIterator[PendingCandidatesSubject]:
+    """An engine at the pending candidates' bound, its stores injected and clocked there."""
+    memory = FakeMemoryStore(now=lambda: PENDING_AT)
+    plans = FakePlanStore(now=lambda: PENDING_AT)
+    built = _wire(
+        memory=memory, plans=plans, candidates=candidates, max_payload_bytes=PENDING_LIMIT
+    )
+    await built.start()
+    try:
+        yield PendingCandidatesSubject(engine=built, memory=memory, plans=plans)
+    finally:
+        await built.aclose()
 
 
 class TestEngineContract(AssistantEngineContract):
@@ -525,6 +547,18 @@ class TestEngineContract(AssistantEngineContract):
             yield EpisodeInspectionSubject(engine=built, memory=memory)
         finally:
             await built.aclose()
+
+    @pytest.fixture
+    async def pending_candidates_subject(self) -> AsyncIterator[PendingCandidatesSubject]:
+        """The production engine built with candidates on, over injected stores."""
+        async for subject in _pending(candidates=True):
+            yield subject
+
+    @pytest.fixture
+    async def pending_candidates_off(self) -> AsyncIterator[PendingCandidatesSubject]:
+        """The production engine built as the composition root builds it, the switch off."""
+        async for subject in _pending(candidates=False):
+            yield subject
 
     @pytest.fixture
     async def engine(self) -> AsyncIterator[AssistantEngine]:

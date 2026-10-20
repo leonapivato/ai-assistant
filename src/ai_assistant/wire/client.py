@@ -137,6 +137,7 @@ if TYPE_CHECKING:
         NonBlankEncodableText,
         NotificationDelivery,
         NotificationPreferences,
+        PendingCandidate,
         PermissionDecision,
         Placement,
         RecordedInvocation,
@@ -643,6 +644,18 @@ class HubClient:
         """
         named = identifier(record_id, name="record_id")
         return await self._call("forget", record_id=named)  # type: ignore[no-any-return]
+
+    async def pending_candidates(self) -> tuple[PendingCandidate, ...]:
+        """The candidates the observer has not yet processed (ADR-0329 §18:2).
+
+        **No local refusal to add**, the method taking no argument. The hub answers
+        none while ``remember`` writes memories under ADR-0328 §13's interim, which
+        is the hub's switch and no setting of this client's.
+
+        Returns:
+            The pending candidates, the most recent episode's first.
+        """
+        return await self._call("pending_candidates")  # type: ignore[no-any-return]
 
     async def guard(self, record_id: Identifier) -> Placement | None:
         """Keep one belief for the owner alone (ADR-0217 §7).

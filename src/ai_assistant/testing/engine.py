@@ -89,6 +89,7 @@ from ai_assistant.core.types import (
     MessageAuthor,
     NewMessage,
     NotificationDelivery,
+    PendingCandidate,
     PermissionDecision,
     Placement,
     PlacementReach,
@@ -131,6 +132,7 @@ from ai_assistant.core.types import (
     story_note_text,
     user_message,
 )
+from ai_assistant.orchestration.candidates import held_candidates
 from ai_assistant.orchestration.change_stream import Activity, ChangeStream
 from ai_assistant.orchestration.channels import (
     UNCAPTURED,
@@ -192,6 +194,7 @@ from ai_assistant.testing.notifications import (
     FakeNotificationStore,
 )
 from ai_assistant.testing.permissions import FakeAuditTrail
+from ai_assistant.testing.planning import FakePlanStore
 from ai_assistant.testing.reads import FakeSourceReadTrail
 from ai_assistant.testing.stories import FakeStoryStore
 
@@ -339,6 +342,14 @@ class FakeAssistantEngine:
         #: methods make read :attr:`episode_memory`, which is where a consumer seeds
         #: the episodes a story's activation members name.
         self.story_store = FakeStoryStore(now=lambda: _AT)
+        #: The plan store :meth:`pending_candidates` reads the observation records and
+        #: effect records from, public so a consumer can seed or inspect it; the
+        #: episodes it joins are :attr:`episode_memory`'s (ADR-0329 §3:3).
+        self.plan_store = FakePlanStore(now=lambda: _AT)
+        #: Whether ``remember`` records candidates (ADR-0329 §19:3), as the engine's
+        #: ``candidates`` says the same: off, the composition root's value until the
+        #: observer is wired, and :meth:`pending_candidates` then answers none.
+        self.candidates = False
         #: The placement each held belief carries (ADR-0217 §1), by record id. Held
         #: **beside** the beliefs rather than on them, because
         #: :class:`~ai_assistant.core.types.Belief` carries no placement: ADR-0217 §7
@@ -1076,6 +1087,21 @@ class FakeAssistantEngine:
         self.placements.pop(named, None)
         removed_belief = self.beliefs_held.pop(named, None) is not None
         return self._checked(removed_episode or removed_belief, "forget")
+
+    async def pending_candidates(self) -> tuple[PendingCandidate, ...]:
+        """The pending candidates of :attr:`episode_memory`'s episodes (ADR-0329 §18:2).
+
+        The engine's own reading, over :attr:`episode_memory` and :attr:`plan_store`
+        (:func:`~ai_assistant.orchestration.candidates.held_candidates`), so the suite
+        compares two implementations of the surface rather than two of the join. With
+        :attr:`candidates` off, as it is by default and as the engine's switch is, it
+        answers none and reads nothing.
+        """
+        self.calls.append(("pending_candidates", {}))
+        if not self.candidates:
+            return self._checked((), "pending_candidates")
+        held = await held_candidates(self.episode_memory, self.plan_store)
+        return self._checked(held, "pending_candidates")
 
     # --- the owner's placement acts (ADR-0217 §7) --------------------------
 
