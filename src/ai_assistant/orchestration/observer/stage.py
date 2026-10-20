@@ -26,6 +26,28 @@ model call the attempt made, so the budget counts every call and a retry commits
 the findings with no outcome. A run writes nothing to the episode, links nothing to a
 story and adds nothing the selector reads (§7:4).
 
+**What a later attempt needs is on the record, never only in the process** (§12:6,
+§16:1, §16:4), so a hub that stops between attempts — or in the middle of one — loses
+nothing:
+
+- each pending finding carries its ``supply``, the meet of every record the runs over
+  it were supplied, the scout's included: set when the scout proposes it, narrowed by
+  every later reading and commit view of its episode before anything is written, and
+  read back as the floor a later commit's placement starts from;
+- each write a commit lands is put in the finding's ``written`` as soon as it lands,
+  before anything else is read or written, so a failure, a cancellation or a stop that
+  follows still leaves it on the record; the commit that decides the finding's outcome
+  merges them into it and clears ``written`` in the same write, a stuck episode's
+  included once an explicit re-run decides it;
+- a supersession whose replacement landed is in ``written`` as that replacement's
+  create, and a later commit reads again what every memory there was created over
+  retired, so a replacement whose retirements were not read when it landed has them
+  recorded on the retry.
+
+A pending finding whose ``supply`` is not recorded — one the plan store held before
+the field — is proposed again by a new scout over the current reading, since its supply
+is unknown and nothing may stand in for it.
+
 **One run at a time** (§16:6): a run asked for while one is running does not start and
 answers busy. The hub is one resident process per data directory, so a lock held in
 the process is the whole of it; the observation record's conditional write is the
@@ -265,13 +287,10 @@ class Observer:
         )
         self._writer = FindingWriter(writes=writes, memory=memory, now=self._now, mint=self._mint)
         self._lock = asyncio.Lock()
-        # What this process keeps beside an episode between its attempts: the supply its
-        # findings were proposed over (§12:6); what a failed commit wrote, with each
-        # replacement whose retirements were not yet read (§16:1); and an outcome decided
-        # whose record could not be written, so the finding is not committed again.
-        self._supplies: dict[str, list[Placement]] = {}
-        self._progress: dict[tuple[str, str], tuple[ObservationWrite, ...]] = {}
-        self._unread: dict[tuple[str, str], tuple[str, ...]] = {}
+        # An outcome decided whose record could not be written, so this process records
+        # it as decided rather than committing the finding again. Every write it made is
+        # already on the record's ``written``, so a process that no longer holds it
+        # decides the finding again with those writes merged in (§12:7, §16:1).
         self._decided: dict[tuple[str, str], ObservationFinding] = {}
 
     async def run(self) -> RunOutcome:
@@ -408,15 +427,9 @@ class Observer:
         return ObservationState.PROCESSED
 
     def _forget(self, episode_id: str) -> None:
-        """Drop what this process kept beside an episode processed or read afresh.
-
-        A stuck episode keeps it: an explicit re-run in this process commits its pending
-        findings with what their failed commits wrote (§16:1, §16:5).
-        """
-        self._supplies.pop(episode_id, None)
-        for held in (self._progress, self._unread, self._decided):
-            for key in [key for key in held if key[0] == episode_id]:
-                del held[key]
+        """Drop the outcomes this process kept beside an episode processed or read afresh."""
+        for key in [key for key in self._decided if key[0] == episode_id]:
+            del self._decided[key]
 
     async def _open(
         self, episode_id: str, held: ObservationRecord | None, started: datetime
@@ -437,36 +450,28 @@ class Observer:
     ) -> None:
         """Read, scout where no finding is pending yet, and commit each finding left.
 
-        The findings an earlier attempt proposed are committed over the supply the scout
-        that proposed them read, which this process keeps beside the episode, joined with
-        this attempt's (§12:6). Where the process no longer holds it, having restarted
-        since, the findings with no outcome are proposed again over this attempt's
-        reading, and those with an outcome stay as recorded (§16:4).
+        The findings an earlier attempt proposed are committed over the supply recorded
+        on each, narrowed by this attempt's reading (§12:6). A pending finding whose
+        supply is not recorded is proposed again over this attempt's reading, and those
+        with an outcome stay as recorded (§16:4).
         """
         reading = await self._reader.read(episode, window)
         findings = attempt.record.findings
-        carried = self._supplies.get(episode.id)
-        pending = [one for one in findings if one.outcome is None]
-        if not findings or (pending and carried is None):
+        unknown = any(one.outcome is None and one.supply is None for one in findings)
+        if not findings or unknown:
             kept = tuple(one for one in findings if one.outcome is not None)
             self._forget(episode.id)
-            carried = []
             await self._scouted(reading, attempt, kept)
-        supplied = [] if carried is None else carried
-        supplied.extend(reading.supplied)
-        self._supplies[episode.id] = supplied
-        for finding in attempt.record.findings:
-            if finding.outcome is not None:
-                continue  # §16:4: a finding whose outcome is recorded is not committed again
-            key = (episode.id, finding.id)
+        else:
+            _narrow(attempt, reading.supplied)
+        for finding_id in [one.id for one in attempt.record.findings if one.outcome is None]:
+            key = (episode.id, finding_id)
             # An outcome decided before its record failed to be written is recorded as
             # decided, never committed again over writes that already landed (§16:1).
-            outcome = self._decided.get(key) or await self._committed(
-                finding, reading, attempt, supplied
-            )
+            outcome = self._decided.get(key) or await self._committed(finding_id, reading, attempt)
             self._decided[key] = outcome
             done = tuple(
-                outcome if one.id == finding.id else one for one in attempt.record.findings
+                outcome if one.id == finding_id else one for one in attempt.record.findings
             )
             await self._save(attempt, findings=done)
             del self._decided[key]
@@ -474,35 +479,36 @@ class Observer:
     async def _scouted(
         self, reading: Reading, attempt: _Attempt, kept: tuple[ObservationFinding, ...]
     ) -> None:
-        """The scout's one call, and its findings recorded after those kept (§9:1-§9:2)."""
+        """The scout's one call, and its findings recorded after those kept (§9:1-§9:2).
+
+        Each new finding carries the meet of what the scout was supplied (§12:6), so a
+        commit in a later attempt, by this process or after a restart, starts from it.
+        """
         reply = await self._call(attempt, ObserverStep.SCOUT, self._scout, scout_messages(reading))
         proposal = parsed(reply, ScoutReply)
         if proposal is None:
             raise _Unparsed(ObserverStep.SCOUT)
         findings, dropped = proposed_findings(proposal, reading, numbered_from=_next_number(kept))
+        supply = Placement.narrowest_of(reading.supplied)
         _log.info("observer_scout", stage="scout", findings=len(findings), dropped=dropped)
-        await self._save(attempt, findings=(*kept, *findings))
+        await self._save(
+            attempt, findings=(*kept, *(_updated(one, supply=supply) for one in findings))
+        )
 
     async def _committed(
-        self,
-        finding: ObservationFinding,
-        reading: Reading,
-        attempt: _Attempt,
-        supplied: list[Placement],
+        self, finding_id: str, reading: Reading, attempt: _Attempt
     ) -> ObservationFinding:
         """One finding's commit call, code's checks, and its writes (§9:3-§9:5, §12).
 
-        What an earlier, failed commit of the finding wrote joins the outcome, whatever
-        this one decides (§16:1).
+        What an earlier commit of the finding wrote — its ``written``, with what any
+        replacement there retired read again — joins the outcome, whatever this one
+        decides, and the outcome clears ``written`` in the write that records it (§16:1).
         """
-        key = (finding.episode, finding.id)
-        unread = self._unread.get(key)
-        if unread:
-            ends = await self._writer.retirements(unread)
-            self._progress[key] = _joined(self._progress.get(key, ()), ends)
-            del self._unread[key]
-        outcome = await self._decision(finding, reading, attempt, supplied)
-        earlier = self._progress.pop(key, ())
+        finding = _finding(attempt, finding_id)
+        earlier = await self._recovered(finding.written)
+        if earlier != finding.written:
+            _set(attempt, _updated(finding, written=earlier))
+        outcome = await self._decision(finding_id, reading, attempt, earlier)
         if earlier:
             outcome = _with_writes(outcome, earlier)
         _log.info(
@@ -512,18 +518,43 @@ class Observer:
             unwritten=None if outcome.unwritten is None else outcome.unwritten.value,
             writes=len(outcome.writes),
         )
-        return _with_outcome(finding, outcome)
+        return _updated(_finding(attempt, finding_id), written=(), outcome=outcome)
+
+    async def _recovered(
+        self, written: tuple[ObservationWrite, ...]
+    ) -> tuple[ObservationWrite, ...]:
+        """``written``, with the end on each memory a replacement there retired (§16:1).
+
+        A supersession lands whole, so what it retired is on its replacement's create
+        however the replacement stands now. A memory ``written`` already names — the
+        retirement read when it landed, or the one a proposal's own retiring operation
+        made — is not named again.
+
+        Raises:
+            MemoryStoreError: Where a replacement cannot be read: the attempt fails,
+                ``written`` stays as recorded, and the retry reads it again.
+        """
+        created = [one.memory for one in written if MemoryOperationKind.CREATE in one.operations]
+        if not created:
+            return written
+        named = {one.memory for one in written}
+        ends = await self._writer.retirements(created)
+        return _joined(written, [one for one in ends if one.memory not in named])
 
     async def _decision(
         self,
-        finding: ObservationFinding,
+        finding_id: str,
         reading: Reading,
         attempt: _Attempt,
-        supplied: list[Placement],
+        earlier: tuple[ObservationWrite, ...],
     ) -> FindingOutcome:
-        """This commit's call, checks and writes: what it wrote, or why nothing was."""
+        """This commit's call, checks and writes: what it wrote, or why nothing was.
+
+        Every write that lands is put in the finding's ``written`` beside ``earlier``
+        and saved before the next is made (§16:1).
+        """
         view = await commit_view(
-            finding,
+            _finding(attempt, finding_id),
             reading,
             reader=self._reader,
             memory=self._memory,
@@ -532,7 +563,8 @@ class Observer:
         )
         if view is None:
             return _check_failed(self._now())
-        supplied.extend(view.supplied)
+        _narrow(attempt, view.supplied)
+        supply = _finding(attempt, finding_id).supply
         reply = await self._call(attempt, ObserverStep.COMMIT, self._commit, commit_messages(view))
         decision = parsed(reply, CommitReply)
         if decision is None:
@@ -542,19 +574,17 @@ class Observer:
             view,
             now=self._now(),
             mint=self._mint,
-            placement=Placement.narrowest_of(supplied),
+            placement=Placement() if supply is None else supply,
         )
-        key = (finding.episode, finding.id)
-        try:
-            return await self._writer.write(verdict, shown=[one.memory for one in view.similar])
-        except BaseException:
-            # §16:1: what the commit wrote before it failed — or before the run was
-            # cancelled — is kept, and merged into the outcome the finding is given when
-            # it is decided again.
-            self._progress[key] = _joined(self._progress.get(key, ()), self._writer.partial)
-            if self._writer.unread:
-                self._unread[key] = (*self._unread.get(key, ()), *self._writer.unread)
-            raise
+
+        async def landed(writes: tuple[ObservationWrite, ...]) -> None:
+            current = _finding(attempt, finding_id)
+            _set(attempt, _updated(current, written=_joined(earlier, writes)))
+            await self._save(attempt, findings=attempt.record.findings)
+
+        return await self._writer.write(
+            verdict, shown=[one.memory for one in view.similar], landed=landed
+        )
 
     async def _call(
         self,
@@ -630,9 +660,38 @@ class Observer:
         return state
 
 
-def _with_outcome(finding: ObservationFinding, outcome: FindingOutcome) -> ObservationFinding:
-    """``finding`` carrying its outcome, validated whole (§16:1)."""
-    return type(finding).model_validate({**finding.model_dump(), "outcome": outcome})
+def _updated(finding: ObservationFinding, **fields: object) -> ObservationFinding:
+    """``finding`` with ``fields`` replaced, validated whole (§16:1)."""
+    return type(finding).model_validate({**dict(finding), **fields})
+
+
+def _finding(attempt: _Attempt, finding_id: str) -> ObservationFinding:
+    """The finding ``finding_id`` as the attempt's record now holds it."""
+    return next(one for one in attempt.record.findings if one.id == finding_id)
+
+
+def _set(attempt: _Attempt, finding: ObservationFinding) -> None:
+    """Put ``finding`` on the attempt's record in place of its earlier self, unsaved.
+
+    The next write of the record — a model call's, a landed write's, the outcome's or
+    the failure's — carries it.
+    """
+    findings = tuple(finding if one.id == finding.id else one for one in attempt.record.findings)
+    attempt.record = attempt.record.model_copy(update={"findings": findings})
+
+
+def _narrow(attempt: _Attempt, supplied: Sequence[Placement]) -> None:
+    """Narrow every pending finding's supply by ``supplied`` (§12:6), unsaved.
+
+    Every record the run reads over an episode is supplied to it, so each finding still
+    to be committed takes the meet, whichever finding's commit view read it; a finding
+    whose supply is unknown stays unknown.
+    """
+    if not supplied:
+        return
+    for one in attempt.record.findings:
+        if one.outcome is None and one.supply is not None:
+            _set(attempt, _updated(one, supply=Placement.narrowest_of([one.supply, *supplied])))
 
 
 def _reason(exc: Exception) -> str:

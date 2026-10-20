@@ -30,8 +30,14 @@ A write the writer refuses as self-consuming or as a fold onto a record it cites
 failed §9:5's check. Every other failure of the write path fails the attempt, which is
 retried and in the end set aside as stuck (§16:4-§16:5): ``MemoryStoreError`` is a
 store's failure as well as a refusal, and only a retry tells a passing outage from a
-refusal, so neither is recorded as a terminal outcome. What one finding wrote before a
-later write of its own failed is recorded with it, never lost.
+refusal, so neither is recorded as a terminal outcome.
+
+**What one finding wrote is handed to the caller as each write lands** (§16:1), before
+the write is verified and before anything else is read or written, so the caller can put
+it on the durable record and a later failure, a cancellation or a stop loses none of it.
+A supersession is handed over as its replacement's create before what it retired is
+read, so a read that fails there leaves the replacement on the record, and what it
+retired is read off its create again (:meth:`FindingWriter.retirements`).
 """
 
 from __future__ import annotations
@@ -83,7 +89,11 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.writes import MemoryWriteStage
 
-__all__ = ["FindingWriter", "WriteBlocked"]
+__all__ = ["FindingWriter", "Landed", "WriteBlocked"]
+
+#: What a commit hands its caller as each write lands: everything it has written so far,
+#: by memory, in the order written (§16:1).
+type Landed = Callable[[tuple[ObservationWrite, ...]], Awaitable[None]]
 
 #: What a ``policy_ask`` question asks, in words, before the claim the policy asked about.
 _ASK_ASKS: Final = "The write path asked before keeping this beside this memory: "
@@ -115,7 +125,6 @@ class _Ledger:
         self.operations: dict[str, list[MemoryOperationKind]] = {}
         self.track_record: dict[str, bool] = {}
         self.ruling: MemoryDecisionKind | None = None
-        self.unread: list[str] = []
 
     def wrote(self, memory: str, *kinds: MemoryOperationKind) -> None:
         self.operations.setdefault(memory, []).extend(kinds)
@@ -176,16 +185,22 @@ class FindingWriter:
         self._mint = mint
         self._expected: dict[str, int] = {}
         self._shown: dict[str, Memory] = {}
-        self.partial: tuple[ObservationWrite, ...] = ()
-        self.unread: tuple[str, ...] = ()
+        self._ledger = _Ledger()
+        self._landed: Landed | None = None
 
-    async def write(self, checked: Checked, *, shown: Sequence[Memory] = ()) -> FindingOutcome:
+    async def write(
+        self, checked: Checked, *, shown: Sequence[Memory] = (), landed: Landed | None = None
+    ) -> FindingOutcome:
         """Write ``checked`` and return the finding's outcome (§16:1).
 
         Args:
             checked: The decision, after code's checks.
             shown: The memories the commit step was shown, as read, against which a
                 fold onto one of them is verified as this finding's own.
+            landed: Handed everything this commit has written so far, each time a write
+                lands and before anything else is read or written, so the caller keeps it
+                on the durable record whatever follows (§16:1). What it raises fails the
+                commit, as a failure of the write path does.
 
         Returns:
             What was written, or why nothing was.
@@ -199,26 +214,24 @@ class FindingWriter:
         ledger = _Ledger()
         self._expected = {}
         self._shown = {one.id: one for one in shown}
-        self.partial = ()
-        self.unread = ()
+        self._ledger = ledger
+        self._landed = landed
         unwritten: FindingUnwritten | None = None
         try:
+            unwritten = await self._primary(checked.primary, ledger)
+        except _Refusal as refusal:
+            unwritten = refusal.reason
+        if checked.resolve is not None:
             try:
-                unwritten = await self._primary(checked.primary, ledger)
+                await self._resolve(checked.resolve, ledger)
             except _Refusal as refusal:
-                unwritten = refusal.reason
-            if checked.resolve is not None:
-                try:
-                    await self._resolve(checked.resolve, ledger)
-                except _Refusal as refusal:
-                    unwritten = unwritten or refusal.reason
-        except BaseException:
-            # What was written before the failure is the caller's to keep (§16:1), with
-            # each installed replacement whose retirements were not yet read.
-            self.partial = ledger.writes()
-            self.unread = tuple(ledger.unread)
-            raise
+                unwritten = unwritten or refusal.reason
         return ledger.outcome(self._now(), unwritten)
+
+    async def _kept(self) -> None:
+        """Hand what this commit has written so far to the caller (§16:1)."""
+        if self._landed is not None:
+            await self._landed(self._ledger.writes())
 
     async def _primary(
         self,
@@ -313,13 +326,15 @@ class FindingWriter:
             ledger.wrote(written, MemoryOperationKind.CREATE)
         if retiring is not None:
             ledger.wrote(retiring.memory.id, retiring.kind)
+        # What the ruling wrote reaches the record before anything more is read (§16:1).
+        await self._kept()
         if kind is MemoryDecisionKind.SUPERSEDE:
             # The supersession landed whole, so what it retired is read off the installed
-            # replacement; until that read succeeds the caller holds its id to read again.
-            ledger.unread.append(written)
+            # replacement; a read that fails leaves the replacement's create on the
+            # record, and a retry reads its retirements again (§16:1).
             for retired in await self.retirements([written]):
                 ledger.wrote(retired.memory, *retired.operations)
-            ledger.unread.remove(written)
+            await self._kept()
         return None
 
     async def retirements(self, installed: Sequence[str]) -> tuple[ObservationWrite, ...]:
@@ -336,8 +351,8 @@ class FindingWriter:
             An end on each memory their creates name as replaced, in the order named.
 
         Raises:
-            MemoryStoreError: Where a replacement cannot be read: the caller keeps the
-                ids and reads them again on a retry (§16:1).
+            MemoryStoreError: Where a replacement cannot be read: its create stays on
+                the record, and a retry reads it again (§16:1).
         """
         found: dict[str, object] = (
             dict(await self._memory.get_many(list(installed))) if installed else {}
@@ -531,6 +546,7 @@ class FindingWriter:
             raise _Refusal(FindingUnwritten.REFUSED) from exc
         if written is not None:
             written()
+            await self._kept()
         await self._verified(checks)
         return done
 

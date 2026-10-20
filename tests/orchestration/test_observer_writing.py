@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     MemorySupport,
     MemoryUpdateProposal,
     MemoryWriterName,
+    ObservationWrite,
     OpenQuestion,
     OpenQuestionKind,
     Placement,
@@ -535,12 +536,18 @@ async def test_a_write_that_lands_is_kept_though_its_verification_fails() -> Non
     harness.writes.apply = landing  # type: ignore[method-assign]  # notes when the write lands
     harness.memory.get_many = failing_after_write  # type: ignore[method-assign,assignment]  # then an outage
     writer = _writer(harness)
+    kept: list[tuple[ObservationWrite, ...]] = []
+
+    async def landed_writes(writes: tuple[ObservationWrite, ...]) -> None:
+        kept.append(writes)
 
     with pytest.raises(MemoryStoreError):
-        await writer.write(Checked(primary=AddSupports(target=held, supports=(_said(),))))
+        await writer.write(
+            Checked(primary=AddSupports(target=held, supports=(_said(),))), landed=landed_writes
+        )
 
-    assert [(one.memory, one.operations) for one in writer.partial] == [
-        ("m-seat", (MemoryOperationKind.ADD_SUPPORT,))
+    assert [[(one.memory, one.operations) for one in writes] for writes in kept] == [
+        [("m-seat", (MemoryOperationKind.ADD_SUPPORT,))]
     ]
     landed = False
     after = await harness.memory.get(held.id)
@@ -587,14 +594,18 @@ async def test_a_supersession_whose_replacement_cannot_be_read_keeps_it_to_read_
     harness.writes.write = landing  # type: ignore[method-assign,assignment]  # notes the landing
     harness.memory.get_many = failing_replacement  # type: ignore[method-assign,assignment]  # an outage
     writer = _writer(harness)
+    kept: list[tuple[ObservationWrite, ...]] = []
+
+    async def landed_writes(writes: tuple[ObservationWrite, ...]) -> None:
+        kept.append(writes)
 
     with pytest.raises(MemoryStoreError):
-        await writer.write(Checked(primary=Create(memory=_new())))
+        await writer.write(Checked(primary=Create(memory=_new())), landed=landed_writes)
 
-    (installed,) = writer.unread
-    assert [(one.memory, one.operations) for one in writer.partial] == [
-        (installed, (MemoryOperationKind.CREATE,))
-    ]
+    (writes,) = kept
+    (created,) = writes
+    installed = created.memory
+    assert created.operations == (MemoryOperationKind.CREATE,)
     failing = False
     assert [(one.memory, one.operations) for one in await writer.retirements([installed])] == [
         ("m-old", (MemoryOperationKind.END,))
