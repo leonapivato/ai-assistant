@@ -167,6 +167,9 @@ def test_a_call_records_one_fact_what_it_rests_on_and_why() -> None:
         pytest.param(
             _arguments(rests_on_input=True, note="bears on it"), "the memory it names", id="note"
         ),
+        pytest.param(
+            _arguments(rests_on_input=True, memory="m1"), "says in a note how", id="memory"
+        ),
         pytest.param(_arguments(rests_on_input="yes"), "true or false", id="flag"),
         pytest.param(_arguments(rests_on_user_messages=[3]), "names things by label", id="labels"),
         pytest.param(
