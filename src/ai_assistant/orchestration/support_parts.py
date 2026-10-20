@@ -41,7 +41,7 @@ from ai_assistant.core.types import (
     part_episode,
 )
 from ai_assistant.orchestration.planning import DELIBERATE_REPEAT, LOOKING_FOR
-from ai_assistant.orchestration.remembering import REMEMBER, STATEMENT_ARGUMENT
+from ai_assistant.orchestration.remembering import FACT_ARGUMENT, REMEMBER, STATEMENT_ARGUMENT
 from ai_assistant.orchestration.stories import episode_address
 
 if TYPE_CHECKING:
@@ -212,15 +212,18 @@ def _approved(processing: EpisodeProcessingRecord | None, round_id: str, part: i
 
     The round keeps every call its message asked about, with the values it sends
     (ADR-0321 §2:8); the part numbers them from one. A remember's statement is the
-    wording the user approved (§4:6); a call carrying none reads as the round's message,
-    which asked the question.
+    wording the user approved (§4:6), and so is a candidate's fact once ``remember``
+    records candidates (ADR-0329 §5:5); a call carrying neither reads as the round's
+    message, which asked the question.
     """
     round_ = _round(processing, round_id)
     if round_ is None or not 1 <= part <= len(round_.asked):
         return None
-    statement = round_.asked[part - 1].values.get(STATEMENT_ARGUMENT)
-    if isinstance(statement, str) and statement:
-        return statement
+    values = round_.asked[part - 1].values
+    for argument in (STATEMENT_ARGUMENT, FACT_ARGUMENT):
+        statement = values.get(argument)
+        if isinstance(statement, str) and statement:
+            return statement
     return round_.text or None
 
 

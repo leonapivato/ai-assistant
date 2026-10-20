@@ -1,0 +1,870 @@
+"""The commit step: one model call per finding, and the checks code makes (ADR-0329 §9-§11).
+
+**What the step is shown** (§9:3): only the finding's claim; the parts it rests on, each
+with the message it answers where it is a reply; and the memories the observer's search
+finds similar to the claim, with their supports and open questions. A reliance finding
+is shown the reliance call and the memory it named as well (§14:2). Nothing else of the
+reading reaches it, so a manipulated or confused scout can propose, but cannot launder
+content into a memory it does not rest on.
+
+**What it decides** (§9:4): the memory's wording, which supports to add and, for each,
+its direction, whether it backs the claim as worded, how sure the reading is, its
+about-when and its note; and which of ADR-0328 §5's operations to apply, or that nothing
+is kept. Its decisions follow §§10-11, which its instruction states.
+
+**What code sets and checks** (§9:5), never a model: each support's origin, its
+``when``, its source details and its added at and by; that every part a support points
+at is one the finding rests on, read from a stored episode; the admission of the
+assistant's own words (§10:1); §9:7's rule for an observer's inference; §11:5's floor;
+and, before a retirement is proposed, ADR-0328 §6:5's refusal of a lower standing, which
+raises a ``conflict`` question instead (§13:1). A decision that fails a check is not
+written, and the finding's outcome says so. Source details are carried only where the
+records a support points at state them (ADR-0328 §4:13), and no part the observer reads
+records an ``Attestation``, so it sets none.
+
+**The admission of the assistant's own words** (§10) is held on every memory, not only
+one about the user: code cannot tell what a claim is about, so it takes the stricter
+reading. A support pointing at a round's message is admitted only beside a ``for``
+support pointing at the user's own message in a later episode than that round's, which
+is the leaving episode or one after it, as the step's note on it says the user asked to
+keep or confirmed what the message said. Without one, the decision is refused whole.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Final, Literal
+
+from pydantic import AwareDatetime, BaseModel, ConfigDict, ValidationError
+
+from ai_assistant.core.types import (
+    BeliefBand,
+    ConfirmationPart,
+    EpisodicMemory,
+    FindingUnwritten,
+    InputPart,
+    Memory,
+    MemoryKind,
+    MemoryOperation,
+    MemoryOperationKind,
+    MemoryRetirement,
+    MemoryStanding,
+    MemorySupport,
+    MemoryWriterName,
+    Message,
+    ObserverInferencePart,
+    OpenQuestionKind,
+    ReadingCertainty,
+    Role,
+    SupportDirection,
+    SupportOrigin,
+    TrackRecordEntry,
+    origin_standing,
+    part_episode,
+    standing_rank,
+)
+from ai_assistant.orchestration.observer.prompts import COMMIT_INSTRUCTION
+from ai_assistant.orchestration.observer.reading import ORIGIN_WORDS, STANDING_WORDS
+from ai_assistant.orchestration.support_parts import (
+    episodes_to_read,
+    part_content,
+    remember_activations,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from datetime import datetime
+
+    from ai_assistant.core.protocols import MemoryStore, PlanStore
+    from ai_assistant.core.types import (
+        ActivationEffect,
+        FrozenJson,
+        ObservationFinding,
+        Placement,
+        SupportPart,
+    )
+    from ai_assistant.orchestration.observer.reading import Reading, ReadPart, Reliance
+
+__all__ = [
+    "INFERENCE_FLOOR",
+    "AddSupports",
+    "Checked",
+    "CommitReply",
+    "CommitView",
+    "Create",
+    "RaiseQuestion",
+    "RecordUse",
+    "Resolve",
+    "Similar",
+    "Unwritten",
+    "checked",
+    "commit_messages",
+    "commit_view",
+    "meets_floor",
+]
+
+#: §11:5: the distinct episodes an inference's counted ``for`` supports, other than an
+#: observer's inference, point at, at least.
+INFERENCE_FLOOR: Final = 3
+
+#: Why the observer proposes a memory, on every proposal it makes: code-owned words.
+_RATIONALE: Final = "the observer kept this from an episode that left the episode window"
+
+_ASSISTANT_ORIGINS: Final = frozenset(
+    {SupportOrigin.ASSISTANT_MESSAGE, SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE}
+)
+
+_RETIRING: Final[dict[str, MemoryOperationKind]] = {
+    "end": MemoryOperationKind.END,
+    "mark_wrong": MemoryOperationKind.MARK_WRONG,
+    "replace": MemoryOperationKind.REPLACE,
+}
+
+#: What a ``conflict`` question asks, in words, before the newer claim it carries.
+_CONFLICT_ASKS: Final = "Newer evidence, at a lower standing than this memory's, says: "
+
+type _Certainty = Literal["sure", "likely", "unsure"]
+
+
+class _ProposedSupport(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    part: str
+    direction: Literal["for", "against"]
+    backs_as_worded: bool = False
+    how_sure: _Certainty
+    about_when: AwareDatetime | None = None
+    note: str = ""
+
+
+class _ProposedInference(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    how_sure: _Certainty
+    note: str = ""
+
+
+class _ProposedResolve(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    memory: str
+    question: str
+    part: str
+    note: str
+
+
+class CommitReply(BaseModel):
+    """The commit step's whole reply (``COMMIT_INSTRUCTION``'s shape)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    action: Literal[
+        "create",
+        "add",
+        "end",
+        "mark_wrong",
+        "replace",
+        "recheck",
+        "single_observation",
+        "nothing",
+    ] = "nothing"
+    wording: str | None = None
+    memory: str | None = None
+    supports: tuple[_ProposedSupport, ...] = ()
+    inference: _ProposedInference | None = None
+    cites: str | None = None
+    asks: str | None = None
+    resolves: _ProposedResolve | None = None
+    track_record: Literal["held_up", "let_down", "neither"] | None = None
+    note: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class Similar:
+    """One stored memory the commit step is shown, under its label (§9:3).
+
+    Attributes:
+        handle: Its label (``M1``, ``M2``, ...).
+        memory: The memory, as read.
+        supports: Each support's part resolved to readable content, or ``None`` for gone.
+        questions: Its open questions' ids, by the labels they are shown under.
+    """
+
+    handle: str
+    memory: Memory
+    supports: tuple[str | None, ...]
+    questions: dict[str, str] = field(default_factory=dict)
+
+    def rendered(self) -> dict[str, FrozenJson]:
+        """The memory as the commit step is shown it, attributed from the record."""
+        stopped = self.memory.stopped
+        open_ = {question_id: handle for handle, question_id in self.questions.items()}
+        return {
+            "memory": self.handle,
+            "claim": self.memory.content,
+            "stands": STANDING_WORDS[self.memory.standing],
+            "status": self.memory.status.value,
+            "supports": [
+                {
+                    "from": ORIGIN_WORDS[support.origin],
+                    "outside": support.outside,
+                    "direction": support.direction.value,
+                    "backs_as_worded": support.backs_as_worded,
+                    "counted": support.points_at not in stopped,
+                    "at": None if support.when is None else support.when.isoformat(),
+                    "text": "(gone)" if text is None else text,
+                }
+                for support, text in zip(self.memory.supports, self.supports, strict=True)
+            ],
+            "open_questions": [
+                {"question": open_[one.id], "asks": one.asks}
+                for one in self.memory.open_questions
+                if one.id in open_
+            ],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CommitView:
+    """Exactly what one commit call is shown, kept so its labels map back (§9:3).
+
+    Attributes:
+        finding: The finding.
+        leaving: The leaving episode.
+        parts: The parts the finding rests on, as read.
+        similar: The memories shown.
+        reliance: The reliance call a reliance finding is about.
+    """
+
+    finding: ObservationFinding
+    leaving: EpisodicMemory
+    parts: tuple[ReadPart, ...]
+    similar: tuple[Similar, ...]
+    reliance: Reliance | None = None
+
+    def part(self, handle: str) -> ReadPart | None:
+        """The part a label names, among those shown."""
+        return next((one for one in self.parts if one.handle == handle), None)
+
+    def memory(self, handle: str | None) -> Similar | None:
+        """The memory a label names, among those shown."""
+        return next((one for one in self.similar if one.handle == handle), None)
+
+    def payload(self) -> dict[str, FrozenJson]:
+        """What the commit step is shown: one JSON object of quoted source data (§8:5)."""
+        shown: dict[str, FrozenJson] = {
+            "claim": self.finding.claim,
+            "parts": [one.rendered(answers=True) for one in self.parts],
+            "memories": [one.rendered() for one in self.similar],
+        }
+        if self.reliance is not None:
+            held = next(one for one in self.similar if one.memory.id == self.reliance.memory.id)
+            shown["relied_on"] = {"memory": held.handle, "shaped": self.reliance.shaped}
+        return shown
+
+
+@dataclass(frozen=True, slots=True)
+class Create:
+    """A new memory proposed through ``ingest``, retiring at most one (§12:2, §12:4).
+
+    ``asked_on`` is the support a ``policy_ask`` question rests on, where the policy
+    asks (§13:1-§13:2): the new memory's leading support, ``against``, never a
+    confirmation or an inference; ``None`` where none can be.
+    """
+
+    memory: Memory
+    retiring: MemoryRetirement | None = None
+    asked_on: MemorySupport | None = None
+    rationale: str = _RATIONALE
+
+
+@dataclass(frozen=True, slots=True)
+class AddSupports:
+    """Supports added to a memory that states the claim as worded (§12:3)."""
+
+    target: Memory
+    supports: tuple[MemorySupport, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RaiseQuestion:
+    """An open question raised on a memory (§13:1), resting on one support (§13:2)."""
+
+    target: Memory
+    kind: OpenQuestionKind
+    asks: str
+    support: MemorySupport
+
+
+@dataclass(frozen=True, slots=True)
+class Resolve:
+    """An open question resolved by the support added from the user's answer (§13:5)."""
+
+    target: Memory
+    question: str
+    support: MemorySupport
+    note: str
+
+
+@dataclass(frozen=True, slots=True)
+class RecordUse:
+    """A track-record entry on a memory a reliance named (§14:1-§14:4)."""
+
+    memory: Memory
+    entry: TrackRecordEntry
+
+
+@dataclass(frozen=True, slots=True)
+class Unwritten:
+    """Nothing to write, and the code-owned reason why (§16:1)."""
+
+    reason: FindingUnwritten
+
+
+type _Primary = Create | AddSupports | RaiseQuestion | RecordUse | Unwritten
+
+
+@dataclass(frozen=True, slots=True)
+class Checked:
+    """A commit decision after code's checks: what to write (§9:5).
+
+    Attributes:
+        primary: The one write the decision makes, or why it makes none.
+        resolve: A question the decision resolves beside it (§13:5), or ``None``.
+    """
+
+    primary: _Primary
+    resolve: Resolve | None = None
+
+
+async def commit_view(
+    finding: ObservationFinding,
+    reading: Reading,
+    *,
+    memory: MemoryStore,
+    plans: PlanStore,
+    similar: int,
+) -> CommitView | None:
+    """What one commit call is shown for ``finding`` (§9:3).
+
+    Args:
+        finding: The finding.
+        reading: The reading its parts were read in.
+        memory: The memory store the similar memories are searched in.
+        plans: The plan store a remember call's effect record is read from.
+        similar: The most memories the search returns.
+
+    Returns:
+        The view, or ``None`` where a part it rests on is no longer read, or the memory
+        a reliance finding names is not: either fails §9:5's check.
+
+    Raises:
+        MemoryStoreError: If the memory store cannot be read.
+        PlanningError: If the plan store cannot be read.
+    """
+    parts = [reading.at(part) for part in finding.rests_on]
+    reliance = None if finding.relied_on is None else reading.reliance(finding.relied_on)
+    if any(one is None for one in parts) or (finding.relied_on is not None and reliance is None):
+        return None
+    found = await memory.search(finding.claim, limit=similar, kinds=(MemoryKind.MEMORY,))
+    memories = [one for one in found.records if isinstance(one, Memory)]
+    named = [] if reliance is None else [reliance.memory]
+    if finding.candidate is not None:
+        named.extend(
+            one.memory
+            for hint in reading.hints
+            if hint.effect == finding.candidate and hint.memory is not None
+            for one in reading.memories
+            if one.handle == hint.memory
+        )
+    for one in named:
+        if all(held.id != one.id for held in memories):
+            memories.append(one)
+    shown = await _resolved(memories, memory=memory, plans=plans)
+    return CommitView(
+        finding=finding,
+        leaving=reading.leaving.record,
+        parts=tuple(one for one in parts if one is not None),
+        similar=shown,
+        reliance=reliance,
+    )
+
+
+async def _resolved(
+    memories: Sequence[Memory], *, memory: MemoryStore, plans: PlanStore
+) -> tuple[Similar, ...]:
+    """Each memory with its supports' parts resolved to readable content (ADR-0328 §15:2)."""
+    if not memories:
+        return ()
+    found = await memory.get_many(list(episodes_to_read(memories)))
+    episodes = {key: one for key, one in found.items() if isinstance(one, EpisodicMemory)}
+    activations = remember_activations(memories, episodes)
+    effects: dict[str, ActivationEffect] = {}
+    if activations:
+        effects = {one.id: one for one in await plans.activation_effects(list(activations))}
+    shown: list[Similar] = []
+    asked = 0
+    for index, one in enumerate(memories, start=1):
+        questions: dict[str, str] = {}
+        for question in one.open_questions:
+            if not question.resolved:
+                asked += 1
+                questions[f"Q{asked}"] = question.id
+        shown.append(
+            Similar(
+                handle=f"M{index}",
+                memory=one,
+                supports=tuple(
+                    part_content(
+                        support.points_at,
+                        episodes=episodes,
+                        effects=effects,
+                        carried=support.carries,
+                    )
+                    for support in one.supports
+                ),
+                questions=questions,
+            )
+        )
+    return tuple(shown)
+
+
+def commit_messages(view: CommitView) -> list[Message]:
+    """The commit step's one call for a finding: its instruction and what it is shown.
+
+    Args:
+        view: What the call is shown.
+
+    Returns:
+        The conversation the commit step's route completes.
+    """
+    return [
+        Message(role=Role.SYSTEM, content=COMMIT_INSTRUCTION),
+        Message(role=Role.USER, content=json.dumps(view.payload(), ensure_ascii=True)),
+    ]
+
+
+def meets_floor(memory: Memory) -> bool:
+    """Whether a memory clears §11:5's evidence floor, as code checks it.
+
+    A memory whose standing is above inference needs no bar (§11:7). One at inference
+    alone needs its counted ``for`` supports, other than an observer's inference and a
+    round's message (which counts toward no evidence bar, §10:2), to point at
+    :data:`INFERENCE_FLOOR` distinct episodes at least, and fewer counted ``against``
+    supports than ``for`` ones.
+
+    Args:
+        memory: The memory as it would be created.
+
+    Returns:
+        Whether it may be created.
+    """
+    if memory.standing is not MemoryStanding.INFERENCE:
+        return True
+    counted = memory.counted_supports
+    supporting = [one for one in counted if one.direction is SupportDirection.FOR]
+    against = [one for one in counted if one.direction is SupportDirection.AGAINST]
+    episodes = {
+        part_episode(one.points_at)
+        for one in supporting
+        if one.origin is not SupportOrigin.OBSERVER_INFERENCE
+        and one.origin not in _ASSISTANT_ORIGINS
+    } - {None}
+    return len(episodes) >= INFERENCE_FLOOR and len(against) < len(supporting)
+
+
+@dataclass(frozen=True, slots=True)
+class _Context:
+    """What every check of one decision reads: the view, the instant and the minter."""
+
+    view: CommitView
+    now: datetime
+    mint: Callable[[], str]
+    placement: Placement
+
+
+class _Refused(Exception):  # noqa: N818 — a control-flow signal carrying a code-owned reason
+    def __init__(self, reason: FindingUnwritten) -> None:
+        super().__init__(reason.value)
+        self.reason = reason
+
+
+def checked(
+    reply: CommitReply,
+    view: CommitView,
+    *,
+    now: datetime,
+    mint: Callable[[], str],
+    placement: Placement,
+) -> Checked:
+    """A commit decision after every check code makes (§9:5, §10, §11:5, §13:1).
+
+    Args:
+        reply: The commit step's parsed reply.
+        view: What it was shown.
+        now: The instant every support, operation and entry is stamped with.
+        mint: Mints a fresh id for a new memory or question.
+        placement: The narrowest placement over every record the run was supplied
+            (§12:6).
+
+    Returns:
+        What to write, or why nothing is.
+    """
+    context = _Context(view=view, now=now, mint=mint, placement=placement)
+    if view.reliance is not None:
+        return Checked(primary=_track_record(reply, context))
+    try:
+        supports = _supports(reply, context)
+        _admitted(supports, context)
+        primary = _primary(reply, supports, context)
+        resolve = _resolve(reply, supports, context)
+    except _Refused as refused:
+        return Checked(primary=Unwritten(refused.reason))
+    return Checked(primary=primary, resolve=resolve)
+
+
+def _track_record(reply: CommitReply, context: _Context) -> _Primary:
+    """§14:2: held up, let down, or nothing recorded."""
+    reliance = context.view.reliance
+    if reliance is None or reply.track_record in {None, "neither"}:
+        return Unwritten(FindingUnwritten.NOT_KEPT)
+    entry = TrackRecordEntry(
+        episode=context.view.leaving.id,
+        relied_at=reliance.relied_at,
+        held_up=reply.track_record == "held_up",
+        note=reply.note,
+        recorded_at=context.now,
+        recorded_by=MemoryWriterName.OBSERVER,
+    )
+    return RecordUse(memory=reliance.memory, entry=entry)
+
+
+def _supports(reply: CommitReply, context: _Context) -> dict[str, MemorySupport]:
+    """Each support the reply gives, by its part's label, its code-owned fields set (§9:5).
+
+    Raises:
+        _Refused: ``check_failed`` where a label names no part the finding rests on, a
+            part is named twice, or a support is malformed.
+    """
+    supports: dict[str, MemorySupport] = {}
+    for proposed in reply.supports:
+        read = context.view.part(proposed.part)
+        if read is None or proposed.part in supports:
+            raise _Refused(FindingUnwritten.CHECK_FAILED)
+        direction = SupportDirection(proposed.direction)
+        confirmation = read.origin is SupportOrigin.CONFIRMATION
+        try:
+            supports[proposed.part] = MemorySupport(
+                points_at=read.part,
+                origin=read.origin,
+                direction=direction,
+                note=proposed.note,
+                backs_as_worded=proposed.backs_as_worded and direction is SupportDirection.FOR,
+                how_sure=ReadingCertainty.SURE
+                if confirmation
+                else ReadingCertainty(proposed.how_sure),
+                when=read.when,
+                about_when=proposed.about_when,
+                added_at=context.now,
+                added_by=MemoryWriterName.OBSERVER,
+            )
+        except ValidationError as exc:
+            raise _Refused(FindingUnwritten.CHECK_FAILED) from exc
+    return supports
+
+
+def _admitted(supports: dict[str, MemorySupport], context: _Context) -> None:
+    """§10:1-§10:2: a round's message only beside the user's later keep or confirmation.
+
+    Raises:
+        _Refused: ``check_failed`` where a support pointing at a round's message has no
+            ``for`` support beside it pointing at the user's own message in a later
+            episode than that round's, the leaving episode or one after it.
+    """
+    view = context.view
+    leaving = view.leaving.occurred_at
+    for handle, support in supports.items():
+        if support.origin not in _ASSISTANT_ORIGINS:
+            continue
+        said = view.part(handle)
+        if said is None:  # pragma: no cover - every support's label was checked above
+            raise _Refused(FindingUnwritten.CHECK_FAILED)
+        kept = any(
+            (other := view.part(key)) is not None
+            and one.origin is SupportOrigin.USER_MESSAGE
+            and one.direction is SupportDirection.FOR
+            and other.occurred_at > said.occurred_at
+            and other.occurred_at >= leaving
+            for key, one in supports.items()
+        )
+        if not kept:
+            raise _Refused(FindingUnwritten.CHECK_FAILED)
+
+
+def _primary(reply: CommitReply, supports: dict[str, MemorySupport], context: _Context) -> _Primary:
+    """The one write the reply's action makes, checked."""
+    match reply.action:
+        case "nothing":
+            return Unwritten(FindingUnwritten.NOT_KEPT)
+        case "single_observation":
+            return Unwritten(FindingUnwritten.SINGLE_OBSERVATION)
+        case "recheck":
+            target = _target(reply, context)
+            if not supports or not (reply.asks or "").strip():
+                raise _Refused(FindingUnwritten.CHECK_FAILED)
+            first = next(iter(supports.values()))
+            return RaiseQuestion(
+                target=target,
+                kind=OpenQuestionKind.RECHECK,
+                asks=reply.asks or "",
+                support=_question_support(first, first.direction, supports, context),
+            )
+        case "add" if reply.inference is None:
+            target = _target(reply, context)
+            if not supports or any(
+                one.origin is SupportOrigin.CONFIRMATION and not one.backs_as_worded
+                for one in supports.values()
+            ):
+                raise _Refused(FindingUnwritten.CHECK_FAILED)
+            return AddSupports(target=target, supports=tuple(supports.values()))
+        case "add":
+            # An inference about a stored claim is a create the policy may reinforce:
+            # one operation adds one support, so it is never applied (§12:3, §9:7).
+            target = _target(reply, context)
+            return _created(reply, supports, context, wording=target.content)
+        case _:
+            return _created(reply, supports, context, wording=reply.wording)
+
+
+def _target(reply: CommitReply, context: _Context) -> Memory:
+    shown = context.view.memory(reply.memory)
+    if shown is None:
+        raise _Refused(FindingUnwritten.CHECK_FAILED)
+    return shown.memory
+
+
+def _created(
+    reply: CommitReply,
+    supports: dict[str, MemorySupport],
+    context: _Context,
+    *,
+    wording: str | None,
+) -> _Primary:
+    """A new memory, retiring at most one, checked (§9:7, §9:8, §11:5, §12:4, §13:1)."""
+    inference = _inference(reply, supports, context)
+    confirmed = {
+        read.text
+        for handle, one in supports.items()
+        if one.origin is SupportOrigin.CONFIRMATION
+        and one.backs_as_worded
+        and (read := context.view.part(handle)) is not None
+    }
+    if len(confirmed) > 1:
+        raise _Refused(FindingUnwritten.CHECK_FAILED)
+    # §5:5: a memory a confirmation backs as worded carries exactly the fact it showed.
+    content = next(iter(confirmed)) if confirmed else (wording or "").strip()
+    ordered = _ordered([*([] if inference is None else [inference]), *supports.values()])
+    if not content or not ordered or not _backs(ordered[0]):
+        raise _Refused(FindingUnwritten.CHECK_FAILED)
+    try:
+        memory = Memory(
+            id=f"observed:{context.mint()}",
+            content=content,
+            supports=tuple(ordered),
+            operations=(
+                MemoryOperation(
+                    kind=MemoryOperationKind.CREATE,
+                    cites=ordered[0].points_at,
+                    note=reply.note,
+                    at=context.now,
+                    by=MemoryWriterName.OBSERVER,
+                ),
+            ),
+            placement=context.placement,
+        )
+    except ValidationError as exc:
+        raise _Refused(FindingUnwritten.CHECK_FAILED) from exc
+    if not meets_floor(memory):
+        raise _Refused(FindingUnwritten.BELOW_FLOOR)
+    try:
+        asked_on = _question_support(ordered[0], SupportDirection.AGAINST, supports, context)
+    except _Refused:
+        asked_on = None
+    kind = _RETIRING.get(reply.action)
+    if kind is None:
+        return Create(memory=memory, asked_on=asked_on)
+    return _retiring(reply, Create(memory=memory, asked_on=asked_on), kind, supports, context)
+
+
+def _inference(
+    reply: CommitReply, supports: dict[str, MemorySupport], context: _Context
+) -> MemorySupport | None:
+    """§9:7: an observer's inference, beside supports that are for and back nothing as worded.
+
+    Raises:
+        _Refused: ``check_failed`` where an inference is given beside a support that is
+            against the memory or backs it as worded.
+    """
+    proposed = reply.inference
+    if proposed is None:
+        return None
+    if any(
+        one.direction is not SupportDirection.FOR or one.backs_as_worded
+        for one in supports.values()
+    ):
+        raise _Refused(FindingUnwritten.CHECK_FAILED)
+    leaving = context.view.leaving
+    return MemorySupport(
+        points_at=ObserverInferencePart(episode=leaving.id),
+        origin=SupportOrigin.OBSERVER_INFERENCE,
+        direction=SupportDirection.FOR,
+        note=proposed.note,
+        backs_as_worded=True,
+        how_sure=ReadingCertainty(proposed.how_sure),
+        when=leaving.occurred_at,
+        added_at=context.now,
+        added_by=MemoryWriterName.OBSERVER,
+    )
+
+
+def _backs(support: MemorySupport) -> bool:
+    return support.direction is SupportDirection.FOR and support.backs_as_worded
+
+
+def _ordered(supports: Sequence[MemorySupport]) -> list[MemorySupport]:
+    """Supports with the one to cite first: the highest-standing backing support.
+
+    A create cites the first, and a ``SUPERSEDE`` ends its targets citing it (ADR-0328
+    §11:7), so the strongest backing support leads; the rest keep the step's order.
+    """
+    return sorted(
+        supports,
+        key=lambda one: (not _backs(one), -standing_rank(origin_standing(one.origin))),
+    )
+
+
+def _retiring(
+    reply: CommitReply,
+    created: Create,
+    kind: MemoryOperationKind,
+    supports: dict[str, MemorySupport],
+    context: _Context,
+) -> _Primary:
+    """One proposal carrying the new memory and the retirement it cites (§12:4, §13:1).
+
+    Raises:
+        _Refused: ``check_failed`` where the target was not shown, the cited support
+            does not back the new memory as worded (§12:5), or an end's about-when lies
+            after its instant (ADR-0328 §5:10).
+    """
+    target = _target(reply, context)
+    memory = created.memory
+    if reply.cites == "inference":
+        cited = next(
+            (one for one in memory.supports if one.origin is SupportOrigin.OBSERVER_INFERENCE),
+            None,
+        )
+    else:
+        cited = None if reply.cites is None else supports.get(reply.cites)
+    if cited is None or not _backs(cited):
+        raise _Refused(FindingUnwritten.CHECK_FAILED)
+    if cited.origin is SupportOrigin.CONFIRMATION and target.band is BeliefBand.ASSERTED:
+        # §12:4: no confirmation the observer builds covers an assertion (§5:7), so
+        # another support backing the new memory as worded is cited, or nothing retires.
+        cited = next(
+            (
+                one
+                for one in memory.backing_supports
+                if one.origin is not SupportOrigin.CONFIRMATION
+            ),
+            None,
+        )
+        if cited is None:
+            return created
+    if (
+        kind is MemoryOperationKind.END
+        and cited.about_when is not None
+        and cited.about_when > context.now
+    ):
+        raise _Refused(FindingUnwritten.CHECK_FAILED)
+    if standing_rank(origin_standing(cited.origin)) < standing_rank(target.standing):
+        # ADR-0328 §6:5 refuses the retirement, and the whole proposal with it (§12:5):
+        # the open question it needs is raised instead (§13:1).
+        return RaiseQuestion(
+            target=target,
+            kind=OpenQuestionKind.CONFLICT,
+            asks=_CONFLICT_ASKS + memory.content,
+            support=_question_support(cited, SupportDirection.AGAINST, supports, context),
+        )
+    retiring = MemoryRetirement(memory=target, kind=kind, cites=cited.points_at, note=reply.note)
+    return Create(memory=memory, retiring=retiring, asked_on=created.asked_on)
+
+
+def _question_support(
+    support: MemorySupport,
+    direction: SupportDirection,
+    supports: dict[str, MemorySupport],
+    context: _Context,
+) -> MemorySupport:
+    """The support a question rests on, added to the memory it is about (§13:2).
+
+    Never a confirmation, which ADR-0328 §4:6 adds to no other memory, nor an observer's
+    inference: for a confirmation the question rests on the yes's input instead, and for
+    an inference on a support that inference reads.
+
+    Raises:
+        _Refused: ``check_failed`` where no such support was read.
+    """
+    part: SupportPart = support.points_at
+    origin = support.origin
+    when = support.when
+    if isinstance(part, ConfirmationPart):
+        read = next(
+            (
+                one
+                for one in context.view.parts
+                if one.part == InputPart(episode=part.episode)
+                or (isinstance(one.part, InputPart) and one.part.episode == part.episode)
+            ),
+            None,
+        )
+        if read is None:
+            raise _Refused(FindingUnwritten.CHECK_FAILED)
+        part, origin, when = read.part, read.origin, read.when
+    elif isinstance(part, ObserverInferencePart):
+        other = next(iter(supports.values()), None)
+        if other is None:
+            raise _Refused(FindingUnwritten.CHECK_FAILED)
+        part, origin, when = other.points_at, other.origin, other.when
+    return MemorySupport(
+        points_at=part,
+        origin=origin,
+        direction=direction,
+        note=support.note,
+        backs_as_worded=False,
+        how_sure=support.how_sure if origin is not SupportOrigin.CONFIRMATION else None,
+        when=when,
+        about_when=support.about_when,
+        added_at=context.now,
+        added_by=MemoryWriterName.OBSERVER,
+    )
+
+
+def _resolve(
+    reply: CommitReply, supports: dict[str, MemorySupport], context: _Context
+) -> Resolve | None:
+    """§13:5: a question the answer resolves, citing the support added from it.
+
+    A resolve that names a memory, a question or a part the step was not shown is
+    dropped, with the rest of the decision written as checked.
+    """
+    proposed = reply.resolves
+    if proposed is None:
+        return None
+    shown = context.view.memory(proposed.memory)
+    support = supports.get(proposed.part)
+    question = None if shown is None else shown.questions.get(proposed.question)
+    if shown is None or support is None or question is None or not proposed.note.strip():
+        return None
+    try:
+        added = _question_support(support, support.direction, supports, context)
+    except _Refused:
+        return None
+    return Resolve(target=shown.memory, question=question, support=added, note=proposed.note)
