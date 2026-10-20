@@ -779,8 +779,10 @@ class DigestingStage:
                 one["part"] = f"{piece.number} of {piece.of}"
             shown.append(one)
         document = {"question": question, "records": shown}
+        # ADR-0335 §9:1: the prompt declares no flag, so the key records an empty set.
+        instruction = self._prompt.rendered()
         messages = (
-            Message(role=Role.SYSTEM, content=self._prompt.render()),
+            Message(role=Role.SYSTEM, content=instruction.text),
             Message(role=Role.USER, content=json.dumps(document, ensure_ascii=True)),
         )
         if self._now() >= deadline:
@@ -792,7 +794,7 @@ class DigestingStage:
             lambda: {
                 **about,
                 "messages": [one.model_dump(mode="json") for one in messages],
-                "prompt": self._prompt.provenance(),
+                "prompt": instruction.provenance(),
             },
         )
         try:

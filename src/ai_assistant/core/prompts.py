@@ -31,6 +31,12 @@ holds — not even the name it got wrong.
 
 **The version** (§8:1) is the first twelve hexadecimal digits of the SHA-256 of the
 file's bytes, whether the file is a default or an override.
+
+**What a given entry records** (§8:2, ADR-0335 §9:1) is the ``prompt`` key of a
+:class:`RenderedPrompt`: the prompt's name, its version, its origin, and every flag it
+declares with the value the code computed for the call. Only a rendering builds that
+key, so the flags an entry records are the flags its instruction was rendered under.
+No value is recorded: values are the code's own text, which the package supplies.
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Never
 
 from ai_assistant.core.errors import ConfigurationError
@@ -51,6 +58,7 @@ __all__ = [
     "PromptDeclaration",
     "PromptOrigin",
     "PromptTemplate",
+    "RenderedPrompt",
 ]
 
 #: The directory of ``Settings.data_dir`` an override is read from (§3:3).
@@ -194,10 +202,6 @@ class PromptTemplate:
         """The prompt's name (§2)."""
         return self.declaration.name
 
-    def provenance(self) -> dict[str, str]:
-        """The ``prompt`` key a given entry carries (§8:2): name, version and origin."""
-        return {"name": self.name, "version": self.version, "origin": self.origin.value}
-
     @classmethod
     def parse(
         cls, declaration: PromptDeclaration, data: bytes, *, origin: PromptOrigin
@@ -239,12 +243,34 @@ class PromptTemplate:
     ) -> str:
         """The instruction this template gives under ``flags``, with ``values`` printed.
 
+        For a call that writes no given entry; one that writes one renders with
+        :meth:`rendered`, whose ``prompt`` key records the flags (ADR-0335 §9:1).
+
         Args:
             flags: Every flag the prompt declares, as the code computed it for this call.
             values: Every value the prompt declares, as the code supplies it.
 
         Returns:
             The included lines, joined by line breaks.
+
+        Raises:
+            ValueError: If ``flags`` or ``values`` is not exactly what the prompt
+                declares: the code supplies every one (§4:2).
+        """
+        return self.rendered(flags=flags, values=values).text
+
+    def rendered(
+        self, *, flags: Mapping[str, bool] | None = None, values: Mapping[str, str] | None = None
+    ) -> RenderedPrompt:
+        """The instruction under ``flags``, paired with the flags it was rendered under.
+
+        Args:
+            flags: Every flag the prompt declares, as the code computed it for this call.
+            values: Every value the prompt declares, as the code supplies it.
+
+        Returns:
+            The instruction, and the ``prompt`` key a given entry for its call records
+            (§8:2, ADR-0335 §9:1).
 
         Raises:
             ValueError: If ``flags`` or ``values`` is not exactly what the prompt
@@ -260,7 +286,57 @@ class PromptTemplate:
             raise ValueError(msg)
         out: list[str] = []
         _emit(self._nodes, given_flags, given_values, out)
-        return "\n".join(out)
+        return RenderedPrompt(
+            text="\n".join(out),
+            template=self,
+            flags=MappingProxyType(dict(sorted(given_flags.items()))),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedPrompt:
+    """One call's instruction, and the flags it was rendered under (ADR-0335 §9:1).
+
+    Built by :meth:`PromptTemplate.rendered`, so a module that sends ``text`` as its
+    system message and records :meth:`provenance` in the call's given entry records
+    exactly the flags the text was rendered under, and cannot record others.
+
+    Attributes:
+        text: The instruction, as the system message carries it.
+        template: The template it was rendered from.
+        flags: Every flag the prompt declares, with the value the code computed for
+            the call, by name; empty for a prompt that declares none.
+    """
+
+    text: str
+    template: PromptTemplate
+    flags: Mapping[str, bool]
+
+    def __post_init__(self) -> None:
+        """Refuse flags other than exactly those the template's prompt declares.
+
+        Raises:
+            ValueError: If ``flags`` names a flag the prompt does not declare, or leaves
+                one out (§4:2).
+        """
+        if set(self.flags) != self.template.declaration.flags:
+            msg = f"the prompt {self.template.name} records exactly the flags it declares"
+            raise ValueError(msg)
+
+    def provenance(self) -> dict[str, object]:
+        """The ``prompt`` key the call's given entry carries (§8:2, ADR-0335 §9:1).
+
+        Returns:
+            The prompt's name, its template's version, ``default`` or ``override``, and
+            ``flags``: each declared flag's value for this call, by name, or an empty
+            object where the prompt declares none. No value is recorded.
+        """
+        return {
+            "name": self.template.name,
+            "version": self.template.version,
+            "origin": self.template.origin.value,
+            "flags": dict(self.flags),
+        }
 
 
 def _emit(

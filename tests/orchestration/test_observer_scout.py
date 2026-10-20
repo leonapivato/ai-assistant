@@ -297,7 +297,9 @@ def test_the_scout_is_shown_its_instruction_and_the_reading_as_data() -> None:
 
     The system message is whatever the scout's template renders (ADR-0334 §3:5).
     """
-    system, user = scout_messages(_reading(), prompt_from(OBSERVER_SCOUT_PROMPT, "Scout."))
+    system, user = scout_messages(
+        _reading(), prompt_from(OBSERVER_SCOUT_PROMPT, "Scout.").rendered()
+    )
 
     assert (system.role, system.content) == (Role.SYSTEM, "Scout.")
     assert user.role is Role.USER
@@ -312,7 +314,7 @@ def test_the_commit_step_is_shown_its_instruction_and_its_view_as_data() -> None
     )
     view = CommitView(finding=finding, leaving=leaving, parts=(read,), similar=())
 
-    system, user = commit_messages(view, prompt_from(OBSERVER_COMMIT_PROMPT, "Commit."))
+    system, user = commit_messages(view, prompt_from(OBSERVER_COMMIT_PROMPT, "Commit.").rendered())
 
     assert (system.role, system.content) == (Role.SYSTEM, "Commit.")
     assert user.role is Role.USER

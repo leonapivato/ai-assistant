@@ -79,7 +79,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
     from datetime import datetime
 
-    from ai_assistant.core.prompts import PromptTemplate
+    from ai_assistant.core.prompts import RenderedPrompt
     from ai_assistant.core.protocols import MemoryStore, PlanStore
     from ai_assistant.core.types import (
         ActivationEffect,
@@ -491,19 +491,20 @@ async def _resolved(
     return tuple(shown), tuple(one.placement for one in episodes.values())
 
 
-def commit_messages(view: CommitView, prompt: PromptTemplate) -> list[Message]:
+def commit_messages(view: CommitView, instruction: RenderedPrompt) -> list[Message]:
     """The commit step's one call for a finding: its instruction and what it is shown.
 
     Args:
         view: What the call is shown.
-        prompt: The template of ``OBSERVER_COMMIT_PROMPT``, default or override, as the
-            composition root read it at start (ADR-0334 §3:5).
+        instruction: ``OBSERVER_COMMIT_PROMPT`` rendered from its template, default or
+            override, as the composition root read it at start (ADR-0334 §3:5); the
+            call's given entry records its ``prompt`` key (ADR-0335 §9:1).
 
     Returns:
         The conversation the commit step's route completes.
     """
     return [
-        Message(role=Role.SYSTEM, content=prompt.render()),
+        Message(role=Role.SYSTEM, content=instruction.text),
         Message(role=Role.USER, content=json.dumps(view.payload(), ensure_ascii=True)),
     ]
 

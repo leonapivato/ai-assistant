@@ -152,8 +152,19 @@ async def test_a_calls_entries_hold_its_request_and_its_reply() -> None:
     (call,) = scout.calls
     assert given.kind is DiagnosticKind.GIVEN
     assert _body(given)["messages"] == [one.model_dump(mode="json") for one in call.messages]
-    assert _body(given)["prompt"] == default_prompt(OBSERVER_SCOUT_PROMPT).provenance()
-    assert _body(commit_given)["prompt"] == default_prompt(OBSERVER_COMMIT_PROMPT).provenance()
+    # ADR-0335 §9:1: neither prompt declares a flag, so each key records an empty set.
+    assert _body(given)["prompt"] == {
+        "name": "observer_scout",
+        "version": default_prompt(OBSERVER_SCOUT_PROMPT).version,
+        "origin": "default",
+        "flags": {},
+    }
+    assert _body(commit_given)["prompt"] == {
+        "name": "observer_commit",
+        "version": default_prompt(OBSERVER_COMMIT_PROMPT).version,
+        "origin": "default",
+        "flags": {},
+    }
     assert _body(returned)["reply"] == _scout("P1")
     assert _body(commit_given)["finding"] == {
         "id": "f1",
@@ -450,7 +461,7 @@ def _target(activation_id: str = "act", episode_id: str = "activation:act") -> D
 
 
 _ASKED = (MessageType(role=Role.USER, content="{}"),)
-_SCOUT_PROMPT = default_prompt(OBSERVER_SCOUT_PROMPT)
+_SCOUT_PROMPT = default_prompt(OBSERVER_SCOUT_PROMPT).rendered()
 
 
 async def test_one_call_over_several_episodes_writes_under_each_activation() -> None:

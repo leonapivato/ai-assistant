@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from test_planning import FLAG_ECHO, _earlier, _flags, _inputs, _remembered, _sent, _stage
+from test_planning import FLAG_ECHO, _earlier, _echoed, _inputs, _remembered, _sent, _stage
 from test_planning_stories import _note, _story
 from test_story_tidy_up import _note as _tidy_note
 from test_story_tidy_up import _reply, _summary, _tidy_up, _trip
@@ -35,7 +35,7 @@ from ai_assistant.orchestration.planning import (
 )
 from ai_assistant.orchestration.story_calls import STORY_CALLS
 from ai_assistant.orchestration.story_tidy_up import TidyUpResult
-from ai_assistant.testing import FakeModelProvider
+from ai_assistant.testing import FakeDiagnosticSink, FakeModelProvider
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import PlanningRound
@@ -312,12 +312,14 @@ async def test_the_template_is_handed_story_reads_where_a_story_read_is_offered(
     ``story_calls`` beside it, since the story calls are offered either way, so the
     template can say a story read shows older notes beside them.
     """
-    stage, completer, _ = _stage(prompt=FLAG_ECHO)
+    sink = FakeDiagnosticSink()
+    stage, completer, _ = _stage(prompt=FLAG_ECHO, diagnostics=sink)
+    inputs = _inputs(capabilities=(*STORY_CALLS, *((READ_STORY,) if reads else ())))
 
-    await stage.plan(_inputs(capabilities=(*STORY_CALLS, *((READ_STORY,) if reads else ()))))
+    flags = await _echoed(stage, completer, sink, inputs)
 
-    assert "story_calls" in _flags(completer)
-    assert ("story_reads" in _flags(completer)) is reads
+    assert "story_calls" in flags
+    assert ("story_reads" in flags) is reads
 
 
 async def test_a_note_moved_away_leaves_the_story_it_left_nothing_to_tidy_until_noted() -> None:
