@@ -1,12 +1,13 @@
 # 334. A prompt is a template the hub loads at start, the owner's hub may override it from its data directory, and each model call records the version it sent
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0335 (§8:2, in the addition alone: the `prompt` key also holds the flags the code computed for the call)
 - Date: 2026-10-20
 - Scope: the instruction, the system message, of each model call the hub makes (§2's table): where its text lives, how the owner changes it without a pull request while the prompts settle, what binds a changed text, how a reply is traced to the text that produced it, and what the tests check meanwhile.
 - Dependency: [ADR-0314](0314-a-diagnostic-record-keeps-what-each-phase-was-given-and-returned-and-nothing-reads-it-back.md) and [ADR-0333](0333-the-observer-writes-diagnostic-entries-in-a-file-of-its-own-beside-the-activation-it-learned-from-and-the-viewer-shows-what-was-learned.md), as their status lines leave them.
 - Authorization: on 2026-10-20 the owner directed: "changing the prompts are going to [be] common for the beginning, so it would be nice for the infrastructure to be dynamic for a while. It's fine to sacrifice testing and documentation for a little until we settle on prompts." Everything below is the dispatcher's and this lane's recommendation, not an owner ruling. The dispatcher assigned 0334. The owner reads it before it is ratified (§1:1).
 - Changes no Protocol and no type in `core/protocols.py` or `core/types.py`, and nothing the wire carries; `PROTOCOL_VERSION` does not move. `Settings` gains one field (§3:3).
 - **Partially supersedes**, in the clauses §10's first table names: ADR-0314 and ADR-0333.
+- Partially superseded: 2026-10-20 by ADR-0335 — §8:2, in the addition alone: the `prompt` key a given entry carries also holds, for each flag the prompt declares, the value the code computed for that call (ADR-0335 §9:1). Every other clause stands. This replacement takes effect on ratification of ADR-0335. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
