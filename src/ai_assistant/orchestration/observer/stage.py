@@ -547,9 +547,10 @@ class Observer:
         key = (finding.episode, finding.id)
         try:
             return await self._writer.write(verdict, shown=[one.memory for one in view.similar])
-        except MemoryStoreError, WriteBlocked:
-            # §16:1: what the commit wrote before it failed is kept, and merged into the
-            # outcome the finding is given when it is decided again.
+        except BaseException:
+            # §16:1: what the commit wrote before it failed — or before the run was
+            # cancelled — is kept, and merged into the outcome the finding is given when
+            # it is decided again.
             self._progress[key] = _joined(self._progress.get(key, ()), self._writer.partial)
             if self._writer.unread:
                 self._unread[key] = (*self._unread.get(key, ()), *self._writer.unread)

@@ -1073,3 +1073,64 @@ async def test_a_stuck_episode_keeps_what_its_failed_commit_wrote_for_a_re_run()
     assert [(one.memory, one.operations) for one in outcome.writes] == [
         ("m-seat", (MemoryOperationKind.ADD_SUPPORT,))
     ]
+
+
+async def test_a_run_cancelled_after_a_write_landed_records_it_on_the_retry() -> None:
+    """§16:1: a support written before the run was cancelled reaches the finding's outcome."""
+    harness = Harness()
+    await _three(harness)
+    await harness.hold(
+        episode("past", at=SINCE - timedelta(days=1), text="Window seats."),
+        Memory.model_validate(
+            memory(
+                "m-seat", "The user prefers window seats.", said_support(address("past"))
+            ).model_dump()
+        ),
+    )
+    apply = harness.writes.apply
+    get_many = harness.memory.get_many
+    landed = False
+
+    async def landing(change: MemoryChange) -> None:
+        nonlocal landed
+        await apply(change)
+        landed = True
+
+    async def cancelled_once(ids: list[str]) -> Any:
+        nonlocal landed
+        if landed:
+            landed = False
+            raise asyncio.CancelledError
+        return await get_many(ids)
+
+    harness.writes.apply = landing  # type: ignore[method-assign]  # notes the landing
+    harness.memory.get_many = cancelled_once  # type: ignore[method-assign,assignment]  # cancelled
+    decided = 0
+
+    def add_then_nothing(shown: dict[str, Any]) -> str:
+        nonlocal decided
+        decided += 1
+        if decided > 1:
+            return reply(action="nothing")
+        (held,) = [one for one in shown["memories"] if one["claim"].startswith("The user")]
+        part = shown["parts"][0]["part"]
+        support = {"part": part, "direction": "for", "backs_as_worded": True, "how_sure": "sure"}
+        return reply(action="add", memory=held["memory"], supports=[support])
+
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")), commit=_answering(add_then_nothing)
+    )
+    with contextlib.suppress(asyncio.CancelledError):
+        await observer.run()
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.findings[0].outcome is None
+
+    harness.writes.apply = apply  # type: ignore[method-assign]  # nothing more to note
+    await observer.run()
+
+    (record,) = await harness.plans.observations(["activation:one"])
+    outcome = record.findings[0].outcome
+    assert outcome is not None
+    assert [(one.memory, one.operations) for one in outcome.writes] == [
+        ("m-seat", (MemoryOperationKind.ADD_SUPPORT,))
+    ]
