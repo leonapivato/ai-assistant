@@ -337,7 +337,7 @@ _CANDIDATE_SCHEMA: Final[dict[str, FrozenJson]] = {
             "type": "string",
             "minLength": 1,
             "maxLength": _REASON_MAX_CHARS,
-            "description": "With memory: how the fact bears on that memory, in words.",
+            "description": ("Required with memory: how the fact bears on that memory, in words."),
         },
         CONFIRM_ARGUMENT: {
             "type": "boolean",
@@ -428,7 +428,8 @@ def candidate_of(parameters: Mapping[str, FrozenJson], /) -> Candidate:
     Raises:
         ValueError: If the fact or the why is missing or blank, an argument is of the
             wrong type, it rests on nothing (§3:1's "one or more"), or it carries a
-            note without the memory the note is about.
+            memory without the note §3:1 has it carry, or a note without the memory
+            the note is about.
     """
     fact = parameters.get(FACT_ARGUMENT)
     why = parameters.get(WHY_ARGUMENT)
@@ -449,6 +450,9 @@ def candidate_of(parameters: Mapping[str, FrozenJson], /) -> Candidate:
     note = _optional_text(parameters, NOTE_ARGUMENT)
     if note is not None and memory is None:
         msg = "a candidate's note is about the memory it names"
+        raise ValueError(msg)
+    if memory is not None and note is None:
+        msg = "a candidate naming a memory says in a note how the fact bears on it"
         raise ValueError(msg)
     return Candidate(
         fact=fact,

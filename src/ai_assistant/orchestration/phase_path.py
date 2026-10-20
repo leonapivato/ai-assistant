@@ -1521,10 +1521,23 @@ class PhaseWorking:
         outcomes: list[CallOutcome] = []
         for one in self._rounds:
             names = {call.call_id: call.name for call in one.planned.round.calls}
-            outcomes.extend(
-                self._looked_up(outcome, names.get(outcome.call_id))
-                for outcome in call_outcomes(one.planned, one.authorization, one.acted)
+            # The capability a call ran as: an approved action is proposed under the
+            # approved-action tool's name and runs as the capability its question
+            # showed (ADR-0321 §4:2), so a remember a yes approved is rendered as one.
+            ran = (
+                {}
+                if one.acted is None
+                else {
+                    acted.result_id: str(acted.call.call.request.tool.capability)
+                    for acted in one.acted.calls
+                    if acted.result_id is not None
+                }
             )
+            for outcome in call_outcomes(one.planned, one.authorization, one.acted):
+                capability = names.get(outcome.call_id)
+                if outcome.result_id is not None:
+                    capability = ran.get(outcome.result_id, capability)
+                outcomes.append(self._looked_up(outcome, capability))
         return tuple(outcomes)
 
     def _looked_up(self, outcome: CallOutcome, capability: str | None) -> CallOutcome:
