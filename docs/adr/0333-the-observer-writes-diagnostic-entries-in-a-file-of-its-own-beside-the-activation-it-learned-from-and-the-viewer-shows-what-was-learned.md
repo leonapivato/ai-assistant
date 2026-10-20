@@ -1,6 +1,6 @@
 # 333. The observer writes diagnostic entries in a file of its own beside the activation it learned from, and the viewer shows what was learned
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-20
 - Scope: milestone 3, "Learning v1: the observer" (acceptance [#3154](https://github.com/leonapivato/ai-assistant/issues/3154)): what the observer gives [ADR-0314](0314-a-diagnostic-record-keeps-what-each-phase-was-given-and-returned-and-nothing-reads-it-back.md)'s diagnostic record, where those entries live and how they age, and how [ADR-0316](0316-an-activation-viewer-outside-the-package-shows-the-diagnostic-record-to-the-owner-on-the-server.md)'s activation viewer shows them.
 - Dependency: ADR-0314, ADR-0316 and ADR-0329, as their status lines leave them.
