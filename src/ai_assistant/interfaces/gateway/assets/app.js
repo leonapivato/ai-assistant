@@ -531,7 +531,7 @@ const LOCAL_DATE_TIME = new Intl.DateTimeFormat(undefined, {
 });
 // A conversation's name and a message's time: always the whole date, so that a name
 // on screen never goes stale as the day turns, and the minute — or the second, where
-// two conversations would otherwise share a name (`conversationNames`).
+// two conversations would otherwise share a name (`conversationName`).
 const CHAT_TIME = new Intl.DateTimeFormat(undefined, {
   weekday: "short",
   year: "numeric",
@@ -1771,7 +1771,7 @@ async function listConversations() {
     if (body.conversations.length === 0) {
       line(list, "No conversations yet.", "hint");
     }
-    listedNames = conversationNames(body.conversations);
+    knowStarts(body.conversations);
     body.conversations.forEach((one) => renderConversation(list, one));
     show("conversations", true);
   } catch (_) {
@@ -1788,13 +1788,10 @@ async function listConversations() {
   return mine;
 }
 
-// What the Conversations panel's rows call each conversation (`conversationNames`), so
-// that the forget ceremony and its outcome name a conversation as its row did.
-let listedNames = new Map();
-
-// The name a row of the panel gave a conversation, or its start where none did.
+// What the Conversations panel calls a conversation it read the digest of: its name
+// (`conversationName`), or its start where no listing has named it.
 function listedName(held) {
-  return listedNames.get(held.id) || chatTime(held.started_at);
+  return conversationName(held.id) || chatTime(held.started_at);
 }
 
 function renderConversation(list, summary) {
@@ -1813,7 +1810,7 @@ function renderConversation(list, summary) {
   // eye is looking for and a phone puts it behind two long instants otherwise. The name
   // is the one the chat gives it — when it started (`chatTime`) — rather than the hub's
   // id, which a person has never been shown anywhere else (#3209's follow-on).
-  line(item, listedNames.get(summary.id), "conversation-name");
+  line(item, conversationName(summary.id), "conversation-name");
   const when = localTime(summary.last_turn_at || summary.last_active_at);
   const active = localTime(summary.last_active_at);
   // Both instants cross and they are different facts (ADR-0074 §2): activity is
@@ -2768,6 +2765,7 @@ async function listChat(more) {
     }
     // A listing read before a removal reached this page still names what was removed.
     const held = body.conversations.filter((summary) => !chat.dropped.has(summary.id));
+    knowStarts(held);
     chat.listing = more ? chat.listing.concat(held) : held;
     el("chat-more").hidden = body.conversations.length < CHAT_PAGE;
     renderChatListing();
@@ -2791,40 +2789,40 @@ function chatTime(iso, seconds = false) {
   return at === null ? iso : (seconds ? CHAT_TIME_SECONDS : CHAT_TIME).format(at);
 }
 
-// What each conversation of a listing is called (#3209's follow-on): when it started,
-// since the listing carries nothing a person wrote. Where two share a minute they are
-// named to the second, and where two share a second too they are numbered in the order
-// of their ids — so no two rows on one screen, and no confirmation taken from one, name
-// the same conversation. The hub's id is on no screen.
-function conversationNames(summaries) {
-  const grouped = (key) => {
-    const groups = new Map();
-    summaries.forEach((one) => {
-      const name = key(one);
-      groups.set(name, (groups.get(name) || []).concat([one.id]));
-    });
-    return groups;
-  };
-  const byMinute = grouped((one) => chatTime(one.started_at));
-  const bySecond = grouped((one) => chatTime(one.started_at, true));
-  const names = new Map();
-  summaries.forEach((one) => {
-    const minute = chatTime(one.started_at);
-    if (byMinute.get(minute).length === 1) {
-      names.set(one.id, minute);
-      return;
-    }
-    const second = chatTime(one.started_at, true);
-    const same = bySecond.get(second).slice().sort();
-    names.set(one.id, same.length === 1 ? second : `${second} (${same.indexOf(one.id) + 1})`);
-  });
-  return names;
+// When each conversation this page has listed started, by id — the chat's listing
+// and the Conversations panel's alike — which is what names are told apart against
+// (`conversationName`). Only ever added to, so that two panels holding different pages
+// of conversations name each the same way, and a name is never handed on to another
+// conversation when one is dropped from a listing or the listing is read again.
+const startedAt = new Map();
+
+function knowStarts(summaries) {
+  summaries.forEach((one) => startedAt.set(one.id, one.started_at));
+}
+
+// What a conversation is called (#3209's follow-on): when it started, since the listing
+// carries nothing a person wrote — to the minute; to the second where another this
+// page knows started in the same minute; and with the hub's id after it only where
+// another started in the same second, which no person starting conversations does. So
+// no two conversations are ever called the same, and the id is on screen only there.
+function conversationName(id) {
+  const started = startedAt.get(id);
+  if (started === undefined) {
+    return undefined;
+  }
+  const others = [...startedAt].filter(([other]) => other !== id).map(([, at]) => at);
+  const minute = chatTime(started);
+  if (!others.some((at) => chatTime(at) === minute)) {
+    return minute;
+  }
+  const second = chatTime(started, true);
+  return others.some((at) => chatTime(at, true) === second) ? `${second} · ${id}` : second;
 }
 
 // What the chat calls one conversation; one not yet in its listing is "this
 // conversation".
 function chatTitle(id) {
-  const name = conversationNames(chat.listing).get(id);
+  const name = conversationName(id);
   return name === undefined ? "This conversation" : name;
 }
 
@@ -2835,7 +2833,7 @@ function capitalised(text) {
 
 // The same, inside a sentence.
 function chatName(id) {
-  const name = conversationNames(chat.listing).get(id);
+  const name = conversationName(id);
   return name === undefined ? "this conversation" : `the conversation from ${name}`;
 }
 
@@ -2855,7 +2853,6 @@ function renderChatListing() {
   }
   // Each row is one control that opens its conversation (#3098). The open one is marked
   // as current and opening it again reads nothing: on a phone it only comes back to it.
-  const names = conversationNames(chat.listing);
   chat.listing.forEach((summary) => {
     const item = document.createElement("li");
     item.className = "chat-conversation-row";
@@ -2866,7 +2863,7 @@ function renderChatListing() {
     open.dataset.conversation = summary.id;
     const name = document.createElement("span");
     name.className = "chat-name";
-    name.textContent = names.get(summary.id);
+    name.textContent = conversationName(summary.id);
     open.appendChild(name);
     const when = `Last active ${chatTime(summary.last_active_at)}`;
     const said = document.createElement("span");

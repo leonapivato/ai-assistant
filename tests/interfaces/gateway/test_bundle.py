@@ -799,7 +799,7 @@ def test_every_row_of_the_listing_says_which_conversation_it_is() -> None:
     stylesheet = _asset("app.css")
     rendering = _functions(script)["renderConversation"]
 
-    assert 'line(item, listedNames.get(summary.id), "conversation-name");' in rendering
+    assert 'line(item, conversationName(summary.id), "conversation-name");' in rendering
     assert "item.dataset.conversation = summary.id;" in rendering
     assert "summary.id}" not in rendering
     # First, so the name is above the row rather than between its two facts.

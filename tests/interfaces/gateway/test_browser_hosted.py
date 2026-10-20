@@ -726,6 +726,49 @@ async def test_two_conversations_started_together_are_never_named_alike(
         assert f"Forget the conversation from {named[1]}?" in message
 
 
+#: Three starts: two in one second, and one later in the same minute.
+_STARTS = {
+    "c-a": "2026-10-20T12:00:05+00:00",
+    "c-b": "2026-10-20T12:00:05.500000+00:00",
+    "c-c": "2026-10-20T12:00:55+00:00",
+}
+
+
+async def test_a_name_belongs_to_one_conversation_whichever_page_of_them_was_read(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A name is told apart against every conversation the page has listed, by either
+    panel and from any page of them, and none is ever handed on: so the chat and the
+    Conversations panel, holding different pages, never call two conversations the same,
+    and a conversation dropped from a listing keeps its name for an answer still out
+    about it (adversarial review, round 2)."""
+    async with through_the_door(gateway_browser, tmp_path, timezone="UTC") as door:
+        await expect(door.page.locator("#console")).to_be_visible()
+        named = """(ids) => ids.map((id) => conversationName(id))"""
+        listed = """(starts) => knowStarts(
+            Object.entries(starts).map(([id, started_at]) => ({ id, started_at })))"""
+
+        # One page holds two that started a minute apart from each other's second.
+        await door.page.evaluate(listed, {"c-b": _STARTS["c-b"], "c-c": _STARTS["c-c"]})
+        before = await door.page.evaluate(named, ["c-b", "c-c"])
+        assert before[0] != before[1]
+        assert "12:00:05" in before[0]
+
+        # Another page brings one that started in c-b's very second.
+        await door.page.evaluate(listed, {"c-a": _STARTS["c-a"]})
+        after = await door.page.evaluate(named, ["c-a", "c-b", "c-c"])
+        assert len(set(after)) == 3
+        assert after[0].endswith("· c-a")
+        assert after[1].endswith("· c-b")
+
+        # A listing read again without them names them as before.
+        await door.page.evaluate("() => { chat.listing = []; }")
+        assert await door.page.evaluate(named, ["c-a", "c-b", "c-c"]) == after
+        assert await door.page.evaluate("(id) => chatName(id)", "c-a") == (
+            f"the conversation from {after[0]}"
+        )
+
+
 async def test_the_loopback_door_keeps_the_owners_press_and_the_whole_menu(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
