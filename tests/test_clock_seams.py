@@ -126,6 +126,7 @@ from ai_assistant.orchestration.authorizer import (
 from ai_assistant.orchestration.digesting import ActivationLabels, DigestingStage
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
+from ai_assistant.orchestration.observer import Observer, ObserverLimits
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, PhaseWorking
 from ai_assistant.orchestration.planning import (
     PlaceWindow,
@@ -135,6 +136,8 @@ from ai_assistant.orchestration.planning import (
 )
 from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls
 from ai_assistant.orchestration.traces import OperationTraces
+from ai_assistant.orchestration.understanding import RecentEpisodes
+from ai_assistant.orchestration.writes import MemoryWriteStage
 from ai_assistant.permissions import (
     SqliteAuditTrail,
 )
@@ -583,6 +586,43 @@ async def _local_file_fetcher(now: Clock) -> None:
             fetcher.close()
 
 
+async def _observer(now: Clock) -> None:
+    """ADR-0329 §16's clock, read as a run takes its queue (§16:2).
+
+    Driven through ``run``, over the canonical fakes on a conforming clock, so the reading
+    under test is the stage's own: the queue's instant is the first thing a run reads.
+    """
+
+    def conforming() -> datetime:
+        return _AWARE
+
+    memory = FakeMemoryStore(now=conforming)
+    writer = FakeMemoryWriter(
+        store=memory, policy=FakeMemoryPolicy(MemoryDecisionKind.ACCEPT), now=conforming
+    )
+    await Observer(
+        scout=FakeModelProvider(),
+        commit=FakeModelProvider(),
+        memory=memory,
+        writes=MemoryWriteStage(writer=writer),
+        plans=FakePlanStore(now=conforming),
+        stories=FakeStoryStore(now=conforming),
+        episodes=RecentEpisodes(memory=memory, limit=2),
+        limits=ObserverLimits(
+            since=_AWARE,
+            story_episodes=1,
+            related=1,
+            similar=1,
+            retry_base=timedelta(minutes=1),
+            retry_cap=timedelta(hours=1),
+            stuck_after=1,
+            per_run=1,
+            daily_calls=1,
+        ),
+        now=now,
+    ).run()
+
+
 async def _fake_plan_store(now: Clock) -> None:
     await FakePlanStore(now=now).export()
 
@@ -854,6 +894,9 @@ SEAMS = [
     # ADR-0309 §3:3's step start, propagating for `ActingStage`'s reason: the glue that
     # runs the phases adds no error class either.
     Seam("PhasePath", _phase_path, ClockReadingError),
+    # ADR-0329 §16's queue instant, propagating for `ActingStage`'s reason: the
+    # observer's stage adds no error class either.
+    Seam("Observer", _observer, ClockReadingError),
     Seam("FakeMemoryStore", _fake_store, MemoryStoreError),
     Seam("FakeMemoryWriter", _fake_writer, MemoryStoreError),
     Seam("FakePlanStore", _fake_plan_store, PlanningError),
@@ -1170,6 +1213,11 @@ PROPAGATED: Final[dict[str, str]] = {
     "PhasePath": (
         "ADR-0309 adds **no** error class to `core.errors`, and a clock this process "
         "cannot read is not a round's outcome: no call ran and no message was claimed"
+    ),
+    "Observer": (
+        "ADR-0329 adds **no** error class to `core.errors`, and a clock this process "
+        "cannot read is not a failed attempt: no episode was read, no model was asked "
+        "and nothing was recorded"
     ),
     "CurrentTime": ("documented at ``tools/builtin.py:148``, and `tools` is not in §4's list"),
     "StoreHealthReader": _UNDECLARED,
