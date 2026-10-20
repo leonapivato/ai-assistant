@@ -137,7 +137,7 @@ type _Certainty = Literal["sure", "likely", "unsure"]
 
 
 class _ProposedSupport(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="ignore")
     part: str
     direction: Literal["for", "against"]
     backs_as_worded: bool = False
@@ -147,13 +147,13 @@ class _ProposedSupport(BaseModel):
 
 
 class _ProposedInference(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="ignore")
     how_sure: _Certainty
     note: str = ""
 
 
 class _ProposedResolve(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="ignore")
     memory: str
     question: str
     part: str
@@ -161,9 +161,14 @@ class _ProposedResolve(BaseModel):
 
 
 class CommitReply(BaseModel):
-    """The commit step's whole reply (``COMMIT_INSTRUCTION``'s shape)."""
+    """The commit step's whole reply (``COMMIT_INSTRUCTION``'s shape).
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    A key this shape, or a shape nested in it, does not name is dropped, as the scout's
+    reply drops one: the fields it names are validated as before, so a missing required
+    field or a value of the wrong kind still fails the reply whole.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
     action: Literal[
         "create",
         "add",

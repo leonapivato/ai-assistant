@@ -14,7 +14,7 @@ import json
 from datetime import timedelta
 from typing import Any
 
-from observer_support import AT, Harness, address, episode
+from observer_support import AT, Harness, address, episode, reply
 
 from ai_assistant.core.types import (
     ConfirmationPart,
@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     MemoryStanding,
     MemorySupport,
     MemoryWriterName,
+    ObservationAttemptEnd,
     ObservationFinding,
     ObserverInferencePart,
     OpenQuestion,
@@ -64,6 +65,8 @@ from ai_assistant.orchestration.observer.reading import (
     ReadPart,
     Reliance,
 )
+from ai_assistant.orchestration.observer.scout import parsed
+from ai_assistant.testing import FakeDiagnosticSink, FakeModelProvider
 from ai_assistant.testing.memories import (
     inference_support,
     memory,
@@ -881,3 +884,104 @@ def test_the_floor_needs_fewer_against_than_for() -> None:
     assert meets_floor(inferred(3))  # four for (the inference among them), three against
     assert not meets_floor(inferred(4))
     assert not meets_floor(inferred(5))
+
+
+def test_a_key_the_commit_reply_does_not_name_is_dropped_and_the_reply_kept() -> None:
+    """A stray key, at the top or inside a support, an inference or a resolve, is dropped."""
+    resolves = {"memory": "M1", "question": "Q1", "part": "P1", "note": "asked"}
+    named: dict[str, Any] = {
+        "action": "add",
+        "memory": "M1",
+        "supports": [_support("P1")],
+        "inference": {"how_sure": "likely"},
+        "resolves": resolves,
+        "track_record": "neither",
+    }
+    stray = {
+        **named,
+        "command": None,
+        "supports": [_support("P1", reason="x")],
+        "inference": {"how_sure": "likely", "why": None},
+        "resolves": {**resolves, "extra": 1},
+    }
+
+    assert parsed(reply(**stray), CommitReply) == CommitReply.model_validate(named)
+
+
+def test_a_commit_reply_still_validates_every_field_it_names() -> None:
+    """Only a key the shape does not name is dropped: a bad or missing one fails whole."""
+    support = {"part": "P1", "direction": "for", "how_sure": "sure"}
+
+    assert parsed(reply(action="create", supports=[support]), CommitReply) is not None
+    assert parsed(reply(action="keep", supports=[support]), CommitReply) is None
+    assert parsed(reply(supports=[{**support, "how_sure": "maybe"}]), CommitReply) is None
+    assert parsed(reply(supports=[{"part": "P1", "how_sure": "sure"}]), CommitReply) is None
+    assert parsed(reply(inference={"note": "x"}), CommitReply) is None
+    assert parsed(reply(resolves={"memory": "M1", "question": "Q1"}), CommitReply) is None
+
+
+async def _three(harness: Harness) -> None:
+    """Three episodes, a minute apart: with a window of two, the oldest has left it."""
+    await harness.hold(
+        episode("one", at=AT - timedelta(minutes=3), text="I prefer window seats when I fly."),
+        episode("two", at=AT - timedelta(minutes=2), text="What time is it?"),
+        episode("three", at=AT - timedelta(minutes=1), text="Thanks."),
+    )
+
+
+_SCOUTED = reply(findings=[{"claim": "The user prefers window seats.", "rests_on": ["P1"]}])
+
+
+async def test_a_commit_reply_with_a_stray_key_is_written() -> None:
+    """End to end: the decision is checked and written as if the key were not there."""
+    harness = Harness()
+    await _three(harness)
+    decision = reply(
+        action="create",
+        wording="The user prefers window seats.",
+        supports=[_support("P1", command=None)],
+        command=None,
+    )
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_SCOUTED), commit=FakeModelProvider.scripted(decision)
+    )
+
+    outcome = await observer.run()
+
+    assert outcome.processed == 1
+    (record,) = await harness.plans.observations(["activation:one"])
+    (finding,) = record.findings
+    assert finding.outcome is not None
+    (write,) = finding.outcome.writes
+    stored = await harness.memory.get(write.memory)
+    assert isinstance(stored, Memory)
+    assert stored.content == "The user prefers window seats."
+
+
+async def test_a_commit_reply_missing_a_required_key_still_fails_as_unparsed() -> None:
+    """§16:4: a support with no direction is no decision; the attempt fails, naming commit."""
+    harness = Harness()
+    await _three(harness)
+    sink = FakeDiagnosticSink()
+    decision = reply(
+        action="create",
+        wording="The user prefers window seats.",
+        supports=[{"part": "P1", "how_sure": "sure", "command": None}],
+    )
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_SCOUTED),
+        commit=FakeModelProvider.scripted(decision),
+        diagnostics=sink,
+    )
+
+    outcome = await observer.run()
+
+    assert outcome.waiting == 1
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.attempts[-1].end is ObservationAttemptEnd.FAILED
+    (finding,) = record.findings
+    assert finding.outcome is None
+    assert json.loads(sink.recorded[-1].model_dump_json())["body"]["failure"] == {
+        "class": "unparsed",
+        "message": "the commit step's reply did not parse",
+    }

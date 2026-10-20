@@ -12,11 +12,12 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 
-from observer_support import AT, address, episode, reply
+from observer_support import AT, Harness, address, episode, reply
 
 from ai_assistant.core.types import (
     ConfirmationPart,
     InputPart,
+    ObservationAttemptEnd,
     QuestionPart,
     Role,
     SupportOrigin,
@@ -36,7 +37,27 @@ from ai_assistant.orchestration.observer.scout import (
     proposed_findings,
     scout_messages,
 )
+from ai_assistant.testing import FakeDiagnosticSink, FakeModelProvider
 from ai_assistant.testing.memories import memory, said_support
+
+_CLAIM = "The user prefers window seats."
+
+
+async def _three(harness: Harness) -> None:
+    """Three episodes, a minute apart: with a window of two, the oldest has left it."""
+    await harness.hold(
+        episode("one", at=AT - timedelta(minutes=3)),
+        episode("two", at=AT - timedelta(minutes=2), text="What time is it?"),
+        episode("three", at=AT - timedelta(minutes=1), text="Thanks."),
+    )
+
+
+def _create() -> str:
+    return reply(
+        action="create",
+        wording=_CLAIM,
+        supports=[{"part": "P1", "direction": "for", "backs_as_worded": True, "how_sure": "sure"}],
+    )
 
 
 def _input(handle: str, name: str, *, at_minutes: int = 0) -> ReadPart:
@@ -72,12 +93,80 @@ def _scouted(reading: Reading, *findings: dict[str, object]) -> tuple[list[str],
     return [one.claim for one in kept], dropped
 
 
+#: A scout reply from a dry run on a copy of live data (2026-10-20): every required field
+#: valid, and one finding carrying a key the shape does not name.
+_DRY_RUN_REPLY = """{"findings": [
+  {"claim": "The user said Zach is their roommate.", "rests_on": ["P1"],
+   "candidate": null, "relied_on": null},
+  {"command": null, "claim": "The user approved the drafted introduction email.",
+   "rests_on": ["P5", "P6"], "candidate": null, "relied_on": null},
+  {"claim": "The user uses more than one chat channel.", "rests_on": ["P3"],
+   "candidate": null, "relied_on": null}
+]}"""
+
+
 def test_a_reply_parses_whole_or_not_at_all() -> None:
     fenced = "```json\n" + reply(findings=[]) + "\n```"
 
     assert parsed(fenced, ScoutReply) == ScoutReply()
     assert parsed("not json", ScoutReply) is None
-    assert parsed(reply(findings=[{"claim": "x", "extra": 1}]), ScoutReply) is None
+    assert parsed(reply(findings=[{"rests_on": ["P1"]}]), ScoutReply) is None
+    assert parsed(reply(findings=[{"claim": "x", "rests_on": "P1"}]), ScoutReply) is None
+    assert parsed(reply(findings=[{"claim": ["x"]}]), ScoutReply) is None
+
+
+def test_a_key_the_shape_does_not_name_is_dropped_and_the_reply_kept() -> None:
+    """A stray key is no reason to discard a reply whose every named field is valid."""
+    proposal = parsed(_DRY_RUN_REPLY, ScoutReply)
+
+    assert proposal is not None
+    assert [(one.claim, one.rests_on) for one in proposal.findings] == [
+        ("The user said Zach is their roommate.", ("P1",)),
+        ("The user approved the drafted introduction email.", ("P5", "P6")),
+        ("The user uses more than one chat channel.", ("P3",)),
+    ]
+    assert all(one.candidate is None and one.relied_on is None for one in proposal.findings)
+    assert parsed(reply(findings=[], note="x"), ScoutReply) == ScoutReply()
+    assert "command" not in proposal.findings[1].model_dump()
+
+
+async def test_a_finding_with_a_stray_key_is_committed() -> None:
+    """The dry run's case end to end: the attempt finishes and the finding is written."""
+    harness = Harness()
+    await _three(harness)
+    scout = reply(findings=[{"command": None, "claim": _CLAIM, "rests_on": ["P1"]}])
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(scout), commit=FakeModelProvider.scripted(_create())
+    )
+
+    outcome = await observer.run()
+
+    assert outcome.processed == 1
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.attempts[-1].end is ObservationAttemptEnd.FINISHED
+    (finding,) = record.findings
+    assert finding.claim == _CLAIM
+    assert finding.outcome is not None
+    assert len(finding.outcome.writes) == 1
+
+
+async def test_a_scout_reply_missing_a_required_key_still_fails_as_unparsed() -> None:
+    """§16:4: a finding with no claim is no proposal; the attempt fails, naming the scout."""
+    harness = Harness()
+    await _three(harness)
+    sink = FakeDiagnosticSink()
+    scout = FakeModelProvider.scripted(reply(findings=[{"command": None, "rests_on": ["P1"]}]))
+
+    outcome = await harness.observer(scout=scout, diagnostics=sink).run()
+
+    assert outcome.waiting == 1
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.findings == ()
+    assert record.attempts[-1].end is ObservationAttemptEnd.FAILED
+    assert json.loads(sink.recorded[-1].model_dump_json())["body"]["failure"] == {
+        "class": "unparsed",
+        "message": "the scout step's reply did not parse",
+    }
 
 
 def test_a_finding_names_parts_by_label_and_code_maps_them_back() -> None:
