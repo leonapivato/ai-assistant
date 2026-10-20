@@ -21,7 +21,10 @@ rests on that yes, whatever else the scout named, and where the scout proposed n
 resting on it, code adds one, its claim the fact the user approved.
 
 A reply that does not parse is no proposal, never a partial one: the attempt fails and
-is retried (§16:4).
+is retried (§16:4). A key the reply's shape does not name is dropped rather than refusing
+the reply: every field it does name is validated as before, so a reply missing a required
+field, or carrying a value of the wrong kind, still fails whole. A model's stray key, such
+as a ``"command": null`` beside a finding's own, is no reason to discard its findings.
 """
 
 from __future__ import annotations
@@ -44,7 +47,7 @@ __all__ = ["ScoutReply", "parsed", "proposed_findings", "scout_messages"]
 class _ProposedFinding(BaseModel):
     """One finding as the scout writes it: labels, never addresses."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="ignore")
     claim: str
     rests_on: tuple[str, ...] = ()
     candidate: str | None = None
@@ -52,9 +55,9 @@ class _ProposedFinding(BaseModel):
 
 
 class ScoutReply(BaseModel):
-    """The scout's whole reply (``SCOUT_INSTRUCTION``'s shape)."""
+    """The scout's whole reply (``SCOUT_INSTRUCTION``'s shape); an unnamed key is dropped."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="ignore")
     findings: tuple[_ProposedFinding, ...] = ()
 
 
