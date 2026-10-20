@@ -531,14 +531,12 @@ class Observer:
             if current.outcome is None:
                 current, decided = await self._committed(finding_id, reading, attempt)
             self._unsaved[key] = current
-            done = tuple(
-                current if one.id == finding_id else one for one in attempt.record.findings
-            )
-            await self._save(attempt, findings=done)
             if decided is not None and current.outcome is not None:
-                # Written once the outcome is on the record, never between its decision
-                # and its keeping: a cancellation reaching the entry's write must not
-                # leave a decided finding to be committed again (ADR-0333 §1:3, §2:11).
+                # Written once the decided finding is kept for the next attempt, and
+                # before the record is written: a cancellation reaching the entry's
+                # write leaves nothing to be committed again (ADR-0333 §1:3, §2:11), and
+                # a record that fails to be written still has its outcome's entry, since
+                # the next attempt restores the finding decided and never decides it anew.
                 await self._entries.outcome(
                     attempt.diagnosed,
                     current,
@@ -546,6 +544,10 @@ class Observer:
                     decided=decided.checked,
                     note=decided.note,
                 )
+            done = tuple(
+                current if one.id == finding_id else one for one in attempt.record.findings
+            )
+            await self._save(attempt, findings=done)
 
     async def _scouted(
         self, reading: Reading, attempt: _Attempt, kept: tuple[ObservationFinding, ...]
