@@ -19709,6 +19709,10 @@ class DiagnosticSource(StrEnum):
     PLANNING = "planning"
     AUTHORIZING = "authorizing"
     DIGESTING = "digesting"
+    OBSERVER = "observer"
+    """The observer, a background stage and no activation, writing under the activation
+    of the episode it learned from (ADR-0333 §2:1); its entries go to a file of their
+    own beside that activation's (§3:1)."""
 
 
 class DiagnosticKind(StrEnum):

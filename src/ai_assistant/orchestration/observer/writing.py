@@ -92,7 +92,7 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.writes import MemoryWriteStage
 
-__all__ = ["FindingWriter", "Landed", "WriteBlocked"]
+__all__ = ["FindingWriter", "Landed", "WriteBlocked", "policy_ask_wording"]
 
 #: What a commit hands its caller as each write lands: everything it has written so far,
 #: by memory, in the order written (§16:1).
@@ -100,6 +100,18 @@ type Landed = Callable[[tuple[ObservationWrite, ...]], Awaitable[None]]
 
 #: What a ``policy_ask`` question asks, in words, before the claim the policy asked about.
 _ASK_ASKS: Final = "The write path asked before keeping this beside this memory: "
+
+
+def policy_ask_wording(claim: str) -> str:
+    """What a ``policy_ask`` question raised over ``claim`` asks (§13:1).
+
+    Args:
+        claim: The wording of the memory the policy asked about.
+
+    Returns:
+        The question's wording.
+    """
+    return _ASK_ASKS + claim
 
 
 class WriteBlocked(Exception):  # noqa: N818 — a control-flow signal the stage turns into a retry
@@ -394,7 +406,7 @@ class FindingWriter:
             await self._raise(
                 memory,
                 OpenQuestionKind.POLICY_ASK,
-                _ASK_ASKS + create.memory.content,
+                policy_ask_wording(create.memory.content),
                 create.asked_on,
                 ledger,
             )

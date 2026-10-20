@@ -51,8 +51,9 @@ _RELEASED_EARLY = (
 #: A second activation, so a case can say "another file".
 _OTHER = "9a1c7e52-6b3d-4f80-8e2a-1c5d7b9f0e46"
 
-#: Ids no file may be named by (§6:1).
-_NOT_PLAIN = ("", ".", "..", "../escape", "a/b", "x\0y", "e" * 250)
+#: Ids no file may be named by (§6:1); one ending ``.observer`` would name its own file
+#: like an observer's (ADR-0333 §3:1).
+_NOT_PLAIN = ("", ".", "..", "../escape", "a/b", "x\0y", "e" * 250, "x.observer")
 
 #: Text an entry's body carries, which no log record may (§2:4, ADR-0004 §5).
 _CONTENT = "the user's private words"

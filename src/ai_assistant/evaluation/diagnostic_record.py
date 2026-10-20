@@ -16,7 +16,15 @@ opens a file for reading, its own tail included. The owner reads the files with 
 server's own tools (§3:4).
 
 **The file** (§6). ``<directory>/<activation_id>.jsonl``, an id that is not a plain
-file name refused (§6:1). Each entry is one line holding one JSON object, appended
+file name refused (§6:1). An entry the observer writes goes to a second file beside it,
+``<activation_id>.observer.jsonl``, and never to the activation's own (ADR-0333 §3:1):
+the observer writes about an activation days after it ran, and its line in the
+activation's own file would restart that file's window from the observer's write. The
+second file is a file of the record like any other (§3:2): the same line, bound,
+truncation marker and modes, and the sweep deletes it by its own last write, since the
+sweep already deletes every regular file in the directory by its own. An id that would
+name its own file like an observer's — one ending ``.observer`` — is refused, so the two
+names never meet. Each entry is one line holding one JSON object, appended
 whole in the order written (§6:2). A file holds at most the composition root's
 ``DIAGNOSTIC_FILE_BYTES``: an entry that would take it past is not written; one last
 line marks the file truncated and when, and nothing more is written to it (§6:3). The
@@ -58,7 +66,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.diagnostics import DIAGNOSTIC_NOT_WRITTEN
 from ai_assistant.core.errors import DiagnosticRecordError
-from ai_assistant.core.types import DiagnosticEntry, fault_class_of
+from ai_assistant.core.types import DiagnosticEntry, DiagnosticSource, fault_class_of
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -69,6 +77,9 @@ _log = structlog.get_logger(__name__)
 
 #: Each activation's file's suffix (§6:1).
 SUFFIX: Final = ".jsonl"
+
+#: The suffix of the file an activation's observer entries go to (ADR-0333 §3:1).
+OBSERVER_SUFFIX: Final = ".observer" + SUFFIX
 
 #: The smallest bound a file may be given: room for a truncation marker and a line.
 MIN_FILE_BYTES: Final = 4096
@@ -139,7 +150,9 @@ class FileDiagnosticRecord:
     # --- the write seam ------------------------------------------------------
 
     async def write(self, entry: DiagnosticEntry) -> None:
-        """Append ``entry`` to its activation's file. No failure escapes (§2:4).
+        """Append ``entry`` to its activation's file, or its observer file (ADR-0333 §3:1).
+
+        No failure escapes (§2:4).
 
         Args:
             entry: The entry, stamped by its emitter.
@@ -153,7 +166,7 @@ class FileDiagnosticRecord:
             _dropped(None, None, exc)
             return
         try:
-            name = _file_name(snapshot.activation_id)
+            name = _file_name(snapshot.activation_id, snapshot.source)
             line = (snapshot.model_dump_json() + "\n").encode("utf-8")
             marker = _marker(snapshot.activation_id, snapshot.recorded_at)
             async with self._lock:
@@ -316,18 +329,24 @@ class _TornError(OSError):
         self.size = size
 
 
-def _file_name(activation_id: str) -> str:
-    """The activation's file's name, or a refusal where the id is not a plain file name.
+def _file_name(activation_id: str, source: DiagnosticSource) -> str:
+    """The name of the file an entry goes to, or a refusal where the id names none.
+
+    The observer's entries go to the activation's second file, every other source's to
+    its own (ADR-0333 §3:1).
 
     Raises:
         _RefusedIdError: If the id is empty, ``.`` or ``..``, carries a separator or
-            a NUL, or makes a name too long for a file system.
+            a NUL, ends ``.observer`` so its own file would be named like an observer's,
+            or makes a name too long for a file system.
     """
     separators = {os.sep, "\0"} | ({os.altsep} if os.altsep else set())
-    name = f"{activation_id}{SUFFIX}"
+    suffix = OBSERVER_SUFFIX if source is DiagnosticSource.OBSERVER else SUFFIX
+    name = f"{activation_id}{suffix}"
     if (
         activation_id in {"", ".", ".."}
         or any(one in activation_id for one in separators)
+        or activation_id.endswith(OBSERVER_SUFFIX.removesuffix(SUFFIX))
         or len(name.encode("utf-8", errors="replace")) > _NAME_BYTES
     ):
         msg = "an activation id that is not a plain file name names no diagnostic file"
@@ -434,4 +453,4 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
     return outcome[0]
 
 
-__all__ = ["MIN_FILE_BYTES", "SUFFIX", "FileDiagnosticRecord"]
+__all__ = ["MIN_FILE_BYTES", "OBSERVER_SUFFIX", "SUFFIX", "FileDiagnosticRecord"]

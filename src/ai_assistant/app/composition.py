@@ -1639,6 +1639,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 daily_calls=settings.observer_daily_calls,
             ),
             now=_utcnow,
+            # ADR-0333 §2:7: the record's write seam where it is on, ``None`` where off.
+            diagnostics=diagnostics,
         )
         # ADR-0309 §2:6: the phases, which plan every activation, over the objects this
         # root already built (:class:`_PhaseSeams`).
