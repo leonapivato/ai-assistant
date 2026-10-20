@@ -12,19 +12,26 @@ Every write the observer makes goes through the orchestration write stage
 - **a track-record entry** is recorded through ``record_use``, conditionally on the
   revision read (§14:4).
 
-Each memory written on is read again just before its write, so the write is conditional
-on the revision it now stands at (ADR-0219 §2). Every write adds to the record and none
-removes anything (§12:7): a support already on a memory changes nothing (ADR-0328 §4:8),
-and it is recorded as its add support, so a finding processed again after a clear says
-what the memory carries rather than nothing.
+Each memory written on is read again just before its write, and the write is made only
+where the memory still stands at the revision the commit step decided on, or at the one
+this finding's own last write left it at; otherwise the attempt fails as stale and the
+finding is decided again on a retry (ADR-0219 §2-§3). Every write adds to the record and
+none removes anything (§12:7): a support already on a memory changes nothing (ADR-0328
+§4:8), and it is recorded as its add support, so a finding processed again after a clear
+says what the memory carries rather than nothing; an entry the memory already holds for
+the episode is recorded as the one held (ADR-0328 §8:3).
 
 **The outcome** names what was written, with the memory ids and the operations, or why
 nothing was (§16:1). A ruling that writes nothing is ``refused``; an ``ASK_USER`` ruling
 raises a ``policy_ask`` question on each stored memory it names (§13:1), and one that
 names none writes nothing and is ``asked`` (§13:3) — never logged and dropped (§13:6).
-A write the writer refuses is ``refused`` (§12:5), and one whose part points at an
-episode the store no longer holds failed §9:5's check. A stale read and a store whose
-deadline passed are not outcomes: they fail the attempt, which is retried (§16:4).
+A write the writer refuses as self-consuming or as a fold onto a record it cites is
+``refused`` (§12:5), and one whose part points at an episode the store no longer holds
+failed §9:5's check. Every other failure of the write path fails the attempt, which is
+retried and in the end set aside as stuck (§16:4-§16:5): ``MemoryStoreError`` is a
+store's failure as well as a refusal, and only a retry tells a passing outage from a
+refusal, so neither is recorded as a terminal outcome. What one finding wrote before a
+later write of its own failed is recorded with it, never lost.
 """
 
 from __future__ import annotations
@@ -32,9 +39,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.errors import (
-    MemoryStoreEmbeddingExpiredError,
-    MemoryStoreError,
     MemoryStoreStaleError,
+    SelfConsumingWriteError,
     UnresolvedEvidenceError,
 )
 from ai_assistant.core.types import (
@@ -136,6 +142,7 @@ class FindingWriter:
         self._memory = memory
         self._now = now
         self._mint = mint
+        self._expected: dict[str, int] = {}
 
     async def write(self, checked: Checked) -> FindingOutcome:
         """Write ``checked`` and return the finding's outcome (§16:1).
@@ -147,11 +154,13 @@ class FindingWriter:
             What was written, or why nothing was.
 
         Raises:
-            MemoryStoreStaleError: Where a memory moved between its read and its write,
-                so the attempt is retried (§16:4).
-            MemoryStoreEmbeddingExpiredError: Where the store's deadline passed.
+            MemoryStoreStaleError: Where a memory moved between the read the decision
+                was made on and its write, so the attempt is retried (§16:4).
+            MemoryStoreError: Where the write path failed or refused in a way only a
+                retry tells apart (§16:4).
         """
         ledger = _Ledger()
+        self._expected = {}
         unwritten: FindingUnwritten | None = None
         try:
             unwritten = await self._primary(checked.primary, ledger)
@@ -178,10 +187,8 @@ class FindingWriter:
                 target = await self._fresh(primary.target)
                 for support in primary.supports:
                     await self._apply(target, MemoryOperationKind.ADD_SUPPORT, support)
-                    target = await self._fresh(target)
-                ledger.wrote(
-                    target.id, *(MemoryOperationKind.ADD_SUPPORT for _ in primary.supports)
-                )
+                    ledger.wrote(target.id, MemoryOperationKind.ADD_SUPPORT)
+                    target = await self._fresh(primary.target)
                 return None
             case RaiseQuestion():
                 await self._raise(primary.target, primary.kind, primary.asks, primary.support)
@@ -189,8 +196,13 @@ class FindingWriter:
                 return None
             case RecordUse():
                 memory = await self._fresh(primary.memory)
-                await self._guarded(self._writes.record_use(memory, primary.entry))
-                ledger.recorded(memory.id, held_up=primary.entry.held_up)
+                entry = primary.entry
+                held = next(
+                    (one for one in memory.track_record if one.episode == entry.episode), None
+                )
+                if held is None:
+                    await self._guarded(self._writes.record_use(memory, entry), memory.id)
+                ledger.recorded(memory.id, held_up=entry.held_up if held is None else held.held_up)
                 return None
 
     async def _create(self, create: Create, ledger: _Ledger) -> FindingUnwritten | None:
@@ -206,9 +218,11 @@ class FindingWriter:
         proposal = MemoryUpdateProposal(
             proposed=create.memory, rationale=create.rationale, retiring=retiring
         )
-        outcome = await self._guarded(self._writes.write(proposal))
+        outcome = await self._guarded(self._writes.write(proposal), *_touched(proposal))
         result = outcome.result
         ledger.ruling = result.decision.kind
+        if result.record_id is not None:
+            await self._note(result.record_id)
         return await self._ruled(create, retiring, result, ledger)
 
     async def _ruled(
@@ -290,7 +304,7 @@ class FindingWriter:
             support=None if carried is not None else support,
             question=question,
         )
-        await self._guarded(self._writes.apply(change))
+        await self._guarded(self._writes.apply(change), memory.id)
 
     async def _resolve(self, resolve: Resolve, ledger: _Ledger) -> None:
         """§13:5: resolve the question, citing the support added from the answer."""
@@ -312,7 +326,7 @@ class FindingWriter:
             operation=operation,
             support=None if carried is not None else resolve.support,
         )
-        await self._guarded(self._writes.apply(change))
+        await self._guarded(self._writes.apply(change), memory.id)
         ledger.wrote(memory.id, MemoryOperationKind.RESOLVE_QUESTION)
 
     async def _apply(
@@ -330,33 +344,56 @@ class FindingWriter:
         change = MemoryChange(
             memory=memory, operation=operation, support=None if carried is not None else support
         )
-        await self._guarded(self._writes.apply(change))
+        await self._guarded(self._writes.apply(change), memory.id)
 
     async def _fresh(self, memory: Memory) -> Memory:
-        """``memory`` as the store holds it now, so a write is conditional on that revision.
+        """``memory`` as the store holds it now, still at the revision decided on.
+
+        The revision expected is the one this finding's own last write left the memory
+        at, or else the one the commit step was shown (ADR-0219 §2).
 
         Raises:
             _Refusal: ``check_failed`` where the store no longer holds it as a memory.
+            MemoryStoreStaleError: Where another writer moved it since: the finding is
+                decided again on a retry (ADR-0219 §3).
         """
         held = await self._memory.get(memory.id)
         if not isinstance(held, Memory):
             raise _Refusal(FindingUnwritten.CHECK_FAILED)
+        if held.revision != self._expected.get(memory.id, memory.revision):
+            msg = "a memory moved between the read the observer decided on and its write"
+            raise MemoryStoreStaleError(msg)
         return held
 
-    async def _guarded[T](self, write: Awaitable[T]) -> T:
-        """Await one write, turning the writer's refusals into the outcome they are.
+    async def _guarded[T](self, write: Awaitable[T], *touched: str) -> T:
+        """Await one write; note where it leaves the memories it touched.
 
         Raises:
             _Refusal: ``check_failed`` for a support whose episode the store does not
-                hold (§9:5), ``refused`` for any other refusal (§12:5).
-            MemoryStoreStaleError: Re-raised: the attempt is retried (§16:4).
-            MemoryStoreEmbeddingExpiredError: Re-raised, likewise.
+                hold (§9:5), ``refused`` for a self-consuming write or a fold onto a
+                record the proposal cites (§12:5).
+            MemoryStoreError: Every other failure or refusal, re-raised: the attempt is
+                retried (§16:4).
         """
         try:
-            return await write
-        except MemoryStoreStaleError, MemoryStoreEmbeddingExpiredError:
-            raise
+            done = await write
         except UnresolvedEvidenceError as exc:
             raise _Refusal(FindingUnwritten.CHECK_FAILED) from exc
-        except MemoryStoreError as exc:
+        except SelfConsumingWriteError as exc:
             raise _Refusal(FindingUnwritten.REFUSED) from exc
+        await self._note(*touched)
+        return done
+
+    async def _note(self, *touched: str) -> None:
+        """Note the revisions this finding's own writes left ``touched`` at."""
+        if not touched:
+            return
+        found = await self._memory.get_many(list(touched))
+        self._expected.update(
+            (key, one.revision) for key, one in found.items() if isinstance(one, Memory)
+        )
+
+
+def _touched(proposal: MemoryUpdateProposal) -> tuple[str, ...]:
+    """The stored memories a proposal may write on: the one it retires, where it has one."""
+    return () if proposal.retiring is None else (proposal.retiring.memory.id,)

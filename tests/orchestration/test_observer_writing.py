@@ -8,9 +8,12 @@ the outcome naming what was written, by memory and operation, or why nothing was
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import NoReturn
 
+import pytest
 from observer_support import AT, Harness, address, episode
 
+from ai_assistant.core.errors import MemoryStoreError, MemoryStoreStaleError
 from ai_assistant.core.types import (
     FindingUnwritten,
     InputPart,
@@ -21,6 +24,7 @@ from ai_assistant.core.types import (
     MemoryRetirement,
     MemoryStatus,
     MemorySupport,
+    MemoryUpdateProposal,
     MemoryWriterName,
     OpenQuestion,
     OpenQuestionKind,
@@ -318,3 +322,77 @@ async def test_a_reason_alone_is_the_outcome() -> None:
         FindingUnwritten.BELOW_FLOOR,
         _NOW,
     )
+
+
+async def test_what_one_finding_wrote_before_a_later_write_failed_is_recorded() -> None:
+    """§16:1: the first support stays written, and the outcome says so."""
+    harness = await _harness()
+    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
+
+    outcome = await _writer(harness).write(
+        Checked(primary=AddSupports(target=held, supports=(_said(), _said("gone"))))
+    )
+
+    (write,) = outcome.writes
+    assert write.operations == (MemoryOperationKind.ADD_SUPPORT,)
+    assert outcome.unwritten is None
+
+
+async def test_an_entry_already_held_for_the_episode_is_recorded_as_held() -> None:
+    """ADR-0328 §8:3: recording again changes nothing, and the outcome says what is held."""
+    harness = await _harness()
+    first = TrackRecordEntry(
+        episode=address("leaving"),
+        relied_at=AT,
+        held_up=True,
+        recorded_at=_NOW,
+        recorded_by=MemoryWriterName.OBSERVER,
+    )
+    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
+    await harness.writes.record_use(held, first)
+    again = await harness.memory.get(held.id)
+    assert isinstance(again, Memory)
+
+    outcome = await _writer(harness).write(
+        Checked(primary=RecordUse(memory=again, entry=first.model_copy(update={"held_up": False})))
+    )
+
+    (write,) = outcome.writes
+    assert write.track_record is True
+    after = await harness.memory.get(held.id)
+    assert isinstance(after, Memory)
+    assert after.track_record == (first,)
+    assert after.revision == again.revision
+
+
+async def test_a_memory_moved_since_the_decision_fails_the_attempt_as_stale() -> None:
+    """ADR-0219 §2-§3: the decision is made again rather than applied to another state."""
+    harness = await _harness()
+    seen = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
+    await harness.writes.record_use(
+        seen,
+        TrackRecordEntry(
+            episode=address("past"),
+            relied_at=AT,
+            held_up=True,
+            recorded_at=_NOW,
+            recorded_by=MemoryWriterName.OBSERVER,
+        ),
+    )
+
+    with pytest.raises(MemoryStoreStaleError):
+        await _writer(harness).write(Checked(primary=AddSupports(target=seen, supports=(_said(),))))
+
+
+async def test_a_failing_store_fails_the_attempt_rather_than_refusing_the_finding() -> None:
+    """§16:4: only a retry tells an outage from a refusal."""
+    harness = await _harness()
+
+    async def down(_proposal: MemoryUpdateProposal) -> NoReturn:
+        msg = "database temporarily unavailable"
+        raise MemoryStoreError(msg)
+
+    harness.writer.ingest = down  # type: ignore[method-assign,assignment]  # an outage no fake arms
+
+    with pytest.raises(MemoryStoreError):
+        await _writer(harness).write(Checked(primary=Create(memory=_new())))

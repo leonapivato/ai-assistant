@@ -9,14 +9,15 @@ failure, the budget, the bound and a second run do.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import structlog.testing
 from observer_support import AT, SINCE, Harness, address, episode, remembered, reply
 
-from ai_assistant.core.errors import ModelError
+from ai_assistant.core.errors import MemoryStoreError, ModelError, PlanningError
 from ai_assistant.core.types import (
     ActivationUnderstanding,
     AnsweredQuestion,
@@ -24,13 +25,16 @@ from ai_assistant.core.types import (
     ConfirmationPart,
     EpisodicMemory,
     FindingUnwritten,
+    InputPart,
     Memory,
+    MemoryDecisionKind,
     MemoryOperationKind,
     MemorySource,
     MemoryStanding,
     ObservationAttemptEnd,
     ObservationState,
     ObserverStep,
+    OpenQuestionKind,
     PlanningRound,
     Provenance,
     QuestionPart,
@@ -45,6 +49,7 @@ from ai_assistant.orchestration.observer import RunOutcome
 from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.orchestration.understanding import RecentEpisodes
 from ai_assistant.testing import FakeModelProvider
+from ai_assistant.testing.memories import memory, said_support
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -412,9 +417,8 @@ def _answering(decide: Callable[[dict[str, Any]], str]) -> FakeModelProvider:
     return FakeModelProvider(reply=answer)
 
 
-async def test_a_candidate_the_user_confirmed_is_kept_in_the_words_they_approved() -> None:
-    """§5:5, §11:1: the yes's support, sure, and the fact the question showed, unreworded."""
-    harness = Harness()
+async def _confirmed_case(harness: Harness) -> str:
+    """An asked candidate and the user's yes, the yes leaving the window; the fact."""
     fact = "The user prefers window seats."
     asked = AskedCall(
         part=1,
@@ -462,6 +466,13 @@ async def test_a_candidate_the_user_confirmed_is_kept_in_the_words_they_approved
         {"fact": "x", "why": "y", "rests_on_input": True},
         part=QuestionPart(round="r-ask", part=1),
     )
+    return fact
+
+
+async def test_a_candidate_the_user_confirmed_is_kept_in_the_words_they_approved() -> None:
+    """§5:5, §11:1: the yes's support, sure, and the fact the question showed, unreworded."""
+    harness = Harness()
+    fact = await _confirmed_case(harness)
 
     def keep(shown: dict[str, Any]) -> str:
         (part,) = shown["parts"]
@@ -501,3 +512,167 @@ async def test_a_candidate_the_user_confirmed_is_kept_in_the_words_they_approved
         question=QuestionPart(round="r-ask", part=1),
     )
     assert support.how_sure is ReadingCertainty.SURE
+
+
+async def test_an_outage_of_the_write_path_waits_and_recovers() -> None:
+    """§16:4: a store failure is retried, never recorded as a refusal."""
+    harness = Harness()
+    await _three(harness)
+    ingest = harness.writer.ingest
+
+    async def down(_proposal: object) -> NoReturn:
+        msg = "database temporarily unavailable"
+        raise MemoryStoreError(msg)
+
+    harness.writer.ingest = down  # type: ignore[method-assign,assignment]  # an outage no fake arms
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")),
+        commit=FakeModelProvider.scripted(_create(), _create()),
+    )
+
+    first = await observer.run()
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert first.waiting == 1
+    assert record.findings[0].outcome is None
+
+    harness.writer.ingest = ingest  # type: ignore[method-assign]  # the outage passes
+    harness.clock.advance(timedelta(minutes=1))
+    second = await observer.run()
+
+    assert second.processed == 1
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.findings[0].outcome is not None
+    assert record.findings[0].outcome.writes
+
+
+async def test_a_retry_reads_again_what_a_finding_rests_on_after_the_window_moved() -> None:
+    """§16:4, §16:9: a finding held by the budget is committed later, not lost."""
+    harness = Harness()
+    await _three(harness)
+    later = reply(findings=[{"claim": "The user prefers window seats.", "rests_on": ["P1", "P2"]}])
+
+    def keep(shown: dict[str, Any]) -> str:
+        assert [part["text"] for part in shown["parts"]] == [_PREFERENCE, "What time is it?"]
+        return _create("P1")
+
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(later), commit=_answering(keep), daily_calls=1, related=0
+    )
+    assert (await observer.run()).held
+    await harness.hold(
+        episode("four", at=AT + timedelta(minutes=1), text="ok"),
+        episode("five", at=AT + timedelta(minutes=2), text="ok"),
+    )
+    harness.clock.advance(timedelta(hours=25))
+
+    observer = harness.observer(
+        scout=FakeModelProvider(reply=reply(findings=[])), commit=_answering(keep), related=0
+    )
+    await observer.run()
+
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.state is ObservationState.PROCESSED
+    outcome = record.findings[0].outcome
+    assert outcome is not None
+    assert outcome.writes
+
+
+async def test_a_cancelled_call_still_counts_against_the_budget() -> None:
+    """§16:9: the call is recorded before it is made."""
+    harness = Harness()
+    await _three(harness)
+    route = _Blocking()
+    observer = harness.observer(daily_calls=1)
+    observer._scout = route
+
+    running = asyncio.create_task(observer.run())
+    await route.entered.wait()
+    running.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await running
+
+    assert await harness.plans.observer_calls_since(AT - timedelta(hours=1)) == 1
+    assert (await observer.run()).held
+
+
+async def test_a_plan_store_read_failure_is_an_attempt_that_backs_off() -> None:
+    """§16:4-§16:5: a read failing inside an attempt fails that attempt, then sticks."""
+    harness = Harness()
+    await _three(harness)
+
+    async def failing(_ids: object) -> NoReturn:
+        msg = "the plan store could not read"
+        raise PlanningError(msg)
+
+    harness.plans.activation_effects = failing  # type: ignore[method-assign]  # no fake arms it
+    observer = harness.observer(stuck_after=2)
+
+    first = await observer.run()
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert first.waiting == 1
+    assert record.next_attempt_at == AT + timedelta(minutes=1)
+
+    harness.clock.advance(timedelta(minutes=1))
+    second = await observer.run()
+    assert second.stuck == 1
+
+
+async def test_the_backoff_doubles_to_its_cap_and_no_further() -> None:
+    """§16:4: the cap bounds it however many attempts fail."""
+    harness = Harness()
+    await _three(harness)
+    observer = harness.observer(scout=_failing(), stuck_after=100, retry_cap=timedelta(minutes=4))
+
+    waits = []
+    for _ in range(50):
+        await observer.run()
+        (record,) = await harness.plans.observations(["activation:one"])
+        assert record.next_attempt_at is not None
+        waits.append(record.next_attempt_at - harness.clock.at)
+        harness.clock.at = record.next_attempt_at
+
+    assert waits[:4] == [
+        timedelta(minutes=1),
+        timedelta(minutes=2),
+        timedelta(minutes=4),
+        timedelta(minutes=4),
+    ]
+    assert set(waits[3:]) == {timedelta(minutes=4)}
+
+
+def _keep_confirmed(shown: dict[str, Any]) -> str:
+    (part,) = shown["parts"]
+    return reply(
+        action="create",
+        wording="anything",
+        supports=[
+            {"part": part["part"], "direction": "for", "backs_as_worded": True, "how_sure": "sure"}
+        ],
+    )
+
+
+async def test_a_confirmed_candidate_the_policy_asks_about_raises_its_question() -> None:
+    """§13:1-§13:2: a ``policy_ask`` on the memory named, resting on the yes's input."""
+    harness = Harness(ruling=MemoryDecisionKind.ASK_USER)
+    fact = await _confirmed_case(harness)
+    await harness.hold(
+        episode("past", at=AT - timedelta(days=2), text="I like window seats."),
+        Memory.model_validate(memory("m-seat", fact, said_support(address("past"))).model_dump()),
+    )
+    observer = harness.observer(
+        scout=FakeModelProvider(reply=reply(findings=[])), commit=_answering(_keep_confirmed)
+    )
+
+    await observer.run()
+
+    (record,) = await harness.plans.observations([address("yes")])
+    (finding,) = record.findings
+    assert finding.outcome is not None
+    assert finding.outcome.ruling is MemoryDecisionKind.ASK_USER
+    (write,) = finding.outcome.writes
+    assert (write.memory, write.operations) == ("m-seat", (MemoryOperationKind.RAISE_QUESTION,))
+    asked = await harness.memory.get("m-seat")
+    assert isinstance(asked, Memory)
+    (question,) = asked.open_questions
+    assert question.kind is OpenQuestionKind.POLICY_ASK
+    assert question.rests_on == (InputPart(episode=address("yes")),)

@@ -181,6 +181,10 @@ class _Held(Exception):  # noqa: N818 — a control-flow signal: the budget, not
     """The daily budget would be exceeded by the next model call (§16:9)."""
 
 
+class _NotRecorded(Exception):  # noqa: N818 — a control-flow signal: the record, not the attempt
+    """The observation record could not be written: another writer, or the store."""
+
+
 class _Unparsed(Exception):  # noqa: N818 — a control-flow signal with a code-owned name
     """A step's reply did not parse: no proposal, never a partial one."""
 
@@ -296,7 +300,7 @@ class Observer:
                 state = await self._attempted(episode, held, window)
             except _Held:
                 return replace(outcome, waiting=outcome.waiting + 1, held=True)
-            except PlanningError:
+            except _NotRecorded:
                 # The record could not be written: another writer moved it (§16:6's
                 # backstop) or the store failed. Nothing more is attempted this run.
                 _log.info("observer_run", stage="record", result="not_written")
@@ -364,7 +368,7 @@ class Observer:
                     ObservationAttempt(started_at=started, end=ObservationAttemptEnd.FINISHED),
                 ),
             )
-            await self._plans.write_observation(skipped, expected_revision=0)
+            await self._record(skipped, expected_revision=0)
             return ObservationState.SKIPPED
         attempt = await self._open(episode_id, held, started)
         try:
@@ -372,7 +376,7 @@ class Observer:
         except _Held:
             await self._close(attempt, ObservationAttemptEnd.HELD, ObservationState.WAITING)
             raise
-        except (ModelError, MemoryStoreError, StoryStoreError, _Unparsed) as exc:
+        except (ModelError, MemoryStoreError, StoryStoreError, PlanningError, _Unparsed) as exc:
             return await self._failed(attempt, exc)
         await self._close(attempt, ObservationAttemptEnd.FINISHED, ObservationState.PROCESSED)
         return ObservationState.PROCESSED
@@ -388,9 +392,7 @@ class Observer:
             attempts=(*attempts, ObservationAttempt(started_at=started)),
             findings=() if held is None else held.findings,
         )
-        stored = await self._plans.write_observation(
-            record, expected_revision=0 if held is None else held.revision
-        )
+        stored = await self._record(record, expected_revision=0 if held is None else held.revision)
         return _Attempt(record=stored, started_at=started)
 
     async def _processed(
@@ -434,13 +436,14 @@ class Observer:
         view = await commit_view(
             finding,
             reading,
+            reader=self._reader,
             memory=self._memory,
             plans=self._plans,
             similar=self._limits.similar,
         )
         if view is None:
             return _with_outcome(finding, _check_failed(self._now()))
-        supplied.extend(one.memory.placement for one in view.similar)
+        supplied.extend(view.supplied)
         reply = await self._call(attempt, ObserverStep.COMMIT, self._commit, commit_messages(view))
         decision = parsed(reply, CommitReply)
         if decision is None:
@@ -472,27 +475,38 @@ class Observer:
         """One model call, inside the daily budget (§16:9), recorded on the attempt."""
         at = self._now()
         made = await self._plans.observer_calls_since(at - _A_DAY)
-        unsaved = len(attempt.calls) - _saved_calls(attempt)
-        if made + unsaved >= self._limits.daily_calls:
+        if made >= self._limits.daily_calls:
             raise _Held
         attempt.calls.append(ObserverCall(step=step, at=at))
+        # Recorded before the call is made, so a call cancelled or lost with the process
+        # mid-flight still counts against the budget (§16:9).
+        await self._save(attempt, findings=attempt.record.findings)
         reply = await route.complete(messages)
         return reply.content
 
     async def _save(self, attempt: _Attempt, *, findings: tuple[ObservationFinding, ...]) -> None:
         """Write the record with the findings and the calls so far, the attempt still open."""
         record = _with_attempt(attempt, findings=findings, end=None, state=ObservationState.WAITING)
-        attempt.record = await self._plans.write_observation(
-            record, expected_revision=attempt.record.revision
-        )
+        attempt.record = await self._record(record, expected_revision=attempt.record.revision)
 
     async def _close(
         self, attempt: _Attempt, end: ObservationAttemptEnd, state: ObservationState
     ) -> None:
         record = _with_attempt(attempt, findings=attempt.record.findings, end=end, state=state)
-        attempt.record = await self._plans.write_observation(
-            record, expected_revision=attempt.record.revision
-        )
+        attempt.record = await self._record(record, expected_revision=attempt.record.revision)
+
+    async def _record(
+        self, record: ObservationRecord, *, expected_revision: int
+    ) -> ObservationRecord:
+        """Write the observation record, conditionally (§16:1, §16:6).
+
+        Raises:
+            _NotRecorded: Where the plan store refused or failed the write.
+        """
+        try:
+            return await self._plans.write_observation(record, expected_revision=expected_revision)
+        except PlanningError as exc:
+            raise _NotRecorded from exc
 
     async def _failed(self, attempt: _Attempt, exc: Exception) -> ObservationState:
         """§16:4-§16:5: a backoff, or stuck once the failed attempts reach the count."""
@@ -508,13 +522,13 @@ class Observer:
             state=state,
         )
         if not stuck:
-            backoff = min(self._limits.retry_cap, self._limits.retry_base * 2 ** (failures - 1))
+            backoff = self._limits.retry_base
+            for _ in range(failures - 1):  # doubled to the cap, never past it (§16:4)
+                backoff = min(self._limits.retry_cap, backoff * 2)
             record = ObservationRecord.model_validate(
                 {**record.model_dump(), "next_attempt_at": self._now() + backoff}
             )
-        attempt.record = await self._plans.write_observation(
-            record, expected_revision=attempt.record.revision
-        )
+        attempt.record = await self._record(record, expected_revision=attempt.record.revision)
         _log.info(
             "observer_attempt",
             stage=exc.step.value if isinstance(exc, _Unparsed) else "attempt",
@@ -532,11 +546,6 @@ def _with_outcome(finding: ObservationFinding, outcome: FindingOutcome) -> Obser
 
 def _random_id() -> str:
     return uuid4().hex
-
-
-def _saved_calls(attempt: _Attempt) -> int:
-    """How many of the attempt's calls its last written record already holds."""
-    return len(attempt.record.attempts[-1].calls) if attempt.record.attempts else 0
 
 
 def _closed(attempts: Sequence[ObservationAttempt]) -> tuple[ObservationAttempt, ...]:
