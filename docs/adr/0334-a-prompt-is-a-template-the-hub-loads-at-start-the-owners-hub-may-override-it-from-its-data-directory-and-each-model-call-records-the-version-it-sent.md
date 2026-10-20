@@ -1,6 +1,6 @@
 # 334. A prompt is a template the hub loads at start, the owner's hub may override it from its data directory, and each model call records the version it sent
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-20
 - Scope: the instruction, the system message, of each model call the hub makes (§2's table): where its text lives, how the owner changes it without a pull request while the prompts settle, what binds a changed text, how a reply is traced to the text that produced it, and what the tests check meanwhile.
 - Dependency: [ADR-0314](0314-a-diagnostic-record-keeps-what-each-phase-was-given-and-returned-and-nothing-reads-it-back.md) and [ADR-0333](0333-the-observer-writes-diagnostic-entries-in-a-file-of-its-own-beside-the-activation-it-learned-from-and-the-viewer-shows-what-was-learned.md), as their status lines leave them.
