@@ -255,7 +255,7 @@ def _copy_directory(
             _backup_database(source / name, target / name)
             counts.databases += 1
         else:
-            _write_new(target / name, _read_regular(source / name))
+            _copy_regular(source / name, target / name)
             counts.files += 1
 
 
@@ -325,6 +325,27 @@ def _read_regular(path: Path) -> bytes:
             msg = f"{path} is not a regular file"
             raise ReplayError(msg)
         return handle.read()
+
+
+def _copy_regular(source: Path, target: Path) -> None:
+    """Copy a regular file whole, in chunks, opened without following a link.
+
+    Raises:
+        ReplayError: If it is not a regular file, or cannot be read.
+    """
+    try:
+        descriptor = os.open(source, _READ_FLAGS)
+    except OSError as exc:
+        msg = f"{source} could not be read: {exc.strerror}"
+        raise ReplayError(msg) from None
+    with os.fdopen(descriptor, "rb") as reading:
+        if not stat.S_ISREG(os.fstat(reading.fileno()).st_mode):
+            msg = f"{source} is not a regular file"
+            raise ReplayError(msg)
+        written = os.open(target, _CREATE_FLAGS, _FILE_MODE)
+        with os.fdopen(written, "wb") as writing:
+            os.fchmod(writing.fileno(), _FILE_MODE)
+            shutil.copyfileobj(reading, writing)
 
 
 def _write_new(path: Path, data: bytes) -> None:
