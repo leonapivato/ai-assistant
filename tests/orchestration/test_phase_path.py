@@ -49,7 +49,7 @@ from ai_assistant.orchestration.planning import (
 )
 from ai_assistant.orchestration.remembering import REMEMBER
 from ai_assistant.orchestration.story_calls import TIDY_STORY_CAPABILITY
-from ai_assistant.orchestration.understanding import TranscriptWindow
+from ai_assistant.orchestration.understanding import TranscriptWindow, _channel_items
 from ai_assistant.testing import FakeAuditTrail, FakeToolInvoker, FakeWebSearcher
 
 if TYPE_CHECKING:
@@ -90,6 +90,30 @@ def test_the_chat_window_is_shown_as_a_place_that_takes_a_message() -> None:
         (PlaceAuthor.ASSISTANT, "hi", False, None),
         (PlaceAuthor.USER, "and now?", True, None),
     ]
+
+
+def test_each_item_carries_the_id_understandings_referent_names_it_by() -> None:
+    """A reference understanding resolved to a message reaches planning as that item.
+
+    Pinned against understanding's own referent for the same message, so the two
+    spellings of a message's id cannot drift apart.
+    """
+    window = TranscriptWindow(
+        conversation=conversation_channel("c1"),
+        messages=(
+            _message(4, MessageAuthor.USER, "my father called"),
+            _message(5, MessageAuthor.ASSISTANT, "Noted."),
+        ),
+        replied_to=(_message(2, MessageAuthor.USER, "earlier"),),
+        input_messages=(_message(6, MessageAuthor.USER, "call him"),),
+        links={4: "act-1"},
+    )
+    understood = {
+        item.position: item.referent.id for item in _channel_items(window) if item.position
+    }
+    shown = [one.referent_id for one in place_window(window).items if not one.is_input]
+    assert shown == [understood[position] for position in sorted(understood)]
+    assert shown == ["message:2", "message:4", "message:5"]
 
 
 def _planned(*calls: ProposedCall, refused: tuple[RefusedCall, ...] = ()) -> PlannedRound:
