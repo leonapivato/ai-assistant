@@ -19,6 +19,11 @@ What it proves, in order:
 4. **The unit is the supervisor ADR-0083's D1 asks for.** A container killed outright is
    started again; one that exits ``78`` (the wrong keyring passphrase) is left down; a
    stop drains to ``0``.
+5. **A relayed hub resolves the relay** (ADR-0330 §8:2). With the relay's settings in
+   ``hub.env``, a deploy without ``--relay-address`` is refused and changes nothing, and
+   one with it runs a container that resolves the relay's host to that address. No
+   relay listens there: resolution is what the deploy owes, and the direct hub of step
+   1 resolves no such name.
 """
 
 from __future__ import annotations
@@ -55,6 +60,24 @@ _CONVERSATION: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 _KEYRING_WRITE: Final = (
     "from ai_assistant.secret_store import select_backend as s; "
     "s().set_password('deploy-smoke', 'probe', 'carried')"
+)
+#: Where the relay listens on the private repository's box, and its origin there.
+RELAY_ADDRESS: Final = "10.254.0.1"
+RELAY_HOST: Final = "telegram-relay"
+#: A CA certificate for the relay's settings, which the hub loads at start (ADR-0330
+#: §3:8): tests/app/test_composition_telegram_relay.py's, as nothing here dials it.
+RELAY_CA: Final = (
+    "-----BEGIN CERTIFICATE-----"
+    "MIIBfTCCASOgAwIBAgIUVBNdEQURzbiRkUNtd9FKXpiqROkwCgYIKoZIzj0EAwIw"
+    "GzEZMBcGA1UEAwwQRXhhbXBsZSBSZWxheSBDQTAeFw0yNjEwMTkwMDAwMDBaFw0z"
+    "NjEwMTYwMDAwMDBaMBsxGTAXBgNVBAMMEEV4YW1wbGUgUmVsYXkgQ0EwWTATBgcq"
+    "hkjOPQIBBggqhkjOPQMBBwNCAATLIYTcOBiLZXvnSdy9Ce/9GnVvplpNdlezdpAM"
+    "bcben+U/yVbz+KAWeaeHaVN3AI6iseuT/BwUAeh710TXUWnWo0UwQzASBgNVHRMB"
+    "Af8ECDAGAQH/AgEAMA4GA1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUrhyCO524DfbQ"
+    "rJ+pjaVMzcCtBpcwCgYIKoZIzj0EAwIDSAAwRQIgIHw06X8kxeupJqfPwjMzL7l0"
+    "qogQOM3T9lHgnxRu7mQCIQCY4s5g3sYKk3LN4ToEodOoIUGyONE0iAJYZVNdlhG6"
+    "JA=="
+    "-----END CERTIFICATE-----"
 )
 _KEYRING_READ: Final = (
     "from ai_assistant.secret_store import select_backend as s; "
@@ -214,6 +237,12 @@ def exec_in(*argv: str) -> str:
     return root("docker", "exec", CONTAINER, *argv)
 
 
+def resolved(host: str) -> str:
+    """What the person's container resolves ``host`` to, or ``""`` if nothing."""
+    out = root("docker", "exec", CONTAINER, "getent", "hosts", host, check=False)
+    return out.split()[0] if out.split() else ""
+
+
 def backups() -> list[str]:
     """The artifacts in the person's backup directory."""
     out = root(
@@ -229,10 +258,11 @@ class Run:
         """Make the edge's key."""
         self.edge = Edge()
         self.conversation = ""
+        self.env = ""
 
     def write_person(self) -> None:
         """Write the person's directory as the operator does, by hand."""
-        env = "\n".join(
+        self.env = "\n".join(
             (
                 "ANTHROPIC_API_KEY=sk-ant-deploy-smoke-not-a-key",
                 f"ASSISTANT_GATEWAY_HOSTED_HOST_NAME={HOST_NAME}",
@@ -246,9 +276,13 @@ class Run:
         )
         root("install", "-d", "-m", "0755", str(DIRECTORY.parent))
         root("install", "-d", "-m", "0700", str(DIRECTORY))
-        root("install", "-m", "0600", "/dev/stdin", str(DIRECTORY / "hub.env"), stdin=env.encode())
+        self.write_env(self.env)
         for name in ("keyring-passphrase", "backup-passphrase"):
             self.passphrase(name, secrets.token_urlsafe(24))
+
+    def write_env(self, env: str) -> None:
+        """Write the person's ``hub.env``, the model key's file."""
+        root("install", "-m", "0600", "/dev/stdin", str(DIRECTORY / "hub.env"), stdin=env.encode())
 
     def passphrase(self, name: str, value: str) -> None:
         """Write one passphrase file, the container user's alone."""
@@ -301,6 +335,9 @@ class Run:
             msg = f"a first install took a backup: {backups()}"
             raise SmokeError(msg)
         self.check_door()
+        if resolved(RELAY_HOST):
+            msg = f"a direct hub's container resolves {RELAY_HOST} to {resolved(RELAY_HOST)}"
+            raise SmokeError(msg)
         started = _CONVERSATION.search(exec_in("assistant", "start-conversation"))
         if started is None:
             msg = "assistant start-conversation printed no conversation id"
@@ -423,6 +460,35 @@ class Run:
         state = await_state("inactive")
         step(f"stopped: {state}")
 
+    def relayed(self) -> None:
+        """A relayed hub is refused without the relay's address, and resolves it with one."""
+        step("a relayed hub without the relay's address is refused")
+        self.write_env(
+            self.env
+            + "ASSISTANT_TELEGRAM_CONNECTION=conn-relay\n"
+            + "ASSISTANT_TELEGRAM_USER_ID=424242\n"
+            + f"ASSISTANT_TELEGRAM_RELAY_ORIGIN=https://{RELAY_HOST}:8443\n"
+            + f"ASSISTANT_TELEGRAM_RELAY_CERTIFICATES={RELAY_CA}\n"
+        )
+        recorded = root("cat", str(DIRECTORY / "unit.env"))
+        refused = deploy()
+        if refused.returncode == 0 or "Pass --relay-address" not in refused.stderr:
+            msg = f"a relayed hub with no relay address was not refused ({refused.returncode})"
+            raise SmokeError(msg)
+        if root("cat", str(DIRECTORY / "unit.env")) != recorded:
+            msg = "unit.env changed although the deploy was refused"
+            raise SmokeError(msg)
+
+        step(f"a relayed hub's container resolves {RELAY_HOST} to {RELAY_ADDRESS}")
+        if deploy("--relay-address", RELAY_ADDRESS).returncode != 0:
+            msg = "the relayed deploy failed"
+            raise SmokeError(msg)
+        if resolved(RELAY_HOST) != RELAY_ADDRESS:
+            msg = f"the container resolves {RELAY_HOST} to {resolved(RELAY_HOST) or 'nothing'}"
+            raise SmokeError(msg)
+        self.check_door()
+        self.check_carried()
+
     def run(self) -> None:
         """Every check, in order."""
         step(f"Docker {root('docker', 'version', '--format', '{{.Server.Version}}').strip()}")
@@ -432,6 +498,7 @@ class Run:
         self.upgrade()
         self.failed_backup()
         self.supervisor()
+        self.relayed()
 
     def clean(self) -> None:
         """Show the unit's journal and the raw table, and remove the person from the box."""

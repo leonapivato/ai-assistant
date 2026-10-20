@@ -28,8 +28,9 @@ that is how the ``container`` workflow deploys to its own runner. Per person, un
   either.** The deploy examines their owner and mode, mounts them read-only into the
   container that needs each, and refuses before stopping anything when one is wrong.
 * ``<person>/unit.env``: what the unit runs, ``HUB_IMAGE`` (an image id, so a moved tag
-  cannot change it) and ``HUB_PORT``. Written by this deploy alone, and only once the
-  backup is verified, so until then the unit's next start is the earlier image.
+  cannot change it) and ``HUB_PORT``, and ``HUB_RELAY_MAPPING`` for a relayed hub
+  (below). Written by this deploy alone, and only once the backup is verified, so until
+  then the unit's next start is the earlier image.
 * ``<person>/backups/``: each deploy's artifact, ``pre-deploy-<UTC>-<run>.age``, outside
   the data volume and never deleted (ADR-0326 §6:3). Pruning is the operator's act.
 * The volumes ``hub-<person>-data`` and ``hub-<person>-keyring``, the container and
@@ -106,6 +107,17 @@ refused, not read), the network beyond the box, and any process on the box that
 forwards the port itself, which is the box's own act. Every process *on* the box can
 reach the listener, as ADR-0327 §6 expects: the edge's signature stands between them.
 
+**A relayed hub resolves the relay on the box** (ADR-0330 §8:2). A hub whose
+``hub.env`` sets ``ASSISTANT_TELEGRAM_RELAY_ORIGIN`` reaches the relay by that origin's
+host name, and its container is on a bridge of its own, where nothing else resolves it.
+So the deploy reads that one setting from ``hub.env``, by ``grep``, and nothing else
+in it, and the unit runs the container with ``--add-host <host>:<address>``. The
+address is ``--relay-address``, the operator's word for where the relay listens on this
+box, never looked up: a name resolved to find it would be the very lookup the mapping
+replaces. A relayed hub deployed without it is refused before anything is stopped,
+since it would start only to fail at its first poll. A hub that sets no origin is in
+direct mode, and its run is as it was: ``--relay-address`` is not used for it.
+
 **One deploy per person at a time.** ``<person>/.deploy-lock`` is made at the start and
 removed at the end; a run that cannot make it refuses, and one killed outright leaves it
 for the operator to remove.
@@ -127,8 +139,10 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from ipaddress import IPv4Address, ip_address
 from pathlib import Path, PurePosixPath
 from typing import IO, TYPE_CHECKING, Protocol
+from urllib.parse import urlsplit
 
 # From deploy_hub, one source for whichever deploy reads it: the backup tool's own words,
 # held to its source by deploy_hub's tests, for what "written and verified" looks like;
@@ -193,6 +207,13 @@ _NON_ACCEPTING_TARGETS = frozenset({"DROP", "CT", "NOTRACK", "LOG", "MARK", "TRA
 _JUMPS = frozenset({"-j", "--jump", "-g", "--goto"})
 #: The setting that sizes ADR-0083's D2, which the unit's stop timeout is fixed against.
 _DRAIN_SETTING = "ASSISTANT_SHUTDOWN_DRAIN_SECONDS"
+#: The setting that puts the hub's Telegram line in relayed mode (ADR-0330 §3), whose
+#: host the container must resolve to the relay on the box (§8:2).
+_RELAY_SETTING = "ASSISTANT_TELEGRAM_RELAY_ORIGIN"
+#: A DNS host name, as the origin's host must be to be mapped: dot-separated labels.
+_HOST_NAME = re.compile(
+    r"(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*"
+)
 #: The template ``docker inspect`` fills for a container: the fields this deploy reads
 #: and nothing else, so the environment (the model key) never crosses the link.
 _CONTAINER_FIELDS = (
@@ -429,6 +450,46 @@ class Person:
         return f"hub-{self.name}-keyring"
 
 
+def relay_host(lines: str) -> str | None:
+    """The host a relayed hub's container must resolve, from ``hub.env``'s origin line.
+
+    Args:
+        lines: The lines of ``hub.env`` that set ``ASSISTANT_TELEGRAM_RELAY_ORIGIN``.
+
+    Returns:
+        The origin's host name, or ``None`` when no line sets it: a direct-mode hub.
+
+    Raises:
+        DeployError: If more than one line sets it, or its host is not a host name.
+    """
+    values = [line.partition("=")[2].strip() for line in lines.splitlines() if line.strip()]
+    if not values:
+        return None
+    if len(values) > 1:
+        raise DeployError(
+            f"hub.env sets {_RELAY_SETTING} {len(values)} times. Keep one.\n{_UNTOUCHED}"
+        )
+    try:
+        host = urlsplit(values[0]).hostname
+    except ValueError:
+        host = None
+    if host is None or _HOST_NAME.fullmatch(host) is None or _is_address(host):
+        raise DeployError(
+            f"hub.env sets {_RELAY_SETTING}={values[0]}, which names no host name for the\n"
+            "container to resolve to the relay. Write https://telegram-relay:8443: a host\n"
+            f"name, never an address, and a port (docs/guide/telegram-relay.md).\n{_UNTOUCHED}"
+        )
+    return host
+
+
+def _is_address(host: str) -> bool:
+    try:
+        ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class Installed:
     """What ``unit.env`` says the unit runs."""
@@ -486,22 +547,27 @@ def parse_unit_env(text: str) -> Installed:
     return Installed(image=image, port=int(port))
 
 
-def render_unit_env(image: Image, port: int, stamp: str) -> str:
+def render_unit_env(image: Image, port: int, stamp: str, relay: str | None = None) -> str:
     """Write ``unit.env``.
 
     Args:
         image: The image the unit is to run.
         port: The person's loopback port.
         stamp: When, for the reader.
+        relay: ``<host>:<address>`` for a relayed hub, or ``None`` for a direct one,
+            whose mapping is set empty: the unit then runs it with no argument for it,
+            and systemd has no unset variable to warn of.
 
     Returns:
         The file's content.
     """
+    mapping = "" if relay is None else f"--add-host={relay}"
     return (
         f"# Written by scripts/deploy_container.py at {stamp}: {image.name},\n"
         f"# commit {image.commit}. Read by hub@.service; edited by nothing else.\n"
         f"HUB_IMAGE={image.id}\n"
         f"HUB_PORT={port}\n"
+        f"HUB_RELAY_MAPPING={mapping}\n"
     )
 
 
@@ -753,6 +819,9 @@ class Deployment:
     stage_context: Callable[[Path, Path], str] | None = None
     allow_earlier: bool = False
     history: Callable[[Path, str, str], str | None] = history_refusal
+    relay_address: str | None = None
+    #: ``<host>:<address>`` once the preflight finds the hub relayed, else ``None``.
+    relay: str | None = None
 
     # -- small helpers --------------------------------------------------------
 
@@ -888,6 +957,7 @@ class Deployment:
         for tool in (["systemctl", "--version"], ["curl", "--version"], ["iptables", "--version"]):
             self._ok(tool, f"{tool[0]} on the box")
         self._check_env_file()
+        self.relay = self._rule_on_relay()
         self._check_passphrase(person.keyring_passphrase, "keyring")
         text = self._read(person.unit_env)
         installed = None if text is None else parse_unit_env(text)
@@ -991,6 +1061,42 @@ class Deployment:
                 "default drain (ADR-0083 §3's D2, sixty seconds, under Docker's ninety), and\n"
                 f"this deploy does not read another. Remove it, or change the unit.\n{_UNTOUCHED}"
             )
+
+    def _rule_on_relay(self) -> str | None:
+        """Find whether the hub is relayed, and so what its container must resolve.
+
+        Returns:
+            ``<host>:<address>`` for a relayed hub, ``None`` for a direct one.
+
+        Raises:
+            DeployError: If ``hub.env`` cannot be read, its origin names no host, or
+                the hub is relayed and ``--relay-address`` was not given.
+        """
+        path = self.person.env_file
+        found = self.box.run(
+            [
+                "grep",
+                "--ignore-case",
+                "--extended-regexp",
+                f"^[[:space:]]*{_RELAY_SETTING}=",
+                "--",
+                str(path),
+            ]
+        )
+        if found.code not in {0, 1}:
+            raise DeployError(f"could not read {path}:\n{found.said()}\n{_UNTOUCHED}")
+        host = relay_host(found.out)
+        if host is None:
+            return None
+        if self.relay_address is None:
+            raise DeployError(
+                f"{path} sets {_RELAY_SETTING}, so the hub's Telegram line is relayed and\n"
+                f"its container must resolve {host} to the relay on this box (ADR-0330\n"
+                "§8:2). Pass --relay-address, the address the relay listens on here; this\n"
+                f"deploy never looks it up.\n{_UNTOUCHED}"
+            )
+        say(f"the line is relayed: {host} resolves to {self.relay_address} in the container")
+        return f"{host}:{self.relay_address}"
 
     def _check_passphrase(self, path: PurePosixPath, which: str) -> None:
         state = self._stat(path)
@@ -1387,7 +1493,7 @@ class Deployment:
                         created.append(volume)
             assert self.port is not None  # noqa: S101  # set by the preflight
             # Replaced whole, so until this lands the unit's next start is the earlier image.
-            self._write(person.unit_env, render_unit_env(image, self.port, self.stamp))
+            self._write(person.unit_env, render_unit_env(image, self.port, self.stamp, self.relay))
         except BaseException:
             if first:
                 # Nothing has started, so the first install is undone whole: no unit at
@@ -1634,11 +1740,13 @@ class Deployment:
             f"door: 127.0.0.1:{self.port} answers {door} without the edge's assertion",
             reachability,
         ]
+        relay = "none, the line is direct" if self.relay is None else f"--add-host {self.relay}"
         return [
             f"person: {self.person.name}, {self.person.unit}, port {self.port}",
             f"before: {before}",
             f"after:  {image.id} ({image.name}, commit {image.commit}), healthy",
             *verified,
+            f"relay:  {relay}",
             _backup_line(artifact),
         ]
 
@@ -1708,6 +1816,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--image", help="deploy this image, already on the box, unbuilt")
     parser.add_argument("--allow-earlier", action="store_true", help=ALLOW_EARLIER_HELP)
     parser.add_argument(
+        "--relay-address",
+        help=(
+            "the IPv4 address the Telegram relay listens on, on this box; a relayed hub's"
+            " container resolves its origin's host to it (ADR-0330 §8:2)"
+        ),
+    )
+    parser.add_argument(
         "--ready-timeout",
         type=float,
         default=DEFAULT_READY_TIMEOUT,
@@ -1741,6 +1856,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"--hubs-dir {args.hubs_dir!r} is not an absolute path of letters, digits, '.',"
                 " '_', '-' and '/'"
             )
+        if args.relay_address is not None:
+            try:
+                IPv4Address(args.relay_address)
+            except ValueError as exc:
+                raise DeployError(
+                    f"--relay-address {args.relay_address!r} is not an IPv4 address"
+                ) from exc
         box: Box = LocalBox() if args.local else SshBox(args.host, args.ssh_user)
         deployment = Deployment(
             box=box,
@@ -1749,6 +1871,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             image_ref=args.image,
             ready_timeout=args.ready_timeout,
             allow_earlier=args.allow_earlier,
+            relay_address=args.relay_address,
         )
         report = deployment.run()
     except (DeployError, HubDeployError) as exc:

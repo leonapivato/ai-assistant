@@ -28,11 +28,20 @@ credential, or the reverse (ADR-0330 §6:7).
 Do this at the person's request, in this order. The line carries nothing until step 4
 restarts the hub with its settings, and nothing is connected before step 2.
 
-**Before you start, the hub must resolve `telegram-relay` to the relay** (ADR-0330
-§8:2). For a hub in a container, that is `--add-host telegram-relay:10.254.0.1` on
-its `docker run`. Neither the run command in [`container.md`](container.md) nor the
-deploy path's unit adds it yet: #3181 adds it to the unit. Until that lands, add the
-mapping to the container's run yourself. Without it every call fails to resolve the
+**The hub must resolve `telegram-relay` to the relay** (ADR-0330 §8:2). Its container
+is on a bridge network of its own, where nothing else resolves the name, so the deploy
+maps it. Once step 4 has written the relay's origin into `hub.env`, every deploy of the
+person names the address the relay listens on, on this box:
+
+```bash
+just deploy-container alice box.example.com --relay-address 10.254.0.1
+```
+
+The deploy reads the origin's host from `hub.env` and runs the container with
+`--add-host telegram-relay:10.254.0.1`. It never looks the address up. A deploy of a
+relayed hub without `--relay-address` is refused before anything is stopped, and a
+hub with no relay origin is run as before. For a container run by hand, add the same
+`--add-host` to its `docker run`. Without the mapping every call fails to resolve the
 host, and the hub logs `outcome=not_written`.
 
 **1. Tell the person what the line costs**, before anything is connected (ADR-0330
@@ -68,7 +77,7 @@ Nothing is armed yet. The line stays off until its settings are written.
 their own act, and the relay records it. The hub sees nothing of it.
 
 **4. Write the line's four settings** into the person's env file (`hub.env`), then
-restart the hub through its deploy:
+restart the hub through its deploy, with `--relay-address` as above:
 
 ```bash
 ASSISTANT_TELEGRAM_CONNECTION=<the reference step 2 printed>

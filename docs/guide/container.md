@@ -115,6 +115,10 @@ What each line holds:
 - **`--publish 127.0.0.1:8501:8423`** is the door. The left half is the host's
   loopback and a port of your choosing, one per person; it is where the edge
   forwards this person's requests. Never publish it without the `127.0.0.1:`.
+- **`--add-host telegram-relay:<address>`**, only for a hub whose Telegram line runs
+  through the relay on the box, maps the relay's host name to the address it listens
+  on there ([`telegram-relay.md`](telegram-relay.md)). The deploy path adds it from
+  `--relay-address`.
 - **`--stop-timeout 90`** gives the hub room to drain. ADR-0083 §3's D2 asks for
   `shutdown_drain_seconds` plus thirty seconds, which is sixty by default; Docker's
   own default of ten would cut every drain short.
@@ -146,7 +150,7 @@ every person on the box at once), owned by root and writable by root alone:
 | `hub.env` | The operator: the env file of step 2 | root, `0600` |
 | `keyring-passphrase` | The operator, as in step 2 | uid 10001, `0400` |
 | `backup-passphrase` | The operator, the same way: the key to every backup | uid 10001, `0400` |
-| `unit.env` | The deploy alone: the image id the unit runs, and the port | root, `0644` |
+| `unit.env` | The deploy alone: the image id the unit runs, the port, and a relayed hub's `--add-host` | root, `0644` |
 | `backups/` | The deploy: one artifact per deploy, never deleted | uid 10001, `0700` |
 
 The deploy never creates, reads or prints a passphrase. It refuses, before it stops

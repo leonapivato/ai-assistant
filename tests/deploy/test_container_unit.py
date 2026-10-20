@@ -66,6 +66,19 @@ def test_unit_mounts_what_the_guide_runs_and_publishes_to_loopback_alone() -> No
     assert _directive("EnvironmentFile") == "/srv/hubs/%i/unit.env"
 
 
+def test_unit_maps_the_relay_host_only_where_unit_env_says_so() -> None:
+    """ADR-0330 §8:2: the deploy writes the flag for a relayed hub, and nothing otherwise.
+
+    Unbraced and a word of its own, so systemd splits it into zero arguments when it is
+    empty or unset, and the direct hub's run is the one it always was.
+    """
+    start = _directive("ExecStart")
+
+    assert re.findall(r"\$\{?HUB_RELAY_MAPPING\}?", start) == ["$HUB_RELAY_MAPPING"]
+    assert re.search(r"\s\$HUB_RELAY_MAPPING\s+\$\{HUB_IMAGE\}$", start.rstrip())
+    assert "--add-host" not in start
+
+
 def test_unit_starts_at_boot_after_docker() -> None:
     assert _directive("WantedBy") == "multi-user.target"
     assert "docker.service" in _directive("Requires")
