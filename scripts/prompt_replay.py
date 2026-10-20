@@ -761,8 +761,9 @@ class Planned:
         prompt: The prompt's name, or ``None`` where the entry's cannot be named.
         instruction: The rendered or recorded instruction it sends.
         flags: The flags it was rendered under, or ``None``.
-        flags_from: ``recorded``, ``stated`` or ``none`` (the prompt declares none), or
-            ``None`` where nothing was rendered and the entry records no flags.
+        flags_from: ``recorded``, ``stated``, or ``none`` where the prompt declares no
+            flag and the entry records none; ``None`` where nothing was rendered and the
+            entry records no flags.
         messages: The request, its system message the candidate's.
         tools: The tools a planning round offered, as recorded; ``None`` for a completion.
     """
@@ -914,8 +915,9 @@ def _rendered(
     """
     declared = template.declaration.flags
     if not declared:
+        # Nothing to render under: recorded where the entry records its (empty) flags.
         flags: Mapping[str, bool] = {}
-        flags_from = "none"
+        flags_from = "none" if recorded is None else "recorded"
     elif recorded is not None and declared <= recorded.keys():
         flags = {one: recorded[one] for one in declared}
         flags_from = "recorded"
@@ -1269,18 +1271,23 @@ def rerun_settings(options: RerunOptions) -> Settings:
     The record is on and the copy's overrides are read (§7:1); every model call goes to the
     run's one model, with no fallback; the observer's daily budget is the bound (§8:4).
     """
-    return _StatedSettings(
-        data_dir=options.copy,
-        diagnostic_record=True,
-        prompt_overrides=True,
-        default_model=options.model,
-        fallback_models=(),
-        observer_scout_model=options.model,
-        observer_commit_model=options.model,
-        observer_daily_calls=options.bound,
-        timezone=options.timezone,
-        embedder=options.embedder,
-    )
+    try:
+        return _StatedSettings(
+            data_dir=options.copy.resolve(),
+            diagnostic_record=True,
+            prompt_overrides=True,
+            default_model=options.model,
+            fallback_models=(),
+            observer_scout_model=options.model,
+            observer_commit_model=options.model,
+            observer_daily_calls=options.bound,
+            timezone=options.timezone,
+            embedder=options.embedder,
+        )
+    except ValidationError as exc:
+        fields = ", ".join(sorted({".".join(map(str, one["loc"])) for one in exc.errors()}))
+        msg = f"the rerun's settings are refused: {fields}"
+        raise ReplayError(msg) from None
 
 
 @contextlib.contextmanager
