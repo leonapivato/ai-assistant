@@ -127,21 +127,24 @@ directory serves as one.
   box command that installs the unit, :data:`UNIT_INSTALL`: it checks the root, writes
   the unit and reloads systemd under the lock, so nothing writes the unit but its holder.
 * ``<person>/.deploy-lock`` is held for the whole deploy, whose box commands are
-  separate ssh sessions, so it is held by one more: a ``flock`` on the box whose holder
-  reads its standard input, a pipe from this process alone, to its end. The deploy
-  releases it by closing the pipe; a deploy killed outright closes it by dying, the
-  holder ends, and the lock is released.
+  separate ssh sessions, so it is held by one more: a ``flock`` on the box whose holder,
+  :data:`HOLDER`, reads its standard input, a pipe from this process alone, to its end.
+  The deploy releases it by closing the pipe; a deploy killed outright closes it by
+  dying, the holder ends, and the lock is released.
+* ``<person>/.deploy-owner`` fences the person's commands to the deploy holding the
+  lock. The holder writes its run's token there as it takes the lock, under the file's
+  own ``flock``, and every box command the deploy sends runs under that ``flock`` and
+  only while the file names its token (:data:`FENCE`). So a deploy taking the lock waits
+  for a command another left running, and a command another sent before its holder
+  ended is refused on the box, however late it arrives.
 
-The ssh link can drop under that holder alone, and its ssh then exits. Every box command
-the deploy sends checks first that it has not, and once it has the deploy stops there, as
-if killed: :class:`LockLost` escapes every handler that would otherwise start, stop or
-disable something, because another deploy may hold the lock by then. Wherever a deploy
-stops, killed or not, running it again finishes it or refuses. Two things are left open.
-One box command may already be on its way when the holder ends, and runs to its end, as a
-command whose own link drops always has; the next deploy's checks are what meet it, as a
-backup container still mounting the data volume is refused by the check that the volume
-is still. And sshd may take the TCP keepalive's two hours to see a silent drop and end
-the holder on the box; until then another deploy refuses, told how to find the holder.
+The ssh link can drop under the holder alone, and its ssh then exits. Every box command
+the deploy sends checks first that it has not, and the box refuses it if another deploy
+has taken the lock; either way the deploy stops there, as if killed: :class:`LockLost`
+escapes every handler that would otherwise start, stop or disable something. Wherever a
+deploy stops, killed or not, running it again finishes it or refuses. sshd may take the
+TCP keepalive's two hours to see a silent drop and end the holder on the box; until then
+another deploy refuses, told how to find the holder.
 
 **A first install that ends early is resumed** (#3185). It records itself in
 ``<person>/.first-install`` before it makes the volumes and removes the record once
@@ -210,6 +213,33 @@ _UNIT_LOCK_SECONDS = 60
 #: could not have it: ``flock --conflict-exit-code``'s, sysexits' ``EX_TEMPFAIL``.
 HELD = b"held\n"
 _BUSY = 75
+#: The person's lock's holder: under ``flock --nonblock <person>/.deploy-lock``, with
+#: ``sh <owner file> <run token>``. It takes the owner file's own ``flock``, which every
+#: command of a deploy holds while it runs (:data:`FENCE`), so it waits for a command a
+#: dead deploy left running; writes its token there, so every command a dead deploy sent
+#: later is refused; and then prints :data:`HELD` and reads its standard input to its
+#: end, which comes when the deploy releases the lock or ends, however it ends.
+HOLDER = """set -eu
+exec 9>>"$1"
+flock 9
+printf '%s\\n' "$2" > "$1"
+exec 9>&-
+echo held
+exec cat
+"""
+#: Every box command of a deploy that holds the person's lock: under ``flock <owner
+#: file>``, with ``sh <owner file> <run token> <the command…>``. It runs the command
+#: only while the owner file names the deploy's token, and holds the file's lock
+#: throughout, so no other deploy takes the person's lock while it runs.
+FENCE = """if [ "$(cat -- "$1")" != "$2" ]; then
+  echo 'deploy-container: fenced: another deploy holds the lock' >&2
+  exit 77
+fi
+shift 2
+exec "$@"
+"""
+_FENCED = 77
+_FENCED_SAID = "deploy-container: fenced"
 #: How long a released holder has to end before it is killed.
 _RELEASE_SECONDS = 30
 #: Installs the unit under ``flock``, as one command: ``sh -c UNIT_INSTALL sh <unit>
@@ -474,20 +504,25 @@ class LockLost(BaseException):
 
 @dataclass(frozen=True, slots=True)
 class LeasedBox:
-    """A box whose every command first checks that this deploy still holds its lock."""
+    """A box whose every command runs only while this deploy holds the person's lock.
+
+    Here, it is not sent once the lock's holder has ended; on the box, it is fenced by
+    :data:`FENCE`, so one already on its way when another deploy took the lock is
+    refused there, however late it arrives.
+    """
 
     box: Box
     lease: Lease
-    path: PurePosixPath
+    person: Person
+    token: str
 
-    def _check(self) -> None:
-        if not self.lease.held():
-            raise LockLost(
-                f"the session holding {self.path} on the box ended: the link to the box\n"
-                "dropped, and another deploy may hold the lock now. This deploy stopped\n"
-                "before its next command, as one killed there would, and changes nothing\n"
-                "more; the lines above say where. Deploy again once the link is back."
-            )
+    def _lost(self) -> LockLost:
+        return LockLost(
+            f"the session holding {self.person.lock} on the box ended: the link to the\n"
+            "box dropped, and another deploy may hold the lock now. This deploy stopped\n"
+            "before its next command, as one killed there would, and changes nothing\n"
+            "more; the lines above say where. Deploy again once the link is back."
+        )
 
     def run(self, argv: Sequence[str], *, stdin: IO[bytes] | None = None) -> Result:
         """Run one command, while the lock is held.
@@ -500,25 +535,28 @@ class LeasedBox:
             Its exit status and output.
 
         Raises:
-            LockLost: If the lock's holder has ended.
+            LockLost: If the lock's holder has ended, or the box refused the command
+                because another deploy holds the lock.
         """
-        self._check()
-        return self.box.run(argv, stdin=stdin)
+        if not self.lease.held():
+            raise self._lost()
+        owner = str(self.person.owner)
+        fenced = ["flock", "--", owner, "sh", "-c", FENCE, "sh", owner, self.token, *argv]
+        result = self.box.run(fenced, stdin=stdin)
+        if result.code == _FENCED and _FENCED_SAID in result.err:
+            raise self._lost()
+        return result
 
     def hold(self, argv: Sequence[str]) -> Lease | Result:
-        """Take another lock, while this one is held.
+        """Refuse: a deploy takes the person's lock once, before its box is leased.
 
         Args:
             argv: The holder.
 
-        Returns:
-            Its lease, or how it ended.
-
         Raises:
-            LockLost: If this lock's holder has ended.
+            DeployError: Always.
         """
-        self._check()
-        return self.box.hold(argv)
+        raise DeployError(f"a second lock was asked for under {self.person.lock}: {argv}")
 
 
 def _flock(path: str | PurePosixPath, *, wait: int) -> list[str]:
@@ -675,6 +713,11 @@ class Person:
     def lock(self) -> PurePosixPath:
         """The file a deploy in progress holds a ``flock`` on; its existence means nothing."""
         return self.dir / ".deploy-lock"
+
+    @property
+    def owner(self) -> PurePosixPath:
+        """The token of the deploy holding the lock, and the lock its commands hold."""
+        return self.dir / ".deploy-owner"
 
     @property
     def first_install(self) -> PurePosixPath:
@@ -1589,19 +1632,17 @@ class Deployment:
         if result.out.strip() == "installed":
             say(f"installed {UNIT_PATH}")
 
-    def _lock(self, path: str | PurePosixPath, *, wait: int = 0) -> Lease | Result:
-        """Take a ``flock`` on a box file, held until released or this deploy ends.
+    def _lock(self) -> Lease | Result:
+        """Take the person's lock, held until released or this deploy ends.
 
-        Args:
-            path: The file, made if missing; an earlier deploy's lock directory serves.
-            wait: Seconds to wait for another holder, or ``0`` not to wait.
+        Its file is made if missing, and an earlier deploy's lock directory serves.
 
         Returns:
             The lease, or how the holder ended: exit :data:`_BUSY` when another holds it.
         """
-        # The holder prints once it holds the lock and then reads its standard input to
-        # its end, which comes when this deploy releases it or ends, however it ends.
-        return self.box.hold([*_flock(path, wait=wait), "sh", "-c", "echo held && exec cat"])
+        person = self.person
+        holder = ["sh", "-c", HOLDER, "sh", str(person.owner), self.token]
+        return self.box.hold([*_flock(person.lock, wait=0), *holder])
 
     # -- 2. the backup --------------------------------------------------------
 
@@ -2022,13 +2063,13 @@ class Deployment:
         """
         person = self.person
         self._check_person_dir()
-        lease = self._lock(person.lock, wait=0)
+        lease = self._lock()
         if isinstance(lease, Result):
             raise DeployError(
                 f"another deploy to {person.name} holds {person.lock}.\n"
                 f"{_holder_hint(str(person.lock), lease)}\n{_UNTOUCHED}"
             )
-        unguarded, self.box = self.box, LeasedBox(self.box, lease, person.lock)
+        unguarded, self.box = self.box, LeasedBox(self.box, lease, person, self.token)
         try:
             return self._run()
         finally:

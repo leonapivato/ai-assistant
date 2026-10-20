@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import IO, TYPE_CHECKING, Any
@@ -123,9 +124,14 @@ class FakeBox:
     killed: bool = False
     #: Called with every argv as it is sent, before it runs.
     on_send: Callable[[list[str]], None] | None = None
+    #: The token the person's owner file names: the last deploy to take the lock.
+    owner: str | None = None
 
     def run(self, argv: Sequence[str], *, stdin: IO[bytes] | None = None) -> Any:
+        argv, token = self._unfenced(argv)
         argv = self._sent(argv)
+        if token is not None and token != self.owner:
+            return dc.Result(77, "", "deploy-container: fenced: another deploy holds the lock\n")
         handler = self._handler(argv)
         code, out, err = handler(argv, stdin.read() if stdin is not None else b"")
         return dc.Result(code, out, err)
@@ -133,12 +139,22 @@ class FakeBox:
     def hold(self, argv: Sequence[str]) -> Any:
         argv = self._sent(argv)
         assert argv[0] == "flock"
-        assert argv[-3:] == ["sh", "-c", "echo held && exec cat"]
+        assert argv[-6:-1] == ["sh", "-c", dc.HOLDER, "sh", str(PERSON.owner)]
         path = argv[argv.index("--") + 1]
         if path in self.locks or path in self.mine:
             return dc.Result(75, "", "")
+        self.owner = argv[-1]
         lease = self.mine[path] = FakeLease(self, path)
         return lease
+
+    @staticmethod
+    def _unfenced(argv: Sequence[str]) -> tuple[list[str], str | None]:
+        """A command under ``FENCE``, and the token it runs for, or ``None`` if none."""
+        argv = list(argv)
+        if argv[:2] != ["flock", "--"] or argv[3:6] != ["sh", "-c", dc.FENCE]:
+            return argv, None
+        assert argv[2] == argv[7] == str(PERSON.owner)
+        return argv[9:], argv[8]
 
     def _sent(self, argv: Sequence[str]) -> list[str]:
         """Record an argv, unless the deploy is dead or dies before sending it."""
@@ -800,7 +816,7 @@ def test_deploy_that_loses_its_lock_before_the_backup_stops_nothing() -> None:
     box = served_box()
     sent = _lose_lock_at(box, _sends(dc.DOCKER, "build"))
 
-    with pytest.raises(dc.LockLost, match="the link to the box\ndropped"):
+    with pytest.raises(dc.LockLost, match="the link to the\nbox dropped"):
         deployment(box).run()
 
     assert sent == [sent[0]], "nothing after the build already on its way"
@@ -821,21 +837,19 @@ def test_deploy_that_loses_its_lock_during_the_backup_restarts_nothing() -> None
     assert dc.parse_unit_env(box.files[str(PERSON.unit_env)].data.decode()).image == OLD_ID
 
 
-def test_deploy_that_loses_its_lock_leaves_the_deploy_that_takes_it_alone() -> None:
+def test_deploy_whose_late_rename_arrives_after_a_takeover_is_refused_on_the_box() -> None:
     box = served_box(enabled=True)
-    after: list[list[str]] = []
+    theirs = "sha256:" + "7" * 64
+    box.images["received:1"] = (theirs, NEW_COMMIT)
     reports: list[list[str]] = []
 
     def take_over(argv: list[str]) -> None:
-        if reports:
-            after.append(argv)
-        elif argv[0] == "stat" and "pre-deploy-" in argv[-1]:
-            # The first deploy's link drops as its backup ends, and a second takes the
-            # lock and deploys, all before the first's next command reaches the box.
-            box.mine = {}
-            box.on_send = None
-            reports.append(deployment(box, stamp=LATER, token=RERUN).run())
-            box.on_send = take_over
+        if not reports and argv[0] == "mv" and argv[-1] == str(PERSON.unit_env):
+            # The first deploy's rename of unit.env is on its way when its link drops,
+            # and arrives only after a second deploy has taken the lock and deployed.
+            box.mine, box.on_send = {}, None
+            second = deployment(box, stamp=LATER, token=RERUN, image_ref="received:1")
+            reports.append(second.run())
 
     box.on_send = take_over
 
@@ -843,9 +857,8 @@ def test_deploy_that_loses_its_lock_leaves_the_deploy_that_takes_it_alone() -> N
         deployment(box).run()
 
     assert reports, "the second deploy ran"
-    assert after == [], "the first deploy sent nothing after the second took over"
-    new = box.images[f"ai-assistant-hub:{NEW_COMMIT[:12]}"][0]
-    assert box.container_image == new
+    assert dc.parse_unit_env(box.files[str(PERSON.unit_env)].data.decode()).image == theirs
+    assert box.container_image == theirs
     assert box.active == "active"
     assert box.enabled
 
@@ -890,57 +903,135 @@ def test_unit_install_writes_once_and_refuses_another_root(tmp_path: Path) -> No
     assert unit.read_text() == wanted + "# more\n", "another root's unit is not written"
 
 
-@pytest.mark.skipif(shutil.which("flock") is None, reason="util-linux's flock is not here")
-def test_a_lock_is_one_holders_until_released(tmp_path: Path) -> None:
-    taker = dc.Deployment(box=dc.LocalBox(root=True), person=PERSON)
-    path = tmp_path / ".deploy-lock"
+needs_flock = pytest.mark.skipif(shutil.which("flock") is None, reason="no util-linux flock")
 
-    lease = taker._lock(path, wait=0)
+
+def _here(tmp_path: Path, token: str) -> Any:
+    """A deploy whose box is this machine, for a person under ``tmp_path``."""
+    person = dc.Person("a", PurePosixPath(tmp_path))
+    Path(person.dir).mkdir(exist_ok=True)
+    return dc.Deployment(box=dc.LocalBox(root=True), person=person, token=token)
+
+
+def _take(deploy: Any, seconds: float = 10.0) -> Any:
+    """Take the person's lock, waiting up to ``seconds`` for its holder to go."""
+    give_up = time.monotonic() + seconds
+    while isinstance(lease := deploy._lock(), dc.Result) and time.monotonic() < give_up:
+        time.sleep(0.05)
+    return lease
+
+
+@needs_flock
+def test_a_lock_is_one_holders_until_released(tmp_path: Path) -> None:
+    first, second = _here(tmp_path, "first"), _here(tmp_path, "second")
+
+    lease = first._lock()
     assert isinstance(lease, dc.ProcessLease)
     assert lease.held()
+    assert Path(first.person.owner).read_text() == "first\n"
     # A Ctrl-C at the terminal is the deploy's to handle, under the lock, not the holder's.
     assert os.getpgid(lease.process.pid) != os.getpgid(0)
-    refused = taker._lock(path, wait=0)
+    refused = second._lock()
     assert isinstance(refused, dc.Result)
     assert refused.code == 75
     lease.release()
     assert not lease.held()
-    again = taker._lock(path, wait=0)
+    again = second._lock()
     assert isinstance(again, dc.ProcessLease)
+    assert Path(first.person.owner).read_text() == "second\n"
     again.release()
 
 
-@pytest.mark.skipif(shutil.which("flock") is None, reason="util-linux's flock is not here")
+@needs_flock
 def test_a_lock_is_released_when_its_deploy_is_killed(tmp_path: Path) -> None:
-    path = tmp_path / ".deploy-lock"
-    path.mkdir()  # an earlier deploy's lock directory serves as the file
+    Path(tmp_path / "a").mkdir()
+    Path(tmp_path / "a" / ".deploy-lock").mkdir()  # an earlier deploy's lock directory
     holder = subprocess.Popen(  # noqa: S603  # a fixed argv
         [
             sys.executable,
             "-c",
             "import sys, time; sys.path.insert(0, sys.argv[1]);"
             "import deploy_container as dc;"
-            "person = dc.Person('a', dc.PurePosixPath('/'));"
-            "d = dc.Deployment(box=dc.LocalBox(root=True), person=person);"
-            "lease = d._lock(sys.argv[2], wait=0);"
-            "print(type(lease).__name__, flush=True); time.sleep(600)",
+            "person = dc.Person('a', dc.PurePosixPath(sys.argv[2]));"
+            "d = dc.Deployment(box=dc.LocalBox(root=True), person=person, token='dead');"
+            "print(type(d._lock()).__name__, flush=True); time.sleep(600)",
             str(SCRIPTS),
-            str(path),
+            str(tmp_path),
         ],
         stdout=subprocess.PIPE,
     )
     assert holder.stdout is not None
     assert holder.stdout.readline() == b"ProcessLease\n"
-    taker = dc.Deployment(box=dc.LocalBox(root=True), person=PERSON)
-    assert isinstance(taker._lock(path, wait=0), dc.Result), "the live deploy holds it"
+    taker = _here(tmp_path, "taker")
+    assert isinstance(taker._lock(), dc.Result), "the live deploy holds it"
 
     holder.kill()  # outright: no finally, no release
     holder.wait()
     holder.stdout.close()
 
-    lease = taker._lock(path, wait=10)
+    lease = _take(taker)
     assert isinstance(lease, dc.ProcessLease), "the kernel released the dead deploy's lock"
     lease.release()
+
+
+@needs_flock
+def test_a_command_that_arrives_after_another_deploy_took_the_lock_is_refused(
+    tmp_path: Path,
+) -> None:
+    late, taker = _here(tmp_path, "late"), _here(tmp_path, "taker")
+    lease = late._lock()
+    assert isinstance(lease, dc.ProcessLease)
+    leased = dc.LeasedBox(late.box, lease, late.person, "late")
+    assert leased.run(["true"]).ok
+    lease.release()  # its link drops; another deploy takes the lock
+    taken = taker._lock()
+    assert isinstance(taken, dc.ProcessLease)
+
+    # A command the first deploy sent before its holder ended, arriving only now.
+    marker = tmp_path / "written"
+    still_held = dc.LeasedBox(late.box, taken, late.person, "late")
+    with pytest.raises(dc.LockLost):
+        still_held.run(["touch", str(marker)])
+
+    assert not marker.exists()
+    taken.release()
+
+
+@needs_flock
+def test_a_deploy_takes_the_lock_only_once_a_running_command_ends(tmp_path: Path) -> None:
+    old, new = _here(tmp_path, "old"), _here(tmp_path, "new")
+    lease = old._lock()
+    assert isinstance(lease, dc.ProcessLease)
+    owner = str(old.person.owner)
+    command = ["sh", "-c", "echo started; sleep 2"]
+    running = subprocess.Popen(  # noqa: S603  # a fixed argv
+        [
+            str(shutil.which("flock")),
+            "--",
+            owner,
+            "sh",
+            "-c",
+            dc.FENCE,
+            "sh",
+            owner,
+            "old",
+            *command,
+        ],
+        stdout=subprocess.PIPE,
+    )
+    assert running.stdout is not None
+    assert running.stdout.readline() == b"started\n"
+    lease.release()  # the old deploy's holder ends while its command still runs
+
+    began = time.monotonic()
+    taken = _take(new)
+    waited = time.monotonic() - began
+
+    assert isinstance(taken, dc.ProcessLease)
+    assert running.poll() == 0, "the new deploy held the lock only once the command ended"
+    assert waited > 0.5
+    running.stdout.close()
+    taken.release()
 
 
 def test_deploy_reads_a_quoted_comment_as_one_argument() -> None:
