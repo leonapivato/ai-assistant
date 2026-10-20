@@ -453,3 +453,79 @@ class RecordingTransport:
     def origins(self) -> tuple[str, ...]:
         """Every endpoint reached for, as a canonical origin."""
         return tuple(f"https://{one.host}:{one.port}" for one in self.endpoints)
+
+
+@final
+class _SilentChannel:
+    """A secure channel that records what is written and never answers."""
+
+    def __init__(self) -> None:
+        self.written = bytearray()
+
+    @property
+    def is_secure(self) -> bool:
+        return True
+
+    async def read_line(self) -> bytes:  # pragma: no cover — the exchange reads by `read`
+        await asyncio.Event().wait()
+        return b""
+
+    async def read(self, limit: int, /) -> bytes:
+        del limit
+        await asyncio.Event().wait()
+        return b""  # pragma: no cover — the wait never ends
+
+    async def write(self, data: bytes, /) -> None:
+        self.written += data
+
+    async def start_tls(self) -> None:
+        """Nothing to upgrade."""
+
+    async def close(self) -> None:
+        """Release it."""
+
+
+@final
+class SilentRelayTransport:
+    """A relay's endpoint that takes a request and never answers, with no handshake.
+
+    **For the one arrangement whose outcome turns on a deadline.** A send cut off by
+    its bound is *unknown* only once its request was written, and over real TLS the
+    write waits on a handshake whose duration a loaded machine decides. Here the channel
+    is open the moment it is asked for, so the request is written at once and the bound
+    always falls after it. Certificate verification is the real relay's to show, and is.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing opened."""
+        self.endpoints: list[TransportEndpoint] = []
+        self.channels: list[_SilentChannel] = []
+
+    async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel:
+        """Open a silent channel to ``endpoint``."""
+        self.endpoints.append(endpoint)
+        channel = _SilentChannel()
+        self.channels.append(channel)
+        return channel
+
+    def origins(self) -> tuple[str, ...]:
+        """Every endpoint reached for, as a canonical origin."""
+        return tuple(f"https://{one.host}:{one.port}" for one in self.endpoints)
+
+    def requests(self) -> tuple[RelayRequest, ...]:
+        """Every request written, as the relay would have read it."""
+        read: list[RelayRequest] = []
+        for channel in self.channels:
+            head, _, body = bytes(channel.written).partition(_END_OF_FIELDS)
+            if not body:
+                continue
+            target = head.split(b"\r\n", 1)[0].split(b" ")[1].decode("ascii")
+            _, credential, method = target.split("/")
+            read.append(
+                RelayRequest(
+                    method=method,
+                    credential=credential.removeprefix("bot"),
+                    body=json.loads(body),
+                )
+            )
+        return tuple(read)
