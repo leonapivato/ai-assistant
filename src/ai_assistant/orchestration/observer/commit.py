@@ -556,35 +556,58 @@ def _strength(support: MemorySupport) -> int:
     return 2 if support.backs_as_worded else 1
 
 
-def _carried(supports: Iterable[MemorySupport], context: _Context) -> None:
+def _carried(supports: Iterable[MemorySupport], context: _Context, *, creates: bool) -> None:
     """§8:2: a write the leaving episode carries, never one new in another episode.
 
     The observer commits only findings that come from the leaving episode, and
     inferences it completes; a later episode only corrects or qualifies such a finding,
-    and what is new in it waits until it is due. So among the write's supports, one
-    pointing at the leaving episode bears on the claim as strongly as any pointing at
-    another: where another episode's backs the claim as worded, one of the leaving
-    episode's does too, and a part of the leaving episode merely beside it carries
-    nothing. A round's message of another episode is left out of the comparison,
-    since it counts only through the user's keep beside it (§10:1-§10:2), which is
-    compared in its place; an observer's inference is code's, drawn from the others.
+    and what is new in it waits until it is due. So the leaving episode holds a support
+    of every write, and:
+
+    - a new memory's claim comes from the leaving episode: one of its supports pointing
+      at the leaving episode is ``for`` the claim, and no other episode's is ``for`` it
+      more strongly, backing it as worded where the leaving episode's does not;
+    - on any write, where the leaving episode holds a ``for`` support, no later
+      episode's is ``for`` the claim more strongly. A support against what the leaving
+      episode is for corrects it, and one for what the leaving episode is only against
+      qualifies it, so neither is compared.
+
+    A round's message of another episode is not compared, since it counts only through
+    the user's keep beside it (§10:1-§10:2), which is compared in its place; nor is an
+    observer's inference, code's own reading of the others.
 
     Raises:
-        _Refused: ``check_failed`` where the leaving episode carries no support of the
-            write, or none as strong as another episode's.
+        _Refused: ``check_failed`` where the leaving episode does not carry the write.
     """
-    leaving = context.view.leaving.id
-    own: list[int] = []
-    other: list[int] = [0]
+    leaving = context.view.leaving
+    own: list[MemorySupport] = []
+    other: list[MemorySupport] = []
     for one in supports:
         if one.origin is SupportOrigin.OBSERVER_INFERENCE:
             continue
-        if part_episode(one.points_at) == leaving:
-            own.append(_strength(one))
-        elif one.origin not in _ASSISTANT_ORIGINS:
-            other.append(_strength(one))
-    if not own or max(own) < max(other):
+        if part_episode(one.points_at) == leaving.id:
+            own.append(one)
+        elif one.origin not in _ASSISTANT_ORIGINS and one.direction is SupportDirection.FOR:
+            other.append(one)
+    strongest = max(
+        (_strength(one) for one in own if one.direction is SupportDirection.FOR), default=None
+    )
+    if not own or (creates and strongest is None):
         raise _Refused(FindingUnwritten.CHECK_FAILED)
+    compared = other if creates else _later(other, context)
+    if strongest is not None and any(_strength(one) > strongest for one in compared):
+        raise _Refused(FindingUnwritten.CHECK_FAILED)
+
+
+def _later(supports: Sequence[MemorySupport], context: _Context) -> list[MemorySupport]:
+    """The supports pointing at an episode after the leaving one, by ``(occurred_at, id)``.
+
+    A support whose part the view does not hold is counted as later, failing closed.
+    """
+    leaving = context.view.leaving
+    key = (leaving.occurred_at, leaving.id)
+    occurred = {one.part: (one.occurred_at, one.episode) for one in context.view.parts}
+    return [one for one in supports if (at := occurred.get(one.points_at)) is None or at > key]
 
 
 def _completed(memory: Memory, context: _Context) -> bool:
@@ -755,7 +778,7 @@ def _primary(  # noqa: PLR0911 — one arm per action §9:4 names
             target = _target(reply, context)
             if not supports or not (reply.asks or "").strip():
                 raise _Refused(FindingUnwritten.CHECK_FAILED)
-            _carried(supports.values(), context)
+            _carried(supports.values(), context, creates=False)
             if narrows(context.placement, target):
                 return Blocked()
             first = next(iter(supports.values()))
@@ -776,7 +799,7 @@ def _primary(  # noqa: PLR0911 — one arm per action §9:4 names
                 # the meet (§12:6) where an operation writes no placement (ADR-0328
                 # §5:2).
                 return _created(reply, supports, context, wording=target.content)
-            _carried(supports.values(), context)
+            _carried(supports.values(), context, creates=False)
             return AddSupports(target=target, supports=tuple(supports.values()))
         case _:
             return _created(reply, supports, context, wording=reply.wording)
@@ -839,7 +862,7 @@ def _created(
         raise _Refused(FindingUnwritten.CHECK_FAILED) from exc
     if not meets_floor(memory):
         raise _Refused(FindingUnwritten.BELOW_FLOOR)
-    _carried(memory.supports, context)
+    _carried(memory.supports, context, creates=True)
     if inference is not None and not _completed(memory, context):
         raise _Refused(FindingUnwritten.CHECK_FAILED)
     try:
@@ -1029,8 +1052,10 @@ def _resolve(
     """§13:5: a question the answer resolves, citing the support added from it.
 
     A resolve that names a memory, a question or a part the step was not shown is
-    dropped, with the rest of the decision written as checked. One resting on a supply
-    narrower than the memory blocks the whole decision (:class:`Blocked`).
+    dropped, with the rest of the decision written as checked, and so is one whose
+    support, as it would be added, points at another episode than the leaving one
+    (§8:2). One resting on a supply narrower than the memory blocks the whole decision
+    (:class:`Blocked`).
 
     Raises:
         _Blocked: Where the supply would narrow the memory the question is on.
@@ -1043,14 +1068,19 @@ def _resolve(
     question = None if shown is None else shown.questions.get(proposed.question)
     if shown is None or support is None or question is None or not proposed.note.strip():
         return None
-    if part_episode(support.points_at) != context.view.leaving.id:
-        # §8:2: an answer a later episode gave is new there, and waits until it is due.
+    try:
+        added: MemorySupport | None = _question_support(
+            support, support.direction, supports, context
+        )
+    except _Refused:
+        added = None
+    if added is not None and part_episode(added.points_at) != context.view.leaving.id:
+        # §8:2: an answer another episode gave, the user's keep standing in for the
+        # assistant's words included, waits until that episode is due.
         return None
     if narrows(context.placement, shown.memory):
         raise _Blocked
-    try:
-        added = _question_support(support, support.direction, supports, context)
-    except _Refused:
+    if added is None:
         return None
     return Resolve(target=shown.memory, question=question, support=added, note=proposed.note)
 
