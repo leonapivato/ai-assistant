@@ -16,9 +16,9 @@ the leaving one (§14:1-§14:2): it is kept only where it names a memory a relia
 in the leaving episode named, and rests on parts of later episodes alone.
 
 **A candidate recorded under an approval is never left out** (§5:5, §11:1). The user's
-yes to its wording is the strongest warrant there is, so where the scout proposed no
-finding about such a candidate, code adds one: its claim the fact the user approved,
-resting on that yes.
+yes to its wording is the strongest warrant there is: a finding naming such a candidate
+rests on that yes, whatever else the scout named, and where the scout proposed no finding
+resting on it, code adds one, its claim the fact the user approved.
 
 A reply that does not parse is no proposal, never a partial one: the attempt fails and
 is retried (§16:4).
@@ -147,9 +147,15 @@ def proposed_findings(
             dropped += 1
     for hint in reading.hints:
         confirmation = hint.confirmation
-        if confirmation is None or any(
-            one.candidate == hint.effect or confirmation.part in one.rests_on for one in kept
-        ):
+        if confirmation is None:
+            continue
+        # A finding about a candidate the user confirmed rests on that yes, whatever
+        # else the scout named: the commit step sees the words the user approved.
+        kept = [
+            _resting_on_too(one, confirmation.part) if one.candidate == hint.effect else one
+            for one in kept
+        ]
+        if any(confirmation.part in one.rests_on for one in kept):
             continue
         kept.append(
             ObservationFinding(
@@ -172,3 +178,10 @@ def _parts(handles: tuple[str, ...], reading: Reading) -> tuple[SupportPart, ...
             return ()
         parts.append(read.part)
     return tuple(parts)
+
+
+def _resting_on_too(finding: ObservationFinding, part: SupportPart) -> ObservationFinding:
+    """``finding``, resting on ``part`` as well where it does not already."""
+    if part in finding.rests_on:
+        return finding
+    return finding.model_copy(update={"rests_on": (*finding.rests_on, part)})

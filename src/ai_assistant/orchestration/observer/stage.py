@@ -65,16 +65,22 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     FindingOutcome,
     FindingUnwritten,
+    MemoryOperationKind,
+    MemoryWriterName,
     ObservationAttempt,
     ObservationAttemptEnd,
     ObservationRecord,
     ObservationState,
+    ObservationWrite,
     ObserverCall,
     ObserverStep,
     Placement,
+    PlacementReach,
+    PlacementSetter,
 )
 from ai_assistant.orchestration.observer.commit import (
     CommitReply,
+    CommitView,
     checked,
     commit_messages,
     commit_view,
@@ -356,10 +362,14 @@ class Observer:
         self, episode_id: str, held: ObservationRecord | None, window: Sequence[EpisodicMemory]
     ) -> ObservationState | None:
         """One attempt at one episode, recorded as it goes; its state, or ``None`` if gone."""
-        episode = await self._memory.get(episode_id)
+        started = self._now()
+        try:
+            episode = await self._memory.get(episode_id)
+        except MemoryStoreError as exc:
+            # A read that fails is the attempt's failure, recorded and backed off (§16:4).
+            return await self._failed(await self._open(episode_id, held, started), exc)
         if not isinstance(episode, EpisodicMemory):
             return None  # deleted since it was queued: nothing left to read
-        started = self._now()
         if held is None and _nothing_to_read(episode):
             skipped = ObservationRecord(
                 episode=episode_id,
@@ -400,7 +410,14 @@ class Observer:
     ) -> None:
         """Read, scout where no finding is recorded yet, and commit each finding left."""
         reading = await self._reader.read(episode, window)
-        if not attempt.record.findings:
+        supplied = list(reading.supplied)
+        retry_since = _retried_since(attempt.record)
+        if attempt.record.findings:
+            # §12:6: the findings were proposed over an earlier attempt's supply, which
+            # this attempt can no longer read whole, so the meet is taken as narrow as
+            # the derivation's own route makes it: owner-only, derived.
+            supplied.append(_NARROWEST)
+        else:
             reply = await self._call(
                 attempt, ObserverStep.SCOUT, self._scout, scout_messages(reading)
             )
@@ -415,11 +432,11 @@ class Observer:
                 dropped=dropped,
             )
             await self._save(attempt, findings=findings)
-        supplied = list(reading.supplied)
         for finding in attempt.record.findings:
             if finding.outcome is not None:
                 continue  # §16:4: a finding whose outcome is recorded is not committed again
-            outcome = await self._committed(finding, reading, attempt, supplied)
+            outcome = await self._committed(finding, reading, attempt, supplied, retry_since)
+            retry_since = None  # only the finding in flight when an attempt failed wrote
             done = tuple(
                 outcome if one.id == finding.id else one for one in attempt.record.findings
             )
@@ -431,6 +448,7 @@ class Observer:
         reading: Reading,
         attempt: _Attempt,
         supplied: list[Placement],
+        retry_since: datetime | None,
     ) -> ObservationFinding:
         """One finding's commit call, code's checks, and its writes (§9:3-§9:5, §12)."""
         view = await commit_view(
@@ -455,7 +473,9 @@ class Observer:
             mint=self._mint,
             placement=Placement.narrowest_of(supplied),
         )
-        outcome = await self._writer.write(verdict)
+        outcome = await self._writer.write(verdict, shown=[one.memory for one in view.similar])
+        if retry_since is not None:
+            outcome = _with_earlier_writes(outcome, finding, view, attempt.record, retry_since)
         _log.info(
             "observer_commit",
             stage="commit",
@@ -542,6 +562,58 @@ class Observer:
 def _with_outcome(finding: ObservationFinding, outcome: FindingOutcome) -> ObservationFinding:
     """``finding`` carrying its outcome, validated whole (§16:1)."""
     return type(finding).model_validate({**finding.model_dump(), "outcome": outcome})
+
+
+#: §12:6: the narrowest placement the derivation's own route writes, taken where an
+#: attempt cannot read again the whole supply its findings were proposed over.
+_NARROWEST: Final = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
+
+
+def _retried_since(record: ObservationRecord) -> datetime | None:
+    """When the failed attempt this one retries started, or ``None`` if it retries none."""
+    if len(record.attempts) < 2:  # noqa: PLR2004 — this attempt and the one before it
+        return None
+    before = record.attempts[-2]
+    return before.started_at if before.end is ObservationAttemptEnd.FAILED else None
+
+
+def _with_earlier_writes(
+    outcome: FindingOutcome,
+    finding: ObservationFinding,
+    view: CommitView,
+    record: ObservationRecord,
+    since: datetime,
+) -> FindingOutcome:
+    """``outcome`` with what the failed attempt's commit of ``finding`` wrote before failing.
+
+    The finding in flight when an attempt failed may have written a support before a
+    later write of its own failed, and its outcome was never recorded (§16:1). The
+    memories the commit step is shown now carry those supports: one added by the
+    observer since the failed attempt started, pointing at a part the finding rests on,
+    on a memory no other finding's outcome names since then, is this finding's.
+    """
+    others = {
+        write.memory
+        for one in record.findings
+        if one.id != finding.id and one.outcome is not None and one.outcome.at >= since
+        for write in one.outcome.writes
+    }
+    named = {write.memory for write in outcome.writes}
+    rests_on = set(finding.rests_on)
+    earlier = [
+        ObservationWrite(memory=one.memory.id, operations=(MemoryOperationKind.ADD_SUPPORT,))
+        for one in view.similar
+        if one.memory.id not in others | named
+        and any(
+            support.points_at in rests_on
+            and support.added_by is MemoryWriterName.OBSERVER
+            and support.added_at >= since
+            for support in one.memory.supports
+        )
+    ]
+    if not earlier:
+        return outcome
+    return FindingOutcome(at=outcome.at, ruling=outcome.ruling, writes=(*outcome.writes, *earlier))
 
 
 def _random_id() -> str:

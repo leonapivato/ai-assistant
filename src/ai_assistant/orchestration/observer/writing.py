@@ -66,14 +66,15 @@ from ai_assistant.orchestration.observer.commit import (
     RecordUse,
     Resolve,
     Unwritten,
+    narrows,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
     from datetime import datetime
 
     from ai_assistant.core.protocols import MemoryStore
-    from ai_assistant.core.types import MemoryIngestResult, MemorySupport
+    from ai_assistant.core.types import MemoryIngestResult, MemorySupport, TrackRecordEntry
     from ai_assistant.orchestration.writes import MemoryWriteStage
 
 __all__ = ["FindingWriter"]
@@ -143,12 +144,15 @@ class FindingWriter:
         self._now = now
         self._mint = mint
         self._expected: dict[str, int] = {}
+        self._shown: dict[str, Memory] = {}
 
-    async def write(self, checked: Checked) -> FindingOutcome:
+    async def write(self, checked: Checked, *, shown: Sequence[Memory] = ()) -> FindingOutcome:
         """Write ``checked`` and return the finding's outcome (§16:1).
 
         Args:
             checked: The decision, after code's checks.
+            shown: The memories the commit step was shown, as read, against which a
+                fold onto one of them is verified as this finding's own.
 
         Returns:
             What was written, or why nothing was.
@@ -161,6 +165,7 @@ class FindingWriter:
         """
         ledger = _Ledger()
         self._expected = {}
+        self._shown = {one.id: one for one in shown}
         unwritten: FindingUnwritten | None = None
         try:
             unwritten = await self._primary(checked.primary, ledger)
@@ -201,7 +206,10 @@ class FindingWriter:
                     (one for one in memory.track_record if one.episode == entry.episode), None
                 )
                 if held is None:
-                    await self._guarded(self._writes.record_use(memory, entry), memory.id)
+                    await self._guarded(
+                        self._writes.record_use(memory, entry),
+                        {memory.id: (memory, lambda after: _recorded(memory, after, entry))},
+                    )
                 ledger.recorded(memory.id, held_up=entry.held_up if held is None else held.held_up)
                 return None
 
@@ -218,11 +226,18 @@ class FindingWriter:
         proposal = MemoryUpdateProposal(
             proposed=create.memory, rationale=create.rationale, retiring=retiring
         )
-        outcome = await self._guarded(self._writes.write(proposal), *_touched(proposal))
+        checks: dict[str, tuple[Memory, Callable[[Memory], bool]]] = {}
+        if retiring is not None:
+            before = retiring.memory
+            checks[before.id] = (before, lambda after: _retired(before, after, retiring.kind))
+        outcome = await self._guarded(self._writes.write(proposal), checks)
         result = outcome.result
         ledger.ruling = result.decision.kind
-        if result.record_id is not None:
-            await self._note(result.record_id)
+        target = None if result.record_id is None else self._shown.get(result.record_id)
+        if target is not None and result.decision.kind is MemoryDecisionKind.REINFORCE:
+            await self._verified(
+                {target.id: (target, lambda after: _reinforced(target, after, create.memory))}
+            )
         return await self._ruled(create, retiring, result, ledger)
 
     async def _ruled(
@@ -262,7 +277,13 @@ class FindingWriter:
     ) -> FindingUnwritten | None:
         """§13:1, §13:3: a ``policy_ask`` on each stored memory the ruling names, or none."""
         named = await self._memory.get_many(list(result.conflicts)) if result.conflicts else {}
-        memories = [one for one in named.values() if isinstance(one, Memory)]
+        # §12:6: a question carries the supply onto the memory it is raised on, which an
+        # operation cannot narrow (ADR-0328 §5:2), so none is raised on a wider memory.
+        memories = [
+            one
+            for one in named.values()
+            if isinstance(one, Memory) and not narrows(create.memory.placement, one)
+        ]
         if not memories or create.asked_on is None:
             return FindingUnwritten.ASKED
         for memory in memories:
@@ -304,7 +325,10 @@ class FindingWriter:
             support=None if carried is not None else support,
             question=question,
         )
-        await self._guarded(self._writes.apply(change), memory.id)
+        await self._guarded(
+            self._writes.apply(change),
+            {memory.id: (memory, lambda after: _applied(memory, after, operation))},
+        )
 
     async def _resolve(self, resolve: Resolve, ledger: _Ledger) -> None:
         """§13:5: resolve the question, citing the support added from the answer."""
@@ -326,7 +350,10 @@ class FindingWriter:
             operation=operation,
             support=None if carried is not None else resolve.support,
         )
-        await self._guarded(self._writes.apply(change), memory.id)
+        await self._guarded(
+            self._writes.apply(change),
+            {memory.id: (memory, lambda after: _applied(memory, after, operation))},
+        )
         ledger.wrote(memory.id, MemoryOperationKind.RESOLVE_QUESTION)
 
     async def _apply(
@@ -344,7 +371,10 @@ class FindingWriter:
         change = MemoryChange(
             memory=memory, operation=operation, support=None if carried is not None else support
         )
-        await self._guarded(self._writes.apply(change), memory.id)
+        await self._guarded(
+            self._writes.apply(change),
+            {memory.id: (memory, lambda after: _applied(memory, after, operation))},
+        )
 
     async def _fresh(self, memory: Memory) -> Memory:
         """``memory`` as the store holds it now, still at the revision decided on.
@@ -365,15 +395,20 @@ class FindingWriter:
             raise MemoryStoreStaleError(msg)
         return held
 
-    async def _guarded[T](self, write: Awaitable[T], *touched: str) -> T:
-        """Await one write; note where it leaves the memories it touched.
+    async def _guarded[T](
+        self,
+        write: Awaitable[T],
+        checks: Mapping[str, tuple[Memory, Callable[[Memory], bool]]],
+    ) -> T:
+        """Await one write, then verify what it left on the memories it touched.
 
         Raises:
             _Refusal: ``check_failed`` for a support whose episode the store does not
                 hold (§9:5), ``refused`` for a self-consuming write or a fold onto a
                 record the proposal cites (§12:5).
             MemoryStoreError: Every other failure or refusal, re-raised: the attempt is
-                retried (§16:4).
+                retried (§16:4); ``MemoryStoreStaleError`` where another writer's change
+                is found beside this one's.
         """
         try:
             done = await write
@@ -381,19 +416,72 @@ class FindingWriter:
             raise _Refusal(FindingUnwritten.CHECK_FAILED) from exc
         except SelfConsumingWriteError as exc:
             raise _Refusal(FindingUnwritten.REFUSED) from exc
-        await self._note(*touched)
+        await self._verified(checks)
         return done
 
-    async def _note(self, *touched: str) -> None:
-        """Note the revisions this finding's own writes left ``touched`` at."""
-        if not touched:
+    async def _verified(
+        self, checks: Mapping[str, tuple[Memory, Callable[[Memory], bool]]]
+    ) -> None:
+        """Adopt a memory's new revision only where this finding's own write made it.
+
+        Each memory is read again after the write: unchanged, it is left; changed exactly
+        as this write changes it, its revision becomes the one the finding's next write
+        expects; changed in any other way, another writer moved it in between, and the
+        finding is decided again on a retry (ADR-0219 §2-§3).
+
+        Raises:
+            MemoryStoreStaleError: Where another writer's change is found.
+        """
+        if not checks:
             return
-        found = await self._memory.get_many(list(touched))
-        self._expected.update(
-            (key, one.revision) for key, one in found.items() if isinstance(one, Memory)
-        )
+        found = await self._memory.get_many(list(checks))
+        for memory_id, (before, mine) in checks.items():
+            after = found.get(memory_id)
+            if not isinstance(after, Memory) or after.revision == before.revision:
+                continue
+            if not mine(after):
+                msg = "a memory moved beside the observer's own write"
+                raise MemoryStoreStaleError(msg)
+            self._expected[memory_id] = after.revision
 
 
-def _touched(proposal: MemoryUpdateProposal) -> tuple[str, ...]:
-    """The stored memories a proposal may write on: the one it retires, where it has one."""
-    return () if proposal.retiring is None else (proposal.retiring.memory.id,)
+def _extends(before: Memory, after: Memory, added: int) -> bool:
+    """Whether ``after`` is ``before`` with ``added`` operations appended, by the observer."""
+    head, tail = (
+        after.operations[: len(before.operations)],
+        after.operations[len(before.operations) :],
+    )
+    return (
+        head == before.operations
+        and len(tail) == added
+        and all(one.by is MemoryWriterName.OBSERVER for one in tail)
+        and after.track_record == before.track_record
+        and after.placement == before.placement
+    )
+
+
+def _applied(before: Memory, after: Memory, operation: MemoryOperation) -> bool:
+    """One operation appended, and it is this one."""
+    return _extends(before, after, 1) and after.operations[-1] == operation
+
+
+def _retired(before: Memory, after: Memory, kind: MemoryOperationKind) -> bool:
+    """One retiring operation of ``kind`` appended by the observer's proposal."""
+    return _extends(before, after, 1) and after.operations[-1].kind is kind
+
+
+def _reinforced(before: Memory, after: Memory, proposed: Memory) -> bool:
+    """The proposal's supports added, each by one add support (ADR-0328 §11:6)."""
+    added = sum(1 for one in proposed.supports if before.support_at(one.points_at) is None)
+    head = after.operations[: len(before.operations)]
+    return head == before.operations and len(after.operations) == len(before.operations) + added
+
+
+def _recorded(before: Memory, after: Memory, entry: TrackRecordEntry) -> bool:
+    """The entry recorded, and nothing else changed (ADR-0328 §8:4)."""
+    return (
+        entry in after.track_record
+        and len(after.track_record) == len(before.track_record) + 1
+        and after.operations == before.operations
+        and after.supports == before.supports
+    )

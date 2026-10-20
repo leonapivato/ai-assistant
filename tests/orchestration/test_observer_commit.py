@@ -727,3 +727,22 @@ async def test_a_part_the_reading_no_longer_holds_is_read_again_by_its_address()
         SupportOrigin.USER_MESSAGE,
     )
     assert _OWNER_ONLY in view.supplied, "the episode a similar memory's support resolved from"
+
+
+def test_a_derived_supply_narrows_an_owner_placed_memory_of_the_same_reach() -> None:
+    """ADR-0217 §3:3: the meet keeps the stronger setter, so the owner's lift lifts nothing."""
+    owner_placed = Placement(
+        reach=PlacementReach.OWNER, set_by=PlacementSetter.OWNER_ACT, set_at=AT
+    )
+    held = memory(
+        "m-seat",
+        "The user prefers window seats.",
+        said_support(address("past")),
+        placement=owner_placed,
+    )
+    view = _view(_input("P1", "leaving"), similar=(_similar("M1", held),))
+
+    added = _narrow(view, action="add", memory="M1", supports=[_support("P1")])
+
+    assert isinstance(added.primary, Create)
+    assert added.primary.memory.placement.set_by is PlacementSetter.DERIVED

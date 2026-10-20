@@ -212,3 +212,32 @@ def test_a_reliance_finding_resting_on_the_leaving_episode_is_dropped() -> None:
     )
 
     assert (claims, dropped) == ([], 2)
+
+
+def test_a_finding_naming_a_confirmed_candidate_rests_on_its_yes() -> None:
+    """§5:5: the commit step sees the words the user approved, whatever else was named."""
+    yes = ReadPart(
+        handle="P3",
+        part=ConfirmationPart(
+            episode=address("leaving"),
+            asking_activation="asking",
+            question=QuestionPart(round="r", part=1),
+        ),
+        episode=address("leaving"),
+        occurred_at=AT,
+        text="The user prefers window seats.",
+        origin=SupportOrigin.CONFIRMATION,
+        when=AT,
+    )
+    reading = _reading(
+        hints=(Hint(handle="C1", effect="effect-1", fact=yes.text, confirmation=yes),)
+    )
+    proposal = parsed(
+        reply(findings=[{"claim": "Window seats.", "rests_on": ["P1"], "candidate": "C1"}]),
+        ScoutReply,
+    )
+    assert proposal is not None
+
+    (finding,), _ = proposed_findings(proposal, reading)
+
+    assert finding.rests_on == (InputPart(episode=address("leaving")), yes.part)
