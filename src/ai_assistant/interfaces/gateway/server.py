@@ -145,6 +145,7 @@ import os
 import re
 import signal
 import socket
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -262,7 +263,7 @@ from ai_assistant.wire.overlay import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Iterator, Mapping
 
     from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import AssistantEngine
@@ -633,6 +634,13 @@ _BUNDLE: Final[Mapping[str, tuple[str, str]]] = {
 #: came through without asking the gateway anything before a session exists (§7:4).
 _DOOR_PATH: Final = "/door.js"
 _HOSTED_DOOR: Final = "door-hosted.js"
+
+#: Whether the call being relayed came through the hosted listener (ADR-0327 §10), set
+#: around the call beside the browser device's name (:meth:`Gateway._relaying_for`). Read
+#: by one place, which words what the hub refused for the person who will read it
+#: (:meth:`Gateway._device_refused`): through the sign-in door that is a person on their
+#: phone, and anywhere else the owner at a machine of their own.
+_THROUGH_THE_DOOR: Final[ContextVar[bool]] = ContextVar("gateway_through_the_door", default=False)
 
 
 def _authority(host: str, port: int) -> str:
@@ -2817,22 +2825,29 @@ class Gateway:
         device = self._browser_device(connection)
         return None if device == self._own_device else device
 
-    def _relaying_for(self, connection: _Connection) -> contextlib.AbstractContextManager[object]:
+    @contextlib.contextmanager
+    def _relaying_for(self, connection: _Connection) -> Iterator[None]:
         """Name the browser device around one relayed call (ADR-0298 §1:5).
 
         The outbound context value is set around the handler, so the one
         ``AssistantEngine`` call each handler makes runs inside it and the wire client
         writes it into that call's frame. No handler takes the name as an argument and
-        no engine method gains one.
+        no engine method gains one. Whether the request came through the hosted
+        listener is set beside it, for the same reason (:data:`_THROUGH_THE_DOOR`).
 
         Args:
             connection: The connection the request arrived on.
 
-        Returns:
-            The block to run the handler in.
+        Yields:
+            Nothing; the handler runs inside both.
         """
         name = self._acting_for(connection)
-        return contextlib.nullcontext() if name is None else acting_for(name)
+        token = _THROUGH_THE_DOOR.set(connection.hosted)
+        try:
+            with contextlib.nullcontext() if name is None else acting_for(name):
+                yield
+        finally:
+            _THROUGH_THE_DOOR.reset(token)
 
     def _browser_device(self, connection: _Connection) -> str | None:
         """The device a browser request comes from, as the gateway names it (ADR-0296 §1).
@@ -3025,6 +3040,12 @@ class Gateway:
         carried — and otherwise the gateway's own, which is the connecting device the
         hub decided where the frame named none (§2:1).
 
+        **The sentence is worded for whoever reads it** (:func:`.refusal_detail`): the
+        person through the sign-in door, where the call came through the hosted
+        listener (:data:`_THROUGH_THE_DOOR`), and the owner at a machine of their own
+        anywhere else. The fault name is the same on both, so the reason stays
+        machine-readable to the page (ADR-0298 §6:2).
+
         Args:
             exc: The refusal.
 
@@ -3040,6 +3061,7 @@ class Gateway:
                 exc.reason,
                 device=self._own_device if named is None else named,
                 gateway=self._own_device,
+                hosted=_THROUGH_THE_DOOR.get(),
             ),
             close=False,
         )
@@ -3143,7 +3165,7 @@ class Gateway:
             body=partial(
                 self._follow_chat,
                 after=after,
-                relaying=self._acting_for(connection),
+                connection=connection,
                 every=budget,
                 ending=ending,
             ),
@@ -3157,7 +3179,7 @@ class Gateway:
         writer: asyncio.StreamWriter,
         *,
         after: int,
-        relaying: str | None,
+        connection: _Connection,
         every: timedelta,
         ending: _Ending,
     ) -> None:
@@ -3177,7 +3199,8 @@ class Gateway:
         Args:
             writer: The connection's writer, already carrying the stream's head.
             after: The browser's cursor.
-            relaying: The browser device the stream is followed for, or ``None``.
+            connection: The connection the stream was opened on, which names the
+                browser device it is followed for (:meth:`_relaying_for`).
             every: The keep-alive cadence the head stated.
             ending: The stream's record of what it has written (:class:`_Ending`).
 
@@ -3197,7 +3220,7 @@ class Gateway:
                 raise ConnectionAbortedError(msg) from None
             ending.wrote()
 
-        with contextlib.nullcontext() if relaying is None else acting_for(relaying):
+        with self._relaying_for(connection):
             try:
                 chunks = self._engine.follow_chat(after=after)
                 async with closing_stream(paced(chunks, every=seconds)) as values:

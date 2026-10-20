@@ -31,13 +31,15 @@ from gateway_edge import DOOR, DOOR_ORIGIN, HOSTED_DEVICE, SUBJECT, FakeEdge
 from gateway_mint import bootstrap_value
 from gateway_ports import free_port
 from gateway_timing import Clock, Timers
+from test_gateway_streams import _values
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.device_context import current_acting_for
-from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.core.errors import ConfigurationError, DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.types import DEFAULT_PAGE_SIZE
 from ai_assistant.interfaces.gateway.edge import ASSERTION_HEADER
 from ai_assistant.interfaces.gateway.http import Request
+from ai_assistant.interfaces.gateway.refusals import REFUSAL_FAULTS, refusal_detail
 from ai_assistant.interfaces.gateway.server import Gateway
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
@@ -45,7 +47,7 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from ai_assistant.core.types import ConversationSummary
+    from ai_assistant.core.types import ChatStreamChunk, ChatStreamEnd, ConversationSummary
 
 pytestmark = pytest.mark.integration
 
@@ -213,7 +215,7 @@ class Hosted:
 
 
 @contextlib.asynccontextmanager
-async def _hosted(**overrides: Any) -> AsyncIterator[Hosted]:
+async def _hosted(*, engine: _Recording | None = None, **overrides: Any) -> AsyncIterator[Hosted]:
     """Bind the loopback and hosted listeners and tear them down afterwards."""
     edge = FakeEdge()
     settings = Settings(
@@ -221,7 +223,7 @@ async def _hosted(**overrides: Any) -> AsyncIterator[Hosted]:
         **edge.settings(gateway_hosted_port=free_port(), **overrides),
     )
     clock, timers = Clock(reading=_NOW), Timers()
-    engine = _Recording()
+    engine = _Recording() if engine is None else engine
     gateway = Gateway(
         settings=settings,
         engine=engine,
@@ -750,6 +752,111 @@ async def test_reading_the_connections_is_admitted_through_the_door(hosted: Host
     answer = await hosted.send("POST", "/connections", body=b"{}", session=session)
 
     assert answer.status == 200, answer.body
+
+
+# --- §10: what the hub refuses for the hosted device, said to the person ---------------
+
+
+class _Refusing(_Recording):
+    """A hub that refuses every listing and every change stream for one reason."""
+
+    def __init__(self, reason: DeviceRefusal) -> None:
+        """Refuse for ``reason``."""
+        super().__init__()
+        self.reason = reason
+
+    async def recent_conversations(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[ConversationSummary, ...]:
+        """Record the device the listing was relayed for, then refuse it."""
+        await super().recent_conversations(limit=limit, offset=offset)
+        msg = "refused for the device"
+        raise DeviceRefusedError(msg, reason=self.reason)
+
+    def follow_chat(self, *, after: int) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        """Refuse the stream on its first step, as the hub's role check does."""
+        return self._refused()
+
+    async def _refused(self) -> AsyncIterator[ChatStreamChunk | ChatStreamEnd]:
+        # Nothing comes before the refusal: it is the stream's first step.
+        nothing: tuple[ChatStreamChunk | ChatStreamEnd, ...] = ()
+        for chunk in nothing:  # pragma: no cover — never entered
+            yield chunk
+        msg = "reading many needs a role"
+        raise DeviceRefusedError(msg, reason=self.reason)
+
+
+#: What no sentence said through the door names: the commands, the machine, the device.
+_OPERATOR_WORDS: Final = ("ai-assistant-device", "my-devices", "hub", HOSTED_DEVICE)
+
+
+@pytest.mark.parametrize("reason", list(DeviceRefusal))
+async def test_a_refusal_through_the_door_is_said_to_the_person(reason: DeviceRefusal) -> None:
+    """The person on the hosted door holds no machine of the hub's: the reason keeps its
+    own fault (ADR-0298 §6:2), and the sentence names no command, machine or device."""
+    async with _hosted(engine=_Refusing(reason)) as one:
+        answer = await one.listing(await one.exchange())
+
+    assert answer.status == 422
+    assert answer.payload == {
+        "fault": REFUSAL_FAULTS[reason],
+        "detail": refusal_detail(reason, device=HOSTED_DEVICE, gateway="hub", hosted=True),
+    }
+    assert "The person who set it up for you" in answer.payload["detail"]
+    for word in _OPERATOR_WORDS:
+        assert word not in answer.payload["detail"]
+
+
+async def test_the_same_refusal_on_the_loopback_listener_keeps_the_owners_command() -> None:
+    """Which listener the request came through decides the wording, on one gateway: the
+    owner at the gateway's own machine is told the command that changes the answer."""
+    async with _hosted(engine=_Refusing(DeviceRefusal.NO_ROLE)) as one:
+        answer = await one.listing(await one.loopback_session(), loopback=True, origin=None)
+
+    assert answer.status == 422
+    assert answer.payload["fault"] == "device-without-role"
+    assert "ai-assistant-device assign" in answer.payload["detail"]
+
+
+async def test_a_change_stream_refused_through_the_door_ends_in_the_persons_sentence() -> None:
+    """The change stream is relayed for the hosted device too (§10:2), and its refusal
+    arrives after the head as the terminal fault, worded as a refused request is."""
+    async with _hosted(engine=_Refusing(DeviceRefusal.NO_ROLE)) as one:
+        cookie, header = await one.exchange()
+        body = b'{"after": 0}'
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", one.settings.gateway_hosted_port
+        )
+        try:
+            writer.write(
+                (
+                    f"POST /chat/follow HTTP/1.1\r\nHost: {DOOR}\r\nOrigin: {DOOR_ORIGIN}\r\n"
+                    f"Edge-Assertion: {one.assertion()}\r\n"
+                    f"Cookie: __Host-assistant_session={cookie}\r\n"
+                    f"X-Assistant-Session: {header}\r\n"
+                    f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n"
+                ).encode()
+                + body
+            )
+            await writer.drain()
+            head = await reader.readuntil(b"\r\n\r\n")
+            assert head.startswith(b"HTTP/1.1 200 "), head
+            async with asyncio.timeout(5):
+                taken = [value async for value in _values(reader)]
+        finally:
+            writer.close()
+            with contextlib.suppress(ConnectionError, OSError):
+                await writer.wait_closed()
+
+    assert taken == [
+        {
+            "kind": "fault",
+            "fault": "device-without-role",
+            "detail": refusal_detail(
+                DeviceRefusal.NO_ROLE, device=HOSTED_DEVICE, gateway="hub", hosted=True
+            ),
+        }
+    ]
 
 
 # --- §4:9: no store, no transform ------------------------------------------------------

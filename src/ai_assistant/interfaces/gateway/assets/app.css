@@ -1274,7 +1274,13 @@ code {
 .chat-compose-row textarea {
   flex: 1;
   min-width: 0;
-  max-height: 12rem;
+  /*
+   * The ceiling is a share of the screen as well as a length, so that on a phone with
+   * its keyboard up a long message does not take what is left of the conversation
+   * being answered: it scrolls inside the box instead.
+   */
+  max-height: min(12rem, 20vh);
+  max-height: min(12rem, 20dvh);
   padding: 0.55rem 1rem;
   line-height: 1.45;
   border-radius: 22px;
@@ -1431,11 +1437,19 @@ code {
     padding: 0.45rem 0.8rem;
   }
 
-  /* One half of the chat at a time, each the frame's whole width. */
+  /*
+   * One half of the chat at a time, each the frame's whole width.
+   *
+   * The floor is lower than the desktop's, because a phone's keyboard takes the bottom
+   * of the screen: where the browser resizes the page for it (`interactive-widget` in
+   * `index.html`) the frame shrinks with the screen, and a floor above what is left
+   * would push the box being typed in under the keyboard.
+   */
   .chat-app {
     grid-template-columns: minmax(0, 1fr);
     height: calc(100vh - 8rem);
     height: calc(100dvh - 8rem);
+    min-height: 15rem;
     border-radius: 14px;
   }
 
