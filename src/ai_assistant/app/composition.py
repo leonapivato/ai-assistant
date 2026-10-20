@@ -197,6 +197,9 @@ PROMPTS: Final[tuple[PromptDeclaration, ...]] = (UNDERSTANDING_PROMPT,)
 #: anyone but its owner (ADR-0334 §5:1).
 _WRITABLE_BY_OTHERS: Final = stat.S_IWGRP | stat.S_IWOTH
 
+#: How much of an override one read takes.
+_READ_CHUNK: Final = 64 * 1024
+
 #: What this layer tunes :class:`MemoryIngestor`'s conflict ceiling to, **passed
 #: explicitly rather than left to the constructor's default** (ADR-0119 §9): the
 #: configuration stamp records the effective ``search`` limit it produces, and the
@@ -2672,7 +2675,9 @@ def _prompt_overrides(directory: Path, *, enabled: bool) -> list[PromptTemplate]
     """The overrides ``directory`` holds, each checked before it is read (§5:1).
 
     The directory is opened once, without following a link, and each file is opened
-    from that descriptor, so every check is made on the object that is read.
+    from that descriptor, so every check is made on the object that is read. The
+    directory's owner and mode are checked whether or not overrides are on (§5:1 makes
+    neither refusal depend on the setting); where they are off, nothing in it is read.
 
     Raises:
         ConfigurationError: Where the start is refused; see :func:`read_prompts`.
@@ -2681,8 +2686,8 @@ def _prompt_overrides(directory: Path, *, enabled: bool) -> list[PromptTemplate]
     if descriptor is None:
         return []
     try:
-        with os.scandir(descriptor) as listing:
-            names = sorted(entry.name for entry in listing)
+        _refuse_unsafe(os.fstat(descriptor), f"the prompt override directory {directory}")
+        names = _listed(descriptor, directory)
         if not enabled:
             if names:
                 msg = (
@@ -2692,24 +2697,42 @@ def _prompt_overrides(directory: Path, *, enabled: bool) -> list[PromptTemplate]
                 )
                 raise ConfigurationError(msg)
             return []
-        _refuse_unsafe(os.fstat(descriptor), f"the prompt override directory {directory}")
-        declared = {declaration.filename: declaration for declaration in PROMPTS}
-        overrides: list[PromptTemplate] = []
-        for name in names:
-            declaration = declared.get(name)
-            if declaration is None:
-                msg = f"the prompt override {directory / name} names no prompt"
-                raise ConfigurationError(msg)
-            data = _read_override(descriptor, name, shown=directory / name)
-            try:
-                template = PromptTemplate.parse(declaration, data, origin=PromptOrigin.OVERRIDE)
-            except ConfigurationError as exc:
-                msg = f"the prompt override {directory / name}: {exc}"
-                raise ConfigurationError(msg) from None
-            overrides.append(template)
-        return overrides
+        return [_override(descriptor, directory, name) for name in names]
     finally:
         os.close(descriptor)
+
+
+def _listed(descriptor: int, directory: Path) -> list[str]:
+    """The names the open directory holds, sorted, so a refusal names the same one each time.
+
+    Raises:
+        ConfigurationError: If the directory cannot be listed.
+    """
+    try:
+        with os.scandir(descriptor) as listing:
+            return sorted(entry.name for entry in listing)
+    except OSError as exc:
+        msg = f"the prompt override directory {directory} could not be listed: {exc.strerror}"
+        raise ConfigurationError(msg) from None
+
+
+def _override(descriptor: int, directory: Path, name: str) -> PromptTemplate:
+    """The override ``name`` in the open directory, read and parsed against its prompt.
+
+    Raises:
+        ConfigurationError: If it names no prompt, or is refused as it is read or parsed.
+    """
+    shown = directory / name
+    declaration = next((one for one in PROMPTS if one.filename == name), None)
+    if declaration is None:
+        msg = f"the prompt override {shown} names no prompt"
+        raise ConfigurationError(msg)
+    data = _read_override(descriptor, name, shown=shown)
+    try:
+        return PromptTemplate.parse(declaration, data, origin=PromptOrigin.OVERRIDE)
+    except ConfigurationError as exc:
+        msg = f"the prompt override {shown}: {exc}"
+        raise ConfigurationError(msg) from None
 
 
 def _open_override_directory(directory: Path) -> int | None:
@@ -2764,8 +2787,14 @@ def _read_override(directory: int, name: str, *, shown: Path) -> bytes:
             msg = f"the prompt override {shown} is not a regular file"
             raise ConfigurationError(msg)
         _refuse_unsafe(info, f"the prompt override {shown}")
-        with os.fdopen(descriptor, "rb", closefd=False) as opened:
-            return opened.read()
+        chunks: list[bytes] = []
+        try:
+            while chunk := os.read(descriptor, _READ_CHUNK):
+                chunks.append(chunk)
+        except OSError as exc:
+            msg = f"the prompt override {shown} could not be read: {exc.strerror}"
+            raise ConfigurationError(msg) from None
+        return b"".join(chunks)
     finally:
         os.close(descriptor)
 

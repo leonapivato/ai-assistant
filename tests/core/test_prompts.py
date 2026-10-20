@@ -81,6 +81,24 @@ def test_a_final_line_break_is_no_part_of_the_text_and_blank_lines_are() -> None
     assert _render("one\n\ntwo\n\n") == "one\n\ntwo\n"
 
 
+def test_a_crlf_line_break_ends_a_line_as_lf_does() -> None:
+    """A file saved with CR LF line endings renders as the same file with LF."""
+    crlf = "top\r\n$if left\r\nleft\r\n$else\r\nnot left\r\n$end\r\nend\r\n"
+
+    assert _render(crlf, left=True) == "top\nleft\nend"
+    assert _render(crlf, left=False) == _render(crlf.replace("\r\n", "\n"), left=False)
+    assert _parse(crlf).version != _parse(crlf.replace("\r\n", "\n")).version
+
+
+@pytest.mark.parametrize("left", [False, True])
+def test_blocks_nested_as_deep_as_a_file_allows_render(*, left: bool) -> None:
+    """Rendering keeps its own stack, so depth the parse accepted is depth it renders."""
+    depth = 5000
+    text = "$if left\n" * depth + "deepest\n" + "$end\n" * depth + "after"
+
+    assert _render(text, left=left) == ("deepest\nafter" if left else "after")
+
+
 def test_a_directive_line_is_removed_with_its_line_break() -> None:
     assert _render("a\n$if left\nb\n$end\nc") == "a\nc"
     assert _render("a\n$if left\nb\n$end\n") == "a"
