@@ -33,12 +33,18 @@ asking round and the part, the yes's understanding names the asking activation, 
 asked call the asking round recorded there carries the fact, its digest checked against
 the effect record's.
 
+**The observer reads the same join** (ADR-0329 §9:1): :func:`done_candidates` gives
+one episode's candidates its own rounds recorded, each with its values and the id of the
+effect record that shows it done, which is how a finding names the candidate it came
+from (``ObservationFinding.candidate``).
+
 A glue module of the phases, outside their ``independence`` contract: it reads
 authorizing's digest and planning's mark, and no phase module imports it.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, cast
 
 from pydantic import ValidationError
@@ -78,7 +84,7 @@ if TYPE_CHECKING:
         ProposedCall,
     )
 
-__all__ = ["held_candidates", "pending_candidates"]
+__all__ = ["DoneCandidate", "done_candidates", "held_candidates", "pending_candidates"]
 
 #: How many episodes one page of the panel's walk lists: the episode listing's most.
 _EPISODE_PAGE: Final = 100
@@ -141,6 +147,64 @@ async def pending_candidates(
         if facts:
             pending[episode] = facts
     return pending
+
+
+@dataclass(frozen=True, slots=True)
+class DoneCandidate:
+    """One candidate an episode's own rounds recorded, joined to its effect record (§3:3).
+
+    Attributes:
+        effect: The id of the effect record that shows the ``remember`` call done.
+        round: The id of the round that recorded the call.
+        fact: The candidate's fact.
+        values: The call's values as authorizing ruled on them, its labels mapped to
+            the ids the episode recorded, which
+            :func:`~ai_assistant.orchestration.remembering.candidate_of` reads.
+    """
+
+    effect: str
+    round: str
+    fact: str
+    values: Mapping[str, FrozenJson]
+
+
+def done_candidates(
+    episode: str, processing: EpisodeProcessingRecord, effects: Sequence[ActivationEffect], /
+) -> tuple[DoneCandidate, ...]:
+    """The candidates one episode's own rounds recorded that its effect records show done.
+
+    The join :func:`pending_candidates` makes, keeping each candidate's effect record:
+    an effect record of the episode's activation, for the call's round, of ``remember``,
+    with the call's digest and spending no question part, shows it done.
+
+    Args:
+        episode: The episode's id, exactly as held.
+        processing: Its processing record.
+        effects: Effect records read for its activation; others are passed over.
+
+    Returns:
+        Its candidates in the order its rounds recorded them.
+    """
+    done = {
+        (effect.activation_id, effect.round, effect.values_digest): effect.id
+        for effect in effects
+        if _done_remember(effect) and effect.part is None
+    }
+    labels = {one.label: one for one in processing.labels}
+    joined: list[DoneCandidate] = []
+    for one in processing.rounds:
+        for call in one.calls:
+            if call.name != REMEMBER_CAPABILITY:
+                continue
+            values = _ruled_values(call, labels)
+            digest = None if values is None else _digest(episode, values)
+            if digest is None or values is None:
+                continue
+            effect = done.get((processing.activation_id, one.id, digest))
+            fact = values.get(FACT_ARGUMENT)
+            if effect is not None and isinstance(fact, str):
+                joined.append(DoneCandidate(effect=effect, round=one.id, fact=fact, values=values))
+    return tuple(joined)
 
 
 async def held_candidates(memory: MemoryStore, plans: PlanStore, /) -> tuple[PendingCandidate, ...]:
