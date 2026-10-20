@@ -142,7 +142,7 @@ from ai_assistant.orchestration.phase_path import (
     PhaseWorking,
     StoryReads,
 )
-from ai_assistant.orchestration.planning import PlannedRound
+from ai_assistant.orchestration.planning import PLANNING_PROMPT, PlannedRound
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls, remembered_record_id
 from ai_assistant.orchestration.story_calls import (
@@ -381,6 +381,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
         )
         place: MessageWriter = chat if wrap is None else wrap(chat)
         return path(
+            planning_prompt=default_prompt(PLANNING_PROMPT),
             completer=completer,
             provider=digests if digests is not None else FakeModelProvider(reply=_DIGESTED),
             authorizing=authorizing(
@@ -3382,10 +3383,9 @@ async def test_an_event_runs_the_phases_in_a_place_that_takes_no_message() -> No
         (ControllerStage.AUTHORIZING, ControllerRule.ROUND_UNAUTHORIZED),
         (ControllerStage.END, ControllerRule.NOTHING_DUE),
     ]
-    # Planning is told up front that the place takes no message (ADR-0307 §3:8).
+    # Planning is shown that the place takes no message (ADR-0307 §3:8).
     (asked,) = completer.calls
-    system, request = asked.messages
-    assert "This input came from a place that takes no message." in system.content
+    _, request = asked.messages
     place = json.loads(request.content)["place"]
     assert place["takes_message"] is False
     assert place["description"] == EVENT_DESCRIPTION

@@ -23,6 +23,7 @@ from ai_assistant.app.composition import PROMPTS, read_prompts
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.prompts import PromptDeclaration, PromptOrigin
+from ai_assistant.orchestration.planning import PLANNING_PROMPT
 from ai_assistant.orchestration.understanding import UNDERSTANDING_PROMPT
 from ai_assistant.testing import default_prompt, flag_combinations
 
@@ -92,11 +93,17 @@ def test_each_default_ships_in_the_wheel_beside_its_module() -> None:
         assert f"{declaration.package.replace('.', '/')}/{declaration.filename}" in shipped
 
 
-def test_understanding_is_the_prompt_moved_so_far() -> None:
-    """§1:2: the mechanism lands with one prompt moved; later lanes add theirs here."""
-    assert PROMPTS == (UNDERSTANDING_PROMPT,)
+def test_understanding_and_planning_are_the_prompts_moved_so_far() -> None:
+    """§1:2, §2:1: the prompts moved so far, each with §2's flags and values; later lanes add."""
+    assert PROMPTS == (UNDERSTANDING_PROMPT, PLANNING_PROMPT)
     assert UNDERSTANDING_PROMPT.flags == frozenset({"recalled", "stories"})
     assert UNDERSTANDING_PROMPT.values == frozenset()
+    assert PLANNING_PROMPT.flags == frozenset(
+        {"takes_message", "story_calls", "story_reads", "approved", "candidates", "reliance"}
+    )
+    assert PLANNING_PROMPT.values == frozenset(
+        {"approved_action_tool", "note_reliance_capability", "needs_your_yes"}
+    )
 
 
 def test_with_no_override_directory_every_prompt_runs_its_default(tmp_path: Path) -> None:
@@ -198,7 +205,7 @@ def test_a_prompts_path_that_is_a_link_is_refused(tmp_path: Path, *, overrides: 
 
 
 @pytest.mark.parametrize(
-    "name", ["planning.txt", "understanding", "understanding.txt.bak", ".understanding.txt.swp"]
+    "name", ["digesting.txt", "understanding", "understanding.txt.bak", ".understanding.txt.swp"]
 )
 def test_a_file_that_names_no_moved_prompt_is_refused(tmp_path: Path, name: str) -> None:
     """A prompt not yet moved has no template, so its file names no prompt either."""

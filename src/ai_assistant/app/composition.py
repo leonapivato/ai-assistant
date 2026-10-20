@@ -92,6 +92,7 @@ from ai_assistant.orchestration.matters_pass import MattersPass
 from ai_assistant.orchestration.observer import Observer, ObserverLimits
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, StoryReads
+from ai_assistant.orchestration.planning import PLANNING_PROMPT
 from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.reliance import NOTE_RELIANCE, RELIANCE_LABEL_ARGUMENTS
 from ai_assistant.orchestration.remembering import (
@@ -191,7 +192,7 @@ _log = structlog.get_logger(__name__)
 #: declaration here and hands the module ``prompts[<declaration>.name]``; nothing else
 #: in this layer changes. An override is read only for a prompt listed here, so a file
 #: naming a prompt not yet moved names no prompt and refuses the start (§5:1).
-PROMPTS: Final[tuple[PromptDeclaration, ...]] = (UNDERSTANDING_PROMPT,)
+PROMPTS: Final[tuple[PromptDeclaration, ...]] = (UNDERSTANDING_PROMPT, PLANNING_PROMPT)
 
 #: What a template file read from the override directory may not be: writable by
 #: anyone but its owner (ADR-0334 §5:1).
@@ -1691,6 +1692,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 diagnostics=diagnostics,
                 tidy_up=tidy_up,
             ),
+            planning_prompt=prompts[PLANNING_PROMPT.name],
         )
         # --- the Telegram line (ADR-0323 §3, §11, §15) --------------------------
         #
@@ -2350,7 +2352,9 @@ class _PhaseSeams:
     diagnostics: DiagnosticSink | None = None
 
 
-def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
+def _build_phase_path(
+    settings: Settings, seams: _PhaseSeams, *, planning_prompt: PromptTemplate
+) -> PhasePath:
     """The phases, which plan every activation (ADR-0309 §2:6, §4).
 
     **The capabilities planning is offered** are every one the phases' tools advertise
@@ -2520,6 +2524,8 @@ def _build_phase_path(settings: Settings, seams: _PhaseSeams) -> PhasePath:
         round_limit=PHASES_ROUND_LIMIT,
         round_wait=PHASES_CALL_DEADLINE,
         excerpt_chars=PHASES_EXCERPT_CHARS,
+        # ADR-0334 §3:5: planning's instruction, as read at start, default or override.
+        planning_prompt=planning_prompt,
         part_chars=PHASES_DIGEST_PART_CHARS,
         # ADR-0308 §3, §4:4: planning and recall's digest fetch recall's kept records
         # from the one memory store recall searched; the second run itself is the

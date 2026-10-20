@@ -34,6 +34,7 @@ from ai_assistant.orchestration.chat import ChatWriter
 from ai_assistant.orchestration.lookups import LookUps
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools
+from ai_assistant.orchestration.planning import PLANNING_PROMPT
 from ai_assistant.orchestration.reliance import NOTE_RELIANCE, RELIANCE_LABEL_ARGUMENTS
 from ai_assistant.orchestration.remembering import (
     CANDIDATE_LABEL_ARGUMENTS,
@@ -45,6 +46,7 @@ from ai_assistant.testing import (
     FakeModelProvider,
     FakeStoryStore,
     FakeToolCallingCompleter,
+    default_prompt,
 )
 from ai_assistant.testing.memories import memory as memory_record
 from ai_assistant.testing.memories import said_support
@@ -80,6 +82,7 @@ def _phases(
             reliance=NOTE_RELIANCE,
         )
         return PhasePath(
+            planning_prompt=default_prompt(PLANNING_PROMPT),
             completer=completer,
             provider=FakeModelProvider(reply=_DIGESTED),
             authorizing=AuthorizingStage(

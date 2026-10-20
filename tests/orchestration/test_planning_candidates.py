@@ -1,24 +1,25 @@
 """What planning is told and shown once ``remember`` records candidates (ADR-0329 §6).
 
 Driven directly over the planning stage, each outcome built by hand as the phases' glue
-hands it over: the instruction (§6:1-§6:5, §6:8), a candidate's result (§4:1, §4:4,
-§6:5), open questions beside a memory (§6:6) and an unprocessed episode's pending
-candidates in the episode window (§6:9). With the switch off the instruction is today's,
-as ``test_planning`` shows untouched.
+hands it over: the instruction's flags (§6:1-§6:5, §6:8), a candidate's result (§4:1,
+§4:4, §6:5), open questions beside a memory (§6:6) and an unprocessed episode's pending
+candidates in the episode window (§6:9). With the switch off neither flag is set, so the
+instruction is the interim's.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from test_planning import (
     _TOOLS,
+    FLAG_ECHO,
     _earlier,
     _episode,
+    _flags,
     _inputs,
-    _instruction,
     _now,
     _Recorder,
     _remembered,
@@ -36,6 +37,7 @@ from ai_assistant.core.types import (
     RoundResponse,
 )
 from ai_assistant.orchestration.planning import (
+    PLANNING_PROMPT,
     CallOutcome,
     CallOutcomeKind,
     PlanningStage,
@@ -43,23 +45,26 @@ from ai_assistant.orchestration.planning import (
 )
 from ai_assistant.orchestration.reliance import NOTE_RELIANCE
 from ai_assistant.orchestration.remembering import REMEMBER, REMEMBER_CANDIDATE
-from ai_assistant.testing import FakeToolCallingCompleter
+from ai_assistant.testing import FakeToolCallingCompleter, default_prompt
+
+if TYPE_CHECKING:
+    from ai_assistant.core.prompts import PromptTemplate
+    from ai_assistant.core.types import ToolDefinition
 from ai_assistant.testing.memories import memory, said_support
 
 _AT: Final = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
-_CANDIDATES_PARAGRAPH: Final = "Remember records a candidate for your long-term memory"
-_RELIANCE_PARAGRAPH: Final = "Note the memories you relied on with note_reliance"
 
 #: The test tools but its stand-in remember, which would disagree with the real one.
 _OTHERS: Final = tuple(one for one in _TOOLS if one.capability != "remember")
 
 
 def _stage(
-    *responses: RoundResponse, candidates: bool = True
+    *responses: RoundResponse, candidates: bool = True, prompt: PromptTemplate | None = None
 ) -> tuple[PlanningStage, FakeToolCallingCompleter]:
     completer = FakeToolCallingCompleter.scripted(*(responses or (RoundResponse(text="ok"),)))
     ids = iter(f"round:{n}" for n in range(100))
     stage = PlanningStage(
+        prompt=default_prompt(PLANNING_PROMPT) if prompt is None else prompt,
         completer=completer,
         recorder=_Recorder(),
         excerpt_chars=200,
@@ -70,60 +75,32 @@ def _stage(
     return stage, completer
 
 
-# --- the instruction (§6:1-§6:5, §6:8) -----------------------------------------------------
+# --- the instruction's flags (§6:1-§6:5, §6:8) -----------------------------------------------
 
 
-async def test_the_instruction_says_what_a_candidate_is_for_and_how_to_reply() -> None:
-    """§6:1-§6:5, §5:1: the page and memory, eagerness, naming a memory, asking, replying."""
-    stage, completer = _stage()
+@pytest.mark.parametrize(
+    ("switch", "offered", "handed"),
+    [
+        (True, (REMEMBER_CANDIDATE, NOTE_RELIANCE), {"candidates", "reliance"}),
+        (True, (REMEMBER_CANDIDATE,), {"candidates"}),
+        (True, (NOTE_RELIANCE,), {"reliance"}),
+        (False, (REMEMBER, NOTE_RELIANCE), set()),
+    ],
+    ids=["both", "candidates", "reliance", "switch-off"],
+)
+async def test_the_template_is_handed_candidates_and_reliance_where_each_is_offered(
+    switch: bool, offered: tuple[ToolDefinition, ...], handed: set[str]
+) -> None:
+    """ADR-0334 §4:2; §6:1-§6:5, §6:8: each flag where its capability is offered.
 
-    await stage.plan(_inputs(capabilities=(*_OTHERS, REMEMBER_CANDIDATE, NOTE_RELIANCE)))
+    With the switch off neither is set, whatever is offered, so the instruction is the
+    interim's (ADR-0328 §13:6).
+    """
+    stage, completer = _stage(candidates=switch, prompt=FLAG_ECHO)
 
-    instruction = _instruction(completer)
-    assert _CANDIDATES_PARAGRAPH in instruction
-    for said in (
-        # §6:1: what a candidate is for, beside a story note, nothing copied.
-        "true and useful if this matter ended or were forgotten",
-        "write a story note for what matters to this matter",
-        "with nothing copied from one to the other",
-        # §6:2: single observations; eager about the user's world, strict for trivia.
-        "Record single observations as candidates too",
-        "people, places, preferences, constraints and plans, and strict for trivia",
-        # §6:3: naming a memory only for something new; a judgment alone is no candidate.
-        "record a candidate naming it by its M label",
-        "is never a candidate by itself",
-        # §6:4: asking only for a conflict that matters.
-        "only where it conflicts with the candidate and the conflict matters",
-        # §5:1: confirm.
-        "Set confirm where you want the user's yes to the fact's wording",
-        # §6:5: will remember, never saved.
-        '"got it, I\'ll remember"',
-        "never that it is saved",
-    ):
-        assert said in instruction
-    # §6:8: reliance, where offered.
-    assert _RELIANCE_PARAGRAPH in instruction
-    assert "not for one only mentioned in passing" not in instruction
-    assert "never for one only mentioned in passing" in instruction
+    await stage.plan(_inputs(capabilities=(*_OTHERS, *offered)))
 
-
-async def test_reliance_is_said_only_where_it_is_offered() -> None:
-    stage, completer = _stage()
-
-    await stage.plan(_inputs(capabilities=(*_OTHERS, REMEMBER_CANDIDATE)))
-
-    assert _CANDIDATES_PARAGRAPH in _instruction(completer)
-    assert _RELIANCE_PARAGRAPH not in _instruction(completer)
-
-
-async def test_with_the_switch_off_the_instruction_is_todays() -> None:
-    """ADR-0328 §13:6: the interim's instruction does not change, whatever is offered."""
-    stage, completer = _stage(candidates=False)
-
-    await stage.plan(_inputs(capabilities=(*_OTHERS, REMEMBER, NOTE_RELIANCE)))
-
-    assert "candidate" not in _instruction(completer)
-    assert _RELIANCE_PARAGRAPH not in _instruction(completer)
+    assert {"candidates", "reliance"} & _flags(completer) == handed
 
 
 # --- a candidate's result (§4:1, §4:4, §6:5) -----------------------------------------------

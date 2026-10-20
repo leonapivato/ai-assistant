@@ -41,7 +41,12 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.digesting import ActivationLabels, DigestingStage
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.held_results import HeldResult
-from ai_assistant.orchestration.planning import PlaceWindow, PlanningInputs, PlanningStage
+from ai_assistant.orchestration.planning import (
+    PLANNING_PROMPT,
+    PlaceWindow,
+    PlanningInputs,
+    PlanningStage,
+)
 from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.understanding import (
     UNDERSTANDING_PROMPT,
@@ -59,8 +64,9 @@ from ai_assistant.testing import (
 from ai_assistant.testing.memories import memory as memory_record
 from ai_assistant.testing.memories import said_support
 
-#: Understanding's shipped template, as the composition root hands it the stage.
+#: Understanding's and planning's shipped templates, as the composition root hands them on.
 _UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
+_PLANNING = default_prompt(PLANNING_PROMPT)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -281,7 +287,12 @@ def _inputs() -> PlanningInputs:
 
 def _planning(completer: Any, sink: FakeDiagnosticSink | None) -> PlanningStage:
     return PlanningStage(
-        completer=completer, recorder=_Recorder(), excerpt_chars=200, now=_now, diagnostics=sink
+        prompt=_PLANNING,
+        completer=completer,
+        recorder=_Recorder(),
+        excerpt_chars=200,
+        now=_now,
+        diagnostics=sink,
     )
 
 
@@ -297,6 +308,8 @@ async def test_planning_writes_its_rendered_request_and_offered_tools_before_the
     assert _body(given) == {
         "messages": [one.model_dump(mode="json") for one in sent.messages],
         "tools": [one.model_dump(mode="json") for one in sent.tools],
+        # ADR-0334 §8:2: the template the system message was rendered from.
+        "prompt": _PLANNING.provenance(),
     }
     # A response came back, and the completer is the one that writes it (§5:2); this
     # fake writes none, and planning does not write one in its place.

@@ -77,6 +77,7 @@ from ai_assistant.orchestration.conversations import ConversationLifecycle
 from ai_assistant.orchestration.grants import GrantOperations
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools
+from ai_assistant.orchestration.planning import PLANNING_PROMPT
 from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.remembering import (
     REMEMBER,
@@ -321,6 +322,7 @@ def build_phases_world(
     # seam over the real writer (ADR-0306 §3:3), as the composition root wires it.
     tools = PhaseTools(registry=registry, invoker=registry, own_records=(REMEMBER,))
     phases = PhasePath(
+        planning_prompt=default_prompt(PLANNING_PROMPT),
         completer=planner,
         provider=digests,
         authorizing=AuthorizingStage(

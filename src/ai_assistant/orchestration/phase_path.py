@@ -318,6 +318,7 @@ from ai_assistant.orchestration.understanding import AskedIn, WrittenBy, fetch_h
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
 
+    from ai_assistant.core.prompts import PromptTemplate
     from ai_assistant.core.protocols import (
         DiagnosticSink,
         MemoryStore,
@@ -2196,6 +2197,7 @@ class PhasePath:
         round_limit: int,
         round_wait: timedelta,
         excerpt_chars: int,
+        planning_prompt: PromptTemplate,
         part_chars: int,
         memory: MemoryStore,
         recall_cap: int,
@@ -2229,6 +2231,8 @@ class PhasePath:
             round_wait: How long the step running a round's calls waits on its
                 digests at most: the call's deadline that bounds the wait (§8:2).
             excerpt_chars: The bound planning cuts another episode's texts to.
+            planning_prompt: Planning's instruction template, as the composition root
+                read it at start (ADR-0334 §3:5), handed on to planning.
             part_chars: ``DIGEST_PART_CHARS`` (ADR-0308 §4:9).
             memory: The memory store planning fetches recall's kept records from
                 (ADR-0282 §2:4).
@@ -2287,6 +2291,7 @@ class PhasePath:
             completer=completer,
             recorder=_RoundRecorder(self),
             excerpt_chars=excerpt_chars,
+            prompt=planning_prompt,
             model=planning_model,
             now=now,
             timezone=timezone,
