@@ -13,7 +13,10 @@ conflicts, asks the policy to rule, and applies the ruling as ADR-0328 §11 says
 operation to one stored memory through its own transition
 (:func:`~ai_assistant.testing._operations.applied_operation`), since no testing module
 imports ``memory``; the shared conformance suite holds it and ``MemoryIngestor``'s to
-the same record and the same refusals. Only
+the same record and the same refusals. It records a track-record entry, and carries
+the observer's admission rules — an observer's inference and a proposal's one retiring
+operation (ADR-0329 §9:7, §12:4) — through its own copy of them
+(:mod:`ai_assistant.testing._observer_writes`). Only
 the behaviour pinned by the shared conformance suite is contract; its conflict
 heuristic, the *value* of its ceiling and its clock are deliberately not.
 
@@ -26,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import unicodedata
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, assert_never
@@ -52,14 +56,24 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemoryOperation,
     MemoryOperationKind,
+    MemoryRetirement,
     MemorySupport,
     MemoryWrite,
     MemoryWriteMode,
+    MemoryWriterName,
     SupportDirection,
     SupportOrigin,
     Validity,
     part_episode,
     record_band,
+)
+from ai_assistant.testing._observer_writes import (
+    added_inference_fault,
+    inference_fault,
+    inference_when_fault,
+    replaces_with,
+    retired_memory,
+    retirement_fault,
 )
 from ai_assistant.testing._operations import applied_operation
 
@@ -73,6 +87,7 @@ if TYPE_CHECKING:
         MemoryDecision,
         MemoryRecord,
         MemoryUpdateProposal,
+        TrackRecordEntry,
     )
 
 _DEFAULT_CONFLICT_THRESHOLD = 0.75
@@ -465,6 +480,34 @@ def _reinforced(target: MemoryRecord, incoming: Memory, *, now: datetime) -> Mem
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _Retiring:
+    """A proposal's retiring operation, checked and ready to apply (ADR-0329 §12:4)."""
+
+    retirement: MemoryRetirement
+    cited: MemorySupport
+    at: datetime
+    by: MemoryWriterName
+
+    def write(self, successor: str | None) -> MemoryWrite:
+        """The retired memory's write, conditional on its revision as read (§5:4).
+
+        Raises:
+            MemoryStoreError: If ADR-0328 §4, §5 or §6:5 refuses the operation.
+        """
+        retired = self.retirement.memory
+        try:
+            record = retired_memory(
+                self.retirement, self.cited, successor=successor, at=self.at, by=self.by
+            )
+        except ValueError as exc:
+            msg = f"refusing to retire {retired.id!r}: {exc}"
+            raise MemoryStoreError(msg) from exc
+        return MemoryWrite(
+            record=record, mode=MemoryWriteMode.IF_UNCHANGED, expected_revision=retired.revision
+        )
+
+
 class FakeMemoryWriter:
     """A ``MemoryWriter`` test double that really writes to an injected store.
 
@@ -548,7 +591,15 @@ class FakeMemoryWriter:
             carried = observed.support is not None and memory.support_at(observed.support.points_at)
             added = () if observed.support is None or carried else (observed.support,)
             successor = () if observed.successor is None else observed.successor.supports
-            await self._require_held_episodes(memory.id, (*added, *successor))
+            held = await self._require_held_episodes(memory.id, (*added, *successor))
+            fault = (
+                added_inference_fault(added[0] if added else None)
+                or inference_fault(successor)
+                or inference_when_fault(successor, held)
+            )
+            if fault is not None:
+                msg = f"refusing to apply a {observed.operation.kind} to {memory.id!r}: {fault}"
+                raise MemoryStoreError(msg)
             try:
                 after = applied_operation(
                     memory, observed.operation, support=observed.support, question=observed.question
@@ -574,9 +625,72 @@ class FakeMemoryWriter:
                 )
             await self._store.write_atomic(batch)
 
+    async def record_use(self, memory: Memory, entry: TrackRecordEntry) -> None:
+        """Record one track-record entry, as ``MemoryIngestor`` does (ADR-0329 §14:4).
+
+        Raises:
+            MemoryStoreStaleError: If the stored memory is not the one read.
+            MemoryStoreError: If ``memory`` carries no revision.
+        """
+        observed = memory.model_copy(deep=True)
+        recorded = entry.model_copy(deep=True)
+        async with self._lock:
+            if observed.revision < 1:
+                msg = f"refusing to record a use of {observed.id!r}: it carries no revision"
+                raise MemoryStoreError(msg)
+            if any(one.episode == recorded.episode for one in observed.track_record):
+                return
+            after = Memory.model_validate(
+                observed.model_dump() | {"track_record": (*observed.track_record, recorded)}
+            )
+            await self._store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=after,
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=observed.revision,
+                    )
+                ]
+            )
+
+    def _retiring(
+        self, proposal: MemoryUpdateProposal, held: Mapping[str, MemoryRecord]
+    ) -> _Retiring | None:
+        """The admission refusals and the checked retirement, as ``MemoryIngestor``'s.
+
+        Raises:
+            MemoryStoreError: On an inference §9:7 forbids, or a retirement §12:4, §12:5,
+                ADR-0328 §5 or §6:5 refuses.
+        """
+        proposed = proposal.proposed
+        fault = (
+            inference_fault(proposed.supports)
+            or inference_when_fault(proposed.supports, held)
+            or retirement_fault(proposal)
+        )
+        if fault is not None:
+            msg = f"refusing to ingest {proposed.id!r}: {fault}"
+            raise MemoryStoreError(msg)
+        retirement = proposal.retiring
+        if retirement is None:
+            return None
+        cited = proposed.support_at(retirement.cites)
+        if cited is None:  # pragma: no cover - retirement_fault found it among the backing
+            msg = f"refusing to ingest {proposed.id!r}: its retirement cites no support of it"
+            raise MemoryStoreError(msg)
+        retiring = _Retiring(
+            retirement=retirement, cited=cited, at=self._now_utc(), by=proposed.operations[0].by
+        )
+        retiring.write(proposed.id)
+        return retiring
+
     async def _ingest(self, observed: MemoryUpdateProposal) -> MemoryIngestResult:
-        await self._require_held_episodes(observed.proposed.id, observed.proposed.supports)
-        conflicts = await self._conflicts_for(observed.proposed)
+        held = await self._require_held_episodes(observed.proposed.id, observed.proposed.supports)
+        retiring = self._retiring(observed, held)
+        conflicts = await self._conflicts_for(
+            observed.proposed,
+            withheld=None if retiring is None else retiring.retirement.memory.id,
+        )
         resolved = tuple(record.id for record in conflicts)
         ruled = observed.model_copy(update={"conflicts": resolved})
         relations = await self._relations_for(ruled, conflicts)
@@ -589,7 +703,12 @@ class FakeMemoryWriter:
         )
         _refuse_before_write(decision, observed, resolved=resolved)
         record_id = await self._apply(
-            decision, observed, conflicts, resolved=resolved, relations=relations or {}
+            decision,
+            observed,
+            conflicts,
+            resolved=resolved,
+            relations=relations or {},
+            retiring=retiring,
         )
         return MemoryIngestResult(decision=decision, record_id=record_id, conflicts=resolved)
 
@@ -614,8 +733,11 @@ class FakeMemoryWriter:
 
     async def _require_held_episodes(
         self, memory_id: str, supports: Sequence[MemorySupport]
-    ) -> None:
+    ) -> Mapping[str, MemoryRecord]:
         """Refuse supports pointing at an episode the store does not hold (ADR-0328 §4:7).
+
+        Returns:
+            The episodes read, by id.
 
         Raises:
             UnresolvedEvidenceError: If any support's episode does not resolve.
@@ -628,7 +750,7 @@ class FakeMemoryWriter:
             )
         )
         if not episodes:
-            return
+            return {}
         held = await self._store.get_many(episodes)
         unresolved = [
             episode
@@ -642,21 +764,30 @@ class FakeMemoryWriter:
                 f"(ADR-0328 §4:7)"
             )
             raise UnresolvedEvidenceError(msg, unresolved)
+        return held
 
-    async def _conflicts_for(self, memory: Memory) -> list[MemoryRecord]:
+    async def _conflicts_for(
+        self, memory: Memory, *, withheld: str | None = None
+    ) -> list[MemoryRecord]:
         """Every conflict retrieval surfaced, or a refusal above the ceiling (ADR-0079 §1).
+
+        ``withheld``, the memory a proposal's retiring operation retires, is never a
+        conflict (ADR-0329 §12:4).
 
         Raises:
             MemoryStoreError: If retrieval surfaced more conflicts than this writer
                 resolves in one ingest.
         """
         found = await self._store.search(
-            memory.content, limit=self._conflict_limit + 2, kinds=[MemoryKind.MEMORY]
+            memory.content,
+            limit=self._conflict_limit + (2 if withheld is None else 3),
+            kinds=[MemoryKind.MEMORY],
         )
         conflicts = [
             match
             for match in found.records
-            if match.id != memory.id and (match.score or 0.0) >= self._conflict_threshold
+            if match.id not in {memory.id, withheld}
+            and (match.score or 0.0) >= self._conflict_threshold
         ]
         if len(conflicts) > self._conflict_limit:
             msg = (
@@ -666,7 +797,7 @@ class FakeMemoryWriter:
             raise MemoryStoreError(msg)
         return conflicts
 
-    async def _apply(
+    async def _apply(  # noqa: PLR0913 — the ruling, what it rules on, and what the fold reads
         self,
         decision: MemoryDecision,
         proposal: MemoryUpdateProposal,
@@ -674,18 +805,57 @@ class FakeMemoryWriter:
         *,
         resolved: tuple[str, ...],
         relations: Mapping[str, ConflictRelation],
+        retiring: _Retiring | None,
     ) -> str | None:
         proposed = proposal.proposed
         match decision.kind:
             case MemoryDecisionKind.ACCEPT:
-                written = await self._store.write_atomic(
-                    [
+                if retiring is None:
+                    batch = [
                         MemoryWrite(
                             record=_installed(proposed), mode=MemoryWriteMode.INSERT_IF_ABSENT
                         )
                     ]
-                )
+                else:
+                    # ADR-0329 §12:4: the install and the operation in one write, each
+                    # naming the other (ADR-0328 §5:6).
+                    installed = _installed(replaces_with(proposed, retiring.retirement.memory.id))
+                    batch = [
+                        MemoryWrite(record=installed, mode=MemoryWriteMode.INSERT_IF_ABSENT),
+                        retiring.write(installed.id),
+                    ]
+                written = await self._store.write_atomic(batch)
                 return written[0]
+            case MemoryDecisionKind.REINFORCE | MemoryDecisionKind.SUPERSEDE:
+                if retiring is not None and (
+                    decision.kind is MemoryDecisionKind.SUPERSEDE
+                    or retiring.retirement.kind is MemoryOperationKind.REPLACE
+                ):
+                    return None  # ADR-0329 §12:4: nothing is written
+                return await self._apply_fold(
+                    decision,
+                    proposal,
+                    conflicts,
+                    resolved=resolved,
+                    relations=relations,
+                    retiring=retiring,
+                )
+            case _:  # REJECT, ASK_USER — nothing is written.
+                return None
+
+    async def _apply_fold(  # noqa: PLR0913 — the ruling, what it rules on, and what the fold reads
+        self,
+        decision: MemoryDecision,
+        proposal: MemoryUpdateProposal,
+        conflicts: list[MemoryRecord],
+        *,
+        resolved: tuple[str, ...],
+        relations: Mapping[str, ConflictRelation],
+        retiring: _Retiring | None,
+    ) -> str | None:
+        """A ``REINFORCE`` or a ``SUPERSEDE`` at its target, as ``MemoryIngestor``'s."""
+        proposed = proposal.proposed
+        match decision.kind:
             case MemoryDecisionKind.REINFORCE | MemoryDecisionKind.SUPERSEDE:
                 target = next((c for c in conflicts if c.id == decision.target_id), None)
                 if target is None:
@@ -694,14 +864,14 @@ class FakeMemoryWriter:
                 _refuse_unsafe_fold(target, proposal, decision.kind, resolved=resolved)
                 _refuse_retiring_a_related_conflict(target, decision.kind, relations)
                 if decision.kind is MemoryDecisionKind.SUPERSEDE:
-                    retiring = _retirement_set(
+                    retired = _retirement_set(
                         target,
                         conflicts,
                         proposal=proposal,
                         resolved=resolved,
                         relations=relations,
                     )
-                    return await self._apply_supersede(retiring, proposed)
+                    return await self._apply_supersede(retired, proposed)
                 folded = _installed(_reinforced(target, proposed, now=self._now_utc()))
                 written = await self._store.write_atomic(
                     [
@@ -709,11 +879,12 @@ class FakeMemoryWriter:
                             record=folded,
                             mode=MemoryWriteMode.IF_UNCHANGED,
                             expected_revision=target.revision,
-                        )
+                        ),
+                        *(() if retiring is None else (retiring.write(None),)),
                     ]
                 )
                 return written[0]
-            case _:  # REJECT, ASK_USER — nothing is written.
+            case _:  # pragma: no cover - only a fold reaches here
                 return None
 
     async def _apply_supersede(self, targets: list[MemoryRecord], proposed: Memory) -> str:

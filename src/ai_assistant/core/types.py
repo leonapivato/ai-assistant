@@ -4779,6 +4779,8 @@ class SupportOrigin(StrEnum):
     """A record stored before ADR-0328 that did not rest on recorded external content."""
     LEGACY_OUTSIDE = "legacy_outside"
     """A record stored before ADR-0328 that did (§16:4)."""
+    OBSERVER_INFERENCE = "observer_inference"
+    """An observer's inference, drawn in processing an episode (ADR-0329 §9:7)."""
 
 
 class MemoryStanding(StrEnum):
@@ -4819,6 +4821,7 @@ _ORIGIN_STANDING: Final[dict[SupportOrigin, MemoryStanding]] = {
     SupportOrigin.REMEMBERED_OVER_OUTSIDE: MemoryStanding.INFERENCE,
     SupportOrigin.LEGACY: MemoryStanding.INFERENCE,
     SupportOrigin.LEGACY_OUTSIDE: MemoryStanding.INFERENCE,
+    SupportOrigin.OBSERVER_INFERENCE: MemoryStanding.INFERENCE,
 }
 
 #: §4's origin table: the origins that are outside content.
@@ -4937,14 +4940,16 @@ _CERTAINTY_RANK: Final[dict[ReadingCertainty, int]] = {
 class MemoryWriterName(StrEnum):
     """The writer that added a support, wrote an operation or recorded an entry.
 
-    A closed set, **added to and never renamed** (ADR-0328 §5:9). The observer's
-    decision adds its own.
+    A closed set, **added to and never renamed** (ADR-0328 §5:9). ADR-0329 §2:2 adds
+    the observer's.
     """
 
     REMEMBER = "remember"
     """The remember capability, in ADR-0328 §13's interim."""
     MIGRATION = "migration"
     """§16's upgrade of a record stored before ADR-0328."""
+    OBSERVER = "observer"
+    """The observer, memory's one writer once ADR-0329 is implemented (§2:1, §2:2)."""
 
 
 class MemoryStatus(StrEnum):
@@ -5028,16 +5033,31 @@ class LegacyPart(BaseModel):
     record: EncodableText
 
 
+class ObserverInferencePart(BaseModel):
+    """An observer's inference, by the episode whose processing drew it (ADR-0329 §9:7).
+
+    The part ADR-0329 adds to ADR-0328 §4's part table. It points at no text of the
+    episode: the inference is the observer's own reading of the other supports it adds
+    with it, which is the memory's wording (§9:7). Its support takes the origin
+    ``observer_inference``, which ranks at inference and is not outside.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    part: Literal["observer_inference"] = "observer_inference"
+    episode: EncodableText
+
+
 SupportPart = Annotated[
     InputPart
     | RoundMessagePart
     | EvidenceItemPart
     | ConfirmationPart
     | RememberCallPart
-    | LegacyPart,
+    | LegacyPart
+    | ObserverInferencePart,
     Field(discriminator="part"),
 ]
-"""The part one support points at (ADR-0328 §4's part table), tagged by ``part``.
+"""The part one support points at (ADR-0328 §4's part table, with ADR-0329 §9:7's), by ``part``.
 
 A frozen value, compared and hashed by its fields: a support is unique by its memory
 and the part it points at (§4:8), and an operation names the support it cites by
@@ -5054,6 +5074,7 @@ _PART_ORIGINS: Final[dict[str, frozenset[SupportOrigin]]] = {
     "confirmation": frozenset({SupportOrigin.CONFIRMATION}),
     "remember_call": frozenset({SupportOrigin.REMEMBERED, SupportOrigin.REMEMBERED_OVER_OUTSIDE}),
     "legacy": frozenset({SupportOrigin.LEGACY, SupportOrigin.LEGACY_OUTSIDE}),
+    "observer_inference": frozenset({SupportOrigin.OBSERVER_INFERENCE}),
 }
 
 
@@ -6161,6 +6182,44 @@ class UserConfirmation(BaseModel):
     )
 
 
+class MemoryRetirement(BaseModel):
+    """The one retiring operation a proposal may carry on a stored memory (ADR-0329 §12:4).
+
+    A finding that ends, marks wrong or replaces a stored memory is one proposal carrying
+    the new memory and this operation. It cites a counted ``for`` support of the new
+    memory that backs it as worded, which the writer adds to the retired memory as an
+    ``against`` support, so the cited support never ranks above the new memory's
+    standing, and ADR-0328 §6:5 then refuses it where it ranks below the retired
+    memory's. The writer builds the operation itself — its instant, its writer and its
+    successor are the write's — and applies it only as §12:4 says for the ruling the new
+    memory gets: with the new memory on an ``ACCEPT``, with the supports a ``REINFORCE``
+    adds on an end or a mark wrong, and never otherwise.
+
+    Attributes:
+        memory: The stored memory it retires, as read, revision and all: the write is
+            conditional on that revision (ADR-0328 §5:4, ADR-0219 §2).
+        kind: Which retiring operation: an end, a mark wrong or a replace.
+        cites: The part of the new memory's support it cites (§12:4, §12:5).
+        note: In words, why.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    memory: Memory
+    kind: MemoryOperationKind
+    cites: SupportPart
+    note: EncodableText = Field(default="", validate_default=True)
+
+    @model_validator(mode="after")
+    def _a_retirement_of_a_stored_memory(self) -> Self:
+        if self.kind not in RETIRING_OPERATIONS:
+            msg = "a proposal retires a memory by an end, a mark wrong or a replace (§12:4)"
+            raise ValueError(msg)
+        if self.memory.revision < 1:
+            msg = "a retirement names a memory a store returned, carrying its revision"
+            raise ValueError(msg)
+        return self
+
+
 class MemoryUpdateProposal(BaseModel):
     """A proposed memory, awaiting a policy decision (ADR-0028, ADR-0328 §11:4).
 
@@ -6168,7 +6227,8 @@ class MemoryUpdateProposal(BaseModel):
     deterministic :class:`~ai_assistant.core.protocols.MemoryPolicy` disposes of.
     ``proposed`` is a :class:`Memory` whose supports and create its producer built
     (ADR-0328 §11:4); the writer installs it, adds its supports to a target, or writes
-    nothing, as the ruling says.
+    nothing, as the ruling says. It may carry one retiring operation on a stored memory
+    (``retiring``, ADR-0329 §12:4), which the policy never sees as a conflict.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -6190,6 +6250,25 @@ class MemoryUpdateProposal(BaseModel):
             "one written under it (ADR-0078 §2, §5, ADR-0321 §5:2); None otherwise."
         ),
     )
+    retiring: MemoryRetirement | None = Field(
+        default=None,
+        description=(
+            "The one retiring operation this proposal carries on a stored memory, citing "
+            "a support of the proposed memory (ADR-0329 §12:4); None otherwise."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _retires_another_memory(self) -> MemoryUpdateProposal:
+        """Refuse a retirement of the proposed memory itself (ADR-0329 §12:4).
+
+        The retiring operation is on a *stored* memory the new one succeeds, and the two
+        name each other (ADR-0328 §5:6): one memory cannot be both.
+        """
+        if self.retiring is not None and self.retiring.memory.id == self.proposed.id:
+            msg = "a proposal retires a stored memory other than the one it proposes (§12:4)"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _secret_data_carries_no_confirmation(self) -> MemoryUpdateProposal:
@@ -6229,7 +6308,8 @@ class MemoryUpdateProposal(BaseModel):
         :attr:`rationale` is out because the projection is over the memory and the
         tier; :attr:`confirmation` is out because it is authority rather than content,
         which is what lets the writer recompute the key of a proposal it has just been
-        handed with one attached.
+        handed with one attached. :attr:`retiring` is out because §11:11's criterion is
+        over the memory, so no key changes for a proposal that carries none.
         """
         return sha256(_canonical_bytes(self._fingerprint_projection())).hexdigest()
 
@@ -15369,7 +15449,13 @@ class SupportView(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     part: Literal[
-        "input", "round_message", "evidence_item", "confirmation", "remember_call", "legacy"
+        "input",
+        "round_message",
+        "evidence_item",
+        "confirmation",
+        "remember_call",
+        "legacy",
+        "observer_inference",
     ]
     content: EncodableText | None = None
     origin: SupportOrigin

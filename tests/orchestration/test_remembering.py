@@ -49,6 +49,7 @@ from ai_assistant.core.types import (
     ToolFailureKind,
     ToolOutcome,
     ToolResult,
+    TrackRecordEntry,
     UserConfirmation,
     YesToQuestion,
 )
@@ -341,6 +342,11 @@ class _FailingWriter:
 
     async def apply(self, change: MemoryChange) -> None:
         del change
+        msg = "the store is gone"
+        raise MemoryStoreError(msg)
+
+    async def record_use(self, memory: Memory, entry: TrackRecordEntry) -> None:
+        del memory, entry
         msg = "the store is gone"
         raise MemoryStoreError(msg)
 
