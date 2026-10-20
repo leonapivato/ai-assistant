@@ -85,6 +85,7 @@ from ai_assistant.orchestration.remembering import (
     RememberCalls,
 )
 from ai_assistant.orchestration.understanding import (
+    UNDERSTANDING_PROMPT,
     RecentEpisodes,
     UnderstandingStage,
     WindowsStage,
@@ -103,6 +104,7 @@ from ai_assistant.testing import (
     FakeToolCallingCompleter,
     FakeTraceRetention,
     FakeTraceSink,
+    default_prompt,
 )
 from ai_assistant.tools.builtin import (
     build_default_registry,
@@ -374,7 +376,9 @@ def build_phases_world(
         ),
         connection_operations=ConnectionOperations(provisioner=FakeConnectionProvisioner()),
         understanding=UnderstandingStage(
-            model=FakeModelProvider(reply=_STATED), excerpt_chars=2000
+            model=FakeModelProvider(reply=_STATED),
+            excerpt_chars=2000,
+            prompt=default_prompt(UNDERSTANDING_PROMPT),
         ),
         understanding_version_limit=8,
         windows=WindowsStage(episodes=RecentEpisodes(memory=store, limit=10)),

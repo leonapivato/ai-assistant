@@ -43,7 +43,8 @@ from ai_assistant.models import PydanticAIProvider
 from ai_assistant.models.tool_calling import PydanticAIToolCallingCompleter
 from ai_assistant.orchestration.activation_state import active_state
 from ai_assistant.orchestration.conversations import conversation_channel
-from ai_assistant.testing import FakeModelProvider, FakeToolCallingCompleter
+from ai_assistant.orchestration.understanding import UNDERSTANDING_PROMPT
+from ai_assistant.testing import FakeModelProvider, FakeToolCallingCompleter, default_renderings
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -69,8 +70,10 @@ if TYPE_CHECKING:
 BUDGET: Final = timedelta(seconds=10)
 SETTLE: Final = 10.0
 
-#: The prompt the understanding stage's system message opens with.
-UNDERSTANDING_PROMPT: Final = "You read one incoming input and state what it means."
+#: Every system message understanding's shipped template renders, one per combination
+#: of its flags: how the fake tells understanding's call from the rest without
+#: matching the instruction's words (ADR-0334 §9:1).
+UNDERSTANDING_INSTRUCTIONS: Final = default_renderings(UNDERSTANDING_PROMPT)
 #: The meaning the substituted understanding states for every input.
 MEANING: Final = "The input means what it says."
 _UNDERSTOOD: Final = json.dumps({"meaning": MEANING, "meaning_ground": "stated"})
@@ -103,7 +106,7 @@ PHASE_PATH_STAGES: Final = frozenset(
 
 def _reply(messages: Sequence[Message]) -> str:
     """Answer the understanding stage with a stated reading, and every other call alike."""
-    return _UNDERSTOOD if UNDERSTANDING_PROMPT in messages[0].content else REPLY
+    return _UNDERSTOOD if messages[0].content in UNDERSTANDING_INSTRUCTIONS else REPLY
 
 
 @dataclass

@@ -57,15 +57,17 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply, UnboundedAudienceSupply
 from ai_assistant.orchestration.story_links import Candidates, ShortView, StoryCandidates
 from ai_assistant.orchestration.understanding import (
+    UNDERSTANDING_PROMPT,
     SuppliedWindow,
     TranscriptWindow,
     UnderstandingStage,
     place_window_links,
 )
-from ai_assistant.testing import FakeModelProvider, FakeStoryStore
+from ai_assistant.testing import FakeModelProvider, FakeStoryStore, default_prompt, prompt_from
 from ai_assistant.testing.memories import memory, remembered_support
 
 if TYPE_CHECKING:
+    from ai_assistant.core.prompts import PromptTemplate
     from ai_assistant.core.types import ActivationUnderstanding, EpisodicMemory
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.understanding import ChannelWindow
@@ -74,6 +76,15 @@ BOUNDED: Final = BoundedAudienceSupply(speakable_attested_sources=frozenset())
 UNBOUNDED: Final = UnboundedAudienceSupply(speakable_attested_sources=frozenset())
 WINDOW: Final = SuppliedWindow(
     ChannelContext(history=(ChannelContextItem(text="Trip plans", item_id="item-1"),))
+)
+
+#: Understanding's shipped template, as the composition root hands it the stage.
+_UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
+
+#: A template of the test's own that prints which of understanding's flags the stage
+#: handed it, so a test reads the flags and none of the default's words (ADR-0334 §9:2).
+_FLAG_ECHO: Final = prompt_from(
+    UNDERSTANDING_PROMPT, "$if recalled\nrecalled\n$end\n$if stories\nstories\n$end\n"
 )
 
 
@@ -122,6 +133,7 @@ async def _understand(  # noqa: PLR0913 — the model, then one knob per input a
     recalled: tuple[EpisodicMemory | Memory, ...] = (),
     window: ChannelWindow = WINDOW,
     audience: TurnSupply = BOUNDED,
+    prompt: PromptTemplate = _UNDERSTANDING,
 ) -> ActivationUnderstanding:
     recall = None
     if recalled:
@@ -130,7 +142,7 @@ async def _understand(  # noqa: PLR0913 — the model, then one knob per input a
             cues=(RecallCue.ACTIVATION_INPUT,),
             items=tuple(_item(record.id, MemoryKind(record.kind)) for record in recalled),
         )
-    return await UnderstandingStage(model=model, excerpt_chars=2000).understand(
+    return await UnderstandingStage(model=model, excerpt_chars=2000, prompt=prompt).understand(
         "The canoe is booked.",
         channel=EVENTS,
         window=window,
@@ -172,15 +184,40 @@ def _instruction(model: FakeModelProvider) -> str:
 # --- §6:5, §6:9: the fourth section and its instruction ------------------------------
 
 
-async def test_no_candidates_render_no_section_and_leave_the_instruction_alone() -> None:
+async def test_no_candidates_render_no_section() -> None:
     model = FakeModelProvider(_proposal())
 
     understood = await _understand(model, stories=None)
 
     assert "stories" not in _payload(model)
-    assert "story_labels" not in _instruction(model)
-    assert "S1" not in _instruction(model)
     assert understood.story_links == ()
+
+
+@pytest.mark.parametrize(
+    ("recalled", "stories", "handed"),
+    [
+        ((), None, set()),
+        ((_FACT,), None, {"recalled"}),
+        ((), Candidates(views=()), {"stories"}),
+        ((_FACT,), Candidates(views=(_TRIP,)), {"recalled", "stories"}),
+    ],
+    ids=["neither", "recalled", "stories", "both"],
+)
+async def test_the_template_is_handed_a_flag_for_each_section_the_message_carries(
+    recalled: tuple[Memory, ...], stories: Candidates | None, handed: set[str]
+) -> None:
+    """ADR-0334 §2, §4:2: the code computes understanding's two flags for each call.
+
+    ``recalled`` where recall made a decision for the pass (ADR-0281 §7), ``stories``
+    where the phase assembled candidates, even none (ADR-0300 §6), so the instruction
+    speaks of a section exactly where the message carries it.
+    """
+    model = FakeModelProvider(_proposal())
+
+    await _understand(model, stories=stories, recalled=recalled, prompt=_FLAG_ECHO)
+
+    assert set(_instruction(model).split("\n")) - {""} == handed
+    assert {"recalled", "stories"} & set(_payload(model)) == handed
 
 
 async def test_the_candidates_render_under_s_labels_attributed_by_their_records() -> None:
@@ -308,41 +345,6 @@ async def test_a_spoken_pass_with_a_pending_owner_note_is_told_nothing_of_notes(
     assert "Friday evening" in note["text"]
     # §4: the instruction is the same whether or not the pass may be shown notes.
     assert _instruction(spoken) == _instruction(bounded)
-    assert "withheld" not in _instruction(spoken)
-
-
-async def test_the_instruction_states_what_a_link_says_and_asks_for_story_labels() -> None:
-    model = FakeModelProvider(_proposal())
-
-    await _understand(model, stories=Candidates(views=(_TRIP,)))
-
-    instruction = _instruction(model)
-    # §6:9's three statements.
-    assert "A link says the input belongs to that matter and nothing more." in instruction
-    assert "One input may belong to several matters." in instruction
-    assert "An input that belongs to none is linked to none" in instruction
-    assert '"story_labels"' in instruction
-
-
-async def test_the_instruction_says_where_an_s_label_may_be_cited_and_what_a_story_is() -> None:
-    """ADR-0304 §8:5: the instruction's three statements, and #2776's rule gone."""
-    model = FakeModelProvider(_proposal())
-
-    await _understand(model, stories=Candidates(views=(_TRIP,)))
-
-    instruction = _instruction(model)
-    assert "An S label may be cited wherever a label may" in instruction
-    assert "Citing an S label outside `story_labels` links nothing" in instruction
-    assert (
-        "A story's summary and notes are the assistant's own record of the matter, "
-        "provisional and possibly out of date." in instruction
-    )
-    assert "A reading an S label supports is `supplied`, as for any label." in instruction
-    assert "is cited in `story_labels` alone" not in instruction
-    assert "Never cite one" not in instruction
-    assert "story supports is `inferred`" not in instruction
-    # The T1 rename's join left "folded into thesummary"; the paragraph reads whole.
-    assert "folded into the summary" in instruction
 
 
 @pytest.mark.parametrize(
@@ -481,8 +483,8 @@ async def test_a_fact_s_label_cited_outside_story_labels_still_resolves_to_its_m
     assert understood.grounding_dropped == 1
 
 
-async def test_a_recalled_fact_is_marked_not_linkable_and_the_instruction_says_why() -> None:
-    """ADR-0305 §3: the place window's mark, and the stories paragraph's sentence."""
+async def test_a_recalled_fact_is_marked_not_linkable() -> None:
+    """ADR-0305 §3: the recalled section's mark, on a pass that renders stories."""
     model = FakeModelProvider(_proposal())
 
     await _understand(model, stories=Candidates(views=(_TRIP,)), recalled=(episode("a-7"), _FACT))
@@ -490,10 +492,6 @@ async def test_a_recalled_fact_is_marked_not_linkable_and_the_instruction_says_w
     shown_episode, shown_fact = _payload(model)["recalled"]
     assert shown_fact["not_linkable"] is True
     assert "not_linkable" not in shown_episode
-    assert (
-        "A remembered fact is never a story link: its M label is marked `not_linkable` and "
-        "links nothing in `story_labels`." in _instruction(model)
-    )
 
 
 # --- ADR-0304 §8: an S label cited as a referent ---------------------------------------
@@ -841,20 +839,6 @@ async def test_a_linkable_item_carries_no_mark() -> None:
     )
 
     assert all("not_linkable" not in item for item in _payload(model)["channel_window"])
-
-
-async def test_the_instruction_says_any_item_not_marked_not_linkable_may_be_named() -> None:
-    """§7:8, in the instruction the first completion is given."""
-    model = FakeModelProvider(_proposal())
-
-    await _understand(model, stories=Candidates(views=(_TRIP,)))
-
-    instruction = _instruction(model)
-    assert (
-        "Any H label may be named in `story_labels` except one whose item is marked "
-        "`not_linkable`, which links nothing." in instruction
-    )
-    assert "No other H label may be named" not in instruction
 
 
 # --- ADR-0303 §7:9: the place window's links, newest item first -------------------------

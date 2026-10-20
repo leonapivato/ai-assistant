@@ -19,7 +19,7 @@ import pytest
 from phases_composition_support import (
     MEANING,
     SETTLE,
-    UNDERSTANDING_PROMPT,
+    UNDERSTANDING_INSTRUCTIONS,
     Phased,
     Turn,
     build_phased,
@@ -419,7 +419,7 @@ async def test_a_later_activation_renders_the_event_as_a_report_received(
     understanding = [
         call.messages[1].content
         for call in composed.model.calls
-        if UNDERSTANDING_PROMPT in call.messages[0].content
+        if call.messages[0].content in UNDERSTANDING_INSTRUCTIONS
     ]
     assert understanding, "the later activation reached the understanding stage"
     sent = json.loads(understanding[0])

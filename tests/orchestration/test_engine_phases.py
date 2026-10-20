@@ -154,6 +154,7 @@ from ai_assistant.orchestration.story_calls import (
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
 from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
 from ai_assistant.orchestration.understanding import (
+    UNDERSTANDING_PROMPT,
     AskedIn,
     Fetched,
     TranscriptWindow,
@@ -172,6 +173,7 @@ from ai_assistant.testing import (
     FakeStoryStore,
     FakeToolCallingCompleter,
     FakeWebSearcher,
+    default_prompt,
 )
 from ai_assistant.testing.memories import memory as memory_record
 from ai_assistant.testing.memories import (
@@ -3268,6 +3270,7 @@ async def test_with_the_record_on_each_source_writes_for_the_one_activation() ->
         understanding=UnderstandingStage(
             model=FakeModelProvider(reply=STATED_PROPOSAL),
             excerpt_chars=EXCERPT_CHARS,
+            prompt=default_prompt(UNDERSTANDING_PROMPT),
             diagnostics=sink,
         ),
         tools=(_BOOK,),

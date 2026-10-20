@@ -18,15 +18,21 @@ data and is not stamped (ADR-0319 §4).
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
+import stat
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from importlib.resources import files
 from typing import TYPE_CHECKING, Final, assert_never
+
+import structlog
 
 from ai_assistant.core.config import EmbedderKind
 from ai_assistant.core.errors import ConfigurationError, ModelError
+from ai_assistant.core.prompts import PROMPT_OVERRIDE_DIRECTORY, PromptOrigin, PromptTemplate
 from ai_assistant.core.types import (
     DELIVERY_RESERVE_BYTES,
     CanonicalDestination,
@@ -107,6 +113,7 @@ from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksSt
 from ai_assistant.orchestration.story_tidy_up import StoryTidyUp
 from ai_assistant.orchestration.telegram import TelegramLineSeams
 from ai_assistant.orchestration.understanding import (
+    UNDERSTANDING_PROMPT,
     RecentEpisodes,
     UnderstandingStage,
     WindowsStage,
@@ -153,6 +160,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.config import Settings
+    from ai_assistant.core.prompts import PromptDeclaration
     from ai_assistant.core.protocols import (
         AuditTrail,
         ConnectionPurger,
@@ -175,6 +183,19 @@ if TYPE_CHECKING:
     )
     from ai_assistant.tools.registry import InMemoryToolRegistry
 
+
+_log = structlog.get_logger(__name__)
+
+#: The prompts whose instruction is a template (ADR-0334 §2), each declared in the
+#: module that sends it. A lane that moves a prompt into its template adds its
+#: declaration here and hands the module ``prompts[<declaration>.name]``; nothing else
+#: in this layer changes. An override is read only for a prompt listed here, so a file
+#: naming a prompt not yet moved names no prompt and refuses the start (§5:1).
+PROMPTS: Final[tuple[PromptDeclaration, ...]] = (UNDERSTANDING_PROMPT,)
+
+#: What a template file read from the override directory may not be: writable by
+#: anyone but its owner (ADR-0334 §5:1).
+_WRITABLE_BY_OTHERS: Final = stat.S_IWGRP | stat.S_IWOTH
 
 #: What this layer tunes :class:`MemoryIngestor`'s conflict ceiling to, **passed
 #: explicitly rather than left to the constructor's default** (ADR-0119 §9): the
@@ -963,6 +984,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     # refuses to start while it would write one or holds one, before any store opens.
     record_directory = diagnostic_record_directory(settings, data_dir=directory)
     refuse_an_unswept_diagnostic_record(settings, record_directory)
+    # ADR-0334 §3:4: every prompt's template, default or override, read and checked
+    # once, before the API accepts a request and before any store opens; a malformed
+    # override refuses the start here (§5:1). It creates nothing (§5:3).
+    prompts = read_prompts(settings, data_dir=directory)
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -1750,6 +1775,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             understanding=UnderstandingStage(
                 model=model,
                 excerpt_chars=UNDERSTANDING_EXCERPT_CHARS,
+                prompt=prompts[UNDERSTANDING_PROMPT.name],
                 diagnostics=diagnostics,
             ),
             understanding_version_limit=UNDERSTANDING_VERSION_LIMIT,
@@ -2577,6 +2603,185 @@ def _holds_a_file(directory: Path) -> bool:
     except OSError as exc:
         msg = f"could not list the diagnostic record's directory {directory}: {exc}"
         raise ConfigurationError(msg) from exc
+
+
+def read_prompts(settings: Settings, *, data_dir: Path | None = None) -> dict[str, PromptTemplate]:
+    """Every prompt's template, default or override, read and checked once (ADR-0334 §3).
+
+    Each of :data:`PROMPTS` takes its default from beside the module that sends it
+    (§3:1); where ``prompt_overrides`` is true, a file ``<name>.txt`` in
+    ``<data_dir>/prompts`` replaces it whole (§3:3). Where it is false no file there is
+    read, and the start is refused while the directory holds anything. Each template's
+    name, version and origin is logged, and nothing of its text (§8:3). Nothing is
+    created, written or deleted (§5:3).
+
+    Args:
+        settings: Loaded application settings: ``prompt_overrides``, and ``data_dir``
+            unless ``data_dir`` is given.
+        data_dir: Overrides ``settings.data_dir`` when given, as :func:`build_engine`'s
+            keyword does.
+
+    Returns:
+        Each prompt's template, by its name.
+
+    Raises:
+        ConfigurationError: Naming the file and its defect, and never its content,
+            where the start is refused (§5:1): ``prompt_overrides`` is false and the
+            directory holds anything; ``prompts`` is not a directory; an entry in it
+            is not a regular file or names no prompt; a file is not UTF-8, holds only
+            whitespace, or is not a well-formed template of its prompt; or the
+            directory or a file in it is owned by another user, or writable by its
+            group or by others.
+    """
+    templates = {declaration.name: _default_prompt(declaration) for declaration in PROMPTS}
+    directory = (data_dir if data_dir is not None else settings.data_dir) / (
+        PROMPT_OVERRIDE_DIRECTORY
+    )
+    for template in _prompt_overrides(directory, enabled=settings.prompt_overrides):
+        templates[template.name] = template
+    for template in templates.values():
+        _log.info(
+            "prompt_template",
+            prompt=template.name,
+            version=template.version,
+            origin=template.origin.value,
+        )
+    return templates
+
+
+def _default_prompt(declaration: PromptDeclaration) -> PromptTemplate:
+    """The prompt's shipped default, from the package that sends it (§3:1).
+
+    Raises:
+        ConfigurationError: If the build ships no such file, or a malformed one.
+    """
+    resource = files(declaration.package).joinpath(declaration.filename)
+    try:
+        data = resource.read_bytes()
+    except OSError as exc:
+        msg = f"the default prompt template {declaration.filename} could not be read: {exc}"
+        raise ConfigurationError(msg) from exc
+    try:
+        return PromptTemplate.parse(declaration, data, origin=PromptOrigin.DEFAULT)
+    except ConfigurationError as exc:
+        msg = f"the default prompt template {declaration.filename}: {exc}"
+        raise ConfigurationError(msg) from None
+
+
+def _prompt_overrides(directory: Path, *, enabled: bool) -> list[PromptTemplate]:
+    """The overrides ``directory`` holds, each checked before it is read (§5:1).
+
+    The directory is opened once, without following a link, and each file is opened
+    from that descriptor, so every check is made on the object that is read.
+
+    Raises:
+        ConfigurationError: Where the start is refused; see :func:`read_prompts`.
+    """
+    descriptor = _open_override_directory(directory)
+    if descriptor is None:
+        return []
+    try:
+        with os.scandir(descriptor) as listing:
+            names = sorted(entry.name for entry in listing)
+        if not enabled:
+            if names:
+                msg = (
+                    f"prompt_overrides is false and the prompt override directory {directory} "
+                    f"holds {len(names)} entries; remove them, or set prompt_overrides on the "
+                    f"owner's hub (ADR-0334 §5:1)"
+                )
+                raise ConfigurationError(msg)
+            return []
+        _refuse_unsafe(os.fstat(descriptor), f"the prompt override directory {directory}")
+        declared = {declaration.filename: declaration for declaration in PROMPTS}
+        overrides: list[PromptTemplate] = []
+        for name in names:
+            declaration = declared.get(name)
+            if declaration is None:
+                msg = f"the prompt override {directory / name} names no prompt"
+                raise ConfigurationError(msg)
+            data = _read_override(descriptor, name, shown=directory / name)
+            try:
+                template = PromptTemplate.parse(declaration, data, origin=PromptOrigin.OVERRIDE)
+            except ConfigurationError as exc:
+                msg = f"the prompt override {directory / name}: {exc}"
+                raise ConfigurationError(msg) from None
+            overrides.append(template)
+        return overrides
+    finally:
+        os.close(descriptor)
+
+
+def _open_override_directory(directory: Path) -> int | None:
+    """``directory`` opened without following a link, or ``None`` where there is none.
+
+    Raises:
+        ConfigurationError: If it is there and is not a directory, or cannot be opened.
+    """
+    try:
+        found = os.lstat(directory)
+    except FileNotFoundError, NotADirectoryError:
+        # No directory, or no data directory for it to be in: the data directory's own
+        # preparation reports the second (#372).
+        return None
+    except OSError as exc:
+        msg = f"the prompt override directory {directory} could not be read: {exc.strerror}"
+        raise ConfigurationError(msg) from None
+    if not stat.S_ISDIR(found.st_mode):
+        msg = f"the prompt override path {directory} is not a directory"
+        raise ConfigurationError(msg)
+    try:
+        return os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        if exc.errno in {errno.ENOTDIR, errno.ELOOP}:
+            msg = f"the prompt override path {directory} is not a directory"
+        else:
+            msg = f"the prompt override directory {directory} could not be opened: {exc.strerror}"
+        raise ConfigurationError(msg) from None
+
+
+def _read_override(directory: int, name: str, *, shown: Path) -> bytes:
+    """One override's bytes, read only once it is known to be a safe regular file.
+
+    Opened without following a link and without blocking, so a link, a pipe or a
+    device is refused rather than read or waited on.
+
+    Raises:
+        ConfigurationError: If it is not a regular file, or is unsafe (§5:1).
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            msg = f"the prompt override {shown} is not a regular file"
+        else:
+            msg = f"the prompt override {shown} could not be opened: {exc.strerror}"
+        raise ConfigurationError(msg) from None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            msg = f"the prompt override {shown} is not a regular file"
+            raise ConfigurationError(msg)
+        _refuse_unsafe(info, f"the prompt override {shown}")
+        with os.fdopen(descriptor, "rb", closefd=False) as opened:
+            return opened.read()
+    finally:
+        os.close(descriptor)
+
+
+def _refuse_unsafe(info: os.stat_result, shown: str) -> None:
+    """Refuse what another user owns, or what its group or others may write (§5:1).
+
+    Raises:
+        ConfigurationError: Naming ``shown`` and which of the two it is.
+    """
+    if info.st_uid != os.geteuid():
+        msg = f"{shown} is owned by uid {info.st_uid}, not by the hub's uid {os.geteuid()}"
+        raise ConfigurationError(msg)
+    if info.st_mode & _WRITABLE_BY_OTHERS:
+        msg = f"{shown} is writable by its group or by others; chmod go-w it"
+        raise ConfigurationError(msg)
 
 
 def _build_model_provider(settings: Settings, specs: Sequence[str]) -> RoutingProvider:

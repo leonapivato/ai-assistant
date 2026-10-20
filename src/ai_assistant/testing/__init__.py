@@ -91,6 +91,12 @@ from ai_assistant.testing.permissions import (
 )
 from ai_assistant.testing.planning import FakePlanStore
 from ai_assistant.testing.policy import FakeMemoryPolicy, PolicyCall
+from ai_assistant.testing.prompts import (
+    default_prompt,
+    default_renderings,
+    flag_combinations,
+    prompt_from,
+)
 from ai_assistant.testing.readers import (
     DEFAULT_READER_NAME,
     FakeReader,
@@ -266,11 +272,15 @@ __all__ = [
     "TransportAttempt",
     "attested_proposal",
     "authorised",
+    "default_prompt",
+    "default_renderings",
     "diagnostic_entry",
     "disclosure_of",
     "evaluation_trace",
+    "flag_combinations",
     "forecast_day",
     "invoker_over",
+    "prompt_from",
     "revocation_of",
     "source_grant",
     "source_read_record",

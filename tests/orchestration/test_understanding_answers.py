@@ -48,14 +48,18 @@ from ai_assistant.orchestration import phase_path
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.story_links import Candidates, ShortView
 from ai_assistant.orchestration.understanding import (
+    UNDERSTANDING_PROMPT,
     AskedIn,
     SuppliedWindow,
     TranscriptWindow,
     UnderstandingStage,
     _place_of,
 )
-from ai_assistant.testing import FakeModelProvider, with_phase_declaration
+from ai_assistant.testing import FakeModelProvider, default_prompt, with_phase_declaration
 from ai_assistant.testing.memories import memory, remembered_support
+
+#: Understanding's shipped template, as the composition root hands it the stage.
+_UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import ActivationUnderstanding, EpisodicMemory
@@ -186,7 +190,9 @@ async def _understand(  # noqa: PLR0913 — one knob per section a case renders
             cues=(RecallCue.ACTIVATION_INPUT,),
             items=tuple(_item(record.id, MemoryKind(record.kind)) for record in recalled),
         )
-    return await UnderstandingStage(model=model, excerpt_chars=2000).understand(
+    return await UnderstandingStage(
+        model=model, excerpt_chars=2000, prompt=_UNDERSTANDING
+    ).understand(
         "yes",
         channel=channel,
         window=window,
@@ -215,10 +221,6 @@ def _item(record_id: str, kind: MemoryKind) -> RecalledItem:
 
 def _view(story_id: str, *episodes: EpisodicMemory) -> ShortView:
     return ShortView(story_id=story_id, lines=(), notes=(), episodes=episodes)
-
-
-def _instruction(model: FakeModelProvider) -> str:
-    return model.calls[0].messages[0].content
 
 
 def _shown(model: FakeModelProvider) -> dict[str, Any]:
@@ -259,101 +261,7 @@ def _matters(understood: ActivationUnderstanding) -> list[str]:
     return [one.matter for one in understood.unresolved]
 
 
-# --- the instruction (ADR-0322 §4:9, ADR-0321 §3:4-§3:11) --------------------------------
-
-
-async def test_the_instruction_carries_the_mark_the_label_and_the_readings() -> None:
-    model = FakeModelProvider(_proposal())
-
-    await _understand(model)
-
-    instruction = _instruction(model)
-    assert '"answers": [{"question": "<Q label of a question the input approves>"' in instruction
-    for reading in (
-        # ADR-0322 §4:9: what the mark and the Q label mean.
-        "Every question is marked wherever it is shown, with a label Q1, Q2",
-        "A question shown in more than one place carries one Q label",
-        "never whether it was answered",
-        "A message that asked only in words carries no mark",
-        "A Q label names a question and nothing else, so it goes only in `answers`",
-        # ADR-0322 §4:5, §2:1, §2:7: a pointer names a question by its Q label alone.
-        "naming the question by its Q label and by no other label",
-        "name no question twice",
-        # ADR-0322 §2:2: several questions only where the reply says which.
-        "A reply approves several questions only where it says which",
-        "never by the label of the message that asked which",
-        "record each of those questions",
-        # ADR-0321 §3:4-§3:11, unchanged.
-        "a strong hint",
-        "A bare yes that could fit more than one question approves nothing",
-        # ADR-0321 §3:5, ADR-0322 §2:3, #3080: what makes a yes bare, and the matter the
-        # stage reads.
-        "A yes is bare when it names no question, part or detail that tells the questions apart",
-        'says neither "both" nor "all of them"',
-        "is not a reply to one question's message",
-        "say the word and I'll book both",
-        "still names only that question's parts",
-        "An unresolved matter's words may still name questions by their Q labels",
-        "naming in the matter's words each question it could answer, if any, by its Q label",
-        "Name Q labels in `unresolved` for nothing else",
-        "no question is recorded as approved, whatever `answers` holds",
-        "A yes approves every part the question showed: leave `parts` empty",
-        "A yes to some parts only names those parts",
-        "A no approves nothing",
-        "A later yes to the same question still approves it",
-        "a conditional yes, which counts as a change",
-        "An unclear reply approves nothing",
-        "A question does not expire",
-        "mixes a yes with a request records the yes",
-        "record that in `unresolved`",
-        "grants nothing",
-    ):
-        assert reading in instruction
-
-
-async def test_a_pass_with_stories_carries_answers_in_its_shape_too() -> None:
-    model = FakeModelProvider(_proposal())
-
-    await _understand(model, stories=Candidates(views=()))
-
-    instruction = _instruction(model)
-    assert '"story_labels"' in instruction
-    assert '"answers": [{"question":' in instruction
-
-
-@pytest.mark.parametrize("stories", [False, True], ids=["no-stories", "stories"])
-async def test_the_instruction_keeps_q_labels_to_answers_and_says_what_names_a_question(
-    stories: bool,
-) -> None:
-    """#3081: a first reading cites a Q label only in `answers`, so no repair is owed.
-
-    The instruction says where a Q label may not go, and what a reference or a
-    relationship names a question by instead; the shape says it beside each list of
-    labels. An unresolved matter's words may still name Q labels: that is what #3083's
-    backstop reads (ADR-0321 §3:5, ADR-0322 §2:3).
-    """
-    model = FakeModelProvider(_proposal())
-
-    await _understand(model, stories=Candidates(views=()) if stories else None)
-
-    instruction = _instruction(model)
-    for said in (
-        "Never put a Q label in any other list of labels: not in `meaning_labels`, and not "
-        "in the `labels` of a reference or a relationship, where it names nothing and the "
-        "reply is sent back to be corrected.",
-        "Where a reference or a relationship is about a question, name the item that shows "
-        "it: the H label of its message in the channel window, or the P, M or S label of "
-        "the episode or story that shows it.",
-        "given as its `answer_label`",
-        '"meaning_labels": ["<label, never a Q label>"]',
-        '"labels": ["<label of what it refers to, never a Q label>"]',
-        '"labels": ["<label, never a Q label>"], "ground"',
-        # #3083's signal stays allowed.
-        "An unresolved matter's words may still name questions by their Q labels",
-        "naming in the matter's words each question it could answer, if any, by its Q label",
-    ):
-        assert said in instruction
-    assert "<label>" not in instruction
+# --- the mark's Q label (ADR-0322 §4, #3081) -------------------------------------------
 
 
 async def test_a_mark_gives_its_q_label_as_answer_label_never_as_label() -> None:

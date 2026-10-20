@@ -98,6 +98,7 @@ from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
 from ai_assistant.orchestration.telegram import TelegramLineSeams, line_channel
 from ai_assistant.orchestration.understanding import (
+    UNDERSTANDING_PROMPT,
     LineMessage,
     RecentEpisodes,
     TranscriptWindow,
@@ -115,9 +116,13 @@ from ai_assistant.testing import (
     FakeToolCallingCompleter,
     FakeToolImplementation,
     FakeWebSearcher,
+    default_prompt,
 )
 from ai_assistant.testing.memories import memory as memory_record
 from ai_assistant.testing.memories import said_support
+
+#: Understanding's shipped template, as the composition root hands it the stage.
+_UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -445,7 +450,9 @@ class _Hub:
         self.harness = Harness(
             memory=self.memory,
             plans=plans,
-            understanding=UnderstandingStage(model=self.reader.model, excerpt_chars=2000),
+            understanding=UnderstandingStage(
+                model=self.reader.model, excerpt_chars=2000, prompt=_UNDERSTANDING
+            ),
             recall=recall_stage(self.memory) if recall else None,
             # A question asked long enough ago has left the episode window, and is
             # found through recall alone.

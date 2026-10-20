@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any, Final
 
-from phases_composition_support import UNDERSTANDING_PROMPT, build_phased, until
+from phases_composition_support import UNDERSTANDING_INSTRUCTIONS, build_phased, until
 
 from ai_assistant.app import composition
 from ai_assistant.core.types import (
@@ -81,7 +81,7 @@ class _Models:
 
     def __call__(self, messages: Sequence[Message]) -> str:
         system = messages[0].content
-        if UNDERSTANDING_PROMPT in system:
+        if system in UNDERSTANDING_INSTRUCTIONS:
             return _UNDERSTOOD
         if system == SCOUT_INSTRUCTION:
             self.steps.append(ObserverStep.SCOUT)

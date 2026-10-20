@@ -16,6 +16,7 @@ from structlog.testing import capture_logs
 from ai_assistant.core.channel_validation import input_origin
 from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.errors import ModelError, UnderstandingError
+from ai_assistant.core.prompts import PromptDeclaration, PromptOrigin, PromptTemplate
 from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
     ActivationUnderstanding,
@@ -50,6 +51,7 @@ from ai_assistant.orchestration.disclosure import (
     UnboundedAudienceSupply,
 )
 from ai_assistant.orchestration.understanding import (
+    UNDERSTANDING_PROMPT,
     LineMessage,
     RecentEpisodes,
     SuppliedWindow,
@@ -58,10 +60,13 @@ from ai_assistant.orchestration.understanding import (
     WindowsStage,
     fetch_held,
 )
-from ai_assistant.testing import FakeMemoryStore, FakeModelProvider
+from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, default_prompt
 from ai_assistant.testing.activation import ended_pass
 from ai_assistant.testing.memories import memory as memory_record
 from ai_assistant.testing.memories import remembered_support
+
+#: Understanding's shipped template, as the composition root hands it the stage.
+_UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -149,7 +154,11 @@ def _stage(model: FakeModelProvider, memory: FakeMemoryStore, **kwargs: int) -> 
     return _Pipeline(
         windows=WindowsStage(episodes=RecentEpisodes(memory=memory, limit=kwargs.get("limit", 10))),
         memory=memory,
-        stage=UnderstandingStage(model=model, excerpt_chars=kwargs.get("excerpt_chars", 2000)),
+        stage=UnderstandingStage(
+            model=model,
+            excerpt_chars=kwargs.get("excerpt_chars", 2000),
+            prompt=_UNDERSTANDING,
+        ),
     )
 
 
@@ -694,7 +703,7 @@ async def test_a_spoken_turn_takes_no_episode_window() -> None:
     pipeline = _Pipeline(
         windows=WindowsStage(episodes=selector),
         memory=await _store(),
-        stage=UnderstandingStage(model=model, excerpt_chars=2000),
+        stage=UnderstandingStage(model=model, excerpt_chars=2000, prompt=_UNDERSTANDING),
     )
     await _understand(pipeline, episodes=False)
     assert calls == []
@@ -787,6 +796,20 @@ def test_recent_episodes_and_the_stage_refuse_a_bound_below_one() -> None:
         RecentEpisodes(memory=memory, limit=0)
     with pytest.raises(ValueError, match="at least 1"):
         _stage(FakeModelProvider(), memory, excerpt_chars=0)
+
+
+def test_the_stage_refuses_a_template_of_another_prompt() -> None:
+    """ADR-0334 §2: the stage renders understanding's prompt, and no other's."""
+    other = PromptDeclaration(
+        name="other", package=UNDERSTANDING_PROMPT.package, flags=UNDERSTANDING_PROMPT.flags
+    )
+
+    with pytest.raises(ValueError, match="understanding prompt"):
+        UnderstandingStage(
+            model=FakeModelProvider(),
+            excerpt_chars=2000,
+            prompt=PromptTemplate.parse(other, b"text", origin=PromptOrigin.OVERRIDE),
+        )
 
 
 # --- logs ---------------------------------------------------------------------------------
