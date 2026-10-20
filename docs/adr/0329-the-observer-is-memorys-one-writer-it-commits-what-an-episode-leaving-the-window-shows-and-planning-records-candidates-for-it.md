@@ -1,12 +1,13 @@
 # 329. The observer is memory's one writer: it commits what an episode leaving the window shows, and planning records candidates for it
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0333 (§15:1, in the addition alone: the observer also holds a `DiagnosticSink` or `None`)
 - Date: 2026-10-18
 - Scope: who writes memories once the observer exists, and when. Planning's side — `remember` repurposed to record a candidate, the lookup that answers it, asking the user to confirm a wording, noting reliance, planning's instruction and what it is shown — and the observer's side: its trigger, what it reads, its two steps, its keep rules and evidence bar, its writes, open questions, the track record, where it lives, its limits and records, the catch-up, and what the user sees. Batch [#3148](https://github.com/leonapivato/ai-assistant/issues/3148), lane L-β, for milestone 3, "Learning v1: the observer" (acceptance [#3154](https://github.com/leonapivato/ai-assistant/issues/3154)).
 - Dependency: ADR-0328, which this decision builds on and changes only where §20 names a clause; ADR-0276, ADR-0284, ADR-0292, ADR-0306, ADR-0307, ADR-0309, ADR-0321 and ADR-0326, as their status lines leave them.
 - Authorization: the owner ruled this design in the learning walk of 2026-10-17 and 2026-10-18 ("Observer walk", "Planner's side", "Keeping memories right") and approved it on 2026-10-18. This decision writes those rulings down and settles only what they leave open, each such point named where it is settled. The dispatcher assigned 0329. The owner reads it before it is ratified (§1:1).
 - **Contract-surface decision.** It changes `core/protocols.py` (`PlanStore` gains the observation record's members; `MemoryWriter` gains a track-record member and a proposal that may retire; `AssistantEngine` gains a read of pending candidates) and `core/types.py` (the observation record's types, the writer `observer`, `EpisodeProjection`'s candidates). It is a breaking change under golden rule 5. The episode record gains no field (§3:3).
 - **Partially supersedes**, in the clauses §20's first table names: ADR-0050, ADR-0284, ADR-0285, ADR-0292, ADR-0294, ADR-0306, ADR-0309, ADR-0319, ADR-0321 and ADR-0328.
+- Partially superseded: 2026-10-20 by ADR-0333 — §15:1, in the addition alone: the observer also holds by injection a `DiagnosticSink`, or `None` where `diagnostic_record` is false, and writes ADR-0333 §2's entries through it (ADR-0333 §2:7). Every other clause stands. This replacement takes effect on ratification of ADR-0333. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
