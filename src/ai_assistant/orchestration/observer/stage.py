@@ -531,23 +531,33 @@ class Observer:
             if current.outcome is None:
                 current, decided = await self._committed(finding_id, reading, attempt)
             self._unsaved[key] = current
-            if decided is not None and current.outcome is not None:
-                # Written once the decided finding is kept for the next attempt, and
-                # before the record is written: a cancellation reaching the entry's
-                # write leaves nothing to be committed again (ADR-0333 §1:3, §2:11), and
-                # a record that fails to be written still has its outcome's entry, since
-                # the next attempt restores the finding decided and never decides it anew.
-                await self._entries.outcome(
-                    attempt.diagnosed,
-                    current,
-                    current.outcome,
-                    decided=decided.checked,
-                    note=decided.note,
-                )
             done = tuple(
                 current if one.id == finding_id else one for one in attempt.record.findings
             )
-            await self._save(attempt, findings=done)
+            try:
+                await self._save(attempt, findings=done)
+            except _NotRecorded:
+                # The next attempt restores the decided finding and never decides it
+                # anew, so its entry is written now or never (ADR-0333 §2:5).
+                await self._outcome_entry(attempt, current, decided)
+                raise
+            # After the record holds the outcome: no cancellation reaching the entry's
+            # write can leave a decided finding to be committed again (§1:3, §2:11).
+            await self._outcome_entry(attempt, current, decided)
+
+    async def _outcome_entry(
+        self, attempt: _Attempt, finding: ObservationFinding, decided: _Decided | None
+    ) -> None:
+        """A finding's outcome entry, where this attempt's commit decided it (§2:5)."""
+        if decided is None or finding.outcome is None:
+            return
+        await self._entries.outcome(
+            attempt.diagnosed,
+            finding,
+            finding.outcome,
+            decided=decided.checked,
+            note=decided.note,
+        )
 
     async def _scouted(
         self, reading: Reading, attempt: _Attempt, kept: tuple[ObservationFinding, ...]

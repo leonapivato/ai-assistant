@@ -565,3 +565,23 @@ async def test_an_outcome_whose_record_failed_to_be_written_still_has_its_entry(
     assert [_body(one)["state"] for one in sink.recorded if _body(one)["stage"] == "end"] == [
         "processed"
     ]
+
+
+async def test_a_cancelled_outcome_write_after_a_restart_never_commits_again() -> None:
+    """§1:3: the outcome is durable before its entry, so a new observer finds it decided."""
+    harness = Harness()
+    await _three(harness)
+    sink = _CancelledAtOutcome()
+    commit = FakeModelProvider.scripted(_create())
+    first = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")), commit=commit, diagnostics=sink
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await first.run()
+
+    restarted = harness.observer(commit=commit, diagnostics=sink)
+    await restarted.run()
+
+    assert len(commit.calls) == 1
+    (record,) = await harness.plans.observations([address("one")])
+    assert record.state is ObservationState.PROCESSED
