@@ -18,6 +18,7 @@ from ai_assistant.core.types import (
     FindingUnwritten,
     InputPart,
     Memory,
+    MemoryChange,
     MemoryDecisionKind,
     MemoryOperation,
     MemoryOperationKind,
@@ -28,6 +29,9 @@ from ai_assistant.core.types import (
     MemoryWriterName,
     OpenQuestion,
     OpenQuestionKind,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     ReadingCertainty,
     SupportDirection,
     SupportOrigin,
@@ -396,3 +400,50 @@ async def test_a_failing_store_fails_the_attempt_rather_than_refusing_the_findin
 
     with pytest.raises(MemoryStoreError):
         await _writer(harness).write(Checked(primary=Create(memory=_new())))
+
+
+async def test_an_ask_raises_no_question_on_a_memory_wider_than_the_supply() -> None:
+    """§12:6: a question would carry the owner-only supply onto an ``anyone`` memory."""
+    harness = await _harness(MemoryDecisionKind.ASK_USER)
+    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
+    narrow = _new().model_copy(
+        update={"placement": Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)}
+    )
+
+    outcome = await _writer(harness).write(
+        Checked(primary=Create(memory=narrow, asked_on=_said(direction=SupportDirection.AGAINST)))
+    )
+
+    assert outcome.unwritten is FindingUnwritten.ASKED
+    after = await harness.memory.get(held.id)
+    assert isinstance(after, Memory)
+    assert after.open_questions == ()
+
+
+async def test_another_writer_between_two_own_writes_fails_the_attempt_as_stale() -> None:
+    """ADR-0219 §2-§3: a revision is adopted only where this finding's own write made it."""
+    harness = await _harness()
+    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
+    apply = harness.writes.apply
+
+    async def interleaved(change: MemoryChange) -> None:
+        await apply(change)
+        moved = await harness.memory.get(held.id)
+        assert isinstance(moved, Memory)
+        await harness.writer.record_use(
+            moved,
+            TrackRecordEntry(
+                episode=address("past"),
+                relied_at=AT,
+                held_up=True,
+                recorded_at=_NOW,
+                recorded_by=MemoryWriterName.OBSERVER,
+            ),
+        )
+
+    harness.writes.apply = interleaved  # type: ignore[method-assign]  # another writer, between
+
+    with pytest.raises(MemoryStoreStaleError):
+        await _writer(harness).write(
+            Checked(primary=AddSupports(target=held, supports=(_said(), _said("past"))))
+        )

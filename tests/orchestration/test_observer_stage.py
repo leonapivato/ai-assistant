@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     FindingUnwritten,
     InputPart,
     Memory,
+    MemoryChange,
     MemoryDecisionKind,
     MemoryOperationKind,
     MemorySource,
@@ -35,6 +36,7 @@ from ai_assistant.core.types import (
     ObservationState,
     ObserverStep,
     OpenQuestionKind,
+    PlacementReach,
     PlanningRound,
     Provenance,
     QuestionPart,
@@ -676,3 +678,116 @@ async def test_a_confirmed_candidate_the_policy_asks_about_raises_its_question()
     (question,) = asked.open_questions
     assert question.kind is OpenQuestionKind.POLICY_ASK
     assert question.rests_on == (InputPart(episode=address("yes")),)
+
+
+async def test_a_finding_committed_on_a_retry_takes_the_narrowest_placement() -> None:
+    """§12:6: the scout's supply is no longer read whole, so the meet is owner-only."""
+    harness = Harness()
+    await _three(harness)
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")),
+        commit=FakeModelProvider.scripted(_create()),
+        daily_calls=1,
+    )
+    assert (await observer.run()).held
+    harness.clock.advance(timedelta(hours=25))
+
+    await observer.run()
+
+    (record,) = await harness.plans.observations(["activation:one"])
+    outcome = record.findings[0].outcome
+    assert outcome is not None
+    (write,) = outcome.writes
+    kept = await harness.memory.get(write.memory)
+    assert isinstance(kept, Memory)
+    assert kept.placement.reach is PlacementReach.OWNER
+
+
+async def test_what_a_failed_commit_wrote_is_merged_into_its_later_outcome() -> None:
+    """§16:1: a support written before the attempt failed is recorded when it is decided."""
+    harness = Harness()
+    await _three(harness)
+    await harness.hold(
+        episode("past", at=SINCE - timedelta(days=1), text="Window seats."),
+        Memory.model_validate(
+            memory(
+                "m-seat", "The user prefers window seats.", said_support(address("past"))
+            ).model_dump()
+        ),
+    )
+    apply = harness.writes.apply
+    calls = 0
+
+    async def failing_second(change: MemoryChange) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            msg = "database temporarily unavailable"
+            raise MemoryStoreError(msg)
+        await apply(change)
+
+    harness.writes.apply = failing_second  # type: ignore[method-assign]  # an outage midway
+
+    def add_both(shown: dict[str, Any]) -> str:
+        (held,) = [one for one in shown["memories"] if one["claim"].startswith("The user")]
+        return reply(
+            action="add",
+            memory=held["memory"],
+            supports=[
+                {
+                    "part": one["part"],
+                    "direction": "for",
+                    "backs_as_worded": True,
+                    "how_sure": "sure",
+                }
+                for one in shown["parts"]
+            ],
+        )
+
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1", "P2")),
+        commit=_answering(add_both),
+    )
+    await observer.run()
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.findings[0].outcome is None
+
+    observer = harness.observer(commit=FakeModelProvider.scripted(reply(action="nothing")))
+    harness.clock.advance(timedelta(minutes=1))
+    await observer.run()
+
+    (record,) = await harness.plans.observations(["activation:one"])
+    outcome = record.findings[0].outcome
+    assert outcome is not None
+    assert [(one.memory, one.operations) for one in outcome.writes] == [
+        ("m-seat", (MemoryOperationKind.ADD_SUPPORT,))
+    ]
+
+
+async def test_a_failing_read_of_the_episode_is_an_attempt_and_later_episodes_proceed() -> None:
+    """§16:4-§16:5: the first read is inside the attempt."""
+    harness = Harness()
+    await harness.hold(
+        episode("one", at=AT - timedelta(minutes=4)),
+        episode("two", at=AT - timedelta(minutes=3), text=""),
+        episode("three", at=AT - timedelta(minutes=2)),
+        episode("four", at=AT - timedelta(minutes=1)),
+    )
+    get = harness.memory.get
+
+    async def failing(record_id: str) -> object:
+        if record_id == "activation:one":
+            msg = "the store could not read"
+            raise MemoryStoreError(msg)
+        return await get(record_id)
+
+    harness.memory.get = failing  # type: ignore[method-assign,assignment]  # one unreadable row
+    observer = harness.observer()
+
+    outcome = await observer.run()
+
+    assert (outcome.waiting, outcome.skipped) == (1, 1)
+    one, two = await harness.plans.observations(["activation:one", "activation:two"])
+    assert one.attempts[-1].end is ObservationAttemptEnd.FAILED
+    assert one.next_attempt_at == AT + timedelta(minutes=1)
+    assert two.state is ObservationState.SKIPPED

@@ -108,6 +108,7 @@ __all__ = [
     "commit_messages",
     "commit_view",
     "meets_floor",
+    "narrows",
 ]
 
 #: §11:5: the distinct episodes an inference's counted ``for`` supports, other than an
@@ -574,7 +575,7 @@ def _track_record(reply: CommitReply, context: _Context) -> _Primary:
     reliance = context.view.reliance
     if reliance is None or reply.track_record in {None, "neither"}:
         return Unwritten(FindingUnwritten.NOT_KEPT)
-    if _narrows(context.placement, reliance.memory):
+    if narrows(context.placement, reliance.memory):
         return Unwritten(FindingUnwritten.CHECK_FAILED)
     entry = TrackRecordEntry(
         episode=context.view.leaving.id,
@@ -658,11 +659,7 @@ def _primary(reply: CommitReply, supports: dict[str, MemorySupport], context: _C
             return Unwritten(FindingUnwritten.SINGLE_OBSERVATION)
         case "recheck":
             target = _target(reply, context)
-            if (
-                not supports
-                or not (reply.asks or "").strip()
-                or _narrows(context.placement, target)
-            ):
+            if not supports or not (reply.asks or "").strip() or narrows(context.placement, target):
                 raise _Refused(FindingUnwritten.CHECK_FAILED)
             first = next(iter(supports.values()))
             return RaiseQuestion(
@@ -675,7 +672,7 @@ def _primary(reply: CommitReply, supports: dict[str, MemorySupport], context: _C
             target = _target(reply, context)
             if not supports or not _confirms_only_as_worded(supports, target, context):
                 raise _Refused(FindingUnwritten.CHECK_FAILED)
-            if reply.inference is not None or _narrows(context.placement, target):
+            if reply.inference is not None or narrows(context.placement, target):
                 # An inference about a stored claim is a create the policy may reinforce,
                 # since one operation adds one support (§12:3, §9:7); and so is an add
                 # whose supply is placed narrower than the memory, since a fold takes
@@ -817,7 +814,7 @@ def _retiring(
     """
     target = _target(reply, context)
     memory = created.memory
-    if _narrows(context.placement, target):
+    if narrows(context.placement, target):
         # §12:6: the retired memory would carry what the supply placed narrower, and an
         # operation writes no placement (ADR-0328 §5:2): the new memory is proposed alone,
         # and the policy rules over the conflict as over any other.
@@ -926,7 +923,7 @@ def _resolve(
     question = None if shown is None else shown.questions.get(proposed.question)
     if shown is None or support is None or question is None or not proposed.note.strip():
         return None
-    if _narrows(context.placement, shown.memory):
+    if narrows(context.placement, shown.memory):
         return None
     try:
         added = _question_support(support, support.direction, supports, context)
@@ -935,15 +932,26 @@ def _resolve(
     return Resolve(target=shown.memory, question=question, support=added, note=proposed.note)
 
 
-def _narrows(supply: Placement, target: Memory) -> bool:
-    """Whether the run's supply is placed narrower than a stored memory (§12:6).
+def narrows(supply: Placement, target: Memory) -> bool:
+    """Whether the run's supply would narrow a stored memory's placement (§12:6).
 
-    An operation on a stored memory writes no placement (ADR-0328 §5:2), so a write
-    resting on a supply narrower than the memory's placement would widen what that
-    supply reaches. Such a write is proposed through ``ingest``, whose fold takes the
-    meet, or not made.
+    The meet over the supply and the memory is narrower in reach, or decided by a
+    stronger setter (ADR-0217 §3:3): a ``DERIVED`` owner-only supply narrows an
+    owner-only memory the owner placed, since the owner's lifting of the one would
+    otherwise lift the other. An operation on a stored memory writes no placement
+    (ADR-0328 §5:2), so a write resting on such a supply is proposed through
+    ``ingest``, whose fold takes the meet, or not made.
+
+    Args:
+        supply: The meet over every record the run was supplied.
+        target: The stored memory.
+
+    Returns:
+        Whether a write onto ``target`` would widen what ``supply`` reaches.
     """
-    return Placement.narrowest_of((supply, target.placement)).reach is not target.placement.reach
+    held = target.placement
+    meet = Placement.narrowest_of((supply, held))
+    return meet.reach is not held.reach or meet.set_by is not held.set_by
 
 
 def _agreement_form(content: str) -> str:

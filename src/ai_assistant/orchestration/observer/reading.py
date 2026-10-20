@@ -468,6 +468,10 @@ def approval_instant(record: EpisodicMemory) -> datetime:
     return max((one.sent_at for one in messages), default=record.occurred_at)
 
 
+#: The largest page of a channel's episodes read to find what an input answers.
+_PAGE: Final = 100
+
+
 class _Labels:
     """Hands out each kind's next label, once per thing."""
 
@@ -565,13 +569,17 @@ class EpisodeReader:
         )
         memories = [ReadMemory(handle=labels("M"), memory=one) for one in gathered.memories]
         reliances = await self._reliances(processing, memories, labels)
-        hints = await self._hints(leaving, processing, gathered.effects, shown, memories, labels)
+        asking_supply: list[Placement] = []
+        hints = await self._hints(
+            leaving, processing, gathered.effects, shown, memories, labels, asking_supply
+        )
         stories_read = tuple(one for _, _, fresh in gathered.stories for one in fresh)
         supplied = [
             one.placement for one in (leaving, *gathered.later, *gathered.past, *stories_read)
         ]
         supplied.extend(one.memory.placement for one in memories)
         supplied.extend(one.memory.placement for one in reliances)
+        supplied.extend(asking_supply)
         return Reading(
             leaving=read_leaving,
             later=later,
@@ -614,6 +622,7 @@ class EpisodeReader:
         episodes = {key: one for key, one in found.items() if isinstance(one, EpisodicMemory)}
         read: dict[SupportPart, ReadPart] = {}
         outsides: dict[str, bool] = {}
+        supplied: list[Placement] = []
         for index, part in enumerate(wanted, start=1):
             record = episodes.get(part_episode(part) or "")
             text = part_content(part, episodes=episodes, effects={}, carried=None)
@@ -622,6 +631,9 @@ class EpisodeReader:
             facts = await self._facts(part, record, outsides)
             if facts is None:
                 continue
+            answers, answered = await self._answered(part, record)
+            if answered is not None:
+                supplied.append(answered)
             read[part] = ReadPart(
                 handle=f"P{index}",
                 part=part,
@@ -630,8 +642,41 @@ class EpisodeReader:
                 text=text,
                 origin=facts[0],
                 when=facts[1],
+                answers=answers,
             )
-        return Rehydrated(parts=read, supplied=tuple(one.placement for one in episodes.values()))
+        supplied.extend(one.placement for one in episodes.values())
+        return Rehydrated(parts=read, supplied=tuple(supplied))
+
+    async def _answered(
+        self, part: SupportPart, record: EpisodicMemory
+    ) -> tuple[str | None, Placement | None]:
+        """What a part read again replies to, and the placement of what was read for it (§9:3).
+
+        A round's message answers its own episode's input; an input answers the last
+        round message of the episode before it on its channel, as a reading renders it.
+        """
+        if isinstance(part, RoundMessagePart):
+            return episode_text(record) or None, None
+        processing = record.processing_record
+        channel = None if processing is None else processing.trigger.channel
+        if not isinstance(part, InputPart) or channel is None:
+            return None, None
+        cursor: str | None = None
+        while True:
+            page = await self._memory.episodes(channel=channel, cursor=cursor, limit=_PAGE)
+            for row in page.items:
+                position = row.position
+                if (position.occurred_at, position.episode_id) >= (record.occurred_at, record.id):
+                    continue
+                before = await self._memory.get(position.episode_id)
+                earlier = before.processing_record if isinstance(before, EpisodicMemory) else None
+                if before is None or earlier is None or earlier.is_open:
+                    return None, None
+                said = [one.text for one in earlier.rounds if one.text]
+                return (said[-1] if said else None), before.placement
+            if page.next_cursor is None or page.next_cursor == cursor:
+                return None, None
+            cursor = page.next_cursor
 
     async def _facts(  # noqa: PLR0911 — one arm per part a finding may rest on (§9:6)
         self, part: SupportPart, record: EpisodicMemory, outsides: dict[str, bool]
@@ -849,8 +894,13 @@ class EpisodeReader:
         shown: _Shown,
         memories: list[ReadMemory],
         labels: _Labels,
+        asking_supply: list[Placement],
     ) -> tuple[Hint, ...]:
-        """The leaving episode's candidates, as hints (§3:3, §9:1)."""
+        """The leaving episode's candidates, as hints (§3:3, §9:1).
+
+        ``asking_supply`` collects the placement of every asking episode read for a candidate
+        recorded under an approval, whose wording the hint carries (§12:6).
+        """
         hints: list[Hint] = []
         for done in done_candidates(leaving.id, processing, effects):
             try:
@@ -870,7 +920,9 @@ class EpisodeReader:
                     note=candidate.note,
                 )
             )
-        hints.extend(await self._approved(leaving, processing, effects, shown, labels))
+        hints.extend(
+            await self._approved(leaving, processing, effects, shown, labels, asking_supply)
+        )
         return tuple(hints)
 
     async def _memory_handle(
@@ -889,13 +941,14 @@ class EpisodeReader:
         memories.append(read)
         return read.handle
 
-    async def _approved(
+    async def _approved(  # noqa: PLR0913 — what an approval is read against, each read already
         self,
         leaving: EpisodicMemory,
         processing: EpisodeProcessingRecord,
         effects: Sequence[ActivationEffect],
         shown: _Shown,
         labels: _Labels,
+        asking_supply: list[Placement],
     ) -> list[Hint]:
         """The candidates recorded under an approval in the leaving episode (§3:3, §5:5).
 
@@ -923,6 +976,9 @@ class EpisodeReader:
         )
         found = without_open_episodes(
             await self._memory.get_many([episode_address(one) for one in askers])
+        )
+        asking_supply.extend(
+            one.placement for one in found.values() if isinstance(one, EpisodicMemory)
         )
         hints: list[Hint] = []
         for effect in approved:

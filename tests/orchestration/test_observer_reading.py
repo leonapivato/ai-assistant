@@ -35,6 +35,9 @@ from ai_assistant.core.types import (
     InputOrigin,
     InputPart,
     LabelKind,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     PlanningLabel,
     PlanningRound,
     ProposedCall,
@@ -384,3 +387,85 @@ async def test_the_payload_is_quoted_data_attributed_from_the_record() -> None:
     ]
     assert [part["outside"] for part in parts] == [False, True]
     assert "content" not in rendered
+
+
+async def test_an_asking_episode_read_for_its_wording_joins_the_supply() -> None:
+    """§12:6: the confirmed fact's wording comes from the asking episode."""
+    harness = Harness()
+    owner_only = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
+    asked = AskedCall(
+        part=1,
+        tool=REMEMBER_CANDIDATE,
+        values={
+            "fact": "The user prefers window seats.",
+            "why": "travel",
+            "rests_on_input": True,
+            "episode": address("asking"),
+            "rests_on_outside_content": False,
+        },
+    )
+    asking = episode(
+        "asking",
+        at=AT - timedelta(days=5),
+        rounds=(
+            PlanningRound(
+                id="r-ask", recorded_at=AT - timedelta(days=5), text="Remember?", asked=(asked,)
+            ),
+        ),
+    ).model_copy(update={"placement": owner_only})
+    understood = ActivationUnderstanding(
+        version=1,
+        recorded_at=AT,
+        producer=UnderstandingProducer.INTERPRETATION,
+        meaning="yes",
+        meaning_ground=UnderstandingGround.STATED,
+        answers=(AnsweredQuestion(activation_id="asking", round="r-ask"),),
+    )
+    await harness.hold(
+        asking,
+        episode("yes", at=AT - timedelta(minutes=3), text="yes", understanding=(understood,)),
+        episode("two", at=AT - timedelta(minutes=2), text="ok"),
+        episode("three", at=AT - timedelta(minutes=1), text="ok"),
+    )
+    await remembered(
+        harness.plans,
+        "yes",
+        "r-yes",
+        {"fact": "x", "why": "y", "rests_on_input": True},
+        part=QuestionPart(round="r-ask", part=1),
+    )
+
+    reading = await EpisodeReader(
+        memory=harness.memory,
+        plans=harness.plans,
+        stories=harness.stories,
+        story_episodes=0,
+        related=0,
+    ).read(
+        await _held(harness, "yes"),
+        await RecentEpisodes(memory=harness.memory, limit=2)(frozenset()),
+    )
+
+    assert owner_only in reading.supplied
+
+
+async def test_a_reply_read_again_carries_what_it_answers_and_its_placement() -> None:
+    """§9:3, §12:6: an input answers the last message before it on its channel."""
+    harness = Harness()
+    owner_only = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
+    question = episode(
+        "question", at=AT - timedelta(minutes=5), rounds=(said("r1", "Window or aisle?"),)
+    ).model_copy(update={"placement": owner_only})
+    await harness.hold(question, episode("answer", at=AT, text="Window, please."))
+
+    again = await _reader(harness).parts_at([InputPart(episode=address("answer"))])
+
+    (part,) = again.parts.values()
+    assert (part.text, part.answers) == ("Window, please.", "Window or aisle?")
+    assert owner_only in again.supplied
+
+
+async def _held(harness: Harness, name: str) -> EpisodicMemory:
+    record = await harness.memory.get(address(name))
+    assert isinstance(record, EpisodicMemory)
+    return record
