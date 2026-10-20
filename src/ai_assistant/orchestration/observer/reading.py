@@ -44,6 +44,7 @@ from ai_assistant.core.types import (
     ConfirmationPart,
     EpisodicMemory,
     EvidenceItemPart,
+    FindingUnwritten,
     InputOrigin,
     InputPart,
     LabelKind,
@@ -308,7 +309,8 @@ class Reading:
         leaving: The leaving episode.
         later: The episodes still in the window that occurred after it, oldest first.
         stories: The stories its activation belongs to.
-        past: Related past episodes, each with its candidates' facts.
+        past: Related past episodes, each with its candidates' facts and the claims of
+            the single observations recorded on it (§11:4).
         memories: Related stored memories, and the memories its hints and reliance
             calls name.
         hints: Its candidates.
@@ -583,8 +585,13 @@ class EpisodeReader:
             for summary, outside, fresh in gathered.stories
         )
         past_effects = await self._effects(gathered.past)
+        observed = await self._single_observations(gathered.past)
         past = tuple(
-            (shown.episode(one, answers), _facts(one, past_effects)) for one in gathered.past
+            (
+                shown.episode(one, answers),
+                tuple(dict.fromkeys((*_facts(one, past_effects), *observed.get(one.id, ())))),
+            )
+            for one in gathered.past
         )
         memories = [ReadMemory(handle=labels("M"), memory=one) for one in gathered.memories]
         reliances = await self._reliances(processing, memories, labels)
@@ -888,6 +895,32 @@ class EpisodeReader:
                 self._memory, processing.activation_id, working=working
             )
             for record_id, processing in held
+        }
+
+    async def _single_observations(
+        self, episodes: Sequence[EpisodicMemory]
+    ) -> dict[str, tuple[str, ...]]:
+        """The single observations recorded on each episode, by its id (§11:4).
+
+        A single observation is evidence only: it is kept as no memory, and waits as a
+        candidate on its episode, where a later run's search finds it. So a past episode
+        is shown with the claim of every finding its observation record holds whose
+        outcome was a single observation, beside planning's candidates.
+
+        Raises:
+            PlanningError: If the plan store cannot be read.
+        """
+        if not episodes:
+            return {}
+        records = await self._plans.observations([one.id for one in episodes])
+        return {
+            record.episode: tuple(
+                finding.claim
+                for finding in record.findings
+                if finding.outcome is not None
+                and finding.outcome.unwritten is FindingUnwritten.SINGLE_OBSERVATION
+            )
+            for record in records
         }
 
     async def _effects(self, episodes: Sequence[EpisodicMemory]) -> tuple[ActivationEffect, ...]:

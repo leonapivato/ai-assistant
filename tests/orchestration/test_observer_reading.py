@@ -32,9 +32,14 @@ from ai_assistant.core.types import (
     ConfirmationPart,
     EpisodicMemory,
     EvidenceItemPart,
+    FindingOutcome,
+    FindingUnwritten,
     InputOrigin,
     InputPart,
     LabelKind,
+    ObservationFinding,
+    ObservationRecord,
+    ObservationState,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -306,6 +311,50 @@ async def test_past_episodes_and_memories_are_found_by_relevance() -> None:
     shown = reading.memory(reading.memories[0].handle)
     assert shown is not None
     assert shown.content == held.content
+
+
+def _finding(number: int, claim: str, unwritten: FindingUnwritten) -> ObservationFinding:
+    """A finding about the episode ``past``, committed with nothing written."""
+    return ObservationFinding(
+        id=f"f{number}",
+        episode=address("past"),
+        claim=claim,
+        rests_on=(InputPart(episode=address("past")),),
+        outcome=FindingOutcome(at=AT, unwritten=unwritten),
+    )
+
+
+async def test_a_past_episode_shows_its_single_observations_beside_its_candidates() -> None:
+    """§11:4: a single observation waits as a candidate on its episode for a later run."""
+    harness = Harness()
+    await harness.hold(
+        episode("past", at=AT - timedelta(days=3), text="Window seats are best on trains."),
+        episode("one", at=AT - timedelta(minutes=3), text="Book me window seats please."),
+        episode("two", at=AT - timedelta(minutes=2), text="ok"),
+        episode("three", at=AT - timedelta(minutes=1), text="ok"),
+    )
+    await harness.plans.write_observation(
+        ObservationRecord(
+            episode=address("past"),
+            state=ObservationState.PROCESSED,
+            findings=(
+                _finding(
+                    1, "The user chose a window seat once.", FindingUnwritten.SINGLE_OBSERVATION
+                ),
+                _finding(2, "The user mentioned trains.", FindingUnwritten.NOT_KEPT),
+            ),
+        ),
+        expected_revision=0,
+    )
+
+    reading = await _read(harness, "one")
+
+    past = reading.payload()["past"]
+    assert isinstance(past, list)
+    (shown,) = past
+    assert isinstance(shown, dict)
+    assert shown["exchange"] == reading.past[0][0].handle
+    assert shown["candidates"] == ["The user chose a window seat once."]
 
 
 async def test_a_candidate_is_a_hint_naming_its_parts_and_memory() -> None:
