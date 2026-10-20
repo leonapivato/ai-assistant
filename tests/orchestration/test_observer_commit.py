@@ -265,9 +265,132 @@ def test_a_keep_before_the_leaving_episode_admits_nothing() -> None:
     assert decision.primary == Unwritten(FindingUnwritten.CHECK_FAILED)
 
 
+def test_a_write_another_episode_backs_as_worded_is_carried_only_by_the_leaving_backing_it() -> (
+    None
+):
+    """§8:2: a part of the leaving episode merely beside a later or earlier claim carries nothing.
+
+    What is new in a later episode waits until that episode is due, and a finding a
+    past episode shows was that episode's to commit.
+    """
+    beside = _support("P1", backs_as_worded=False, how_sure="unsure")
+    for other in ("later", "past"):
+        minutes = 5 if other == "later" else -5
+        view = _view(_input("P1", "leaving"), _input("P2", other, at_minutes=minutes))
+
+        carried_elsewhere = _checked(
+            view, action="create", wording="x", supports=[_support("P2"), beside]
+        )
+        carried_here = _checked(
+            view, action="create", wording="x", supports=[_support("P2"), _support("P1")]
+        )
+        corrected = _checked(
+            view,
+            action="create",
+            wording="x",
+            supports=[_support("P1"), _support("P2", direction="against", backs_as_worded=False)],
+        )
+
+        assert carried_elsewhere.primary == Unwritten(FindingUnwritten.CHECK_FAILED), other
+        assert isinstance(carried_here.primary, Create), other
+        assert isinstance(corrected.primary, Create), other
+
+
+def test_an_add_or_a_recheck_another_episode_carries_is_refused() -> None:
+    """§8:2: an add and a recheck are writes the leaving episode carries too."""
+    held = memory("m-seat", "x", said_support(address("past")))
+    view = _view(
+        _input("P1", "leaving"),
+        _input("P2", "later", at_minutes=5),
+        similar=(_similar("M1", held),),
+    )
+    beside = _support("P1", backs_as_worded=False)
+
+    added = _checked(view, action="add", memory="M1", supports=[_support("P2"), beside])
+    rechecked = _checked(
+        view, action="recheck", memory="M1", asks="Still?", supports=[_support("P2"), beside]
+    )
+    added_here = _checked(view, action="add", memory="M1", supports=[_support("P1")])
+
+    assert added.primary == Unwritten(FindingUnwritten.CHECK_FAILED)
+    assert rechecked.primary == Unwritten(FindingUnwritten.CHECK_FAILED)
+    assert isinstance(added_here.primary, AddSupports)
+
+
+def test_an_earlier_message_of_the_assistant_is_carried_by_the_users_keep_in_the_leaving() -> None:
+    """§8:2, §10:1: the user's keep in the leaving episode carries the message it admits."""
+    message = _part(
+        "P1",
+        RoundMessagePart(episode=address("past"), round="r1"),
+        origin=SupportOrigin.ASSISTANT_MESSAGE,
+        at_minutes=-5,
+    )
+    keep = _input("P2", "leaving")
+
+    decision = _checked(
+        _view(message, keep),
+        action="create",
+        wording="x",
+        supports=[_support("P1"), _support("P2", backs_as_worded=False)],
+    )
+
+    assert isinstance(decision.primary, Create)
+
+
+def test_an_inference_only_later_episodes_would_complete_waits() -> None:
+    """§8:2: the leaving episode completes an inference; a later one only qualifies it."""
+    leaving = _input("P1", "leaving")
+    earlier = [_input(f"P{index}", f"before-{index}", at_minutes=-index) for index in (2, 3)]
+    later = [_input(f"P{index}", f"after-{index}", at_minutes=index) for index in (4, 5)]
+
+    completed_later = _inferred([leaving, *later])
+    completed_here = _inferred([leaving, *earlier, later[0]])
+    leaving_aside = _inferred([*earlier, *later])
+
+    assert completed_later.primary == Unwritten(FindingUnwritten.CHECK_FAILED)
+    assert isinstance(completed_here.primary, Create)
+    assert leaving_aside.primary == Unwritten(FindingUnwritten.CHECK_FAILED)
+
+
+def test_a_resolve_a_later_episode_answers_waits() -> None:
+    """§8:2, §13:5: an answer a later episode gave resolves nothing until it is due."""
+    open_question = OpenQuestion(
+        id="question:1",
+        kind=OpenQuestionKind.RECHECK,
+        asks="Still aisle?",
+        rests_on=(InputPart(episode=address("past")),),
+        raised_at=AT,
+        raised_by=MemoryWriterName.OBSERVER,
+    )
+    held = memory(
+        "m-seat", "The user likes aisle seats.", said_support(address("past"))
+    ).model_copy(update={"open_questions": (open_question,)})
+    view = _view(
+        _input("P1", "leaving"),
+        _input("P2", "later", at_minutes=5),
+        similar=(_similar("M1", held, questions={"Q1": "question:1"}),),
+    )
+
+    decision = _checked(
+        view,
+        action="create",
+        wording="The user prefers window seats.",
+        supports=[_support("P1"), _support("P2")],
+        resolves={"memory": "M1", "question": "Q1", "part": "P2", "note": "now window"},
+    )
+
+    assert isinstance(decision.primary, Create)
+    assert decision.resolve is None
+
+
 def _choices(count: int) -> list[ReadPart]:
+    """A choice in the leaving episode, and one in each of ``count - 1`` before it."""
     return [
-        _input(f"P{index}", f"choice-{index}", at_minutes=-index) for index in range(1, count + 1)
+        _input("P1", "leaving"),
+        *(
+            _input(f"P{index}", f"choice-{index}", at_minutes=-index)
+            for index in range(2, count + 1)
+        ),
     ]
 
 

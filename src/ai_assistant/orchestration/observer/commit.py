@@ -17,7 +17,8 @@ is kept. Its decisions follow §§10-11, which its instruction states.
 at is one the finding rests on, read from a stored episode; the admission of the
 assistant's own words (§10:1); §9:7's rule for an observer's inference; §11:5's floor;
 and, before a retirement is proposed, ADR-0328 §6:5's refusal of a lower standing, which
-raises a ``conflict`` question instead (§13:1). A decision that fails a check is not
+raises a ``conflict`` question instead (§13:1); and that the leaving episode carries the
+write (§8:2). A decision that fails a check is not
 written, and the finding's outcome says so. Source details are carried only where the
 records a support points at state them (ADR-0328 §4:13), and no part the observer reads
 records an ``Attestation``, so it sets none.
@@ -76,7 +77,7 @@ from ai_assistant.orchestration.support_parts import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
     from datetime import datetime
 
     from ai_assistant.core.protocols import MemoryStore, PlanStore
@@ -522,16 +523,87 @@ def meets_floor(memory: Memory) -> bool:
     """
     if memory.standing is not MemoryStanding.INFERENCE:
         return True
-    counted = memory.counted_supports
+    return _clears_floor(memory.counted_supports)
+
+
+def _floor_episodes(supports: Iterable[MemorySupport]) -> set[str]:
+    """The distinct episodes §11:5's floor counts among ``supports``.
+
+    Those its ``for`` supports point at, other than an observer's inference and a
+    round's message, which counts toward no evidence bar (§10:2).
+    """
+    return {
+        episode
+        for one in supports
+        if one.direction is SupportDirection.FOR
+        and one.origin is not SupportOrigin.OBSERVER_INFERENCE
+        and one.origin not in _ASSISTANT_ORIGINS
+        and (episode := part_episode(one.points_at)) is not None
+    }
+
+
+def _clears_floor(counted: Sequence[MemorySupport]) -> bool:
+    """§11:5 over ``counted``: enough distinct episodes, and fewer ``against`` than ``for``."""
     supporting = [one for one in counted if one.direction is SupportDirection.FOR]
     against = [one for one in counted if one.direction is SupportDirection.AGAINST]
-    episodes = {
-        part_episode(one.points_at)
-        for one in supporting
-        if one.origin is not SupportOrigin.OBSERVER_INFERENCE
-        and one.origin not in _ASSISTANT_ORIGINS
-    } - {None}
-    return len(episodes) >= INFERENCE_FLOOR and len(against) < len(supporting)
+    return len(_floor_episodes(supporting)) >= INFERENCE_FLOOR and len(against) < len(supporting)
+
+
+def _strength(support: MemorySupport) -> int:
+    """How strongly a support bears on a claim: backing it as worded, for it, or against."""
+    if support.direction is SupportDirection.AGAINST:
+        return 0
+    return 2 if support.backs_as_worded else 1
+
+
+def _carried(supports: Iterable[MemorySupport], context: _Context) -> None:
+    """§8:2: a write the leaving episode carries, never one new in another episode.
+
+    The observer commits only findings that come from the leaving episode, and
+    inferences it completes; a later episode only corrects or qualifies such a finding,
+    and what is new in it waits until it is due. So among the write's supports, one
+    pointing at the leaving episode bears on the claim as strongly as any pointing at
+    another: where another episode's backs the claim as worded, one of the leaving
+    episode's does too, and a part of the leaving episode merely beside it carries
+    nothing. A round's message of another episode is left out of the comparison,
+    since it counts only through the user's keep beside it (§10:1-§10:2), which is
+    compared in its place; an observer's inference is code's, drawn from the others.
+
+    Raises:
+        _Refused: ``check_failed`` where the leaving episode carries no support of the
+            write, or none as strong as another episode's.
+    """
+    leaving = context.view.leaving.id
+    own: list[int] = []
+    other: list[int] = [0]
+    for one in supports:
+        if one.origin is SupportOrigin.OBSERVER_INFERENCE:
+            continue
+        if part_episode(one.points_at) == leaving:
+            own.append(_strength(one))
+        elif one.origin not in _ASSISTANT_ORIGINS:
+            other.append(_strength(one))
+    if not own or max(own) < max(other):
+        raise _Refused(FindingUnwritten.CHECK_FAILED)
+
+
+def _completed(memory: Memory, context: _Context) -> bool:
+    """§8:2: whether the leaving episode completes an inference.
+
+    It does where §11:5's floor holds over the supports pointing at the leaving
+    episode and the episodes before it, the leaving episode among those it counts. A
+    later episode's support qualifies the inference but never completes it: what it
+    adds waits until that episode is due.
+    """
+    leaving = context.view.leaving
+    key = (leaving.occurred_at, leaving.id)
+    occurred = {one.part: (one.occurred_at, one.episode) for one in context.view.parts}
+    by_then = [
+        one
+        for one in memory.counted_supports
+        if (at := occurred.get(one.points_at)) is not None and at <= key
+    ]
+    return leaving.id in _floor_episodes(by_then) and _clears_floor(by_then)
 
 
 @dataclass(frozen=True, slots=True)
@@ -683,6 +755,7 @@ def _primary(  # noqa: PLR0911 — one arm per action §9:4 names
             target = _target(reply, context)
             if not supports or not (reply.asks or "").strip():
                 raise _Refused(FindingUnwritten.CHECK_FAILED)
+            _carried(supports.values(), context)
             if narrows(context.placement, target):
                 return Blocked()
             first = next(iter(supports.values()))
@@ -703,6 +776,7 @@ def _primary(  # noqa: PLR0911 — one arm per action §9:4 names
                 # the meet (§12:6) where an operation writes no placement (ADR-0328
                 # §5:2).
                 return _created(reply, supports, context, wording=target.content)
+            _carried(supports.values(), context)
             return AddSupports(target=target, supports=tuple(supports.values()))
         case _:
             return _created(reply, supports, context, wording=reply.wording)
@@ -765,6 +839,9 @@ def _created(
         raise _Refused(FindingUnwritten.CHECK_FAILED) from exc
     if not meets_floor(memory):
         raise _Refused(FindingUnwritten.BELOW_FLOOR)
+    _carried(memory.supports, context)
+    if inference is not None and not _completed(memory, context):
+        raise _Refused(FindingUnwritten.CHECK_FAILED)
     try:
         asked_on = _question_support(ordered[0], SupportDirection.AGAINST, supports, context)
     except _Refused:
@@ -965,6 +1042,9 @@ def _resolve(
     support = supports.get(proposed.part)
     question = None if shown is None else shown.questions.get(proposed.question)
     if shown is None or support is None or question is None or not proposed.note.strip():
+        return None
+    if part_episode(support.points_at) != context.view.leaving.id:
+        # §8:2: an answer a later episode gave is new there, and waits until it is due.
         return None
     if narrows(context.placement, shown.memory):
         raise _Blocked
