@@ -83,8 +83,6 @@ from ai_assistant.memory import (
 )
 from ai_assistant.models import BoundedEmbedder, HashingEmbedder
 from ai_assistant.orchestration import Engine
-from ai_assistant.orchestration.acting import OwnRecordsByCapability
-from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY, RememberCalls
 from ai_assistant.orchestration.upcoming import (
     NOTIFICATION_CLASS as UPCOMING_NOTIFICATION_CLASS,
 )
@@ -227,8 +225,8 @@ async def test_build_engine_wires_one_memory_store_into_both_the_engine_and_the_
 def _memory_writer(engine: Engine) -> MemoryIngestor:
     """The one :class:`MemoryIngestor` the root builds, as the engine holds it.
 
-    Reached through ``remember``'s runner on the phases' acting stage, which holds
-    it since the consolidation stage, its other holder, retired (ADR-0328 §14:2).
+    Reached through the observer's write stage, its one holder since ``remember``
+    records candidates and the observer is memory's one writer (ADR-0329 §2:1, §12:1).
 
     Args:
         engine: The engine the root built.
@@ -236,13 +234,9 @@ def _memory_writer(engine: Engine) -> MemoryIngestor:
     Returns:
         The writer, narrowed from the Protocol-typed seams it sits behind.
     """
-    phases = engine._phases
-    assert phases is not None
-    own_records = phases._acting._own_records
-    assert isinstance(own_records, OwnRecordsByCapability)
-    runner = own_records._runners[REMEMBER_CAPABILITY]
-    assert isinstance(runner, RememberCalls)
-    writer = runner._writer
+    observer = engine._observer
+    assert observer is not None
+    writer = observer._writer._writes._writer
     assert isinstance(writer, MemoryIngestor)  # narrows the Protocol-typed seam
     return writer
 
@@ -1748,11 +1742,14 @@ async def test_only_the_maintenance_operation_is_handed_the_trace_store(
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         holders = _holders_of(engine, built[0])
+        # The memory store is the engine's own, reached first through the observer that
+        # holds it beside the engine (ADR-0329 §15:1); the writer's sink is the
+        # observer's write stage's since `remember` records candidates (§2:1, §12:1).
         assert sorted(holders) == [
-            "engine._memory._traces._sink",
             "engine._notifications._traces._sink",
+            "engine._observer._memory._traces._sink",
+            "engine._observer._writer._writes._writer._traces._sink",
             "engine._operation_traces._sink",
-            "engine._phases._acting._own_records._runners['remember']._writer._traces._sink",
             "engine._traces",
         ], f"the trace store is reachable from {holders}"
     finally:

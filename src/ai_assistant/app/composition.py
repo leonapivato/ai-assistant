@@ -69,6 +69,7 @@ from ai_assistant.orchestration import (
     Engine,
     GrantOperations,
     HeldSource,
+    MemoryWriteStage,
     NotificationWriteStage,
     UpcomingEventStage,
 )
@@ -82,6 +83,7 @@ from ai_assistant.orchestration.lookups import (
     LookUps,
 )
 from ai_assistant.orchestration.matters_pass import MattersPass
+from ai_assistant.orchestration.observer import Observer, ObserverLimits
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, StoryReads
 from ai_assistant.orchestration.recall import RecallStage
@@ -417,17 +419,67 @@ PHASES_STORY_EPISODES: Final = STORY_SHORT_VIEW_EPISODES + 1
 PHASES_MEMORY_SEARCH_LIMIT: Final = RECALL_SECOND_RUN_CAP
 
 #: Whether planning's ``remember`` records a candidate for the observer (ADR-0329 §§3-6)
-#: rather than writing a memory through ``MemoryPolicy`` (ADR-0328 §13's interim). **Off,
-#: and a constant of this module, never a setting** (§19:3): no build in which
-#: ``remember`` records candidates while the observer does not run is deployed to a
-#: person's hub, so nothing a hub reads can turn it on. The lane that wires the observer
-#: turns it on, in that change, by setting this to ``True``.
-REMEMBER_RECORDS_CANDIDATES: Final = False
+#: rather than writing a memory through ``MemoryPolicy`` (ADR-0328 §13's interim). **A
+#: constant of this module, never a setting** (§19:3): no build in which ``remember``
+#: records candidates while the observer does not run is deployed to a person's hub, so
+#: nothing a hub reads can turn it. **On**, in the change that wires the observer below
+#: (§19:3), and the two go live in one deploy (§19:2).
+REMEMBER_RECORDS_CANDIDATES: Final = True
 
 #: How many similar memories a candidate's lookup returns at most (ADR-0329 §4:1).
 #: **Provisional (#2589).** A handful: enough to show planning a conflict that matters,
 #: few enough that a result stays short.
 CANDIDATE_LOOKUP_LIMIT: Final = 5
+
+# --- The observer's bounds (ADR-0329 §7:5, §8:1, §9:3, §16) ------------------------
+#
+# Every bound the observer works within but its daily budget, which is the setting
+# ``observer_daily_calls`` (§16:9). None is measured yet; each is chosen for a hub
+# learning from a person's ordinary use, and the catch-up (§17) is the first evidence.
+
+#: §7:5's instant: an episode that occurred before it is never due. The decision's own
+#: value, the day the memory record of ADR-0328 went live.
+OBSERVER_SINCE: Final = datetime(2026, 10, 16, tzinfo=UTC)
+
+#: The most recent episodes read for each story the leaving episode belongs to (§8:1).
+#: Planning's own count for a story's latest episodes, so the observer reads a matter as
+#: far back as planning was shown it.
+OBSERVER_STORY_EPISODES: Final = PHASES_STORY_EPISODES
+
+#: The most past episodes, and the most memories, the observer's relevance search reads
+#: for a leaving episode (§8:1). The lookup's count: enough for the episodes that make an
+#: inference's three distinct occasions (§11:5) with room beside them, few enough that
+#: the scout's reading stays a page.
+OBSERVER_RELATED: Final = CANDIDATE_LOOKUP_LIMIT
+
+#: The most similar memories the commit step is shown for one finding (§9:3). The
+#: lookup's count, so the commit step weighs a claim against as many stored memories as
+#: planning saw beside the candidate.
+OBSERVER_SIMILAR: Final = CANDIDATE_LOOKUP_LIMIT
+
+#: The first backoff after a failed attempt, doubled each further failure (§16:4).
+#: Long enough that a passing outage of a provider is over before the retry, short
+#: enough that an episode a reply failed to parse is tried again within the hour.
+OBSERVER_RETRY_BASE: Final = timedelta(minutes=15)
+
+#: The longest backoff (§16:4). Half a day, so an episode failing through a long outage
+#: is still tried twice a day.
+OBSERVER_RETRY_CAP: Final = timedelta(hours=12)
+
+#: The failed attempts after which an episode is stuck and set aside (§16:5). A stuck
+#: episode is processed again only by an explicit re-run, and no surface makes one yet,
+#: so the count must outlast an outage: with the backoff above the tenth failure comes
+#: about 52 hours after the first, which rides out a weekend's outage of a provider
+#: while still setting aside, within days, an episode no attempt can finish. A held
+#: attempt — the budget, or the run's bound — is not a failure and does not count.
+OBSERVER_STUCK_AFTER: Final = 10
+
+#: The most episodes one run takes (§16:8), so a run stays bounded on the scheduler's
+#: serial loop (ADR-0083 §7). Each episode costs a scout call and one commit call per
+#: finding, so five is about fifteen calls: a few minutes at most behind the loop's other
+#: jobs. With a run on every freeze and the timer every fifteen minutes, that drains a
+#: catch-up faster than the daily budget lets it spend.
+OBSERVER_PER_RUN: Final = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -837,6 +889,12 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     # rather than the first ingest that would have used it.
     reconciler_route = _reconciler_spec(settings)
     reconciler_model = _build_reconciler_provider(settings, reconciler_route)
+    # The observer's two routes, on consolidation's shape and for its reasons (ADR-0329
+    # §9:9, ADR-0285 §5:3): each named by its own setting or else ``default_model``, and
+    # neither falls back. Up here so a spec naming an uninstalled vendor fails the build
+    # rather than the first run.
+    observer_scout = _build_observer_provider(settings, _observer_scout_spec(settings))
+    observer_commit = _build_observer_provider(settings, _observer_commit_spec(settings))
     # The read-only sources, if this deployment configured one (ADR-0093 §7).
     # **One reader instance per consumer**, and ADR-0096 §5 decides it here rather
     # than leaving the composition lane to pick by accident: ADR-0093 §7 bounds a
@@ -1550,6 +1608,38 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             budget=STORY_TIDY_UP_BUDGET,
             threshold=RECALL_THRESHOLDS[settings.embedder],
         )
+        # ADR-0276 §4's episode selector, **one object** handed to the windows stage that
+        # shows understanding the episode window and to the observer that tests which
+        # episodes have left it (ADR-0329 §15:3), so the window the observer tests is the
+        # window understanding is shown. Swapping the method is a change on this line.
+        episode_selector = RecentEpisodes(memory=memory, limit=UNDERSTANDING_EPISODE_LIMIT)
+        # ADR-0329's observer, memory's one writer (§2:1): a background stage over its two
+        # routes, the one memory store, the write stage over the writer persisting to that
+        # store (§12:1, ADR-0028 §4), the one plan store its observation records live in
+        # (§16:1), the story store and the selector above (§15:1, §15:3). The engine
+        # starts a run on every frozen episode and the scheduler's row runs it on a timer
+        # (§7:6).
+        observer = Observer(
+            scout=observer_scout,
+            commit=observer_commit,
+            memory=memory,
+            writes=MemoryWriteStage(writer=writer),
+            plans=plans,
+            stories=stories,
+            episodes=episode_selector,
+            limits=ObserverLimits(
+                since=OBSERVER_SINCE,
+                story_episodes=OBSERVER_STORY_EPISODES,
+                related=OBSERVER_RELATED,
+                similar=OBSERVER_SIMILAR,
+                retry_base=OBSERVER_RETRY_BASE,
+                retry_cap=OBSERVER_RETRY_CAP,
+                stuck_after=OBSERVER_STUCK_AFTER,
+                per_run=OBSERVER_PER_RUN,
+                daily_calls=settings.observer_daily_calls,
+            ),
+            now=_utcnow,
+        )
         # ADR-0309 §2:6: the phases, which plan every activation, over the objects this
         # root already built (:class:`_PhaseSeams`).
         phases = _build_phase_path(
@@ -1664,9 +1754,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # ADR-0282's windows stage, holding the initial episode selector over the
             # one memory store. The selector is the method ADR-0276 §4 makes a wiring
             # choice: swapping it is a change on this line and nowhere else.
-            windows=WindowsStage(
-                episodes=RecentEpisodes(memory=memory, limit=UNDERSTANDING_EPISODE_LIMIT)
-            ),
+            windows=WindowsStage(episodes=episode_selector),
             # ADR-0281's recall stage, over the same memory store, with the threshold
             # chosen for the embedder that store was built with, and the one story
             # store, where it looks up the stories of the episodes it keeps (ADR-0300
@@ -1771,6 +1859,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # panel's read of the pending candidates answers none while `remember`
             # writes memories under ADR-0328 §13's interim.
             candidates=REMEMBER_RECORDS_CANDIDATES,
+            # ADR-0329 §7:6, §15:1: the observer, run on each frozen episode and by the
+            # scheduler's `observer` row.
+            observer=observer,
             # The capture/lifecycle stage, holding *both* durable stores — the same
             # `memory` again, so a captured turn is retrievable and destroyable
             # through the surfaces the user already has (ADR-0074 §9). Its
@@ -2140,10 +2231,10 @@ def ensure_model_credentials(settings: Settings) -> None:
     revoked or throttled still fails at request time, classified there as the
     model error it is.
 
-    Every route is checked — the router's whole preference order *and*
-    consolidation's own — because ADR-0285 §5 gives that route one spec that never
-    falls back, so a credential it lacks disables the background work riding it
-    silently rather than being covered by a sibling. Duplicates are checked once;
+    Every route is checked — the router's whole preference order, consolidation's
+    own and the observer's two — because ADR-0285 §5 gives each of those one spec that
+    never falls back (ADR-0329 §9:9), so a credential it lacks disables the background
+    work riding it silently rather than being covered by a sibling. Duplicates are checked once;
     consolidation's spec defaults to ``default_model``, and repeating the probe
     would only repeat the message.
 
@@ -2158,7 +2249,14 @@ def ensure_model_credentials(settings: Settings) -> None:
             misconfiguration to a single exit code through one type check
             (ADR-0083 §5).
     """
-    for spec in dict.fromkeys((*_model_specs(settings), _consolidation_spec(settings))):
+    for spec in dict.fromkeys(
+        (
+            *_model_specs(settings),
+            _consolidation_spec(settings),
+            _observer_scout_spec(settings),
+            _observer_commit_spec(settings),
+        )
+    ):
         # In this order: the vendor check owns the "package not installed" message
         # and names the extra to install, and the credential probe presumes the
         # vendor resolved. Repeating a check `build_engine` also runs is cheap and
@@ -2611,6 +2709,64 @@ def _build_consolidation_provider(settings: Settings, spec: str) -> RetryingProv
             first background run. It is checked even when it repeats
             ``default_model``: the check is cheap, and a helper that trusted a caller
             to have checked already would break the day the two stop coinciding.
+    """
+    ensure_vendor_available(spec)
+    return RetryingProvider(PydanticAIProvider(spec), policy=RetryPolicy.from_settings(settings))
+
+
+def _observer_scout_spec(settings: Settings) -> str:
+    """The ``"provider:model"`` spec the observer's scout reads through (ADR-0329 §9:9).
+
+    ``observer_scout_model`` when the operator named one; otherwise ``default_model``,
+    on :func:`_consolidation_spec`'s argument: the default names no provider the operator
+    did not already configure (ADR-0004 §2).
+
+    Args:
+        settings: Loaded application settings.
+
+    Returns:
+        The spec, never empty: ``default_model`` stands behind it.
+    """
+    named = settings.observer_scout_model
+    return named if named is not None else settings.default_model
+
+
+def _observer_commit_spec(settings: Settings) -> str:
+    """The ``"provider:model"`` spec the observer's commit step decides through (§9:9).
+
+    ``observer_commit_model`` when the operator named one; otherwise ``default_model``,
+    for :func:`_observer_scout_spec`'s reason.
+
+    Args:
+        settings: Loaded application settings.
+
+    Returns:
+        The spec, never empty: ``default_model`` stands behind it.
+    """
+    named = settings.observer_commit_model
+    return named if named is not None else settings.default_model
+
+
+def _build_observer_provider(settings: Settings, spec: str) -> RetryingProvider:
+    """Build one of the observer's model seams: **retry, and no routing** (ADR-0329 §9:9).
+
+    Consolidation's shape (:func:`_build_consolidation_provider`), by ADR-0285 §5:3's
+    rule, which §9:9 applies: the observer's work is deferrable — an episode that fails
+    waits and is retried (§16:4) — so fallback would buy nothing and widen the set of
+    providers shown the user's episodes and memories. Retry re-sends to the same
+    provider, so it widens nothing.
+
+    Args:
+        settings: Loaded application settings — the resilience knobs every route gets.
+        spec: The route's ``"provider:model"`` spec.
+
+    Returns:
+        The provider the step reads through.
+
+    Raises:
+        ConfigurationError: If ``spec`` names a vendor unknown to pydantic-ai or whose
+            optional package is not installed, so the build fails rather than the first
+            run (ADR-0062 §2).
     """
     ensure_vendor_available(spec)
     return RetryingProvider(PydanticAIProvider(spec), policy=RetryPolicy.from_settings(settings))

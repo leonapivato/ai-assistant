@@ -89,6 +89,7 @@ class FakeEngine:
         self.closed = 0
         self.purged = 0
         self.decided_flags = 0
+        self.observed = 0
         self.reconsidered = 0
         self.noticed = 0
         self.removed: list[str] = []
@@ -129,6 +130,12 @@ class FakeEngine:
         # *startup* rather than only the job it would have armed.
         self.decided_flags += 1
         _marker.info("fake_engine_decided_story_flags")
+
+    async def observe_episodes(self) -> None:
+        # ADR-0329 §7:6's observer row, armed by default at `observer_interval`, so
+        # the default table drives it as it drives the reconsideration below.
+        self.observed += 1
+        _marker.info("fake_engine_observed")
 
     async def notice_upcoming_events(self) -> int:
         # ADR-0132's upcoming-event producer. Present for ``decide_story_flags``'s reason
@@ -428,6 +435,7 @@ async def test_the_readiness_event_names_the_pid_the_directory_and_the_job_set(
         "retention_purge",
         "conversation_sweep",
         "notification_reconsider",
+        "observer",
     ]
 
 
@@ -740,6 +748,7 @@ async def test_shutdown_reports_its_completion_its_phase_and_what_it_cost(
         "retention_purge",
         "conversation_sweep",
         "notification_reconsider",
+        "observer",
     ]
     for field in ("drain_seconds", "scheduler_join_seconds", "elapsed_seconds"):
         assert isinstance(done[field], float), field

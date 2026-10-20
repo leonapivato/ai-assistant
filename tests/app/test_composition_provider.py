@@ -26,8 +26,6 @@ from ai_assistant.core.errors import ConfigurationError, ModelError, ModelUnavai
 from ai_assistant.core.types import Message, Role
 from ai_assistant.memory import MemoryIngestor, ModelBackedReconciler
 from ai_assistant.models import PydanticAIProvider, RetryingProvider, RoutingProvider
-from ai_assistant.orchestration.acting import OwnRecordsByCapability
-from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY, RememberCalls
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -404,16 +402,12 @@ def test_an_uninstalled_consolidation_vendor_stops_the_build(tmp_path: Path) -> 
 def _reconciler_of(engine: Engine) -> ModelBackedReconciler:
     """The reconciler the composed engine's writer holds.
 
-    Reached through ``remember``'s runner on the phases' acting stage, the one writer's
-    holder since the consolidation stage retired (ADR-0328 §14:2).
+    Reached through the observer's write stage, the one writer's holder since the
+    observer is memory's one writer (ADR-0329 §2:1, §12:1).
     """
-    phases = engine._phases
-    assert phases is not None
-    own_records = phases._acting._own_records
-    assert isinstance(own_records, OwnRecordsByCapability)
-    runner = own_records._runners[REMEMBER_CAPABILITY]
-    assert isinstance(runner, RememberCalls)
-    writer = runner._writer
+    observer = engine._observer
+    assert observer is not None
+    writer = observer._writer._writes._writer
     assert isinstance(writer, MemoryIngestor)
     reconciler = writer._reconciler
     assert isinstance(reconciler, ModelBackedReconciler)

@@ -35,6 +35,8 @@ from ai_assistant.orchestration.lookups import (
     LookUps,
 )
 from ai_assistant.orchestration.phase_path import PhasePath
+from ai_assistant.orchestration.reliance import NOTE_RELIANCE_CAPABILITY, RELIANCE_LABEL_ARGUMENTS
+from ai_assistant.orchestration.remembering import CANDIDATE_LABEL_ARGUMENTS
 from ai_assistant.orchestration.story_calls import (
     STORY_CALL_CAPABILITIES,
     STORY_LABEL_ARGUMENTS,
@@ -82,7 +84,8 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(
         assert 1 <= RECALL_SECOND_RUN_CAP <= RECALLED_ITEMS_MAX
         assert phases._memory is engine._memory
         assert engine._chat_turn_budget == PHASES_TURN_BUDGET
-        # ADR-0306 §2:7: every capability the tools advertise — here remembering; no
+        # ADR-0306 §2:7: every capability the tools advertise — here remembering and
+        # noting reliance (ADR-0329 §3:1, §6:7); no
         # search, account or booking is configured, so none of theirs, and the clock
         # the registry holds is not offered, since planning's input carries ``now``
         # (#2942). Planning's story calls that write are offered beside them
@@ -91,13 +94,21 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(
         offered = await _offered(phases)
         assert {str(one.capability) for one in offered} == {
             "remember",
+            NOTE_RELIANCE_CAPABILITY,
             *STORY_CALL_CAPABILITIES,
             *LOOK_UP_CAPABILITIES,
         }
         # ADR-0048 §1: the clock stays registered, and selection still finds it.
         clock = await phases._tools.find("report_current_time")
         assert [str(one.id) for one in clock] == ["current_time"]
-        assert phases._label_arguments == {**STORY_LABEL_ARGUMENTS, **LOOK_UP_LABEL_ARGUMENTS}
+        # ADR-0329 §3:1, §6:7: `remember` records a candidate, whose labels and the
+        # reliance call's are filled like any other's.
+        assert phases._label_arguments == {
+            **STORY_LABEL_ARGUMENTS,
+            **LOOK_UP_LABEL_ARGUMENTS,
+            **CANDIDATE_LABEL_ARGUMENTS,
+            **RELIANCE_LABEL_ARGUMENTS,
+        }
         # One look-ups runner behind every look-up, over the root's own memory store and
         # the story views' reads, whose scope the path opens around acting.
         look_ups = phases._look_ups
@@ -144,6 +155,7 @@ async def test_a_connected_search_is_offered_without_the_origin_the_hub_fills(
         assert set(offered) == {
             "web_search",
             "remember",
+            NOTE_RELIANCE_CAPABILITY,
             *STORY_CALL_CAPABILITIES,
             *LOOK_UP_CAPABILITIES,
         }
@@ -188,6 +200,7 @@ async def test_a_configured_booking_act_is_offered_with_its_endpoint_filled(
             "booking_availability",
             "book_stay",
             "remember",
+            NOTE_RELIANCE_CAPABILITY,
             *STORY_CALL_CAPABILITIES,
             *LOOK_UP_CAPABILITIES,
         }

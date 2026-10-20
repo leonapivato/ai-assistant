@@ -42,6 +42,9 @@ retired is read off its create again (:meth:`FindingWriter.retirements`).
 
 from __future__ import annotations
 
+# At runtime, not under TYPE_CHECKING: `Landed` is a PEP 695 alias, whose value is read
+# lazily and must resolve when it is (#1706).
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.errors import (
@@ -77,7 +80,7 @@ from ai_assistant.orchestration.observer.commit import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
     from datetime import datetime
 
     from ai_assistant.core.protocols import MemoryStore
