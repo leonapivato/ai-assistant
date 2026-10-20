@@ -494,3 +494,38 @@ async def test_a_cancellation_reaching_a_write_is_re_raised() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         await entries.ended(_target(), ObservationAttemptEnd.FINISHED, ObservationState.PROCESSED)
+
+
+class _CancelledAtOutcome(FakeDiagnosticSink):
+    """A record whose first outcome entry's write is reached by a cancellation."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancelled = False
+
+    async def write(self, entry: DiagnosticEntry) -> None:
+        if not self.cancelled and entry.body.get("stage") == "outcome":
+            self.cancelled = True
+            raise asyncio.CancelledError
+        await super().write(entry)
+
+
+async def test_a_cancelled_outcome_write_never_commits_its_finding_again() -> None:
+    """§1:3, §2:11: the outcome is on the record before its entry is written."""
+    harness = Harness()
+    await _three(harness)
+    sink = _CancelledAtOutcome()
+    commit = FakeModelProvider.scripted(_create())
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")), commit=commit, diagnostics=sink
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await observer.run()
+    await observer.run()
+
+    assert len(commit.calls) == 1
+    created = [one for one in await harness.memory.export() if isinstance(one, Memory)]
+    assert [one.content for one in created] == [_CLAIM]
+    (record,) = await harness.plans.observations([address("one")])
+    assert record.state is ObservationState.PROCESSED

@@ -1041,6 +1041,10 @@ class Learned:
             attempt.items.append(item)
             self.waiting.setdefault(key, []).append(item)
             self.pairs[line.line] = None
+            if stage == "commit" and finding is not None and finding not in self.current:
+                # Its findings entry is not in this file (written while the record was
+                # off, say): the commit's own given entry names the finding.
+                self._stub(attempt, finding, _mapping(body.get("finding")).get("claim"))
             self._called(attempt, stage, finding, {"given": line.line, "returned": None})
             return
         waiting = self.waiting.get(key)
@@ -1104,19 +1108,24 @@ class Learned:
         self.current[finding_id] = record
         return record
 
+    def _stub(self, attempt: _Try, finding_id: str, claim: object) -> dict[str, object]:
+        """A finding no findings entry in this file named, known by its id and claim."""
+        record: dict[str, object] = {
+            "id": finding_id, "claim": _text(claim), "parts": None, "candidate": None,
+            "relied_on": None, "attempt": attempt.key, "findings_line": None, "scout": {},
+            "commit": None, "outcome": None,
+        }  # fmt: skip
+        self.findings.append(record)
+        self.current[finding_id] = record
+        return record
+
     def _outcome(self, attempt: _Try, line: Entry, body: Mapping[str, object]) -> None:
         finding_id = _text(body.get("finding")) or "?"
         record = self.current.get(finding_id)
         if record is None:
             # Its findings entry was never written, or is not this file's: the outcome
             # still names its claim.
-            record = {
-                "id": finding_id, "claim": _text(body.get("claim")), "parts": None,
-                "candidate": None, "relied_on": None, "attempt": attempt.key,
-                "findings_line": None, "scout": {}, "commit": None, "outcome": None,
-            }  # fmt: skip
-            self.findings.append(record)
-            self.current[finding_id] = record
+            record = self._stub(attempt, finding_id, body.get("claim"))
         decided = _mapping(body.get("decided"))
         short = outcome_in_short(body.get("outcome"))
         record["outcome"] = {
@@ -2068,7 +2077,7 @@ def learning_call(lines: Sequence[Line], number: int) -> dict[str, object] | Non
         isinstance(picked, Entry)
         and picked.source == "observer"
         and picked.kind in {"given", "returned"}
-        and _mapping(picked.body).get("stage") in OBSERVER_CALLS
+        and _text(_mapping(picked.body).get("stage")) in OBSERVER_CALLS
     ):
         return None
     learned = Learned("")

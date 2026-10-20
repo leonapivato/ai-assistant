@@ -525,15 +525,27 @@ class Observer:
         for finding_id in [one.id for one in attempt.record.findings if one.outcome is None]:
             key = (episode.id, finding_id)
             current = _finding(attempt, finding_id)
+            decided: _Decided | None = None
             # An outcome decided before its record failed to be written is recorded as
             # decided, never committed again over writes that already landed (§16:1).
             if current.outcome is None:
-                current = await self._committed(finding_id, reading, attempt)
+                current, decided = await self._committed(finding_id, reading, attempt)
             self._unsaved[key] = current
             done = tuple(
                 current if one.id == finding_id else one for one in attempt.record.findings
             )
             await self._save(attempt, findings=done)
+            if decided is not None and current.outcome is not None:
+                # Written once the outcome is on the record, never between its decision
+                # and its keeping: a cancellation reaching the entry's write must not
+                # leave a decided finding to be committed again (ADR-0333 §1:3, §2:11).
+                await self._entries.outcome(
+                    attempt.diagnosed,
+                    current,
+                    current.outcome,
+                    decided=decided.checked,
+                    note=decided.note,
+                )
 
     async def _scouted(
         self, reading: Reading, attempt: _Attempt, kept: tuple[ObservationFinding, ...]
@@ -556,12 +568,14 @@ class Observer:
 
     async def _committed(
         self, finding_id: str, reading: Reading, attempt: _Attempt
-    ) -> ObservationFinding:
+    ) -> tuple[ObservationFinding, _Decided]:
         """One finding's commit call, code's checks, and its writes (§9:3-§9:5, §12).
 
         What an earlier commit of the finding wrote — its ``written``, with what any
         replacement there retired read again — joins the outcome, whatever this one
         decides, and the outcome clears ``written`` in the write that records it (§16:1).
+        Returns the finding with its outcome, and the decision it came from, which the
+        outcome's diagnostic entry gives once the record holds it (ADR-0333 §2:5).
         """
         finding = _finding(attempt, finding_id)
         earlier = await self._recovered(finding.written)
@@ -578,14 +592,7 @@ class Observer:
             unwritten=None if outcome.unwritten is None else outcome.unwritten.value,
             writes=len(outcome.writes),
         )
-        await self._entries.outcome(
-            attempt.diagnosed,
-            _finding(attempt, finding_id),
-            outcome,
-            decided=decided.checked,
-            note=decided.note,
-        )
-        return _updated(_finding(attempt, finding_id), written=(), outcome=outcome)
+        return _updated(_finding(attempt, finding_id), written=(), outcome=outcome), decided
 
     async def _recovered(
         self, written: tuple[ObservationWrite, ...]

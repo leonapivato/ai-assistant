@@ -295,3 +295,38 @@ def test_odd_observer_lines_lose_their_summary_and_nothing_else() -> None:
         line for one in lane["attempts"] for item in one["items"] for line in item["lines"]
     ]
     assert sorted(clickable) == list(range(len(odd)))
+
+
+def test_a_commit_whose_findings_entry_is_absent_keeps_its_link(server: Any, record: Path) -> None:
+    """A finding recorded only from its commit on (the record turned on between attempts)."""
+    kept = (record / "a-kept.observer.jsonl").read_text(encoding="utf-8").splitlines()
+    later = [one for one in kept if json.loads(one)["body"]["stage"] not in {"scout", "findings"}]
+    (record / "later.observer.jsonl").write_text("\n".join(later) + "\n", encoding="utf-8")
+
+    first, second = _overview(server.port)["later"]["findings"]
+
+    assert (first["claim"], second["claim"]) == (KEPT_CLAIM, NOT_KEPT_CLAIM)
+    assert second["findings_line"] is None
+    commit = second["commit"]
+    assert json.loads(later[commit["given"]])["body"]["finding"]["id"] == "f2"
+    assert json.loads(later[commit["returned"]])["body"]["finding"] == "f2"
+    assert second["outcome"]["short"] == "nothing kept"
+
+
+@pytest.mark.parametrize("stage", [["scout"], {"step": "commit"}, 3, None])
+def test_a_call_whose_stage_is_of_another_shape_reads_as_no_call(
+    server: Any, record: Path, stage: object
+) -> None:
+    """ADR-0316 §5:2 via ADR-0333 §5:7: an odd hint loses its reading, never the request."""
+    line = {
+        "activation_id": "odd",
+        "source": "observer",
+        "kind": "given",
+        "recorded_at": "2026-10-18T12:00:00+00:00",
+        "body": {"stage": stage, "messages": []},
+    }
+    (record / "odd.observer.jsonl").write_text(json.dumps(line) + "\n", encoding="utf-8")
+
+    assert _get(server.port, "/api/call?id=odd&file=observer&line=0")[0] == 404
+    assert _json(server.port, "/api/entry?id=odd&file=observer&line=0")["kind"] == "given"
+    assert _json(server.port, "/api/activation?id=odd")["learning"]["entries"]
