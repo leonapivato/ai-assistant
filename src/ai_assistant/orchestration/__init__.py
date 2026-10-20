@@ -64,9 +64,9 @@ here precisely because neither store may hold the other (golden rule 1).
 
 ``MemoryWriteStage`` is the **write stage**: the one place a producer's proposal
 reaches memory. It holds the ratified ``MemoryWriter``, and an ``ASK_USER`` ruling
-writes nothing and is logged by the proposal's id (ADR-0309 §5). Its one producer,
-the consolidation stage, retired (ADR-0328 §14:2), so the composition root builds
-none until another producer holds it.
+writes nothing and is logged by its kinds alone (ADR-0319 §5). Its producer is the
+observer (``orchestration.observer``, ADR-0329 §12:1), memory's one writer, which the
+composition root does not yet build.
 
 ``NotificationWriteStage`` is ADR-0130 §3's **producer seam**, concrete: it holds
 the deterministic policy and hands it to the store, so the duplicate lookup, the

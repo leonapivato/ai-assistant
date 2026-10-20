@@ -16,9 +16,14 @@ should become something the user is asked is for the learning work to decide,
 not this stage.
 
 **One stage, injected into every producer's stage**, so every producer's proposal
-takes the one route and is reported the same way. Its one producer, the
-consolidation stage, retired (ADR-0328 §14:2), and nothing in production holds it
-until another producer does.
+takes the one route and is reported the same way. Its producer is the observer,
+memory's one writer (ADR-0329 §2:1, §12:1): every write it makes goes through here,
+never to the writer directly (ADR-0106 §6:8). So beside :meth:`MemoryWriteStage.write`,
+which carries a creation and a proposal that retires a stored memory alike
+(ADR-0329 §12:2, §12:4), the stage passes one operation on one stored memory through to
+``MemoryWriter.apply`` (§12:3) and one track-record entry through to
+``MemoryWriter.record_use`` (§14:4). Both add nothing to what the writer does: they are
+the route, not a second write path.
 """
 
 from __future__ import annotations
@@ -32,7 +37,13 @@ from ai_assistant.core.types import MemoryDecisionKind
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import MemoryWriter
-    from ai_assistant.core.types import MemoryIngestResult, MemoryUpdateProposal
+    from ai_assistant.core.types import (
+        Memory,
+        MemoryChange,
+        MemoryIngestResult,
+        MemoryUpdateProposal,
+        TrackRecordEntry,
+    )
 
 _log = structlog.get_logger(__name__)
 
@@ -115,3 +126,40 @@ class MemoryWriteStage:
                 memory_kind=observed.proposed.kind,
             )
         return WriteOutcome(result=result)
+
+    async def apply(self, change: MemoryChange) -> None:
+        """Apply one operation to one stored memory, through the writer (ADR-0329 §12:3).
+
+        A pass-through to ``MemoryWriter.apply``: an add support, a raise question or a
+        resolve question, written conditionally on the revision the caller read.
+
+        Args:
+            change: The memory as read, the operation, and what it brings with it.
+
+        Raises:
+            UnresolvedEvidenceError: As the writer raises, for a support pointing at an
+                episode the store does not hold.
+            MemoryStoreStaleError: As the writer raises, where the stored memory is not
+                the one read.
+            MemoryStoreError: As the writer raises, for every other refusal or a store
+                failure. Nothing is written.
+        """
+        await self._writer.apply(change)
+
+    async def record_use(self, memory: Memory, entry: TrackRecordEntry) -> None:
+        """Record one track-record entry, through the writer (ADR-0329 §14:4).
+
+        A pass-through to ``MemoryWriter.record_use``, conditional on the revision
+        ``memory`` was read at; an entry already held for the episode changes nothing.
+
+        Args:
+            memory: The stored memory, as read.
+            entry: The entry to record.
+
+        Raises:
+            MemoryStoreStaleError: As the writer raises, where the stored memory is not
+                the one read.
+            MemoryStoreError: As the writer raises, for a memory no store returned or a
+                store failure. Nothing is written.
+        """
+        await self._writer.record_use(memory, entry)
