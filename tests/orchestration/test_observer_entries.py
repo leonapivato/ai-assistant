@@ -18,6 +18,7 @@ import structlog.testing
 from observer_support import AT, Harness, address, episode, reply
 
 from ai_assistant.core.diagnostics import DIAGNOSTIC_NOT_WRITTEN
+from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     DiagnosticEntry,
     DiagnosticKind,
@@ -529,3 +530,38 @@ async def test_a_cancelled_outcome_write_never_commits_its_finding_again() -> No
     assert [one.content for one in created] == [_CLAIM]
     (record,) = await harness.plans.observations([address("one")])
     assert record.state is ObservationState.PROCESSED
+
+
+async def test_an_outcome_whose_record_failed_to_be_written_still_has_its_entry() -> None:
+    """§2:5: the next attempt restores the decided finding, so its entry is not deferred."""
+    harness = Harness()
+    await _three(harness)
+    write_observation = harness.plans.write_observation
+    refused = False
+
+    async def failing_outcome(record: Any, *, expected_revision: int) -> Any:
+        nonlocal refused
+        if not refused and any(one.outcome is not None for one in record.findings):
+            refused = True
+            msg = "the plan store could not write"
+            raise PlanningError(msg)
+        return await write_observation(record, expected_revision=expected_revision)
+
+    harness.plans.write_observation = failing_outcome  # type: ignore[method-assign]  # one outage
+    sink = FakeDiagnosticSink()
+    commit = FakeModelProvider.scripted(_create())
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")), commit=commit, diagnostics=sink
+    )
+
+    await observer.run()
+    await observer.run()
+
+    (record,) = await harness.plans.observations([address("one")])
+    assert record.state is ObservationState.PROCESSED
+    assert len(commit.calls) == 1
+    (outcome,) = [one for one in sink.recorded if _body(one)["stage"] == "outcome"]
+    assert _body(outcome)["decided"]["action"] == "create"
+    assert [_body(one)["state"] for one in sink.recorded if _body(one)["stage"] == "end"] == [
+        "processed"
+    ]
