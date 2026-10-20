@@ -149,15 +149,14 @@ TCP keepalive's two hours to see a silent drop and end the holder on the box; un
 another deploy refuses, told how to find the holder.
 
 **A first install that ends early is resumed** (#3185). It records itself in
-``<person>/.first-install`` before it makes the volumes and removes the record once
-``unit.env`` is written and before the unit is enabled or started, each step synced to
-the box's disk. While the record stands nothing can have run on the volumes, so the next
-deploy finds the record, keeps the volumes, and installs again, writing ``unit.env``
-over any the interrupted run wrote. It checks first that the unit is neither enabled
-nor started, as only a hand could have made it while the record stood; if it is, a hub
-may have run there, and it refuses. Volumes with neither a record nor ``unit.env`` are
-still refused: that may be a person's data with nothing to say which image wrote it
-(ADR-0326 §6:1).
+``<person>/.first-install`` before it makes the volumes, and removes the record once
+``unit.env`` is written and synced to the box's disk. The unit cannot start without
+``unit.env``, so while the record stands without it nothing can have run on the
+volumes, and the next deploy finds the record, keeps the volumes, and installs again.
+Beside ``unit.env`` the record says nothing: the volumes are served, a deploy backs
+them up first with the image ``unit.env`` names, and removes the record. Volumes with
+neither a record nor ``unit.env`` are still refused: that may be a person's data with
+nothing to say which image wrote it (ADR-0326 §6:1).
 """
 
 from __future__ import annotations
@@ -1185,7 +1184,7 @@ class Deployment:
                 "systemctl",
                 "show",
                 self.person.unit,
-                "--property=ActiveState,SubState,ExecMainStatus,NRestarts,UnitFileState",
+                "--property=ActiveState,SubState,ExecMainStatus,NRestarts",
             ],
             f"reading {self.person.unit}'s state",
         )
@@ -1260,15 +1259,16 @@ class Deployment:
         self._check_env_file()
         self.relay = self._rule_on_relay()
         self._check_passphrase(person.keyring_passphrase, "keyring")
-        # A first install records itself before it makes the volumes and removes the
-        # record before anything starts on them, so while it stands they hold nothing a
-        # hub wrote, whatever unit.env says, and the install is resumed.
-        resumed = self._stat(person.first_install) is not None
-        if resumed:
-            self._check_nothing_ran()
-            say(f"{person.first_install}: a first install that ran nothing; resuming it")
-        text = None if resumed else self._read(person.unit_env)
+        text = self._read(person.unit_env)
         installed = None if text is None else parse_unit_env(text)
+        # A first install records itself before it makes the volumes, and removes the
+        # record only once unit.env is written. The unit cannot start without unit.env,
+        # so a record with no unit.env means nothing has run on the volumes, and the
+        # install is resumed. Beside unit.env the record says nothing: the volumes are
+        # served, and backed up first.
+        resumed = installed is None and self._stat(person.first_install) is not None
+        if resumed:
+            say(f"{person.first_install}: a first install that wrote no unit.env; resuming it")
         served = self._volume_exists(person.data_volume)
         if installed is None and served and not resumed:
             raise DeployError(
@@ -1311,30 +1311,6 @@ class Deployment:
         installed = self._read(PurePosixPath(UNIT_PATH))
         if installed is not None and self._unit_root() not in installed.splitlines():
             raise self._other_root(installed)
-
-    def _check_nothing_ran(self) -> None:
-        """Refuse to resume a first install whose unit could have started on its volumes.
-
-        This deploy enables the unit only once the record is gone, so a unit enabled or
-        started while it stands was made so by hand, and a boot may have run a hub on
-        the volumes: they are then treated as served, backed up first, never resumed.
-
-        Raises:
-            DeployError: If the unit is enabled, or has started since the box booted.
-        """
-        unit = self.person.unit
-        state = self._unit_state()
-        enabled = state.get("UnitFileState", "")
-        active = state.get("ActiveState", "")
-        if enabled in {"", "disabled"} and active == "inactive":
-            return
-        raise DeployError(
-            f"{self.person.first_install} records a first install that ran nothing, but\n"
-            f"{unit} is {enabled or 'not installed'} and {active}, so a hub may have run on\n"
-            f"its volumes. Run `systemctl disable --now {unit}`, remove\n"
-            f"{self.person.first_install}, and deploy again: the volumes are then treated\n"
-            f"as served, and backed up before anything is installed.\n{_UNTOUCHED}"
-        )
 
     def _unit_root(self) -> str:
         """The line of the unit that names this deploy's person-directory root."""
@@ -1492,9 +1468,7 @@ class Deployment:
                 "+",
             ]
         )
-        # A resumed first install's own unit.env is the one it replaces.
-        own = str(self.person.unit_env)
-        others = [line for line in taken.out.splitlines() if line.strip() and line != own]
+        others = [line for line in taken.out.splitlines() if line.strip()]
         if others:
             raise DeployError(
                 f"port {self.port} is already another person's: {', '.join(others)}.\n{_UNTOUCHED}"
@@ -1854,6 +1828,10 @@ class Deployment:
         if first:
             self._install_first(image)
             return
+        # A first install's record left beside unit.env says nothing, and the volumes
+        # were backed up as served; it goes, so it is never read without unit.env.
+        record = self.person.first_install
+        self._ok(["rm", "-f", "--", str(record)], f"removing {record}")
         self._ok(["systemctl", "enable", self.person.unit], f"enabling {self.person.unit}")
         # Replaced whole, so until this lands the unit's next start is the earlier image.
         self._write_unit_env(image)
@@ -1862,10 +1840,10 @@ class Deployment:
         """Make a first install's volumes and ``unit.env``, recorded until they are made.
 
         :attr:`Person.first_install` is written before the volumes are made, and removed
-        once ``unit.env`` is written and before the unit is enabled or started. While it
-        stands nothing can run on the volumes, so a run that fails or is killed with it
-        standing leaves volumes that hold nothing a hub wrote, and the next deploy
-        resumes the install on them.
+        once ``unit.env`` is written. The unit cannot start without ``unit.env``, so a run
+        that fails or is killed before it is written leaves volumes that hold nothing a
+        hub wrote, and the next deploy resumes the install on them; one that ends after
+        leaves served volumes, which the next deploy backs up first.
 
         Args:
             image: The image to run.
@@ -1885,7 +1863,6 @@ class Deployment:
         self._write_unit_env(image)
         self._sync(person.unit_env, person.dir)
         self._ok(["rm", "-f", "--", str(person.first_install)], "removing the record")
-        self._sync(person.dir)
         self._ok(["systemctl", "enable", person.unit], f"enabling {person.unit}")
 
     def _write_unit_env(self, image: Image) -> None:

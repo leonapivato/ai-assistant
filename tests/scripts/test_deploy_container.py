@@ -197,7 +197,6 @@ class FakeBox:
             state = (
                 f"ActiveState={self.active}\nSubState=x\n"
                 f"ExecMainStatus={self.exit_status}\nNRestarts=0\n"
-                f"UnitFileState={'enabled' if self.enabled else 'disabled'}\n"
             )
             return 0, state, ""
         if verb == "stop":
@@ -668,7 +667,7 @@ def test_deploy_recovery_door_that_does_not_refuse_is_stopped() -> None:
     assert not box.enabled
 
 
-def test_deploy_first_install_interrupted_after_unit_env_is_resumed() -> None:
+def test_deploy_first_install_interrupted_after_unit_env_is_backed_up_when_run_again() -> None:
     box = FakeBox(files=person_files(served=False), interrupt_after_rename=True)
 
     with pytest.raises(KeyboardInterrupt):
@@ -677,16 +676,16 @@ def test_deploy_first_install_interrupted_after_unit_env_is_resumed() -> None:
     created = [argv[-1] for argv in box.ran if argv[:3] == [dc.DOCKER, "volume", "create"]]
     assert created == [PERSON.data_volume, PERSON.keyring_volume]
     assert verbs(box)[-1] == "unit.env", "interrupted on unit.env's rename, and nothing after"
-    assert str(PERSON.first_install) in box.files, "the record stands: nothing ran"
+    assert str(PERSON.first_install) in box.files, "the record stands, beside unit.env"
     assert box.volumes == {PERSON.data_volume, PERSON.keyring_volume}
     assert not box.enabled
     assert not box.mine, "every lock is released"
 
     box.interrupt_after_rename = False
-    report = deployment(box, port=8501, stamp="20261018T130000Z").run()
+    report = deployment(box, port=8501, stamp=LATER, token=RERUN).run()
 
-    assert "backup: none, a first install has served no data" in report
-    assert "20261018T130000Z" in box.files[str(PERSON.unit_env)].data.decode()
+    assert report[-1].endswith(f"pre-deploy-{LATER}-{RERUN}.age (verified, and kept)")
+    assert LATER in box.files[str(PERSON.unit_env)].data.decode()
     assert str(PERSON.first_install) not in box.files
     assert box.active == "active"
     assert box.enabled  # last: mypy reads the earlier `not box.enabled` as still holding
@@ -709,8 +708,8 @@ def _sends(*head: str, last: str | None = None) -> Callable[[list[str]], bool]:
 
 
 #: Where a first install is killed, and whether the run again resumes it as a first
-#: install. Once the record is gone the volumes count as served, and the run again backs
-#: them up with the image unit.env names before installing, as for any served hub.
+#: install. Once unit.env is written the volumes count as served, record or not, and the
+#: run again backs them up with the image it names before installing, as for any hub.
 _FIRST_INSTALL_KILLS: dict[str, tuple[Callable[[list[str]], bool], bool]] = {
     "before the lock": (_sends("sh", "-c", dc.HOLDER), True),
     "holding the person's lock": (_sends(dc.DOCKER, "build"), True),
@@ -733,7 +732,7 @@ _FIRST_INSTALL_KILLS: dict[str, tuple[Callable[[list[str]], bool], bool]] = {
     ),
     "after unit.env, before the record goes": (
         _sends("rm", last=str(PERSON.first_install)),
-        True,
+        False,
     ),
     "after the record, before the unit is enabled": (_sends("systemctl", "enable"), False),
     "before the start": (_sends("systemctl", "start"), False),
@@ -771,51 +770,27 @@ def test_deploy_first_install_killed_anywhere_finishes_when_run_again(
 
 @pytest.mark.parametrize(
     ("enabled", "active"),
-    [(True, "inactive"), (False, "active"), (False, "failed"), (True, "active")],
+    [(False, "inactive"), (True, "inactive"), (True, "active"), (False, "failed")],
 )
-def test_deploy_refuses_to_resume_a_first_install_whose_unit_could_have_run(
+def test_deploy_a_first_install_that_wrote_unit_env_is_backed_up_whatever_ran(
     enabled: bool, active: str
 ) -> None:
-    # Killed with unit.env written and the record standing; then the unit was enabled by
-    # hand, or started, or both, as a boot does to an enabled one: a hub may have run.
+    # Killed with unit.env written and the record standing. A hand, or a boot, may then
+    # have started the unit, and stopped it again: the record no longer says nothing ran.
     box = FakeBox(
         files=person_files(served=False), kill_at=_sends("rm", last=str(PERSON.first_install))
     )
     with pytest.raises(Killed):
         deployment(box, port=8501).run()
     box.revive()
-    box.ran.clear()
     box.enabled, box.active = enabled, active
-    written = box.files[str(PERSON.unit_env)].data
+    if active == "active":
+        box.container_image = dc.parse_unit_env(box.files[str(PERSON.unit_env)].data.decode()).image
 
-    _refused_untouched(box, "so a hub may have run on", port=8501, stamp=LATER, token=RERUN)
-
-    assert str(PERSON.first_install) in box.files
-    assert box.files[str(PERSON.unit_env)].data == written
-    assert box.volumes == {PERSON.data_volume, PERSON.keyring_volume}
-    assert not [argv for argv in box.ran if argv[:2] == ["systemctl", "disable"]]
-
-
-def test_deploy_a_first_install_whose_unit_ran_is_backed_up_once_its_record_goes() -> None:
-    box = FakeBox(
-        files=person_files(served=False), kill_at=_sends("rm", last=str(PERSON.first_install))
-    )
-    with pytest.raises(Killed):
-        deployment(box, port=8501).run()
-    box.revive()
-    box.enabled, box.active = True, "active"
-    box.container_image = dc.parse_unit_env(box.files[str(PERSON.unit_env)].data.decode()).image
-    with pytest.raises(
-        dc.DeployError, match=re.escape("systemctl disable --now hub@alice.service")
-    ):
-        deployment(box, port=8501).run()
-
-    # What the refusal says to do: disable and stop the unit, and remove the record.
-    box.enabled, box.active, box.container_image = False, "inactive", None
-    del box.files[str(PERSON.first_install)]
     report = deployment(box, port=8501, stamp=LATER, token=RERUN).run()
 
     assert report[-1].endswith(f"pre-deploy-{LATER}-{RERUN}.age (verified, and kept)")
+    assert str(PERSON.first_install) not in box.files
     assert box.active == "active"
     assert box.enabled
 
