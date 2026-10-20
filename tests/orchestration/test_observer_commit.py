@@ -22,6 +22,7 @@ from ai_assistant.core.types import (
     FindingUnwritten,
     InputPart,
     Memory,
+    MemoryOperation,
     MemoryOperationKind,
     MemoryStanding,
     MemorySupport,
@@ -43,6 +44,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.observer.commit import (
     AddSupports,
+    Blocked,
     Checked,
     CommitReply,
     CommitView,
@@ -616,22 +618,79 @@ def test_a_narrower_supply_never_widens_onto_a_stored_memory() -> None:
     assert isinstance(added.primary, Create)
     assert added.primary.memory.content == held.content
     assert added.primary.memory.placement.reach is PlacementReach.OWNER
-    assert recheck.primary == Unwritten(FindingUnwritten.CHECK_FAILED)
+    assert recheck.primary == Blocked()
     assert isinstance(retired.primary, Create)
     assert retired.primary.retiring is None
 
 
-def test_a_narrower_supply_records_no_entry_and_resolves_nothing_on_a_wider_memory() -> None:
-    """§12:6: neither an entry nor a resolution carries the supply onto the memory."""
+def test_a_narrower_supply_blocks_an_entry_and_a_resolution_on_a_wider_memory() -> None:
+    """§12:6, §16:4: neither is written onto the wider memory, and neither is dropped."""
+    open_question = OpenQuestion(
+        id="question:1",
+        kind=OpenQuestionKind.RECHECK,
+        asks="Still?",
+        rests_on=(InputPart(episode=address("past")),),
+        raised_at=AT,
+        raised_by=MemoryWriterName.OBSERVER,
+    )
     held = memory("m-seat", "The user prefers window seats.", said_support(address("past")))
+    asked = held.model_copy(update={"open_questions": (open_question,)})
+    asked = Memory.model_validate(
+        {
+            **asked.model_dump(),
+            "operations": (
+                *held.operations,
+                MemoryOperation(
+                    kind=MemoryOperationKind.RAISE_QUESTION,
+                    cites=InputPart(episode=address("past")),
+                    at=AT,
+                    by=MemoryWriterName.OBSERVER,
+                    question="question:1",
+                ),
+            ),
+        }
+    )
     reliance = Reliance(handle="M1", memory=held, shaped="the seat", relied_at=AT)
     relied = _view(
         _input("P1", "later", at_minutes=5), similar=(_similar("M1", held),), reliance=reliance
     )
-
-    assert _narrow(relied, track_record="held_up").primary == Unwritten(
-        FindingUnwritten.CHECK_FAILED
+    answered = _view(
+        _input("P1", "leaving"), similar=(_similar("M1", asked, questions={"Q1": "question:1"}),)
     )
+
+    entry = _narrow(relied, track_record="held_up")
+    resolution = _narrow(
+        answered,
+        action="nothing",
+        supports=[_support("P1", direction="against", backs_as_worded=False)],
+        resolves={"memory": "M1", "question": "Q1", "part": "P1", "note": "now window"},
+    )
+
+    assert entry.primary == Blocked()
+    assert resolution.primary == Blocked()
+
+
+def test_a_recheck_on_the_assistants_words_rests_on_the_users_keep() -> None:
+    """§10:1, §13:2: a question rests on one support, so on the keep, never the words."""
+    held = memory("m-seat", "The user likes aisle seats.", said_support(address("past")))
+    message = _part(
+        "P1",
+        RoundMessagePart(episode=address("leaving"), round="r1"),
+        origin=SupportOrigin.ASSISTANT_MESSAGE,
+    )
+    keep = _input("P2", "later", at_minutes=5)
+    view = _view(message, keep, similar=(_similar("M1", held),))
+
+    decision = _checked(
+        view,
+        action="recheck",
+        memory="M1",
+        asks="Still aisle?",
+        supports=[_support("P1", backs_as_worded=False), _support("P2", backs_as_worded=False)],
+    )
+
+    assert isinstance(decision.primary, RaiseQuestion)
+    assert decision.primary.support.points_at == keep.part
 
 
 def test_a_confirmation_is_added_only_to_a_memory_its_wording_agrees_with() -> None:

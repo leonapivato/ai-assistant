@@ -152,10 +152,12 @@ def proposed_findings(
         # A finding about a candidate the user confirmed rests on that yes, whatever
         # else the scout named: the commit step sees the words the user approved.
         kept = [
-            _resting_on_too(one, confirmation.part) if one.candidate == hint.effect else one
+            _resting_on_too(one, confirmation.part)
+            if one.candidate == hint.effect and one.relied_on is None
+            else one
             for one in kept
         ]
-        if any(confirmation.part in one.rests_on for one in kept):
+        if any(confirmation.part in one.rests_on and one.relied_on is None for one in kept):
             continue
         kept.append(
             ObservationFinding(

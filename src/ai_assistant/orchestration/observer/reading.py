@@ -79,7 +79,7 @@ from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.support_parts import part_content
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
     from datetime import datetime
 
     from ai_assistant.core.protocols import MemoryStore, PlanStore, StoryStore
@@ -471,6 +471,10 @@ def approval_instant(record: EpisodicMemory) -> datetime:
 #: The largest page of a channel's episodes read to find what an input answers.
 _PAGE: Final = 100
 
+#: How many episodes back on a channel the observer looks for what an input answers,
+#: passing over those in which the assistant said nothing (§9:3).
+_REPLY_HORIZON: Final = 50
+
 
 class _Labels:
     """Hands out each kind's next label, once per thing."""
@@ -552,7 +556,14 @@ class EpisodeReader:
         labels = _Labels()
         shown = _Shown(labels, await self._outsides(leaving, gathered))
         everything = (leaving, *gathered.later, *(r for s in gathered.stories for r in s[2]))
-        answers = _answers((*everything, *gathered.past))
+        answers: dict[str, str] = {}
+        replied: list[Placement] = []
+        for record in (*everything, *gathered.past):
+            text, placement = await self._reply_to(record)
+            if text is not None:
+                answers[record.id] = text
+            if placement is not None:
+                replied.append(placement)
         read_leaving = shown.episode(leaving, answers)
         later = tuple(shown.episode(one, answers) for one in gathered.later)
         stories = tuple(
@@ -580,6 +591,7 @@ class EpisodeReader:
         supplied.extend(one.memory.placement for one in memories)
         supplied.extend(one.memory.placement for one in reliances)
         supplied.extend(asking_supply)
+        supplied.extend(replied)
         return Reading(
             leaving=read_leaving,
             later=later,
@@ -652,31 +664,54 @@ class EpisodeReader:
     ) -> tuple[str | None, Placement | None]:
         """What a part read again replies to, and the placement of what was read for it (§9:3).
 
-        A round's message answers its own episode's input; an input answers the last
-        round message of the episode before it on its channel, as a reading renders it.
+        A round's message answers its own episode's input; an input answers what the
+        assistant last said on its channel before it (:meth:`_reply_to`).
         """
         if isinstance(part, RoundMessagePart):
             return episode_text(record) or None, None
+        if not isinstance(part, InputPart):
+            return None, None
+        return await self._reply_to(record)
+
+    async def _reply_to(self, record: EpisodicMemory) -> tuple[str | None, Placement | None]:
+        """What the assistant last said on ``record``'s channel before it, and where (§9:3).
+
+        The text, and the placement of the episode it came from, which joins the supply
+        (§12:6). Read from the channel's own history, never from what a reading happens to hold:
+        an episode the reading left out still stands between a question and its answer.
+        An episode in which the assistant said nothing is passed over, up to
+        :data:`_REPLY_HORIZON` episodes back.
+        """
         processing = record.processing_record
         channel = None if processing is None else processing.trigger.channel
-        if not isinstance(part, InputPart) or channel is None:
+        if channel is None:
             return None, None
+        key = (record.occurred_at, record.id)
         cursor: str | None = None
-        while True:
+        seen = 0
+        while seen < _REPLY_HORIZON:
             page = await self._memory.episodes(channel=channel, cursor=cursor, limit=_PAGE)
-            for row in page.items:
-                position = row.position
-                if (position.occurred_at, position.episode_id) >= (record.occurred_at, record.id):
-                    continue
-                before = await self._memory.get(position.episode_id)
-                earlier = before.processing_record if isinstance(before, EpisodicMemory) else None
-                if before is None or earlier is None or earlier.is_open:
-                    return None, None
-                said = [one.text for one in earlier.rounds if one.text]
-                return (said[-1] if said else None), before.placement
+            earlier = [
+                row.position.episode_id
+                for row in page.items
+                if (row.position.occurred_at, row.position.episode_id) < key
+            ][: _REPLY_HORIZON - seen]
+            seen += len(earlier)
+            found = without_open_episodes(await self._memory.get_many(earlier)) if earlier else {}
+            for episode_id in earlier:
+                before = found.get(episode_id)
+                rounds = (
+                    before.processing_record.rounds
+                    if isinstance(before, EpisodicMemory) and before.processing_record is not None
+                    else ()
+                )
+                said = [one.text for one in rounds if one.text]
+                if said and isinstance(before, EpisodicMemory):
+                    return said[-1], before.placement
             if page.next_cursor is None or page.next_cursor == cursor:
-                return None, None
+                break
             cursor = page.next_cursor
+        return None, None
 
     async def _facts(  # noqa: PLR0911 — one arm per part a finding may rest on (§9:6)
         self, part: SupportPart, record: EpisodicMemory, outsides: dict[str, bool]
@@ -1037,27 +1072,6 @@ def _facts(record: EpisodicMemory, effects: Sequence[ActivationEffect]) -> tuple
     if processing is None:  # pragma: no cover - only readable episodes are read
         return ()
     return tuple(one.fact for one in done_candidates(record.id, processing, effects))
-
-
-def _answers(records: Iterable[EpisodicMemory]) -> dict[str, str]:
-    """For each episode, the assistant's last message before it on its channel (§9:3).
-
-    An input replies to what the assistant last said on the same channel: the last
-    round message of the episode before it there, among those read.
-    """
-    last: dict[object, str] = {}
-    answers: dict[str, str] = {}
-    for record in sorted(records, key=lambda one: (one.occurred_at, one.id)):
-        processing = record.processing_record
-        channel = None if processing is None else processing.trigger.channel
-        if processing is None or channel is None:
-            continue
-        if channel in last:
-            answers[record.id] = last[channel]
-        said = [one.text for one in processing.rounds if one.text]
-        if said:
-            last[channel] = said[-1]
-    return answers
 
 
 class _Shown:

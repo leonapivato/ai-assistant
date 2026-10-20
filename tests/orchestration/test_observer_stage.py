@@ -36,7 +36,9 @@ from ai_assistant.core.types import (
     ObservationState,
     ObserverStep,
     OpenQuestionKind,
+    Placement,
     PlacementReach,
+    PlacementSetter,
     PlanningRound,
     Provenance,
     QuestionPart,
@@ -558,7 +560,11 @@ async def test_a_retry_reads_again_what_a_finding_rests_on_after_the_window_move
         return _create("P1")
 
     observer = harness.observer(
-        scout=FakeModelProvider.scripted(later), commit=_answering(keep), daily_calls=1, related=0
+        scout=FakeModelProvider.scripted(later),
+        commit=_answering(keep),
+        daily_calls=1,
+        related=0,
+        per_run=1,
     )
     assert (await observer.run()).held
     await harness.hold(
@@ -567,16 +573,113 @@ async def test_a_retry_reads_again_what_a_finding_rests_on_after_the_window_move
     )
     harness.clock.advance(timedelta(hours=25))
 
-    observer = harness.observer(
-        scout=FakeModelProvider(reply=reply(findings=[])), commit=_answering(keep), related=0
-    )
     await observer.run()
 
     (record,) = await harness.plans.observations(["activation:one"])
     assert record.state is ObservationState.PROCESSED
     outcome = record.findings[0].outcome
     assert outcome is not None
-    assert outcome.writes
+    (write,) = outcome.writes
+    kept = await harness.memory.get(write.memory)
+    assert isinstance(kept, Memory)
+    assert kept.placement.reach is PlacementReach.ANYONE, "nothing in the supply narrowed it"
+
+
+async def test_a_retry_takes_the_supply_its_findings_were_proposed_over() -> None:
+    """§12:6: an owner-only episode the scout read narrows the memory, though it left."""
+    harness = Harness()
+    owner_only = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
+    await harness.hold(
+        episode("one", at=AT - timedelta(minutes=3)),
+        episode("two", at=AT - timedelta(minutes=2), text="ok").model_copy(
+            update={"placement": owner_only}
+        ),
+        episode("three", at=AT - timedelta(minutes=1), text="ok"),
+    )
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")),
+        commit=FakeModelProvider.scripted(_create()),
+        daily_calls=1,
+        related=0,
+        per_run=1,
+    )
+    assert (await observer.run()).held
+    await harness.hold(
+        episode("four", at=AT + timedelta(minutes=1), text="ok"),
+        episode("five", at=AT + timedelta(minutes=2), text="ok"),
+    )
+    harness.clock.advance(timedelta(hours=25))
+
+    await observer.run()
+
+    (record,) = await harness.plans.observations(["activation:one"])
+    outcome = record.findings[0].outcome
+    assert outcome is not None
+    (write,) = outcome.writes
+    kept = await harness.memory.get(write.memory)
+    assert isinstance(kept, Memory)
+    assert kept.placement.reach is PlacementReach.OWNER
+
+
+async def test_after_a_restart_the_pending_findings_are_proposed_again() -> None:
+    """§12:6, §16:4: a supply no process holds any more is read again by a new scout."""
+    harness = Harness()
+    await _three(harness)
+    first = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")), daily_calls=1, per_run=1
+    )
+    assert (await first.run()).held
+    harness.clock.advance(timedelta(hours=25))
+    scout = FakeModelProvider.scripted(_scout("P1"))
+    restarted = harness.observer(
+        scout=scout, commit=FakeModelProvider.scripted(_create()), per_run=1
+    )
+
+    await restarted.run()
+
+    assert len(scout.calls) == 1
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.state is ObservationState.PROCESSED
+    (finding,) = record.findings
+    assert finding.outcome is not None
+    assert finding.outcome.writes
+
+
+async def test_a_write_the_supply_keeps_off_a_wider_memory_is_retried_until_stuck() -> None:
+    """§12:6, §16:5: a blocked write is never dropped: the episode is set aside."""
+    harness = Harness()
+    owner_only = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
+    await harness.hold(
+        episode("one", at=AT - timedelta(minutes=3)).model_copy(update={"placement": owner_only}),
+        episode("two", at=AT - timedelta(minutes=2), text="ok"),
+        episode("three", at=AT - timedelta(minutes=1), text="ok"),
+        episode("past", at=SINCE - timedelta(days=1), text="Aisle seats."),
+        Memory.model_validate(
+            memory(
+                "m-aisle", "The user likes aisle seats.", said_support(address("past"))
+            ).model_dump()
+        ),
+    )
+
+    def recheck(shown: dict[str, Any]) -> str:
+        (held,) = [one for one in shown["memories"] if "aisle" in one["claim"]]
+        return reply(
+            action="recheck",
+            memory=held["memory"],
+            asks="Still aisle?",
+            supports=[{"part": "P1", "direction": "against", "how_sure": "likely"}],
+        )
+
+    observer = harness.observer(
+        scout=FakeModelProvider(reply=_scout("P1")), commit=_answering(recheck), stuck_after=1
+    )
+
+    outcome = await observer.run()
+
+    assert outcome.stuck == 1
+    aisle = await harness.memory.get("m-aisle")
+    assert isinstance(aisle, Memory)
+    assert aisle.open_questions == ()
 
 
 async def test_a_cancelled_call_still_counts_against_the_budget() -> None:
@@ -680,29 +783,6 @@ async def test_a_confirmed_candidate_the_policy_asks_about_raises_its_question()
     assert question.rests_on == (InputPart(episode=address("yes")),)
 
 
-async def test_a_finding_committed_on_a_retry_takes_the_narrowest_placement() -> None:
-    """§12:6: the scout's supply is no longer read whole, so the meet is owner-only."""
-    harness = Harness()
-    await _three(harness)
-    observer = harness.observer(
-        scout=FakeModelProvider.scripted(_scout("P1")),
-        commit=FakeModelProvider.scripted(_create()),
-        daily_calls=1,
-    )
-    assert (await observer.run()).held
-    harness.clock.advance(timedelta(hours=25))
-
-    await observer.run()
-
-    (record,) = await harness.plans.observations(["activation:one"])
-    outcome = record.findings[0].outcome
-    assert outcome is not None
-    (write,) = outcome.writes
-    kept = await harness.memory.get(write.memory)
-    assert isinstance(kept, Memory)
-    assert kept.placement.reach is PlacementReach.OWNER
-
-
 async def test_what_a_failed_commit_wrote_is_merged_into_its_later_outcome() -> None:
     """§16:1: a support written before the attempt failed is recorded when it is decided."""
     harness = Harness()
@@ -728,7 +808,13 @@ async def test_what_a_failed_commit_wrote_is_merged_into_its_later_outcome() -> 
 
     harness.writes.apply = failing_second  # type: ignore[method-assign]  # an outage midway
 
-    def add_both(shown: dict[str, Any]) -> str:
+    decided = 0
+
+    def add_both_then_nothing(shown: dict[str, Any]) -> str:
+        nonlocal decided
+        decided += 1
+        if decided > 1:
+            return reply(action="nothing")
         (held,) = [one for one in shown["memories"] if one["claim"].startswith("The user")]
         return reply(
             action="add",
@@ -746,13 +832,13 @@ async def test_what_a_failed_commit_wrote_is_merged_into_its_later_outcome() -> 
 
     observer = harness.observer(
         scout=FakeModelProvider.scripted(_scout("P1", "P2")),
-        commit=_answering(add_both),
+        commit=_answering(add_both_then_nothing),
+        per_run=1,
     )
     await observer.run()
     (record,) = await harness.plans.observations(["activation:one"])
     assert record.findings[0].outcome is None
 
-    observer = harness.observer(commit=FakeModelProvider.scripted(reply(action="nothing")))
     harness.clock.advance(timedelta(minutes=1))
     await observer.run()
 

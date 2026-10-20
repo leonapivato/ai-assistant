@@ -95,6 +95,7 @@ if TYPE_CHECKING:
 __all__ = [
     "INFERENCE_FLOOR",
     "AddSupports",
+    "Blocked",
     "Checked",
     "CommitReply",
     "CommitView",
@@ -332,7 +333,19 @@ class Unwritten:
     reason: FindingUnwritten
 
 
-type _Primary = Create | AddSupports | RaiseQuestion | RecordUse | Unwritten
+@dataclass(frozen=True, slots=True)
+class Blocked:
+    """A write the supply's placement keeps off a wider stored memory (§12:6).
+
+    An operation writes no placement (ADR-0328 §5:2), so a question, a resolution or an
+    entry resting on a supply narrower than the memory it would be written on cannot be
+    written without widening that supply. It is not dropped: the attempt fails, and the
+    finding is retried and in the end set aside as stuck, kept for an explicit re-run
+    (§16:4-§16:5).
+    """
+
+
+type _Primary = Create | AddSupports | RaiseQuestion | RecordUse | Unwritten | Blocked
 
 
 @dataclass(frozen=True, slots=True)
@@ -530,6 +543,10 @@ class _Context:
     placement: Placement
 
 
+class _Blocked(Exception):  # noqa: N818 — a control-flow signal: the whole decision is blocked
+    pass
+
+
 class _Refused(Exception):  # noqa: N818 — a control-flow signal carrying a code-owned reason
     def __init__(self, reason: FindingUnwritten) -> None:
         super().__init__(reason.value)
@@ -567,6 +584,8 @@ def checked(
         resolve = _resolve(reply, supports, context)
     except _Refused as refused:
         return Checked(primary=Unwritten(refused.reason))
+    except _Blocked:
+        return Checked(primary=Blocked())
     return Checked(primary=primary, resolve=resolve)
 
 
@@ -576,7 +595,7 @@ def _track_record(reply: CommitReply, context: _Context) -> _Primary:
     if reliance is None or reply.track_record in {None, "neither"}:
         return Unwritten(FindingUnwritten.NOT_KEPT)
     if narrows(context.placement, reliance.memory):
-        return Unwritten(FindingUnwritten.CHECK_FAILED)
+        return Blocked()
     entry = TrackRecordEntry(
         episode=context.view.leaving.id,
         relied_at=reliance.relied_at,
@@ -650,7 +669,9 @@ def _admitted(supports: dict[str, MemorySupport], context: _Context) -> None:
             raise _Refused(FindingUnwritten.CHECK_FAILED)
 
 
-def _primary(reply: CommitReply, supports: dict[str, MemorySupport], context: _Context) -> _Primary:
+def _primary(  # noqa: PLR0911 — one arm per action §9:4 names
+    reply: CommitReply, supports: dict[str, MemorySupport], context: _Context
+) -> _Primary:
     """The one write the reply's action makes, checked."""
     match reply.action:
         case "nothing":
@@ -659,8 +680,10 @@ def _primary(reply: CommitReply, supports: dict[str, MemorySupport], context: _C
             return Unwritten(FindingUnwritten.SINGLE_OBSERVATION)
         case "recheck":
             target = _target(reply, context)
-            if not supports or not (reply.asks or "").strip() or narrows(context.placement, target):
+            if not supports or not (reply.asks or "").strip():
                 raise _Refused(FindingUnwritten.CHECK_FAILED)
+            if narrows(context.placement, target):
+                return Blocked()
             first = next(iter(supports.values()))
             return RaiseQuestion(
                 target=target,
@@ -893,6 +916,21 @@ def _question_support(
         if other is None:
             raise _Refused(FindingUnwritten.CHECK_FAILED)
         part, origin, when = other.points_at, other.origin, other.when
+    if origin in _ASSISTANT_ORIGINS:
+        # §10:1: the assistant's words are added only beside the user's keep, and a
+        # question rests on one support, so it rests on that keep instead.
+        keep = next(
+            (
+                one
+                for one in supports.values()
+                if one.origin is SupportOrigin.USER_MESSAGE
+                and one.direction is SupportDirection.FOR
+            ),
+            None,
+        )
+        if keep is None:
+            raise _Refused(FindingUnwritten.CHECK_FAILED)
+        part, origin, when = keep.points_at, keep.origin, keep.when
     return MemorySupport(
         points_at=part,
         origin=origin,
@@ -913,7 +951,11 @@ def _resolve(
     """§13:5: a question the answer resolves, citing the support added from it.
 
     A resolve that names a memory, a question or a part the step was not shown is
-    dropped, with the rest of the decision written as checked.
+    dropped, with the rest of the decision written as checked. One resting on a supply
+    narrower than the memory blocks the whole decision (:class:`Blocked`).
+
+    Raises:
+        _Blocked: Where the supply would narrow the memory the question is on.
     """
     proposed = reply.resolves
     if proposed is None:
@@ -924,7 +966,7 @@ def _resolve(
     if shown is None or support is None or question is None or not proposed.note.strip():
         return None
     if narrows(context.placement, shown.memory):
-        return None
+        raise _Blocked
     try:
         added = _question_support(support, support.direction, supports, context)
     except _Refused:
