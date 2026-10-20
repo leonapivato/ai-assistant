@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from datetime import datetime
 
-    from ai_assistant.core.prompts import PromptTemplate
+    from ai_assistant.core.prompts import RenderedPrompt
     from ai_assistant.core.protocols import DiagnosticSink
     from ai_assistant.core.types import (
         EpisodicMemory,
@@ -138,7 +138,7 @@ class ObserverEntries:
         step: ObserverStep,
         messages: Sequence[Message],
         *,
-        prompt: PromptTemplate,
+        prompt: RenderedPrompt,
         finding: ObservationFinding | None = None,
     ) -> None:
         """A call's given entry, under each activation its episodes name (§2:2, §2:9).
@@ -147,8 +147,8 @@ class ObserverEntries:
             targets: The attempts the call reads for, one per episode it reads.
             step: The step making it.
             messages: Its rendered request.
-            prompt: The template its system message was rendered from, which the entry
-                names (ADR-0334 §8:2).
+            prompt: Its system message's instruction, whose template and flags the
+                entry names (ADR-0334 §8:2, ADR-0335 §9:1).
             finding: The finding a commit call decides.
         """
 

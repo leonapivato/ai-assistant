@@ -14,7 +14,7 @@ from test_planning import (
     FLAG_ECHO,
     _call,
     _earlier,
-    _flags,
+    _echoed,
     _inputs,
     _remembered,
     _sent,
@@ -45,6 +45,7 @@ from ai_assistant.orchestration.planning import (
     RefusedCall,
     exact_line,
 )
+from ai_assistant.testing import FakeDiagnosticSink
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import Memory, ToolDefinition
@@ -739,9 +740,10 @@ async def test_an_approved_action_is_shown_under_an_a_label_with_its_details() -
 async def test_the_template_is_handed_approved_exactly_where_an_action_was_approved() -> None:
     """ADR-0334 §4:2, ADR-0321 §4:2: the code computes it from the tool it offers."""
     for approved, handed in (((_approved(),), True), ((), False)):
-        stage, completer, _ = _stage(prompt=FLAG_ECHO)
-        await stage.plan(_inputs(capabilities=_TOOLS, approved=approved))
-        assert ("approved" in _flags(completer)) is handed
+        sink = FakeDiagnosticSink()
+        stage, completer, _ = _stage(prompt=FLAG_ECHO, diagnostics=sink)
+        inputs = _inputs(capabilities=_TOOLS, approved=approved)
+        assert ("approved" in await _echoed(stage, completer, sink, inputs)) is handed
 
 
 async def test_nothing_approved_offers_no_tool_and_no_section() -> None:

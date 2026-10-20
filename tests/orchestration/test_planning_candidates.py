@@ -17,8 +17,8 @@ from test_planning import (
     _TOOLS,
     FLAG_ECHO,
     _earlier,
+    _echoed,
     _episode,
-    _flags,
     _inputs,
     _now,
     _Recorder,
@@ -45,7 +45,7 @@ from ai_assistant.orchestration.planning import (
 )
 from ai_assistant.orchestration.reliance import NOTE_RELIANCE
 from ai_assistant.orchestration.remembering import REMEMBER, REMEMBER_CANDIDATE
-from ai_assistant.testing import FakeToolCallingCompleter, default_prompt
+from ai_assistant.testing import FakeDiagnosticSink, FakeToolCallingCompleter, default_prompt
 
 if TYPE_CHECKING:
     from ai_assistant.core.prompts import PromptTemplate
@@ -59,7 +59,10 @@ _OTHERS: Final = tuple(one for one in _TOOLS if one.capability != "remember")
 
 
 def _stage(
-    *responses: RoundResponse, candidates: bool = True, prompt: PromptTemplate | None = None
+    *responses: RoundResponse,
+    candidates: bool = True,
+    prompt: PromptTemplate | None = None,
+    diagnostics: FakeDiagnosticSink | None = None,
 ) -> tuple[PlanningStage, FakeToolCallingCompleter]:
     completer = FakeToolCallingCompleter.scripted(*(responses or (RoundResponse(text="ok"),)))
     ids = iter(f"round:{n}" for n in range(100))
@@ -71,6 +74,7 @@ def _stage(
         now=_now,
         new_id=lambda: next(ids),
         candidates=candidates,
+        diagnostics=diagnostics,
     )
     return stage, completer
 
@@ -96,11 +100,12 @@ async def test_the_template_is_handed_candidates_and_reliance_where_each_is_offe
     With the switch off neither is set, whatever is offered, so the instruction is the
     interim's (ADR-0328 §13:6).
     """
-    stage, completer = _stage(candidates=switch, prompt=FLAG_ECHO)
+    sink = FakeDiagnosticSink()
+    stage, completer = _stage(candidates=switch, prompt=FLAG_ECHO, diagnostics=sink)
 
-    await stage.plan(_inputs(capabilities=(*_OTHERS, *offered)))
+    flags = await _echoed(stage, completer, sink, _inputs(capabilities=(*_OTHERS, *offered)))
 
-    assert {"candidates", "reliance"} & _flags(completer) == handed
+    assert {"candidates", "reliance"} & flags == handed
 
 
 # --- a candidate's result (§4:1, §4:4, §6:5) -----------------------------------------------

@@ -11,7 +11,12 @@ import hashlib
 import pytest
 
 from ai_assistant.core.errors import ConfigurationError
-from ai_assistant.core.prompts import PromptDeclaration, PromptOrigin, PromptTemplate
+from ai_assistant.core.prompts import (
+    PromptDeclaration,
+    PromptOrigin,
+    PromptTemplate,
+    RenderedPrompt,
+)
 
 _DECLARED = PromptDeclaration(
     name="sample",
@@ -144,10 +149,11 @@ def test_the_version_is_twelve_hex_digits_of_the_files_sha256() -> None:
     template = _parse(data)
 
     assert template.version == hashlib.sha256(data).hexdigest()[:12]
-    assert template.provenance() == {
+    assert template.rendered(flags={"left": True, "right": False}, values=_VALUES).provenance() == {
         "name": "sample",
         "version": template.version,
         "origin": "override",
+        "flags": {"left": True, "right": False},
     }
 
 
@@ -163,8 +169,77 @@ def test_the_version_is_of_the_bytes_so_two_files_rendering_alike_differ() -> No
 def test_a_default_carries_its_origin() -> None:
     template = PromptTemplate.parse(_DECLARED, b"text", origin=PromptOrigin.DEFAULT)
 
-    assert template.provenance()["origin"] == "default"
+    rendering = template.rendered(flags={"left": False, "right": False}, values=_VALUES)
+    assert rendering.provenance()["origin"] == "default"
     assert template.name == "sample"
+
+
+# --- ADR-0335 §9:1: the flags a given entry records ------------------------------------------
+
+_BRANCHING = "$if left\nleft\n$end\n$if not right\nnot right\n$end\n$tool"
+
+
+@pytest.mark.parametrize("left", [False, True])
+@pytest.mark.parametrize("right", [False, True])
+def test_a_rendering_records_exactly_the_flags_it_was_rendered_under(
+    left: bool, right: bool
+) -> None:
+    template = _parse(_BRANCHING)
+    flags = {"right": right, "left": left}
+
+    rendering = template.rendered(flags=flags, values=_VALUES)
+
+    assert rendering.text == template.render(flags=flags, values=_VALUES)
+    assert rendering.template is template
+    recorded = rendering.provenance()["flags"]
+    assert recorded == {"left": left, "right": right}
+    # Recorded by name in a fixed order, whatever order the code computed them in.
+    assert isinstance(recorded, dict)
+    assert list(recorded) == ["left", "right"]
+
+
+def test_a_rendering_records_no_value() -> None:
+    """§9's explanation: values are the code's text, which the package supplies."""
+    rendering = _parse("$tool").rendered(flags={"left": True, "right": True}, values=_VALUES)
+
+    assert set(rendering.provenance()) == {"name", "version", "origin", "flags"}
+    assert "remember" not in repr(rendering.provenance())
+
+
+def test_a_prompt_declaring_no_flag_records_an_empty_set() -> None:
+    flagless = PromptDeclaration(name="plain", package="ai_assistant.core")
+    template = PromptTemplate.parse(flagless, b"text", origin=PromptOrigin.DEFAULT)
+
+    assert template.rendered().provenance() == {
+        "name": "plain",
+        "version": template.version,
+        "origin": "default",
+        "flags": {},
+    }
+
+
+def test_a_rendering_keeps_the_flags_as_they_were_when_it_rendered() -> None:
+    """The code's mapping changing afterwards changes neither the record nor the text."""
+    flags = {"left": True, "right": False}
+    rendering = _parse(_BRANCHING).rendered(flags=flags, values=_VALUES)
+
+    flags["left"] = False
+    recorded = rendering.provenance()["flags"]
+    assert isinstance(recorded, dict)
+    recorded["right"] = True
+
+    assert rendering.provenance()["flags"] == {"left": True, "right": False}
+    assert rendering.text.startswith("left\n")
+
+
+def test_a_rendering_takes_exactly_the_declared_flags_and_values() -> None:
+    with pytest.raises(ValueError, match="exactly"):
+        _parse("text").rendered(flags={"left": True}, values=_VALUES)
+
+
+def test_a_rendering_built_by_hand_still_records_exactly_the_declared_flags() -> None:
+    with pytest.raises(ValueError, match="exactly"):
+        RenderedPrompt(text="text", template=_parse("text"), flags={"left": True})
 
 
 # --- §5:1, §5:2: the defects, named by line and never quoted --------------------------------

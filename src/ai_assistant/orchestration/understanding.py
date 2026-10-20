@@ -181,7 +181,7 @@ from ai_assistant.orchestration.story_privacy import activation_of
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from ai_assistant.core.prompts import PromptTemplate
+    from ai_assistant.core.prompts import PromptTemplate, RenderedPrompt
     from ai_assistant.core.protocols import DiagnosticSink, MemoryStore, ModelProvider
     from ai_assistant.core.types import (
         ActivationRecall,
@@ -727,6 +727,9 @@ class _Brief:
     """
 
     messages: tuple[Message, Message]
+    #: The system message's instruction and the flags it was rendered under, which each
+    #: given entry for the call, and for its repair, records (ADR-0335 §9:1).
+    instruction: RenderedPrompt
     labels: dict[str, UnderstandingReferent]
     channel_count: int
     episode_count: int
@@ -910,7 +913,7 @@ class UnderstandingStage:
             origin=origin,
         )
         _within(deadline)
-        first = await self._completed(brief.messages)
+        first = await self._completed(brief.messages, brief.instruction)
         proposal, problem = self._validated(first.content, brief)
         if problem is not None:
             _within(deadline)
@@ -920,7 +923,8 @@ class UnderstandingStage:
                     *brief.messages,
                     Message(role=Role.ASSISTANT, content=first.content),
                     Message(role=Role.USER, content=problem.statement),
-                )
+                ),
+                brief.instruction,
             )
             proposal, problem = self._validated(second.content, brief)
             if proposal is None:
@@ -937,13 +941,14 @@ class UnderstandingStage:
             recorded_at=now(),
         )
 
-    async def _completed(self, messages: Sequence[Message]) -> Message:
+    async def _completed(self, messages: Sequence[Message], instruction: RenderedPrompt) -> Message:
         """One completion, its rendered request and its reply written to the record.
 
         The given entry is written before the call and the returned one once it returns
         or fails (ADR-0314 §4:1); the failure is re-raised unchanged. The given entry
-        names the template the system message was rendered from (ADR-0334 §8:2), the
-        repair's included, since it resends that message.
+        names the template the system message was rendered from and the flags it was
+        rendered under (ADR-0334 §8:2, ADR-0335 §9:1), the repair's included, since it
+        resends that message.
         """
         await write_diagnostic(
             self._diagnostics,
@@ -951,7 +956,7 @@ class UnderstandingStage:
             DiagnosticKind.GIVEN,
             lambda: {
                 "messages": [one.model_dump(mode="json") for one in messages],
-                "prompt": self._prompt.provenance(),
+                "prompt": instruction.provenance(),
             },
         )
         try:
@@ -1056,15 +1061,16 @@ class UnderstandingStage:
             payload["stories"], story_count = self._stories_section(
                 stories, labels, story_members, marks
             )
-        instruction = self._prompt.render(
+        instruction = self._prompt.rendered(
             flags={"recalled": recall is not None, "stories": stories is not None}
         )
         messages = (
-            Message(role=Role.SYSTEM, content=instruction),
+            Message(role=Role.SYSTEM, content=instruction.text),
             Message(role=Role.USER, content=json.dumps(payload, ensure_ascii=True)),
         )
         return _Brief(
             messages,
+            instruction,
             labels,
             len(rendered_items),
             len(rendered_episodes),

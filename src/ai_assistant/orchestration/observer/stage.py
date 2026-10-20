@@ -129,7 +129,7 @@ from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from ai_assistant.core.prompts import PromptTemplate
+    from ai_assistant.core.prompts import PromptTemplate, RenderedPrompt
     from ai_assistant.core.protocols import (
         DiagnosticSink,
         MemoryStore,
@@ -592,7 +592,7 @@ class Observer:
             attempt,
             ObserverStep.SCOUT,
             self._scout,
-            scout_messages(reading, self._prompts[ObserverStep.SCOUT]),
+            lambda instruction: scout_messages(reading, instruction),
         )
         proposal = parsed(reply, ScoutReply)
         if proposal is None:
@@ -684,7 +684,7 @@ class Observer:
             attempt,
             ObserverStep.COMMIT,
             self._commit,
-            commit_messages(view, self._prompts[ObserverStep.COMMIT]),
+            lambda instruction: commit_messages(view, instruction),
             finding=_finding(attempt, finding_id),
         )
         decision = parsed(reply, CommitReply)
@@ -717,7 +717,7 @@ class Observer:
         attempt: _Attempt,
         step: ObserverStep,
         route: ModelProvider,
-        messages: list[Message],
+        request: Callable[[RenderedPrompt], list[Message]],
         *,
         finding: ObservationFinding | None = None,
     ) -> str:
@@ -725,8 +725,13 @@ class Observer:
 
         Its given entry is written once the budget admits it and before it is made, and
         its returned entry once it returns or fails (ADR-0333 §2:2); a failure is
-        re-raised unchanged.
+        re-raised unchanged. ``request`` builds the call's messages around the step's
+        instruction, rendered here so that the given entry records the ``prompt`` key
+        of the very instruction they carry (ADR-0334 §8:2, ADR-0335 §9:1); the
+        observer's prompts declare no flag, so it records none.
         """
+        instruction = self._prompts[step].rendered()
+        messages = request(instruction)
         at = self._now()
         made = await self._plans.observer_calls_since(at - _A_DAY)
         if made >= self._limits.daily_calls:
@@ -736,9 +741,7 @@ class Observer:
         # mid-flight still counts against the budget (§16:9).
         await self._save(attempt, findings=attempt.record.findings)
         targets = () if attempt.diagnosed is None else (attempt.diagnosed,)
-        await self._entries.given(
-            targets, step, messages, prompt=self._prompts[step], finding=finding
-        )
+        await self._entries.given(targets, step, messages, prompt=instruction, finding=finding)
         named = None if finding is None else finding.id
         try:
             reply = await route.complete(messages)

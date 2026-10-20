@@ -33,12 +33,15 @@ from story_support import (
     story,
 )
 
+from ai_assistant.core.diagnostics import diagnosed_activation
 from ai_assistant.core.types import (
     UNDERSTANDING_REFERENT_EXCERPT_CHARS,
     ActivationRecall,
     BeliefBand,
     ChannelContext,
     ChannelContextItem,
+    DiagnosticKind,
+    DiagnosticSource,
     Memory,
     MemoryKind,
     MessageAuthor,
@@ -63,7 +66,13 @@ from ai_assistant.orchestration.understanding import (
     UnderstandingStage,
     place_window_links,
 )
-from ai_assistant.testing import FakeModelProvider, FakeStoryStore, default_prompt, prompt_from
+from ai_assistant.testing import (
+    FakeDiagnosticSink,
+    FakeModelProvider,
+    FakeStoryStore,
+    default_prompt,
+    prompt_from,
+)
 from ai_assistant.testing.memories import memory, remembered_support
 
 if TYPE_CHECKING:
@@ -134,6 +143,7 @@ async def _understand(  # noqa: PLR0913 — the model, then one knob per input a
     window: ChannelWindow = WINDOW,
     audience: TurnSupply = BOUNDED,
     prompt: PromptTemplate = _UNDERSTANDING,
+    diagnostics: FakeDiagnosticSink | None = None,
 ) -> ActivationUnderstanding:
     recall = None
     if recalled:
@@ -142,19 +152,23 @@ async def _understand(  # noqa: PLR0913 — the model, then one knob per input a
             cues=(RecallCue.ACTIVATION_INPUT,),
             items=tuple(_item(record.id, MemoryKind(record.kind)) for record in recalled),
         )
-    return await UnderstandingStage(model=model, excerpt_chars=2000, prompt=prompt).understand(
-        "The canoe is booked.",
-        channel=EVENTS,
-        window=window,
-        audience=audience,
-        episodes=episodes,
-        version=1,
-        now=lambda: AT,
-        deadline=asyncio.get_running_loop().time() + 60,
-        recall=recall,
-        recalled=recalled,
-        stories=stories,
+    stage = UnderstandingStage(
+        model=model, excerpt_chars=2000, prompt=prompt, diagnostics=diagnostics
     )
+    with diagnosed_activation("a-0", clock=lambda: AT):
+        return await stage.understand(
+            "The canoe is booked.",
+            channel=EVENTS,
+            window=window,
+            audience=audience,
+            episodes=episodes,
+            version=1,
+            now=lambda: AT,
+            deadline=asyncio.get_running_loop().time() + 60,
+            recall=recall,
+            recalled=recalled,
+            stories=stories,
+        )
 
 
 def _item(record_id: str, kind: MemoryKind) -> RecalledItem:
@@ -213,11 +227,19 @@ async def test_the_template_is_handed_a_flag_for_each_section_the_message_carrie
     speaks of a section exactly where the message carries it.
     """
     model = FakeModelProvider(_proposal())
+    sink = FakeDiagnosticSink()
 
-    await _understand(model, stories=stories, recalled=recalled, prompt=_FLAG_ECHO)
+    await _understand(
+        model, stories=stories, recalled=recalled, prompt=_FLAG_ECHO, diagnostics=sink
+    )
 
     assert set(_instruction(model).split("\n")) - {""} == handed
     assert {"recalled", "stories"} & set(_payload(model)) == handed
+    # ADR-0335 §9:1: the given entry records each flag the prompt declares, as the stage
+    # computed it for the call and rendered the instruction under it.
+    (given,) = sink.of(DiagnosticSource.UNDERSTANDING, DiagnosticKind.GIVEN)
+    recorded = given.model_dump(mode="json")["body"]["prompt"]["flags"]
+    assert recorded == {flag: flag in handed for flag in ("recalled", "stories")}
 
 
 async def test_the_candidates_render_under_s_labels_attributed_by_their_records() -> None:

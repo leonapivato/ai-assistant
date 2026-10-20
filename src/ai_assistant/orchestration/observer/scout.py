@@ -37,7 +37,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from ai_assistant.core.types import Message, ObservationFinding, Role
 
 if TYPE_CHECKING:
-    from ai_assistant.core.prompts import PromptTemplate
+    from ai_assistant.core.prompts import RenderedPrompt
     from ai_assistant.core.types import SupportPart
     from ai_assistant.orchestration.observer.reading import Reading
 
@@ -86,19 +86,20 @@ def parsed[T: BaseModel](content: str, shape: type[T]) -> T | None:
         return None
 
 
-def scout_messages(reading: Reading, prompt: PromptTemplate) -> list[Message]:
+def scout_messages(reading: Reading, instruction: RenderedPrompt) -> list[Message]:
     """The scout's one call: its instruction, and the reading as quoted source data.
 
     Args:
         reading: What the observer read around the leaving episode.
-        prompt: The template of ``OBSERVER_SCOUT_PROMPT``, default or override, as the
-            composition root read it at start (ADR-0334 §3:5).
+        instruction: ``OBSERVER_SCOUT_PROMPT`` rendered from its template, default or
+            override, as the composition root read it at start (ADR-0334 §3:5); the
+            call's given entry records its ``prompt`` key (ADR-0335 §9:1).
 
     Returns:
         The conversation the scout's route completes.
     """
     return [
-        Message(role=Role.SYSTEM, content=prompt.render()),
+        Message(role=Role.SYSTEM, content=instruction.text),
         Message(role=Role.USER, content=json.dumps(reading.payload(), ensure_ascii=True)),
     ]
 

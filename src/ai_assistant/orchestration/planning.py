@@ -174,7 +174,7 @@ from ai_assistant.orchestration.story_calls import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
 
-    from ai_assistant.core.prompts import PromptTemplate
+    from ai_assistant.core.prompts import PromptTemplate, RenderedPrompt
     from ai_assistant.core.protocols import DiagnosticSink, ToolCallingCompleter
     from ai_assistant.core.types import (
         ActionRequest,
@@ -2458,28 +2458,24 @@ class PlanningStage:
             inputs, book, excerpt_chars=self._excerpt_chars, now=self._now(), zone=self._zone
         )
         rendered = request.rendered(offered_here)
+        instruction = self._prompt.rendered(
+            flags={
+                "takes_message": inputs.place.takes_message,
+                "story_calls": any(tool.name in STORY_CALL_CAPABILITIES for tool in offered),
+                "story_reads": _offers_story_reads(offered),
+                "approved": approved_tool is not None,
+                "candidates": self._candidates
+                and any(tool.name == REMEMBER_CAPABILITY for tool in offered),
+                "reliance": self._candidates
+                and any(tool.name == NOTE_RELIANCE_CAPABILITY for tool in offered),
+            },
+            values=_PLANNING_VALUES,
+        )
         messages = (
-            Message(
-                role=Role.SYSTEM,
-                content=self._prompt.render(
-                    flags={
-                        "takes_message": inputs.place.takes_message,
-                        "story_calls": any(
-                            tool.name in STORY_CALL_CAPABILITIES for tool in offered
-                        ),
-                        "story_reads": _offers_story_reads(offered),
-                        "approved": approved_tool is not None,
-                        "candidates": self._candidates
-                        and any(tool.name == REMEMBER_CAPABILITY for tool in offered),
-                        "reliance": self._candidates
-                        and any(tool.name == NOTE_RELIANCE_CAPABILITY for tool in offered),
-                    },
-                    values=_PLANNING_VALUES,
-                ),
-            ),
+            Message(role=Role.SYSTEM, content=instruction.text),
             Message(role=Role.USER, content=rendered),
         )
-        response = await self._responded(messages, offered_here)
+        response = await self._responded(messages, offered_here, instruction)
         read_outside = (
             inputs.outside_content_read
             or inputs.trigger_origin is InputOrigin.OUTSIDE
@@ -2531,7 +2527,10 @@ class PlanningStage:
         )
 
     async def _responded(
-        self, messages: Sequence[Message], offered: Sequence[OfferedTool]
+        self,
+        messages: Sequence[Message],
+        offered: Sequence[OfferedTool],
+        instruction: RenderedPrompt,
     ) -> RoundResponse:
         """Ask the round, its request written to the record first (ADR-0314 §4, §5).
 
@@ -2539,7 +2538,7 @@ class PlanningStage:
         whether or not it reads as a round (§5:2). Where it wrote none because no
         response came back, this module writes it, with the failure; the failure is
         re-raised unchanged. The given entry names the template the system message was
-        rendered from (ADR-0334 §8:2).
+        rendered from and the flags it was rendered under (ADR-0334 §8:2, ADR-0335 §9:1).
         """
         await write_diagnostic(
             self._diagnostics,
@@ -2548,7 +2547,7 @@ class PlanningStage:
             lambda: {
                 "messages": [one.model_dump(mode="json") for one in messages],
                 "tools": [tool.model_dump(mode="json") for tool in offered],
-                "prompt": self._prompt.provenance(),
+                "prompt": instruction.provenance(),
             },
         )
         written = returned_written(DiagnosticSource.PLANNING)

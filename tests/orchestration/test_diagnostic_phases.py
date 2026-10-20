@@ -217,11 +217,13 @@ async def test_understanding_writes_its_rendered_request_and_the_reply() -> None
     sent = model.calls[0].messages
     assert _body(given) == {
         "messages": [one.model_dump(mode="json") for one in sent],
-        # ADR-0334 §8:2: which template, in which version, the system message came from.
+        # ADR-0334 §8:2: which template, in which version, the system message came from;
+        # ADR-0335 §9:1: and each flag it declares, as the stage computed it for the call.
         "prompt": {
             "name": "understanding",
             "version": _UNDERSTANDING.version,
             "origin": "default",
+            "flags": {"recalled": False, "stories": False},
         },
     }
     assert _body(returned) == {"reply": _PROPOSAL}
@@ -240,8 +242,10 @@ async def test_understanding_s_repair_is_a_second_given_and_returned_pair() -> N
     entries = sink.of(DiagnosticSource.UNDERSTANDING)
     kinds = [one.kind for one in entries]
     assert kinds == [DiagnosticKind.GIVEN, DiagnosticKind.RETURNED] * 2
-    # The repair resends the system message, so its given entry names the template too.
-    assert _body(entries[2])["prompt"] == _UNDERSTANDING.provenance()
+    # The repair resends the system message, so its given entry names the template, and
+    # the flags it was rendered under, too.
+    assert _body(entries[2])["prompt"] == _body(entries[0])["prompt"]
+    assert _body(entries[2])["prompt"]["flags"] == {"recalled": False, "stories": False}
     assert _body(sink.of(DiagnosticSource.UNDERSTANDING)[1]) == {"reply": "not json"}
 
 
@@ -308,8 +312,21 @@ async def test_planning_writes_its_rendered_request_and_offered_tools_before_the
     assert _body(given) == {
         "messages": [one.model_dump(mode="json") for one in sent.messages],
         "tools": [one.model_dump(mode="json") for one in sent.tools],
-        # ADR-0334 §8:2: the template the system message was rendered from.
-        "prompt": _PLANNING.provenance(),
+        # ADR-0334 §8:2: the template the system message was rendered from, and ADR-0335
+        # §9:1: every flag it declares, as the stage computed it for this round.
+        "prompt": {
+            "name": "planning",
+            "version": _PLANNING.version,
+            "origin": "default",
+            "flags": {
+                "approved": False,
+                "candidates": False,
+                "reliance": False,
+                "story_calls": False,
+                "story_reads": False,
+                "takes_message": True,
+            },
+        },
     }
     # A response came back, and the completer is the one that writes it (§5:2); this
     # fake writes none, and planning does not write one in its place.
@@ -424,7 +441,13 @@ async def test_digesting_writes_each_part_s_prompt_its_reply_and_the_items_dropp
     assert _body(given) == {
         **about,
         "messages": [one.model_dump(mode="json") for one in provider.calls[0]],
-        "prompt": default_prompt(DIGESTING_PROMPT).provenance(),
+        # ADR-0335 §9:1: the prompt declares no flag, so the key records an empty set.
+        "prompt": {
+            "name": "digesting",
+            "version": default_prompt(DIGESTING_PROMPT).version,
+            "origin": "default",
+            "flags": {},
+        },
     }
     assert _body(returned) == {
         **about,

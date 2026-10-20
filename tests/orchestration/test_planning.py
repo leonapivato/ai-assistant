@@ -217,6 +217,7 @@ def _stage(
     *responses: RoundResponse,
     recorder: _Recorder | None = None,
     prompt: PromptTemplate | None = None,
+    diagnostics: FakeDiagnosticSink | None = None,
 ) -> tuple[PlanningStage, FakeToolCallingCompleter, _Recorder]:
     completer = FakeToolCallingCompleter.scripted(*(responses or (RoundResponse(text="ok"),)))
     recording = recorder or _Recorder()
@@ -228,6 +229,7 @@ def _stage(
         excerpt_chars=200,
         now=_now,
         new_id=lambda: next(ids),
+        diagnostics=diagnostics,
     )
     return stage, completer, recording
 
@@ -252,6 +254,28 @@ def _sent(completer: FakeToolCallingCompleter) -> dict[str, Any]:
 def _flags(completer: FakeToolCallingCompleter) -> set[str]:
     """The flags the last round set, where its stage was built over :data:`FLAG_ECHO`."""
     return set(completer.last_call.messages[0].content.split("\n")) - {""}
+
+
+async def _echoed(
+    stage: PlanningStage,
+    completer: FakeToolCallingCompleter,
+    sink: FakeDiagnosticSink,
+    inputs: PlanningInputs,
+) -> set[str]:
+    """Plan one round with the record on: the flags it rendered :data:`FLAG_ECHO` under.
+
+    Checked first against its given entry, whose ``prompt`` key records every flag the
+    prompt declares with the value the stage computed, so exactly those it rendered
+    under are set (ADR-0335 §9:1).
+    """
+    with diagnosed_activation(inputs.activation_id, clock=_now):
+        await stage.plan(inputs)
+    given = sink.of(DiagnosticSource.PLANNING, DiagnosticKind.GIVEN)[-1]
+    recorded = given.model_dump(mode="json")["body"]["prompt"]["flags"]
+    assert set(recorded) == PLANNING_PROMPT.flags
+    assert {name for name, value in recorded.items() if value is True} == _flags(completer)
+    assert all(value is False for name, value in recorded.items() if name not in _flags(completer))
+    return _flags(completer)
 
 
 def _understanding(**fields: Any) -> ActivationUnderstanding:
@@ -490,9 +514,10 @@ async def test_the_template_is_handed_takes_message_as_the_place_has_it(
     takes_message: bool,
 ) -> None:
     """ADR-0334 §4:2, ADR-0307 §3:8: the code computes whether the place takes a message."""
-    stage, completer, _ = _stage(prompt=FLAG_ECHO)
-    await stage.plan(_inputs(place=PlaceWindow(takes_message=takes_message)))
-    assert ("takes_message" in _flags(completer)) is takes_message
+    sink = FakeDiagnosticSink()
+    stage, completer, _ = _stage(prompt=FLAG_ECHO, diagnostics=sink)
+    inputs = _inputs(place=PlaceWindow(takes_message=takes_message))
+    assert ("takes_message" in await _echoed(stage, completer, sink, inputs)) is takes_message
 
 
 async def test_the_template_is_handed_every_value_the_code_owns() -> None:
