@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from browser_drive import Drive
-    from playwright.async_api import Browser, Dialog, Route
+    from playwright.async_api import Browser, Dialog, Locator, Route
 
 pytestmark = [
     pytest.mark.integration,
@@ -91,10 +91,20 @@ async def _open(drive: Drive, *, devices: tuple[str, ...] = ("hub",)) -> str:
     await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
     await _streaming(drive)
     await drive.page.locator("#chat-conversations button.chat-open:not([aria-current])").click()
-    await expect(drive.page.locator("#chat-heading")).to_have_text(f"Conversation {started.id}")
+    await expect(drive.page.locator("#chat-heading")).to_have_text(await _title(drive, started.id))
     # The conversation's opening reads have landed: its state is the last of them.
     await drive.page.wait_for_function("() => chat.state !== null")
     return started.id
+
+
+async def _title(drive: Drive, conversation: str) -> str:
+    """What the page calls a conversation: its start, in this browser's terms."""
+    return str(await drive.page.evaluate("(id) => chatTitle(id)", conversation))
+
+
+def _row(drive: Drive, conversation: str) -> Locator:
+    """The listing's row that opens one conversation."""
+    return drive.page.locator(f'#chat-conversations [data-conversation="{conversation}"]')
 
 
 async def _streaming(drive: Drive) -> None:
@@ -323,11 +333,11 @@ async def test_a_reload_keeps_the_conversation_the_chat_was_reading(
     """The tab's chat and its conversation survive a reload, as the ask's thread does."""
     async with driving(gateway_browser, tmp_path) as drive:
         conversation = await _open(drive)
+        title = await _title(drive, conversation)
         await drive.page.reload()
 
-        await expect(drive.page.locator("#chat-heading")).to_have_text(
-            f"Conversation {conversation}"
-        )
+        await expect(drive.page.locator("#chat-heading")).to_have_text(title)
+        assert await drive.page.evaluate("() => chat.selected") == conversation
 
 
 #: Holds the page's reading of the first answer to ``path`` until the case releases it,
@@ -373,8 +383,8 @@ async def test_a_transcript_read_before_a_deletion_does_not_bring_the_message_ba
             drive.page.locator("#chat-transcript li.from-user:not(.pending)")
         ).to_have_count(1, timeout=_FOLLOWED)
         await drive.page.click("#chat-start")
-        await expect(drive.page.locator("#chat-heading")).not_to_have_text(
-            f"Conversation {conversation}"
+        await drive.page.wait_for_function(
+            "(id) => chat.selected !== null && chat.selected !== id", arg=conversation
         )
 
         await drive.page.evaluate(_HOLDING, "/chat/transcript")
@@ -761,9 +771,7 @@ async def test_a_listing_that_could_not_be_read_again_stops_the_following(
 
         drive.engine.recent_conversations = held  # type: ignore[method-assign]
         await drive.page.click("#chat-follow-again")
-        await expect(drive.page.locator("#chat-conversations")).to_contain_text(
-            f"Conversation {started.id}"
-        )
+        await expect(_row(drive, started.id)).to_have_count(1)
         await expect(follow).to_contain_text("Following this chat")
 
 
@@ -983,12 +991,10 @@ async def test_a_device_removed_from_a_conversation_drops_it(
 
             said = drive.page.locator("#chat-said")
             await expect(said).to_contain_text(
-                f"This device no longer reads conversation {conversation}", timeout=_FOLLOWED
+                "This device no longer reads the conversation from", timeout=_FOLLOWED
             )
             await expect(drive.page.locator("#chat-thread")).to_be_hidden()
-            await expect(drive.page.locator("#chat-conversations")).not_to_contain_text(
-                f"Conversation {conversation}"
-            )
+            await expect(_row(drive, conversation)).to_have_count(0)
             await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
             assert await drive.page.evaluate(
                 "() => document.documentElement.scrollWidth <= document.documentElement.clientWidth"
@@ -1012,8 +1018,7 @@ async def test_a_device_added_to_a_conversation_is_listed_it_with_its_snapshot(
             started.id, devices=[ChatDevice(device_id=_LAPTOP, access=DeviceAccess.READ_WRITE)]
         )
 
-        listing = drive.page.locator("#chat-conversations")
-        await expect(listing).to_contain_text(f"Conversation {started.id}", timeout=_FOLLOWED)
+        await expect(_row(drive, started.id)).to_have_count(1, timeout=_FOLLOWED)
         await drive.page.locator("#chat-conversations button.chat-open:not([aria-current])").click()
         await expect(drive.page.locator("#chat-transcript")).to_contain_text("Written before.")
 
@@ -1037,9 +1042,7 @@ async def test_a_device_refused_for_holding_no_role_drops_every_conversation(
             f"ai-assistant-device assign {_LAPTOP} commands"
         )
         await expect(drive.page.locator("#chat-thread")).to_be_hidden()
-        await expect(drive.page.locator("#chat-conversations")).not_to_contain_text(
-            f"Conversation {conversation}"
-        )
+        await expect(_row(drive, conversation)).to_have_count(0)
         await expect(drive.page.locator("#chat-follow")).to_contain_text("Stopped following")
         await expect(drive.page.locator("#chat-follow-again")).to_be_visible()
         opened = len(_follows(drive))
@@ -1067,7 +1070,7 @@ async def test_a_listing_read_before_a_removal_does_not_bring_the_conversation_b
 
         listing = drive.page.locator("#chat-conversations")
         await expect(listing.locator("li")).to_have_count(1)
-        await expect(listing).not_to_contain_text(f"Conversation {conversation}")
+        await expect(_row(drive, conversation)).to_have_count(0)
 
 
 async def test_a_listing_read_before_a_no_role_refusal_lists_nothing_when_it_lands(
@@ -1124,7 +1127,7 @@ async def test_a_state_read_refused_for_a_removal_leaves_the_stream_to_say_so(
         )
 
         await expect(drive.page.locator("#chat-said")).to_contain_text(
-            f"This device no longer reads conversation {conversation}", timeout=_FOLLOWED
+            "This device no longer reads the conversation from", timeout=_FOLLOWED
         )
         await expect(drive.page.locator("#chat-thread")).to_be_hidden()
         await expect(drive.page.locator("#chat-follow")).to_contain_text("You came back")
@@ -1146,8 +1149,9 @@ async def test_a_roles_chunk_with_no_roles_drops_nothing(
             "roster gives it no role", timeout=_FOLLOWED
         )
         await expect(drive.page.locator("#chat-heading")).to_have_text(
-            f"Conversation {conversation}"
+            await _title(drive, conversation)
         )
+        assert await drive.page.evaluate("() => chat.selected") == conversation
         await expect(drive.page.locator("#chat-follow")).to_contain_text("Following this chat")
         await expect(drive.page.locator("#chat-said")).to_be_hidden()
 

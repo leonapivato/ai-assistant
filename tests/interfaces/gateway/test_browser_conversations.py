@@ -106,6 +106,13 @@ def _seed(drive: Drive, conversation_id: str, *, turns: int) -> None:
     )
 
 
+async def _title(drive: Drive, conversation_id: str) -> str:
+    """What the page calls a held conversation: when it started, by the page's own rule
+    (``chatTime``), so no second copy of the formatting sits in an assertion."""
+    started = drive.engine.conversations_held[conversation_id].started_at.isoformat()
+    return str(await drive.page.evaluate("(iso) => chatTime(iso)", started))
+
+
 async def _answered(drive: Drive, conversation_id: str) -> None:
     """Write one message into a held conversation, and let the fake's reader answer it.
 
@@ -278,19 +285,18 @@ async def test_a_row_names_its_conversation_and_offers_only_the_forget(
 
     **Named**, because every other line about a conversation on this page names it —
     the destroy ceremony and the outcome of a forget — and a row of two timestamps
-    gives the owner nothing to recognise the thread by.
+    gives the owner nothing to recognise the thread by. Named as the chat names it,
+    by when it started, and never by the hub's id (#3209's follow-on).
 
     **No "Continue"** (ADR-0309 §5:4): it continued a conversation into the Ask form,
     which retired with the Ask panel, and the chat's own listing is where one is
     opened. Asserted over the row's buttons rather than over the file, because a
     control left on screen is what the owner would press.
 
-    It is also laid out so an id cannot push the row off a phone, and the ids seeded
-    here are what makes that assertion mean anything: an id is a hub value with no
-    bounded length and **no spaces to break at**, so a row of ``c-1`` and ``c-2``
-    would scroll no further sideways whether the wrapping rule were there or not
-    (adversarial review round 5). These are unbroken and far wider than 390px, which
-    is #1385's "Remo ve" one row over.
+    The ids seeded here are unbroken and far wider than 390px (adversarial review
+    round 5, #1385's "Remo ve" one row over). The row no longer shows one, and they
+    stay so that one brought back would still have to wrap rather than push the row
+    off a phone.
     """
     async with driving(gateway_browser, tmp_path) as drive:
         long = "conversation-" + "x" * 120
@@ -299,7 +305,9 @@ async def test_a_row_names_its_conversation_and_offers_only_the_forget(
         await drive.page.set_viewport_size({"width": 390, "height": 844})
         await _open_listing(drive)
         named = await _first_row(drive).locator(".conversation-name").inner_text()
-        assert named in {f"Conversation {long}", f"Conversation {long.upper()}"}
+        assert named == await _title(drive, long)
+        assert long not in named
+        assert long.upper() not in named
         buttons = _first_row(drive).get_by_role("button")
         await expect(buttons).to_have_count(1)
         await expect(buttons).to_have_text("Forget")
@@ -329,14 +337,15 @@ async def test_a_forget_refreshes_the_listing_and_states_what_was_forgotten(
         # what the outcome will name -- so the outcome is not merely echoing the id
         # the button carried.
         asked = await answered
-        assert "Forget conversation c-1?" in asked
+        title = await _title(drive, "c-1")
+        assert f"Forget the conversation from {title}?" in asked
         assert "only deleting removes it" in asked
         await drive.page.wait_for_selector("#forget-outcome:not([hidden])")
         said = await drive.page.inner_text("#forget-outcome")
         assert said == (
-            "The assistant has forgotten conversation c-1's 3 recorded turn(s), and no "
-            "longer recalls them anywhere else. The conversation and its transcript "
-            "stay; only deleting removes them."
+            f"The assistant has forgotten the 3 recorded turn(s) of the conversation from "
+            f"{title}, and no longer recalls them anywhere else. The conversation and its "
+            "transcript stay; only deleting removes them."
         )
         await expect(drive.page.locator("#conversation-list .conversation-row")).to_have_count(1)
         assert set(drive.engine.conversations_held) == {"c-1"}
@@ -362,7 +371,8 @@ async def test_a_forget_that_destroyed_nothing_says_that_instead(
         await drive.page.wait_for_selector("#forget-outcome:not([hidden])")
         said = await drive.page.inner_text("#forget-outcome")
         assert said == (
-            "Conversation c-1 held nothing in the assistant's memory, so nothing was forgotten."
+            f"The conversation from {await _title(drive, 'c-1')} held nothing in the "
+            "assistant's memory, so nothing was forgotten."
         )
 
 
@@ -460,7 +470,7 @@ async def test_a_superseded_listing_read_cannot_put_back_a_row_the_newer_one_dro
         # held read's continuation could have been holding has drained (ADR-0216 §7).
         await drive.page.evaluate("() => null")
         await expect(rows).to_have_count(1)
-        assert await rows.nth(0).locator(".conversation-name").inner_text() == "Conversation kept"
+        assert await rows.nth(0).get_attribute("data-conversation") == "kept"
 
 
 async def test_a_second_read_of_the_listing_clears_the_outcome_it_did_not_produce(

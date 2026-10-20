@@ -515,6 +515,56 @@ async function readBody(response) {
 // arrived as a stream's terminal value, because the gateway writes the same names
 // on both — so §9's distinction survives to what the owner reads rather than
 // stopping at a status code a stream cannot revise.
+// --- instants (#1392) -----------------------------------------------------------
+//
+// An instant the hub wrote — ISO-8601 with its offset — said in this browser's own
+// language and time zone, everywhere the page prints one. The hub's own zone
+// (`Settings.timezone`) is still what a quiet window is read in (ADR-0130 §6): that is
+// how the hub *decides*, and this is only how a page *shows* an instant it was sent,
+// so no second zone decides anything. A value that is not an instant with an offset —
+// a bare date, a time with no zone, a word — is shown as it came, because nothing here
+// can know which zone it meant.
+const INSTANT_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+const LOCAL_DATE_TIME = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+const LOCAL_TIME = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
+const LOCAL_DATE = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
+const LOCAL_DAY = new Intl.DateTimeFormat(undefined, {
+  weekday: "short",
+  day: "numeric",
+  month: "short",
+});
+
+function instant(iso) {
+  if (typeof iso !== "string" || !INSTANT_SHAPE.test(iso)) {
+    return null;
+  }
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? null : at;
+}
+
+function localTime(iso) {
+  const at = instant(iso);
+  return at === null ? iso : LOCAL_DATE_TIME.format(at);
+}
+
+// A day as a person names it: today, yesterday, a weekday and date this year, or the
+// date with its year.
+function localDay(at) {
+  const now = new Date();
+  const day = (when) => `${when.getFullYear()}-${when.getMonth()}-${when.getDate()}`;
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  if (day(at) === day(now)) {
+    return "Today";
+  }
+  if (day(at) === day(yesterday)) {
+    return "Yesterday";
+  }
+  return at.getFullYear() === now.getFullYear() ? LOCAL_DAY.format(at) : LOCAL_DATE.format(at);
+}
+
 // The headline of each of the hub's three device refusals on the hosted door (below).
 const HOSTED_DEVICE_REFUSED = "That didn't go through, so nothing was done.";
 
@@ -1742,6 +1792,8 @@ async function listConversations() {
 function renderConversation(list, summary) {
   const item = document.createElement("div");
   item.className = "conversation-row";
+  // Which conversation the row is, for nothing on screen: its name is its start.
+  item.dataset.conversation = summary.id;
   // **Which conversation this row is** (#1371's first clause, found by driving the
   // page rather than by reading it). Every other line about a conversation on this
   // page names it — the indicator, the destroy ceremony, the outcome of a forget —
@@ -1749,10 +1801,13 @@ function renderConversation(list, summary) {
   // timestamps, and the sentence that appears after a tap names an id that was never
   // on screen before the tap.
   //
-  // Its own line rather than a clause of the next one, because the id is what the
-  // eye is looking for and a phone puts it behind two long instants otherwise.
-  line(item, `Conversation ${summary.id}`, "conversation-name");
-  const when = summary.last_turn_at || summary.last_active_at;
+  // Its own line rather than a clause of the next one, because the name is what the
+  // eye is looking for and a phone puts it behind two long instants otherwise. The name
+  // is the one the chat gives it — when it started (`chatTime`) — rather than the hub's
+  // id, which a person has never been shown anywhere else (#3209's follow-on).
+  line(item, chatTime(summary.started_at), "conversation-name");
+  const when = localTime(summary.last_turn_at || summary.last_active_at);
+  const active = localTime(summary.last_active_at);
   // Both instants cross and they are different facts (ADR-0074 §2): activity is
   // when someone was last here and orders the list, and `last_turn_at` is when a
   // turn was last recorded. A conversation with no turn says so rather than
@@ -1760,8 +1815,8 @@ function renderConversation(list, summary) {
   line(
     item,
     summary.last_turn_at
-      ? `Last turn ${when} — active ${summary.last_active_at}`
-      : `No turn yet — active ${summary.last_active_at}`,
+      ? `Last turn ${when} — active ${active}`
+      : `No turn yet — active ${active}`,
     "hint"
   );
   // **No "Continue" here** (ADR-0309 §5:4). It continued a conversation into the Ask
@@ -1808,8 +1863,10 @@ async function forgetConversation(id) {
     // conversation is still read while the owner talks there, and that only
     // deleting removes it.
     const asked = window.confirm(
-      `Forget conversation ${held.id}? It holds ${held.recorded_turns} recorded ` +
-        `turn(s), from ${held.started_at} to ${held.last_turn_at || "no turn yet"}. ` +
+      `Forget the conversation from ${chatTime(held.started_at)}? It holds ` +
+        `${held.recorded_turns} recorded ` +
+        `turn(s), from ${localTime(held.started_at)} to ` +
+        `${held.last_turn_at ? localTime(held.last_turn_at) : "no turn yet"}. ` +
         "Forgetting removes them from the assistant's memory, so it no longer " +
         "recalls them anywhere else. The conversation and its transcript stay: the " +
         "assistant still reads it while you keep talking there, and only deleting " +
@@ -1831,7 +1888,7 @@ async function forgetConversation(id) {
     // no longer the last word on what is on screen, so it does not get to write over
     // one: the outcome is dropped rather than restored above a newer listing.
     if (read === listed) {
-      sayForgotten(statedForget(id, held, done.destroyed));
+      sayForgotten(statedForget(held, done.destroyed));
     }
   } catch (_) {
     // Not this session's condition to report (#2404).
@@ -1858,14 +1915,16 @@ function sayForgotten(text) {
 //
 // **The count is the digest's, read before the forget**, which is the only moment it
 // was readable — after the forget there is nothing left to count.
-function statedForget(id, held, destroyed) {
+function statedForget(held, destroyed) {
+  const named = `the conversation from ${chatTime(held.started_at)}`;
   if (!destroyed) {
-    return `Conversation ${id} held nothing in the assistant's memory, so nothing was forgotten.`;
+    const nothing = "held nothing in the assistant's memory, so nothing was forgotten.";
+    return `${capitalised(named)} ${nothing}`;
   }
   return (
-    `The assistant has forgotten conversation ${id}'s ${held.recorded_turns} recorded ` +
-    "turn(s), and no longer recalls them anywhere else. The conversation and its " +
-    "transcript stay; only deleting removes them."
+    `The assistant has forgotten the ${held.recorded_turns} recorded turn(s) of ${named}, ` +
+    "and no longer recalls them anywhere else. The conversation and its transcript " +
+    "stay; only deleting removes them."
   );
 }
 
@@ -2569,7 +2628,7 @@ function applyChanges(changes, snapshot) {
       relist = true;
       chat.unread.delete(change.conversation_id);
       if (change.conversation_id === chat.selected) {
-        chatGone(`Conversation ${change.conversation_id} was deleted.`);
+        chatGone(`${capitalised(chatName(change.conversation_id))} was deleted.`);
       }
     } else if (change.kind === "devices_changed") {
       // Always applied: the stream is the authority (`seen`'s comment).
@@ -2614,12 +2673,14 @@ function applyChanges(changes, snapshot) {
 // A conversation this device no longer reads, dropped: out of the listing, its unsent
 // messages with it, and off the screen where it is open (ADR-0296 §4:8).
 function dropConversation(id) {
+  // Named while the listing still holds it, since the name is read off the listing.
+  const name = chatName(id);
   chat.dropped.add(id);
   chat.listing = chat.listing.filter((summary) => summary.id !== id);
   chat.unread.delete(id);
   chat.pending = chat.pending.filter((one) => one.conversation !== id);
   if (id === chat.selected) {
-    chatGone(`This device no longer reads conversation ${id}, so this page has let it go.`);
+    chatGone(`This device no longer reads ${name}, so this page has let it go.`);
     return;
   }
   renderChatListing();
@@ -2715,19 +2776,39 @@ async function listChat(more) {
   }
 }
 
-// An instant, as the hub wrote it: the date and the minute, and the zone it is in. No
-// `Date` is built and no zone database consulted (ADR-0194 §5's reach, which this page
-// keeps everywhere); how the page shows instants in the owner's own zone is #1392's.
+// An instant in the chat, as a person reads one: the day — today, yesterday, or the
+// date — and the time, in this browser's own language and zone (`localTime`).
 function chatTime(iso) {
-  const shaped = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})[^+Z-]*(Z|[+-]\d{2}:\d{2})$/.exec(iso);
-  if (shaped === null) {
-    return iso;
-  }
-  const zone = shaped[3] === "Z" || shaped[3] === "+00:00" ? "UTC" : `UTC${shaped[3]}`;
-  return `${shaped[1]} ${shaped[2]} ${zone}`;
+  const at = instant(iso);
+  return at === null ? iso : `${localDay(at)}, ${LOCAL_TIME.format(at)}`;
+}
+
+// What a conversation is called (#3209's follow-on): when it started, as `chatTime`
+// says it, since the listing carries nothing a person wrote. The hub's id names it
+// nowhere on screen; a conversation not yet in the listing is "this conversation".
+function chatTitle(id) {
+  const summary = chat.listing.find((one) => one.id === id);
+  return summary === undefined ? "This conversation" : chatTime(summary.started_at);
+}
+
+// A sentence's first word, capitalised.
+function capitalised(text) {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+// The same, inside a sentence.
+function chatName(id) {
+  const summary = chat.listing.find((one) => one.id === id);
+  return summary === undefined
+    ? "this conversation"
+    : `the conversation from ${chatTime(summary.started_at)}`;
 }
 
 function renderChatListing() {
+  // The open conversation is named from the listing, which may land after it opened.
+  if (chat.selected !== null && !el("chat-thread").hidden) {
+    el("chat-heading").textContent = chatTitle(chat.selected);
+  }
   const list = el("chat-conversations");
   clearNode(list);
   if (chat.listing.length === 0) {
@@ -2745,11 +2826,13 @@ function renderChatListing() {
     const open = document.createElement("button");
     open.type = "button";
     open.className = "chat-open";
+    // Which conversation the row opens, for nothing on screen: its name is its start.
+    open.dataset.conversation = summary.id;
     const name = document.createElement("span");
     name.className = "chat-name";
-    name.textContent = `Conversation ${summary.id}`;
+    name.textContent = chatTime(summary.started_at);
     open.appendChild(name);
-    const when = `Started ${chatTime(summary.started_at)}`;
+    const when = `Last active ${chatTime(summary.last_active_at)}`;
     const said = document.createElement("span");
     said.className = "chat-when";
     said.textContent = chat.unread.has(summary.id) ? `${when} · new messages` : when;
@@ -2821,7 +2904,7 @@ async function selectChat(id) {
   chat.reading = true;
   el("chat-thread").hidden = false;
   renderChatView();
-  el("chat-heading").textContent = `Conversation ${id}`;
+  el("chat-heading").textContent = chatTitle(id);
   renderChatListing();
   renderTranscript();
   renderChatState();
@@ -2888,7 +2971,7 @@ async function readTranscript(id, mine, before) {
     }
     if (body === null) {
       if (refusal !== null && refusal.fault === "no-such-conversation") {
-        chatGone(`Conversation ${id} no longer exists.`);
+        chatGone(`${capitalised(chatName(id))} no longer exists.`);
         return true;
       }
       return false;
@@ -3499,8 +3582,8 @@ async function deleteChat() {
     if (chat.selected === id) {
       chatGone(
         body.deleted
-          ? `Conversation ${id} was deleted. Nothing was forgotten.`
-          : `Conversation ${id} was already gone.`
+          ? `${capitalised(chatName(id))} was deleted. Nothing was forgotten.`
+          : `${capitalised(chatName(id))} was already gone.`
       );
     }
     void listChat(false);
@@ -3533,9 +3616,10 @@ async function forgetChat() {
     }
     sayChat(
       body.destroyed
-        ? `The assistant has forgotten conversation ${id}: it no longer recalls it anywhere ` +
+        ? `The assistant has forgotten ${chatName(id)}: it no longer recalls it anywhere ` +
             "else. The conversation and its transcript stay; only deleting removes them."
-        : `Conversation ${id} held nothing in the assistant's memory, so nothing was forgotten.`
+        : `${capitalised(chatName(id))} held nothing in the assistant's memory, so nothing ` +
+          "was forgotten."
     );
   } catch (_) {
     if (!sameSession(half, era)) {
@@ -3569,7 +3653,8 @@ function renderMyDevices() {
   const list = el("chat-my-devices");
   clearNode(list);
   const said = el("chat-this-device");
-  const held = chat.myDevices.some((one) => one.device_id === chat.thisDevice);
+  const mine = chat.myDevices.find((one) => one.device_id === chat.thisDevice);
+  const held = mine !== undefined;
   if (chat.thisDevice === null) {
     said.textContent =
       "This gateway cannot name this browser's device, so it cannot write a message " +
@@ -3580,10 +3665,20 @@ function renderMyDevices() {
     // Through the sign-in door this browser is the person's one hosted browser device,
     // "the web" rather than a machine (ADR-0327 §10), and adding it is the setup's act
     // rather than a command the person can run — so it is said without either.
-    said.textContent = held
-      ? "This page is one of your devices, so every new conversation is shown here."
-      : "This page is not one of your devices yet, so a new conversation is not shown " +
+    // A member for writing alone is not shown a conversation (ADR-0293 §3:5), so the
+    // promise is made only to one that reads (#3211).
+    if (!held) {
+      said.textContent =
+        "This page is not one of your devices yet, so a new conversation is not shown " +
         "here on its own. The person who set up your assistant can add it.";
+    } else if (mine.access === "write") {
+      said.textContent =
+        "This page is one of your devices for writing only, so a new conversation is " +
+        "not shown here. The person who set up your assistant can change that.";
+    } else {
+      said.textContent =
+        "This page is one of your devices, so every new conversation is shown here.";
+    }
   } else if (held) {
     said.textContent = `This browser is device ${chat.thisDevice}, one of your devices.`;
   } else {
@@ -4110,7 +4205,7 @@ function renderGrantFields(item, grant) {
   name.textContent = grant.source;
   item.appendChild(name);
   line(item, `You authorise ${usePhrase(grant.scope)}.`, "reply");
-  line(item, `Decided ${grant.decided_at}`, "hint");
+  line(item, `Decided ${localTime(grant.decided_at)}`, "hint");
 }
 
 // The history (ADR-0097 §4). **No row here is presented as live or as withdrawn on
@@ -4165,7 +4260,7 @@ function renderHistory(list, record) {
       : `You withdrew a grant of ${usePhrase(record.scope)}.`,
     "hint"
   );
-  line(item, `Decided ${record.decided_at}`, "hint");
+  line(item, `Decided ${localTime(record.decided_at)}`, "hint");
   list.appendChild(item);
 }
 
@@ -4455,7 +4550,7 @@ function whyHeld(belief) {
   const latest =
     evidence.latest === null
       ? " None of it is dated."
-      : ` The latest piece is from ${evidence.latest}.`;
+      : ` The latest piece is from ${localTime(evidence.latest)}.`;
   return (
     `I worked it out from ${evidence.supporting} piece(s) of support${across}${against}.` +
     latest +
@@ -4470,15 +4565,15 @@ function whyHeld(belief) {
 function beliefLines(belief) {
   const lines = [
     `Why: ${whyHeld(belief)}`,
-    `Learned: ${belief.learned === null ? "unknown" : belief.learned}`,
-    `As of: ${belief.as_of === null ? "unknown" : belief.as_of}`,
+    `Learned: ${belief.learned === null ? "unknown" : localTime(belief.learned)}`,
+    `As of: ${belief.as_of === null ? "unknown" : localTime(belief.as_of)}`,
   ];
   if (belief.attestation !== null) {
     // ADR-0189 §1, §4: which source its standing rests on, and when that source said so
     // on its own clock (ADR-0328 §2:6), as the CLI says it.
     lines.push(
       `Reported by: ${belief.attestation.reported_by}, as of ` +
-        `${belief.attestation.reported_at} on its own clock`,
+        `${localTime(belief.attestation.reported_at)} on its own clock`,
     );
   }
   if (belief.reading_certainty !== "sure") {
@@ -4505,7 +4600,7 @@ function beliefLines(belief) {
     );
   }
   if (belief.valid_until !== null) {
-    lines.push(`Believed until: ${belief.valid_until}`);
+    lines.push(`Believed until: ${localTime(belief.valid_until)}`);
   }
   lines.push(`id: ${belief.id}`);
   return lines;
@@ -4530,8 +4625,9 @@ function supportLine(support) {
   const named =
     source === null
       ? ""
-      : ` · ${source.reported_by}, which said so as of ${source.reported_at} on its own clock`;
-  const when = support.when === null ? "" : ` · ${support.when}`;
+      : ` · ${source.reported_by}, which said so as of ` +
+        `${localTime(source.reported_at)} on its own clock`;
+  const when = support.when === null ? "" : ` · ${localTime(support.when)}`;
   const against = support.direction === "against" ? " · against it" : "";
   const stopped = support.counts ? "" : " · no longer counted";
   const said = support.content === null ? "what it pointed at is gone" : support.content;
@@ -4781,7 +4877,7 @@ function renderHeldNotification(list, record, offset) {
   // assistant vouches for it.
   line(item, `Class: ${record.notification_class} (noticed by ${record.producer})`, "hint");
   renderRuling(item, record);
-  line(item, `Noticed: ${record.noticed_at}`, "hint");
+  line(item, `Noticed: ${localTime(record.noticed_at)}`, "hint");
   renderExpiry(item, record);
   offerNotificationActs(item, record, offset);
   list.appendChild(item);
@@ -4804,10 +4900,10 @@ function renderRuling(item, record) {
     line(item, `Not now, because: ${conditionPhrase(condition)}`, "hint");
   });
   if (record.dismissed_at) {
-    line(item, `Dismissed: ${record.dismissed_at}`, "hint");
+    line(item, `Dismissed: ${localTime(record.dismissed_at)}`, "hint");
   }
   if (record.dropped_at) {
-    line(item, `Ruled out: ${record.dropped_at}`, "hint");
+    line(item, `Ruled out: ${localTime(record.dropped_at)}`, "hint");
   }
 }
 
@@ -4823,12 +4919,13 @@ function renderExpiry(item, record) {
   if (record.expired) {
     line(
       item,
-      `Expired: ${record.expires_at} — it is kept and readable, and it will not reach you`,
+      `Expired: ${localTime(record.expires_at)} — it is kept and readable, and it will not ` +
+        "reach you",
       "notice"
     );
     return;
   }
-  line(item, `Expires: ${record.expires_at}`, "hint");
+  line(item, `Expires: ${localTime(record.expires_at)}`, "hint");
 }
 
 function offerNotificationActs(item, record, offset) {
@@ -4928,7 +5025,7 @@ async function forgetNotification(id, offset) {
     const asked = window.confirm(
       `About to destroy this notification.\n\n${record.summary}\n\n` +
         `Class: ${record.notification_class} (noticed by ${record.producer})\n` +
-        `Noticed: ${record.noticed_at}\n\n` +
+        `Noticed: ${localTime(record.noticed_at)}\n\n` +
         "This destroys the record: it leaves your export, and the same thing can be " +
         "raised afresh afterwards. To deal with it and keep the record, dismiss it " +
         "instead. Neither act says anything about whether it reached a device."
@@ -6020,7 +6117,14 @@ function showConsole(resumed) {
   watchDeliveries();
   // The chat this browser has opened before, opened again; a browser that never opened
   // it reads nothing of it until the owner presses Chat.
-  if (chatWasOpen()) {
+  //
+  // **Through the sign-in door the chat opens on the first load too** (#3209's
+  // follow-on): a person who signed in through the edge has asked for their assistant,
+  // and a first screen holding only "Watching for notifications" leaves them looking for
+  // where to talk. The page has no control that closes the chat, so there is no stored
+  // choice that could say otherwise; the loopback and remote doors keep the owner's one
+  // press.
+  if (chatWasOpen() || HOSTED) {
     openChat();
   }
 }
@@ -6125,6 +6229,16 @@ if (HOSTED) {
   // but the person never meets its end — they meet their sign-in's.
   el("session-terms").hidden = true;
   el("hosted-terms").hidden = false;
+  // The panels a person on this door can neither use nor act on, out of its menu
+  // (#3209's follow-on). Grant history is a ledger of decisions for the owner auditing
+  // them, which "What I may read now" already answers in the form a person acts on. The
+  // two connection panels answer for accounts connected at the gateway's own machine:
+  // entering one is refused here (ADR-0327 §12:1) and the operator never acts as the
+  // person (§13), so on this door the list is empty and its log has nothing of theirs.
+  // The gateway still admits each read (§12:2); only the page stops offering them.
+  for (const control of ["history-button", "connections-button", "connection-log-button"]) {
+    el(control).hidden = true;
+  }
 }
 if (headerHalf() !== null) {
   showConsole();

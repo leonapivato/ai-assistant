@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Any
 
 import gateway_ports
 import pytest
-from browser_drive import DESKTOP, PHONE, SESSION_IDLE_MARGIN, DriveEngine, press
+from browser_drive import DESKTOP, PHONE, SESSION_IDLE_MARGIN, DriveEngine, driving, press
 from gateway_edge import DOOR, DOOR_ORIGIN, HOSTED_DEVICE, FakeEdge
 from gateway_timing import Clock, Timers
 from playwright.async_api import Error as PlaywrightError
@@ -49,7 +49,7 @@ from playwright.async_api import expect
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import DeviceRefusal, DeviceRefusedError
-from ai_assistant.core.types import ChatDevice, DeviceAccess
+from ai_assistant.core.types import ChatDevice, DeviceAccess, MessageAuthor, NewMessage
 from ai_assistant.interfaces.gateway.server import Gateway, packaged_bundle
 
 if TYPE_CHECKING:
@@ -159,6 +159,7 @@ async def through_the_door(
     *,
     viewport: ViewportSize | None = None,
     open_page: bool = True,
+    timezone: str | None = None,
     **overrides: Any,
 ) -> AsyncIterator[Door]:
     """Bind a gateway with its hosted listener, and open the page through the fake edge.
@@ -167,6 +168,8 @@ async def through_the_door(
         browser: The one browser this run launched.
         tmp_path: The case's data directory (ADR-0216 §4).
         viewport: The window, or ``None`` for :data:`DESKTOP`.
+        timezone: The browser's own time zone, with ``en-US`` as its language, or
+            ``None`` for the machine's.
         open_page: Whether to open the page; ``False`` for a case that sets the door
             up first.
         **overrides: Any setting to replace.
@@ -197,7 +200,11 @@ async def through_the_door(
     context: BrowserContext | None = None
     held: list[Route] = []
     try:
-        context = await browser.new_context(viewport=viewport or DESKTOP)
+        context = await browser.new_context(
+            viewport=viewport or DESKTOP,
+            timezone_id=timezone,
+            locale=None if timezone is None else "en-US",
+        )
         page = await context.new_page()
         door = Door(
             page=page,
@@ -240,6 +247,14 @@ async def through_the_door(
                 server.close_clients()
                 with contextlib.suppress(Exception):
                     await server.wait_closed()
+
+
+async def _chat_loaded(door: Door) -> None:
+    """Wait for the console, and for the chat the door opens on load to have read what
+    it reads before following (its stream is held), so a case that changes the door next
+    changes it under no read of the chat's."""
+    await expect(door.page.locator("#console")).to_be_visible()
+    await door.page.wait_for_function("() => chat.loaded")
 
 
 async def _settled(door: Door) -> None:
@@ -393,7 +408,7 @@ async def test_a_session_that_ended_is_replaced_by_one_exchange_and_nothing_is_r
     session. One exchange, the console back, and the refused request not re-issued
     (§11:4) — the page says so where the owner reads what it is watching."""
     async with through_the_door(gateway_browser, tmp_path, viewport=viewport) as door:
-        await expect(door.page.locator("#console")).to_be_visible()
+        await _chat_loaded(door)
         door.expire_sessions()
         await press(door.page, "#conversations-button")
 
@@ -417,7 +432,7 @@ async def test_two_refusals_at_once_start_one_session(
     """§11:2: "at most one exchange for each such event" — and an exchange in flight is
     the one for every refusal that arrives while it is."""
     async with through_the_door(gateway_browser, tmp_path) as door:
-        await expect(door.page.locator("#console")).to_be_visible()
+        await _chat_loaded(door)
         door.expire_sessions()
         door.hold_exchange = asyncio.Event()
         # Two of the page's own reads, out at once under the session that has ended:
@@ -444,7 +459,7 @@ async def test_a_cookie_half_mismatch_is_shown_as_itself_and_exchanged_for_by_no
     """§11:5: "a refusal that ADR-0168 §6:4 reports as its own fault is shown as that
     fault, and the page makes no exchange for it"."""
     async with through_the_door(gateway_browser, tmp_path) as door:
-        await expect(door.page.locator("#console")).to_be_visible()
+        await _chat_loaded(door)
         door.swap_cookie = "not-this-sessions-cookie-half"
         await press(door.page, "#conversations-button")
 
@@ -463,7 +478,7 @@ async def test_a_door_refusal_mid_session_says_where_signing_in_happens(
     """§11:6, on a page already in use: the person's sign-in ends, the edge stops
     signing, and the page says the door refused and makes no exchange."""
     async with through_the_door(gateway_browser, tmp_path) as door:
-        await expect(door.page.locator("#console")).to_be_visible()
+        await _chat_loaded(door)
         door.signing = False
         await press(door.page, "#conversations-button")
 
@@ -539,13 +554,8 @@ async def test_on_a_phone_the_box_to_write_in_is_on_screen_and_nothing_scrolls_s
     unbroken message wraps rather than widening the page, and with the keyboard up a
     message of many lines grows the box to a share of the screen and no further, the
     send control still on it."""
-    async with through_the_door(gateway_browser, tmp_path, viewport=PHONE) as door:
-        await door.engine.set_my_devices(
-            [ChatDevice(device_id=HOSTED_DEVICE, access=DeviceAccess.READ_WRITE)]
-        )
-        await door.engine.start_conversation()
-        await expect(door.page.locator("#console")).to_be_visible()
-        await door.page.click("#chat-button")
+    async with through_the_door(gateway_browser, tmp_path, viewport=PHONE, open_page=False) as door:
+        await _seeded(door)
         await door.page.locator("#chat-conversations button.chat-open").click()
         await expect(door.page.locator("#chat-thread")).to_be_visible()
 
@@ -583,6 +593,120 @@ async def test_the_page_asks_a_phone_to_make_room_for_its_keyboard(
 
     assert viewport is not None
     assert "interactive-widget=resizes-content" in viewport
+
+
+# --- What the person meets first: the chat, named as they would name it -------------
+
+
+async def _seeded(door: Door, *, written: str | None = None) -> str:
+    """Put the hosted device in my devices, start a conversation, and open the page.
+
+    Seeded before the load, because the door holds the change stream that would carry a
+    later conversation, or a message's recording, to the page (module docstring).
+    """
+    await door.engine.set_my_devices(
+        [ChatDevice(device_id=HOSTED_DEVICE, access=DeviceAccess.READ_WRITE)]
+    )
+    started = await door.engine.start_conversation()
+    if written is not None:
+        await door.engine.chat.append_message(
+            started.id,
+            NewMessage(
+                author=MessageAuthor.USER, text=written, device_id=HOSTED_DEVICE, message_id="m-1"
+            ),
+        )
+    await door.page.goto(f"{DOOR_ORIGIN}/")
+    await expect(door.page.locator("#console")).to_be_visible()
+    await expect(door.page.locator("#chat-conversations button.chat-open")).to_have_count(1)
+    return started.id
+
+
+@pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
+async def test_the_chat_is_open_on_the_first_load_through_the_door(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """A person who signed in through the edge asked for their assistant: the chat is
+    the first screen, with nothing pressed and nothing stored in this browser."""
+    async with through_the_door(gateway_browser, tmp_path, viewport=viewport) as door:
+        await expect(door.page.locator("#console")).to_be_visible()
+
+        await expect(door.page.locator("#chat")).to_be_visible()
+        await expect(door.page.locator("#chat-start")).to_be_visible()
+
+
+async def test_a_conversation_is_named_by_its_start_in_the_browsers_own_zone(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The listing and the open conversation name it by when it started, and a message
+    says when it was written, both in the browser's own zone and language — never the
+    hub's id, and never the instant as the hub wrote it. The fake starts everything at
+    2026-01-01 12:00 UTC, which is 9:00 PM in Tokyo."""
+    async with through_the_door(
+        gateway_browser, tmp_path, open_page=False, timezone="Asia/Tokyo"
+    ) as door:
+        conversation = await _seeded(door, written="What's on Friday?")
+        row = door.page.locator("#chat-conversations button.chat-open")
+        await row.click()
+        await expect(door.page.locator("#chat-transcript li")).to_have_count(1)
+
+        for said in (row, door.page.locator("#chat-heading"), door.page.locator(".chat-meta")):
+            text = await said.inner_text()
+            assert "Jan 1" in text, text
+            assert "9:00" in text, text
+            for raw in (conversation, "UTC", "12:00", "2026-01-01"):
+                assert raw not in text, (raw, text)
+
+
+async def test_the_door_offers_no_panel_its_person_cannot_use(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Grant history and the two connection panels are the operator's: the person on
+    the door can enter no account (ADR-0327 §12:1), so the list is empty and its log
+    holds nothing of theirs. The menu keeps everything that is."""
+    async with through_the_door(gateway_browser, tmp_path) as door:
+        await expect(door.page.locator("#console")).to_be_visible()
+        await door.page.click("#menu > summary")
+
+        for gone in ("#history-button", "#connections-button", "#connection-log-button"):
+            await expect(door.page.locator(gone)).to_be_hidden()
+        for kept in (
+            "#conversations-button",
+            "#beliefs-button",
+            "#sources-button",
+            "#standing-button",
+            "#review-button",
+            "#tuning-button",
+        ):
+            await expect(door.page.locator(kept)).to_be_visible()
+
+
+async def test_the_loopback_door_keeps_the_owners_press_and_the_whole_menu(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The other doors are the owner's, and unchanged: the chat waits for the owner's
+    press, and every panel stays in the menu."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await drive.page.click("#menu > summary")
+
+        await expect(drive.page.locator("#chat")).to_be_hidden()
+        for kept in ("#history-button", "#connections-button", "#connection-log-button"):
+            await expect(drive.page.locator(kept)).to_be_visible()
+
+
+async def test_a_page_that_only_writes_is_not_promised_new_conversations(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """#3211: a member of my devices for writing alone is not shown a conversation
+    (ADR-0293 §3:5), so the note says so rather than promising one."""
+    async with through_the_door(gateway_browser, tmp_path, open_page=False) as door:
+        await door.engine.set_my_devices(
+            [ChatDevice(device_id=HOSTED_DEVICE, access=DeviceAccess.WRITE)]
+        )
+        await door.page.goto(f"{DOOR_ORIGIN}/")
+
+        note = door.page.locator("#chat-this-device")
+        await expect(note).to_contain_text("for writing only")
+        await expect(note).not_to_contain_text("every new conversation is shown here")
 
 
 # --- The harness: a forward the door was closed under -----------------------------------
