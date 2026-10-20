@@ -364,6 +364,43 @@ def test_the_memory_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> Non
     } == dict.fromkeys(carried)
 
 
+@pytest.mark.integration
+def test_the_plan_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> None:
+    """ADR-0329 §16:10: the carry from shape 1 says what the head's upgrade reads back.
+
+    Taken over the file the previous release wrote (``tests/planning/legacy``), so the
+    carry is held to the store's real upgrade rather than to a hand-built record. The
+    base's read-back is the stop records and each effect record as that release
+    exported them, which is the stored blob; carried to shape 2, every record of it is
+    read back by this build after the upgrade, and nothing more.
+    """
+    import shutil  # noqa: PLC0415
+
+    legacy = Path(__file__).resolve().parents[1] / "planning" / "legacy"
+    shutil.copyfile(legacy / "plans-before-adr-0329.db", tmp_path / "plans.db")
+    with sqlite3.connect(tmp_path / "plans.db") as conn:
+        base: Records = {
+            "stopped": [
+                str(one)
+                for (one,) in conn.execute(
+                    "SELECT activation_id FROM stopped_activations ORDER BY activation_id"
+                )
+            ],
+            **{
+                f"effect/{effect_id}": json.loads(data)
+                for effect_id, data in conn.execute("SELECT id, data FROM activation_effects")
+            },
+        }
+    (plans,) = [one for one in STORES if one.name == "plans"]
+
+    carried = plans.carries[1](base)
+    head = asyncio.run(plans.read(tmp_path))
+
+    assert plans.shape == 2
+    assert carried["observations"] == []
+    assert upgrade_check.compare_records("plans", carried, head) == []
+
+
 def test_a_snapshot_format_the_head_does_not_know_fails_the_check() -> None:
     assert compare({"format": 99, "stores": {}}, {}, STORES) == [
         "the snapshot is format 99; this build reads 1"

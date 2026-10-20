@@ -24,6 +24,14 @@ from ai_assistant.core.errors import ClaimStopped, PlanningError
 from ai_assistant.core.types import (
     ActivationEffect,
     ActivationEffectClaim,
+    InputPart,
+    ObservationAttempt,
+    ObservationAttemptEnd,
+    ObservationFinding,
+    ObservationRecord,
+    ObservationState,
+    ObserverCall,
+    ObserverStep,
     QuestionPart,
     ToolOutcome,
 )
@@ -51,7 +59,7 @@ def _fixed_now() -> datetime:
 #: The instant every effect record this suite claims was claimed at.
 _AT = datetime(2026, 1, 1, tzinfo=UTC)
 #: The record tables this store creates. A refused open creates neither.
-_RECORD_TABLES: Final = frozenset({"stopped_activations", "activation_effects"})
+_RECORD_TABLES: Final = frozenset({"stopped_activations", "activation_effects", "observations"})
 
 
 def _journal_mode(database: Path) -> int | None:
@@ -75,6 +83,10 @@ _SYNC_METHODS = {
     "activation_effects": "_activation_effects_sync",
     # ADR-0321 §4:9's read by question part, its own lock site.
     "part_effects": "_part_effects_sync",
+    # ADR-0329 §16:9's three members: the conditional write, and its two reads.
+    "write_observation": "_write_observation_sync",
+    "observations": "_observations_sync",
+    "observer_calls_since": "_calls_since_sync",
 }
 
 
@@ -266,7 +278,7 @@ async def test_a_newer_schema_is_refused_before_any_record_table_exists(tmp_path
     raw.commit()
     raw.close()
 
-    with pytest.raises(PlanningError, match="this code reads version 12 only"):
+    with pytest.raises(PlanningError, match="newer than this code reads"):
         SqlitePlanStore(path=path, now=_fixed_now)
 
     assert _tables(path).isdisjoint(_RECORD_TABLES)
@@ -415,24 +427,24 @@ async def test_a_newer_on_disk_schema_is_refused(tmp_path: Path) -> None:
     raw.commit()
     raw.close()
 
-    with pytest.raises(PlanningError, match="this code reads version"):
+    with pytest.raises(PlanningError, match="newer than this code reads"):
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
-async def test_a_fresh_file_is_labelled_version_12_and_holds_only_the_two_tables(
+async def test_a_fresh_file_is_labelled_version_13_and_holds_only_its_three_tables(
     tmp_path: Path,
 ) -> None:
-    """The absolute figure's home, and the shape it labels (ADR-0309 §5, ADR-0321 §4:9).
+    """The absolute figure's home, and the shape it labels (ADR-0329 §16).
 
-    Version 12 is the store ADR-0309 §5 leaves, its effect records carrying the question
-    part ADR-0321 §4:9 promotes: the stop records and the activation effect records,
-    beside ``meta``, and no table of the old path.
+    Version 13 is the store ADR-0309 §5 leaves, its effect records carrying the question
+    part ADR-0321 §4:9 promotes, with the observation records ADR-0329 §16 adds: three
+    record tables beside ``meta``, and no table of the old path.
     """
     path = tmp_path / "plans.db"
     SqlitePlanStore(path=path, now=_fixed_now).close()
 
-    assert sqlite_store._SCHEMA_VERSION == 12
-    assert _meta(path, "schema_version") == "12"
+    assert sqlite_store._SCHEMA_VERSION == 13
+    assert _meta(path, "schema_version") == "13"
     assert _tables(path) == {"meta", *_RECORD_TABLES}
 
 
@@ -440,13 +452,14 @@ async def test_a_fresh_file_is_labelled_version_12_and_holds_only_the_two_tables
     "version", ["0", "1", "10", "11"], ids=["zero", "the-first", "the-cutover-old", "the-last-old"]
 )
 async def test_an_older_on_disk_schema_is_refused(tmp_path: Path, version: str) -> None:
-    """Every older version is refused, the ones this store once upgraded included.
+    """Every version before 12 is refused, the ones this store once upgraded included.
 
     ADR-0309 §6: the cutover deploys on a fresh data directory, and no lane writes a
-    migration, a reader or a shim for a store written before it. Opening such a file
-    over ``CREATE TABLE IF NOT EXISTS`` would leave its old tables beside the new ones,
-    holding records this code would neither export nor clear, so it is refused at the
-    open (ADR-0049 §1) and named as a store written before the cutover.
+    migration, a reader or a shim for a store written before it; ADR-0326 §5:1 keeps
+    that refusal for files written before ADR-0309 §6:1's deploy, which wrote 12.
+    Opening such a file over ``CREATE TABLE IF NOT EXISTS`` would leave its old tables
+    beside the new ones, holding records this code would neither export nor clear, so it
+    is refused at the open (ADR-0049 §1) and named as a store written before the cutover.
     """
     path = tmp_path / "plans.db"
     SqlitePlanStore(path=path, now=_fixed_now).close()
@@ -465,8 +478,13 @@ async def test_an_older_on_disk_schema_is_refused(tmp_path: Path, version: str) 
 
 @pytest.mark.parametrize(
     "label",
-    ["10", None, "12"],
-    ids=["as-written", "its-marker-deleted", "its-marker-rewritten-to-current"],
+    ["10", None, "12", "13"],
+    ids=[
+        "as-written",
+        "its-marker-deleted",
+        "its-marker-rewritten-to-the-upgradable",
+        "its-marker-rewritten-to-current",
+    ],
 )
 async def test_a_pre_cutover_file_is_refused_and_left_exactly_as_it_was(
     tmp_path: Path, label: str | None
@@ -733,6 +751,26 @@ def _hand_built_table(path: Path, table: str, body: str) -> None:
             "activation_id TEXT PRIMARY KEY COLLATE NOCASE",
             "NOCASE-collated activation_id PRIMARY KEY",
             id="a-case-folded-stop-refuses-another-activations-claims",
+        ),
+        pytest.param(
+            "observations",
+            "episode_id TEXT PRIMARY KEY, revision TEXT NOT NULL, last_call_us INTEGER, "
+            "data TEXT NOT NULL",
+            "revision column has TEXT affinity",
+            id="revision-not-integer-compares-a-stamp-as-text",
+        ),
+        pytest.param(
+            "observations",
+            "episode_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, last_call_us TEXT, "
+            "data TEXT NOT NULL",
+            "last_call_us column has TEXT affinity",
+            id="last-call-not-integer-hides-a-call-from-the-budget",
+        ),
+        pytest.param(
+            "observations",
+            "episode_id TEXT, revision INTEGER NOT NULL, last_call_us INTEGER, data TEXT NOT NULL",
+            "no PRIMARY KEY",
+            id="observations-without-a-key-admit-two-records-of-one-episode",
         ),
     ],
 )
@@ -1345,3 +1383,116 @@ async def test_a_spent_part_survives_a_restart(tmp_path: Path) -> None:
         )
     finally:
         reopened.close()
+
+
+# --- the observation record (ADR-0329 §16) --------------------------------------------
+
+
+def _observed(episode: str = "activation:act-1", *, at: datetime = _AT) -> ObservationRecord:
+    """A waiting record whose one attempt made a scout call at ``at`` and then failed."""
+    return ObservationRecord(
+        episode=episode,
+        state=ObservationState.WAITING,
+        attempts=(
+            ObservationAttempt(
+                started_at=at,
+                calls=(ObserverCall(step=ObserverStep.SCOUT, at=at),),
+                end=ObservationAttemptEnd.FAILED,
+            ),
+        ),
+        findings=(
+            ObservationFinding(
+                id="f1",
+                episode=episode,
+                claim="The user prefers window seats.",
+                rests_on=(InputPart(episode=episode),),
+            ),
+        ),
+    )
+
+
+async def test_an_observation_record_and_its_issuer_survive_a_restart(tmp_path: Path) -> None:
+    """The record outlives the process, and a revision issued before it is never reissued.
+
+    The issuer is persisted beside the records and kept by ``clear``, so a writer that
+    read a record before a restart and a clear cannot land on a record written after.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        first = await store.write_observation(_observed(), expected_revision=0)
+    finally:
+        store.close()
+
+    reopened = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        assert await reopened.observations([first.episode]) == (first,)
+        assert await reopened.observer_calls_since(_AT) == 1
+        await reopened.clear()
+    finally:
+        reopened.close()
+
+    again = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        second = await again.write_observation(_observed(), expected_revision=0)
+        assert second.revision > first.revision
+        with pytest.raises(PlanningError):
+            await again.write_observation(_observed(), expected_revision=first.revision)
+    finally:
+        again.close()
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "UPDATE observations SET revision = revision + 1",
+        "UPDATE observations SET episode_id = 'activation:other'",
+        "UPDATE observations SET last_call_us = NULL",
+        "UPDATE observations SET last_call_us = last_call_us - 1",
+    ],
+    ids=["another-revision", "another-episode", "the-call-erased", "an-earlier-call"],
+)
+async def test_an_observation_whose_columns_disagree_with_its_record_is_refused(
+    tmp_path: Path, tamper: str
+) -> None:
+    """The promoted columns are reconciled with the record on every read that decodes it.
+
+    The conditional write compares ``revision``, the reads select on ``episode_id`` and
+    the budget's count on ``last_call_us``; a column an outside writer changed is
+    corruption, refused as ``PlanningError`` rather than read as a different record.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.write_observation(_observed(), expected_revision=0)
+        with sqlite3.connect(path) as conn:
+            conn.execute(tamper)
+        with pytest.raises(PlanningError):
+            await store.export()
+        with pytest.raises(PlanningError):
+            await store.observations(["activation:act-1", "activation:other"])
+    finally:
+        store.close()
+
+
+async def test_the_budget_decodes_only_the_records_with_a_call_since(tmp_path: Path) -> None:
+    """``last_call_us`` narrows the count to records that can hold a call since.
+
+    A record whose latest call is earlier is not decoded at all, so a blob a count need
+    not read cannot fail it; one whose latest call is at or after ``since`` is decoded
+    and counted.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.write_observation(_observed("activation:old"), expected_revision=0)
+        later = _AT.replace(hour=12)
+        await store.write_observation(_observed("activation:new", at=later), expected_revision=0)
+        with sqlite3.connect(path) as conn:
+            conn.execute("UPDATE observations SET data = '{}' WHERE episode_id = 'activation:old'")
+
+        assert await store.observer_calls_since(later) == 1
+        with pytest.raises(PlanningError):
+            await store.observer_calls_since(_AT)
+    finally:
+        store.close()

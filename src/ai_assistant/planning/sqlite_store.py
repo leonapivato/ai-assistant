@@ -8,13 +8,14 @@ thread, records stored as their pydantic JSON dump and rebuilt on every read (wh
 how the "detached, validated snapshot" obligation is met without a copy step to
 forget), and an owner-only database file.
 
-It holds what the phases write and nothing else: the stop records ADR-0297 §1 gives
-the store, and the activation effect records ADR-0306 §6 gives it. Each lives in its
-own table, and :meth:`SqlitePlanStore.export` and :meth:`SqlitePlanStore.clear` carry
-ADR-0004 §6's data rights over both. The goal, plan, execution, attempt, question,
-evidence and goal-effect tables retired with the old path (ADR-0309 §5), and so did
-their migrations: the cutover deploys on a fresh data directory, and no lane writes a
-migration, a reader or a shim for a store written before it (ADR-0309 §6).
+It holds what the phases and the observer write and nothing else: the stop records
+ADR-0297 §1 gives the store, the activation effect records ADR-0306 §6 gives it, and the
+observation records ADR-0329 §16 gives it. Each lives in its own table, and
+:meth:`SqlitePlanStore.export` and :meth:`SqlitePlanStore.clear` carry ADR-0004 §6's
+data rights over all three. The goal, plan, execution, attempt, question, evidence and
+goal-effect tables retired with the old path (ADR-0309 §5), and so did their
+migrations: a file written before ADR-0309 §6:1's deploy is refused. A file the store
+has written since is upgraded in place when it opens (ADR-0326 §4, §5:1).
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ import asyncio
 import contextlib
 import sqlite3
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,7 +32,12 @@ from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import PlanningError
-from ai_assistant.core.types import ActivationEffect, ActivationEffectClaim, PlanExport
+from ai_assistant.core.types import (
+    ActivationEffect,
+    ActivationEffectClaim,
+    ObservationRecord,
+    PlanExport,
+)
 from ai_assistant.planning._transactions import transaction
 from ai_assistant.planning.activation_effects import (
     checked_effect_id,
@@ -41,6 +47,14 @@ from ai_assistant.planning.activation_effects import (
     requested_activations,
     requested_parts,
     revalidated_claim,
+)
+from ai_assistant.planning.observations import (
+    checked_expected_revision,
+    checked_observation,
+    checked_since,
+    decide_observation_write,
+    requested_episodes,
+    stamped,
 )
 from ai_assistant.planning.stops import revalidated_activation_id
 
@@ -84,7 +98,29 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: :meth:`SqlitePlanStore.part_effects` select on it. A version 11 file has no such
 #: columns, and ADR-0321 §9:2 has the deploy start from a fresh data directory, so it
 #: is refused on the same ground as every older one.
-_SCHEMA_VERSION = 12
+#:
+#: **Version 13 is ADR-0329 §16's**: the store gains ``observations``, the observer's
+#: record of each episode it processed or attempted, and ``meta`` the issuer of its
+#: revisions. **A version 12 file is upgraded in place, not refused** (ADR-0326 §4:1,
+#: §5:1): 12 is the label ADR-0309 §6:1's deploy wrote, so a person's hub holds such a
+#: file, and the upgrade adds the empty table and moves the label inside the open's one
+#: transaction, carrying every stop and effect record as it stands (§4:3, §4:4). The
+#: refusal of 0 to 11 stands under ADR-0326 §5:1, as a refusal of files written before
+#: that deploy.
+_SCHEMA_VERSION = 13
+
+#: The labels :meth:`SqlitePlanStore._verify_or_init_meta` upgrades from, each to the
+#: next, in order (ADR-0326 §4:5). Every label from ADR-0309 §6:1's deploy to the one
+#: before :data:`_SCHEMA_VERSION` is here, and none is removed without the owner's
+#: ruling (§4:6).
+_UPGRADABLE: tuple[int, ...] = (12,)
+
+#: The ``meta`` key holding the last observation revision issued (ADR-0329 §16:9). It
+#: lives beside the records rather than being derived from them, because a revision is
+#: never issued twice for the life of the data: ``clear`` erases the records and keeps
+#: this row, and a store that rebuilt the issuer from the rows present would reissue the
+#: stamp of a record a clear erased.
+_OBSERVATION_ISSUER = "observation_revision"
 
 # The ``meta`` table is created first and on its own, so the schema version can be
 # read and any other version refused *before* a record table is created (ADR-0049
@@ -112,6 +148,14 @@ _RECORD_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS activation_effects("
     "id TEXT PRIMARY KEY, activation_id TEXT NOT NULL, claimed_seq INTEGER NOT NULL, "
     "data TEXT NOT NULL, part_round TEXT, part_number INTEGER)",
+    # ADR-0329 §16's observation records, one per episode. The record is the blob;
+    # `revision` is promoted because the conditional write compares it, and
+    # `last_call_us` — the latest model call the record holds, in microseconds since the
+    # epoch, NULL where it made none — because the budget's count selects on it rather
+    # than decoding every record. Both are reconciled with the blob on every read.
+    "CREATE TABLE IF NOT EXISTS observations("
+    "episode_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, last_call_us INTEGER, "
+    "data TEXT NOT NULL)",
 )
 
 #: Each record column's ``(affinity, required NOT NULL)``. ``CREATE TABLE IF NOT
@@ -154,7 +198,23 @@ _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
         "part_round": ("TEXT", False),
         "part_number": ("INTEGER", False),
     },
+    "observations": {
+        "episode_id": ("TEXT", False),
+        "revision": ("INTEGER", True),
+        "last_call_us": ("INTEGER", False),
+        "data": ("TEXT", True),
+    },
 }
+
+#: The columns every read of an observation record selects, in the order
+#: :func:`_checked_observation` reconciles them with the record.
+_OBSERVATION_COLUMNS = "episode_id, revision, last_call_us, data"
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+#: How many episode ids one statement of :meth:`SqlitePlanStore.observations` binds,
+#: well under the smallest limit SQLite has shipped (999).
+_IN_SLICE = 500
 
 #: The column each record table's ``PRIMARY KEY`` is, checked against the key's own
 #: index. A pre-existing table keyed on something else opens a store whose
@@ -163,6 +223,7 @@ _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
 _RECORD_PRIMARY_KEY: dict[str, tuple[str, ...]] = {
     "stopped_activations": ("activation_id",),
     "activation_effects": ("id",),
+    "observations": ("episode_id",),
 }
 
 
@@ -387,17 +448,19 @@ class SqlitePlanStore:
                 sidecar.chmod(_OWNER_ONLY)
 
     def _verify_or_init_meta(self, conn: sqlite3.Connection) -> None:
-        """Write the version on a fresh database, or refuse any other version.
+        """Write the version on a fresh database, upgrade an older one, or refuse it.
 
-        Runs inside the setup transaction. A stored ``schema_version`` other than
-        :data:`_SCHEMA_VERSION` is refused with ``PlanningError`` *before any record
-        table is created, read, or written* (ADR-0049 §1). A **newer** label is a file
-        a later build wrote. An **older** one is a store written before the cutover,
-        which ADR-0309 §6 leaves without a migration or a reader, or before an effect
-        record carried its question part, which ADR-0321 §9:2 leaves the same way, so
-        it is refused rather than opened over tables this code would neither export
-        nor clear or columns it would not find. An
-        unlabelled database is one this code is creating now, and it is stamped.
+        Runs inside the setup transaction, before any record table is created, read or
+        written (ADR-0049 §1). A stored ``schema_version`` equal to
+        :data:`_SCHEMA_VERSION` opens as it is. One in :data:`_UPGRADABLE` is brought
+        forward by :meth:`_upgrade`, one version at a time (ADR-0326 §4:5), inside the
+        same transaction, so a failure anywhere in the open — the shape checks that
+        follow included — leaves the file as it found it (§4:3). Any other is refused:
+        a **newer** label is a file a later build wrote (ADR-0326 §5:3), and an
+        **older** one a store written before ADR-0309 §6:1's deploy — before the
+        cutover, or before an effect record carried its question part — which has no
+        reader (ADR-0309 §6, ADR-0321 §9:2, ADR-0326 §5:1). An unlabelled database is
+        one this code is creating now, and it is stamped.
 
         The marker is read through :meth:`_read_meta`, so a store holding conflicting
         rows for it is refused rather than resolved by row order (issue #349). The
@@ -406,8 +469,8 @@ class SqlitePlanStore:
 
         Raises:
             PlanningError: If the file holds a table this code does not create, the
-                schema version is not this code's, or the marker is ambiguous or
-                unparseable.
+                schema version is neither this code's nor one it upgrades, or the
+                marker is ambiguous or unparseable.
         """
         self._refuse_foreign_tables(conn)
         version = self._read_meta(conn, "schema_version")
@@ -420,20 +483,48 @@ class SqlitePlanStore:
         held = self._meta_int("schema_version", version[0])
         if held == _SCHEMA_VERSION:
             return
+        if held in _UPGRADABLE:
+            self._upgrade(conn, held)
+            return
+        if held > _SCHEMA_VERSION:
+            msg = (
+                f"the plan store at {self._path!r} has schema_version={held}, newer than "
+                f"this code reads (version {_SCHEMA_VERSION}); a later build wrote it, and "
+                f"no build opens a file whose label is newer than its own (ADR-0326 §5:3)"
+            )
+            raise PlanningError(msg)
         msg = (
             f"the plan store at {self._path!r} has schema_version={held}, but this code "
-            f"reads version {_SCHEMA_VERSION} only; refusing to open it rather than read it "
-            f"blindly (a store written before the cutover, or before the question part, has "
-            f"no reader: ADR-0309 §6, ADR-0321 §9:2)"
+            f"reads version {_SCHEMA_VERSION} and upgrades "
+            f"{', '.join(str(one) for one in _UPGRADABLE)}; refusing to open it rather than "
+            f"read it blindly (a store written before the cutover, or before the question "
+            f"part, has no reader: ADR-0309 §6, ADR-0321 §9:2, ADR-0326 §5:1)"
         )
         raise PlanningError(msg)
+
+    def _upgrade(self, conn: sqlite3.Connection, held: int) -> None:
+        """Bring a file at ``held`` forward to :data:`_SCHEMA_VERSION`, in place.
+
+        Each step converts one version to the next (ADR-0326 §4:5) and carries every
+        record the file holds (§4:4). It runs on the open's own transaction, before a
+        record is read or written, and a raise anywhere in the open rolls back the
+        steps already taken (§4:3).
+
+        **12 → 13** (ADR-0329 §16:10): the store gains the ``observations`` table, which
+        the open's ``CREATE TABLE IF NOT EXISTS`` creates, empty, in this same
+        transaction; no stop or effect record changes, and the observation issuer is
+        absent, which reads as nothing issued. So the step is the label alone.
+        """
+        for step in range(held, _SCHEMA_VERSION):
+            conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(step + 1),))
 
     def _refuse_foreign_tables(self, conn: sqlite3.Connection) -> None:
         """Refuse a file holding a table this code does not create, whatever its label.
 
         The version marker is what tells a store written before the cutover from this
         one, but a marker is one row: deleted, a pre-cutover file reads as a database
-        this code is creating and is stamped, and rewritten to 12, it reads as current.
+        this code is creating and is stamped, and rewritten to a label this code opens,
+        it reads as current.
         Either way its ``goals``, ``plans`` or ``executions`` would stay in the file and
         outside :meth:`SqlitePlanStore.export` and :meth:`SqlitePlanStore.clear`,
         which is ADR-0004 §6 failing in silence. So the tables are read first: a file
@@ -931,28 +1022,150 @@ class SqlitePlanStore:
         except sqlite3.Error as exc:
             raise _wrap("read activation effects by question part", "", exc) from exc
 
+    # --- observation records (ADR-0329 §16) ------------------------------
+
+    async def write_observation(
+        self, record: ObservationRecord, /, *, expected_revision: int
+    ) -> ObservationRecord:
+        """Write an episode's observation record whole, conditionally (ADR-0329 §16:9).
+
+        The held revision, the issuer and the write are read and decided inside one
+        ``BEGIN IMMEDIATE`` transaction, so a second writer holding the same
+        expectation waits on the write lock and then finds the first's revision.
+
+        Raises:
+            PlanningError: If the record is not valid, the expectation is not a
+                revision, the held record does not match it, or the backend fails.
+        """
+        # Snapshotted before the first await (ADR-0018 §3).
+        written = checked_observation(record)
+        expected = checked_expected_revision(expected_revision)
+        async with self._lock:
+            return await _run_to_completion(self._write_observation_sync, written, expected)
+
+    def _write_observation_sync(
+        self, record: ObservationRecord, expected: int
+    ) -> ObservationRecord:
+        with self._transaction(f"write the observation record of {record.episode!r}") as conn:
+            row = conn.execute(
+                "SELECT " + _OBSERVATION_COLUMNS + " FROM observations WHERE episode_id = ?",  # noqa: S608 — only a constant is interpolated
+                (record.episode,),
+            ).fetchone()
+            held = None if row is None else _checked_observation(str(self._path), row)
+            decide_observation_write(
+                record.episode, held=None if held is None else held.revision, expected=expected
+            )
+            issued = self._read_meta(conn, _OBSERVATION_ISSUER)
+            last = self._meta_int(_OBSERVATION_ISSUER, issued[0]) if issued else 0
+            stored = stamped(record, last + 1)
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_OBSERVATION_ISSUER, str(stored.revision)),
+            )
+            conn.execute(
+                "INSERT INTO observations(episode_id, revision, last_call_us, data) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(episode_id) DO UPDATE SET "
+                "revision = excluded.revision, last_call_us = excluded.last_call_us, "
+                "data = excluded.data",
+                (stored.episode, stored.revision, _last_call_us(stored), stored.model_dump_json()),
+            )
+        return stored
+
+    async def observations(self, episode_ids: Sequence[str], /) -> tuple[ObservationRecord, ...]:
+        """Return the named episodes' observation records, in the order named.
+
+        Raises:
+            PlanningError: If ``episode_ids`` is not a sequence of strings, or the
+                backend fails.
+        """
+        named = requested_episodes(episode_ids)
+        if not named:
+            return ()
+        async with self._lock:
+            rows = await _run_to_completion(self._observations_sync, named)
+        found = {
+            record.episode: record
+            for record in (_checked_observation(str(self._path), row) for row in rows)
+        }
+        return tuple(found[one] for one in named if one in found)
+
+    def _observations_sync(self, named: tuple[str, ...]) -> list[tuple[Any, ...]]:
+        # In slices, because the observer may ask after every due episode at once and
+        # SQLite bounds the parameters one statement binds. Several statements under one
+        # read transaction, so the slices see one snapshot.
+        rows: list[tuple[Any, ...]] = []
+        with transaction(
+            self._conn, "read observation records", error=PlanningError, immediate=False
+        ) as conn:
+            for start in range(0, len(named), _IN_SLICE):
+                part = named[start : start + _IN_SLICE]
+                marks = ", ".join("?" for _ in part)
+                rows.extend(
+                    tuple(row)
+                    for row in conn.execute(
+                        "SELECT " + _OBSERVATION_COLUMNS + " FROM observations "  # noqa: S608 — only placeholders are interpolated
+                        f"WHERE episode_id IN ({marks})",
+                        part,
+                    ).fetchall()
+                )
+        return rows
+
+    async def observer_calls_since(self, since: datetime, /) -> int:
+        """Count the model calls the observation records hold at or after ``since``.
+
+        Only a record whose latest call is at or after ``since`` can hold one, so only
+        those are decoded, each reconciled with its promoted columns.
+
+        Raises:
+            PlanningError: If ``since`` is not a timezone-aware instant, or the
+                backend fails.
+        """
+        start = checked_since(since)
+        async with self._lock:
+            rows = await _run_to_completion(self._calls_since_sync, _micros(start))
+        return sum(_checked_observation(str(self._path), row).call_count(start) for row in rows)
+
+    def _calls_since_sync(self, since_us: int) -> list[tuple[Any, ...]]:
+        try:
+            return [
+                tuple(row)
+                for row in self._conn.execute(
+                    "SELECT " + _OBSERVATION_COLUMNS + " FROM observations "  # noqa: S608 — only a constant is interpolated
+                    "WHERE last_call_us >= ?",
+                    (since_us,),
+                ).fetchall()
+            ]
+        except sqlite3.Error as exc:
+            raise _wrap("count the observer's model calls", "", exc) from exc
+
     # --- data rights (ADR-0004) -------------------------------------------
 
     async def export(self) -> PlanExport:
         """Return a portable, internally consistent snapshot (ADR-0004 §6).
 
-        The document carries the two kinds of record this store holds: every stop
-        record, and every activation effect record in claim order. Its goal, plan,
-        execution, attempt, question, evidence and goal-effect sections left it with
-        the members that wrote them (ADR-0309 §5).
+        The document carries the three kinds of record this store holds: every stop
+        record, every activation effect record in claim order, and every observation
+        record by episode id. Its goal, plan, execution, attempt, question, evidence
+        and goal-effect sections left it with the members that wrote them (ADR-0309
+        §5).
         """
         exported_at = self._now()
         async with self._lock:
-            stopped, acted = await _run_to_completion(self._export_sync)
+            stopped, acted, observed = await _run_to_completion(self._export_sync)
         return PlanExport(
             exported_at=exported_at,
             # ADR-0297 §1: every stop record, in a deterministic order.
             stopped_activations=tuple(stopped),
             # ADR-0306 §6: every effect record, in claim order.
             activation_effects=tuple(acted),
+            # ADR-0329 §16:9: every observation record, by episode id.
+            observations=tuple(observed),
         )
 
-    def _export_sync(self) -> tuple[list[str], list[ActivationEffect]]:
+    def _export_sync(
+        self,
+    ) -> tuple[list[str], list[ActivationEffect], list[ObservationRecord]]:
         # Both reads inside one transaction, so the export is a single database
         # snapshot. The write form, not the deferred one a read would otherwise take:
         # the write lock excludes a writer outright rather than leaving the reads to a
@@ -974,12 +1187,21 @@ class SqlitePlanStore:
                     "ORDER BY claimed_seq ASC"
                 ).fetchall()
             ]
-        return stopped, acted
+            observed = [
+                _checked_observation(str(self._path), row)
+                for row in conn.execute(
+                    "SELECT " + _OBSERVATION_COLUMNS + " FROM observations "  # noqa: S608 — only a constant is interpolated
+                    "ORDER BY episode_id ASC"
+                ).fetchall()
+            ]
+        return stopped, acted, observed
 
     async def clear(self) -> int:
-        """Delete every stop record and activation effect record, returning the count.
+        """Delete every stop, effect and observation record, returning the count.
 
-        The store holds no execution, so no live step can refuse the erase.
+        The store holds no execution, so no live step can refuse the erase. The
+        observation issuer in ``meta`` is kept, so no revision is issued twice
+        (ADR-0329 §16:9).
         """
         async with self._lock:
             return await _run_to_completion(self._clear_sync)
@@ -988,8 +1210,11 @@ class SqlitePlanStore:
         with self._transaction("clear the plan store") as conn:
             # ADR-0297 §1: `clear` erases every stop record with the store's other rows.
             removed: int = conn.execute("DELETE FROM stopped_activations").rowcount
-            # ADR-0306 §6: and every effect record. `meta` is untouched.
+            # ADR-0306 §6: and every effect record.
             removed += conn.execute("DELETE FROM activation_effects").rowcount
+            # ADR-0329 §16:9: and every observation record. `meta`, which holds the
+            # observation issuer, is untouched.
+            removed += conn.execute("DELETE FROM observations").rowcount
         return removed
 
     def close(self) -> None:
@@ -1007,6 +1232,50 @@ def _is_stopped(conn: sqlite3.Connection, activation_id: str) -> bool:
         "SELECT 1 FROM stopped_activations WHERE activation_id = ?", (activation_id,)
     ).fetchone()
     return row is not None
+
+
+def _micros(instant: datetime) -> int:
+    """``instant`` as whole microseconds since the epoch, the budget's column unit."""
+    return (instant - _EPOCH) // timedelta(microseconds=1)
+
+
+def _last_call_us(record: ObservationRecord) -> int | None:
+    """The record's latest model call, as :data:`_RECORD_SCHEMA`'s ``last_call_us``."""
+    last = record.last_call_at
+    return None if last is None else _micros(last)
+
+
+def _checked_observation(path: str, row: Sequence[Any]) -> ObservationRecord:
+    """Decode one observation record and refuse a blob that disagrees with its columns.
+
+    The episode, the revision and the latest call are promoted, and the conditional
+    write, the reads and the budget's count select on them, so each is reconciled with
+    the record a tampered file could answer with.
+
+    Args:
+        path: The store's path, for the message.
+        row: ``(episode_id, revision, last_call_us, data)``.
+
+    Returns:
+        The reconciled record.
+
+    Raises:
+        PlanningError: If the blob does not validate, or disagrees with its columns.
+    """
+    try:
+        record = ObservationRecord.model_validate_json(str(row[3]))
+    except ValidationError as exc:
+        msg = f"the plan store holds an observation record that no longer validates: {exc}"
+        raise PlanningError(msg) from exc
+    promoted = (row[0], row[1], row[2])
+    held = (record.episode, record.revision, _last_call_us(record))
+    if promoted != held:
+        msg = (
+            f"the plan store at {path!r} holds an observation record indexed at {promoted} "
+            f"whose record names {held}; the store is corrupt"
+        )
+        raise PlanningError(msg)
+    return record
 
 
 def _wrap(action: str, subject: str, exc: sqlite3.Error) -> PlanningError:

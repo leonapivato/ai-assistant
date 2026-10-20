@@ -175,6 +175,7 @@ if TYPE_CHECKING:
         NotificationDisposition,
         NotificationEnqueue,
         NotificationPreferences,
+        ObservationRecord,
         OfferedTool,
         PermissionDecision,
         PermissionRuling,
@@ -2965,11 +2966,11 @@ class Forecaster(Protocol):
 
 @runtime_checkable
 class PlanStore(Protocol):
-    """Durable planning state: stop records and activation effect records (ADR-0014 §5).
+    """Durable planning state: stop records, effect records, observation records.
 
     Planning owns this rather than the wiring layer, because plan state is
-    personal data and carries ADR-0004's obligations. Implementations persist
-    **locally only**; none may write plan state to a remote service.
+    personal data and carries ADR-0004's obligations (ADR-0014 §5). Implementations
+    persist **locally only**; none may write plan state to a remote service.
 
     **Seven members are what the phases use**, and ADR-0309 §5 retires the rest: the
     goal, attempt, interpretation, intended-action, quote, question and evidence
@@ -2978,9 +2979,18 @@ class PlanStore(Protocol):
     :meth:`finish_activation_effect` write an activation's effect records,
     :meth:`activation_effects` reads them back by activation and :meth:`part_effects`
     by question part (ADR-0321 §4:4, §4:11), and :meth:`export` and :meth:`clear`
-    carry ADR-0004 §6's data rights. Every write is a **command and not a snapshot**,
-    on ADR-0014 §5's argument: each names the change it makes, and none takes a
-    stored record back in order to write it.
+    carry ADR-0004 §6's data rights. Each of those writes is a **command and not a
+    snapshot**, on ADR-0014 §5's argument: each names the change it makes, and none
+    takes a stored record back in order to write it.
+
+    **Three more are the observer's** (ADR-0329 §16:9): :meth:`write_observation`
+    writes an episode's observation record, :meth:`observations` reads records by
+    episode id, and :meth:`observer_calls_since` counts the model calls they record
+    since an instant, for the observer's daily budget. The observation record is the
+    one record here written whole, because it is the observer's own account of an
+    episode rather than a fact another member decides; it is written **conditionally
+    on the revision the writer read**, so two writers cannot both land a record
+    computed from one state (ADR-0329 §16:6's backstop, in ADR-0219 §2's shape).
 
     **The stop record lives here and in no other store** (ADR-0297 §1, §2, §6):
     :meth:`record_stop` writes a record naming one activation, and an effect claim
@@ -3156,6 +3166,79 @@ class PlanStore(Protocol):
         """
         ...
 
+    async def write_observation(
+        self, record: ObservationRecord, /, *, expected_revision: int
+    ) -> ObservationRecord:
+        """Write an episode's observation record whole, conditionally (ADR-0329 §16:9).
+
+        **One indivisible step**, which reads the record the store holds for
+        ``record.episode`` and writes the new one only where it matches the
+        expectation: ``expected_revision`` is ``0`` where the writer read no record,
+        and the held record's revision where it read one. Otherwise it raises and
+        writes nothing — a record held where none was expected, none held where one
+        was, or one held at another revision.
+
+        The written record is stamped with a fresh revision, positive and **never
+        issued before by this store** — :meth:`clear` included, which erases records
+        and never the issuer, so a revision read before a clear can never match a
+        record written after it. The submitted ``revision`` is discarded. The store
+        rules on nothing else: what a record holds is the observer's, and the type
+        refuses a malformed one.
+
+        Args:
+            record: The record to write.
+            expected_revision: The revision of the record the writer read, or ``0``
+                where it read none.
+
+        Returns:
+            The record as stored, carrying its new revision.
+
+        Raises:
+            PlanningError: If ``record`` is not a valid ``ObservationRecord``,
+                ``expected_revision`` is not a non-negative integer, the held record
+                does not match it, or the backend fails. Nothing is written.
+        """
+        ...
+
+    async def observations(self, episode_ids: Sequence[str], /) -> tuple[ObservationRecord, ...]:
+        """Return the observation records held for the named episodes (ADR-0329 §16:9).
+
+        Each with the revision the store holds for it, in the order the episodes are
+        named, each once. An episode the store holds no record for contributes
+        nothing, so a due episode with none is one never attempted — or one whose
+        record :meth:`clear` erased, which is processed again (§16:9).
+
+        Args:
+            episode_ids: The episodes whose records to return.
+
+        Returns:
+            The records.
+
+        Raises:
+            PlanningError: If ``episode_ids`` is a bare string or holds anything but
+                strings, or the backend fails.
+        """
+        ...
+
+    async def observer_calls_since(self, since: datetime, /) -> int:
+        """Count the model calls the observation records hold at or after ``since``.
+
+        ADR-0329 §16:9's budget reads the calls made in any 24 hours. Every call an
+        attempt recorded counts, whatever the record's state, and :meth:`clear`
+        erases them with the records that hold them.
+
+        Args:
+            since: The instant to count from, timezone-aware.
+
+        Returns:
+            The count.
+
+        Raises:
+            PlanningError: If ``since`` is not a timezone-aware instant, or the
+                backend fails.
+        """
+        ...
+
     async def export(self) -> PlanExport:
         """Return a portable snapshot of all planning state (ADR-0004 §6).
 
@@ -3164,6 +3247,9 @@ class PlanStore(Protocol):
 
         **And its activation effect records** (ADR-0306 §6), finished or not, in the
         order they were claimed. :meth:`clear` erases them with the rest.
+
+        **And its observation records** (ADR-0329 §16:9), each with its revision,
+        ordered by episode id.
         """
         ...
 
@@ -3171,7 +3257,9 @@ class PlanStore(Protocol):
         """Delete every record in this store, returning the number removed.
 
         **Every stop record goes with the rest** (ADR-0297 §1), and is counted among
-        the records removed.
+        the records removed. **So does every observation record** (ADR-0329 §16:9),
+        each counted once; the revision issuer is kept, so no revision is issued
+        twice.
 
         Raises:
             PlanningError: If the backend fails.

@@ -8407,6 +8407,373 @@ _RETRYABLE_BY_KIND: Mapping[ToolFailureKind, bool] = {
 }
 
 
+# --- planning: the observation record (ADR-0329 §16) ---------------------------
+#
+# What the observer records beside an episode it processed or attempted: its state,
+# its attempts with the model calls each made, when it may next be attempted, the
+# scout's findings and each finding's outcome (§16:1). The plan store keeps one per
+# episode, keyed by the episode's id, and the queue the observer works from is a query
+# over these records, never a store (§16:2). Every value the observer's budget and
+# queue read off a record is computed here, so the three stores compute one rule.
+
+
+class ObservationState(StrEnum):
+    """Where an episode stands with the observer (ADR-0329 §16:1).
+
+    Closed, **added to and never renamed**: the value is stored.
+    """
+
+    PROCESSED = "processed"
+    """Every finding has its outcome, and the episode is not processed again
+    automatically (§7:1)."""
+    SKIPPED = "skipped"
+    """Nothing to read, by §16:7's rule, with no model call."""
+    WAITING = "waiting"
+    """Attempted, and not yet processed: it may be attempted again from its
+    :attr:`ObservationRecord.next_attempt_at` (§16:4, §16:9)."""
+    STUCK = "stuck"
+    """Its attempts reached the composition root's count; set aside, and processed
+    again only by an explicit re-run (§16:5)."""
+
+
+#: §16:2: the states that take an episode out of the queue.
+SETTLED_OBSERVATION_STATES: Final[frozenset[ObservationState]] = frozenset(
+    {ObservationState.PROCESSED, ObservationState.SKIPPED, ObservationState.STUCK}
+)
+
+
+class ObserverStep(StrEnum):
+    """Which of the observer's two steps made a model call (ADR-0329 §9)."""
+
+    SCOUT = "scout"
+    """The one call over what §8 names, proposing findings (§9:1)."""
+    COMMIT = "commit"
+    """One call per finding, deciding what is written (§9:3)."""
+
+
+class ObserverCall(BaseModel):
+    """One model call an attempt made (ADR-0329 §16:1), counted by §16:9's budget.
+
+    Attributes:
+        step: Which step made it.
+        at: When it was made, on this system's clock.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    step: ObserverStep
+    at: UtcInstant
+
+
+class ObservationAttemptEnd(StrEnum):
+    """How an attempt ended (ADR-0329 §16:4, §16:9). Closed, added to, never renamed."""
+
+    FINISHED = "finished"
+    """It ran to the end: the episode was processed or skipped."""
+    FAILED = "failed"
+    """A model call, a read or a write failed, and the episode waits for a retry
+    with a backoff (§16:4)."""
+    HELD = "held"
+    """It was stopped before the end by something that is not a failure — the daily
+    budget or the run's bound — and the episode waits, with nothing dropped
+    (§16:8, §16:9)."""
+
+
+class ObservationAttempt(BaseModel):
+    """One attempt at an episode (ADR-0329 §16:1).
+
+    Attributes:
+        started_at: When it started.
+        calls: The model calls it made, in the order it made them, none before it
+            started.
+        end: How it ended, or ``None`` while it runs: an attempt records each
+            finding's outcome as it is written (§16:4), so a record is written with
+            its last attempt still open.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    started_at: UtcInstant
+    calls: tuple[ObserverCall, ...] = ()
+    end: ObservationAttemptEnd | None = None
+
+    @model_validator(mode="after")
+    def _calls_follow_the_start(self) -> Self:
+        instants = [self.started_at, *(call.at for call in self.calls)]
+        if any(later < earlier for earlier, later in pairwise(instants)):
+            msg = "an attempt's calls are made in order, none before it started"
+            raise ValueError(msg)
+        return self
+
+
+class ObservationWrite(BaseModel):
+    """What a finding's commit wrote on one memory (ADR-0329 §16:1, §12, §13, §14).
+
+    Attributes:
+        memory: The memory's id, exactly as the memory store holds it.
+        operations: The operations written on it, in the order they were applied
+            (ADR-0328 §5): a create, an add support for each support added, a
+            retiring operation, a raise question or a resolve question.
+        track_record: Where a track-record entry was recorded on it (§14), whether
+            the reliance held up (``True``) or let the user down; ``None`` where
+            none was. An entry is not an operation (ADR-0328 §8).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    memory: NonBlankEncodableText
+    operations: tuple[MemoryOperationKind, ...] = ()
+    track_record: bool | None = None
+
+    @model_validator(mode="after")
+    def _writes_something(self) -> Self:
+        if not self.operations and self.track_record is None:
+            msg = "a write names an operation or a track-record entry on its memory"
+            raise ValueError(msg)
+        return self
+
+
+class FindingUnwritten(StrEnum):
+    """Why a finding's commit wrote nothing (ADR-0329 §16:1).
+
+    Closed, **added to and never renamed**: the value is stored.
+    """
+
+    NOT_KEPT = "not_kept"
+    """The commit step decided nothing is kept (§9:4, §11:2, §11:3), or, for a
+    reliance, that the later episodes show neither held up nor let down (§14:2)."""
+    SINGLE_OBSERVATION = "single_observation"
+    """A single observation, evidence only: it waits as a candidate on its episode,
+    where a later run's search finds it (§11:4)."""
+    BELOW_FLOOR = "below_floor"
+    """An inference whose supports fall short of §11:5's floor, as code checked it."""
+    CHECK_FAILED = "check_failed"
+    """A decision that failed one of code's checks — a part that does not resolve in
+    a stored episode among them — and was not written (§9:5)."""
+    REFUSED = "refused"
+    """The write path wrote nothing: the writer refused the proposal (§12:5), or the
+    policy's ruling writes nothing for it (§12:4)."""
+    ASKED = "asked"
+    """``MemoryPolicy`` ruled ``ASK_USER`` naming no stored memory, so nothing was
+    raised and the candidate waits on its episode (§13:3)."""
+
+
+class FindingOutcome(BaseModel):
+    """What a finding's commit did: what was written, or why nothing was (§16:1).
+
+    Exactly one of :attr:`writes` and :attr:`unwritten` says it. A conflict refused
+    by the writer that raised a question (§13:1) wrote that question, so it is a
+    write; a ruling of ``ASK_USER`` that named stored memories raised a question on
+    each of them (§13:1), and one that named none wrote nothing (§13:3).
+
+    Attributes:
+        at: When the outcome was decided.
+        ruling: ``MemoryPolicy``'s ruling on the finding's proposal, where one was
+            made (§12:2); ``None`` where no proposal reached the policy.
+        writes: Each memory the commit wrote on, each once.
+        unwritten: Why nothing was written, exactly where :attr:`writes` is empty.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    at: UtcInstant
+    ruling: MemoryDecisionKind | None = None
+    writes: tuple[ObservationWrite, ...] = ()
+    unwritten: FindingUnwritten | None = None
+
+    @model_validator(mode="after")
+    def _written_or_why_not(self) -> Self:
+        if bool(self.writes) == (self.unwritten is not None):
+            msg = "an outcome names what was written, or why nothing was, and never both"
+            raise ValueError(msg)
+        memories = [write.memory for write in self.writes]
+        if len(set(memories)) != len(memories):
+            msg = "an outcome names each memory it wrote on once"
+            raise ValueError(msg)
+        if (
+            self.unwritten is FindingUnwritten.ASKED
+            and self.ruling is not MemoryDecisionKind.ASK_USER
+        ):
+            msg = "an outcome records an ask only under a ruling of ask_user (ADR-0329 §13:3)"
+            raise ValueError(msg)
+        return self
+
+
+#: §9:6: the parts a finding may rest on. A candidate is a hint and never a part
+#: (§3:6), a legacy record is no episode's, and an observer's inference is what a
+#: commit draws from a finding's parts rather than one of them (§9:7).
+_FINDING_PARTS: Final[frozenset[str]] = frozenset(
+    {"input", "round_message", "evidence_item", "confirmation"}
+)
+
+
+class ObservationFinding(BaseModel):
+    """One thing the scout proposed about one episode, and its outcome (ADR-0329 §9:1).
+
+    Attributes:
+        id: The finding's id, unique on its record, so a retry finds the findings
+            that already have an outcome and commits only the rest (§16:4).
+        episode: The one episode it comes from (§8:3), which is the episode whose
+            record holds it.
+        claim: The claim, in words.
+        rests_on: The parts of episodes it rests on (§9:1, §9:6): the input or one of
+            its messages, a round's message, an evidence item or a confirmation, each
+            once. A result is rested on through the evidence items of its digests.
+        candidate: Where the finding came from a candidate (§3:3), the id of the
+            effect record its ``remember`` call is joined to; ``None`` where it came
+            from the record alone.
+        relied_on: Where the finding is about a reliance (§14:1), the id of the
+            memory a reliance call in the episode named; ``None`` otherwise.
+        outcome: What its commit did, or ``None`` while it has not been committed.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: Identifier
+    episode: NonBlankEncodableText
+    claim: NonBlankEncodableText
+    rests_on: tuple[SupportPart, ...] = Field(min_length=1)
+    candidate: Identifier | None = None
+    relied_on: NonBlankEncodableText | None = None
+    outcome: FindingOutcome | None = None
+
+    @model_validator(mode="after")
+    def _rests_on_episode_parts(self) -> Self:
+        foreign = sorted({part.part for part in self.rests_on} - _FINDING_PARTS)
+        if foreign:
+            msg = f"a finding rests on parts of episodes, not on {', '.join(foreign)} (§9:6)"
+            raise ValueError(msg)
+        if len(set(self.rests_on)) != len(self.rests_on):
+            msg = "a finding names each part it rests on once"
+            raise ValueError(msg)
+        recorded = [
+            write.memory
+            for write in (() if self.outcome is None else self.outcome.writes)
+            if write.track_record is not None
+        ]
+        if recorded and (self.relied_on is None or recorded != [self.relied_on]):
+            msg = (
+                "a track-record entry is recorded only by a reliance finding, on the "
+                "memory it relied on (ADR-0329 §14:1)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+def _observation_fault(record: ObservationRecord) -> str | None:
+    """Which of the observation record's rules ``record`` breaks, if any (§16)."""
+    state = record.state
+    ids = [finding.id for finding in record.findings]
+    starts = [attempt.started_at for attempt in record.attempts]
+    clauses: tuple[tuple[bool, str], ...] = (
+        (
+            any(finding.episode != record.episode for finding in record.findings),
+            "a finding comes from the episode whose record holds it (ADR-0329 §8:3)",
+        ),
+        (len(set(ids)) != len(ids), "a record names each finding once"),
+        (
+            any(later < earlier for earlier, later in pairwise(starts)),
+            "a record's attempts are in the order they started",
+        ),
+        (
+            any(attempt.end is None for attempt in record.attempts[:-1]),
+            "only a record's last attempt may still be running",
+        ),
+        (
+            state is not ObservationState.WAITING
+            and bool(record.attempts)
+            and record.attempts[-1].end is None,
+            "an attempt still running leaves its episode waiting",
+        ),
+        (
+            record.next_attempt_at is not None and state is not ObservationState.WAITING,
+            "only a waiting episode has a next attempt (ADR-0329 §16:4)",
+        ),
+        (
+            state is ObservationState.PROCESSED
+            and any(finding.outcome is None for finding in record.findings),
+            "a processed episode's findings each have an outcome (ADR-0329 §16:4)",
+        ),
+        (
+            state is ObservationState.SKIPPED
+            and (bool(record.findings) or record.call_count() > 0),
+            "a skipped episode has no finding and made no model call (ADR-0329 §16:7)",
+        ),
+    )
+    return next((fault for broken, fault in clauses if broken), None)
+
+
+class ObservationRecord(BaseModel):
+    """What the observer recorded about one episode (ADR-0329 §16:1).
+
+    The plan store keeps one per processed or attempted episode, keyed by
+    :attr:`episode`, and writes it whole, conditionally on the :attr:`revision` the
+    writer read (``PlanStore.write_observation``). A clear erases it, and the episode
+    is then processed again, additively (§16:9, §12:7).
+
+    Attributes:
+        episode: The episode's id, exactly as the memory store holds it.
+        state: Where it stands (§16:1).
+        attempts: Its attempts, in the order they started.
+        next_attempt_at: When a waiting episode may next be attempted, after a
+            failure's backoff (§16:4); ``None`` where it may be attempted now, and on
+            every episode that is not waiting.
+        findings: The scout's findings about it, each with its outcome once
+            committed (§9:2).
+        revision: The store's concurrency token for the record: the stamp issued for
+            the write that stored it, never reissued within a store, and ``0`` on a
+            record no store has stored. Store-authored: a submitted value is
+            discarded. Compared for equality only, never ordered.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    episode: NonBlankEncodableText
+    state: ObservationState
+    attempts: tuple[ObservationAttempt, ...] = ()
+    next_attempt_at: UtcInstant | None = None
+    findings: tuple[ObservationFinding, ...] = ()
+    revision: int = Field(default=0, strict=True, ge=0, lt=2**63)
+
+    @model_validator(mode="after")
+    def _well_formed(self) -> Self:
+        fault = _observation_fault(self)
+        if fault is not None:
+            raise ValueError(fault)
+        return self
+
+    def call_count(self, since: datetime | None = None) -> int:
+        """How many model calls its attempts made at or after ``since`` (§16:9).
+
+        Args:
+            since: The instant to count from; ``None`` counts every call.
+
+        Returns:
+            The count.
+        """
+        return sum(
+            1
+            for attempt in self.attempts
+            for call in attempt.calls
+            if since is None or call.at >= since
+        )
+
+    @property
+    def last_call_at(self) -> datetime | None:
+        """The latest instant among its model calls, or ``None`` where it made none."""
+        return max((call.at for attempt in self.attempts for call in attempt.calls), default=None)
+
+    def attemptable(self, now: datetime) -> bool:
+        """Whether the episode may be attempted at ``now`` (§16:2).
+
+        A settled episode — processed, skipped or stuck — may not; a waiting one may
+        once its :attr:`next_attempt_at`, where it has one, has come.
+
+        Args:
+            now: The instant asked about.
+
+        Returns:
+            ``True`` where the queue takes it.
+        """
+        if self.state in SETTLED_OBSERVATION_STATES:
+            return False
+        return self.next_attempt_at is None or self.next_attempt_at <= now
+
+
 # --- planning: the write path, deletion, export (ADR-0014 §5, ADR-0004 §6) ---
 # A transition is a command rather than a caller-built state, which is what
 # keeps the transition graph authoritative. `PlanExport` is the portable
@@ -8416,7 +8783,14 @@ _RETRYABLE_BY_KIND: Mapping[ToolFailureKind, bool] = {
 class PlanExport(BaseModel):
     """A portable snapshot of planning state (see ADR-0014 §5, ADR-0004 §6).
 
-    **``schema_version`` is 20 because the document's effect records gained ``part``**
+    **``schema_version`` is 21 because the document gained ``observations``**
+    (ADR-0329 §16:9): the observer's record of each episode it processed or attempted,
+    so ADR-0004 §6's export reaches it. A record names an episode, which the document
+    does not carry, so ADR-0014 §5's closure rule is extended by nothing; the only
+    constraint stated over the member is that no episode appears twice, since the store
+    keeps one record per episode. A reader of 20 refuses the member as extra.
+
+    **It was 20 because the document's effect records gained ``part``**
     (ADR-0321 §4:9): the question part a call that ran under an approval spent. A
     reader of 19 refuses the field as extra, and no reader for 19 is written: the
     deploy starts from a fresh data directory (ADR-0321 §9:2).
@@ -8456,12 +8830,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[20] = Field(
-        default=20,
+    schema_version: Literal[21] = Field(
+        default=21,
         description=(
-            "Shape of this export, pinned to exactly 20 (ADR-0039 §10, ADR-0321 §4:9): an "
+            "Shape of this export, pinned to exactly 21 (ADR-0039 §10, ADR-0329 §16:9): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[20]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[21]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -8483,6 +8857,29 @@ class PlanExport(BaseModel):
             "(ADR-0306 §6)."
         ),
     )
+    observations: tuple[ObservationRecord, ...] = Field(
+        default=(),
+        description=(
+            "The observer's records, one per processed or attempted episode, ordered by "
+            "episode id (ADR-0329 §16:9)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _an_observation_appears_once(self) -> PlanExport:
+        """Refuse a document carrying two records of one episode (ADR-0329 §16:1).
+
+        The store keeps one observation record per episode, so a duplicate states a
+        record the store cannot hold.
+
+        Raises:
+            ValueError: If an episode appears more than once.
+        """
+        episodes = [record.episode for record in self.observations]
+        if len(set(episodes)) != len(episodes):
+            msg = "export contains duplicate observation records of one episode"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _an_activation_effect_appears_once(self) -> PlanExport:

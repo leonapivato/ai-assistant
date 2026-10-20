@@ -77,6 +77,13 @@ from ai_assistant.core.types import (
     MessageAuthor,
     NewMessage,
     NotificationCandidate,
+    ObservationAttempt,
+    ObservationAttemptEnd,
+    ObservationFinding,
+    ObservationRecord,
+    ObservationState,
+    ObserverCall,
+    ObserverStep,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
@@ -767,6 +774,30 @@ async def _write_plans(directory: Path, moment: Moment) -> None:
             ),
             match=None,
         )
+        # ADR-0329 §16: an episode the observer attempted, which waits for a retry.
+        await store.write_observation(
+            ObservationRecord(
+                episode="activation:act-upgrade-1",
+                state=ObservationState.WAITING,
+                attempts=(
+                    ObservationAttempt(
+                        started_at=moment.ago(minutes=10),
+                        calls=(ObserverCall(step=ObserverStep.SCOUT, at=moment.ago(minutes=10)),),
+                        end=ObservationAttemptEnd.FAILED,
+                    ),
+                ),
+                next_attempt_at=moment.ago(minutes=5),
+                findings=(
+                    ObservationFinding(
+                        id="finding-upgrade-1",
+                        episode="activation:act-upgrade-1",
+                        claim="The user prefers window seats.",
+                        rests_on=(InputPart(episode="activation:act-upgrade-1"),),
+                    ),
+                ),
+            ),
+            expected_revision=0,
+        )
     finally:
         store.close()
 
@@ -778,9 +809,20 @@ async def _read_plans(directory: Path) -> Records:
         return {
             "stopped": to_json(exported.stopped_activations),
             **_keyed("effect", exported.activation_effects, _field("id")),
+            "observations": to_json(exported.observations),
         }
     finally:
         store.close()
+
+
+def _plans_observations_carry(records: Records) -> Records:
+    """What a plan store read back before ADR-0329 reads back after it (§16:10).
+
+    The upgrade from label 12 adds the observation table, empty, and changes no stop or
+    effect record, so a file the base wrote reads back as it did, with no observation
+    record beside it.
+    """
+    return {**records, "observations": []}
 
 
 # --- conversations.db -----------------------------------------------------------------
@@ -1249,7 +1291,14 @@ STORES: Final[tuple[Store, ...]] = (
     ),
     Store("stories", ("stories.db",), _write_stories, _read_stories),
     Store("audit", ("audit.db",), _write_audit, _read_audit),
-    Store("plans", ("plans.db",), _write_plans, _read_plans),
+    Store(
+        "plans",
+        ("plans.db",),
+        _write_plans,
+        _read_plans,
+        shape=2,
+        carries={1: _plans_observations_carry},
+    ),
     Store("conversations", ("conversations.db",), _write_conversations, _read_conversations),
     Store("grants", ("grants.db",), _write_grants, _read_grants),
     Store("reads", ("reads.db",), _write_reads, _read_reads),
