@@ -82,8 +82,8 @@ code appends to a message, or a cap the code enforces.
 
 > **Normative.** The prompts are the table's eight, each named by its first column, and
 > each declares in its module the closed set of flags and values its template may name:
-> those the table lists, which are the conditions and code-owned values its instruction
-> uses today.
+> those the table lists, under names the implementing lane chooses, which are the
+> conditions and code-owned values its instruction uses today.
 
 ### 3. Where the text lives, and when an override takes effect
 
@@ -130,22 +130,22 @@ code appends to a message, or a cap the code enforces.
 > directory holds anything; an entry in it is not a regular file or names no prompt; a file
 > is not UTF-8 or holds only whitespace; a template names an undeclared flag or value,
 > leaves a block unbalanced, or holds a `$` that is none of §4:1's forms; or the directory
-> or a file in it is writable by anyone but the hub's user.
+> or a file in it is owned by a user other than the hub's, or is writable by its group or
+> by others.
 
 > **Normative.** An override's file is Tier 1 under ADR-0004 §1, and its text never reaches
 > a log (ADR-0004 §5).
 
-> **Normative.** Nothing in `ai_assistant` creates, writes or deletes anything in the
-> directory.
+> **Normative.** The running hub creates, writes and deletes nothing in the directory.
+> Deleting the owner's data destroys it with every other entry of the data directory
+> (ADR-0126 §1:2), and a backup and its restore carry it as they carry the rest (ADR-0123).
 
-The directory is in the data directory, so a backup carries it (ADR-0123) and deleting the
-owner's data deletes it (ADR-0126 §1:2). It is not a store under ADR-0326 §2:2: the hub
-never writes it.
+It is not a store under ADR-0326 §2:2, because the hub never writes it.
 
 ### 6. Who may override, and on which hub
 
-> **Normative.** Only the owner places, changes or removes an override, or the dispatcher
-> writing a text the owner directed.
+> **Normative.** Only the owner, or the dispatcher at the owner's direction, places,
+> changes or removes an override.
 
 > **Normative.** `prompt_overrides` is true only on the owner's hub, or on a hub the owner
 > runs over a copy of that hub's data directory. A hub hosted for another person under the
@@ -179,7 +179,8 @@ the system changing, as any release does.
 > change to that decision: its ADR merges before an override or a default carries it.
 
 > **Normative.** The deploy that installs a promoted text on the owner's hub removes the
-> override it promoted.
+> override whose version equals the new default's, and leaves an override the owner has
+> changed since.
 
 ### 8. Each call records its prompt's version
 
@@ -193,7 +194,8 @@ the system changing, as any release does.
 > **Normative.** At start the hub logs, for each of §2's prompts, its name, its template's
 > version, and `default` or `override`, and nothing of its text.
 
-The story tidy-up, the matters pass and the reconciler write no diagnostic entries; because
+A version identifies a text and carries none of it, so the start's line logs no Tier 1
+data. The story tidy-up, the matters pass and the reconciler write no diagnostic entries; because
 a template is read once per start, the start's line names the version each of their calls
 sent until the next start. The viewer shows the key as part of the entry, whole (ADR-0316
 §3:3); a display or filter by version is left to a later decision.
@@ -217,8 +219,8 @@ ADR-0098 §9's attribution test is over the rendered request, which stays in cod
 ### 10. How long it lasts, and relationship to earlier decisions
 
 > **Normative.** This decision stands until a later ADR ends or changes it. The owner ends
-> the experiments on their hub by setting `prompt_overrides` to false, which runs the
-> defaults from the next start.
+> the experiments on their hub by removing every override from the directory and setting
+> `prompt_overrides` to false; the hub then runs the defaults from its next start.
 
 Superseded in part; every clause the middle column does not name stands:
 
