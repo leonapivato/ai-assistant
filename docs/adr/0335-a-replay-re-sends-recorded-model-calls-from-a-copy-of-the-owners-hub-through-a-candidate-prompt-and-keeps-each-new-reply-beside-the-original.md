@@ -1,6 +1,6 @@
 # 335. A replay re-sends recorded model calls from a copy of the owner's hub through a candidate prompt, and keeps each new reply beside the original
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-20
 - Scope: an owner-run tool for judging a prompt change on inputs the hub has already seen: it re-sends the model calls the diagnostic record kept through a candidate template, and reruns the observer, over a copy of the owner's hub's data directory, and the activation viewer shows each new reply beside the one the hub got.
 - Dependency: [ADR-0314](0314-a-diagnostic-record-keeps-what-each-phase-was-given-and-returned-and-nothing-reads-it-back.md), [ADR-0316](0316-an-activation-viewer-outside-the-package-shows-the-diagnostic-record-to-the-owner-on-the-server.md), [ADR-0333](0333-the-observer-writes-diagnostic-entries-in-a-file-of-its-own-beside-the-activation-it-learned-from-and-the-viewer-shows-what-was-learned.md) and [ADR-0334](0334-a-prompt-is-a-template-the-hub-loads-at-start-the-owners-hub-may-override-it-from-its-data-directory-and-each-model-call-records-the-version-it-sent.md), as their status lines leave them.
