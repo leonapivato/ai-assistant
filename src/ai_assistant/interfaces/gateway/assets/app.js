@@ -2842,10 +2842,13 @@ function capitalised(text) {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-// The same, inside a sentence.
+// The same, inside a sentence. Where the page knows no start for it — every read that
+// would have told it failed — it is named by the hub's id instead: a sentence about it
+// may land after another conversation has been opened, and "this conversation" would
+// then name that one.
 function chatName(id) {
   const name = conversationName(id);
-  return name === undefined ? "this conversation" : `the conversation from ${name}`;
+  return name === undefined ? `conversation ${id}` : `the conversation from ${name}`;
 }
 
 function renderChatListing() {

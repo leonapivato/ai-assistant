@@ -316,6 +316,49 @@ async def test_a_conversation_restored_off_the_listing_is_named_from_its_own_rea
         )
 
 
+async def test_a_late_forget_answer_names_its_conversation_when_nothing_else_could(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Adversarial review, round 4: the conversation a reload restored is on no page the
+    page has listed, and its own read fails, so the page knows no start to name it by.
+    A forget answer that lands after another conversation was opened still names the
+    one it was about — by the hub's id, the one name left — and never "this
+    conversation", which would now be the other one."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        conversation = await _open(drive)
+        other = (await drive.engine.start_conversation()).id
+        listed = await drive.engine.recent_conversations()
+        real_read = drive.engine.conversation
+
+        async def only_the_other(*, limit: int = 50, offset: int = 0) -> tuple[Any, ...]:
+            return tuple(one for one in listed if one.id == other)
+
+        async def failing_for_it(conversation_id: str) -> Any:
+            if conversation_id == conversation:
+                msg = "the store could not be read"
+                raise ConversationStoreError(msg)
+            return await real_read(conversation_id)
+
+        drive.engine.recent_conversations = only_the_other  # type: ignore[method-assign]
+        drive.engine.conversation = failing_for_it  # type: ignore[method-assign]
+        await drive.page.reload()
+        await drive.page.wait_for_function("(id) => chat.selected === id", arg=conversation)
+        await expect(drive.page.locator("#chat-heading")).to_have_text("This conversation")
+
+        await drive.page.evaluate(_HOLDING, "/conversation/forget")
+        drive.page.once("dialog", lambda dialog: asyncio.ensure_future(dialog.accept()))
+        await drive.page.click("#chat-thread .chat-about > summary")
+        await drive.page.click("#chat-forget")
+        await drive.page.wait_for_function("() => window.__held.reached")
+        await _row(drive, other).click()
+        await drive.page.wait_for_function("(id) => chat.selected === id", arg=other)
+        await drive.page.evaluate("() => window.__held.release()")
+
+        said = drive.page.locator("#chat-said")
+        await expect(said).to_contain_text(f"conversation {conversation}", ignore_case=True)
+        await expect(said).not_to_contain_text("this conversation", ignore_case=True)
+
+
 async def test_a_long_listing_is_named_in_one_pass(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
