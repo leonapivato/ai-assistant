@@ -1107,6 +1107,31 @@ class CountedModel(WrapperModel):
             yield streamed
 
 
+class CountedProvider(PydanticAIProvider):
+    """A completion provider whose every request, a call's own route included, is counted.
+
+    A caller may name a model per call, as the reconciler names its route; that model is
+    counted on the same meter as the default, so no route escapes the bound.
+    """
+
+    def __init__(self, default_model: models.Model | str, meter: CallMeter) -> None:
+        """Build the provider over a counted default model.
+
+        Args:
+            default_model: The model a call that names none goes to.
+            meter: Where every request is counted.
+        """
+        super().__init__(CountedModel(default_model, meter))
+        self.meter = meter
+
+    @override
+    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
+        """Complete as the package's provider does, counted whichever model is named."""
+        if model is None:
+            return await super().complete(messages)
+        return await PydanticAIProvider(CountedModel(model, self.meter)).complete(messages)
+
+
 #: Why a replay refuses a second request for one call (§4:10).
 _ONE_REQUEST: Final = "a replay sends each call once and sends no repair (ADR-0335 §4:10)"
 
@@ -1492,7 +1517,7 @@ def counted_models(meter: CallMeter) -> Iterator[None]:
     original = held[name]
 
     def built(spec: models.Model | str) -> PydanticAIProvider:
-        return PydanticAIProvider(CountedModel(spec, meter))
+        return CountedProvider(spec, meter)
 
     held[name] = built
     try:
