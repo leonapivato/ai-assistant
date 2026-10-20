@@ -50,7 +50,6 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemoryStanding,
     Placement,
-    QuestionPart,
     RecordedChannelTrigger,
     RecordedTextInput,
     RoundMessagePart,
@@ -61,7 +60,11 @@ from ai_assistant.core.types import (
     origin_is_outside,
     part_episode,
 )
-from ai_assistant.orchestration.authorizer import WorkingRecord, read_outside_content
+from ai_assistant.orchestration.authorizer import (
+    WorkingRecord,
+    read_outside_content,
+    values_digest,
+)
 from ai_assistant.orchestration.candidates import done_candidates
 from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.reliance import (
@@ -1020,7 +1023,7 @@ class EpisodeReader:
             part = effect.part
             if part is None:  # pragma: no cover - filtered above
                 continue
-            asked = _asked(found, askers, part)
+            asked = _asked(found, askers, effect)
             if asked is None:
                 continue
             asking, fact = asked
@@ -1043,9 +1046,17 @@ class EpisodeReader:
 
 
 def _asked(
-    found: Mapping[str, object], askers: Sequence[str], part: QuestionPart
+    found: Mapping[str, object], askers: Sequence[str], effect: ActivationEffect
 ) -> tuple[str, str] | None:
-    """The asking activation and the fact its asked call showed, for one question part."""
+    """The asking activation and the fact its asked call showed, for one spent part.
+
+    The asked call is the one the effect record's question part names, and its digest is
+    the one the record claimed, as the panel's read checks it
+    (:func:`~ai_assistant.orchestration.candidates.held_candidates`).
+    """
+    part = effect.part
+    if part is None:
+        return None
     for activation_id in askers:
         record = found.get(episode_address(activation_id))
         processing = record.processing_record if isinstance(record, EpisodicMemory) else None
@@ -1056,7 +1067,13 @@ def _asked(
             continue
         asked = round_.asked[part.part - 1]
         fact = asked.values.get(FACT_ARGUMENT)
-        if asked.tool.capability == REMEMBER_CAPABILITY and isinstance(fact, str) and fact:
+        if asked.tool.capability != REMEMBER_CAPABILITY or not isinstance(fact, str) or not fact:
+            continue
+        try:
+            digest = values_digest(asked.request)
+        except ValueError:
+            continue
+        if digest == effect.values_digest:
             return activation_id, fact
     return None
 
