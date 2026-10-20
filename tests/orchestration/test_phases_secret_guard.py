@@ -339,7 +339,8 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     text, identifiers, clocks and closed values. ``Memory`` (ADR-0328 §3), which took
     ``SemanticMemory``'s place in the graph, holds its wording and the envelope's
     fields, with ``MemorySupport``, its parts (``InputPart``, ``RoundMessagePart``,
-    ``EvidenceItemPart``, ``ConfirmationPart``, ``RememberCallPart``, ``LegacyPart``),
+    ``EvidenceItemPart``, ``ConfirmationPart``, ``RememberCallPart``, ``LegacyPart``, and
+    ADR-0329 §9:7's ``ObserverInferencePart``, an episode address alone),
     ``MemoryOperation``, ``OpenQuestion`` and ``TrackRecordEntry``: episode addresses,
     positions, identifiers, clocks, closed values, notes in words and an
     ``Attestation``. A legacy support's ``carries`` is the record stored before ADR-0328
@@ -474,6 +475,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "MemorySupport",
         "Message",
         "NewConversation",
+        "ObserverInferencePart",
         "OfferedTool",
         "OpenQuestion",
         "PlaceItem",

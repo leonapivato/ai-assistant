@@ -28,11 +28,14 @@ from ai_assistant.core.types import (
     MemoryOperation,
     MemoryOperationKind,
     MemoryRecord,
+    MemoryRetirement,
     MemorySource,
     MemoryStanding,
     MemoryStatus,
     MemorySupport,
+    MemoryUpdateProposal,
     MemoryWriterName,
+    ObserverInferencePart,
     OpenQuestion,
     OpenQuestionKind,
     Provenance,
@@ -61,6 +64,7 @@ from ai_assistant.testing.memories import (
     AT,
     HELD_EPISODE,
     confirmed_support,
+    inference_support,
     legacy_support,
     memory,
     message_support,
@@ -694,3 +698,111 @@ def test_a_projection_says_which_kind_it_is_and_carries_its_shape() -> None:
         BeliefSummary.model_validate(
             episodic | {"standing": MemoryStanding.SAID, "status": MemoryStatus.CURRENT}
         )
+
+
+# --- ADR-0329's additions: the observer's inference and the retiring proposal -----
+
+
+def test_an_observers_inference_ranks_at_inference_and_is_not_outside() -> None:
+    """ADR-0329 §9:7: the origin ranks at inference and is not outside content."""
+    origin = SupportOrigin.OBSERVER_INFERENCE
+    assert origin_standing(origin) is MemoryStanding.INFERENCE
+    assert not origin_is_outside(origin)
+    assert inference_support().added_by is MemoryWriterName.OBSERVER
+
+
+def test_an_observers_inference_is_addressed_by_its_episode_and_takes_its_origin() -> None:
+    """ADR-0329 §9:7: the part is the episode's; only that origin points at it."""
+    held = inference_support("activation:drawn")
+    assert held.points_at == ObserverInferencePart(episode="activation:drawn")
+    with pytest.raises(ValidationError, match="cannot take"):
+        MemorySupport.model_validate(held.model_dump() | {"origin": SupportOrigin.REMEMBERED})
+    with pytest.raises(ValidationError, match="cannot take"):
+        MemorySupport.model_validate(said_support().model_dump() | {"origin": "observer_inference"})
+
+
+def test_an_observers_inference_carries_no_source_details() -> None:
+    """ADR-0329 §9:7: "it carries no source details"."""
+    with pytest.raises(ValidationError, match="no source details"):
+        MemorySupport.model_validate(inference_support().model_dump() | {"source_details": _SOURCE})
+
+
+def _stored(record: Memory) -> Memory:
+    """``record`` as a store returns it, carrying a revision."""
+    return record.model_copy(update={"revision": 1})
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [MemoryOperationKind.END, MemoryOperationKind.MARK_WRONG, MemoryOperationKind.REPLACE],
+    ids=str,
+)
+def test_a_retirement_is_an_end_a_mark_wrong_or_a_replace(kind: MemoryOperationKind) -> None:
+    """ADR-0329 §12:4: one retiring operation, on a stored memory."""
+    retired = _stored(memory("old", "c"))
+    retirement = MemoryRetirement(memory=retired, kind=kind, cites=InputPart(episode="e"))
+    assert retirement.kind is kind
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        kind
+        for kind in MemoryOperationKind
+        if kind
+        not in {
+            MemoryOperationKind.END,
+            MemoryOperationKind.MARK_WRONG,
+            MemoryOperationKind.REPLACE,
+        }
+    ],
+    ids=str,
+)
+def test_a_retirement_by_any_other_operation_is_unconstructable(
+    kind: MemoryOperationKind,
+) -> None:
+    """ADR-0329 §12:4: a proposal retires a memory, so only a retiring kind is carried."""
+    with pytest.raises(ValidationError, match="§12:4"):
+        MemoryRetirement(
+            memory=_stored(memory("old", "c")), kind=kind, cites=InputPart(episode="e")
+        )
+
+
+def test_a_retirement_names_a_memory_a_store_returned() -> None:
+    """The write is conditional on the revision read, so the memory carries one."""
+    with pytest.raises(ValidationError, match="revision"):
+        MemoryRetirement(
+            memory=memory("old", "c"), kind=MemoryOperationKind.END, cites=InputPart(episode="e")
+        )
+
+
+def test_a_proposal_does_not_retire_the_memory_it_proposes() -> None:
+    """ADR-0329 §12:4, ADR-0328 §5:6: the retired memory and the new one are two."""
+    new = memory("same", "c")
+    with pytest.raises(ValidationError, match="other than the one it proposes"):
+        MemoryUpdateProposal(
+            proposed=new,
+            rationale="r",
+            retiring=MemoryRetirement(
+                memory=_stored(memory("same", "old")),
+                kind=MemoryOperationKind.END,
+                cites=new.supports[0].points_at,
+            ),
+        )
+
+
+def test_a_retiring_operation_moves_no_proposal_key() -> None:
+    """ADR-0328 §11:11's criterion is over the memory: a retirement keys nothing."""
+    new = memory("new", "c")
+    bare = MemoryUpdateProposal(proposed=new, rationale="r")
+    retiring = bare.model_copy(
+        update={
+            "retiring": MemoryRetirement(
+                memory=_stored(memory("old", "o")),
+                kind=MemoryOperationKind.END,
+                cites=new.supports[0].points_at,
+            )
+        }
+    )
+    assert retiring.proposal_fingerprint == bare.proposal_fingerprint
+    assert retiring.question_key == bare.question_key
