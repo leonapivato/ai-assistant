@@ -28,7 +28,7 @@ from ai_assistant.core.types import (
     ToolOutcome,
 )
 from ai_assistant.orchestration.authorizer import values_digest
-from ai_assistant.orchestration.candidates import pending_candidates
+from ai_assistant.orchestration.candidates import done_candidates, pending_candidates
 from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.testing import FakePlanStore
 
@@ -206,3 +206,18 @@ async def test_an_unreadable_plan_store_raises_for_the_caller() -> None:
 
     with pytest.raises(PlanningError):
         await pending_candidates(plans, (_window(call),))
+
+
+async def test_the_observer_reads_each_candidate_with_its_effect_record() -> None:
+    """ADR-0329 §3:3, §9:1: the same join, keeping the record that shows it done."""
+    plans = FakePlanStore(now=lambda: _AT)
+    await _claimed(plans, _digest(**_arguments()), ToolOutcome.SUCCEEDED, effect_id="effect-7")
+    window = _window(ProposedCall(call_id="c1", name="remember", arguments=_arguments()))
+    assert window.processing_record is not None
+
+    (done,) = done_candidates(
+        window.id, window.processing_record, await plans.activation_effects([_ACTIVATION])
+    )
+
+    assert (done.effect, done.round, done.fact) == ("effect-7", _ROUND, "prefers window seats")
+    assert done.values["rests_on_input"] is True

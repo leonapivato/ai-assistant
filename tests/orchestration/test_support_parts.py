@@ -39,6 +39,7 @@ from ai_assistant.orchestration.remembering import (
     EPISODE_ARGUMENT,
     OUTSIDE_CONTENT_ARGUMENT,
     REMEMBER,
+    REMEMBER_CANDIDATE,
     REMEMBER_CAPABILITY,
 )
 from ai_assistant.orchestration.support_parts import (
@@ -222,6 +223,39 @@ def test_a_confirmation_reads_as_the_statement_its_approved_part_showed() -> Non
     assert _content(part, {asking.id: asking}) is None, "the yes's episode is gone"
     wrong_part = part.model_copy(update={"question": QuestionPart(round="r-ask", part=2)})
     assert _content(wrong_part, episodes) is None
+
+
+def test_a_confirmed_candidate_reads_as_the_fact_its_approved_part_showed() -> None:
+    """ADR-0329 §5:5: once ``remember`` records candidates, the yes approved the fact."""
+    asking = _held(
+        episode("ask"),
+        rounds=(
+            _round(
+                "r-ask",
+                "Want me to remember you like tea?",
+                asked=(
+                    AskedCall(
+                        part=1,
+                        tool=REMEMBER_CANDIDATE,
+                        values={
+                            "fact": "The user likes tea.",
+                            "why": "drinks",
+                            "rests_on_input": True,
+                            "confirm": True,
+                            EPISODE_ARGUMENT: "activation:ask",
+                            OUTSIDE_CONTENT_ARGUMENT: False,
+                        },
+                    ),
+                ),
+            ),
+        ),
+    )
+    yes = episode("yes", text="yes")
+    part = ConfirmationPart(
+        episode=yes.id, asking_activation="ask", question=QuestionPart(round="r-ask", part=1)
+    )
+
+    assert _content(part, {asking.id: asking, yes.id: yes}) == "The user likes tea."
 
 
 def test_a_remember_call_reads_as_the_statement_of_the_call_its_effect_claims() -> None:

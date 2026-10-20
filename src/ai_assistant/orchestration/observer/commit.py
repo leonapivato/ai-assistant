@@ -649,6 +649,13 @@ def _created(
 ) -> _Primary:
     """A new memory, retiring at most one, checked (§9:7, §9:8, §11:5, §12:4, §13:1)."""
     inference = _inference(reply, supports, context)
+    if any(
+        one.origin is SupportOrigin.CONFIRMATION and not one.backs_as_worded
+        for one in supports.values()
+    ):
+        # ADR-0328 §4:6: a confirmation is added only to the memory it backs as worded
+        # or one its ingest retires, never to a new memory as anything else.
+        raise _Refused(FindingUnwritten.CHECK_FAILED)
     confirmed = {
         read.text
         for handle, one in supports.items()
@@ -793,7 +800,12 @@ def _retiring(
             asks=_CONFLICT_ASKS + memory.content,
             support=_question_support(cited, SupportDirection.AGAINST, supports, context),
         )
-    retiring = MemoryRetirement(memory=target, kind=kind, cites=cited.points_at, note=reply.note)
+    try:
+        retiring = MemoryRetirement(
+            memory=target, kind=kind, cites=cited.points_at, note=reply.note
+        )
+    except ValidationError as exc:
+        raise _Refused(FindingUnwritten.CHECK_FAILED) from exc
     return Create(memory=memory, retiring=retiring, asked_on=created.asked_on)
 
 

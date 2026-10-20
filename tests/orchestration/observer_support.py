@@ -14,7 +14,9 @@ from typing import TYPE_CHECKING, Any, Final
 
 from ai_assistant.core.episode_encoding import episode_content
 from ai_assistant.core.types import (
+    ActionRequest,
     ActivationDigest,
+    ActivationEffect,
     ChannelContext,
     ChannelIdentity,
     DigestOutcome,
@@ -35,13 +37,17 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     ProposedCall,
     Provenance,
+    QuestionPart,
     RecordedChannelTrigger,
     RecordedInputMessage,
     RecordedTextInput,
+    ToolOutcome,
     UnderstandingOmission,
     WholeTextReply,
 )
+from ai_assistant.orchestration.authorizer import values_digest
 from ai_assistant.orchestration.observer import Observer, ObserverLimits
+from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.orchestration.understanding import RecentEpisodes
 from ai_assistant.orchestration.writes import MemoryWriteStage
 from ai_assistant.testing import (
@@ -94,9 +100,11 @@ def episode(  # noqa: PLR0913 — one knob per part of the record a case varies
 ) -> EpisodicMemory:
     """One activation's episode at its own address, frozen unless ``open_``."""
     frozen = not open_
+    owner = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
     record = EpisodicMemory(
         id=address(activation_id),
         content="",
+        placement=Placement() if frozen else owner,
         occurred_at=at,
         outcome="Noted." if frozen else None,
         provenance=Provenance(
@@ -131,9 +139,39 @@ def episode(  # noqa: PLR0913 — one knob per part of the record a case varies
         ),
     )
     if not frozen:
-        owner = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
-        return record.model_copy(update={"placement": owner})
+        return record
     return record.model_copy(update={"content": episode_content(record)})
+
+
+async def remembered(  # noqa: PLR0913 — the call, where it was recorded, and its record
+    plans: FakePlanStore,
+    activation_id: str,
+    round_id: str,
+    values: dict[str, Any],
+    *,
+    effect_id: str = "effect-1",
+    part: QuestionPart | None = None,
+) -> ActivationEffect:
+    """Claim and finish the effect record that shows a ``remember`` call done (§3:3)."""
+    filled = {**values, "episode": address(activation_id), "rests_on_outside_content": False}
+    effect = ActivationEffect(
+        id=effect_id,
+        activation_id=activation_id,
+        round=round_id,
+        capability="remember",
+        values_digest=values_digest(ActionRequest(tool=REMEMBER_CANDIDATE, parameters=filled)),
+        decision_id=f"decision-{effect_id}",
+        claimed_at=AT,
+        part=part,
+    )
+    await plans.claim_activation_effect(effect, match=None)
+    await plans.finish_activation_effect(effect_id, ToolOutcome.SUCCEEDED)
+    return effect
+
+
+def remember_call(call_id: str = "c1", **values: Any) -> ProposedCall:
+    """A ``remember`` call as a round records it, recording a candidate."""
+    return ProposedCall(call_id=call_id, name="remember", arguments=values)
 
 
 def said(
