@@ -328,6 +328,9 @@ class PlaceItem:
         is_input: Whether it is the input this activation is processing, or part of it.
         episode_id: The id of the episode of the activation it links to, where it links
             to one (ADR-0303 §7:1); it is shown with that episode's label (§5:6).
+        referent_id: The id understanding's referent names this item by, where the
+            glue that builds the window knows it: a ``channel_item`` referent with this
+            id is shown as this item (ADR-0307 §5:6) and never by its words.
     """
 
     author: PlaceAuthor
@@ -335,6 +338,7 @@ class PlaceItem:
     at: datetime | None = None
     is_input: bool = False
     episode_id: str | None = None
+    referent_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -962,6 +966,8 @@ _WITHHELD_ITEM: Final = (
     "reaches you only through understanding's record"
 )
 _NO_UNDERSTANDING: Final = "missing: understanding recorded no reading of this input"
+#: A channel item understanding named that the place window cannot be shown pointing at.
+_SOME_ITEM: Final = "an item of the place window"
 #: ADR-0308 §4:13: a failed digest records no evidence, and planning is told so.
 _DIGEST_FAILED: Final = "could not be read: its digest failed, and its content is not shown"
 _NOTHING_ANSWERED: Final = "nothing in it answered what was looked for"
@@ -1168,6 +1174,11 @@ class _Request:
         # the assistant's, each in the window's order (ADR-0276 §3, ADR-0307 §5:6). An
         # item someone else wrote is never shown, so it shows nothing of an episode.
         self._in_place: dict[str, _PlaceTexts] = {}
+        # The place window's items by the id understanding's referents name them by, so
+        # a reference to one is shown as that item (ADR-0307 §5:6).
+        self._by_referent: dict[str, PlaceItem] = {
+            item.referent_id: item for item in inputs.place.items if item.referent_id is not None
+        }
         for item in inputs.place.items:
             if item.episode_id is None or item.author is PlaceAuthor.OTHER:
                 continue
@@ -1257,7 +1268,8 @@ class _Request:
 
         Never its excerpt: a channel item's excerpt is the item's own words, which may
         be what someone other than the user wrote, and planning never reads raw outside
-        content (ADR-0307 §9:2). The place window shows the items it may.
+        content (ADR-0307 §9:2). The place window shows the items it may, and a channel
+        item is named as the window shows it (:meth:`_channel_item`).
         """
         kinds = {
             "story": LabelKind.STORY,
@@ -1270,8 +1282,27 @@ class _Request:
         if referent.kind == "input":
             return "the input"
         if referent.kind == "channel_item":
-            return "an item of the place window"
+            return self._channel_item(referent)
         return f"a {referent.kind} no longer named"
+
+    def _channel_item(self, referent: UnderstandingReferent) -> str:
+        """A channel item understanding named, as the place window shows that item.
+
+        An item linked to an activation by that activation's episode label, which the
+        window shows it under (ADR-0307 §5:6); any other by who wrote it and when, as
+        the window shows those. Never by its words, which may be what someone other
+        than the user wrote (§9:2): an item the window does not hold, or one it shows
+        no instant for, is named only as an item of the window.
+        """
+        item = None if referent.id is None else self._by_referent.get(referent.id)
+        if item is None:
+            return _SOME_ITEM
+        if item.episode_id is not None:
+            return self._book.label(LabelKind.EPISODE, item.episode_id)
+        if item.at is None:
+            return _SOME_ITEM
+        author = _AUTHOR_TEXT[item.author]
+        return f"the item of the place window {author} wrote at {item.at.isoformat()}"
 
     def _item(self, item: PlaceItem) -> dict[str, object]:
         shown: dict[str, object] = {"from": _AUTHOR_TEXT[item.author]}

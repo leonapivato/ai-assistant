@@ -1649,11 +1649,13 @@ def place_window(
 
     Each message keeps its author; the input's messages are marked as the input; and a
     message the window links to an activation, the one that took it in or wrote it,
-    names that activation's episode (ADR-0303 §7:1, ADR-0307 §5:6). A deleted message
-    is not shown. A forward is someone else's, claimed (ADR-0323 §4:10), as is any
-    other message whose author the place's kind does not establish (§4:2): each is an
-    item of ``other``'s, whose raw text planning is never shown (ADR-0307 §9:2), and
-    reaches planning through understanding's record alone.
+    names that activation's episode (ADR-0303 §7:1, ADR-0307 §5:6). Each carries the id
+    understanding's referent names it by, so a reference to it reaches planning as the
+    item the window shows. A deleted message is not shown. A forward is someone else's,
+    claimed (ADR-0323 §4:10), as is any other message whose author the place's kind
+    does not establish (§4:2): each is an item of ``other``'s, whose raw text planning
+    is never shown (ADR-0307 §9:2), and reaches planning through understanding's record
+    alone.
 
     Args:
         window: The conversation's recent transcript, brought in with the input.
@@ -1680,6 +1682,9 @@ def place_window(
             episode_id=(
                 None if (linked := window.links.get(position)) is None else episode_address(linked)
             ),
+            # The id understanding's referent names the message by (understanding.py
+            # `_message_item`), pinned equal by test_phase_path.py.
+            referent_id=f"message:{position}",
         )
         for position, one in sorted(shown.items())
     )
