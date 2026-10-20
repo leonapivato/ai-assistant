@@ -989,3 +989,70 @@ def test_a_rerun_counts_every_model_request_retries_included_against_its_bound(
     assert engine.runs == 1
     assert "the bound of 4 model calls is reached" in reports
     assert "4 model calls made (bound 4); 1 refused" in reports
+
+
+def test_a_rerun_counts_a_call_that_names_its_own_route_as_the_reconciler_does(
+    tmp_path: Path,
+) -> None:
+    # The reconciler names its route on every call (``complete(..., model=route)``), which
+    # replaces the provider's default model for that call: it is counted all the same.
+    copy = make_copy(tmp_path)
+    requests: list[int] = []
+    failures: list[str] = []
+
+    def answer(messages: list[Any], info: Any) -> Any:
+        del messages, info
+        requests.append(1)
+        return ModelResponse(parts=[TextPart("a reply")])
+
+    class _Engine:
+        def __init__(self) -> None:
+            self.provider = RetryingProvider(
+                replay_tool.composition.PydanticAIProvider(FunctionModel(answer)),
+                policy=RetryPolicy(max_attempts=3, backoff_base_seconds=0.001),
+                sleep=_no_wait,
+            )
+
+        async def observe_episodes(self) -> RunOutcome:
+            messages = [Message(role=Role.USER, content="x")]
+            await self.provider.complete(messages)
+            for route in ("test", None):
+                try:
+                    await self.provider.complete(messages, model=route)
+                except ModelError as exc:
+                    failures.append(type(exc).__name__)
+            return RunOutcome(processed=1)
+
+        async def aclose(self) -> None:
+            return None
+
+    reports: list[str] = []
+    asyncio.run(
+        replay_tool.rerun(
+            replay_tool.RerunOptions(copy=copy, model="anthropic:claude-test", bound=2),
+            report=reports.append,
+            build=lambda _: _Engine(),
+            check_model=lambda _: None,
+            now=now,
+        )
+    )
+
+    # The named route ("test", pydantic-ai's offline model) takes the second request; the
+    # third is refused unsent, whichever model it names.
+    assert len(requests) == 1
+    assert failures == ["ModelError"]
+    assert "2 model calls made (bound 2); 1 refused" in reports
+
+
+def test_a_counted_provider_refuses_a_named_route_once_the_bound_is_reached() -> None:
+    meter = replay_tool.CallMeter(1, "the bound is reached")
+    provider = replay_tool.CountedProvider("test", meter)
+    messages = [Message(role=Role.USER, content="x")]
+
+    asyncio.run(provider.complete(messages, model="test"))
+    with pytest.raises(ModelError, match="the bound is reached"):
+        asyncio.run(provider.complete(messages, model="test"))
+    with pytest.raises(ModelError, match="the bound is reached"):
+        asyncio.run(provider.complete(messages))
+
+    assert (meter.made, meter.refused) == (1, 2)
