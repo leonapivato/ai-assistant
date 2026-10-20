@@ -3389,6 +3389,22 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Prompt overrides (ADR-0334 §3:3, §6:2) ---------------------------
+    # Each model call's instruction is a template shipped in the package; where this is
+    # true, a file `<name>.txt` under `<data_dir>/prompts` replaces that prompt's
+    # default whole, read and checked once at start. True only on the owner's hub, or a
+    # hub the owner runs over a copy of its data directory: a hub hosted for another
+    # person runs the shipped defaults (§6:2). Where it is false the hub reads no file
+    # in that directory, and refuses to start while it holds anything (§5:1), so an
+    # override that would be ignored is never mistaken for one that ran.
+    prompt_overrides: bool = Field(
+        default=False,
+        description=(
+            "Let files under <data_dir>/prompts replace the shipped prompt templates, "
+            "read at start (ADR-0334). Only on the owner's own hub. Off by default."
+        ),
+    )
+
     # --- The calendar reader (ADR-0093 §7, §7a; ADR-0095 §1) --------------
     # Leg 6 configures **exactly one source, by explicit fields**. There is no
     # source registry and no list-valued source configuration, on ADR-0083 §7's

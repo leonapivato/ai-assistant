@@ -23,7 +23,7 @@ from phases_composition_support import (
     PHONE,
     REPLY,
     SETTLE,
-    UNDERSTANDING_PROMPT,
+    UNDERSTANDING_INSTRUCTIONS,
     Phased,
     Turn,
     build_phased,
@@ -143,7 +143,9 @@ async def test_an_event_over_the_hub_socket_runs_the_phases_and_starts_no_conver
     assert result.result.ended is ActivationEnding.DONE
     # The understanding stage ran once, over the supplied context; planning followed.
     (understanding,) = [
-        call for call in hub.phased.model.calls if UNDERSTANDING_PROMPT in call.messages[0].content
+        call
+        for call in hub.phased.model.calls
+        if call.messages[0].content in UNDERSTANDING_INSTRUCTIONS
     ]
     assert understanding
     assert hub.phased.completer.calls, "planning ran"

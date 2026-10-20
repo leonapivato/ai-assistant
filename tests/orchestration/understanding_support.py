@@ -8,11 +8,12 @@ from typing import TYPE_CHECKING, Final
 
 from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.understanding import (
+    UNDERSTANDING_PROMPT,
     RecentEpisodes,
     UnderstandingStage,
     WindowsStage,
 )
-from ai_assistant.testing import FakeModelProvider, FakeStoryStore
+from ai_assistant.testing import FakeModelProvider, FakeStoryStore, default_prompt
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import MemoryStore, ModelProvider, StoryStore
@@ -46,6 +47,7 @@ def understanding_stage(*, model: ModelProvider | None = None) -> UnderstandingS
     return UnderstandingStage(
         model=model if model is not None else FakeModelProvider(reply=STATED_PROPOSAL),
         excerpt_chars=EXCERPT_CHARS,
+        prompt=default_prompt(UNDERSTANDING_PROMPT),
     )
 
 

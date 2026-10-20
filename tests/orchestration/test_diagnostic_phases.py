@@ -43,16 +43,24 @@ from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.held_results import HeldResult
 from ai_assistant.orchestration.planning import PlaceWindow, PlanningInputs, PlanningStage
 from ai_assistant.orchestration.recall import RecallStage
-from ai_assistant.orchestration.understanding import TranscriptWindow, UnderstandingStage
+from ai_assistant.orchestration.understanding import (
+    UNDERSTANDING_PROMPT,
+    TranscriptWindow,
+    UnderstandingStage,
+)
 from ai_assistant.testing import (
     FakeDiagnosticSink,
     FakeMemoryStore,
     FakeModelProvider,
     FakeStoryStore,
     FakeToolCallingCompleter,
+    default_prompt,
 )
 from ai_assistant.testing.memories import memory as memory_record
 from ai_assistant.testing.memories import said_support
+
+#: Understanding's shipped template, as the composition root hands it the stage.
+_UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -192,27 +200,42 @@ async def _understand(stage: UnderstandingStage) -> None:
 async def test_understanding_writes_its_rendered_request_and_the_reply() -> None:
     model = FakeModelProvider(reply=_PROPOSAL)
     sink = FakeDiagnosticSink()
-    stage = UnderstandingStage(model=model, excerpt_chars=200, diagnostics=sink)
+    stage = UnderstandingStage(
+        model=model, excerpt_chars=200, prompt=_UNDERSTANDING, diagnostics=sink
+    )
 
     with diagnosed_activation(_ACTIVATION, clock=_now):
         await _understand(stage)
 
     given, returned = sink.of(DiagnosticSource.UNDERSTANDING)
     sent = model.calls[0].messages
-    assert _body(given) == {"messages": [one.model_dump(mode="json") for one in sent]}
+    assert _body(given) == {
+        "messages": [one.model_dump(mode="json") for one in sent],
+        # ADR-0334 §8:2: which template, in which version, the system message came from.
+        "prompt": {
+            "name": "understanding",
+            "version": _UNDERSTANDING.version,
+            "origin": "default",
+        },
+    }
     assert _body(returned) == {"reply": _PROPOSAL}
 
 
 async def test_understanding_s_repair_is_a_second_given_and_returned_pair() -> None:
     model = FakeModelProvider.scripted("not json", _PROPOSAL)
     sink = FakeDiagnosticSink()
-    stage = UnderstandingStage(model=model, excerpt_chars=200, diagnostics=sink)
+    stage = UnderstandingStage(
+        model=model, excerpt_chars=200, prompt=_UNDERSTANDING, diagnostics=sink
+    )
 
     with diagnosed_activation(_ACTIVATION, clock=_now):
         await _understand(stage)
 
-    kinds = [one.kind for one in sink.of(DiagnosticSource.UNDERSTANDING)]
+    entries = sink.of(DiagnosticSource.UNDERSTANDING)
+    kinds = [one.kind for one in entries]
     assert kinds == [DiagnosticKind.GIVEN, DiagnosticKind.RETURNED] * 2
+    # The repair resends the system message, so its given entry names the template too.
+    assert _body(entries[2])["prompt"] == _UNDERSTANDING.provenance()
     assert _body(sink.of(DiagnosticSource.UNDERSTANDING)[1]) == {"reply": "not json"}
 
 
@@ -223,7 +246,10 @@ async def test_understanding_writes_the_failure_of_its_call() -> None:
 
     sink = FakeDiagnosticSink()
     stage = UnderstandingStage(
-        model=FakeModelProvider(reply=down), excerpt_chars=200, diagnostics=sink
+        model=FakeModelProvider(reply=down),
+        excerpt_chars=200,
+        prompt=_UNDERSTANDING,
+        diagnostics=sink,
     )
 
     with diagnosed_activation(_ACTIVATION, clock=_now), pytest.raises(ModelError):
@@ -476,7 +502,11 @@ async def test_with_no_sink_every_phase_writes_nothing_and_decides_the_same() ->
             "dentist appointment", audience=_AUDIENCE, deadline=math.inf
         )
         await _understand(
-            UnderstandingStage(model=FakeModelProvider(reply=_PROPOSAL), excerpt_chars=200)
+            UnderstandingStage(
+                model=FakeModelProvider(reply=_PROPOSAL),
+                excerpt_chars=200,
+                prompt=_UNDERSTANDING,
+            )
         )
         await _planning(FakeToolCallingCompleter(RoundResponse(text="ok")), None).plan(_inputs())
 

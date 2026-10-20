@@ -35,8 +35,10 @@ from ai_assistant.core.types import (
 from ai_assistant.models import PydanticAIProvider
 from ai_assistant.orchestration.activation_state import active_state
 from ai_assistant.orchestration.conversations import conversation_channel
+from ai_assistant.orchestration.understanding import UNDERSTANDING_PROMPT
 from ai_assistant.testing import (
     FakeModelProvider,
+    default_renderings,
 )
 
 if TYPE_CHECKING:
@@ -51,14 +53,17 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.integration
 _BUDGET = timedelta(seconds=10)
-_UNDERSTANDING_PROMPT = "You read one incoming input and state what it means."
+#: Every system message understanding's shipped template renders, one per combination
+#: of its flags: how the fake tells understanding's call from the rest without
+#: matching the instruction's words (ADR-0334 §9:1).
+_UNDERSTANDING_INSTRUCTIONS = default_renderings(UNDERSTANDING_PROMPT)
 _UNDERSTOOD = json.dumps({"meaning": "The input means what it says.", "meaning_ground": "stated"})
 _SENSOR = ChannelIdentity(channel_type="informational_event", instance_id="sensor")
 
 
 def _reply(messages: Sequence[Message]) -> str:
     """Answer the understanding stage with a stated reading, and every other stage alike."""
-    return _UNDERSTOOD if _UNDERSTANDING_PROMPT in messages[0].content else "Noted."
+    return _UNDERSTOOD if messages[0].content in _UNDERSTANDING_INSTRUCTIONS else "Noted."
 
 
 @dataclass

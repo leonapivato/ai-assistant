@@ -34,17 +34,21 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.understanding import (
+    UNDERSTANDING_PROMPT,
     RecentEpisodes,
     TranscriptWindow,
     UnderstandingStage,
 )
-from ai_assistant.testing import FakeMemoryStore, FakeModelProvider
+from ai_assistant.testing import FakeMemoryStore, FakeModelProvider, default_prompt
 from ai_assistant.testing.memories import (
     memory,
     remembered_support,
     said_support,
     sourced_support,
 )
+
+#: Understanding's shipped template, as the composition root hands it the stage.
+_UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import ActivationUnderstanding, MemoryRecord
@@ -123,7 +127,7 @@ async def _stage(model: FakeModelProvider, *records: MemoryRecord) -> _Staged:
         [MemoryWrite(record=record, mode=MemoryWriteMode.INSERT_IF_ABSENT) for record in records]
     )
     return _Staged(
-        stage=UnderstandingStage(model=model, excerpt_chars=2000),
+        stage=UnderstandingStage(model=model, excerpt_chars=2000, prompt=_UNDERSTANDING),
         window=await RecentEpisodes(memory=memory, limit=10)(frozenset()),
     )
 
@@ -150,10 +154,6 @@ def _sent(model: FakeModelProvider, call: int = 0) -> dict[str, Any]:
     return payload
 
 
-def _instruction(model: FakeModelProvider) -> str:
-    return model.calls[0].messages[0].content
-
-
 # --- rendering --------------------------------------------------------------------------
 
 
@@ -161,7 +161,6 @@ async def test_no_recall_decision_renders_no_section_and_keeps_the_instruction()
     model = FakeModelProvider.scripted(_proposal(), _proposal())
     await _understand(await _stage(model), None)
     assert "recalled" not in _sent(model)
-    assert "M1" not in _instruction(model)
     # The same instruction a stage built before recall existed renders.
     await _understand(await _stage(model), None)
     assert model.calls[1].messages[0] == model.calls[0].messages[0]
@@ -187,8 +186,6 @@ async def test_recalled_records_render_under_m_labels_in_recalls_order() -> None
     assert second["item"] == "an earlier exchange on capture modality text"
     assert second["occurred_at"] == EARLIER.isoformat()
     assert second["response"] == "Booked for Friday."
-    assert "M1, M2" in _instruction(model)
-    assert "provisional, possibly out of date" in _instruction(model)
 
 
 @pytest.mark.parametrize(
