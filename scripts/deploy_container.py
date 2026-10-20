@@ -371,7 +371,8 @@ class ProcessLease:
 
     Its standard input is a pipe from this process alone, so it ends when this deploy
     does, however it ends: a kill closes the pipe, the holder on the box reads its end
-    and exits, and the kernel releases the lock with its descriptor.
+    and exits, and the kernel releases the lock with its descriptor. It runs in a
+    session of its own, so an interrupt at the terminal is the deploy's to handle.
     """
 
     process: subprocess.Popen[bytes]
@@ -406,8 +407,14 @@ def _hold(argv: Sequence[str]) -> ProcessLease | Result:
         DeployError: If the executable cannot be started.
     """
     try:
+        # A session of its own, so a Ctrl-C at the terminal reaches the deploy and not
+        # the holder: the deploy's own handling of it still runs under the lock.
         process = subprocess.Popen(  # noqa: S603  # an argv, never a shell line
-            list(argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            list(argv),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
         )
     except OSError as exc:
         raise DeployError(f"could not run {argv[0]}: {exc.strerror or exc}") from exc
@@ -1106,9 +1113,16 @@ class Deployment:
         self._check_env_file()
         self.relay = self._rule_on_relay()
         self._check_passphrase(person.keyring_passphrase, "keyring")
-        installed = self._installed()
+        # A first install records itself before it makes the volumes and removes the
+        # record before anything starts on them, so while it stands they hold nothing a
+        # hub wrote, whatever unit.env says, and the install is resumed.
+        resumed = self._stat(person.first_install) is not None
+        if resumed:
+            say(f"{person.first_install}: a first install that ran nothing; resuming it")
+        text = None if resumed else self._read(person.unit_env)
+        installed = None if text is None else parse_unit_env(text)
         served = self._volume_exists(person.data_volume)
-        if installed is None and served and self._stat(person.first_install) is None:
+        if installed is None and served and not resumed:
             raise DeployError(
                 f"the volume {person.data_volume} exists but {person.unit_env} does not, so a\n"
                 "hub has served data here and nothing says which image wrote it: no backup can\n"
@@ -1142,22 +1156,6 @@ class Deployment:
         self._check_unit_root()
         self._check_box_network()
         return installed
-
-    def _installed(self) -> Installed | None:
-        """What the unit runs, or ``None`` when no hub has run on the person's volumes.
-
-        A first install records itself before it makes the volumes and removes the
-        record before anything starts on them, so while the record stands the volumes
-        hold nothing a hub wrote, whatever ``unit.env`` says: the install is resumed.
-
-        Returns:
-            What ``unit.env`` names, or ``None`` for a first install, new or resumed.
-        """
-        if self._stat(self.person.first_install) is not None:
-            say(f"{self.person.first_install}: a first install that ran nothing; resuming it")
-            return None
-        text = self._read(self.person.unit_env)
-        return None if text is None else parse_unit_env(text)
 
     def _check_unit_root(self) -> None:
         """Refuse a person-directory root other than the one the box's unit reads.

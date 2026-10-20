@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import shlex
 import shutil
@@ -781,6 +782,8 @@ def test_a_lock_is_one_holders_until_released(tmp_path: Path) -> None:
     lease = taker._lock(path, wait=0)
     assert isinstance(lease, dc.ProcessLease)
     assert lease.held()
+    # A Ctrl-C at the terminal is the deploy's to handle, under the lock, not the holder's.
+    assert os.getpgid(lease.process.pid) != os.getpgid(0)
     refused = taker._lock(path, wait=0)
     assert isinstance(refused, dc.Result)
     assert refused.code == 75
