@@ -1864,6 +1864,7 @@ async function forgetConversation(id) {
       return;
     }
     const held = digest.conversation;
+    knowStarts([held]);
     // ADR-0293 §5:7's plain disclosure: what forgetting removes, that the
     // conversation is still read while the owner talks there, and that only
     // deleting removes it.
@@ -2789,15 +2790,28 @@ function chatTime(iso, seconds = false) {
   return at === null ? iso : (seconds ? CHAT_TIME_SECONDS : CHAT_TIME).format(at);
 }
 
-// When each conversation this page has listed started, by id — the chat's listing
-// and the Conversations panel's alike — which is what names are told apart against
-// (`conversationName`). Only ever added to, so that two panels holding different pages
-// of conversations name each the same way, and a name is never handed on to another
-// conversation when one is dropped from a listing or the listing is read again.
-const startedAt = new Map();
+// Every conversation this page has been told the start of — by the chat's listing, the
+// Conversations panel's, a conversation started or one read whole — which is what names
+// are told apart against (`conversationName`). Only ever added to, so that two panels
+// holding different pages of conversations name each the same way, and a name is never
+// handed on to another conversation when one is dropped from a listing.
+//
+// Each start is formatted once, as it arrives, and counted under its minute and its
+// second, so a name is a lookup and a listing of any length is named in one pass.
+const starts = new Map();
+const byMinute = new Map();
+const bySecond = new Map();
 
 function knowStarts(summaries) {
-  summaries.forEach((one) => startedAt.set(one.id, one.started_at));
+  summaries.forEach((one) => {
+    if (starts.has(one.id)) {
+      return;
+    }
+    const known = { minute: chatTime(one.started_at), second: chatTime(one.started_at, true) };
+    starts.set(one.id, known);
+    byMinute.set(known.minute, (byMinute.get(known.minute) || 0) + 1);
+    bySecond.set(known.second, (bySecond.get(known.second) || 0) + 1);
+  });
 }
 
 // What a conversation is called (#3209's follow-on): when it started, since the listing
@@ -2806,17 +2820,14 @@ function knowStarts(summaries) {
 // another started in the same second, which no person starting conversations does. So
 // no two conversations are ever called the same, and the id is on screen only there.
 function conversationName(id) {
-  const started = startedAt.get(id);
-  if (started === undefined) {
+  const known = starts.get(id);
+  if (known === undefined) {
     return undefined;
   }
-  const others = [...startedAt].filter(([other]) => other !== id).map(([, at]) => at);
-  const minute = chatTime(started);
-  if (!others.some((at) => chatTime(at) === minute)) {
-    return minute;
+  if (byMinute.get(known.minute) === 1) {
+    return known.minute;
   }
-  const second = chatTime(started, true);
-  return others.some((at) => chatTime(at, true) === second) ? `${second} · ${id}` : second;
+  return bySecond.get(known.second) === 1 ? known.second : `${known.second} · ${id}`;
 }
 
 // What the chat calls one conversation; one not yet in its listing is "this
@@ -2903,6 +2914,7 @@ async function startChat() {
     }
     sayChat(null);
     void listChat(false);
+    knowStarts([body.conversation]);
     await selectChat(body.conversation.id);
     el("chat-text").focus();
   } catch (_) {
@@ -3149,6 +3161,12 @@ async function readChatDigest(id, mine) {
     }
     if (body === null) {
       return false;
+    }
+    // Its start, for its name: a conversation opened from a page of the listing this
+    // page has not read — restored on a reload — is named from here.
+    knowStarts([body.conversation]);
+    if (chat.selected === id) {
+      el("chat-heading").textContent = chatTitle(id);
     }
     if (settle("state", stateBefore)) {
       chat.state = body.conversation.state;

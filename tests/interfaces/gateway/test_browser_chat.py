@@ -292,6 +292,55 @@ async def test_a_deleted_message_leaves_its_reply_naming_a_deleted_message(
         )
 
 
+async def test_a_conversation_restored_off_the_listing_is_named_from_its_own_read(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A reload restores the conversation the tab was reading, which may be on a page of
+    the listing the page has not read: its name comes from its own read, so the heading
+    and any outcome about it name it rather than "this conversation" (adversarial
+    review, round 3)."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        conversation = await _open(drive)
+        title = await _title(drive, conversation)
+
+        async def nothing_listed(*, limit: int = 50, offset: int = 0) -> tuple[Any, ...]:
+            return ()
+
+        drive.engine.recent_conversations = nothing_listed  # type: ignore[method-assign]
+        await drive.page.reload()
+
+        await drive.page.wait_for_function("(id) => chat.selected === id", arg=conversation)
+        await expect(drive.page.locator("#chat-heading")).to_have_text(title)
+        assert await drive.page.evaluate("(id) => chatName(id)", conversation) == (
+            f"the conversation from {title}"
+        )
+
+
+async def test_a_long_listing_is_named_in_one_pass(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Names are looked up, not searched for: five thousand conversations started in
+    distinct minutes are known and named well inside a second's work, where telling
+    each apart against every other took seconds for a fifth as many (adversarial
+    review, round 3)."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        spent = await drive.page.evaluate(
+            """() => {
+              const summaries = Array.from({ length: 5000 }, (_, n) => ({
+                id: `c-${n}`,
+                started_at: new Date(Date.UTC(2026, 0, 1) + n * 60000).toISOString(),
+              }));
+              const began = performance.now();
+              knowStarts(summaries);
+              const names = new Set(summaries.map((one) => conversationName(one.id)));
+              return { ms: performance.now() - began, distinct: names.size };
+            }"""
+        )
+
+    assert spent["distinct"] == 5000
+    assert spent["ms"] < 2000, spent
+
+
 async def test_a_send_whose_answer_was_lost_is_shown_once_it_is_recorded(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
