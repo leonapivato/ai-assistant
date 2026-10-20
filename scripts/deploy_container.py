@@ -120,8 +120,10 @@ direct mode, and its run is as it was: ``--relay-address`` is not used for it.
 
 **One deploy per person at a time, and one unit install per box.** Each is a ``flock``
 on a box file, so the kernel releases it when its holder ends, and no run ever finds a
-dead deploy's lock; the files themselves mean nothing, and an earlier deploy's lock
-directory serves as one.
+dead deploy's lock; the files themselves mean nothing. A directory where one goes is an
+earlier version's ``mkdir`` lock, which takes no ``flock``, so it is refused, naming the
+fix; and the file, once made, makes that version's ``mkdir`` fail, so the two never run
+together.
 
 * ``/run/hub-deploy-unit.lock``, which every person's deploy shares, is held by the one
   box command that installs the unit, :data:`UNIT_INSTALL`: it checks the root, writes
@@ -209,20 +211,26 @@ UNIT_PATH = "/etc/systemd/system/hub@.service"
 UNIT_LOCK = "/run/hub-deploy-unit.lock"
 #: How long a deploy waits for another to finish installing the unit.
 _UNIT_LOCK_SECONDS = 60
-#: What a lock's holder prints once it holds the lock, and the exit status of one that
-#: could not have it: ``flock --conflict-exit-code``'s, sysexits' ``EX_TEMPFAIL``.
+#: What a lock's holder prints once it holds the lock; the exit status of one that could
+#: not have it, sysexits' ``EX_TEMPFAIL``; and of one that found a directory where its
+#: lock file goes, an earlier version's lock, which takes no ``flock`` and so is refused.
 HELD = b"held\n"
 _BUSY = 75
-#: The person's lock's holder: under ``flock --nonblock <person>/.deploy-lock``, with
-#: ``sh <owner file> <run token>``. It takes the owner file's own ``flock``, which every
-#: command of a deploy holds while it runs (:data:`FENCE`), so it waits for a command a
-#: dead deploy left running; writes its token there, so every command a dead deploy sent
-#: later is refused; and then prints :data:`HELD` and reads its standard input to its
-#: end, which comes when the deploy releases the lock or ends, however it ends.
+_LEGACY = 78
+#: The person's lock's holder, ``sh -c HOLDER sh <lock> <owner file> <run token>``. It
+#: takes the lock file's ``flock`` on a descriptor of its own, never a directory's. It then
+#: takes the owner file's ``flock``, which every command of a deploy holds while it runs
+#: (:data:`FENCE`), so it waits for a command a dead deploy left running; writes its
+#: token there, so every command a dead deploy sent later is refused; and then prints
+#: :data:`HELD` and reads its standard input to its end, which comes when the deploy
+#: releases the lock or ends, however it ends.
 HOLDER = """set -eu
-exec 9>>"$1"
+[ ! -d "$1" ] || exit 78
+exec 8>>"$1"
+flock --nonblock --conflict-exit-code 75 8
+exec 9>>"$2"
 flock 9
-printf '%s\\n' "$2" > "$1"
+printf '%s\\n' "$3" > "$2"
 exec 9>&-
 echo held
 exec cat
@@ -242,14 +250,19 @@ _FENCED = 77
 _FENCED_SAID = "deploy-container: fenced"
 #: How long a released holder has to end before it is killed.
 _RELEASE_SECONDS = 30
-#: Installs the unit under ``flock``, as one command: ``sh -c UNIT_INSTALL sh <unit>
-#: <the root's EnvironmentFile line> <partial path> <the unit's text> <reload argv…>``.
-#: It refuses with :data:`_OTHER_ROOT` and the unit's ``EnvironmentFile`` lines when the
-#: installed unit reads another root, and prints ``unchanged`` or ``installed``. The text
-#: is an argument, not standard input, so a link that drops cannot install half of it.
+#: Installs the unit under the box's lock, as one command: ``sh -c UNIT_INSTALL sh <lock>
+#: <seconds to wait for it> <unit> <the root's EnvironmentFile line> <partial path> <the
+#: unit's text> <reload argv…>``. It takes the lock as :data:`HOLDER` does, refusing with
+#: :data:`_BUSY` once it has waited and :data:`_LEGACY` for a directory; refuses with
+#: :data:`_OTHER_ROOT` and the unit's ``EnvironmentFile`` lines when the installed unit
+#: reads another root; and prints ``unchanged`` or ``installed``. The text is an
+#: argument, not standard input, so a link that drops cannot install half of it.
 UNIT_INSTALL = """set -eu
-unit=$1 root=$2 partial=$3 wanted=$4
-shift 4
+lock=$1 wait=$2 unit=$3 root=$4 partial=$5 wanted=$6
+shift 6
+[ ! -d "$lock" ] || exit 78
+exec 8>>"$lock"
+flock --wait "$wait" --conflict-exit-code 75 8
 if [ -e "$unit" ]; then
   if ! grep -qxF -e "$root" -- "$unit"; then
     grep -e '^EnvironmentFile=' -- "$unit" || :
@@ -557,20 +570,6 @@ class LeasedBox:
             DeployError: Always.
         """
         raise DeployError(f"a second lock was asked for under {self.person.lock}: {argv}")
-
-
-def _flock(path: str | PurePosixPath, *, wait: int) -> list[str]:
-    """``flock`` on a box file, refusing with :data:`_BUSY` when another holds it.
-
-    Args:
-        path: The file, made if missing.
-        wait: Seconds to wait for another holder, or ``0`` not to wait.
-
-    Returns:
-        The argv up to the command it runs while holding the lock.
-    """
-    waits = "--nonblock" if wait == 0 else f"--wait={wait}"
-    return ["flock", f"--conflict-exit-code={_BUSY}", waits, "--", str(path)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1613,11 +1612,16 @@ class Deployment:
         partial = f"{UNIT_PATH}.{self.token}.partial"
         result = self.box.run(
             [
-                *_flock(UNIT_LOCK, wait=_UNIT_LOCK_SECONDS),
-                *("sh", "-c", UNIT_INSTALL, "sh", UNIT_PATH, self._unit_root(), partial),
-                *(wanted, "systemctl", "daemon-reload"),
+                *("sh", "-c", UNIT_INSTALL, "sh", UNIT_LOCK, str(_UNIT_LOCK_SECONDS)),
+                *(UNIT_PATH, self._unit_root(), partial, wanted, "systemctl", "daemon-reload"),
             ]
         )
+        if result.code == _LEGACY:
+            raise DeployError(
+                f"{UNIT_LOCK} is a directory: a deploy older than this one is installing the\n"
+                "unit, or was killed doing it, and its lock takes no flock. Once none runs,\n"
+                f"remove it (rmdir {UNIT_LOCK}) or reboot, and deploy again.\n{_UNTOUCHED}"
+            )
         if result.code == _BUSY:
             raise DeployError(
                 f"another deploy on this box held {UNIT_LOCK}, installing the unit, for\n"
@@ -1635,14 +1639,15 @@ class Deployment:
     def _lock(self) -> Lease | Result:
         """Take the person's lock, held until released or this deploy ends.
 
-        Its file is made if missing, and an earlier deploy's lock directory serves.
+        Its file is made if missing; a directory there is an earlier version's lock.
 
         Returns:
             The lease, or how the holder ended: exit :data:`_BUSY` when another holds it.
         """
         person = self.person
-        holder = ["sh", "-c", HOLDER, "sh", str(person.owner), self.token]
-        return self.box.hold([*_flock(person.lock, wait=0), *holder])
+        return self.box.hold(
+            ["sh", "-c", HOLDER, "sh", str(person.lock), str(person.owner), self.token]
+        )
 
     # -- 2. the backup --------------------------------------------------------
 
@@ -2064,6 +2069,14 @@ class Deployment:
         person = self.person
         self._check_person_dir()
         lease = self._lock()
+        if isinstance(lease, Result) and lease.code == _LEGACY:
+            raise DeployError(
+                f"{person.lock} is a directory: a deploy older than this one holds it, or was\n"
+                "killed holding it, and its lock takes no flock. Once no deploy to\n"
+                f"{person.name} runs, remove it (rmdir {person.lock}) and deploy again; from\n"
+                "then on deploy with this version alone, as an earlier one refuses where\n"
+                f"this one's lock file stands.\n{_UNTOUCHED}"
+            )
         if isinstance(lease, Result):
             raise DeployError(
                 f"another deploy to {person.name} holds {person.lock}.\n"

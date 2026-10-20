@@ -336,6 +336,12 @@ the deploy sends the box runs only while `.deploy-owner` names its run, so a dep
 takes the lock waits for a command the last one left running, and refuses one it sent
 that arrives late.
 
+**After upgrading from a deploy that made its locks with `mkdir`**, a directory left at
+either lock's path is refused, because that version's lock takes no `flock` and may
+belong to a deploy still running. Once none runs, remove it with `rmdir` (a reboot clears
+the one under `/run`) and deploy again. Then deploy with this version alone: an earlier
+one finds this one's lock file where it makes its directory, and refuses.
+
 If the ssh link drops under that session alone, the deploy stops before its next command
 to the box, or the box refuses that command once another deploy holds the lock, and it
 starts, stops or disables nothing more. Run it again once the link is back; wherever a
