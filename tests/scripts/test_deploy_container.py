@@ -197,6 +197,7 @@ class FakeBox:
             state = (
                 f"ActiveState={self.active}\nSubState=x\n"
                 f"ExecMainStatus={self.exit_status}\nNRestarts=0\n"
+                f"UnitFileState={'enabled' if self.enabled else 'disabled'}\n"
             )
             return 0, state, ""
         if verb == "stop":
@@ -768,6 +769,57 @@ def test_deploy_first_install_killed_anywhere_finishes_when_run_again(
         assert report[-1].endswith(f"pre-deploy-{LATER}-{RERUN}.age (verified, and kept)")
 
 
+@pytest.mark.parametrize(
+    ("enabled", "active"),
+    [(True, "inactive"), (False, "active"), (False, "failed"), (True, "active")],
+)
+def test_deploy_refuses_to_resume_a_first_install_whose_unit_could_have_run(
+    enabled: bool, active: str
+) -> None:
+    # Killed with unit.env written and the record standing; then the unit was enabled by
+    # hand, or started, or both, as a boot does to an enabled one: a hub may have run.
+    box = FakeBox(
+        files=person_files(served=False), kill_at=_sends("rm", last=str(PERSON.first_install))
+    )
+    with pytest.raises(Killed):
+        deployment(box, port=8501).run()
+    box.revive()
+    box.ran.clear()
+    box.enabled, box.active = enabled, active
+    written = box.files[str(PERSON.unit_env)].data
+
+    _refused_untouched(box, "so a hub may have run on", port=8501, stamp=LATER, token=RERUN)
+
+    assert str(PERSON.first_install) in box.files
+    assert box.files[str(PERSON.unit_env)].data == written
+    assert box.volumes == {PERSON.data_volume, PERSON.keyring_volume}
+    assert not [argv for argv in box.ran if argv[:2] == ["systemctl", "disable"]]
+
+
+def test_deploy_a_first_install_whose_unit_ran_is_backed_up_once_its_record_goes() -> None:
+    box = FakeBox(
+        files=person_files(served=False), kill_at=_sends("rm", last=str(PERSON.first_install))
+    )
+    with pytest.raises(Killed):
+        deployment(box, port=8501).run()
+    box.revive()
+    box.enabled, box.active = True, "active"
+    box.container_image = dc.parse_unit_env(box.files[str(PERSON.unit_env)].data.decode()).image
+    with pytest.raises(
+        dc.DeployError, match=re.escape("systemctl disable --now hub@alice.service")
+    ):
+        deployment(box, port=8501).run()
+
+    # What the refusal says to do: disable and stop the unit, and remove the record.
+    box.enabled, box.active, box.container_image = False, "inactive", None
+    del box.files[str(PERSON.first_install)]
+    report = deployment(box, port=8501, stamp=LATER, token=RERUN).run()
+
+    assert report[-1].endswith(f"pre-deploy-{LATER}-{RERUN}.age (verified, and kept)")
+    assert box.active == "active"
+    assert box.enabled
+
+
 _UPGRADE_KILLS = {
     "holding the person's lock": _sends(dc.DOCKER, "build"),
     "the hub stopped for its backup": _sends(dc.DOCKER, "run"),
@@ -1327,9 +1379,6 @@ def test_deploy_refuses_a_served_volume_with_no_record_of_its_image() -> None:
     box = served_box()
     del box.files[str(PERSON.unit_env)]
     _refused_untouched(box, "nothing says which image wrote it", port=8501)
-    _refused_untouched(
-        box, re.escape(f"than {PERSON.first_install}), remove {PERSON.data_volume}"), port=8501
-    )
 
 
 def test_deploy_refuses_a_record_with_no_volume() -> None:
