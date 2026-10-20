@@ -32,6 +32,15 @@ from _activation_record import (
     viewer,
     write_record,
 )
+from _learning_record import (
+    ALONE_CLAIM,
+    EVIDENCE_CLAIM,
+    KEPT_CLAIM,
+    NOT_KEPT_CLAIM,
+    NOT_KEPT_NOTE,
+    SAID,
+    write_learning,
+)
 from _model_call_record import ADDED, CALLS, LABELS, ODD, ROUND_1_INPUT, write_calls
 
 if TYPE_CHECKING:
@@ -420,4 +429,121 @@ async def test_a_model_call_reads_at_a_phones_width_with_no_sideways_scroll(
         assert box is not None
         assert box["width"] <= 390
         wide = await readable.evaluate("node => node.scrollWidth - node.clientWidth")
+        assert wide <= 0
+
+
+# --- ADR-0316 §3:3: every step stays clickable ------------------------------------------
+
+
+async def test_every_step_is_clickable_beside_the_model_call_inside_it(
+    server: Any, gateway_browser: Browser
+) -> None:
+    """ADR-0333 §1:2: a model call's bar no longer covers its step's (ADR-0316 §3:3)."""
+    async with _page(gateway_browser, width=1400) as page:
+        await _open(page, server.port, "act-1")
+        steps = page.locator(".tl-lane .bar.step")
+        await expect(steps).to_have_count(7, timeout=_SHOWN)
+        covered = await page.evaluate(
+            """() => [...document.querySelectorAll('.tl-lane .bar')].filter((bar) => {
+                const r = bar.getBoundingClientRect();
+                return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+                  !== bar;
+            }).map((bar) => bar.title)"""
+        )
+        assert covered == []
+        round_1 = page.locator(".tl-lane .bar.step", has_text="round 1")
+        await round_1.click()
+        await expect(page.locator("#drawer-title")).to_contain_text("round 1")
+        await expect(page.locator("#drawer-body")).to_contain_text("first_round_due")
+        await expect(page.locator("#drawer-tabs")).to_be_hidden()
+
+
+# --- ADR-0333 §5: the learning lane and the learning overview ---------------------------
+
+
+@pytest.fixture
+def learning(tmp_path: Path) -> Iterator[Any]:
+    """The viewer over the activation record and the observer's files beside it."""
+    with serving(write_learning(write_record(tmp_path))) as bound:
+        yield bound
+
+
+async def test_the_overview_shows_each_findings_claim_and_outcome_newest_first(
+    learning: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser, width=1400) as page:
+        await page.goto(f"http://127.0.0.1:{learning.port}/#learning")
+        cards = page.locator(".ov-card")
+        await expect(cards).to_have_count(4, timeout=_SHOWN)
+        await expect(cards.first).to_contain_text(SAID["a-retried"])
+        kept = cards.nth(2)
+        await expect(kept.locator(".ov-finding .claim")).to_have_text([KEPT_CLAIM, NOT_KEPT_CLAIM])
+        await expect(kept.locator(".oc")).to_have_text(["memory created", "nothing kept"])
+        await expect(kept).to_contain_text(NOT_KEPT_NOTE)
+        await expect(cards.nth(1)).to_contain_text("own record absent")
+        await page.locator("#ov-filters button", has_text="Not kept").click()
+        await expect(page.locator(".ov-finding")).to_have_count(2)
+        await page.locator("#ov-filters button", has_text="All findings").click()
+        await page.locator("#ov-search").fill("vegetarian")
+        await expect(page.locator(".ov-finding")).to_have_count(1)
+
+
+async def test_a_finding_jumps_to_the_exact_prompt_and_reply_behind_it(
+    learning: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser, width=1400) as page:
+        await page.goto(f"http://127.0.0.1:{learning.port}/#learning")
+        row = page.locator(".ov-finding", has_text=NOT_KEPT_CLAIM)
+        await row.locator(".jump", has_text="Commit").click()
+        readable = page.locator("#drawer-read")
+        await expect(readable.locator(".call-head h2")).to_have_text(
+            "Observer · commit f2", timeout=_SHOWN
+        )
+        await expect(readable.locator("#call-did")).to_contain_text(NOT_KEPT_NOTE)
+        await page.locator("#tab-raw").click()
+        await expect(page.locator("#drawer-body")).to_contain_text("observer · given")
+        await page.locator("#drawer-close").click()
+        await row.locator(".jump", has_text="Outcome").click()
+        await expect(page.locator("#drawer-body")).to_contain_text("What the commit decided")
+        await expect(page.locator("#drawer-tabs")).to_be_hidden()
+
+
+async def test_an_activations_page_shows_its_learning_by_attempt(
+    learning: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser, width=1400) as page:
+        await _open(page, learning.port, "a-retried")
+        attempts = page.locator(".ln-attempt")
+        await expect(attempts).to_have_count(2, timeout=_SHOWN)
+        await expect(attempts.first).to_contain_text("timed out")
+        await expect(attempts.nth(1).locator(".ov-finding")).to_contain_text(EVIDENCE_CLAIM)
+        await expect(page.locator("#timeline-card")).to_be_visible()
+        await attempts.nth(1).locator(".ln-track .bar.call").first.click()
+        await expect(page.locator("#drawer-read .call-head h2")).to_have_text(
+            "Observer · scout", timeout=_SHOWN
+        )
+
+
+async def test_an_activation_whose_own_record_is_gone_shows_its_learning_alone(
+    learning: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser, width=1400) as page:
+        await _open(page, learning.port, "a-alone")
+        await expect(page.locator("#d-own-absent")).to_contain_text(
+            "own record is absent", timeout=_SHOWN
+        )
+        await expect(page.locator("#timeline-card")).to_be_hidden()
+        await expect(page.locator("#rounds-card")).to_be_hidden()
+        await expect(page.locator("#learning-card .ov-finding")).to_contain_text(ALONE_CLAIM)
+
+
+async def test_the_overview_reads_at_a_phones_width_with_no_sideways_scroll(
+    learning: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser, width=390) as page:
+        await page.goto(f"http://127.0.0.1:{learning.port}/#learning")
+        await expect(page.locator(".ov-card")).to_have_count(4, timeout=_SHOWN)
+        wide = await page.evaluate(
+            "document.documentElement.scrollWidth - document.documentElement.clientWidth"
+        )
         assert wide <= 0

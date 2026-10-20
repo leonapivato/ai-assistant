@@ -36,6 +36,15 @@ key to a part; the tools it could call; what it did, part by part, with its usag
 where the entry keeps one; and, for a planning round, what changed in its request
 since the round before. Each part has its size, a token estimate, and a copy control;
 the raw entries are one tab away.
+
+What the observer learned from an activation is in the file beside its own,
+``<activation_id>.observer.jsonl`` (ADR-0333 §3), joined to it by name and never listed as
+an activation of its own. The activation's page shows it as a learning lane, attempt by
+attempt, each on the observer's own instants, so it never widens the activation's
+timeline; an activation whose own file is gone is shown with that lane alone. The
+Learning view lists every activation the observer wrote about, its latest work first:
+each finding's claim and outcome in short, a click from the scout's and the commit step's
+prompt and reply behind it (§5).
 """
 
 from __future__ import annotations
@@ -71,6 +80,10 @@ DEFAULT_PORT: Final = 8765
 
 #: Each activation's file's suffix (ADR-0314 §6:1).
 SUFFIX: Final = ".jsonl"
+
+#: The suffix of the file beside it holding what the observer learned from it (ADR-0333
+#: §3:1). Never listed as an activation of its own name (§5:6).
+OBSERVER_SUFFIX: Final = ".observer" + SUFFIX
 
 #: The record's directory's name in a data directory (ADR-0314 §6:1).
 RECORD_DIRECTORY: Final = "diagnostics"
@@ -851,6 +864,367 @@ def timeline(activation_id: str, lines: Sequence[Line]) -> dict[str, object]:
     return built.result(activation_id)
 
 
+# --- the learning lane and the overview (ADR-0333 §5) ------------------------------------
+# What the observer learned from an activation is in the observer file beside the
+# activation's own (ADR-0333 §3:1). Every key read here is a hint, as the timeline's are
+# (ADR-0316 §5:2): a body of another shape loses its summary and is still shown whole.
+
+#: The observer's two steps that make a model call (ADR-0329 §9).
+OBSERVER_CALLS: Final = frozenset({"scout", "commit"})
+
+#: What a write did, in short, by the operations it names, the first that applies.
+_WRITE_WORDS: Final = (
+    ("create", "memory created"),
+    ("replace", "memory replaced"),
+    ("mark_wrong", "memory marked wrong"),
+    ("end", "memory ended"),
+    ("raise_question", "question raised"),
+    ("resolve_question", "question resolved"),
+    ("add_support", "memory added to"),
+)
+
+#: Why a finding's commit wrote nothing, in short, by ``FindingUnwritten``'s values.
+_UNWRITTEN_WORDS: Final = {
+    "not_kept": "the commit step kept nothing",
+    "single_observation": "a single observation, left as evidence",
+    "below_floor": "below the evidence floor",
+    "check_failed": "failed a check",
+    "refused": "the write path refused it",
+    "asked": "the policy asked, naming no memory",
+}
+
+#: How much of a claim, a wording or a note the overview shows.
+CLAIM_CHARS: Final = 240
+
+
+def outcome_in_short(outcome: object) -> dict[str, object]:
+    """A finding's outcome in short (ADR-0333 §5:5): what was kept, or that nothing was and why.
+
+    Args:
+        outcome: An outcome entry's ``outcome``, as the observation record gives it.
+
+    Returns:
+        ``kept``, the outcome in a few words, and, where nothing was kept, the reason's
+        value and what it means.
+    """
+    held = _mapping(outcome)
+    said: list[str] = []
+    for write in _sequence(held.get("writes")):
+        shown = _mapping(write)
+        operations = {one for one in _sequence(shown.get("operations")) if isinstance(one, str)}
+        word = next((text for kind, text in _WRITE_WORDS if kind in operations), None)
+        if word is not None:
+            said.append(word)
+        if shown.get("track_record") is True:
+            said.append("track record: held up")
+        elif shown.get("track_record") is False:
+            said.append("track record: let down")
+    if said:
+        return {"kept": True, "short": ", ".join(dict.fromkeys(said)), "reason": None, "why": None}
+    reason = _text(held.get("unwritten"))
+    why = (_UNWRITTEN_WORDS.get(reason) or _words(reason)) if reason else "no outcome recorded"
+    return {"kept": False, "short": "nothing kept", "reason": reason, "why": why}
+
+
+@dataclass(slots=True)
+class _Try:
+    """One attempt at the episode, as its entries name it (ADR-0333 §2:3)."""
+
+    key: str
+    episode: str | None
+    started_at: str | None
+    started: float | None
+    first: float | None = None
+    last: float | None = None
+    ended: dict[str, object] | None = None
+    items: list[dict[str, object]] = field(default_factory=list)
+    scout: dict[str, int | None] = field(default_factory=dict)
+
+    def widen(self, at: float) -> None:
+        self.first = at if self.first is None else min(self.first, at)
+        self.last = at if self.last is None else max(self.last, at)
+
+    def shown(self, number: int) -> dict[str, object]:
+        return {
+            "key": self.key,
+            "number": number,
+            "episode": self.episode,
+            "started_at": self.started_at,
+            "start": _ms(self.first),
+            "end": _ms(self.last),
+            "ended": self.ended,
+            "items": self.items,
+        }
+
+
+@dataclass(slots=True)
+class Learned:
+    """What one observer file says, fed its lines in order (ADR-0333 §5:2-§5:5).
+
+    Fed incrementally, so the overview reads only what a file gained since it last
+    looked; the activation's page feeds it the whole file. Its own instants are its
+    own: nothing here reaches the activation's timeline or its row (§5:3).
+    """
+
+    activation_id: str
+    entries: int = 0
+    unreadable: int = 0
+    truncated: bool = False
+    latest: float | None = None
+    episode: str | None = None
+    dropped: int = 0
+    tries: dict[str, _Try] = field(default_factory=dict)
+    findings: list[dict[str, object]] = field(default_factory=list)
+    current: dict[str, dict[str, object]] = field(default_factory=dict)
+    waiting: dict[tuple[str, str, str | None], list[dict[str, object]]] = field(
+        default_factory=dict
+    )
+    pairs: dict[int, int | None] = field(default_factory=dict)
+    rows: list[dict[str, object]] = field(default_factory=list)
+
+    def feed(self, line: Line) -> None:
+        """Take one more line in."""
+        if line is None:
+            self.unreadable += 1
+            return
+        if isinstance(line, Truncation):
+            self.truncated = True
+            return
+        self.entries += 1
+        self.latest = line.at if self.latest is None else max(self.latest, line.at)
+        body = _mapping(line.body)
+        attempt = self._attempt(body)
+        attempt.widen(line.at)
+        stage = _text(body.get("stage"))
+        self.rows.append(
+            {"line": line.line, "stage": stage, "kind": line.kind, "at": _ms(line.at),
+             "attempt": attempt.key}
+        )  # fmt: skip
+        if line.source != "observer" or stage is None:
+            self._point(attempt, line, "unknown", f"{line.source} {line.kind}", "unknown")
+        elif stage in OBSERVER_CALLS and line.kind in {"given", "returned"}:
+            self._call(attempt, line, stage, body)
+        elif line.kind == "step":
+            self._step(attempt, line, stage, body)
+        else:
+            self._point(attempt, line, "unknown", f"{stage} {line.kind}", "unknown")
+
+    def _attempt(self, body: Mapping[str, object]) -> _Try:
+        episode, started_at = _text(body.get("episode")), _text(body.get("attempt_started_at"))
+        if episode is not None:
+            self.episode = episode
+        key = f"{episode or ''}\0{started_at or ''}"
+        held = self.tries.get(key)
+        if held is None:
+            held = _Try(key, episode, started_at, instant(started_at))
+            self.tries[key] = held
+        return held
+
+    def _point(self, attempt: _Try, line: Entry, kind: str, label: str, tone: str) -> None:
+        attempt.items.append(
+            {"type": "point", "kind": kind, "start": _ms(line.at), "end": _ms(line.at),
+             "label": label, "tone": tone, "lines": [line.line], "call": None}
+        )  # fmt: skip
+
+    def _call(self, attempt: _Try, line: Entry, stage: str, body: Mapping[str, object]) -> None:
+        finding = _text(body.get("finding"))
+        if finding is None:
+            finding = _text(_mapping(body.get("finding")).get("id"))
+        key = (attempt.key, stage, finding)
+        if line.kind == "given":
+            label = stage if finding is None else f"{stage} {finding}"
+            item: dict[str, object] = {
+                "type": "span", "kind": "call", "stage": stage, "start": _ms(line.at),
+                "end": None, "label": label, "tone": "pending", "lines": [line.line],
+                "call": line.line,
+            }  # fmt: skip
+            attempt.items.append(item)
+            self.waiting.setdefault(key, []).append(item)
+            self.pairs[line.line] = None
+            self._called(attempt, stage, finding, {"given": line.line, "returned": None})
+            return
+        waiting = self.waiting.get(key)
+        if not waiting:
+            failed = "failure" in body
+            self._point(
+                attempt, line, "returned", f"{stage} returned", "failed" if failed else "ok"
+            )
+            return
+        item = waiting.pop()
+        given = item["call"]
+        assert isinstance(given, int)  # noqa: S101 — set just above, always a line
+        item["end"] = _ms(line.at)
+        item["tone"] = "failed" if "failure" in body else "ok"
+        item["lines"] = [given, line.line]
+        self.pairs[given] = line.line
+        self._called(attempt, stage, finding, {"given": given, "returned": line.line})
+
+    def _called(
+        self, attempt: _Try, stage: str, finding: str | None, lines: dict[str, int | None]
+    ) -> None:
+        if stage == "scout":
+            attempt.scout = lines
+        elif finding is not None and finding in self.current:
+            self.current[finding]["commit"] = lines
+
+    def _step(self, attempt: _Try, line: Entry, stage: str, body: Mapping[str, object]) -> None:
+        if stage == "findings":
+            proposed = [
+                self._proposed(attempt, line, one) for one in _sequence(body.get("findings"))
+            ]
+            dropped = body.get("dropped")
+            label = f"{len(proposed)} {'finding' if len(proposed) == 1 else 'findings'}"
+            if isinstance(dropped, int) and not isinstance(dropped, bool) and dropped:
+                label += f" · {dropped} dropped"
+                self.dropped += dropped
+            self._point(attempt, line, "findings", label, "findings")
+        elif stage == "outcome":
+            self._outcome(attempt, line, body)
+        elif stage == "end":
+            self._end(attempt, line, body)
+        else:
+            self._point(attempt, line, "unknown", _words(stage), "unknown")
+
+    def _proposed(self, attempt: _Try, line: Entry, value: object) -> dict[str, object]:
+        shown = _mapping(value)
+        finding_id = _text(shown.get("id")) or f"#{len(self.findings) + 1}"
+        record: dict[str, object] = {
+            "id": finding_id,
+            "claim": _text(shown.get("claim")),
+            "parts": len(_sequence(shown.get("rests_on"))),
+            "candidate": _text(shown.get("candidate")),
+            "relied_on": _text(shown.get("relied_on")),
+            "attempt": attempt.key,
+            "findings_line": line.line,
+            "scout": dict(attempt.scout),
+            "commit": None,
+            "outcome": None,
+        }
+        self.findings.append(record)
+        self.current[finding_id] = record
+        return record
+
+    def _outcome(self, attempt: _Try, line: Entry, body: Mapping[str, object]) -> None:
+        finding_id = _text(body.get("finding")) or "?"
+        record = self.current.get(finding_id)
+        if record is None:
+            # Its findings entry was never written, or is not this file's: the outcome
+            # still names its claim.
+            record = {
+                "id": finding_id, "claim": _text(body.get("claim")), "parts": None,
+                "candidate": None, "relied_on": None, "attempt": attempt.key,
+                "findings_line": None, "scout": {}, "commit": None, "outcome": None,
+            }  # fmt: skip
+            self.findings.append(record)
+            self.current[finding_id] = record
+        decided = _mapping(body.get("decided"))
+        short = outcome_in_short(body.get("outcome"))
+        record["outcome"] = {
+            **short,
+            "action": _text(decided.get("action")),
+            "wording": _text(decided.get("wording")) if decided.get("action") != "raise_question"
+            else _text(decided.get("asks")),
+            "note": _text(decided.get("note")),
+            "line": line.line,
+            "attempt": attempt.key,
+        }  # fmt: skip
+        tone = "kept" if short["kept"] else "not_kept"
+        self._point(attempt, line, "outcome", f"{finding_id} · {short['short']}", tone)
+
+    def _end(self, attempt: _Try, line: Entry, body: Mapping[str, object]) -> None:
+        end, state = _text(body.get("end")), _text(body.get("state"))
+        failure = body.get("failure")
+        attempt.ended = {
+            "end": end,
+            "state": state,
+            "failure": None if failure is None else _failure_text(failure),
+            "skipped": body.get("skipped") is not None,
+            "line": line.line,
+        }
+        label = _words(state or end or "end")
+        tone = {"failed": "failed", "held": "held"}.get(end or "", "end")
+        self._point(attempt, line, "end", label, tone)
+
+    def _ordered(self) -> list[_Try]:
+        return sorted(
+            self.tries.values(),
+            key=lambda one: one.started if one.started is not None else math.inf,
+        )
+
+    def summary(self) -> dict[str, object]:
+        """What the learning overview shows of this activation (ADR-0333 §5:4-§5:5)."""
+        ordered = self._ordered()
+        last = ordered[-1] if ordered else None
+        ended = None if last is None else last.ended
+        return {
+            "id": self.activation_id,
+            "latest": _ms(self.latest),
+            "entries": self.entries,
+            "unreadable": self.unreadable,
+            "truncated": self.truncated,
+            "episode": self.episode,
+            "attempts": len(ordered),
+            "failed": sum(1 for one in ordered if (one.ended or {}).get("end") == "failed"),
+            "dropped": self.dropped,
+            "state": None if ended is None else ended["state"],
+            "end": None if ended is None else ended["end"],
+            "failure": None if ended is None else ended["failure"],
+            "findings": [_in_short(one) for one in self.findings],
+        }
+
+    def lane(self) -> dict[str, object]:
+        """The learning lane an activation's page draws, grouped by attempt (§5:2)."""
+        ordered = self._ordered()
+        return {
+            "latest": _ms(self.latest),
+            "episode": self.episode,
+            "attempts": [one.shown(number) for number, one in enumerate(ordered, 1)],
+            "findings": self.findings,
+            "entries": self.rows,
+            "unreadable": self.unreadable,
+            "truncated": self.truncated,
+        }
+
+
+def _in_short(record: Mapping[str, object]) -> dict[str, object]:
+    """A finding as the overview lists it: its claim and outcome in short, and its lines."""
+    claim = _text(record.get("claim"))
+    outcome = _mapping(record.get("outcome"))
+    shown: dict[str, object] = {
+        "id": record.get("id"),
+        "claim": None if claim is None else _short(claim, CLAIM_CHARS),
+        "findings_line": record.get("findings_line"),
+        "scout": record.get("scout"),
+        "commit": record.get("commit"),
+        "outcome": None,
+    }
+    if outcome:
+        wording, note = _text(outcome.get("wording")), _text(outcome.get("note"))
+        shown["outcome"] = {
+            **outcome,
+            "wording": None if wording is None else _short(wording, CLAIM_CHARS),
+            "note": None if note is None else _short(note, CLAIM_CHARS),
+        }
+    return shown
+
+
+def learning_lane(activation_id: str, lines: Sequence[Line]) -> dict[str, object]:
+    """An activation's learning lane, from its observer file's lines (ADR-0333 §5:2).
+
+    Args:
+        activation_id: The activation, as its observer file is named.
+        lines: That file's complete lines, read.
+
+    Returns:
+        Its attempts, each with its own items over its own instants, its findings with
+        their outcomes, and every entry; times are milliseconds since the epoch.
+    """
+    learned = Learned(activation_id)
+    for line in lines:
+        learned.feed(line)
+    return learned.lane()
+
+
 # --- the record's directory --------------------------------------------------------------
 
 
@@ -862,6 +1236,16 @@ class _Watched:
     offset: int
     lines: int
     tally: Tally
+
+
+@dataclass(slots=True)
+class _WatchedLearning:
+    """What the overview knows of one observer file: how far it has read it, and what."""
+
+    identity: tuple[int, int]
+    offset: int
+    lines: int
+    learned: Learned
 
 
 class Record:
@@ -880,6 +1264,7 @@ class Record:
         self._root = root
         self._lock = threading.Lock()
         self._watched: dict[str, _Watched] = {}
+        self._learned: dict[str, _WatchedLearning] = {}
 
     @property
     def directory(self) -> Path:
@@ -888,21 +1273,38 @@ class Record:
         return inner if inner.is_dir() else self._root
 
     def listing(self) -> dict[str, Path]:
-        """Every activation's file in the directory, by its id (ADR-0316 §6:3).
+        """Every activation's own file in the directory, by its id (ADR-0316 §6:3).
 
         Returns:
             Empty where the directory does not exist yet.
         """
-        found: dict[str, Path] = {}
+        return self._scan()[0]
+
+    def learned_listing(self) -> dict[str, Path]:
+        """Every observer file in the directory, by its activation's id (ADR-0333 §5:1)."""
+        return self._scan()[1]
+
+    def _scan(self) -> tuple[dict[str, Path], dict[str, Path]]:
+        """The directory's activations' own files and their observer files, each by id.
+
+        An observer file is joined to its activation by name alone, and is never taken
+        for an activation of its own name (ADR-0333 §5:1, §5:6).
+        """
+        own: dict[str, Path] = {}
+        learned: dict[str, Path] = {}
         directory = self.directory
         try:
             with os.scandir(directory) as entries:
                 for one in entries:
-                    if one.name.endswith(SUFFIX) and one.is_file(follow_symlinks=False):
-                        found[one.name[: -len(SUFFIX)]] = directory / one.name
+                    if not one.name.endswith(SUFFIX) or not one.is_file(follow_symlinks=False):
+                        continue
+                    if one.name.endswith(OBSERVER_SUFFIX):
+                        learned[one.name[: -len(OBSERVER_SUFFIX)]] = directory / one.name
+                    else:
+                        own[one.name[: -len(SUFFIX)]] = directory / one.name
         except _NO_DIRECTORY:
-            return {}
-        return found
+            return {}, {}
+        return own, learned
 
     def activations(self) -> dict[str, object]:
         """The list: every activation's summary, newest first, and a version for polling."""
@@ -959,15 +1361,94 @@ class Record:
         Returns:
             ``None`` where no file in the listing has that id.
         """
-        path = self.listing().get(activation_id)
-        if path is None:
-            return None
-        try:
-            data, status = read_from(path, 0)
-        except OSError:
-            return None
-        read, taken = complete_lines(data)
-        return read, f"{status.st_ino}:{taken}:{status.st_mtime_ns}"
+        return _whole(self.listing().get(activation_id))
+
+    def learned_lines(self, activation_id: str) -> tuple[list[Line], str] | None:
+        """An activation's observer file's complete lines, read, and a version.
+
+        Args:
+            activation_id: An id, looked up in the directory's listing and never used
+                as a path.
+
+        Returns:
+            ``None`` where no observer file in the listing has that id.
+        """
+        return _whole(self.learned_listing().get(activation_id))
+
+    def learning(self) -> dict[str, object]:
+        """The learning overview: every activation with an observer file (ADR-0333 §5:4).
+
+        Each observer file is followed as the list follows an activation's own file,
+        reading only what it gained since the last poll; an activation's input comes
+        from its own file's summary where that file is in the listing.
+
+        Returns:
+            Each activation's learning summary, newest observer entry first, and a
+            version for polling.
+        """
+        own, learned = self._scan()
+        with self._lock:
+            for gone in set(self._learned) - set(learned):
+                del self._learned[gone]
+            versions: list[str] = []
+            summaries: list[dict[str, object]] = []
+            for activation_id, path in sorted(learned.items()):
+                try:
+                    status = self._follow_learned(activation_id, path)
+                except OSError:
+                    self._learned.pop(activation_id, None)
+                    continue
+                versions.append(f"{activation_id}\0{status.st_size}\0{status.st_mtime_ns}")
+                summary = self._learned[activation_id].learned.summary()
+                summary["input"] = None
+                summary["own"] = activation_id in own
+                if activation_id in own:
+                    try:
+                        own_status = self._follow(activation_id, own[activation_id])
+                    except OSError:
+                        summary["own"] = False
+                    else:
+                        tally = self._watched[activation_id].tally
+                        summary["input"] = tally.input
+                        versions.append(f"{activation_id}\0own\0{own_status.st_size}")
+                summaries.append(summary)
+        summaries.sort(key=lambda one: _sort_key(one.get("latest")), reverse=True)
+        version = hashlib.blake2b("\n".join(versions).encode(), digest_size=12).hexdigest()
+        return {"version": version, "present": self.directory.is_dir(), "activations": summaries}
+
+    def _follow_learned(self, activation_id: str, path: Path) -> os.stat_result:
+        """Read what an observer file gained since the last poll, as :meth:`_follow` does."""
+        watched = self._learned.get(activation_id)
+        status = path.stat(follow_symlinks=False)
+        identity = (status.st_dev, status.st_ino)
+        if watched is not None and (
+            watched.identity != identity or status.st_size < watched.offset
+        ):
+            watched = None
+        if watched is None:
+            watched = _WatchedLearning(identity, 0, 0, Learned(activation_id))
+            self._learned[activation_id] = watched
+        if status.st_size == watched.offset:
+            return status
+        data, status = read_from(path, watched.offset)
+        read, taken = complete_lines(data, watched.lines)
+        for line in read:
+            watched.learned.feed(line)
+        watched.offset += taken
+        watched.lines += len(read)
+        return status
+
+
+def _whole(path: Path | None) -> tuple[list[Line], str] | None:
+    """A listed file's complete lines, read, and a version for polling; ``None`` if gone."""
+    if path is None:
+        return None
+    try:
+        data, status = read_from(path, 0)
+    except OSError:
+        return None
+    read, taken = complete_lines(data)
+    return read, f"{status.st_ino}:{taken}:{status.st_mtime_ns}"
 
 
 def _sort_key(value: object) -> float:
@@ -1041,6 +1522,12 @@ HEADING_CHARS: Final = 80
 NO_USAGE: Final = (
     "This entry records no token usage: understanding's and digesting's returned entries "
     "keep the reply alone (#3090)."
+)
+
+#: What the observer's returned entry, which keeps the reply alone, says of its usage.
+NO_OBSERVER_USAGE: Final = (
+    "This entry records no token usage: the observer's returned entries keep the reply "
+    "alone (ADR-0333 §2:1)."
 )
 
 _BLANK_LINE: Final = re.compile(r"\n[ \t]*\n")
@@ -1386,7 +1873,7 @@ def _did(source: str, body: object) -> dict[str, object]:
     if not parts and "failure" not in did:
         did["odd"] = "This entry holds no reply to read."
     did["usage"] = None
-    did["usage_note"] = NO_USAGE
+    did["usage_note"] = NO_OBSERVER_USAGE if source == "observer" else NO_USAGE
     return did
 
 
@@ -1546,17 +2033,73 @@ def model_call(lines: Sequence[Line], number: int) -> dict[str, object] | None:
         return None
     built = _Timeline(lines)
     built.build()
-    given, returned = _pair_of(built, lines, picked)
+    given, returned = _pair_of(built.pairs, lines, picked)
     anchor = given or picked
+    view = _read_call(picked.source, given, returned)
+    view["round"] = built.round_of(anchor.at) if picked.source == "planning" else None
+    view["about"] = _about(picked.source, anchor.body)
+    if given is not None and picked.source == "planning":
+        view["changes"] = _changes(built, given)
+    if returned is not None:
+        view["tools"] = _tools(_mapping(returned.body).get("offered_tools"), "returned")
+        if _mapping(returned.body).get("offered_tools_unprepared") is not None:
+            _notes(view).append("The offered tools are as the round built them, not as prepared.")
+    if view["tools"] is None and given is not None:
+        view["tools"] = _tools(_mapping(given.body).get("tools"), "given")
+    return view
+
+
+def learning_call(lines: Sequence[Line], number: int) -> dict[str, object] | None:
+    """One of the observer's model calls, readable as any other (ADR-0333 §5:2).
+
+    Args:
+        lines: The activation's observer file's complete lines.
+        number: The line of the call's given entry or of its returned one.
+
+    Returns:
+        ``None`` where that line is no scout's or commit's given or returned entry; else
+        the call's parts as :func:`model_call` gives them, and which step, finding and
+        attempt it was.
+    """
+    if not 0 <= number < len(lines):
+        return None
+    picked = lines[number]
+    if not (
+        isinstance(picked, Entry)
+        and picked.source == "observer"
+        and picked.kind in {"given", "returned"}
+        and _mapping(picked.body).get("stage") in OBSERVER_CALLS
+    ):
+        return None
+    learned = Learned("")
+    for line in lines:
+        learned.feed(line)
+    given, returned = _pair_of(learned.pairs, lines, picked)
+    anchor = _mapping((given or picked).body)
+    view = _read_call("observer", given, returned)
+    finding = anchor.get("finding")
+    view["about"] = {
+        "stage": _text(anchor.get("stage")),
+        "finding": _text(_mapping(finding).get("id")) or _text(finding),
+        "claim": _text(_mapping(finding).get("claim")),
+        "episode": _text(anchor.get("episode")),
+        "attempt": _text(anchor.get("attempt_started_at")),
+    }
+    return view
+
+
+def _read_call(source: str, given: Entry | None, returned: Entry | None) -> dict[str, object]:
+    """What any model call shows: told, given and done, and what the record lacks."""
+    anchor = given or returned
     notes: list[str] = []
     view: dict[str, object] = {
-        "source": picked.source,
-        "round": built.round_of(anchor.at) if picked.source == "planning" else None,
+        "source": source,
+        "round": None,
         "given": None if given is None else given.line,
         "returned": None if returned is None else returned.line,
-        "at": _ms(anchor.at),
+        "at": None if anchor is None else _ms(anchor.at),
         "took": None if given is None or returned is None else _ms(returned.at - given.at),
-        "about": _about(picked.source, anchor.body),
+        "about": {},
         "told": None,
         "input": None,
         "tools": None,
@@ -1573,29 +2116,28 @@ def model_call(lines: Sequence[Line], number: int) -> dict[str, object] | None:
         else:
             view["told"] = _told(messages)
             view["input"] = _given(messages)
-        if picked.source == "planning":
-            view["changes"] = _changes(built, given)
     if returned is None:
         notes.append("No returned entry was recorded for this call: what it did is not here.")
     else:
-        view["did"] = _did(picked.source, returned.body)
-        view["tools"] = _tools(_mapping(returned.body).get("offered_tools"), "returned")
-        if _mapping(returned.body).get("offered_tools_unprepared") is not None:
-            notes.append("The offered tools are as the round built them, not as prepared.")
-    if view["tools"] is None and given is not None:
-        view["tools"] = _tools(_mapping(given.body).get("tools"), "given")
+        view["did"] = _did(source, returned.body)
     return view
 
 
+def _notes(view: Mapping[str, object]) -> list[str]:
+    notes = view["notes"]
+    assert isinstance(notes, list)  # noqa: S101 — built by _read_call, always a list
+    return notes
+
+
 def _pair_of(
-    built: _Timeline, lines: Sequence[Line], picked: Entry
+    pairs: Mapping[int, int | None], lines: Sequence[Line], picked: Entry
 ) -> tuple[Entry | None, Entry | None]:
-    """A call's given entry and its returned one, as the timeline paired them."""
+    """A call's given entry and its returned one, as the timeline or the lane paired them."""
     if picked.kind == "given":
-        paired = built.pairs.get(picked.line)
+        paired = pairs.get(picked.line)
         found = None if paired is None else lines[paired]
         return picked, found if isinstance(found, Entry) else None
-    paired = next((one for one, back in built.pairs.items() if back == picked.line), None)
+    paired = next((one for one, back in pairs.items() if back == picked.line), None)
     found = None if paired is None else lines[paired]
     return (found if isinstance(found, Entry) else None), picked
 
@@ -1756,26 +2298,47 @@ class ViewerHandler(BaseHTTPRequestHandler):
     def _activation(self, query: Mapping[str, str]) -> None:
         activation_id = query.get("id", "")
         read = self.server.record.lines(activation_id)
-        if read is None:
+        learned = self.server.record.learned_lines(activation_id)
+        if read is None and learned is None:
             self._json({"error": "no such activation"}, HTTPStatus.NOT_FOUND)
             return
-        lines, version = read
+        version = "|".join("-" if one is None else one[1] for one in (read, learned))
         if query.get("v") == version:
             self._json({"version": version, "unchanged": True, "now": _now()})
             return
-        self._json({**timeline(activation_id, lines), "version": version, "now": _now()})
+        shown = timeline(activation_id, [] if read is None else read[0])
+        # ADR-0333 §5:6: an activation whose own file is absent is shown with its
+        # learning lane alone, saying so.
+        shown["own"] = read is not None
+        shown["learning"] = None if learned is None else learning_lane(activation_id, learned[0])
+        self._json({**shown, "version": version, "now": _now()})
+
+    def _learning(self, query: Mapping[str, str]) -> None:
+        listed = self.server.record.learning()
+        if query.get("v") == listed["version"]:
+            self._json({"version": listed["version"], "unchanged": True, "now": _now()})
+            return
+        self._json({**listed, "now": _now()})
+
+    def _lines_of(self, query: Mapping[str, str]) -> tuple[list[Line], str] | None:
+        """The asked file's lines: the observer file's where ``file=observer``."""
+        record, activation_id = self.server.record, query.get("id", "")
+        if query.get("file") == "observer":
+            return record.learned_lines(activation_id)
+        return record.lines(activation_id)
 
     def _call(self, query: Mapping[str, str]) -> None:
-        read = self.server.record.lines(query.get("id", ""))
+        read = self._lines_of(query)
         number = query.get("line", "")
-        shown = model_call(read[0], int(number)) if read is not None and number.isdigit() else None
+        read_call = learning_call if query.get("file") == "observer" else model_call
+        shown = read_call(read[0], int(number)) if read is not None and number.isdigit() else None
         if shown is None:
             self._json({"error": "no such model call"}, HTTPStatus.NOT_FOUND)
             return
         self._json(shown)
 
     def _entry(self, query: Mapping[str, str]) -> None:
-        read = self.server.record.lines(query.get("id", ""))
+        read = self._lines_of(query)
         number = query.get("line", "")
         shown = entry_of(read[0], int(number)) if read is not None and number.isdigit() else None
         if shown is None:
@@ -1794,6 +2357,7 @@ _ROUTES: Final[dict[str, Callable[[ViewerHandler, Mapping[str, str]], None]]] = 
     "/app.js": ViewerHandler._script,
     "/api/activations": ViewerHandler._activations,
     "/api/activation": ViewerHandler._activation,
+    "/api/learning": ViewerHandler._learning,
     "/api/entry": ViewerHandler._entry,
     "/api/call": ViewerHandler._call,
     "/favicon.ico": ViewerHandler._no_icon,
@@ -1816,6 +2380,11 @@ PAGE: Final = """<!doctype html>
 <body>
 <header class="top">
   <div class="brand">Activations</div>
+  <nav class="views" aria-label="Views">
+    <button class="view" id="view-activations" type="button"
+      aria-pressed="true">Activations</button>
+    <button class="view" id="view-learning" type="button" aria-pressed="false">Learning</button>
+  </nav>
   <div class="status" id="status">connecting…</div>
 </header>
 <main class="layout">
@@ -1830,21 +2399,42 @@ PAGE: Final = """<!doctype html>
       <h1 class="input" id="d-input"></h1>
       <div class="meta" id="d-meta"></div>
       <div class="badges" id="d-badges"></div>
-      <div class="card">
+      <p class="note own-absent" id="d-own-absent" hidden></p>
+      <div class="card" id="timeline-card">
         <div class="card-title">Timeline</div>
         <div class="timeline" id="timeline"></div>
         <div class="legend" id="legend"></div>
       </div>
-      <div class="card">
+      <div class="card" id="learning-card" hidden>
+        <div class="card-title">Learning</div>
+        <div id="learning-lane"></div>
+      </div>
+      <div class="card" id="rounds-card">
         <div class="card-title">Rounds</div>
         <div id="rounds"></div>
       </div>
-      <details class="card">
+      <details class="card" id="entries-card">
         <summary class="card-title">Every entry</summary>
         <div id="entries"></div>
       </details>
     </div>
   </section>
+</main>
+<main class="learning" id="learning" hidden aria-label="Learning">
+  <div class="ov-head-block">
+    <h1 class="ov-title">What the observer learned</h1>
+    <p class="note">Every activation the observer wrote about, its latest work first: each finding
+      the scout proposed, what the commit step kept of it or why not, and the prompt and reply
+      behind each.</p>
+    <div class="ov-stats" id="ov-stats"></div>
+    <div class="ov-tools">
+      <div class="ov-filters" id="ov-filters"></div>
+      <input class="ov-search" id="ov-search" type="search"
+        placeholder="Filter by words in a claim, a wording or a note" aria-label="Filter findings">
+    </div>
+  </div>
+  <div id="ov-list"></div>
+  <p class="empty" id="ov-empty" hidden>No observer files in the record yet.</p>
 </main>
 <aside class="drawer" id="drawer" hidden>
   <div class="drawer-head">
@@ -1870,6 +2460,7 @@ STYLE: Final = """
   --controller: #8a93a6; --recall: #1f9e8f; --understanding: #3b82f6; --planning: #7c5cdb;
   --authorizing: #d4890f; --acting: #2f9d55; --digesting: #d14d7a; --unknown: #6b7280;
   --failed: #d23c3c; --needs: #d4890f; --outside: #7c5cdb; --refused: #c2410c;
+  --scout: #0f8b8d; --commit: #6d5bd0; --kept: #2f9d55; --not-kept: #8a93a6;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: dark) {
@@ -1879,6 +2470,7 @@ STYLE: Final = """
     --controller: #7d869a; --recall: #34c3b1; --understanding: #6aa5ff; --planning: #a58bff;
     --authorizing: #f0a93a; --acting: #4cc27a; --digesting: #f07aa2; --unknown: #8b93a3;
     --failed: #ff6b6b; --needs: #f0a93a; --outside: #a58bff; --refused: #ff8a4c;
+    --scout: #3cc4c6; --commit: #a493ff; --kept: #4cc27a; --not-kept: #8b93a3;
   }
 }
 * { box-sizing: border-box; }
@@ -1997,12 +2589,15 @@ details.card[open] > summary { margin-bottom: 8px; }
   font-size: 11px; line-height: 18px; padding: 0 5px; color: #fff;
   background: var(--lane); opacity: .9;
 }
-.bar.step { opacity: .32; color: var(--ink); }
+/* A step and the model call inside it take bands of their own, so a call never covers
+   its step and both stay clickable (ADR-0316 §3:3): the step above, the call below. */
+.bar.step { opacity: .32; color: var(--ink); top: 3px; height: 11px; line-height: 11px;
+  font-size: 10px; }
 .bar.step.t-failed, .bar.step.t-timed_out { opacity: .9; background: var(--failed); color: #fff; }
 .bar.call {
-  top: 9px;
-  height: 12px;
-  line-height: 12px;
+  top: 16px;
+  height: 11px;
+  line-height: 11px;
   font-size: 10px;
   opacity: 1;
   padding: 0 4px;
@@ -2232,6 +2827,97 @@ details.part[open] > summary::before { content: "\u25be"; }
 .ch-added { color: var(--acting); } .ch-removed { color: var(--failed); }
 .ch-changed { color: var(--needs); }
 .asks { display: flex; flex-wrap: wrap; gap: 5px; padding: 6px 10px; }
+.views { display: flex; gap: 4px; margin-right: auto; }
+.view {
+  border: 1px solid var(--line); background: none; color: var(--muted); border-radius: 6px;
+  padding: 2px 10px; cursor: pointer; font-size: 12px;
+}
+.view[aria-pressed="true"] {
+  background: var(--select); color: var(--ink); border-color: var(--accent);
+}
+.own-absent { margin: 4px 0 0; }
+.ln-attempt { border-top: 1px solid var(--line); padding: 10px 0; }
+.ln-attempt:first-child { border-top: none; padding-top: 2px; }
+.ln-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: 13px; }
+.ln-head .n { font-weight: 650; color: var(--scout); }
+.ln-head .m { color: var(--muted); font-size: 12px; }
+.ln-track {
+  position: relative; height: 30px; margin: 6px 0 4px; border-radius: 4px;
+  background: var(--bg); border: 1px solid var(--line);
+}
+.ln-track .bar.call { top: 9px; height: 12px; line-height: 12px; }
+.ln-track .s-scout { --lane: var(--scout); } .ln-track .s-commit { --lane: var(--commit); }
+.ln-track .pt { --lane: var(--scout); }
+.pt.k-outcome.t-kept { background: var(--kept); }
+.pt.k-outcome.t-not_kept { background: var(--not-kept); }
+.pt.t-held { background: var(--needs); }
+.ln-scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px;
+  font-variant-numeric: tabular-nums; }
+.ln-entries { font-family: var(--mono); font-size: 12px; margin-top: 6px; }
+.ln-steps { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 2px; }
+.ln-steps .t-kept { color: var(--kept); } .ln-steps .t-not_kept { color: var(--muted); }
+.ln-steps .t-failed { color: var(--failed); } .ln-steps .t-held { color: var(--needs); }
+.ln-steps .t-end { color: var(--ink); }
+.learning { height: calc(100% - 45px); overflow-y: auto; padding: 18px 22px 40px; }
+.ov-head-block { max-width: 1180px; margin: 0 auto; }
+.ov-title { font-size: 18px; margin: 0 0 4px; }
+.ov-stats { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.ov-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 4px; }
+.ov-filters { display: flex; flex-wrap: wrap; gap: 4px; }
+.ov-search {
+  flex: 1 1 240px; min-width: 0; font: inherit; font-size: 13px; padding: 4px 8px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink);
+}
+#ov-list { max-width: 1180px; margin: 0 auto; }
+.ov-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 14px; margin-top: 12px;
+}
+.ov-card-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; }
+.ov-card-head .when { font-weight: 600; font-variant-numeric: tabular-nums; }
+.ov-card-head .m { color: var(--muted); font-size: 12px; }
+.ov-card-head .open-act { margin-left: auto; }
+.ov-input { margin: 4px 0 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-input.none { color: var(--muted); font-style: italic; }
+.b-processed { color: var(--kept); } .b-waiting { color: var(--needs); }
+.b-stuck { color: var(--failed); } .b-skipped { color: var(--muted); }
+.b-no_end { color: var(--muted); }
+.findings { margin-top: 6px; }
+.ov-finding {
+  display: grid; grid-template-columns: 30px minmax(0, 1.25fr) minmax(0, 1fr) auto;
+  gap: 4px 10px; align-items: start; padding: 6px 0; border-top: 1px solid var(--line);
+}
+.ov-finding .fid {
+  font-family: var(--mono); font-size: 12px; color: var(--muted); padding-top: 1px;
+}
+.ov-finding .claim { word-break: break-word; }
+.ov-finding .claim.none { color: var(--muted); font-style: italic; }
+.ov-finding .result { font-size: 13px; word-break: break-word; }
+.ov-finding .said { margin-top: 2px; }
+.ov-finding .why { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.ov-finding .links { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+.oc {
+  font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid currentColor;
+  white-space: nowrap; display: inline-block; line-height: 16px;
+}
+.oc.kept { color: var(--kept); } .oc.not_kept { color: var(--not-kept); }
+.oc.pending { color: var(--needs); }
+.jump {
+  font-size: 11px; border: 1px solid var(--line); background: var(--bg); color: var(--accent);
+  border-radius: 999px; padding: 0 9px; cursor: pointer; line-height: 18px;
+}
+.jump:hover { border-color: var(--accent); }
+.jump[disabled] { color: var(--muted); cursor: default; border-color: var(--line); }
+.elsewhere { color: var(--muted); font-size: 12px; }
+@media (max-width: 760px) {
+  .learning { padding: 14px 16px 40px; height: auto; overflow: visible; }
+  .views { margin-right: 0; }
+  .top { flex-wrap: wrap; }
+  .ov-finding { grid-template-columns: 26px minmax(0, 1fr); }
+  .ov-finding .result, .ov-finding .links { grid-column: 2; }
+  .ov-finding .links { justify-content: flex-start; }
+  .ov-card-head .open-act { margin-left: 0; }
+}
 @media (max-width: 760px) {
   .layout { grid-template-columns: 1fr; height: auto; }
   .list-pane { border-right: none; }
@@ -2244,6 +2930,7 @@ details.part[open] > summary::before { content: "\u25be"; }
   .entry-row { grid-template-columns: 70px 1fr; }
   .entry-row span:nth-child(3), .entry-row span:nth-child(4) { display: none; }
 }
+body.show-learning .layout { display: none; }
 """
 
 SCRIPT: Final = r"""
@@ -2273,7 +2960,11 @@ SCRIPT: Final = r"""
   const state = {
     listVersion: null, list: [], present: true, now: null, selected: null,
     detailVersion: null, detail: null, drawnOpen: false, listBusy: false, detailBusy: false,
+    view: "activations", learningVersion: null, learning: [], learningPresent: true,
+    learningBusy: false, filter: "all", search: "",
   };
+  // The hash that shows the learning overview: no activation id the hub mints is it.
+  const LEARNING = "learning";
 
   const $ = (id) => document.getElementById(id);
   function el(tag, cls, text) {
@@ -2390,6 +3081,7 @@ SCRIPT: Final = r"""
 
   // --- one activation ----------------------------------------------------------------
   function select(id) {
+    showView("activations");
     if (state.selected !== id) {
       state.selected = id;
       state.detailVersion = null;
@@ -2442,7 +3134,7 @@ SCRIPT: Final = r"""
   function renderGone() {
     const empty = $("detail-empty");
     empty.hidden = false;
-    empty.textContent = "That activation's file is gone: the record's window deleted it.";
+    empty.textContent = "That activation's files are gone: the record's window deleted them.";
     $("detail-body").hidden = true;
   }
   function renderDetail() {
@@ -2450,15 +3142,25 @@ SCRIPT: Final = r"""
     $("detail-empty").hidden = true;
     $("detail-body").hidden = false;
     const s = d.summary;
+    const own = d.own !== false;
+    // ADR-0333 \u00a75:6: an activation whose own file is absent shows its learning alone.
+    for (const id of ["timeline-card", "rounds-card", "entries-card"]) $(id).hidden = !own;
+    const absent = $("d-own-absent");
+    absent.hidden = own;
+    absent.textContent = own ? "" : "This activation's own record is absent: swept by the "
+      + "record's window, never written, or written while the record was off. What the "
+      + "observer learned from it is shown alone.";
     const input = $("d-input");
-    input.textContent = s.input || "input not shown";
+    input.textContent = s.input || (own ? "input not shown" : "own record absent");
     input.className = "input" + (s.input ? "" : " none");
     const meta = $("d-meta");
     clear(meta);
-    const pairs = [
+    const learning = d.learning;
+    const pairs = own ? [
       ["started", clock(s.start, true)], ["took", duration(s.duration)], ["rounds", s.rounds],
       ["ended", endingText(s) || "not yet"], ["entries", s.entries],
-    ];
+    ] : [["learned", clock(learning ? learning.latest : null, true)],
+      ["attempts", learning ? learning.attempts.length : 0]];
     for (const [k, v] of pairs) {
       const span = el("span", null, k + " ");
       span.appendChild(el("b", null, v));
@@ -2468,9 +3170,12 @@ SCRIPT: Final = r"""
     clear(badges);
     badgesFor(s, badges);
     state.drawnOpen = isOpen(s);
-    renderTimeline();
-    renderRounds();
-    renderEntries();
+    if (own) {
+      renderTimeline();
+      renderRounds();
+      renderEntries();
+    }
+    renderLearningLane();
   }
 
   // --- the timeline ------------------------------------------------------------------
@@ -2531,12 +3236,20 @@ SCRIPT: Final = r"""
         line.style.left = g + "%";
         track.appendChild(line);
       }
-      const ordered = items.slice().sort((a, b) => (a.kind === "call") - (b.kind === "call"));
-      for (const item of ordered) track.appendChild(drawItem(item, pos, end));
+      for (const item of drawOrder(items, end)) track.appendChild(drawItem(item, pos, end));
       row.appendChild(track);
       root.appendChild(row);
     }
     renderLegend();
+  }
+  // Steps first, then model calls, then entries' points, each later one drawn over the
+  // earlier; within a layer the longer first, so nothing shorter is hidden under it. A
+  // step and its call also take bands of their own (the stylesheet), so a call never
+  // covers its step: every item stays clickable (ADR-0316 \u00a73:3).
+  function drawOrder(items, end) {
+    const layer = (item) => (item.type !== "span" ? 2 : item.kind === "step" ? 0 : 1);
+    const width = (item) => (item.end === null ? end : item.end) - item.start;
+    return items.slice().sort((a, b) => layer(a) - layer(b) || width(b) - width(a));
   }
   function drawItem(item, pos, end) {
     const tone = "t-" + item.tone;
@@ -2666,9 +3379,310 @@ SCRIPT: Final = r"""
     }
   }
 
+  // --- the learning lane (ADR-0333 §5:2-§5:3) -------------------------------------
+  // Drawn over the observer's own instants, one attempt to a row, each row on its own
+  // scale: an attempt can come days after the activation, and none of it widens the
+  // activation's timeline, its duration or its row in the list.
+  const STATES = { processed: "processed", waiting: "waiting", stuck: "stuck",
+    skipped: "skipped" };
+  function attemptEnding(ended) {
+    if (!ended) return "no end recorded";
+    let text = ended.skipped ? "skipped: nothing to read" : words(ended.state || ended.end || "");
+    if (ended.end === "held") text = "held by the daily budget · " + words(ended.state || "");
+    else if (ended.end === "failed") text = "failed · " + words(ended.state || "");
+    return text;
+  }
+  function renderLearningLane() {
+    const d = state.detail;
+    const card = $("learning-card");
+    const root = $("learning-lane");
+    clear(root);
+    const learning = d.learning;
+    card.hidden = !learning;
+    if (!learning) return;
+    if (!learning.attempts.length) {
+      root.appendChild(el("p", "note", "The observer file holds no entry yet."));
+    }
+    const byAttempt = new Map();
+    for (const f of learning.findings) {
+      if (!byAttempt.has(f.attempt)) byAttempt.set(f.attempt, []);
+      byAttempt.get(f.attempt).push(f);
+    }
+    const numbers = new Map(learning.attempts.map((a) => [a.key, a.number]));
+    for (const a of learning.attempts) {
+      const box = el("div", "ln-attempt");
+      const head = el("div", "ln-head");
+      head.appendChild(el("span", "n", "Attempt " + a.number));
+      head.appendChild(el("span", "m", clock(a.start, true)));
+      if (a.end !== null && a.start !== null) {
+        head.appendChild(el("span", "m", duration(a.end - a.start)));
+      }
+      const ending = el("span", "badge b-" + ((a.ended && a.ended.state) || "no_end"),
+        attemptEnding(a.ended));
+      head.appendChild(ending);
+      box.appendChild(head);
+      if (a.ended && a.ended.failure) box.appendChild(el("div", "fail", a.ended.failure));
+      box.appendChild(learningTrack(d.id, a));
+      for (const f of byAttempt.get(a.key) || []) {
+        box.appendChild(findingRow(d.id, f, { full: true, numbers, here: a.key }));
+      }
+      root.appendChild(box);
+    }
+    const all = el("details", "ln-entries");
+    const count = learning.entries.length;
+    all.appendChild(el("summary", "note", "Every learning entry (" + count + ")"));
+    for (const e of learning.entries) {
+      const row = el("div", "entry-row");
+      row.appendChild(el("span", null, clock(e.at)));
+      row.appendChild(el("span", null, e.stage || "?"));
+      row.appendChild(el("span", null, e.kind));
+      row.appendChild(el("span", null, "attempt " + (numbers.get(e.attempt) || "?")));
+      const call = e.kind === "step" ? null : callable(learning, e.line);
+      row.addEventListener("click", () => openLines(d.id, "observer · " + (e.stage || e.kind),
+        [e.line], { file: "observer", call }));
+      all.appendChild(row);
+    }
+    if (learning.truncated) {
+      all.appendChild(el("p", "note", "The observer file was truncated: nothing after its "
+        + "marker was written."));
+    }
+    if (learning.unreadable) {
+      all.appendChild(el("p", "note", learning.unreadable + " unreadable line(s) were skipped."));
+    }
+    root.appendChild(all);
+  }
+  // The given line of the call ``line`` belongs to, or null where it is no call's.
+  function callable(learning, line) {
+    for (const a of learning.attempts) {
+      for (const item of a.items) {
+        if (item.kind === "call" && item.lines.includes(line)) return item.call;
+      }
+    }
+    return null;
+  }
+  function learningTrack(id, a) {
+    const holder = el("div");
+    const track = el("div", "ln-track");
+    const start = a.start;
+    const end = a.end === null ? start : a.end;
+    const span = Math.max(end - start, 1);
+    const pos = (t) => Math.min(100, Math.max(0, ((t - start) / span) * 100));
+    for (const item of drawOrder(a.items, end)) {
+      const tone = "t-" + item.tone;
+      let node;
+      if (item.type === "span") {
+        const itemEnd = item.end === null ? end : item.end;
+        const width = Math.max(0, pos(itemEnd) - pos(item.start));
+        node = el("div", "bar call s-" + item.stage + " " + tone, width >= 8 ? item.label : null);
+        node.style.width = width + "%";
+      } else {
+        node = el("div", "pt k-" + item.kind + " " + tone);
+      }
+      node.style.left = pos(item.start) + "%";
+      let title = "observer · " + item.label;
+      if (item.type === "span") {
+        title += item.end === null ? " · no returned entry was recorded"
+          : " · " + duration(item.end - item.start);
+      }
+      node.title = title;
+      node.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openLines(id, title, item.lines, { file: "observer", call: item.call });
+      });
+      track.appendChild(node);
+    }
+    holder.appendChild(track);
+    const scale = el("div", "ln-scale");
+    scale.appendChild(el("span", null, clock(start)));
+    scale.appendChild(el("span", null, "+" + duration(end - start)));
+    holder.appendChild(scale);
+    // The attempt's step entries again, in order, as controls: several can share an
+    // instant on the track, and each stays one click away.
+    const steps = el("div", "ln-steps");
+    for (const item of a.items) {
+      if (item.type === "span") continue;
+      const go = el("button", "jump t-" + item.tone, item.label);
+      go.type = "button";
+      go.addEventListener("click", () => openLines(id, "observer \u00b7 " + item.label, item.lines,
+        { file: "observer", call: null }));
+      steps.appendChild(go);
+    }
+    if (steps.childNodes.length) holder.appendChild(steps);
+    return holder;
+  }
+  // One finding: its claim, what was kept of it or why not, and the jumps to the exact
+  // prompt and reply behind it (ADR-0333 §5:5).
+  function findingRow(id, f, opts) {
+    const row = el("div", "ov-finding");
+    row.appendChild(el("span", "fid", f.id));
+    row.appendChild(el("div", "claim" + (f.claim ? "" : " none"), f.claim || "claim not recorded"));
+    const result = el("div", "result");
+    const o = f.outcome;
+    if (!o) {
+      result.appendChild(el("span", "oc pending", "no outcome yet"));
+    } else {
+      result.appendChild(el("span", "oc " + (o.kept ? "kept" : "not_kept"), o.short));
+      if (o.kept && o.wording) {
+        result.appendChild(el("div", "said", "“" + o.wording + "”"));
+      }
+      if (!o.kept && o.why) result.appendChild(el("div", "why", o.why));
+      if (o.note) result.appendChild(el("div", "why", "note: " + o.note));
+      if (opts.here && o.attempt && o.attempt !== opts.here && opts.numbers) {
+        result.appendChild(el("div", "elsewhere",
+          "decided in attempt " + (opts.numbers.get(o.attempt) || "?")));
+      }
+    }
+    row.appendChild(result);
+    const links = el("div", "links");
+    const jump = (label, lines, call) => {
+      const go = el("button", "jump", label);
+      go.type = "button";
+      const kept = lines.filter((one) => one !== null && one !== undefined);
+      if (!kept.length) {
+        go.disabled = true;
+      } else {
+        go.addEventListener("click", (event) => {
+          event.stopPropagation();
+          openLines(id, f.id + " · " + label.toLowerCase(), kept,
+            { file: "observer", call: call === undefined ? null : call });
+        });
+      }
+      links.appendChild(go);
+    };
+    const scout = f.scout || {};
+    const commit = f.commit || {};
+    jump("Scout", [scout.given, scout.returned], scout.given);
+    jump("Commit", [commit.given, commit.returned], commit.given);
+    jump("Outcome", [f.findings_line, o ? o.line : null]);
+    row.appendChild(links);
+    return row;
+  }
+
+  // --- the learning overview (ADR-0333 §5:4-§5:5) ----------------------------------
+  const FILTERS = [["all", "All findings"], ["kept", "Kept"], ["not_kept", "Not kept"],
+    ["pending", "No outcome yet"], ["failed", "Failed attempts"]];
+  function showView(view) {
+    state.view = view;
+    const learning = view === "learning";
+    document.body.classList.toggle("show-learning", learning);
+    $("learning").hidden = !learning;
+    $("view-learning").setAttribute("aria-pressed", String(learning));
+    $("view-activations").setAttribute("aria-pressed", String(!learning));
+    if (learning) {
+      closeDrawer();
+      pollLearning();
+    }
+  }
+  async function pollLearning() {
+    if (state.view !== "learning" || state.learningBusy) return;
+    state.learningBusy = true;
+    try {
+      let url = "/api/learning";
+      if (state.learningVersion) url += "?v=" + encodeURIComponent(state.learningVersion);
+      const data = await getJson(url);
+      if (data && !data.unchanged) {
+        state.learningVersion = data.version;
+        state.learning = data.activations || [];
+        state.learningPresent = data.present;
+        renderLearning();
+      }
+    } catch (error) {
+      lost();
+    } finally {
+      state.learningBusy = false;
+    }
+  }
+  function matches(f) {
+    const o = f.outcome;
+    if (state.filter === "kept" && !(o && o.kept)) return false;
+    if (state.filter === "not_kept" && !(o && !o.kept)) return false;
+    if (state.filter === "pending" && o) return false;
+    const needle = state.search.trim().toLowerCase();
+    if (!needle) return true;
+    const hay = [f.claim, o && o.wording, o && o.note, o && o.why].filter(Boolean)
+      .join(" ").toLowerCase();
+    return hay.includes(needle);
+  }
+  function renderLearning() {
+    const list = $("ov-list");
+    clear(list);
+    const shown = state.learning;
+    const findings = shown.flatMap((a) => a.findings);
+    const kept = findings.filter((f) => f.outcome && f.outcome.kept).length;
+    const notKept = findings.filter((f) => f.outcome && !f.outcome.kept).length;
+    const stats = $("ov-stats");
+    clear(stats);
+    for (const text of [plural(shown.length, "activation", "activations"),
+      plural(findings.length, "finding", "findings"), kept + " kept", notKept + " not kept",
+      (findings.length - kept - notKept) + " with no outcome yet",
+      plural(shown.reduce((n, a) => n + (a.failed || 0), 0), "failed attempt",
+        "failed attempts")]) {
+      stats.appendChild(el("span", "chip", text));
+    }
+    const filters = $("ov-filters");
+    clear(filters);
+    for (const [key, label] of FILTERS) {
+      const b = el("button", "view", label);
+      b.type = "button";
+      b.setAttribute("aria-pressed", String(state.filter === key));
+      b.addEventListener("click", () => { state.filter = key; renderLearning(); });
+      filters.appendChild(b);
+    }
+    const empty = $("ov-empty");
+    empty.hidden = shown.length > 0;
+    empty.textContent = state.learningPresent === false
+      ? "The record's directory does not exist yet: the observer has written nothing."
+      : "No observer files in the record yet.";
+    let drawnCards = 0;
+    for (const a of shown) {
+      const rows = a.findings.filter(matches);
+      const failedOnly = state.filter === "failed";
+      if (failedOnly ? !(a.failed || a.failure) : (!rows.length && (state.filter !== "all"
+        || state.search.trim()))) continue;
+      list.appendChild(overviewCard(a, failedOnly ? a.findings : rows));
+      drawnCards += 1;
+    }
+    if (shown.length && !drawnCards) list.appendChild(el("p", "empty", "Nothing matches."));
+  }
+  function overviewCard(a, rows) {
+    const card = el("article", "ov-card");
+    const head = el("div", "ov-card-head");
+    head.appendChild(el("span", "when", clock(a.latest, true)));
+    head.appendChild(el("span", "badge b-" + (a.state || "no_end"),
+      a.state ? (STATES[a.state] || words(a.state)) : "no end recorded"));
+    head.appendChild(el("span", "m", plural(a.attempts, "attempt", "attempts")
+      + (a.failed ? " · " + a.failed + " failed" : "")
+      + (a.dropped ? " · " + plural(a.dropped, "proposal", "proposals")
+        + " dropped by code" : "")));
+    if (a.truncated) head.appendChild(badge("truncated", "truncated"));
+    const open = el("button", "jump open-act", "Open activation →");
+    open.type = "button";
+    open.addEventListener("click", () => {
+      location.hash = "#" + encodeURIComponent(a.id);
+    });
+    head.appendChild(open);
+    card.appendChild(head);
+    const input = a.input || (a.own ? "input not shown" : "own record absent");
+    card.appendChild(el("div", "ov-input" + (a.input ? "" : " none"), input));
+    if (a.failure) card.appendChild(el("div", "fail", "last attempt failed: " + a.failure));
+    const box = el("div", "findings");
+    for (const f of rows) box.appendChild(findingRow(a.id, f, {}));
+    if (!a.findings.length) {
+      box.appendChild(el("p", "note", a.state === "skipped"
+        ? "Skipped by rule: nothing to read." : "No finding recorded."));
+    }
+    card.appendChild(box);
+    return card;
+  }
+
   // --- details on click --------------------------------------------------------------
   let drawn = 0;
-  async function openLines(id, title, lines) {
+  // ``opts.file`` is "observer" for the observer file beside the activation's own
+  // (ADR-0333 \u00a75:1), and ``opts.call`` the line of the model call the lines are, where
+  // the caller knows it; else it is looked for among the activation's own entries.
+  async function openLines(id, title, lines, opts) {
+    const file = opts && opts.file ? opts.file : null;
+    const suffix = file ? "&file=" + encodeURIComponent(file) : "";
     // Each opening is one generation: a load still in flight from an earlier click,
     // on this activation or another, finds its generation gone and draws nothing.
     const generation = ++drawn;
@@ -2677,18 +3691,20 @@ SCRIPT: Final = r"""
     clear(body);
     clear($("drawer-read"));
     // A model call opens readable, its entries whole one tab away (ADR-0316 \u00a73:3).
-    const call = callLine(id, lines);
+    let call = opts && opts.call !== undefined ? opts.call : null;
+    if (!file && !(opts && opts.call !== undefined)) call = callLine(id, lines);
+    if (call === undefined) call = null;
     $("drawer-tabs").hidden = call === null;
     $("drawer").classList.toggle("wide", call !== null);
     showTab(call === null ? "raw" : "read");
     $("drawer").hidden = false;
-    if (call !== null) loadCall(generation, id, call);
+    if (call !== null) loadCall(generation, id, call, suffix);
     for (const line of lines) {
       const holder = el("div");
       body.appendChild(holder);
       try {
         const url = "/api/entry?id=" + encodeURIComponent(id)
-          + "&line=" + encodeURIComponent(line);
+          + "&line=" + encodeURIComponent(line) + suffix;
         const entry = await getJson(url);
         if (generation !== drawn) return;
         if (entry === null) {
@@ -2717,7 +3733,7 @@ SCRIPT: Final = r"""
   // --- a model call, readable --------------------------------------------------------
   const MODEL_SOURCES = ["understanding", "planning", "digesting"];
   const SOURCE_NAMES = { understanding: "Understanding", planning: "Planning",
-    digesting: "Digesting" };
+    digesting: "Digesting", observer: "Observer" };
   // The first of the lines a click opens that is a model call's given or returned entry.
   function callLine(id, lines) {
     const d = state.detail;
@@ -2730,13 +3746,13 @@ SCRIPT: Final = r"""
     }
     return null;
   }
-  async function loadCall(generation, id, line) {
+  async function loadCall(generation, id, line, suffix) {
     const holder = $("drawer-read");
     holder.appendChild(el("p", "note", "Loading\u2026"));
     let view;
     try {
       view = await getJson("/api/call?id=" + encodeURIComponent(id)
-        + "&line=" + encodeURIComponent(line));
+        + "&line=" + encodeURIComponent(line) + (suffix || ""));
     } catch (error) {
       if (generation !== drawn) return;
       clear(holder);
@@ -2845,6 +3861,9 @@ SCRIPT: Final = r"""
     let title = SOURCE_NAMES[v.source] || v.source;
     if (v.round) title += " \u00b7 round " + v.round;
     if (v.about && v.about.part) title += " \u00b7 part " + v.about.part;
+    if (v.source === "observer" && v.about && v.about.stage) {
+      title += " \u00b7 " + v.about.stage + (v.about.finding ? " " + v.about.finding : "");
+    }
     head.appendChild(el("h2", null, title));
     const where = [];
     where.push(v.given === null ? "no given entry" : "given line " + v.given);
@@ -2854,6 +3873,10 @@ SCRIPT: Final = r"""
     holder.appendChild(head);
     if (v.about && (v.about.question || v.about.result)) {
       kv(holder, [["question", v.about.question], ["result", v.about.result]]);
+    }
+    if (v.source === "observer" && v.about) {
+      kv(holder, [["claim", v.about.claim || undefined], ["episode", v.about.episode],
+        ["attempt started", v.about.attempt]]);
     }
     for (const note of v.notes || []) holder.appendChild(el("p", "note", note));
     const stats = el("div", "call-stats");
@@ -3281,7 +4304,68 @@ SCRIPT: Final = r"""
       pre(box, JSON.stringify(dropped, null, 2));
     }
   }
+  function supportsView(box, list) {
+    for (const s of arr(list)) {
+      const one = obj(s);
+      const part = obj(one.part);
+      const where = [part.part, part.episode, part.message, part.round, part.item]
+        .filter((x) => x !== undefined && x !== null).join(" \u00b7 ");
+      pre(box, where + "\n" + [one.direction, one.backs_as_worded ? "backs as worded" : null,
+        one.how_sure, one.origin].filter(Boolean).join(" \u00b7 ")
+        + (one.note ? "\nnote: " + one.note : ""));
+    }
+  }
+  function observerStep(holder, b) {
+    if (b.stage === "findings") {
+      const box = sec(holder, "Findings");
+      kv(box, [["episode", b.episode], ["attempt started", b.attempt_started_at],
+        ["dropped", b.dropped]]);
+      for (const f of arr(b.findings)) {
+        const one = obj(f);
+        box.appendChild(el("h4", null, (one.id || "finding") + " \u00b7 " + (one.claim || "")));
+        kv(box, [["candidate", one.candidate || undefined],
+          ["relied on", one.relied_on || undefined],
+          ["rests on", arr(one.rests_on).length + " part(s)"]]);
+      }
+      return;
+    }
+    if (b.stage === "outcome") {
+      const box = sec(holder, "Outcome");
+      const o = obj(b.outcome);
+      kv(box, [["finding", b.finding], ["claim", b.claim], ["ruling", o.ruling],
+        ["unwritten", o.unwritten || undefined],
+        ["writes", arr(o.writes).map((w) => obj(w).memory + " (" + arr(obj(w).operations)
+          .join(", ") + ")").join("; ") || undefined]]);
+      const d = obj(b.decided);
+      if (b.decided) {
+        const db = sec(holder, "What the commit decided");
+        kv(db, [["action", d.action], ["memory", d.memory], ["wording", d.wording],
+          ["asks", d.asks], ["reason", d.reason], ["note", d.note],
+          ["held up", d.held_up], ["retiring", d.retiring ? obj(d.retiring).kind + " "
+            + obj(d.retiring).memory : undefined]]);
+        supportsView(db, d.supports);
+        if (d.support) supportsView(db, [d.support]);
+      }
+      return;
+    }
+    kv(sec(holder, "Attempt"), [["stage", b.stage], ["end", b.end], ["state", b.state],
+      ["skipped", b.skipped], ["failure", failure(b.failure)], ["episode", b.episode],
+      ["attempt started", b.attempt_started_at]]);
+  }
   const VIEWS = {
+    "observer.given": (holder, b) => {
+      kv(sec(holder, "Call"), [["step", b.stage], ["episode", b.episode],
+        ["attempt started", b.attempt_started_at],
+        ["finding", b.finding
+          ? obj(b.finding).id + " \u00b7 " + obj(b.finding).claim : undefined]]);
+      messages(holder, b);
+    },
+    "observer.returned": (holder, b) => {
+      const box = sec(holder, "Reply");
+      kv(box, [["step", b.stage], ["finding", b.finding], ["failure", failure(b.failure)]]);
+      if (typeof b.reply === "string") pre(box, pretty(b.reply));
+    },
+    "observer.step": observerStep,
     "controller.step": step,
     "understanding.given": messages,
     "understanding.returned": (holder, b) => {
@@ -3331,13 +4415,30 @@ SCRIPT: Final = r"""
     });
     window.addEventListener("hashchange", () => {
       const chosen = fromHash();
-      if (chosen && chosen !== state.selected) select(chosen);
+      if (chosen === LEARNING) showView("learning");
+      else if (chosen && chosen !== state.selected) select(chosen);
+      else if (chosen) showView("activations");
+    });
+    $("view-learning").addEventListener("click", () => { location.hash = "#" + LEARNING; });
+    $("view-activations").addEventListener("click", () => {
+      if (state.selected) {
+        history.replaceState(null, "", "#" + encodeURIComponent(state.selected));
+      } else {
+        history.replaceState(null, "", location.pathname);
+      }
+      showView("activations");
+    });
+    $("ov-search").addEventListener("input", (event) => {
+      state.search = event.target.value;
+      renderLearning();
     });
     const initial = fromHash();
-    if (initial) select(initial);
+    if (initial === LEARNING) showView("learning");
+    else if (initial) select(initial);
     pollList();
     setInterval(pollList, 2000);
     setInterval(pollDetail, 1500);
+    setInterval(pollLearning, 2500);
   });
 })();
 """
