@@ -1014,6 +1014,44 @@ async def test_a_response_of_many_days_is_read_in_one_pass_over_them() -> None:
     assert _days(outcome) == ["2026-01-02", "2026-01-03", "2026-01-04"]
 
 
+async def test_a_long_shared_unit_is_measured_once_and_not_once_per_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Row 13 over a unit every day shares, at a size the response bound admits.
+
+    A unit appears in every day's transcription, so a reader that built and encoded each
+    day before measuring it would copy a hundred-thousand-character unit once per day —
+    quadratic work on the event loop's own thread, where ADR-0260 §4's deadline cannot be
+    delivered (adversarial review of PR #3352, round 1). **Asserted over the work and not
+    over a clock**: every string the read hands ``json.dumps`` is counted, and the total
+    is bounded by a small multiple of the response's own size.
+    """
+    unit = "x" * 100_000
+    positions = [
+        day(date=(datetime(2026, 1, 1, tzinfo=UTC) + timedelta(days=index)).date().isoformat())
+        for index in range(3000)
+    ]
+    payload = body(*positions, units={**UNITS, "weather_code": unit})
+    subject = await built(
+        channels=[far_end(response(payload=payload))], max_response_bytes=4 * 1024 * 1024
+    )
+    call = authorised_read(await request(subject))
+    encoded: list[int] = []
+    real = json.dumps
+
+    def counting(value: Any, *arguments: Any, **keywords: Any) -> str:
+        if isinstance(value, str):
+            encoded.append(len(value))
+        return real(value, *arguments, **keywords)
+
+    monkeypatch.setattr(json, "dumps", counting)
+    outcome = await subject.forecaster.read(call, timeout=_BOUND)
+    monkeypatch.undo()
+
+    assert outcome.refusal is ForecastRefusal.NO_RESULT
+    assert sum(encoded) <= 2 * len(payload)
+
+
 # --- the transcription (ADR-0344 §5:2, §5:5, §5:6) --------------------------
 
 
