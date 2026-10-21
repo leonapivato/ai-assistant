@@ -96,7 +96,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast, override
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from pydantic_ai.models import infer_model
 from pydantic_ai.models.wrapper import WrapperModel
 
@@ -113,6 +113,12 @@ from ai_assistant.models import (
     ensure_credential_available,
     ensure_vendor_available,
 )
+from ai_assistant.orchestration.observer.commit import CommitReply
+from ai_assistant.orchestration.observer.scout import ScoutReply, parsed
+
+# Understanding's own reading of its reply, so the suite reads a reply as the hub does
+# rather than as a copy of that reading that could drift from it.
+from ai_assistant.orchestration.understanding import _parsed as understanding_parsed
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME, SOCKET_FILENAME
 
@@ -1695,15 +1701,16 @@ _RETIRING: Final = frozenset({"end", "mark_wrong", "replace"})
 
 @dataclass(frozen=True, slots=True)
 class Reply:
-    """One sample's reply, as a code check reads it.
+    """One sample's reply, as a code check reads it: as the hub's own stage reads it.
 
     Attributes:
-        text: A completion's reply, or ``None`` for a planning round.
+        reading: A completion's reply as its stage's reply shape reads it, as JSON
+            values, or ``None`` where the stage would refuse it, or for a planning round.
         round: A planning round as the completer read it, or ``None`` where it read as
             none, or for a completion.
     """
 
-    text: str | None = None
+    reading: dict[str, object] | None = None
     round: RoundResponse | None = None
 
 
@@ -1719,7 +1726,7 @@ class CodeCheck:
     Attributes:
         name: How a case names it.
         what: What it decides, in words.
-        prompts: The prompts it reads a reply of, or ``None`` for any.
+        prompts: The prompts it reads a reply of.
         params: Each parameter a case gives it, by name: ``strings``, a non-empty list
             of non-blank strings, or ``string``, one non-blank string.
         judge: The check itself, over a reply and the case's parameters.
@@ -1727,25 +1734,31 @@ class CodeCheck:
 
     name: str
     what: str
-    prompts: frozenset[str] | None
+    prompts: frozenset[str]
     params: Mapping[str, str]
     judge: Callable[[Reply, Mapping[str, object]], Judgement]
 
 
-def _reply_object(reply: Reply) -> dict[str, object] | None:
-    """A completion's reply as one JSON object, one enclosing code fence removed."""
-    if reply.text is None:
-        return None
-    body = reply.text.strip()
-    if body.startswith("```") and body.endswith("```") and len(body) >= 6:  # noqa: PLR2004 — two fences
-        body = body[3:-3]
-        first, _, rest = body.partition("\n")
-        body = rest if first.strip().isalnum() or not first.strip() else body
-    try:
-        held = json.loads(body)
-    except ValueError, RecursionError:
-        return None
-    return held if isinstance(held, dict) else None
+#: How each prompt's stage reads a completion's reply: the very function the stage reads
+#: it with, so a reply the hub would refuse whole passes no code check, and a key it drops
+#: is not read. A prompt not named here, or planning, whose round the completer reads,
+#: takes a code check only once its reader is added here.
+REPLY_READERS: Final[dict[str, Callable[[str], BaseModel | None]]] = {
+    "understanding": understanding_parsed,
+    "observer_scout": lambda content: parsed(content, ScoutReply),
+    "observer_commit": lambda content: parsed(content, CommitReply),
+}
+
+
+def completion_reply(prompt: str, text: str) -> Reply:
+    """A completion's reply as its prompt's stage reads it (:data:`REPLY_READERS`)."""
+    reader = REPLY_READERS.get(prompt)
+    read = None if reader is None else reader(text)
+    return Reply(reading=None if read is None else read.model_dump(mode="json"))
+
+
+#: Why a completion's reply passes no check where its stage would refuse it.
+_UNREAD: Final = "the reply is not one its stage reads"
 
 
 def _strings_under(
@@ -1767,16 +1780,13 @@ def _no_label(reply: Reply, params: Mapping[str, object]) -> Judgement:
     fields = frozenset(cast("list[str]", params["fields"]))
     letters = cast("list[str]", params["labels"])
     pattern = re.compile(r"\b(?:" + "|".join(sorted(letters)) + r")[0-9]+\b")
-    if reply.text is None:
-        if reply.round is None:
-            return "the response reads as no round"
+    if reply.round is not None:
         texts = [("message", reply.round.text), ("notes", reply.round.notes or "")]
         held = [(name, text) for name, text in texts if name in fields]
+    elif reply.reading is not None:
+        held = list(_strings_under(reply.reading, fields))
     else:
-        reading = _reply_object(reply)
-        if reading is None:
-            return "the reply is not one JSON object"
-        held = list(_strings_under(reading, fields))
+        return _UNREAD
     for name, text in held:
         if pattern.search(text):
             return f"a label stands in {name}"
@@ -1797,26 +1807,18 @@ def _asks_about(reply: Reply, params: Mapping[str, object]) -> Judgement:
 
 def _action_in(reply: Reply, params: Mapping[str, object]) -> Judgement:
     """The commit step's reply takes one of the named actions."""
-    reading = _reply_object(reply)
-    if reading is None:
-        return "the reply is not one JSON object"
-    action = reading.get("action")
-    if not isinstance(action, str):
-        return "the reply's action is not a string"
-    if action not in cast("list[str]", params["actions"]):
+    if reply.reading is None:
+        return _UNREAD
+    if reply.reading.get("action") not in cast("list[str]", params["actions"]):
         return "the reply takes another action"
     return None
 
 
 def _memory_kept(reply: Reply, params: Mapping[str, object]) -> Judgement:
     """The commit step's reply does not end, mark wrong or replace the named memory."""
-    reading = _reply_object(reply)
-    if reading is None:
-        return "the reply is not one JSON object"
-    action = reading.get("action")
-    if not isinstance(action, str):
-        return "the reply's action is not a string"
-    if action in _RETIRING and reading.get("memory") == params["memory"]:
+    if reply.reading is None:
+        return _UNREAD
+    if reply.reading.get("action") in _RETIRING and reply.reading.get("memory") == params["memory"]:
         return "the reply retires the memory"
     return None
 
@@ -1831,7 +1833,7 @@ CODE_CHECKS: Final[dict[str, CodeCheck]] = {
         CodeCheck(
             "no_label",
             "no label of the named letters stands in the named free-text fields",
-            None,
+            frozenset({PLANNING, *REPLY_READERS}),
             {"fields": "strings", "labels": "strings"},
             _no_label,
         ),
@@ -2081,7 +2083,7 @@ def _case_property(held: object, prompt: str) -> tuple[str, dict[str, object]]:
     declared = CODE_CHECKS.get(check)
     if declared is None:
         raise _CaseDefectError(f"names no code check the runner declares: {sorted(CODE_CHECKS)}")
-    if declared.prompts is not None and prompt not in declared.prompts:
+    if prompt not in declared.prompts:
         raise _CaseDefectError(f"the check {check} reads no reply of the prompt {prompt}")
     _check_params(declared, given)
     if check == "no_label":
@@ -2363,7 +2365,7 @@ async def _suite_outcome(call: SuiteCall, caller: Caller) -> tuple[dict[str, obj
     try:
         if call.case.tools is None:
             text = await caller.complete(call.messages)
-            return {"reply": text}, Reply(text=text)
+            return {"reply": text}, completion_reply(call.case.prompt, text)
         replayed = await caller.replay_round(call.messages, call.case.tools)
     except Exception as exc:  # every failure of the one model is recorded (ADR-0335 §4:7)
         return {"failure": failure_body(exc)}, None

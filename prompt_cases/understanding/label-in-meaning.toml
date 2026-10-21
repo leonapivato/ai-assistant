@@ -17,49 +17,5 @@ check = "no_label"
 fields = ["meaning", "phrase", "statement", "matter", "why_it_matters"]
 labels = ["H", "P"]
 
-[[input.messages]]
-role = "user"
-content = '''
-{
-  "input": {
-    "received_as": "the message the user just sent on telegram:line-1",
-    "text": "wait, which venue was it that could fit all of us?"
-  },
-  "channel_window": [
-    {
-      "label": "H1",
-      "item": "a message of this conversation",
-      "position": 41,
-      "author": "the user",
-      "written_at": "2026-03-04T18:02:11+00:00",
-      "text": "Odile says the Lantern Room on Quay Street can seat twelve of us on the 14th"
-    },
-    {
-      "label": "H2",
-      "item": "a message of this conversation",
-      "position": 42,
-      "author": "the assistant",
-      "written_at": "2026-03-04T18:02:40+00:00",
-      "text": "That sounds like a good fit for the team dinner. The Copper Kettle could only take eight."
-    },
-    {
-      "label": "H3",
-      "item": "a message of this conversation",
-      "position": 43,
-      "author": "the user",
-      "written_at": "2026-03-04T18:05:02+00:00",
-      "text": "ok let me think about it"
-    }
-  ],
-  "episode_window": [
-    {
-      "label": "P1",
-      "item": "an earlier exchange on telegram:line-1",
-      "occurred_at": "2026-03-03T09:15:00+00:00",
-      "input": "help me find somewhere for a team dinner in mid-March, about twelve people",
-      "input_cut_to_first_chars": false,
-      "response": "Happy to. Do you have an area or a budget in mind?",
-      "response_cut_to_first_chars": false
-    }
-  ]
-}'''
+[input]
+file = "label-in-meaning.json"

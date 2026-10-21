@@ -12,44 +12,5 @@ check = "no_label"
 fields = ["claim"]
 labels = ["P", "C", "M", "E"]
 
-[[input.messages]]
-role = "user"
-content = '''
-{
-  "leaving": {
-    "exchange": "E1",
-    "occurred_at": "2026-05-12T07:40:00+00:00",
-    "parts": [
-      {
-        "part": "P1",
-        "from": "the user",
-        "outside": false,
-        "at": null,
-        "text": "find me a train to Hollin Bay on Saturday morning, and get me a window seat, I always get queasy on the aisle"
-      },
-      {
-        "part": "P2",
-        "from": "the assistant",
-        "outside": false,
-        "at": null,
-        "text": "There is an 8:12 from Marlow Cross that arrives at 10:05. I will look for a window seat on it."
-      }
-    ],
-    "candidates": [
-      {
-        "candidate": "C1",
-        "fact": "Per P1, the user prefers window seats on trains (P1) because the aisle makes them queasy",
-        "why": "a lasting travel preference",
-        "rests_on": ["P1"],
-        "memory": null,
-        "note": null
-      }
-    ],
-    "confirmations": [],
-    "reliance": []
-  },
-  "later": [],
-  "stories": [],
-  "past": [],
-  "memories": []
-}'''
+[input]
+file = "label-in-claim.json"

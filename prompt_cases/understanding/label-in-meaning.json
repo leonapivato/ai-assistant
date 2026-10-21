@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "{\"input\": {\"received_as\": \"the message the user just sent on conversation:c-1\", \"text\": \"wait, which venue was it that could fit all of us?\"}, \"channel_window\": [{\"label\": \"H1\", \"item\": \"a recent message of this conversation\", \"position\": 41, \"author\": \"the user\", \"written_at\": \"2026-09-22T11:59:00+00:00\", \"text\": \"Odile says the Lantern Room on Quay Street can seat twelve of us on the 14th\", \"not_linkable\": true}, {\"label\": \"H2\", \"item\": \"a recent message of this conversation\", \"position\": 42, \"author\": \"the assistant\", \"written_at\": \"2026-09-22T11:59:00+00:00\", \"text\": \"That sounds like a good fit for the team dinner. The Copper Kettle could only take eight.\", \"not_linkable\": true}, {\"label\": \"H3\", \"item\": \"a recent message of this conversation\", \"position\": 43, \"author\": \"the user\", \"written_at\": \"2026-09-22T11:59:00+00:00\", \"text\": \"ok let me think about it\", \"not_linkable\": true}], \"episode_window\": [{\"label\": \"P1\", \"item\": \"an earlier exchange on conversation:c-1\", \"occurred_at\": \"2026-09-21T12:00:00+00:00\", \"input\": \"help me find somewhere for a team dinner in mid-October, about twelve people\", \"input_cut_to_first_chars\": false, \"response\": \"Happy to. Do you have an area or a budget in mind?\", \"response_cut_to_first_chars\": false, \"status\": \"completed\", \"reason\": \"returned\"}]}",
+      "name": null
+    }
+  ]
+}
