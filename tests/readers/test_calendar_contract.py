@@ -22,15 +22,10 @@ the payload would have been — which is the source's secret.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path as _Path
 from typing import TYPE_CHECKING
 
 import pytest
 from ics_fixtures import NOW, STAMP, calendar, frozen, reader, source, utc, vevent
-
-sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "core"))
-
 from reader_contract import GatedRead, ReaderContract, declared_name_of
 
 from ai_assistant.core.errors import ReaderError
