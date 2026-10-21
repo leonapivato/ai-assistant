@@ -1113,8 +1113,9 @@ class SqlitePlanStore:
         """Return the named episodes' observation records, in the order named.
 
         Raises:
-            PlanningError: If ``episode_ids`` is not a sequence of strings, or the
-                backend fails.
+            PlanningError: If ``episode_ids`` is not a sequence of strings, names an id
+                with no UTF-8 encoding (which SQLite could not bind), or the backend
+                fails.
         """
         named = requested_episodes(episode_ids)
         if not named:

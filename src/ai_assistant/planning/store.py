@@ -213,7 +213,8 @@ class InMemoryPlanStore:
         """Return the named episodes' observation records, in the order named.
 
         Raises:
-            PlanningError: If ``episode_ids`` is not a sequence of strings.
+            PlanningError: If ``episode_ids`` is not a sequence of strings, or names an
+                id with no UTF-8 encoding.
         """
         return tuple(
             self._observations[one].model_copy(deep=True)
