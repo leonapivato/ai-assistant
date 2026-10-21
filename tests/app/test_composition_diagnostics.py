@@ -20,6 +20,7 @@ from ai_assistant.app.composition import DIAGNOSTIC_FILE_BYTES
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.evaluation import FileDiagnosticRecord
+from ai_assistant.models.follow_up import FollowUpAsker
 from ai_assistant.orchestration.phase_path import PhasePath
 
 if TYPE_CHECKING:
@@ -208,3 +209,95 @@ def test_an_observer_file_alone_still_refuses_a_start_without_a_sweep(tmp_path: 
 
     with pytest.raises(ConfigurationError, match=str(directory)):
         build_engine(settings, data_dir=tmp_path)
+
+
+def test_a_follow_up_file_alone_still_refuses_a_start_without_a_sweep(tmp_path: Path) -> None:
+    """ADR-0337 §8:13: the follow-up file is counted by the startup refusal like any other."""
+    directory = tmp_path / "diagnostics"
+    directory.mkdir(mode=0o700)
+    (directory / "3f2b8c4e-1d5a-4e7b-9c0d-2a6f8e1b7c35.followup.jsonl").write_text("{}\n")
+    settings = Settings(embedder=EmbedderKind.HASHING, retention_purge_interval=None)
+
+    with pytest.raises(ConfigurationError, match=str(directory)):
+        build_engine(settings, data_dir=tmp_path)
+
+
+# --- ADR-0337 §8: the follow-up asker around the record ----------------------------------
+
+
+def test_the_follow_up_without_the_record_refuses_the_start_naming_both(tmp_path: Path) -> None:
+    """§8:2: refused before the API accepts a request; here, before the data directory."""
+    data_dir = tmp_path / "fresh"
+    settings = Settings(embedder=EmbedderKind.HASHING, follow_up_question=True)
+
+    with pytest.raises(ConfigurationError, match="follow_up_question") as refused:
+        build_engine(settings, data_dir=data_dir)
+
+    assert "diagnostic_record" in str(refused.value)
+    assert not data_dir.exists()
+
+
+async def test_with_the_record_on_and_no_follow_up_no_emitter_holds_an_asker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§8:1: off by default, so a hub hosted for another person never asks."""
+    built = _spy(monkeypatch)
+    settings = Settings(embedder=EmbedderKind.HASHING, diagnostic_record=True)
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        assert engine._diagnostics is built[0]
+        assert not any(isinstance(one, FollowUpAsker) for one in vars(engine).values())
+    finally:
+        await engine.aclose()
+
+
+async def test_with_the_follow_up_on_every_emitter_holds_the_asker_around_the_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§8:5: the sink every emitter is handed is the asker, wrapping the one record."""
+    built = _spy(monkeypatch)
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        diagnostic_record=True,
+        follow_up_question=True,
+        follow_up_daily_calls=7,
+        default_model="anthropic:claude-default",
+        observer_scout_model="anthropic:claude-scout",
+        model_timeout_seconds=12.5,
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        record = built[0]
+        held = engine._diagnostics
+        assert isinstance(held, FollowUpAsker)
+        asker: FollowUpAsker = held
+        assert asker._sink is record
+        phases = engine._phases
+        assert isinstance(phases, PhasePath)
+        assert engine._recall is not None
+        assert engine._recall._diagnostics is asker
+        assert engine._understanding is not None
+        assert engine._understanding._diagnostics is asker
+        assert phases._planning._diagnostics is asker
+        assert phases._planning._completer._diagnostics is asker  # type: ignore[attr-defined]
+        assert phases._authorizing._diagnostics is asker
+        assert phases._digesting._diagnostics is asker
+        assert engine._observer is not None
+        assert engine._observer._entries._sink is asker
+        # The sweep still holds the record itself, never the asker (ADR-0314 §3:3).
+        assert engine._diagnostic_retention is record
+        # §8:8: each route's first model; §8:3 the budget; the routes' own deadline.
+        assert asker._routes == {
+            "understanding": "anthropic:claude-default",
+            "planning": "anthropic:claude-default",
+            "digesting": "anthropic:claude-default",
+            "observer.scout": "anthropic:claude-scout",
+            "observer.commit": "anthropic:claude-default",
+        }
+        assert asker._budget.limit == 7
+        assert asker._timeout == 12.5
+        # §8:16: the asker is stopped first among what the façade closes.
+        assert engine._closers[0] == asker.aclose
+    finally:
+        await engine.aclose()
+    assert asker._closed

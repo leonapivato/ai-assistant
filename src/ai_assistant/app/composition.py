@@ -69,7 +69,7 @@ from ai_assistant.models import (
     ensure_credential_available,
     ensure_vendor_available,
 )
-from ai_assistant.models.follow_up import FOLLOW_UP_PROMPT
+from ai_assistant.models.follow_up import FOLLOW_UP_PROMPT, FollowUpAsker
 from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.orchestration import (
     ConnectionOperations,
@@ -199,8 +199,8 @@ _log = structlog.get_logger(__name__)
 #: declaration here and hands the module ``prompts[<declaration>.name]``; nothing else
 #: in this layer changes. An override is read only for a prompt listed here, so a file
 #: naming a prompt not yet moved names no prompt and refuses the start (§5:1). The
-#: follow-up's (ADR-0337 §6:1) is listed so its override is read as any prompt's; no
-#: module is handed it until the hub-side asker (§8:5) is wired.
+#: follow-up's (ADR-0337 §6:1) is listed so its override is read as any prompt's, and the
+#: hub-side asker is handed it where ``follow_up_question`` is on (§8:5).
 PROMPTS: Final[tuple[PromptDeclaration, ...]] = (
     UNDERSTANDING_PROMPT,
     PLANNING_PROMPT,
@@ -1007,6 +1007,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     # refuses to start while it would write one or holds one, before any store opens.
     record_directory = diagnostic_record_directory(settings, data_dir=directory)
     refuse_an_unswept_diagnostic_record(settings, record_directory)
+    # ADR-0337 §8:2: the follow-up is kept in the record, so it is not asked without one.
+    refuse_a_follow_up_without_the_record(settings)
     # ADR-0334 §3:4: every prompt's template, default or override, read and checked
     # once, before the API accepts a request and before any store opens; a malformed
     # override refuses the start here (§5:1). It creates nothing (§5:3).
@@ -1064,7 +1066,15 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         diagnostic_record = FileDiagnosticRecord(
             directory=record_directory, file_bytes=DIAGNOSTIC_FILE_BYTES
         )
-        diagnostics = diagnostic_record if settings.diagnostic_record else None
+        diagnostics: DiagnosticSink | None = (
+            diagnostic_record if settings.diagnostic_record else None
+        )
+        # ADR-0337 §8:5: where the follow-up is asked, the asker wraps the sink every
+        # emitter is handed, passing each entry on unchanged; the record is on here,
+        # since the start is refused above where it is not (§8:2).
+        follow_ups = _follow_up_asker(settings, diagnostics, prompts[FOLLOW_UP_PROMPT.name])
+        if follow_ups is not None:
+            diagnostics = follow_ups
         # ADR-0119 §8's ``RETRIEVAL`` emitter is *inside* this store, because what
         # the trace reports about a read is observable only here: the ``limit``
         # asked for, the ``fetch_k`` the KNN was actually given after the clamp, the
@@ -2059,6 +2069,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # place that knows which implementation satisfies it.
             connection_operations=connection_operations,
             closers=[
+                # The follow-up asker first (ADR-0337 §8:16): once the façade has drained
+                # every activation, a follow-up not yet sent is not sent, and nothing
+                # keeps the queue. It writes into the record, which owns nothing to close.
+                *([follow_ups.aclose] if follow_ups is not None else []),
                 _as_async(memory.close),
                 _as_async(trail.close),
                 # And the story store: no store reads it and it reads none (ADR-0289
@@ -2594,6 +2608,67 @@ def diagnostic_record_directory(settings: Settings, *, data_dir: Path | None = N
     """
     directory = data_dir if data_dir is not None else settings.data_dir
     return directory / DIAGNOSTIC_DIRECTORY
+
+
+def refuse_a_follow_up_without_the_record(settings: Settings) -> None:
+    """Refuse a start that would ask the follow-up with no record to keep it in (ADR-0337 §8:2).
+
+    The follow-up is asked of a recorded call and its answer kept in the diagnostic
+    record (§8:4, §8:9), so ``follow_up_question`` true with ``diagnostic_record`` false
+    is a configuration that could do neither. It is refused before the API accepts a
+    request, naming both settings.
+
+    Args:
+        settings: Loaded application settings.
+
+    Raises:
+        ConfigurationError: Naming both settings, where the start is refused.
+    """
+    if settings.follow_up_question and not settings.diagnostic_record:
+        msg = (
+            "follow_up_question is on and diagnostic_record is off: the follow-up is "
+            "asked of recorded calls and kept in the diagnostic record; turn "
+            "diagnostic_record on or follow_up_question off"
+        )
+        raise ConfigurationError(msg)
+
+
+def _follow_up_asker(
+    settings: Settings, diagnostics: DiagnosticSink | None, prompt: PromptTemplate
+) -> FollowUpAsker | None:
+    """The follow-up asker around the record's sink, where it asks (ADR-0337 §8:5, §8:8).
+
+    Each route's follow-up goes to the first model of the stage's own route: planning,
+    understanding and a digest's parts to ``default_model``, which leads the routed
+    order and is the one planning's completer asks (:func:`_model_specs`); the
+    observer's two steps each to its own step's model. Its deadline is the one every
+    route's attempt is held to, ``model_timeout_seconds``, and it asks with the
+    planning completer's own thinking, the default.
+
+    Args:
+        settings: Loaded application settings.
+        diagnostics: The record's sink, or ``None`` where the record is off.
+        prompt: The ``follow_up`` template, as read at start (ADR-0337 §6:1).
+
+    Returns:
+        ``None`` where ``follow_up_question`` is false or there is no sink to wrap.
+    """
+    if not settings.follow_up_question or diagnostics is None:
+        return None
+    first = _model_specs(settings)[0]
+    return FollowUpAsker(
+        diagnostics,
+        prompt=prompt,
+        routes={
+            "understanding": first,
+            "planning": first,
+            "digesting": first,
+            "observer.scout": _observer_scout_spec(settings),
+            "observer.commit": _observer_commit_spec(settings),
+        },
+        daily_calls=settings.follow_up_daily_calls,
+        timeout=settings.model_timeout_seconds,
+    )
 
 
 def refuse_an_unswept_diagnostic_record(settings: Settings, record_directory: Path) -> None:
