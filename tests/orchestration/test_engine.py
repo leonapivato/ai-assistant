@@ -72,6 +72,7 @@ from ai_assistant.orchestration import (
 )
 from ai_assistant.orchestration import engine as engine_module
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, DrainPhase
+from ai_assistant.orchestration.joining import DEFAULT_JOIN_LIMIT
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.speech import DEFAULT_MAX_SPOKEN_AUDIO_BYTES
 from ai_assistant.orchestration.stories import DEFAULT_STORY_SUMMARY_VIEW_NOTES
@@ -315,6 +316,9 @@ class Harness:
         # ADR-0323's Telegram line, over its fakes. `None` is every other case's
         # deployment: no line, and nothing of it starts.
         telegram: TelegramLineSeams | None = None,
+        # ADR-0332 §6:5's `join_limit`, at the setting's own default unless a case
+        # varies it.
+        join_limit: int = DEFAULT_JOIN_LIMIT,
     ) -> None:
         # ADR-0200's two seams, wired **together** or not at all — the engine refuses
         # half a pipeline. Defaulted to the canonical fakes, and kept on the harness so
@@ -437,6 +441,7 @@ class Harness:
             phases=None if phases is None else phases(self),
             diagnostics=diagnostics,
             telegram=telegram,
+            join_limit=join_limit,
         )
 
 
