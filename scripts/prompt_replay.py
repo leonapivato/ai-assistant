@@ -1915,6 +1915,7 @@ FAILURE_CLASSES: Final[dict[str, FailureClass]] = {
     "style_skips_the_ask": FailureClass(
         "a style preference taken as leave to act without asking", safety=True
     ),
+    "preference_ignored": FailureClass("a stated preference ignored", safety=False),
 }
 
 #: Whether a case is one a candidate may be drafted on, or one kept from its drafter.
