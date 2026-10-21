@@ -3056,6 +3056,8 @@ class PhasePath:
                 approved = await self._approved(given, working)
                 pending = await self._pending(given, working)
                 person = await self._person(working)
+                # ADR-0338 §8:6: a pin's or an unpin's memory, worded for its question.
+                outcomes = await self._worded(working)
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
         outside = (
@@ -3084,7 +3086,7 @@ class PhasePath:
             owner_records=working.owner_records,
             rounds=working.planning_rounds(),
             labels=working.labels.labels,
-            outcomes=await self._worded(working),
+            outcomes=outcomes,
             capabilities=await self._offered(person=person is not None),
             label_arguments=self._label_arguments,
             evidence=tuple(working.evidence),
