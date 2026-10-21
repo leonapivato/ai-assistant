@@ -1,6 +1,6 @@
 # 38. A user assertion supersedes a conflicting inference
 
-- Status: Partially superseded by ADR-0092 (§2a's policy-side exclusion of `EXTERNAL` from the supersedable set)
+- Status: Partially superseded by ADR-0092 (§2a's policy-side exclusion of `EXTERNAL` from the supersedable set) and ADR-0336 (§1 and §2, as they reach a conflict no relation labels a contradiction; §3's ratification of the deferral, as it reaches a conflict set none of whose asserted members is labelled `CONTRADICTS`)
 - Date: 2026-07-22
 - Amended: 2026-08-29 by ADR-0214 — **§3's ratification of an unconditional
   `ASK_USER` becomes over-wide, and §2a's first fold refusal admits one more
@@ -147,6 +147,7 @@
   [ADR-0009](0009-learning-model.md) §5 recorded and deferred. It supersedes
   nothing: ADR-0009 §5 states the interaction exists and names it out of scope,
   which stays true as history.
+- Partially superseded: 2026-10-21 by ADR-0336 — §1 and §2, as they reach a conflict no relation labels a contradiction: a user assertion supersedes a derived memory only where the writer labels it `CONTRADICTS`, and an unlabelled one is left live beside it (ADR-0336 §3:1, §5:1, §6:1). §3's ratification of the deferral, as it reaches a conflict set none of whose asserted members is labelled `CONTRADICTS`: such a proposal is accepted beside them (ADR-0336 §4:1). §3's one-way rule stands. Every other part stands. This replacement takes effect on ratification of ADR-0336. This reciprocal header record lands with ADR-0336 under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

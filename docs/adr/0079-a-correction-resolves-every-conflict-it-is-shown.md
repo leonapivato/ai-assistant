@@ -1,6 +1,6 @@
 # 79. A correction resolves every conflict it is shown, or it does not land
 
-- Status: Partially superseded by ADR-0159 (§3's promoted full-set retirement obligation, as it reaches a conflict labelled a restatement or an addition) and ADR-0171 (that same obligation, as it reaches a conflict the writer holds no relation for on a crossing carrying a labelled contradiction)
+- Status: Partially superseded by ADR-0159 (§3's promoted full-set retirement obligation, as it reaches a conflict labelled a restatement or an addition) and ADR-0171 (that same obligation, as it reaches a conflict the writer holds no relation for on a crossing carrying a labelled contradiction) and ADR-0336 (§3's obligation, on a crossing for which the writer holds no `CONTRADICTS` relation: the target alone is retired)
 - Date: 2026-07-28
 - Partially superseded: 2026-08-21 by ADR-0171 — **§3's promoted `MemoryWriter`
   obligation is narrowed a second time, on a ground its sentence again has no term
@@ -132,6 +132,7 @@
   the roadmap's leg 4 (the exit test this ADR half-discharges); issues #313 and
   #314 (the two questions decided), #306, #423, #457 (the retrieval-side residual
   §1 names and declines to close), #411.
+- Partially superseded: 2026-10-21 by ADR-0336 — §3's obligation, on a crossing for which the writer holds no `CONTRADICTS` relation for any member: a `SUPERSEDE` retires the named target alone, besides what ADR-0078 §5b's confirmation covers (ADR-0336 §5:1–§5:2). §1 stands. Every other part stands. This replacement takes effect on ratification of ADR-0336. This reciprocal header record lands with ADR-0336 under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
