@@ -1,6 +1,6 @@
 # 213. A record carries the topics it is about, proposed once at write and never inferred at read
 
-- Status: Partially superseded by ADR-0239 (§4's set-at-write clause, §6's producer enumeration and its no-labelling-another-producer's-record clause, and §8's revised-only-by-two-routes and only-in-place-write clauses — each for `EpisodicMemory` records only) and ADR-0285 (§5:9; §6:1's `ModelBackedObserver` member)
+- Status: Partially superseded by ADR-0239 (§4's set-at-write clause, §6's producer enumeration and its no-labelling-another-producer's-record clause, and §8's revised-only-by-two-routes and only-in-place-write clauses — each for `EpisodicMemory` records only) and ADR-0285 (§5:9; §6:1's `ModelBackedObserver` member) and ADR-0345 (every clause, as it applies to a memory)
 - Date: 2026-08-29
 - **Partially superseded: 2026-09-05 by
   [ADR-0239](0239-the-observation-pass-labels-the-episodes-it-read-and-a-label-lands-as-a-conditional-write-at-the-episodes-own-id.md),
@@ -37,6 +37,13 @@
   ratification of ADR-0285. This reciprocal header record accompanies the numbered draft
   under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
   preserved.
+- Partially superseded: 2026-10-21 by ADR-0345 — every clause, as it applies to a memory:
+  a memory carries no `topics`, and what topics were meant to serve on a memory is served by
+  situation labels and `about_person` (ADR-0345 §7, §9, §10). A memory stored with topics
+  carries each as a situation label after the upgrade. Every clause stands for an episode,
+  as ADR-0239 and ADR-0285 leave it. This replacement takes effect on ratification of
+  ADR-0345. This reciprocal header record accompanies the numbered draft under ADR-0070
+  and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
