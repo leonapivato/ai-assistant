@@ -168,17 +168,26 @@ class ReadPart:
     answers: str | None = None
     question: str | None = None
 
-    def rendered(self, *, answers: bool = False) -> dict[str, FrozenJson]:
+    def rendered(
+        self, *, answers: bool = False, exchange: str | None = None
+    ) -> dict[str, FrozenJson]:
         """The part as the steps are shown it, attributed from the record (§8:5).
 
         Args:
             answers: Whether to carry the message it replies to (§9:3).
+            exchange: The label of the exchange it belongs to, where the step is shown
+                parts apart from their exchanges (the commit step); the part then names
+                that exchange and when it occurred. The scout is shown each part inside
+                its exchange instead, and passes none.
 
         Returns:
             One JSON object.
         """
-        shown: dict[str, FrozenJson] = {
-            "part": self.handle,
+        shown: dict[str, FrozenJson] = {"part": self.handle}
+        if exchange is not None:
+            shown["exchange"] = exchange
+            shown["occurred_at"] = self.occurred_at.isoformat()
+        shown |= {
             "from": ORIGIN_WORDS[self.origin],
             "outside": origin_is_outside(self.origin),
             "at": None if self.when is None else self.when.isoformat(),
