@@ -9,6 +9,7 @@ sent to, so nothing here reaches a provider.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
@@ -791,6 +792,55 @@ async def test_a_follow_up_past_its_deadline_is_recorded_as_failed() -> None:
     await _hand(asker, _given(), _returned())
     (entry,) = await _settled(sink, 1)
 
+    assert _body(entry)["failure"]["class"] == "TimeoutError"
+    await asker.aclose()
+
+
+async def test_a_cancellation_the_model_raises_of_its_own_is_a_failure_and_the_queue_goes_on() -> (
+    None
+):
+    """A cancellation not the asker's own fails one follow-up and stops none after it."""
+    sink, world = FakeDiagnosticSink(), _World()
+    asker = _asker(sink, world, daily_calls=2)
+    failures: list[BaseException] = [asyncio.CancelledError()]
+
+    async def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del messages, info
+        if failures:
+            raise failures.pop()
+        return ModelResponse(parts=[TextPart("I had to guess.")])
+
+    world.model.function = respond  # the world's answer, swapped
+
+    await _hand(asker, _given(), _returned(), _given(), _returned())
+    first, second = await _settled(sink, 2)
+
+    assert _body(first)["failure"]["class"] == "CancelledError"
+    assert _body(second)["answer"] == "I had to guess."
+    await asker.aclose()
+
+
+async def test_a_rounds_follow_up_answered_past_its_deadline_is_recorded_as_failed() -> None:
+    """A model that swallows the deadline's cancellation and answers anyway answered late."""
+    sink, world = FakeDiagnosticSink(), _World()
+
+    async def late(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del messages, info
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.sleep(10)
+        return ModelResponse(parts=[TextPart("too late")])
+
+    world.model.function = late  # the world's answer, swapped
+    asker = _asker(sink, world, timeout=0.05)
+
+    await _hand(
+        asker,
+        _given(DiagnosticSource.PLANNING, tools=_TOOLS),
+        _returned(DiagnosticSource.PLANNING, reply=None, response=_round_response("world")),
+    )
+    (entry,) = await _settled(sink, 1)
+
+    assert "answer" not in _body(entry)
     assert _body(entry)["failure"]["class"] == "TimeoutError"
     await asker.aclose()
 
