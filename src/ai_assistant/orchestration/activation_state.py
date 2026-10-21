@@ -214,7 +214,7 @@ class ActivationState:
     joined: tuple[JoinedInput, ...] = field(default=(), init=False)
     #: ADR-0332 §3:6, §3:18: joins taken, in one step with their check, whose reader's
     #: marking of their messages has not yet landed (:meth:`reserve`). Counted toward
-    #: ``join_limit``, they hold acting's commitment step (:meth:`settled`), and are no
+    #: ``join_limit``, they hold every route out of running (:meth:`settled`), and are no
     #: part of the input, so no stage reads and no episode records them, until the
     #: marking lands and confirms them, or fails and withdraws them.
     _pending: list[JoinedInput] = field(default_factory=list, init=False, repr=False)
@@ -344,12 +344,39 @@ class ActivationState:
             self._settled.set()
 
     async def settled(self) -> None:
-        """Wait until no join is pending its marking, as acting's commitment step does.
+        """Wait until no join is pending its marking (ADR-0332 §3:16, §3:18).
+
+        **Every route out of running waits for this**: acting's commitment step, the
+        rules the controller reads once each stage ends, a takeover of this activation,
+        and the episode's freeze (:meth:`settled_through`). So a join taken is confirmed
+        or withdrawn before the activation commits, ends, is taken over or is frozen,
+        and the episode records every message the reader marked taken in by it. The
+        wait is the reader's one marking write, which a reader awaits to its end
+        (:func:`~ai_assistant.orchestration.joining.settle`).
 
         Returns at once, without yielding, where none is.
         """
         while self._pending:
             await self._settled.wait()
+
+    async def settled_through(self) -> asyncio.CancelledError | None:
+        """:meth:`settled`, holding a cancellation that arrives meanwhile (§3:16).
+
+        The freeze's wait: a shutdown's cancellation still reaches the freeze, which
+        then records the join the reader's marking confirmed. Returns at once, without
+        yielding, where no join is pending.
+
+        Returns:
+            The cancellation held, for the caller to raise once the episode is frozen;
+            ``None`` where none arrived.
+        """
+        cancelled: asyncio.CancelledError | None = None
+        while self._pending:
+            try:
+                await self._settled.wait()
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+        return cancelled
 
     def join(self, joined: JoinedInput, *, limit: int) -> bool:
         """Take ``joined`` into the activation, where it may still join (ADR-0332 §3:6).

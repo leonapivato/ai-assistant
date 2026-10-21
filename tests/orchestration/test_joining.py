@@ -15,6 +15,7 @@ import pytest
 from test_engine import tool
 
 from ai_assistant.core.config import Settings
+from ai_assistant.core.errors import ConversationStoreError
 from ai_assistant.core.types import (
     ActivationUnderstanding,
     CapabilityEffect,
@@ -54,6 +55,7 @@ from ai_assistant.orchestration.joining import (
     is_pure_read,
     join_running,
     reserve_join,
+    settle,
     take_over,
     visible_running,
 )
@@ -512,17 +514,77 @@ def test_a_join_before_the_pass_begins_is_not_yet_and_one_stopped_is_refused() -
     assert reserve_join([], _joining("a"), limit=3, at=_AT) == (JoinCheck.REFUSED, None)
 
 
-def test_an_activation_waiting_on_a_joins_marking_is_not_taken_over() -> None:
-    """§4:6: its pending join would land after its input was taken, so none is taken."""
+def test_a_pending_join_is_no_condition_of_a_takeover() -> None:
+    """§4:6's conditions are exhaustive: the engine waits for the marking, and never refuses.
+
+    The engine's takeover stage waits for the other's join to settle before this step
+    (``Engine._takeover_settled``); the step itself reads only §4:6's conditions.
+    """
     other = _running("a", _IDS[0])
     _, pending = reserve_join([other], _joining("a"), limit=3, at=_AT)
     assert pending is not None
     taker = _running("b", _IDS[1])
 
-    assert not take_over([other, taker], taker, _IDS[0], limit=3, at=_AT)
-    assert not other.stopped
-    pending.confirm([2])
     assert take_over([other, taker], taker, _IDS[0], limit=3, at=_AT)
+    assert other.stopped
+
+
+async def test_a_marking_is_written_to_its_end_through_a_cancellation() -> None:
+    """§3:18: the join is confirmed with what the store marked, then the cancellation goes on."""
+    state = _running("a")
+    _, pending = reserve_join([state], _joining("a"), limit=3, at=_AT)
+    assert pending is not None
+    release = asyncio.Event()
+    marked: list[int] = []
+
+    async def marking() -> None:
+        await release.wait()
+        marked.append(2)
+
+    settling = asyncio.ensure_future(settle(pending, marking(), lambda: marked))
+    await asyncio.sleep(0)
+    settling.cancel()
+    await asyncio.sleep(0)
+    assert not settling.done(), "the marking under way is not cut off"
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await settling
+    (joined,) = _joined_now(state)
+    assert [one.position for one in joined.messages] == [2]
+    assert not _joining_now(state)
+
+
+async def test_a_marking_that_fails_confirms_nothing_and_raises() -> None:
+    state = _running("a")
+    _, pending = reserve_join([state], _joining("a"), limit=3, at=_AT)
+    assert pending is not None
+
+    async def marking() -> None:
+        msg = "the store refuses the marking"
+        raise ConversationStoreError(msg)
+
+    with pytest.raises(ConversationStoreError):
+        await settle(pending, marking(), list)
+    assert _joined_now(state) == ()
+    assert not _joining_now(state)
+
+
+async def test_the_freezes_wait_holds_a_cancellation_until_the_join_settles() -> None:
+    """§3:16: a cancellation during the freeze's wait is returned, once nothing is pending."""
+    state = _running("a")
+    assert await state.settled_through() is None
+    _, pending = reserve_join([state], _joining("a"), limit=3, at=_AT)
+    assert pending is not None
+    waiting = asyncio.ensure_future(state.settled_through())
+    await asyncio.sleep(0)
+    waiting.cancel()
+    await asyncio.sleep(0)
+    assert not waiting.done()
+
+    pending.confirm([2])
+    held = await asyncio.wait_for(waiting, 1)
+    assert isinstance(held, asyncio.CancelledError)
+    assert len(_joined_now(state)) == 1
 
 
 def _joining_now(state: ActivationState) -> bool:

@@ -20,8 +20,8 @@ activation has not committed and is not stopped, its author and standing are the
 running input's, and fewer than ``join_limit`` joins are taken; the reader holds the
 fourth condition itself, that no earlier input on the place is waiting, since once one
 message has not joined nothing after it joins. The join is taken pending the reader's
-marking of the message, taken in by the activation it joins, and that activation commits
-nothing until the marking has landed (§3:18), so the store's bookkeeping is what a
+marking of the message, taken in by the activation it joins, and that activation leaves
+running by no route until the marking has settled (§3:18), so the store's bookkeeping is what a
 restart reads. A message that does not join waits: it is never
 refused, and when the activation ends the reader looks again and takes in everything
 waiting **together, as one input**.
@@ -87,7 +87,7 @@ from ai_assistant.core.types import (
     TranscriptMessage,
 )
 from ai_assistant.orchestration.conversations import conversation_channel, fitted_message
-from ai_assistant.orchestration.joining import JoinCheck, JoiningInput, input_standing
+from ai_assistant.orchestration.joining import JoinCheck, JoiningInput, input_standing, settle
 from ai_assistant.orchestration.understanding import AskedIn, TranscriptWindow, WrittenBy
 
 if TYPE_CHECKING:
@@ -590,12 +590,7 @@ class ChatReader:
             if joins is not None:
                 turn.over = True
                 turn.due.set()
-                try:
-                    await asyncio.gather(joins, return_exceptions=True)
-                except asyncio.CancelledError:
-                    joins.cancel()
-                    await asyncio.gather(joins, return_exceptions=True)
-                    raise
+                await _joiner_ended(joins)
             self._current.pop(conversation_id, None)
             self._turns[conversation_id] = self._turns.get(conversation_id, 0) + 1
 
@@ -673,10 +668,10 @@ class ChatReader:
         it in one step, **pending this marking** (§3:6, §3:18): the reader marks the
         messages taken in by that activation, as at admission (ADR-0293 §6:8), and only
         what the store marked joins; a message deleted or taken in elsewhere meanwhile
-        does not. Acting's commitment step waits for it, so the activation acts on
-        nothing the store does not hold taken in by it, and a marking that fails leaves
-        the message waiting with nothing having read it. Where the join refuses, the
-        input waits, and so does everything after it (§3:4).
+        does not. Every route out of running waits for it, so the activation acts on
+        nothing, and freezes on nothing, the store does not hold taken in by it, and a
+        marking that fails leaves the message waiting with nothing having read it. Where
+        the join refuses, the input waits, and so does everything after it (§3:4).
 
         Returns:
             What the join found, or ``None`` where nothing was waiting.
@@ -698,8 +693,9 @@ class ChatReader:
             turn.waited = found is JoinCheck.REFUSED
             return found
         marked: set[int] = set()
-        try:
-            positions = [one.position for one in waiting]
+        positions = [one.position for one in waiting]
+
+        async def marking() -> None:
             for start in range(0, len(positions), _MARK_CHUNK):
                 marked.update(
                     await self._conversations.take_in(
@@ -708,10 +704,13 @@ class ChatReader:
                         activation_id=pending.activation_id,
                     )
                 )
+
+        try:
+            # Settled however the marking ended, and written to its end through a
+            # shutdown's cancellation: what the store holds joins, and the activation,
+            # whose every route out of running waits for this, goes on.
+            await settle(pending, marking(), lambda: marked)
         finally:
-            # Settled however the marking ended: what the store holds joins, and the
-            # activation's commitment step goes on.
-            pending.confirm(marked)
             turn.handed.update(marked)
         return found
 
@@ -836,6 +835,29 @@ class ChatReader:
                 )
             )
         return links
+
+
+async def _joiner_ended(joins: asyncio.Future[None]) -> None:
+    """Wait for the joiner to end once its activation has (ADR-0332 §3:18).
+
+    A read cancelled by a shutdown cancels the joiner too, so a store read it is
+    suspended in never holds the shutdown; a marking it has begun is still written to
+    its end (:func:`~ai_assistant.orchestration.joining.settle`). Otherwise
+    the joiner finishes the attempt under way, so a marking is never cut off, and a
+    cancellation that arrives meanwhile reaches it too.
+
+    Raises:
+        CancelledError: Where the read was cancelled, once the joiner has ended.
+    """
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        joins.cancel()
+    try:
+        await asyncio.gather(joins, return_exceptions=True)
+    except asyncio.CancelledError:
+        joins.cancel()
+        await asyncio.gather(joins, return_exceptions=True)
+        raise
 
 
 def _loop_time() -> float:

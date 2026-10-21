@@ -2730,6 +2730,23 @@ class Engine:
         except TimeoutError:
             return
 
+    async def _stage_appended(self) -> None:
+        """A stage ended: extend the open episode, then settle a pending join (ADR-0332).
+
+        The controller reads its rules next, so a join taken while the stage ran and
+        pending its reader's marking (§3:18) is confirmed, or withdrawn, before they are
+        read: ``not_understood`` then finds what joined, and the pass neither ends, fails
+        nor stops past a message the reader marked taken in by it (§3:9, §3:16), and
+        writes nothing after its end, *couldn't finish* included, before the join is
+        settled. No await lies between this wait's end and the rules' reading. The wait
+        is the reader's one marking write, and not the pass's deadline: the stage after
+        it meets the deadline itself.
+        """
+        await self._episode_appended()
+        state = active_state()
+        if state is not None:
+            await state.settled()
+
     async def stop_activation(self, activation_id: Identifier, /) -> ActivationStop:
         """Stop one running activation: its mark, then its stop record (ADR-0297 §3, §5).
 
@@ -6203,6 +6220,10 @@ class Engine:
         is handed *stopped* where the stop mark is set and *couldn't finish* for any
         other failure, once the episode has frozen classified by that failure, so the
         record keeps why it did not finish. A cancellation still propagates as itself.
+
+        **A join pending its reader's marking settles before the freeze** (ADR-0332
+        §3:16, §3:18), on every ending: a cancellation that arrives during that wait is
+        held until the episode is frozen, so it still reaches the freeze.
         """
         self._reject_if_closing()
         admitted = asyncio.Event()
@@ -6223,6 +6244,12 @@ class Engine:
                     failure = exc
                 state = scope.state
                 if state is not None:
+                    # ADR-0332 §3:16, §3:18: a join pending its reader's marking settles
+                    # before the freeze, so the episode records what the reader marked
+                    # taken in by this activation; a cancellation meanwhile is held, and
+                    # still reaches the freeze.
+                    held = await state.settled_through()
+                    finished = failure is None
                     report = state.degraded_report()
                     try:
                         completion = await self._activation_coordinator.finish(
@@ -6241,6 +6268,8 @@ class Engine:
                     # ADR-0329 §7:6: the episode is frozen, so a run of the observer
                     # starts, without this activation waiting on it.
                     self._observe_soon()
+                    if held is not None and finished:
+                        raise held
                 failure = _stopped_failure(state, failure)
                 answer = _answered(
                     value, failure, state=state, unfinished=unfinished, check=check_output
@@ -6507,7 +6536,7 @@ class Engine:
             stages=stages,
             clock=self._clock,
             rules=ACTIVATION_RULES,
-            appended=self._episode_appended,
+            appended=self._stage_appended,
             stopped=None if state is None else (lambda: state.stopped),
             # ADR-0314 §4:4, §5:4: the controller binds the admitted activation for
             # its run and writes its steps through the composition root's sink.
@@ -6903,11 +6932,18 @@ class Engine:
         and the pass goes on: the marks are set, so the other activation runs no further
         stage, commits nothing and takes no join, and nothing it holds is claimed
         (§3:5). The stage is not entered past the deadline (:func:`_takeover_expired`).
+
+        **A join of the other's pending its reader's marking is waited for first**
+        (:meth:`_takeover_settled`, §3:18), and refuses nothing: so the takeover takes
+        the other's whole input, a join confirmed by then among it, and nothing is
+        confirmed into an activation already taken over.
         """
         understanding = working.understanding
         assert understanding is not None  # noqa: S101 — the rule makes the stage due only once a version is recorded
         named = understanding.continues
         state = active_state()
+        await self._takeover_settled(named, working)
+        # No await between the settle's end and the check: one synchronous step (§4:6).
         taken = (
             named is not None
             and state is not None
@@ -6936,6 +6972,34 @@ class Engine:
                 )
             else:
                 _log.warning("takeover_stop_unrecorded", stage="takeover", reason="store_failed")
+
+    async def _takeover_settled(self, named: str | None, working: _ActivationPass) -> None:
+        """Wait for a join of the named activation's pending its marking (ADR-0332 §3:18).
+
+        §4:6's conditions are exhaustive, so a pending join refuses no takeover: it is
+        waited for, inside the pass's deadline, and the takeover then takes the other's
+        whole input with that join confirmed in it, or withdrawn. The wait is the
+        reader's one marking write.
+
+        Raises:
+            ModelTimeoutError: If the deadline passed first; nothing is taken over, as
+                past the deadline the stage is not entered (:func:`_takeover_expired`).
+        """
+        other = next(
+            (
+                one.state
+                for one in self._running
+                if one.state is not None and one.state.activation_id == named
+            ),
+            None,
+        )
+        if named is None or other is None:
+            return
+        try:
+            async with asyncio.timeout_at(working.deadline):
+                await other.settled()
+        except TimeoutError:
+            raise ModelTimeoutError(_TAKEOVER_EXPIRED) from None
 
     def _reserve_join(self, joining: JoiningInput) -> tuple[JoinCheck, PendingJoin | None]:
         """The readers' join (ADR-0332 §3:3, §3:6, §3:18): taken, pending its marking.

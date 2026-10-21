@@ -22,9 +22,13 @@ ActivationState.join`: taken only where the activation has not ended, neither it
 committed mark nor its stop mark is set, and it has taken fewer joins than
 ``join_limit`` (§6:5), in one step with no await between the check and the append. A
 reader takes it through :func:`reserve_join`, which decides it the same way but holds
-it pending the reader's marking of its messages, taken in by that activation (§3:18):
-acting's commitment step waits for that, so the activation acts on nothing the reader's
-bookkeeping does not hold, as at admission.
+it pending the reader's marking of its messages, taken in by that activation (§3:18).
+**Every route out of running waits for that marking to settle** (:meth:`~ai_assistant.
+orchestration.activation_state.ActivationState.settled`): acting's commitment step, the
+rules the controller reads once each stage ends, a takeover of the activation, and the
+episode's freeze, on a stop, a failure and a shutdown's cancellation as on a finish. So
+the activation acts on nothing the reader's bookkeeping does not hold, as at admission,
+and its episode records every message the reader marked taken in by it (§3:16).
 
 **What another place is shown** (§4:1-§4:3). :func:`visible_running` reads the running
 activations of the same person on that person's other places, each with its input and
@@ -46,6 +50,7 @@ episode carries only the :class:`~ai_assistant.core.types.JoinedInput` records (
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
@@ -61,7 +66,7 @@ from ai_assistant.orchestration.channel_kinds import one_at_a_time
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Coroutine, Iterable, Sequence
     from datetime import datetime
 
     from ai_assistant.core.types import ToolDefinition
@@ -81,6 +86,7 @@ __all__ = [
     "join_running",
     "place_busy",
     "reserve_join",
+    "settle",
     "take_over",
     "visible_running",
 ]
@@ -251,8 +257,9 @@ class PendingJoin:
     """A join taken pending its reader's marking (ADR-0332 §3:6, §3:18).
 
     The reader marks the input's messages taken in by :attr:`activation_id`, then
-    confirms what its store marked, or withdraws it where the marking failed. Until
-    then the activation does not commit (:meth:`ActivationState.settled`).
+    confirms what its store marked, or withdraws it where the marking failed
+    (:func:`settle`). Until then the activation leaves running by no route
+    (:meth:`ActivationState.settled`).
 
     Attributes:
         activation_id: The activation it joins, which the reader marks it taken in by.
@@ -272,6 +279,61 @@ class PendingJoin:
     def withdraw(self) -> None:
         """The marking failed: nothing joined, and the input waits (§3:4)."""
         self._state.withdraw(self._joined)
+
+
+async def settle(
+    pending: PendingJoin,
+    marking: Coroutine[object, object, None],
+    marked: Callable[[], Iterable[int | None]],
+) -> None:
+    """Write a reader's ``marking`` to its end, then confirm ``pending`` with ``marked``.
+
+    **Held through a cancellation** (§3:18): a marking once begun is awaited to its end,
+    so what the store holds is known when the join is confirmed, and a cancellation is
+    re-raised only then, as the line's ``_finished`` holds one around its record write.
+    So a shutdown never leaves a message marked taken in by an activation whose episode
+    does not record it, and the activation, whose every route out of running waits for
+    this (:meth:`ActivationState.settled`), waits for one store write at most.
+
+    Args:
+        pending: The join taken pending this marking.
+        marking: The reader's marking of its messages, taken in by
+            :attr:`PendingJoin.activation_id`.
+        marked: The positions of the messages the store marked, read once the marking
+            has ended, however it ended.
+
+    Raises:
+        CancelledError: Once the marking has ended and the join is settled, where one
+            arrived meanwhile.
+        Exception: The marking's own failure, once what it marked before then is
+            confirmed.
+    """
+    # Started at once, so the marking's first write begins in the step that took the
+    # join, before anything else on the loop runs.
+    writing = asyncio.get_running_loop().create_task(marking, eager_start=True)
+    try:
+        await _to_its_end(writing)
+    finally:
+        pending.confirm(marked())
+        failure = None if writing.cancelled() else writing.exception()
+    if failure is not None:
+        raise failure
+
+
+async def _to_its_end(work: asyncio.Future[None]) -> None:
+    """Wait until ``work`` has ended, holding a cancellation that arrives meanwhile.
+
+    Raises:
+        CancelledError: Once ``work`` has ended, where one arrived meanwhile.
+    """
+    cancelled: asyncio.CancelledError | None = None
+    while not work.done():
+        try:
+            await asyncio.wait((work,))
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+    if cancelled is not None:
+        raise cancelled
 
 
 def reserve_join(
@@ -437,7 +499,10 @@ def take_over(
     :class:`~ai_assistant.core.types.JoinedInput` naming it (§4:6, §3:17).
 
     Its stop record is the caller's to write once this returns (ADR-0297 §3:4): the mark
-    is what every stage reads, and the record follows it.
+    is what every stage reads, and the record follows it. A join of the other's pending
+    its reader's marking is no condition here, since §4:6's conditions are exhaustive:
+    the caller waits for it to settle first (:meth:`ActivationState.settled`), so what is
+    taken is the other's whole input, a join confirmed by then among it.
 
     Args:
         running: The activations the engine holds as running.
@@ -460,7 +525,6 @@ def take_over(
         or not standing.joins(other.standing)
         or not _running(other)
         or other.committed
-        or other.joining
         or not taker.can_join(limit=limit)
     ):
         return False
