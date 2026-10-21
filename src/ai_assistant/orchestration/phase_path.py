@@ -191,6 +191,19 @@ pending candidates are handed planning by its fact (§6:9). A call noting relian
 effect, so it reaches :class:`PhaseTools`, which answers it done and reaches nothing
 (§6:7). With the switch off, none of this is reached.
 
+**The person model's calls, where a store is wired** (ADR-0338 §8:4-§8:8, §11:2). The
+engine attaches the person block's assembly with :meth:`PhasePath.attach_person_model`
+exactly where it is handed one; unattached, as on every hub whose switch is off, nothing
+below is reached. Attached, ``set_profile``, ``pin`` and ``unpin`` are advertised beside
+the own records' other declarations and offered to each round of an activation given a
+person block; a ``pin``'s and an ``unpin``'s memory is named by ``M`` label; each runs
+through acting's own-records seam, by
+:class:`~ai_assistant.orchestration.person_calls.PersonModelCalls`. Before each round,
+the memory each such call that needs the user names is read from the memory store, so
+its question shows the memory's wording in place of its label (§8:6); one whose memory
+is gone, or rests on outside content, which no question shows (ADR-0307 §9:2), cannot be
+asked about.
+
 **Left to later lanes:** pulls (ADR-0292 §13:3), which nothing builds yet.
 
 **It logs stage and code-owned reason only** (ADR-0275 §8), and a defect by its class
@@ -215,6 +228,7 @@ from ai_assistant.core.errors import (
     ActivationStoppedError,
     ClaimStopped,
     ConversationStoreError,
+    MemoryStoreError,
     ModelTimeoutError,
     PlanningError,
     StoryStoreError,
@@ -298,6 +312,13 @@ from ai_assistant.orchestration.lookups import (
 )
 from ai_assistant.orchestration.outside_content import rests_on_outside_content
 from ai_assistant.orchestration.person_block import still_held
+from ai_assistant.orchestration.person_calls import (
+    PERSON_MODEL_CALLS,
+    PERSON_MODEL_CAPABILITIES,
+    PERSON_MODEL_LABEL_ARGUMENTS,
+    PersonModelCalls,
+    worded_argument,
+)
 from ai_assistant.orchestration.planning import (
     ApprovedAction,
     CallOutcome,
@@ -367,7 +388,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.controller import ControllerStageRun
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.lookups import LookUps
-    from ai_assistant.orchestration.person_block import PersonBlock
+    from ai_assistant.orchestration.person_block import PersonBlock, PersonBlocks
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.story_calls import StoryCalls
     from ai_assistant.orchestration.story_links import Candidates, ShortView, StoryCandidates
@@ -730,6 +751,24 @@ class PhaseTools:
         }
         self._reliance = reliance
         self._search: ToolDefinition | None = None
+
+    def add_own_records(self, declarations: Sequence[ToolDefinition]) -> None:
+        """Advertise further declarations on the assistant's own records.
+
+        For capabilities wired once the store they write is known: the person model's
+        calls, attached where the engine is handed a person-model store (ADR-0338 §11:2).
+
+        Args:
+            declarations: The further declarations.
+
+        Raises:
+            ValueError: If one names a capability already advertised here.
+        """
+        held = {str(one.capability) for one in self._own_records}
+        if any(str(one.capability) in held for one in declarations):
+            msg = "a capability on the assistant's own records is declared once"
+            raise ValueError(msg)
+        self._own_records = (*self._own_records, *declarations)
 
     async def search_declaration(self) -> ToolDefinition | None:
         """The configured search's declaration, as its searcher proposes it, or ``None``.
@@ -2507,6 +2546,8 @@ class PhasePath:
         }
         self._story_calls = story_calls
         self._look_ups = look_ups
+        # ADR-0338 §11:2: the person model's calls, attached only where a store is wired.
+        self._person_calls: PersonModelCalls | None = None
         self._append: Callable[[], Awaitable[None]] | None = None
         self._spawn: Callable[[Coroutine[None, None, None]], None] = self._spawn_held
         self._closing: Callable[[], bool] = _never
@@ -2536,6 +2577,34 @@ class PhasePath:
             self._spawn = spawn
         if closing is not None:
             self._closing = closing
+
+    def attach_person_model(self, blocks: PersonBlocks) -> None:
+        """Offer planning the person model's three calls, over the stores ``blocks`` reads.
+
+        ADR-0338 §8:4-§8:8. The engine attaches the person block's assembly here exactly
+        where it is handed one, so the calls are offered where a person-model store is
+        wired and nowhere else (§11:2): ``set_profile``, ``pin`` and ``unpin`` are
+        advertised among the own records' declarations, so authorizing's selection
+        reaches them; acting runs each by one
+        :class:`~ai_assistant.orchestration.person_calls.PersonModelCalls`; and a
+        ``pin``'s and an ``unpin``'s memory is named by its ``M`` label.
+
+        Args:
+            blocks: The person block's assembly, over the person-model store, the memory
+                store and the slot's budget.
+
+        Raises:
+            ValueError: If the person model is attached already, or a capability it
+                declares is advertised already.
+        """
+        if self._person_calls is not None:
+            msg = "the person model's calls are attached once"
+            raise ValueError(msg)
+        calls = PersonModelCalls(blocks=blocks)
+        self._tools.add_own_records(PERSON_MODEL_CALLS)
+        self._acting.add_own_records(dict.fromkeys(PERSON_MODEL_CAPABILITIES, calls))
+        self._label_arguments.update(PERSON_MODEL_LABEL_ARGUMENTS)
+        self._person_calls = calls
 
     def _spawn_held(self, work: Coroutine[None, None, None]) -> None:
         """Start ``work`` as a task this path holds until it ends."""
@@ -3015,8 +3084,8 @@ class PhasePath:
             owner_records=working.owner_records,
             rounds=working.planning_rounds(),
             labels=working.labels.labels,
-            outcomes=working.outcomes(),
-            capabilities=await self._offered(),
+            outcomes=await self._worded(working),
+            capabilities=await self._offered(person=person is not None),
             label_arguments=self._label_arguments,
             evidence=tuple(working.evidence),
             outside_content_read=working.read_outside_content,
@@ -3086,16 +3155,64 @@ class PhasePath:
                 working.pending = {}
         return working.pending
 
-    async def _offered(self) -> tuple[ToolDefinition, ...]:
+    async def _offered(self, *, person: bool = True) -> tuple[ToolDefinition, ...]:
         """The declarations this round offers planning (ADR-0306 §2:7), the clock apart.
 
         Planning's input carries ``now``, so the clock's call would only spend a round
         on what it has (#2942): it is left out of the offer, and stays registered.
+
+        The person model's calls are offered where they are attached, a fixed list or
+        none, and only to a round of an activation given a person block (``person``): an
+        activation that is no person's has no profile or pins to change (ADR-0338 §2:3).
         """
         names = (
             await self._tools.capabilities() if self._capabilities is None else self._capabilities
         )
+        if self._person_calls is not None:
+            names = (*names, *sorted(PERSON_MODEL_CAPABILITIES - set(names)))
+            if not person:
+                names = tuple(name for name in names if name not in PERSON_MODEL_CAPABILITIES)
         return await self._tools.offered([name for name in names if name not in _NOT_OFFERED])
+
+    async def _worded(self, working: PhaseWorking) -> tuple[CallOutcome, ...]:
+        """What came of every round's calls, a pin's or an unpin's memory worded.
+
+        ADR-0338 §8:6: the question about a ``pin`` or an ``unpin`` call that needs the
+        user shows the memory's wording as the memory store holds it, read here for the
+        round that may ask, in place of its label. Where it cannot be read, the memory is
+        gone, or it rests on outside content, which no question shows (ADR-0307 §9:2),
+        the call is handed on with no request, and cannot be asked about. A wording read
+        for a question is among what the activation obtained (ADR-0309 §5:10).
+        """
+        outcomes = working.outcomes()
+        if self._person_calls is None:
+            return outcomes
+        named: dict[int, tuple[str, str]] = {}
+        for index, one in enumerate(outcomes):
+            request = one.request
+            if one.kind is not CallOutcomeKind.NEEDS_YOU or request is None:
+                continue
+            argument = worded_argument(str(request.tool.capability))
+            memory_id = None if argument is None else request.parameters.get(argument)
+            if argument is not None and isinstance(memory_id, str):
+                named[index] = (argument, memory_id)
+        if not named:
+            return outcomes
+        held: Mapping[str, Memory]
+        try:
+            held = await self._memory.get_history(sorted({one for _, one in named.values()}))
+        except MemoryStoreError:
+            _log.warning("planning_wording_unread", stage="planning", reason="memory_fault")
+            held = {}
+        worded = list(outcomes)
+        for index, (argument, memory_id) in named.items():
+            record = held.get(memory_id)
+            if record is None or record.rests_on_outside_content:
+                worded[index] = replace(outcomes[index], request=None, deliberate_repeat=False)
+                continue
+            working.supplied.obtained((record,))
+            worded[index] = replace(outcomes[index], worded=((argument, record.content),))
+        return tuple(worded)
 
     async def _notes_checked(self, planned: PlannedRound, working: PhaseWorking) -> PlannedRound:
         """Refuse whole, before authorizing, a move or a split naming a note not held.

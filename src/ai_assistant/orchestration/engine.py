@@ -1130,7 +1130,7 @@ def _windows_expired(working: _ActivationPass) -> Exception | None:
     return ModelTimeoutError(_WINDOWS_EXPIRED)
 
 
-def _wired_phases(  # noqa: PLR0913 — the path, the two wirings it needs beside it, and the three seams it is handed
+def _wired_phases(  # noqa: PLR0913 — the path, the two wirings it needs beside it, the three seams it is handed, and the person model
     phases: PhasePath | None,
     *,
     understanding: bool,
@@ -1138,6 +1138,7 @@ def _wired_phases(  # noqa: PLR0913 — the path, the two wirings it needs besid
     append: Callable[[], Awaitable[None]],
     spawn: Callable[[Coroutine[None, None, None]], None],
     closing: Callable[[], bool],
+    person_blocks: PersonBlocks | None = None,
 ) -> PhasePath | None:
     """The phases, wired beside understanding and the chat's reader.
 
@@ -1146,6 +1147,10 @@ def _wired_phases(  # noqa: PLR0913 — the path, the two wirings it needs besid
     event ``receive`` admits (ADR-0309 §2:6, ADR-0313 §4:3). Their recorders extend the
     episode through ``append``, and a tidy-up call nobody waits on starts through
     ``spawn`` unless ``closing`` says shutdown has begun (§7:2).
+
+    Where a person-model store is wired, through the person block's assembly, the phases
+    are attached to it, so planning is offered the person model's three calls
+    (ADR-0338 §8:4); where none is, nothing is attached and none is offered (§11:2).
 
     An engine built without them runs no activation: no reader, and an event refused
     at admission. That is a suite holding the medium alone, or a surface no activation
@@ -1171,6 +1176,8 @@ def _wired_phases(  # noqa: PLR0913 — the path, the two wirings it needs besid
         )
         raise ConfigurationError(msg)
     phases.attach(append, spawn=spawn, closing=closing)
+    if person_blocks is not None:
+        phases.attach_person_model(person_blocks)
     return phases
 
 
@@ -1804,7 +1811,9 @@ class Engine:
                 (ADR-0338 §7:1), or ``None``, the default, where no store is wired: then
                 no activation is given a block, and nothing of the person model reaches
                 understanding or planning. Wired, an activation that is a person's is
-                given one, assembled once before understanding (§2:2-§2:4).
+                given one, assembled once before understanding (§2:2-§2:4), and the
+                phases are attached to it, so planning is offered ``set_profile``, ``pin``
+                and ``unpin`` (§8:4); with none, they are not offered.
 
         Raises:
             TypeError: If ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is
@@ -2023,6 +2032,7 @@ class Engine:
             # as a chat read is, so its shutdown drains it; none starts once it closes.
             spawn=self._spawn_read,
             closing=lambda: self._closing,
+            person_blocks=person_blocks,
         )
         # ADR-0323 §2:2: the Telegram line's spoke in the hub, its reader and its writer,
         # wired only beside the phases, which plan every activation it starts.

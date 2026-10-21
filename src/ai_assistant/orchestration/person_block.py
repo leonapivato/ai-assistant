@@ -241,6 +241,40 @@ class PersonBlocks:
         self._budget = budget_chars
         self._suggestions = suggestions
 
+    @property
+    def store(self) -> PersonModelStore:
+        """The person-model store the block is read from, which planning's calls write."""
+        return self._store
+
+    @property
+    def memory(self) -> MemoryStore:
+        """The memory store the slot's memories are read from."""
+        return self._memory
+
+    @property
+    def budget_chars(self) -> int:
+        """The kept-in-mind slot's budget, which a pin is checked against (ADR-0338 §6:3)."""
+        return self._budget
+
+    async def current_ends(self, memory_ids: Iterable[str]) -> dict[str, Memory]:
+        """Each memory's chain's current end, where it has one (ADR-0338 §4:8).
+
+        What a pin or a mark on each of ``memory_ids`` shows, walked as the block walks
+        it (ADR-0342 §5:2-§5:3), keyed by the memory the pin or mark was made on. A
+        chain that reaches no current memory, or a memory the store no longer holds, is
+        absent.
+
+        Args:
+            memory_ids: The memories pins or marks were made on.
+
+        Returns:
+            Each one's current end, by the memory it starts from.
+
+        Raises:
+            MemoryStoreError: If the memory store cannot be read.
+        """
+        return await self._reached(memory_ids)
+
     async def assemble(self, person_id: str | None, *, supply: TurnSupply) -> PersonBlock | None:
         """The block for ``person_id``, or ``None`` where there is none to give.
 

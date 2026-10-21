@@ -47,6 +47,12 @@ approved call does, the policy's recorded allow its deciding decision (§5:3). A
 it cannot read is not done. With the switch off, remembering passes ``MemoryPolicy`` as
 above (ADR-0328 §13).
 
+**The person model's calls** (ADR-0338 §8:5). Every ``set_profile``, ``pin`` and
+``unpin`` call needs the person's yes, by rule and with no model: a source of *needs you*
+beside the policy's confirm, the stand-in's and a candidate's *confirm*, with the
+policy's recorded allow as the deciding decision (ADR-0321 §4:17). Under a yes it runs as
+any approved call does (§4); a deny still refuses it, and the policy's confirm still asks.
+
 **It logs stage and code-owned reason only**, never arguments or rulings' text (ADR-0275
 §8).
 
@@ -116,6 +122,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.channel_kinds import users_place
 from ai_assistant.orchestration.outside_content import from_outside, is_outside_episode
+from ai_assistant.orchestration.person_calls import PERSON_MODEL_CAPABILITIES
 from ai_assistant.orchestration.remembering import (
     CONFIRM_ARGUMENT,
     EPISODE_ARGUMENT,
@@ -197,6 +204,8 @@ _MEMORY_ASK: Final = "the memory policy asks the user about remembering this"
 _MEMORY_REJECT: Final = "the memory policy rejects remembering this"
 #: ADR-0329 §5:2: a candidate whose wording planning asked the user to confirm.
 _CONFIRM_WORDING: Final = "the user is asked to confirm this wording before it is kept"
+#: ADR-0338 §8:5: a change to the person's profile or pins, which runs only on their yes.
+_PERSON_MODEL_YES: Final = "a change to the person's profile or pins runs only on their yes"
 _ELSEWHERE: Final = "a round's message goes only into the place its input came from"
 _UNKNOWN_REPEAT: Final = (
     "a deliberate repeat of a call whose earlier outcome is unknown or not yet written "
@@ -1394,7 +1403,10 @@ class AuthorizingStage:
     async def _after_the_policy(
         self, call: ProposedCall, ruled: _Ruled, state: _Round
     ) -> CallVerdict:
-        """The policy's ruling, then the stand-in, then ``MemoryPolicy`` (§4:1 to §4:9)."""
+        """The policy's ruling, the stand-in, then the person model's rule or ``MemoryPolicy``.
+
+        ADR-0306 §4:1 to §4:9, and ADR-0338 §8:5's rule for the person model's calls.
+        """
         decision = ruled.decision
 
         def verdict(kind: Verdict, reason: str | None = None) -> CallVerdict:
@@ -1421,6 +1433,11 @@ class AuthorizingStage:
             return verdict(Verdict.NEEDS_YOU, _STAND_IN)
         if tool.leaves_hub:
             state.note(call, "stand_in", "passed", None)
+        if str(tool.capability) in PERSON_MODEL_CAPABILITIES:
+            # ADR-0338 §8:5: by rule, beside the policy's allow, which stays the deciding
+            # decision (ADR-0321 §4:17).
+            state.note(call, "person_model", Verdict.NEEDS_YOU.value, _PERSON_MODEL_YES)
+            return verdict(Verdict.NEEDS_YOU, _PERSON_MODEL_YES)
         if tool.capability == REMEMBER_CAPABILITY:
             remembered = (
                 self._candidate(ruled, call, state)
