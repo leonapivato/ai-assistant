@@ -428,6 +428,26 @@ async def test_a_pin_follows_two_retirements_to_its_chains_current_end() -> None
     assert [pin.memory_id for pin in model.pins] == ["m:old"]
 
 
+async def test_a_chain_is_followed_to_its_current_end_however_long() -> None:
+    """ADR-0342 §5:3 ends a walk only where its history read omits, names no successor or
+    loops, so no count of retirements stops it short."""
+    world = _World()
+    hops = 40
+    await world.held(
+        *(
+            _ended(f"m:{at}", f"Lives at number {at}.", successor=f"m:{at + 1}")
+            for at in range(hops)
+        ),
+        _fact(f"m:{hops}", "Lives at the end of the road."),
+    )
+    await world.pin("m:0")
+
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+
+    assert block is not None
+    assert [one.memory.id for one in block.kept] == [f"m:{hops}"]
+
+
 async def test_a_retirement_landing_as_the_live_read_is_made_is_followed() -> None:
     """ADR-0342 §5:3's order: the live read misses, and the history read made after it
     names a successor that is current.

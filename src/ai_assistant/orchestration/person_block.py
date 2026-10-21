@@ -106,10 +106,6 @@ PLANNING_SUGGESTIONS: Final = 5
 #: pushes on a channel that exists because it is built in or the user connected it.
 _PUSHED_BY_A_CONNECTED_SOURCE: Final = frozenset({"informational_event"})
 
-#: How many successors a pin or mark is followed through before it is taken to reach no
-#: current memory: a bound on the reads, never reached by a chain the writer builds.
-_SUCCESSOR_HOPS: Final = 16
-
 
 def activation_person(trigger: RecordedChannelTrigger | None) -> str | None:
     """The person an activation is for, from its recorded trigger (ADR-0338 §2:2-§2:4).
@@ -386,8 +382,10 @@ class PersonBlocks:
         between the two is read retired and its successor is followed rather than lost
         (ADR-0342 §5:3's order). The walk ends with no current memory where the history
         read omits the memory, where its record names no successor, or where the
-        successor is one this chain has already reached. The chains are walked together:
-        one live read per step, and one history read where that live read missed.
+        successor is one this chain has already reached, and at no other length: each
+        step adds a memory the chain had not reached, so the walk ends however long the
+        chain. The chains are walked together: one live read per step, and one history
+        read where that live read missed.
 
         A live read returning a memory whose status is not current, a state the writer
         never builds (a retired memory's window is closed, ADR-0328 §3:4, §5:9), is
@@ -397,9 +395,7 @@ class PersonBlocks:
         at = {start: start for start in dict.fromkeys(starts)}
         reached: dict[str, Memory] = {}
         visited: dict[str, set[str]] = {start: {start} for start in at}
-        for _ in range(_SUCCESSOR_HOPS):
-            if not at:
-                break
+        while at:
             live = await self._memory.get_many(list(dict.fromkeys(at.values())))
             missed: dict[str, str] = {}
             for start, memory_id in at.items():
