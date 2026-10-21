@@ -1,6 +1,6 @@
 # 336. A memory is retired or asked about only where a relation says it contradicts
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-21
 - Scope: the memory write path wherever a conflict set holds a memory in band `ASSERTED` or the proposal is in it. When a reconciler labels the conflict set; what `DefaultMemoryPolicy` supersedes and defers on; what a `SUPERSEDE` retires; which stored memories a deferral names; and where the observer raises its question. The defect and its reproduction are draft PR [#3237](https://github.com/leonapivato/ai-assistant/pull/3237).
 - Dependency: ADR-0159, ADR-0171, ADR-0328 and ADR-0329, as their status lines leave them.
