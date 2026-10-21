@@ -3478,22 +3478,40 @@ class Engine:
     # assembly, tracked and measured as every member is. The canonical fake answers them
     # from the same module, so the two cannot read the slot two ways.
 
-    async def person_model(self, person_id: NonBlankEncodableText) -> PersonModelView | None:
+    async def person_model(
+        self,
+        person_id: NonBlankEncodableText,
+        *,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PersonModelView | None:
         """Read one person's model, as the About you panel shows it (ADR-0338 §8:1).
 
         Raises:
             RuntimeError: If the engine is shutting down.
-            ValueError: If ``person_id`` is blank or unwritable.
+            ValueError: If ``person_id`` is blank or unwritable, or a page argument is
+                out of range.
+            TypeError: If a page argument is not an integer.
             PersonModelOffError: If no person-model store is wired.
             PersonModelStoreError: If the person-model store cannot be read.
             MemoryStoreError: If the memory store cannot be read.
         """
         self._reject_if_closing()
         named = non_blank_text(person_id, name="person_id")
-        check_arguments("person_model", max_bytes=self._max_payload_bytes, person_id=named)
+        page_argument(limit, name="limit")
+        page_argument(offset, name="offset")
+        check_arguments(
+            "person_model",
+            max_bytes=self._max_payload_bytes,
+            person_id=named,
+            limit=limit,
+            offset=offset,
+        )
         blocks = person_panel.wired(self._person_blocks)
         return await self._tracked(
-            person_panel.person_model_view(blocks, named), "person_model", checked=True
+            person_panel.person_model_view(blocks, named, limit=limit, offset=offset),
+            "person_model",
+            checked=True,
         )
 
     async def profile_changes(

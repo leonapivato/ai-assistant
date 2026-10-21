@@ -20907,10 +20907,11 @@ class PersonModelWrite(BaseModel):
 #
 # What ``AssistantEngine``'s person-model members carry: a read of one person's model
 # for the About you panel (§8:2), and what a panel's write did. Built from the types
-# above. The memory wording here is the slot's, which it shows the models (§6), and a
-# retired memory's that a pin or mark no longer current was made on, which no live
-# read can word (§4:8). A live memory the slot leaves out and a pin suggestion's memory
-# are named by id, and the panel words them from the beliefs read.
+# above. Every memory the panel shows is worded here, as the memory store holds it
+# under the id the pin, mark or suggestion points at: the slot's (§6), what it left
+# out (§6:4), a pin suggestion's (§4:3), and a retired memory's that a pin or mark no
+# longer current was made on, which no live read can word (§4:8). None is left to a
+# second read by an id, which an implementation could normalise.
 
 
 class KeptMemoryView(BaseModel):
@@ -20945,18 +20946,21 @@ class LeftOutReason(StrEnum):
 class LeftOutMemory(BaseModel):
     """A memory a pin or a style mark reaches that the slot does not show, and why (§6:4).
 
-    Named by id alone: the panel words it from the beliefs read, as it words any
-    memory.
+    The panel shows the memories the slot leaves out, and why (§6:4), so it carries
+    the wording the memory store holds for the id the pin or mark points at, never a
+    second read by an id another implementation might normalise.
 
     Attributes:
         memory_id: The memory: the pinned or marked one, or the current successor its
             chain reached (§4:8).
+        content: Its wording.
         pinned: ``True`` where a pin reaches it, ``False`` where only a style mark does.
         reason: Why the slot left it out.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     memory_id: NonBlankEncodableText
+    content: EncodableText
     pinned: bool
     reason: LeftOutReason
 
@@ -20971,11 +20975,26 @@ class SuggestionView(BaseModel):
             suggestion's part has an outside origin, or a pin suggestion's memory rests
             on outside content. Such a suggestion is shown on the panel alone, marked
             so (§7:9).
+        content: A pin suggestion's memory's wording, as the memory store holds it
+            under the id the suggestion names: what accepting it pins, and so
+            confirms (§4:3). ``None`` for a field suggestion.
+
+    Raises:
+        ValueError: If ``content`` is set for a field suggestion, or missing for a pin
+            suggestion.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     suggestion: PersonSuggestion
     rests_on_outside_content: bool
+    content: EncodableText | None = None
+
+    @model_validator(mode="after")
+    def _a_pin_is_worded(self) -> Self:
+        if (self.suggestion.proposed.kind is SuggestionKind.PIN) != (self.content is not None):
+            msg = "a pin suggestion carries its memory's wording, and a field one none"
+            raise ValueError(msg)
+        return self
 
 
 class StalePinView(BaseModel):
@@ -21035,6 +21054,13 @@ class PersonModelView(BaseModel):
     longer current, the style marks and the pending suggestions. The change log, which
     grows with every change, is read a page at a time by ``profile_changes``.
 
+    **The four lists that grow are each a page**: ``left_out``, ``no_longer_current``,
+    ``style_marks`` and ``suggestions`` each hold the entries of their own order from
+    the read's ``offset``, at most its ``limit``, and each ``*_total`` says how many
+    the whole list holds, so every entry, and the control it carries, is reached by
+    bounded reads however many there are. The slot itself is bounded by its budget
+    (§6:1) and is always whole.
+
     Attributes:
         person: The person.
         profile: Their five fields, each set or not.
@@ -21050,9 +21076,14 @@ class PersonModelView(BaseModel):
             memory it shows (§5:3).
         suggestions: The pending suggestions the panel shows, the most recent first
             (§7:9, §9:5).
+        left_out_total: How many memories the slot left out in all.
+        no_longer_current_total: How many standing pins are no longer current in all.
+        style_marks_total: How many standing style marks are held in all.
+        suggestions_total: How many pending suggestions the panel shows in all.
 
     Raises:
-        ValueError: If a memory is in the slot twice, left out twice, or both.
+        ValueError: If a memory is in the slot twice, left out twice, or both, or a
+            page holds more entries than its list's total.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -21064,12 +21095,25 @@ class PersonModelView(BaseModel):
     no_longer_current: tuple[StalePinView, ...] = ()
     style_marks: tuple[StyleMarkView, ...] = ()
     suggestions: tuple[SuggestionView, ...] = ()
+    left_out_total: int = Field(default=0, strict=True, ge=0)
+    no_longer_current_total: int = Field(default=0, strict=True, ge=0)
+    style_marks_total: int = Field(default=0, strict=True, ge=0)
+    suggestions_total: int = Field(default=0, strict=True, ge=0)
 
     @model_validator(mode="after")
     def _each_memory_once(self) -> Self:
         shown = [one.memory_id for one in self.kept] + [one.memory_id for one in self.left_out]
         if len(shown) != len(set(shown)):
             msg = "the slot shows or leaves out each memory once (ADR-0338 §6:2)"
+            raise ValueError(msg)
+        pages = (
+            (self.left_out, self.left_out_total),
+            (self.no_longer_current, self.no_longer_current_total),
+            (self.style_marks, self.style_marks_total),
+            (self.suggestions, self.suggestions_total),
+        )
+        if any(len(page) > total for page, total in pages):
+            msg = "a page holds no more entries than its list"
             raise ValueError(msg)
         return self
 

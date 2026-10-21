@@ -69,6 +69,7 @@ from ai_assistant.core.types import (
     StalePinView,
     StyleMarkView,
     SuggestionKind,
+    SuggestionState,
     SuggestionView,
 )
 from ai_assistant.orchestration.person_block import PinRefusal
@@ -129,7 +130,9 @@ def wired(blocks: PersonBlocks | None) -> PersonBlocks:
     return blocks
 
 
-async def person_model_view(blocks: PersonBlocks, person_id: str) -> PersonModelView | None:
+async def person_model_view(
+    blocks: PersonBlocks, person_id: str, *, limit: int, offset: int
+) -> PersonModelView | None:
     """Read one person's model as the About you panel shows it (ADR-0338 §8:1-§8:2).
 
     The chains are walked first, live read first (:meth:`PersonBlocks.current_ends`),
@@ -140,9 +143,15 @@ async def person_model_view(blocks: PersonBlocks, person_id: str) -> PersonModel
     drops it before a planning round. A start held whose current end is not is a
     chain that reaches no current memory.
 
+    The four lists that grow — what the slot left out, the pins no longer current, the
+    style marks and the suggestions — are each cut to the page ``offset`` and ``limit``
+    name, beside each one's total; the slot is whole, bounded by its budget.
+
     Args:
         blocks: The person-block assembly over the two stores.
         person_id: The person, by id.
+        limit: How many entries each list's page holds at most.
+        offset: How many of each list's entries to skip.
 
     Returns:
         The view, or ``None`` where the store holds no such person.
@@ -174,25 +183,33 @@ async def person_model_view(blocks: PersonBlocks, person_id: str) -> PersonModel
         if one.proposed.kind is SuggestionKind.PIN and one.proposed.memory_id is not None
     ]
     live = await blocks.memory.get_many(list(dict.fromkeys(suggested))) if suggested else {}
+    stale = [
+        StalePinView(
+            pin=pin,
+            content=history[pin.memory_id].content,
+            rests_on_outside_content=history[pin.memory_id].rests_on_outside_content,
+        )
+        for pin in model.standing_pins
+        if pin.memory_id in history and pin.memory_id not in ends
+    ]
+    marked = [
+        _mark(mark, ends, history) for mark in model.standing_marks if mark.memory_id in history
+    ]
+    shown = _suggestions(pending, live)
+    window = slice(offset, offset + limit)
     return PersonModelView(
         person=model.person,
         profile=model.profile,
         kept=kept,
         budget_chars=blocks.budget_chars,
-        left_out=left_out,
-        no_longer_current=tuple(
-            StalePinView(
-                pin=pin,
-                content=history[pin.memory_id].content,
-                rests_on_outside_content=history[pin.memory_id].rests_on_outside_content,
-            )
-            for pin in model.standing_pins
-            if pin.memory_id in history and pin.memory_id not in ends
-        ),
-        style_marks=tuple(
-            _mark(mark, ends, history) for mark in model.standing_marks if mark.memory_id in history
-        ),
-        suggestions=_suggestions(pending, live),
+        left_out=tuple(left_out[window]),
+        no_longer_current=tuple(stale[window]),
+        style_marks=tuple(marked[window]),
+        suggestions=tuple(shown[window]),
+        left_out_total=len(left_out),
+        no_longer_current_total=len(stale),
+        style_marks_total=len(marked),
+        suggestions_total=len(shown),
     )
 
 
@@ -235,7 +252,7 @@ async def profile_changes(
 
 def _slot(
     starts: Sequence[tuple[str, bool]], reached: Mapping[str, Memory], *, budget: int
-) -> tuple[tuple[KeptMemoryView, ...], tuple[LeftOutMemory, ...]]:
+) -> tuple[tuple[KeptMemoryView, ...], list[LeftOutMemory]]:
     """The slot within the budget, and what it left out and why (ADR-0338 §6:1-§6:4).
 
     Each start in the slot's order, pinned first: a start whose chain reaches no
@@ -257,7 +274,10 @@ def _slot(
         if memory.rests_on_outside_content:
             left_out.append(
                 LeftOutMemory(
-                    memory_id=memory.id, pinned=pinned, reason=LeftOutReason.OUTSIDE_CONTENT
+                    memory_id=memory.id,
+                    content=memory.content,
+                    pinned=pinned,
+                    reason=LeftOutReason.OUTSIDE_CONTENT,
                 )
             )
             continue
@@ -267,27 +287,41 @@ def _slot(
             continue
         full = True
         left_out.append(
-            LeftOutMemory(memory_id=memory.id, pinned=pinned, reason=LeftOutReason.BUDGET)
+            LeftOutMemory(
+                memory_id=memory.id,
+                content=memory.content,
+                pinned=pinned,
+                reason=LeftOutReason.BUDGET,
+            )
         )
-    return tuple(kept), tuple(left_out)
+    return tuple(kept), left_out
 
 
 def _suggestions(
     pending: Sequence[PersonSuggestion], live: Mapping[str, MemoryRecord]
-) -> tuple[SuggestionView, ...]:
+) -> list[SuggestionView]:
     """The pending suggestions the panel shows, the most recent first (§7:9, §9:5)."""
     shown: list[SuggestionView] = []
     for one in pending:
         proposed = one.proposed
         if proposed.kind is SuggestionKind.FIELD:
-            outside = proposed.rests_on_outside_content
-        else:
-            record = live.get(proposed.memory_id or "")
-            if not isinstance(record, Memory) or record.status is not MemoryStatus.CURRENT:
-                continue
-            outside = record.rests_on_outside_content
-        shown.append(SuggestionView(suggestion=one, rests_on_outside_content=outside))
-    return tuple(shown)
+            shown.append(
+                SuggestionView(
+                    suggestion=one, rests_on_outside_content=proposed.rests_on_outside_content
+                )
+            )
+            continue
+        record = live.get(proposed.memory_id or "")
+        if not isinstance(record, Memory) or record.status is not MemoryStatus.CURRENT:
+            continue
+        shown.append(
+            SuggestionView(
+                suggestion=one,
+                rests_on_outside_content=record.rests_on_outside_content,
+                content=record.content,
+            )
+        )
+    return shown
 
 
 async def set_profile_field(
@@ -365,15 +399,15 @@ async def accept_suggestion(
 ) -> PersonModelEdit:
     """Accept a pending suggestion on the panel (ADR-0338 §8:8, §9:2, §9:5).
 
-    The suggestion is read first, to tell a pin suggestion from a field suggestion. A
-    pending pin suggestion is accepted by pinning its memory through the checked pin,
-    whose write accepts it (§8:8); were it dismissed between the read and the pin, the
-    pin is still the person's act and the suggestion stays dismissed. Every other id —
-    a pending field suggestion, or one not pending when read — goes to the store's
-    accept, which writes the field as the suggestion's or refuses it ``unknown_record``
-    or ``already_decided``. An id not pending when read can name no pin suggestion
-    recorded after that read: the store mints each id fresh (``uuid4`` on SQLite), and
-    a caller names one it was shown.
+    The suggestion is read first, to tell a pin suggestion from a field suggestion, and
+    **every pin goes through the checked pin**: a pending pin suggestion is accepted
+    by pinning its memory through :meth:`PersonBlocks.pin`, whose write accepts it
+    (§8:8); were it dismissed between the read and the pin, the pin is still the
+    person's act and the suggestion stays dismissed. Only a field suggestion reaches
+    the store's own accept, which writes the field as the suggestion's. An id not
+    pending when the model is read is looked up in the store's export, which writes
+    nothing: unknown, it is refused ``unknown_record``; decided, ``already_decided``;
+    recorded since the read, it is accepted by its kind as above.
 
     Raises:
         PersonModelStoreError: If the person-model store cannot be read or written.
@@ -383,10 +417,31 @@ async def accept_suggestion(
     if model is None:
         return PersonModelEdit(write=_refused(PersonModelRefusal.UNKNOWN_PERSON))
     found = _pending(model, suggestion_id)
-    if found is not None and found.proposed.kind is SuggestionKind.PIN:
+    if found is None:
+        # Not pending when read: looked up in the export, which writes nothing, so no
+        # write is made for an id this read did not see as a field suggestion.
+        exported = await blocks.store.export()
+        held = next(
+            (
+                one
+                for one in exported.suggestions
+                if one.id == suggestion_id and one.person_id == person_id
+            ),
+            None,
+        )
+        if held is None:
+            return PersonModelEdit(write=_refused(PersonModelRefusal.UNKNOWN_RECORD))
+        if held.state is not SuggestionState.PENDING:
+            return PersonModelEdit(
+                write=_refused(PersonModelRefusal.ALREADY_DECIDED, record_id=held.id)
+            )
+        found = held  # recorded since the read
+    if found.proposed.kind is SuggestionKind.PIN:
         memory_id = found.proposed.memory_id
         assert memory_id is not None  # noqa: S101 — a pin suggestion names its memory
         return _edit(await blocks.pin(person_id, memory_id, act=PANEL_ACT))
+    # A field suggestion, by its id; a suggestion's kind never changes, so the store's
+    # accept writes a field and never a pin.
     return PersonModelEdit(
         write=await blocks.store.accept_suggestion(person_id, suggestion_id, by=OWNER_PERSON_ID)
     )
@@ -407,8 +462,8 @@ def _pending(model: PersonModel, suggestion_id: str) -> PersonSuggestion | None:
     return next((one for one in model.suggestions if one.id == suggestion_id), None)
 
 
-def _refused(refusal: PersonModelRefusal) -> PersonModelWrite:
-    return PersonModelWrite(kind=PersonModelWriteKind.REFUSED, refusal=refusal)
+def _refused(refusal: PersonModelRefusal, *, record_id: str | None = None) -> PersonModelWrite:
+    return PersonModelWrite(kind=PersonModelWriteKind.REFUSED, refusal=refusal, record_id=record_id)
 
 
 def _ordered[R](

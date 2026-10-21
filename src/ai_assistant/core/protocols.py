@@ -8962,7 +8962,13 @@ class AssistantEngine(Protocol):
     # stripped**: the person model holds every id verbatim, and a pointer that
     # normalised what it was handed could name another record (ADR-0338 §10:4).
 
-    async def person_model(self, person_id: NonBlankEncodableText) -> PersonModelView | None:
+    async def person_model(
+        self,
+        person_id: NonBlankEncodableText,
+        *,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PersonModelView | None:
         """Read one person's model, as the About you panel shows it (ADR-0338 §8:1-§8:2).
 
         The fields; the kept-in-mind slot, assembled as the person block assembles it
@@ -8976,18 +8982,29 @@ class AssistantEngine(Protocol):
         the memory store no longer holds is shown nowhere (§4:10). The change log is
         :meth:`profile_changes`'s, a page at a time.
 
-        A live memory the slot left out, and a pin suggestion's memory, are named by
-        id, and the panel words them from :meth:`belief`.
+        Every memory it shows is worded, as the memory store holds it under the id
+        the pin, mark or suggestion points at, so the panel reads no memory again by an
+        id an implementation could normalise.
+
+        **The four lists that grow are paged together**: what the slot left out, the
+        pins no longer current, the style marks and the suggestions each hold the page
+        of their own order ``offset`` and ``limit`` name, beside their totals, so every
+        entry and its control is reached by bounded reads however many there are. The
+        slot is whole, bounded by its budget.
 
         Args:
             person_id: The person, by id: :data:`~ai_assistant.core.types.OWNER_PERSON_ID`
                 on today's hub.
+            limit: How many entries each list's page holds at most.
+            offset: How many of each list's entries to skip.
 
         Returns:
             Their model, or ``None`` where the hub holds no such person.
 
         Raises:
-            ValueError: If ``person_id`` is blank or unwritable. Refused locally.
+            ValueError: If ``person_id`` is blank or unwritable, or ``limit`` or
+                ``offset`` falls outside ``0 <= value < 2**63``. Refused locally.
+            TypeError: If ``limit`` or ``offset`` is not an integer.
             PersonModelOffError: If the hub keeps no person model.
             PersonModelStoreError: If the person-model store cannot be read.
             MemoryStoreError: If the memory store cannot be read.

@@ -672,17 +672,29 @@ class HubClient:
     # ``PersonModelOffError``. Each sits in the route table's command row, so a device
     # without the command role is refused by the hub before dispatch (§8:3).
 
-    async def person_model(self, person_id: NonBlankEncodableText) -> PersonModelView | None:
+    async def person_model(
+        self,
+        person_id: NonBlankEncodableText,
+        *,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PersonModelView | None:
         """One person's model, as the About you panel shows it (ADR-0338 §8:1).
 
         Args:
             person_id: The person, by id.
+            limit: How many entries each growing list's page holds at most.
+            offset: How many of each list's entries to skip.
 
         Returns:
             Their model, or ``None`` where the hub holds no such person.
         """
         named = non_blank_text(person_id, name="person_id")
-        return await self._call("person_model", person_id=named)  # type: ignore[no-any-return]
+        page_argument(limit, name="limit")
+        page_argument(offset, name="offset")
+        return await self._call(  # type: ignore[no-any-return]
+            "person_model", person_id=named, limit=limit, offset=offset
+        )
 
     async def profile_changes(
         self,

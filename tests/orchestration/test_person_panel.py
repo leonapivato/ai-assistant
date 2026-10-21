@@ -23,7 +23,11 @@ from ai_assistant.core.types import (
     MemoryOperationKind,
     MemoryStatus,
     MemoryWriterName,
+    PersonModelEdit,
+    PersonModelEditRefusal,
     PersonModelWriteKind,
+    ProposedSuggestion,
+    SuggestionKind,
     Validity,
 )
 from ai_assistant.orchestration import person_panel
@@ -36,7 +40,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.protocols import PersonModelStore
-    from ai_assistant.core.types import Memory, MemoryRecord, PersonModelWrite
+    from ai_assistant.core.types import Memory, MemoryRecord, PersonModel, PersonModelWrite
 
 pytestmark = pytest.mark.anyio
 
@@ -113,7 +117,7 @@ async def test_the_panels_slot_is_the_slot_the_models_are_given(budget: int) -> 
     world = _World(budget=budget)
     await _scenario(world)
 
-    view = await person_panel.person_model_view(world.blocks, OWNER_PERSON_ID)
+    view = await person_panel.person_model_view(world.blocks, OWNER_PERSON_ID, limit=100, offset=0)
     block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
 
     assert view is not None
@@ -130,7 +134,7 @@ async def test_the_scenario_reads_each_part_once() -> None:
     world = _World(budget=40)
     await _scenario(world)
 
-    view = await person_panel.person_model_view(world.blocks, OWNER_PERSON_ID)
+    view = await person_panel.person_model_view(world.blocks, OWNER_PERSON_ID, limit=100, offset=0)
 
     assert view is not None
     assert [one.memory_id for one in view.kept] == ["m:diet", "m:new"]
@@ -181,7 +185,7 @@ async def test_a_memory_forgotten_while_the_chains_are_walked_is_shown_nowhere(
         await world.people.add_style_mark(OWNER_PERSON_ID, "m:diet")
     await world.people.add_style_mark(OWNER_PERSON_ID, "m:brief")
 
-    view = await person_panel.person_model_view(world.blocks, OWNER_PERSON_ID)
+    view = await person_panel.person_model_view(world.blocks, OWNER_PERSON_ID, limit=100, offset=0)
 
     assert view is not None
     assert [one.memory_id for one in view.kept] == ["m:brief"]
@@ -196,7 +200,7 @@ async def test_a_store_fault_reaches_the_caller_and_never_an_empty_view() -> Non
     world.people.fail_next()
 
     with pytest.raises(PersonModelStoreError):
-        await person_panel.person_model_view(world.blocks, OWNER_PERSON_ID)
+        await person_panel.person_model_view(world.blocks, OWNER_PERSON_ID, limit=100, offset=0)
 
 
 async def test_no_assembly_is_the_switch_off() -> None:
@@ -240,6 +244,54 @@ async def test_an_unpin_stopped_part_way_raises_rather_than_reporting_done() -> 
     held = await people.read(OWNER_PERSON_ID)
     assert held is not None
     assert [pin.removed_at is not None for pin in held.pins] == [True, False]
+
+
+class _RecordingAfterTheRead:
+    """The canonical store, which records a pin suggestion just after the model is read.
+
+    The race the accept guards: an id the caller names that was not pending when read,
+    recorded before the accept is made. Its pin must still go through the checked pin.
+    """
+
+    def __init__(self, store: FakePersonModelStore) -> None:
+        self._store = store
+        self.landed: str | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._store, name)
+
+    async def read(self, person_id: str) -> PersonModel | None:
+        model = await self._store.read(person_id)
+        if self.landed is None:
+            written = await self._store.record_suggestion(
+                person_id,
+                ProposedSuggestion(
+                    kind=SuggestionKind.PIN, memory_id="m:more", episode_id="activation:a1"
+                ),
+            )
+            self.landed = written.record_id
+        return model
+
+
+async def test_a_pin_suggestion_recorded_after_the_read_is_still_checked() -> None:
+    """§4:2, §6:3: a pin is made through the checked pin, whatever the read saw."""
+    seconds = count()
+    # Ids a caller can guess, as a conforming store may mint them.
+    people = FakePersonModelStore(
+        now=lambda: NOW + timedelta(seconds=next(seconds)), new_id=lambda kind: f"{kind}:next"
+    )
+    racing = _RecordingAfterTheRead(people)
+    world = _World(budget=20, store=cast("PersonModelStore", racing))
+    await world.held(_fact("m:long", "x" * 15), _fact("m:more", "y" * 10))
+    await people.add_pin(OWNER_PERSON_ID, "m:long", act=person_panel.PANEL_ACT)
+
+    edit = await person_panel.accept_suggestion(world.blocks, OWNER_PERSON_ID, "suggestion:next")
+
+    assert racing.landed == "suggestion:next"
+    assert edit == PersonModelEdit(refused=PersonModelEditRefusal.OVER_BUDGET)
+    held = await people.read(OWNER_PERSON_ID)
+    assert held is not None
+    assert [pin.memory_id for pin in held.standing_pins] == ["m:long"]
 
 
 async def test_an_unpin_where_nothing_shows_the_memory_changes_nothing() -> None:
