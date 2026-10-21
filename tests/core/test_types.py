@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 import pytest
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
     Attestation,
@@ -709,23 +710,86 @@ def test_discriminated_union_resolves_by_kind(
     assert isinstance(record, expected)
 
 
-@pytest.mark.parametrize("kind", ["semantic", "preference", "procedural"])
-def test_a_retired_kind_is_no_stored_record(kind: str) -> None:
+class _StoredPreference(MemoryBase):
+    """A preference record as the release before ADR-0328 stored it, for the test below."""
+
+    kind: Literal["preference"] = "preference"
+    preference: str
+    context: str | None = None
+    strength: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class _StoredProcedural(MemoryBase):
+    """A procedural record as the release before ADR-0328 stored it, for the test below."""
+
+    kind: Literal["procedural"] = "procedural"
+    situation: str
+    steps: tuple[str, ...] = ()
+
+
+#: The envelope every record that release stored carried, as it wrote it (the shape of
+#: ``tests/memory/legacy/memory-before-adr-0328.db``'s records).
+_LEGACY_ENVELOPE: dict[str, object] = {
+    "id": "legacy-1",
+    "content": "The user prefers mornings.",
+    "provenance": {
+        "source": "observed",
+        "confidence": 0.6,
+        "evidence": ["episode-1"],
+        "evidence_elided": 0,
+        "last_updated": _WHEN,
+        "attestation": None,
+        "derived_from_external": False,
+        "last_confirmed_at": None,
+    },
+    "score": None,
+    "expires_at": None,
+    "validity": {"valid_from": None, "valid_until": None},
+    "about_person": None,
+    "topics": [],
+    "placement": {"reach": "anyone", "set_by": None, "set_at": None},
+}
+
+
+@pytest.mark.parametrize(
+    ("kind", "fields", "stored_as"),
+    [
+        (
+            "semantic",
+            {"fact": "The user prefers mornings.", "valid_until": None},
+            SemanticMemory,
+        ),
+        (
+            "preference",
+            {"preference": "The user prefers mornings.", "context": "meetings", "strength": 0.7},
+            _StoredPreference,
+        ),
+        (
+            "procedural",
+            {"situation": "Booking a trip.", "steps": ["Check the calendar", "Book it"]},
+            _StoredProcedural,
+        ),
+    ],
+)
+def test_a_retired_kind_is_no_stored_record(
+    kind: str, fields: dict[str, object], stored_as: type[MemoryBase]
+) -> None:
     """The semantic, preference and procedural kinds retire from the store (ADR-0328 §2:3).
 
     A record of one reaches a store only through §16's upgrade, which carries it on a
-    legacy support; the union refuses it as a stored record.
+    legacy support; the union refuses it as a stored record, for its tag. The record is
+    one its kind's model accepts whole, so the refusal is the tag's and no missing field's.
     """
+    record = {**_LEGACY_ENVELOPE, "kind": kind, **fields}
+    assert stored_as.model_validate(record).model_dump()["kind"] == kind, "otherwise valid"
+
     adapter: TypeAdapter[MemoryRecord] = TypeAdapter(MemoryRecord)
-    with pytest.raises(ValidationError):
-        adapter.validate_python(
-            {
-                "kind": kind,
-                "id": "1",
-                "content": "c",
-                "provenance": {"source": "inferred", "confidence": 0.4, "last_updated": _WHEN},
-            }
-        )
+    with pytest.raises(ValidationError) as refused:
+        adapter.validate_python(record)
+
+    errors = refused.value.errors()
+    assert [error["type"] for error in errors] == ["union_tag_invalid"]
+    assert errors[0].get("ctx", {}).get("tag") == kind
 
 
 def _semantic(record_id: str) -> Memory:

@@ -173,6 +173,60 @@ def test_a_part_the_episode_does_not_hold_is_gone() -> None:
     assert _content(InputPart(episode="activation:absent"), episodes) is None
 
 
+def _evidence(*texts: str) -> ActivationDigest:
+    return ActivationDigest(
+        question="where is the office?",
+        outcome=DigestOutcome.ANSWERED,
+        evidence=tuple(EvidenceItem(text=text, source="R1") for text in texts),
+        recorded_at=AT,
+    )
+
+
+def test_each_position_of_an_indexed_collection_reads_as_its_own_part() -> None:
+    """A later message, digest or item reads as itself; one past the end of each is gone.
+
+    Each collection holds distinct texts at several positions, so a resolver reading the
+    wrong position, or one past the end, reads as another part's text and is caught.
+    """
+    record = _held(
+        episode("a"),
+        rounds=(_round("r-1", "first round"), _round("r-2", "second round")),
+        digests=(
+            _evidence(
+                "first digest, first item", "first digest, second item", "first digest, third item"
+            ),
+            _evidence("second digest, first item"),
+        ),
+    )
+    trigger = record.processing_record.trigger if record.processing_record else None
+    assert trigger is not None
+    texts = ("the first message", "the second message", "the third message")
+    record = _held(
+        record,
+        trigger=trigger.model_copy(
+            update={"messages": tuple(RecordedInputMessage(text=t, sent_at=AT) for t in texts)}
+        ),
+    )
+    episodes = {record.id: record}
+
+    for position, text in enumerate(texts):
+        assert _content(InputPart(episode=record.id, message=position), episodes) == text
+    assert _content(InputPart(episode=record.id, message=len(texts)), episodes) is None
+
+    for round_id, text in (("r-1", "first round"), ("r-2", "second round")):
+        assert _content(RoundMessagePart(episode=record.id, round=round_id), episodes) == text
+
+    def item(digest: int, item: int) -> str | None:
+        return _content(EvidenceItemPart(episode=record.id, digest=digest, item=item), episodes)
+
+    assert item(0, 1) == "first digest, second item"
+    assert item(0, 2) == "first digest, third item"
+    assert item(0, 3) is None, "one past the first digest's items"
+    assert item(1, 0) == "second digest, first item"
+    assert item(1, 1) is None, "the second digest's own bound, not the first's"
+    assert item(2, 0) is None, "one past the digests"
+
+
 def test_a_round_that_wrote_no_message_has_no_message_to_show() -> None:
     record = _held(episode("a"), rounds=(_round("r-1", ""),))
     assert _content(RoundMessagePart(episode=record.id, round="r-1"), {record.id: record}) is None
@@ -225,6 +279,47 @@ def test_a_confirmation_reads_as_the_statement_its_approved_part_showed() -> Non
     assert _content(part, {asking.id: asking}) is None, "the yes's episode is gone"
     wrong_part = part.model_copy(update={"question": QuestionPart(round="r-ask", part=2)})
     assert _content(wrong_part, episodes) is None
+
+
+def test_a_confirmation_for_a_later_part_reads_as_that_parts_statement() -> None:
+    """A round asking two parts: a yes to part 2 reads as part 2's statement, not part 1's.
+
+    Parts number from one (ADR-0321 §2:6), so part 2 is the round's last asked call and
+    part 3 is one past the end.
+    """
+
+    def asked(part: int, statement: str) -> AskedCall:
+        return AskedCall(
+            part=part,
+            tool=REMEMBER,
+            values={
+                "statement": statement,
+                EPISODE_ARGUMENT: "activation:ask",
+                OUTSIDE_CONTENT_ARGUMENT: False,
+            },
+        )
+
+    asking = _held(
+        episode("ask"),
+        rounds=(
+            _round(
+                "r-ask",
+                "Shall I remember that you like tea, and that you live in Lisbon?",
+                asked=(asked(1, "likes tea"), asked(2, "lives in Lisbon")),
+            ),
+        ),
+    )
+    yes = episode("yes", text="yes")
+    episodes = {asking.id: asking, yes.id: yes}
+
+    def approved(part: int) -> str | None:
+        question = QuestionPart(round="r-ask", part=part)
+        confirmation = ConfirmationPart(episode=yes.id, asking_activation="ask", question=question)
+        return _content(confirmation, episodes)
+
+    assert approved(1) == "likes tea"
+    assert approved(2) == "lives in Lisbon"
+    assert approved(3) is None, "one past the round's asked parts"
 
 
 def test_a_confirmed_candidate_reads_as_the_fact_its_approved_part_showed() -> None:
