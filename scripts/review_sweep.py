@@ -86,6 +86,14 @@ that lands in the instant from archiving them out from under the verdict about
 to appear beside them. The same rule covers a ``<stem>.partial.<pid>`` staging
 directory an interrupted install stranded. Nothing that is not a plain
 directory is touched: what this cannot classify, it keeps.
+
+**A parts directory is acted on only once it is proved to be the one
+classified.** A round can install parts at a stem between the classification
+and the act, so the sweep first renames the directory under a name no round
+installs at, then compares it with what it classified, and puts back — and
+stops — on a mismatch. And a pair is archived as a pair or not at all: when the
+parts cannot follow their artifact, the artifact is put back too, so no later
+sweep has to guess which archived recording a stranded directory belonged to.
 """
 
 from __future__ import annotations
@@ -95,6 +103,7 @@ import contextlib
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -463,6 +472,9 @@ class PartsVerdict(NamedTuple):
             directory).
         detail: Why, in one phrase.
         artifact: The artifact it follows, or ``None`` when it has none.
+        identity: The directory's ``(st_dev, st_ino)`` when it was classified,
+            which is what the sweep later proves it is acting on; ``None`` for
+            an entry that is not a plain directory.
     """
 
     path: Path
@@ -470,6 +482,7 @@ class PartsVerdict(NamedTuple):
     state: str
     detail: str
     artifact: Path | None
+    identity: tuple[int, int] | None
 
 
 def classify_parts(review: Path, verdicts: Iterable[Verdict], now: float) -> list[PartsVerdict]:
@@ -495,31 +508,32 @@ def classify_parts(review: Path, verdicts: Iterable[Verdict], now: float) -> lis
     for entry in sorted(root.iterdir()):
         artifact = review / f"{entry.name}.md"
         verdict = by_name.get(artifact.name)
-        if entry.is_symlink() or not entry.is_dir():
-            found.append(PartsVerdict(entry, False, "unreadable", "not a directory", None))
-        elif verdict is not None:
+        try:
+            status = entry.lstat()
+        except OSError as exc:
+            found.append(PartsVerdict(entry, False, "unreadable", str(exc), None, None))
+            continue
+        if not stat.S_ISDIR(status.st_mode):
+            found.append(PartsVerdict(entry, False, "unreadable", "not a directory", None, None))
+            continue
+        identity = (status.st_dev, status.st_ino)
+        if verdict is not None:
             swept = verdict.state in SWEEPABLE
             detail = f"its artifact is {verdict.state}"
-            found.append(PartsVerdict(entry, swept, "paired", detail, verdict.path))
+            found.append(PartsVerdict(entry, swept, "paired", detail, verdict.path, identity))
         elif os.path.lexists(artifact):
             # An artifact of the stem that was never classified is not one this
             # can call gone.
             detail = f"{artifact.name} exists but was not classified"
-            found.append(PartsVerdict(entry, False, "unreadable", detail, None))
+            found.append(PartsVerdict(entry, False, "unreadable", detail, None, identity))
+        # A modification time in the future reads as a negative age, and so as
+        # recent: a skewed clock costs a later sweep, never this round.
+        elif now - status.st_mtime < ORPHAN_GRACE_SECONDS:
+            detail = "no artifact, but changed within the hour; a round may be installing it"
+            found.append(PartsVerdict(entry, False, "recent", detail, None, identity))
         else:
-            try:
-                age = now - entry.lstat().st_mtime
-            except OSError as exc:
-                found.append(PartsVerdict(entry, False, "unreadable", str(exc), None))
-                continue
-            # A modification time in the future reads as a negative age, and so
-            # as recent: a skewed clock costs a later sweep, never this round.
-            if age < ORPHAN_GRACE_SECONDS:
-                detail = "no artifact, but changed within the hour; a round may be installing it"
-                found.append(PartsVerdict(entry, False, "recent", detail, None))
-            else:
-                detail = f"no {artifact.name}, and unchanged for over an hour"
-                found.append(PartsVerdict(entry, True, "orphan", detail, None))
+            detail = f"no {artifact.name}, and unchanged for over an hour"
+            found.append(PartsVerdict(entry, True, "orphan", detail, None, identity))
     return found
 
 
@@ -588,16 +602,47 @@ def archive_plan(
     return plan + following
 
 
-def _plain_directory(path: Path) -> bool:
-    """Report whether a path is a directory and not a symbolic link to one.
+#: The prefix of the name a parts directory is held under while it is swept: a
+#: name `codex-review.sh` never installs at, so no round can collide with it.
+_CLAIM_PREFIX = ".sweeping-"
+
+
+def _archive_file(path: Path, destination: Path) -> None:
+    """Move one file to a name nothing holds, never replacing anything.
 
     Args:
-        path: The path.
+        path: The file.
+        destination: Where it goes; its parent exists.
 
-    Returns:
-        True for a plain directory.
+    Raises:
+        OSError: If the name is taken or the move fails, with nothing left
+            half-done.
+        NotImplementedError: Where ``link`` cannot decline to follow a symbolic
+            link.
     """
-    return path.is_dir() and not path.is_symlink()
+    # `link` then `unlink`, not `rename`: a rename replaces whatever is at the
+    # destination, and not replacing is the whole point. `link` fails with EEXIST
+    # instead, so a name that appeared since the plan was made costs this sweep
+    # rather than that file.
+    #
+    # `follow_symlinks=False` because `link` otherwise links what a symbolic link
+    # *points at*: an artifact that is a link would be archived as a hard link to
+    # its target and the link itself deleted, which is neither the file that was
+    # swept nor recoverable in the sense the default rests on. A rename moved the
+    # link itself, and so does this.
+    os.link(path, destination, follow_symlinks=False)
+    try:
+        path.unlink()
+    except OSError:
+        # The link landed and the source did not go. Left alone, the archive would
+        # hold a copy of a file that was never swept and the next sweep would
+        # number a second one beside it — two copies of one artifact, from a move
+        # that failed. So undo the half of it that succeeded, and only while the
+        # destination is still the link just made.
+        with contextlib.suppress(OSError):
+            if os.path.samestat(os.lstat(path), os.lstat(destination)):
+                destination.unlink()
+        raise
 
 
 def _move_directory(source: Path, destination: Path) -> None:
@@ -627,23 +672,83 @@ def _move_directory(source: Path, destination: Path) -> None:
         raise
 
 
+def _claim(part: PartsVerdict) -> Path | None:
+    """Take a parts directory out of a round's reach, and prove it is the one classified.
+
+    Classifying and acting are two moments, and a round can install a parts
+    directory between them — ``codex-review.sh`` replaces the directory at an
+    artifact's stem and then renames the artifact into place. Acting on the
+    *name* would then move or delete that round's messages from under the
+    verdict landing beside them. So the directory is first renamed under a name
+    no round installs at, and only then compared with what was classified: once
+    it is held there, nothing a round does can change which directory it is.
+
+    The identity is the device and inode, and the comparison cannot be fooled by
+    the old directory's inode being reused for the new one: a round copies its
+    messages into place *before* it removes the directory it replaces, so the
+    new one is allocated while the old one still holds its number.
+
+    Args:
+        part: The parts directory, as classified.
+
+    Returns:
+        Where it is now held, or ``None`` when it is already gone — a round
+        withdrew it, or another sweep took it — and there is nothing to act on.
+
+    Raises:
+        SweepError: If what was there is not what was classified. It is put back
+            first, so the round that installed it is undisturbed.
+        OSError: If the claim or the putting back fails.
+    """
+    held = part.path.with_name(f"{_CLAIM_PREFIX}{os.getpid()}-{part.path.name}")
+    try:
+        _move_directory(part.path, held)
+    except FileNotFoundError:
+        return None
+    status = held.lstat()
+    if (status.st_dev, status.st_ino) == part.identity:
+        return held
+    try:
+        _move_directory(held, part.path)
+    except OSError as exc:
+        raise SweepError(
+            f"{PARTS_DIR}/{part.path.name}/ changed after it was classified, and it could "
+            f"not be put back: it is at {held}. Move it back by hand. ({exc})"
+        ) from exc
+    raise SweepError(
+        f"{PARTS_DIR}/{part.path.name}/ changed after it was classified — a review round "
+        f"installed it meanwhile — so it was left where it is. Run the sweep again."
+    )
+
+
 def _act(
-    paths: Sequence[Path], plan: Sequence[tuple[Path, Path]], *, delete: bool, dry_run: bool
+    paths: Sequence[Path],
+    plan: Sequence[tuple[Path, Path]],
+    *,
+    delete: bool,
+    dry_run: bool,
+    parts: Sequence[PartsVerdict] = (),
 ) -> None:
     """Archive or delete the swept files and parts directories.
 
     Every file is acted on before any directory, and a swept artifact precedes
-    its parts directory in both ``paths`` and ``plan``: a failure partway leaves
-    at worst a parts directory whose artifact is gone, which the next sweep
-    reads as an orphan — never a retained artifact whose messages went.
+    its parts directory in both ``paths`` and ``plan``. A parts directory that
+    cannot be archived *beside its artifact* puts the artifact back, so a
+    failure never leaves the pair split across the archive with a name only
+    this sweep knew: the next sweep finds both where they were and plans them
+    together again. When deleting, a split pair is an artifact gone and an
+    orphan the next sweep deletes, which loses nothing that pairing protects.
 
     Args:
         paths: The files and directories to act on. Deletion needs nothing else;
             it has no destinations to reason about.
-        plan: Where each of those files lands under the archive, from
+        plan: Where each of those lands under the archive, from
             :func:`archive_plan`. Empty when deleting, which computes none.
         delete: Delete rather than archive.
         dry_run: Decide everything and change nothing.
+        parts: The swept parts directories' classifications. A directory in
+            ``paths`` or ``plan`` is acted on only through its classification,
+            and only once :func:`_claim` has proved it is still that directory.
 
     Raises:
         SweepError: If a file cannot be moved or removed — including a filesystem
@@ -654,49 +759,82 @@ def _act(
     """
     if dry_run:
         return
+    classified = {p.path: p for p in parts}
     try:
         if delete:
-            for path in paths:
-                if _plain_directory(path):
-                    shutil.rmtree(path)
-                else:
-                    path.unlink()
+            _delete(paths, classified)
         else:
-            for path, destination in plan:
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                if _plain_directory(path):
-                    _move_directory(path, destination)
-                    continue
-                # `link` then `unlink`, not `rename`: a rename replaces whatever
-                # is at the destination, and not replacing is the whole point.
-                # `link` fails with EEXIST instead, so a name that appeared since
-                # the plan was made costs this sweep rather than that file.
-                #
-                # `follow_symlinks=False` because `link` otherwise links what a
-                # symbolic link *points at*: an artifact that is a link would be
-                # archived as a hard link to its target and the link itself
-                # deleted, which is neither the file that was swept nor
-                # recoverable in the sense the default rests on. A rename moved
-                # the link itself, and so does this.
-                os.link(path, destination, follow_symlinks=False)
-                try:
-                    path.unlink()
-                except OSError:
-                    # The link landed and the source did not go. Left alone, the
-                    # archive would hold a copy of a file that was never swept and
-                    # the next sweep would number a second one beside it — two
-                    # copies of one artifact, from a move that failed. So undo the
-                    # half of it that succeeded, and only while the destination is
-                    # still the link just made.
-                    with contextlib.suppress(OSError):
-                        if os.path.samestat(os.lstat(path), os.lstat(destination)):
-                            destination.unlink()
-                    raise
+            _archive(plan, classified)
     except (OSError, NotImplementedError) as exc:
         # `NotImplementedError` is what `link` raises where it cannot decline to
         # follow a symbolic link. It is not an `OSError`, and an uncaught one
         # would be a traceback where every other failure here is a refusal.
         raise SweepError(f"could not sweep the review directory: {exc}") from exc
+
+
+def _delete(paths: Sequence[Path], classified: Mapping[Path, PartsVerdict]) -> None:
+    """Delete the swept files and, once claimed, the swept parts directories.
+
+    Args:
+        paths: What to delete.
+        classified: The parts directories among them, by path.
+    """
+    for path in paths:
+        part = classified.get(path)
+        if part is None:
+            path.unlink()
+        elif (held := _claim(part)) is not None:
+            shutil.rmtree(held)
+
+
+def _archive(plan: Sequence[tuple[Path, Path]], classified: Mapping[Path, PartsVerdict]) -> None:
+    """Archive the swept files and, once claimed, the swept parts directories.
+
+    Args:
+        plan: Each path with where it lands.
+        classified: The parts directories among them, by path.
+    """
+    archived: dict[Path, Path] = {}
+    for path, destination in plan:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        part = classified.get(path)
+        if part is None:
+            _archive_file(path, destination)
+            archived[path] = destination
+            continue
+        held = _claim(part)
+        if held is None:
+            continue
+        try:
+            _move_directory(held, destination)
+        except OSError:
+            _put_back(part, held, archived)
+            raise
+
+
+def _put_back(part: PartsVerdict, held: Path, archived: Mapping[Path, Path]) -> None:
+    """Undo a pair's half-done archive: its parts to their name, its artifact back.
+
+    Args:
+        part: The parts directory whose move failed.
+        held: Where :func:`_claim` holds it.
+        archived: Each file this sweep archived, with where it went.
+
+    Raises:
+        SweepError: If either cannot be put back, naming where each now is.
+    """
+    try:
+        _move_directory(held, part.path)
+        if part.artifact is not None and part.artifact in archived:
+            _archive_file(archived[part.artifact], part.artifact)
+    except (OSError, NotImplementedError) as exc:
+        artifact = archived.get(part.artifact) if part.artifact is not None else None
+        raise SweepError(
+            f"could not archive {PARTS_DIR}/{part.path.name}/ beside its artifact, nor put "
+            f"the pair back: the messages are at {held if held.exists() else part.path}"
+            + (f" and the artifact at {artifact}" if artifact is not None else "")
+            + f". ({exc})"
+        ) from exc
 
 
 def _report(  # noqa: PLR0913 — what was classified, what follows it, and how it was acted on
@@ -790,7 +928,13 @@ def _sweep(args: argparse.Namespace) -> int:
     else:
         plan = archive_plan([*files, *orphans], review, companions)
         sweeping = [source for source, _ in plan]
-    _act(sweeping, plan, delete=args.delete, dry_run=args.dry_run)
+    _act(
+        sweeping,
+        plan,
+        delete=args.delete,
+        dry_run=args.dry_run,
+        parts=[p for p in parts if p.swept],
+    )
     renamed = [pair for pair in plan if pair[1].name != pair[0].name]
     _report(verdicts, snapshots, parts, renamed, delete=args.delete, dry_run=args.dry_run)
     return 0
