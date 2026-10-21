@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Final
 import pytest
 from structlog.testing import capture_logs
 
+from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ChannelContext,
@@ -149,13 +150,20 @@ class _Reads(FakeMemoryStore):
     """The canonical fake, recording each read by id the walk makes, in order.
 
     ``before_live`` runs as the first live read is made, before it answers: a write
-    landing as the walk reads.
+    landing as the walk reads. ``history_fault``, where given, is raised as a
+    ``MemoryStoreError`` by every history read, once recorded, and by no live read.
     """
 
-    def __init__(self, *, before_live: Callable[[_Reads], Awaitable[None]] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        before_live: Callable[[_Reads], Awaitable[None]] | None = None,
+        history_fault: str | None = None,
+    ) -> None:
         super().__init__(now=lambda: NOW)
         self.reads: list[tuple[str, tuple[str, ...]]] = []
         self._before_live = before_live
+        self._history_fault = history_fault
 
     async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
         ids = tuple(record_ids)
@@ -168,6 +176,8 @@ class _Reads(FakeMemoryStore):
     async def get_history(self, record_ids: Sequence[str]) -> Mapping[str, Memory]:
         ids = tuple(record_ids)
         self.reads.append(("history", ids))
+        if self._history_fault is not None:
+            raise MemoryStoreError(self._history_fault)
         return await super().get_history(ids)
 
 
@@ -814,6 +824,33 @@ async def test_a_memory_store_fault_gives_no_block() -> None:
     assert [one["reason"] for one in logs if one["event"] == "person_block_unread"] == [
         "memory_fault"
     ]
+
+
+async def test_a_history_read_fault_on_a_mixed_batch_gives_no_block() -> None:
+    """#3330: one pin resolves on the live read, the other misses it, and the history read
+    made for the miss fails (ADR-0342 §5:3): no block, and one fault logged without words.
+
+    The reads pin where the fault fired: the one live read answered both pins, so the
+    walk reached the history read, for the missed pin alone, and it raised there.
+    """
+    wordings = ("Eats no meat.", "Lives in Porto.", "Lives in Coimbra.")
+    world = _World(memory=_Reads(history_fault="history down"))
+    await world.held(
+        _fact("m:diet", wordings[0]),
+        _ended("m:old", wordings[1], successor="m:new"),
+        _fact("m:new", wordings[2]),
+    )
+    await world.pin("m:diet", "m:old")
+
+    with capture_logs() as logs:
+        block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+
+    assert block is None
+    assert world.memory.reads == [("live", ("m:diet", "m:old")), ("history", ("m:old",))]
+    [logged] = [one for one in logs if one["event"] == "person_block_unread"]
+    assert logged["reason"] == "memory_fault"
+    assert not [one for one in logs if one["event"] == "person_block"]
+    assert not [wording for wording in wordings if wording in repr(logs)]
 
 
 async def test_an_assembled_block_is_logged_by_its_counts_alone() -> None:
