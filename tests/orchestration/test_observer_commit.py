@@ -1313,6 +1313,18 @@ def test_nothing_inside_a_malformed_object_is_read_as_the_answer() -> None:
     assert parsed(f"{_REASONING}\n{truncated}", CommitReply) is None
 
 
+def test_nothing_inside_an_array_or_a_fence_within_a_malformed_object_is_read() -> None:
+    """Neither an array's members nor a fence opened inside an unclosed object is a reply."""
+    fragment = json.dumps({"part": "P1", "how_sure": "sure", "note": "evidence"})
+    fenced = '{ "action": "add", "supports": [\n```json\n{"note": "evidence"}\n```'
+
+    assert parsed(f"[{fragment}]", CommitReply) is None
+    assert parsed(f"{_REASONING}\n[{fragment}]", CommitReply) is None
+    assert parsed(f"{_REASONING} [P1, {fragment}", CommitReply) is None
+    assert parsed(fenced, CommitReply) is None
+    assert parsed(f"{_REASONING}\n{fenced}", CommitReply) is None
+
+
 def test_braces_inside_an_objects_strings_do_not_end_it() -> None:
     """A brace in a string, past an escaped quote too, neither ends an object nor opens one."""
     decision = {**_ADD, "note": 'the user wrote "{" and "}"'}
@@ -1390,6 +1402,25 @@ async def test_a_commit_reply_with_prose_around_its_object_is_written() -> None:
     stored = await harness.memory.get(write.memory)
     assert isinstance(stored, Memory)
     assert stored.content == "The user prefers window seats."
+
+
+async def test_a_fragment_of_a_malformed_commit_reply_fails_as_unparsed() -> None:
+    """§16:4: a support inside an array is no decision; the attempt fails and waits."""
+    harness = Harness()
+    await _three(harness)
+    fragment = json.dumps({"part": "P1", "how_sure": "sure", "note": "evidence"})
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_SCOUTED),
+        commit=FakeModelProvider.scripted(f"{_REASONING}\n[{fragment}]"),
+    )
+
+    outcome = await observer.run()
+
+    assert outcome.waiting == 1
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.attempts[-1].end is ObservationAttemptEnd.FAILED
+    (finding,) = record.findings
+    assert finding.outcome is None
 
 
 async def test_a_commit_reply_missing_a_required_key_still_fails_as_unparsed() -> None:
