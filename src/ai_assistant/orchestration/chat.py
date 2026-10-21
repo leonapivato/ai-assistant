@@ -218,7 +218,8 @@ class _Turn:
         activation_id: The activation.
         handed: The positions of the messages it was handed, its trigger's and each
             joined one's, which no later look hands anything again.
-        due: Set by a notice while it runs: a message may be waiting to join.
+        due: Set by a notice while it runs: a message may be waiting to join. Set at
+            admission too, for a message noticed while the admitting read ran.
         waited: Whether a message did not join it, after which nothing joins it, since
             no input joins past one that is waiting (ADR-0332 §3:3).
         over: Whether it has ended, so the joiner stops once its attempt is done.
@@ -563,6 +564,11 @@ class ChatReader:
         self._waits.pop(conversation_id, None)
         activation_id = self._mint()
         turn = _Turn(activation_id=activation_id, handed={one.position for one in waiting})
+        # Due from the start: a message noticed after the read took ``waiting`` and
+        # before this turn was running found none to wake, so the joiner looks once,
+        # whatever was noticed during that read (ADR-0332 §3:3). Where nothing waits,
+        # the look is one read.
+        turn.due.set()
         self._running[conversation_id] = turn
         try:
             window = await self._window(conversation_id, waiting)

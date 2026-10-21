@@ -451,6 +451,52 @@ async def test_a_message_written_while_the_activation_is_admitted_joins_once_it_
     assert await store.taken_in(conversation, positions=[1, 2]) == {1: running, 2: running}
 
 
+async def test_a_message_noticed_while_the_admitting_read_runs_joins_the_activation() -> None:
+    """§3:3: a notice after the read's snapshot, before the activation runs, still joins."""
+    store = _HeldSnapshot()
+    completer = Gated()
+    harness = phases_harness(completer, conversation_store=store)
+    conversation = await open_conversation(harness)
+    await harness.engine.write_message(conversation, message=said("m-1", "book Riverside"))
+    await asyncio.wait_for(store.holding.wait(), SETTLE)
+    await harness.engine.write_message(conversation, message=said("m-2", "for Saturday"))
+    # Past the start wait that notice moved, so the read admits what it took: m-1.
+    await asyncio.sleep(CASE_START_WAIT.total_seconds() * 10)
+    store.release.set()
+    await asyncio.wait_for(completer.entered.wait(), SETTLE)
+    running = await working(harness, conversation)
+
+    async def marked() -> bool:
+        return bool(await store.taken_in(conversation, positions=[2]))
+
+    await until(marked, what="the message to join")
+    completer.release.set()
+    (episode,) = await _frozen(harness, 1)
+    await harness.engine.aclose()
+
+    assert processing(episode).activation_id == running
+    assert [one.position for one in processing(episode).joined[0].messages] == [2]
+    assert await store.taken_in(conversation, positions=[1, 2]) == {1: running, 2: running}
+
+
+class _HeldSnapshot(FakeConversationStore):
+    """A store whose first waiting-message read waits for :attr:`release` past its snapshot."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+        self.holding = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def untaken_messages(
+        self, conversation_id: str, *, limit: int = 100
+    ) -> tuple[TranscriptMessage, ...]:
+        found = await super().untaken_messages(conversation_id, limit=limit)
+        if not self.holding.is_set():
+            self.holding.set()
+            await self.release.wait()
+        return found
+
+
 async def test_a_join_whose_marking_is_refused_joins_nothing_and_is_taken_in_after() -> None:
     """§3:18: nothing is joined that the store does not hold taken in by the activation."""
     store = _HeldMarking(refused=2)
