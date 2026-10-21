@@ -6,7 +6,7 @@
 - Dependency: ADR-0260 as its status line leaves it, and ADR-0324 and ADR-0325, all on `main` at `c973d57a`.
 - Authorization: the direction is the owner's ruling of 2026-10-17 in batch #3113 that the calendar and the weather come back as pulls, which ADR-0324 decides and which needs a real forecast source to reach anyone. The dispatcher assigned 0344, and walks and ratifies this decision under the owner's standing delegation of 2026-10-21: "Dont draw the line who ratifies what, Ill just check in and if I see something wrong I'll give input to you".
 - **Does not change `core`.** No Protocol, type, error class, constant or `Settings` field is added or changed, and `PROTOCOL_VERSION` does not move (§8:3). Its required review set is adversarial *and* architecture, because it supersedes part of the forecast seam's credential clause, ADR-0260 §4:3.
-- **Partially supersedes** [ADR-0260](0260-a-forecast-read-is-its-own-seam-at-a-configured-provider-and-what-it-mints-carries-the-extent-that-makes-it-evidence.md), in §4:3's credential and provisioning limbs, §6:2's *before the credential is read* and its re-read limb, §12:5's and §12:6's reference-provider limbs, and §13:3's arm (c) in its credential limbs, each as it reaches the production forecaster and in the scope §9 states.
+- **Partially supersedes** [ADR-0260](0260-a-forecast-read-is-its-own-seam-at-a-configured-provider-and-what-it-mints-carries-the-extent-that-makes-it-evidence.md), in §4:3's credential and provisioning limbs, §6:2's *before the credential is read* and its re-read limb, §12:5's and §12:6's reference-provider limbs, §13:3's arm (b) in its omitted-field limb, and its arm (c) in its credential limbs, each as it reaches the production forecaster and in the scope §9 states.
 
 ## Context
 
@@ -218,14 +218,15 @@ days those of the place the forecast is for.
 | 7 | `utc_offset_seconds` absent, not an integer token, or of magnitude 86 400 or more | Every day declares no offset and is dropped (ADR-0260 §5:8) |
 | 8 | A requested variable whose member is absent, or whose unit `daily_units` does not give as a string | Every day is dropped (ADR-0260 §5:3) |
 | 9 | A `time` element that is not a `YYYY-MM-DD` string naming a calendar day | That position names no day and is dropped |
-| 10 | A day named more than once in `daily.time` | Every one of its positions is dropped (ADR-0260 §5:3) |
-| 11 | A day whose element for a requested variable is `null`, a boolean, a string, an array or an object | That day is dropped (ADR-0260 §5:3) |
-| 12 | A day whose transcription exceeds `forecast_max_day_chars` | That day is dropped (ADR-0260 §5:3) |
-| 13 | Days surviving rows 7 to 12 | The first `forecast_max_days` of them are minted, in `daily.time`'s order (ADR-0260 §5:1); none surviving is `NO_RESULT` |
+| 10 | A day whose date and offset make no constructible extent, such as `9999-12-31` whose end is past the representable range | That day is dropped (ADR-0260 §5:9) |
+| 11 | A day named more than once in `daily.time` | Every one of its positions is dropped (ADR-0260 §5:3) |
+| 12 | A day whose element for a requested variable is `null`, a boolean, a string, an array or an object | That day is dropped (ADR-0260 §5:3) |
+| 13 | A day whose transcription exceeds `forecast_max_day_chars` | That day is dropped (ADR-0260 §5:3) |
+| 14 | Days surviving rows 7 to 13 | The first `forecast_max_days` of them are minted, in `daily.time`'s order (ADR-0260 §5:1); none surviving is `NO_RESULT` |
 
 > **Normative.** The production forecaster maps a response onto `ForecastOutcome` as the
 > table above states. Rows 1 to 6 are taken in order and the first that holds decides the
-> read; rows 7 to 12 each drop days, and row 13 mints what survives them. No refusal class is
+> read; rows 7 to 13 each drop days, and row 14 mints what survives them. No refusal class is
 > added: `ForecastRefusal`'s six members say each case (ADR-0260 §4:6).
 
 > **Normative.** The body is decoded with each number token kept as the text the response
@@ -252,6 +253,14 @@ days those of the place the forecast is for.
 
 > **Normative.** `reported_at` is the instant the response's `Date` field declares, read by
 > `declared_instant`, and there is no substitute (ADR-0260 §5:7).
+
+> **Normative.** ADR-0260 §13:3's arm (b), in its limb *a response one of whose days omits a
+> documented field … mints its siblings only*, as it reaches the production forecaster: a
+> column of Open-Meteo's table cannot be absent for one day alone, so that limb is asserted
+> as row 8, a requested variable's member absent dropping every day and yielding
+> `NO_RESULT`, and as row 4, a member of another length than `daily.time`'s yielding
+> `PROVIDER_REFUSED`. Its limbs for a value supplied as `null` and for one of a type the
+> format does not admit, each of which mints the siblings, stand.
 
 **The order is the reference adapter's.** The status and the shape are judged first, then the
 declared instant, then the days, which is how `ForecastEgress._read` orders them today. A
@@ -377,7 +386,7 @@ command have both merged.
 | ADR-0260 §4:3 | Its *holds the credential*, its *supplying an identity and a credential*, and its *a source needing no credential at all is a shape this corpus does not have*, as they reach the production forecaster (§3:1–§3:3). *This contract never carries one*, no credential in a binding, the `ACTIVE` record `forecast_connection` names, and *claims no exemption from the connection model* stand |
 | ADR-0260 §6:2 | *Before the credential is read*, read as before the record's one read, and the re-read limb, which has no subject, as they reach the production forecaster (§3:4–§3:6). The three checks, their order, `ToolBindingError` and the `PROVIDER_REFUSED` mapping stand |
 | ADR-0260 §12:5, §12:6 | Their reference-provider limbs: the production forecaster is no longer the reference provider (§2:1–§2:2). What §12:6 asked of it carries to the Open-Meteo forecaster: every §5 outcome reachable through its format, a refusal on a connection that is not the bound one, and the deadline arm run against a real suspension of the injected transport |
-| ADR-0260 §13:3 | Arm (c)'s *before any credential is read*, asserted as before the connection record is read; and its interleaving limb, *a reprovisioning landing between the credential read and the re-read*, replaced by a record re-provisioned to name a slot before the one read, which returns `PROVIDER_REFUSED` with no channel opened while the three checks still raise (§8:4). Every other arm and limb stands |
+| ADR-0260 §13:3 | Arm (b)'s omitted-field limb, asserted as a variable absent for every day and as a column of the wrong length, its `null` and ill-typed limbs standing (§5:8). Arm (c)'s *before any credential is read*, asserted as before the connection record is read; and its interleaving limb, *a reprovisioning landing between the credential read and the re-read*, replaced by a record re-provisioned to name a slot before the one read, which returns `PROVIDER_REFUSED` with no channel opened while the three checks still raise (§8:4). Every other arm and limb stands |
 | ADR-0260 §1:1–§1:4, §2:3, §3:2–§3:3, §4:1–§4:2, §4:4–§4:10, §5:1–§5:10, §6:1, §6:3–§6:10, §11:1–§11:3, §11:5–§11:9, §12:1–§12:2, §12:4, §13:1–§13:2, §13:4, §14:1, §15:1–§15:3 | Nothing: read through and left standing, as earlier status lines leave them. §4:8's *before any credential is read* holds, with nothing read. §5:2's form and §5:3's drops are applied (§5). §11:5 is applied (§7:3) |
 | ADR-0260 §2:1–§2:2, §3:1, §3:4, §7–§10, §11:4, §12:3, §13:5 | Nothing: ADR-0309, ADR-0319 and ADR-0320 already retire them |
 | ADR-0325 §6:1 | Nothing: this is the decision its first item defers to, and §2–§5 bind the forecaster as they bind every keyless callable |
