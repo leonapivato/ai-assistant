@@ -5479,9 +5479,16 @@ async function aboutEdit(path, payload, act, landed) {
     if (body.off !== true && editLanded(body.edit) && landed !== undefined) {
       landed();
     }
-    await openAbout(true);
+    // The read is started, and its run counted, before it is waited on.
+    const reading = openAbout(true);
+    const run = aboutRuns.current;
+    await reading;
+    // **Only the latest read, in its own session, with nothing focused since, puts the
+    // focus back** (adversarial review, round 9): a read overtaken by a later edit's
+    // would otherwise move the keyboard out of the box the person is now typing in.
+    const unfocused = document.activeElement === null || document.activeElement === document.body;
     const again = focused === "" ? null : el(focused);
-    if (again !== null) {
+    if (again !== null && run === aboutRuns.current && sameSession(half, era) && unfocused) {
       again.focus();
     }
   } catch (_) {

@@ -810,6 +810,51 @@ async def test_a_stalled_read_after_a_write_holds_up_no_later_write(
         assert heard == []
 
 
+async def test_a_read_overtaken_by_a_later_save_leaves_the_focus_where_it_is(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A save's read that comes back after a later save's puts no focus back: the person
+    is typing in the later box (adversarial review, round 9)."""
+    loop = asyncio.get_running_loop()
+    release: asyncio.Future[None] = loop.create_future()
+    held_once: list[bool] = []
+
+    async def stall_first(route: Route) -> None:
+        if not held_once:
+            held_once.append(True)
+            await release
+        await route.fallback()
+
+    async with driving(gateway_browser, tmp_path, viewport=PHONE) as drive:
+        heard = _complaints(drive.page)
+        switch_on(drive.engine)
+        await _open(drive)
+        page = drive.page
+        language = page.locator("#field-language")
+        await page.route("**/person/changes", stall_first)
+
+        await page.fill("#field-name", "Robin")
+        async with page.expect_request("**/person/changes"):
+            await page.press("#field-name", "Enter")
+        await page.fill("#field-language", "Português")
+        async with page.expect_response("**/person/changes"):
+            await page.press("#field-language", "Enter")
+        await expect(page.locator("#change-list > .about-row")).to_have_count(2)
+        await expect(language).to_be_focused()
+
+        # The first save's read, let go; the ordering is a whole round trip after its
+        # last byte.
+        async with page.expect_response("**/person/changes") as stale:
+            release.set_result(None)
+        await (await stale.value).finished()
+        await page.evaluate("() => fetch('/').then((answer) => answer.text())")
+        await expect(language).to_be_focused()
+        await page.keyboard.type("!")
+        await expect(language).to_have_value("Português!")
+        await expect(page.locator("#field-name")).to_have_value("Robin")
+        assert heard == []
+
+
 async def test_a_box_typed_in_while_a_clear_is_out_keeps_what_was_typed(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
