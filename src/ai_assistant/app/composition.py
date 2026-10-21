@@ -1641,12 +1641,18 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # that named none of `forecast_connection`, `forecast_origin`,
         # `forecast_latitude` and `forecast_longitude` holds no forecaster at all —
         # and `Settings` refuses every half-set combination of the four, so this is
-        # whole or absent. `records`, `secrets` and the transport are the objects this
-        # root already holds, for the search integration's reasons: a second store
-        # handle would let a provisioning act commit a revision one of them could not
-        # yet see, and constructing the transport inside the branch is what keeps "a
+        # whole or absent. `records` and the transport are the objects this root
+        # already holds, for the search integration's reasons: a second store handle
+        # would let a provisioning act commit a revision one of them could not yet
+        # see, and constructing the transport inside the branch is what keeps "a
         # subsystem handed no capability has no route to the world" true of the whole
         # tree rather than of one argument list (ADR-0191 §1, §3).
+        #
+        # **No `Secrets` face is handed over, and that is the integration's shape**
+        # (ADR-0344 §2:3): the provider is Open-Meteo and the connection is keyless
+        # (ADR-0325 §2:1), so the forecaster reads no credential and the builder takes
+        # no face to read one with. Which shape it is lives in the builder's code, not
+        # here and not in `Settings` (ADR-0325 §2:2, ADR-0344 §2:4).
         #
         # **No ledger and no gate are passed, and ADR-0260 §6 is why**: that section
         # enumerates what `Forecaster.read` performs and states that this seam
@@ -1658,8 +1664,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # than skipped** — the searcher's reasoning one integration along. That
         # section's obligation is over "the resources it has opened"; a forecaster
         # opens none that outlives a call, ADR-0191 §3 makes the exchange open a
-        # channel per call and close it in a `finally`, and the connection store and
-        # the keyring it reads through are objects this root already closes.
+        # channel per call and close it in a `finally`, and the connection store it
+        # reads is an object this root already closes.
         # ADR-0260 §4's `close` clause is conditional on "a concrete forecaster
         # **holding an opened resource**", and this one holds none; a no-op `close`
         # registered here would be a lifecycle nobody has.
@@ -1680,7 +1686,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 latitude=settings.forecast_latitude,
                 longitude=settings.forecast_longitude,
                 records=connections,
-                secrets=integration_secrets,
                 transport=StreamOutboundTransport() if transport is None else transport,
                 max_days=settings.forecast_max_days,
                 max_day_chars=settings.forecast_max_day_chars,

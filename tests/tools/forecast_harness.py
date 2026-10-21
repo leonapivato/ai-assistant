@@ -2,8 +2,14 @@
 
 Shared by :mod:`test_forecast` and the composition case that asserts the forecast
 declaration reaches no registry. What varies between those is what the provider answered
-and what the connection store did under the credential read; none of it is a property of
-the forecaster, so the arrangement lives here and the cases stay about ADR-0260's clauses.
+and what the connection store held at the one record read; none of it is a property of
+the forecaster, so the arrangement lives here and the cases stay about ADR-0260's and
+ADR-0344's clauses.
+
+**The far end speaks Open-Meteo's documented format** (ADR-0344 §2:5): :func:`body`
+writes a ``/v1/forecast`` response — the daily table, its units, the one offset and the
+members that locate the place — as JSON text, so a number token reaches the forecaster
+spelled exactly as a case wrote it. **Nothing here sends a request to Open-Meteo.**
 
 **Nothing here opens a socket, and that is a property of the design rather than of the
 arrangement.** :class:`~ai_assistant.tools.egress.HttpsExchange` takes the
@@ -16,12 +22,14 @@ connect.
 
 **The account facts and the transport doubles are the search harness's**, imported
 rather than restated, for exactly the reason that harness gives for importing the mail
-one: a connection reference, an identity, a slot and a credential are what a provisioning
-act writes for *any* integration, and a transport that stalls, raises or absorbs a
-cancellation is a double for the **seam** rather than for either kind. Two spellings of
-them would be two harnesses that could disagree about what ADR-0148 §6 and ADR-0060 §1
-are over — and the seam under both is now literally one class
-(:class:`~ai_assistant.tools.egress.HttpsEgressTransport`).
+one: a connection reference and an identity are what a provisioning act writes for *any*
+integration, and a transport that stalls, raises or absorbs a cancellation is a double
+for the **seam** rather than for either kind. Two spellings of them would be two
+harnesses that could disagree about what ADR-0148 §6 and ADR-0060 §1 are over — and the
+seam under both is now literally one class
+(:class:`~ai_assistant.tools.egress.HttpsEgressTransport`). The record defaults to the
+keyless one ADR-0325's act writes — ``ACTIVE``, naming no slot — because the forecast
+is keyless (ADR-0344 §2:3).
 """
 
 from __future__ import annotations
@@ -31,7 +39,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, final
 
-from egress_transport_harness import CREDENTIAL, REFERENCE, Records, entry, keyring
+from egress_transport_harness import REFERENCE, Records, entry
 from web_search_harness import (
     AbsorbingTransport,
     GatedTransport,
@@ -39,9 +47,7 @@ from web_search_harness import (
     RaisingTransport,
     ReprovisioningRecords,
     StallingTransport,
-    SuspendableKeyring,
     elsewhere_account,
-    suspendable,
 )
 
 from ai_assistant.core.types import (
@@ -62,8 +68,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from decimal import Decimal
 
-    from egress_transport_harness import Keyring
-
     from ai_assistant.core.errors import TransportError
     from ai_assistant.core.protocols import OutboundTransport
     from ai_assistant.core.types import BoundEgressCall, FrozenJson, ToolDefinition
@@ -73,14 +77,18 @@ if TYPE_CHECKING:
 __all__ = [
     "DATE_FIELD",
     "DECIDED_AT",
+    "KEYLESS",
     "LATITUDE",
+    "LOCATING",
     "LONGITUDE",
     "MAX_DAYS",
     "MAX_DAY_CHARS",
     "MAX_RESPONSE_BYTES",
-    "OMITTED",
+    "OFFSET",
     "ORIGIN",
     "REPORTED_AT",
+    "UNITS",
+    "VARIABLES",
     "AbsorbingTransport",
     "Built",
     "GatedTransport",
@@ -88,7 +96,6 @@ __all__ = [
     "RaisingTransport",
     "ReprovisioningRecords",
     "StallingTransport",
-    "SuspendableKeyring",
     "answering",
     "authorised_read",
     "body",
@@ -99,7 +106,6 @@ __all__ = [
     "far_end",
     "request",
     "response",
-    "suspendable",
 ]
 
 #: The configured provider's origin. ``.invalid`` (RFC 6761 §6.4), so a case that reached
@@ -128,76 +134,136 @@ MAX_DAY_CHARS: Final = 2048
 #: cases supply their own.
 MAX_RESPONSE_BYTES: Final = 64 * 1024
 
-
-@final
-class _Omitted:
-    """A field the provider did not send at all, as distinct from one it sent null.
-
-    ADR-0260 §5's drop rule is total over four forms and each has to be expressible;
-    ``None`` already means ``null``, so omission needs a value of its own.
-    """
-
-    __slots__ = ()
+#: The record ADR-0325's keyless act writes: ``ACTIVE`` at revision 1, naming no slot.
+KEYLESS: Final = entry(slot=None)
 
 
-#: The one instance of it, passed to :func:`day` for a field to leave out.
-OMITTED: Final = _Omitted()
+#: The daily variables ADR-0344 §4:3 asks for, in its order, restated here rather than
+#: imported so that a case asserting the request target is asserting the decision and
+#: not the module's own constant back at it.
+VARIABLES: Final = (
+    "weather_code",
+    "temperature_2m_max",
+    "temperature_2m_min",
+    "precipitation_sum",
+    "precipitation_probability_max",
+    "wind_speed_10m_max",
+)
+
+#: What Open-Meteo's ``daily_units`` documents for each of them in its default units.
+UNITS: Final = {
+    "time": "iso8601",
+    "weather_code": "wmo code",
+    "temperature_2m_max": "\N{DEGREE SIGN}C",
+    "temperature_2m_min": "\N{DEGREE SIGN}C",
+    "precipitation_sum": "mm",
+    "precipitation_probability_max": "%",
+    "wind_speed_10m_max": "km/h",
+}
+
+#: ``+01:00``, the offset every day of a response here is in unless a case names its
+#: own, as ``utc_offset_seconds`` spells it.
+OFFSET: Final = "3600"
+
+#: The members a response carries that §5:6 says reach no record, each with a value
+#: distinctive enough that a case can look for it in a minted content.
+LOCATING: Final = {
+    "latitude": "41.16",
+    "longitude": "-8.62",
+    "generationtime_ms": "0.0731",
+    "timezone": '"Europe/Lisbon"',
+    "timezone_abbreviation": '"WEST"',
+    "elevation": "93.0",
+}
 
 
-def day(  # noqa: PLR0913 — one parameter per field the documented format names, so a case can make any one of them absent, null or ill-typed
+def day(  # noqa: PLR0913 — one parameter per daily variable ADR-0344 §4:3 names, so a case can make any one of them null or ill-typed
     *,
-    date: str | None | _Omitted | Any = "2026-09-05",
-    utc_offset: str | None | _Omitted | Any = "+01:00",
-    conditions: str | None | _Omitted | Any = "Clear",
-    temperature_min: str | None | _Omitted | Any = "11.4",
-    temperature_max: str | None | _Omitted | Any = "19.2",
-    precipitation: str | None | _Omitted | Any = "0.0",
-) -> dict[str, Any]:
-    """One day row, in the shape the reference provider's documented format carries.
+    date: Any = "2026-09-05",
+    weather_code: str = "3",
+    temperature_2m_max: str = "19.2",
+    temperature_2m_min: str = "11.4",
+    precipitation_sum: str = "0.0",
+    precipitation_probability_max: str = "10",
+    wind_speed_10m_max: str = "14.4",
+) -> dict[str, str]:
+    """One position of Open-Meteo's daily table, as the JSON text each column carries.
 
-    **Every value is a JSON string in that format**, which ADR-0260 §5 forces: a content
-    is "the octets of the value the response carried, and never a re-rendering of a
-    parsed number", so a documented format carrying a number as a JSON number would
-    oblige the reader to render a parsed float.
+    **Every variable is raw JSON text**, so a case writes ``"17.20"``, ``"1e1"``,
+    ``"null"``, ``"true"``, ``'"19.2"'``, ``"[1]"`` or ``"{}"`` and the body carries
+    exactly that — which is what makes a transcription case about the token the response
+    spelled rather than about a float this harness rendered.
 
     Args:
-        date: The day, as ``YYYY-MM-DD`` — a string, ``None`` for ``null``,
-            :data:`OMITTED` for a field the provider did not send, or any other JSON
-            value for §5's ill-typed case.
-        utc_offset: The offset that day is in, as ``+HH:MM``, likewise.
-        conditions: The conditions span, likewise.
-        temperature_min: The low, likewise.
-        temperature_max: The high, likewise.
-        precipitation: The precipitation, likewise.
+        date: The ``time`` element. A ``str`` is sent as that JSON string; any other
+            value is sent as ``json.dumps`` writes it, ``None`` as ``null``.
+        weather_code: That column's element, as JSON text.
+        temperature_2m_max: Likewise.
+        temperature_2m_min: Likewise.
+        precipitation_sum: Likewise.
+        precipitation_probability_max: Likewise.
+        wind_speed_10m_max: Likewise.
 
     Returns:
-        The object, ready for :func:`body`.
+        The position, by member name, ready for :func:`body`.
     """
-    fields = {
-        "date": date,
-        "utc_offset": utc_offset,
-        "conditions": conditions,
-        "temperature_min": temperature_min,
-        "temperature_max": temperature_max,
-        "precipitation": precipitation,
+    return {
+        "time": json.dumps(date),
+        "weather_code": weather_code,
+        "temperature_2m_max": temperature_2m_max,
+        "temperature_2m_min": temperature_2m_min,
+        "precipitation_sum": precipitation_sum,
+        "precipitation_probability_max": precipitation_probability_max,
+        "wind_speed_10m_max": wind_speed_10m_max,
     }
-    return {name: value for name, value in fields.items() if not isinstance(value, _Omitted)}
 
 
-def body(*days: Mapping[str, Any], group: bool = True) -> bytes:
-    """The documented response's body, carrying ``days``.
+def body(
+    *days: Mapping[str, str],
+    offset: str | None = OFFSET,
+    units: Mapping[str, str] | str | None = None,
+    columns: Mapping[str, str | None] | None = None,
+    daily: str | None = None,
+    group: bool = True,
+) -> bytes:
+    """An Open-Meteo ``/v1/forecast`` body carrying ``days``, written as JSON text.
+
+    Written by hand rather than through ``json.dumps`` of a payload, because a number
+    token's spelling is the subject of half the cases and a decoder-encoder round trip
+    would re-render every one of them.
 
     Args:
-        days: The day rows, in the order the provider returned them.
-        group: Whether to carry the list at all. ``False`` is the response a provider
-            with nothing to say for the coordinate sends, which ADR-0260 §5 reads as a
-            response describing no day rather than as a shape refusal.
+        days: The positions of the daily table, in ``time``'s order.
+        offset: ``utc_offset_seconds`` as JSON text, or ``None`` to send no such member.
+        units: ``daily_units`` — a mapping of member to unit string, raw JSON text for
+            the whole member, or ``None`` for :data:`UNITS`.
+        columns: Members of ``daily`` to replace with this raw JSON text, or to leave
+            out where the value is ``None`` — for a column of another length, another
+            type, or absent.
+        daily: Raw JSON text for the whole ``daily`` member, in place of the table.
+        group: Whether to carry ``daily`` and ``daily_units`` at all. ``False`` is a
+            response naming no day, which §5's row 6 reads as ``NO_RESULT``.
 
     Returns:
         The body's octets.
     """
-    payload = {"days": list(days)} if group else {}
-    return json.dumps(payload).encode("utf-8")
+    members = [f'"{name}": {value}' for name, value in LOCATING.items()]
+    if offset is not None:
+        members.append(f'"utc_offset_seconds": {offset}')
+    if group:
+        if isinstance(units, str):
+            members.append(f'"daily_units": {units}')
+        else:
+            members.append(f'"daily_units": {json.dumps(UNITS if units is None else units)}')
+        if daily is None:
+            table: dict[str, str | None] = {
+                name: "[" + ", ".join(position[name] for position in days) + "]"
+                for name in ("time", *VARIABLES)
+            }
+            table.update(columns or {})
+            daily = "{" + ", ".join(f'"{n}": {v}' for n, v in table.items() if v is not None) + "}"
+        members.append(f'"daily": {daily}')
+    return ("{" + ", ".join(members) + "}").encode("utf-8")
 
 
 def response(
@@ -240,11 +306,11 @@ def far_end(*octets: bytes) -> FakeByteChannel:
     return FakeByteChannel(secure=True).deliver(*octets)
 
 
-def answering(*days: Mapping[str, Any], date: str | None = DATE_FIELD) -> FakeByteChannel:
+def answering(*days: Mapping[str, str], date: str | None = DATE_FIELD) -> FakeByteChannel:
     """A far end answering ``200`` with ``days``, in one call.
 
     Args:
-        days: The day rows.
+        days: The positions of the daily table.
         date: The ``Date`` field's value, or ``None`` for a response declaring none.
 
     Returns:
@@ -261,8 +327,8 @@ class Built:
         integration: What the composition root's builder returned.
         transport: The outbound-transport capability, so a case can read the opens back
             — including the case whose whole assertion is that there were none.
-        keyring: The recording ``Secrets`` face, likewise for credential reads.
-        records: The connection store, whose answers a case scripts read by read.
+        records: The connection store, whose answers a case scripts read by read, and
+            whose ``reads`` say whether the one record read happened at all.
     """
 
     integration: ForecastIntegration
@@ -274,7 +340,6 @@ class Built:
         | RaisingTransport
         | AbsorbingTransport
     )
-    keyring: Keyring | SuspendableKeyring
     records: Records | ReprovisioningRecords
 
     @property
@@ -322,8 +387,6 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
     | OutboundTransport
     | None = None,
     records: Records | ReprovisioningRecords | None = None,
-    secrets: SuspendableKeyring | None = None,
-    holds: str | None = CREDENTIAL,
     origin: str = ORIGIN,
     latitude: float = LATITUDE,
     longitude: float = LONGITUDE,
@@ -342,12 +405,8 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
         transport: A transport of the case's own, for the states the canonical fake has
             no arrangement for — one held open, one that stalls, one that raises and one
             that absorbs a cancellation.
-        records: The connection store's scripted answers; defaults to one active record
-            that never moves.
-        secrets: A keyring of the case's own, for the arms that hold a credential read
-            open. Defaults to the recording one the mail harness builds.
-        holds: What the keyring holds under the record's slot, or ``None`` for a keyring
-            with no entry — which is what an interrupted provisioning act leaves behind.
+        records: The connection store's scripted answers; defaults to one active,
+            keyless record that never moves.
         origin: The origin the configured provider names.
         latitude: ``Settings.forecast_latitude``.
         longitude: ``Settings.forecast_longitude``.
@@ -363,21 +422,19 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
     Returns:
         The integration and every double behind it.
     """
-    ring = await keyring(holds=holds) if secrets is None else secrets
     capability = transport
     if capability is None:
         served = FakeOutboundTransport().serve(*channels)
         if refusal is not None:
             served.refuse_with(refusal)
         capability = served
-    store = Records(entry()) if records is None else records
+    store = Records(KEYLESS) if records is None else records
     integration = build_forecast_integration(
         connection=REFERENCE,
         origin=origin,
         latitude=latitude,
         longitude=longitude,
         records=store,
-        secrets=ring,
         transport=capability,
         max_days=max_days,
         max_day_chars=max_day_chars,
@@ -388,7 +445,6 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
     return Built(
         integration=integration,
         transport=capability,  # type: ignore[arg-type]  # the union above is the set of doubles this harness serves
-        keyring=ring,
         records=store,
     )
 
@@ -456,7 +512,7 @@ async def bound(  # noqa: PLR0913 — one knob per argument a case varies about 
     seam = EgressBindingSeam(
         definitions=_NoDefinitions(),
         registrations=egress_registrations(None, None, subject.integration),
-        records=Records(entry()),
+        records=Records(KEYLESS),
     )
     parameters: dict[str, FrozenJson] = {
         "origin": origin,

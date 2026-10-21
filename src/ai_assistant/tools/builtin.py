@@ -515,7 +515,6 @@ def build_forecast_integration(  # noqa: PLR0913 — one parameter per injected 
     latitude: float,
     longitude: float,
     records: ConnectionRecords,
-    secrets: Secrets,
     transport: OutboundTransport,
     max_days: int,
     max_day_chars: int,
@@ -541,6 +540,14 @@ def build_forecast_integration(  # noqa: PLR0913 — one parameter per injected 
     nothing written about ``WEB_SEARCH``". What the configured cost pair reaches is the
     **declaration**, which is what ADR-0236 §4's unknown-cost floor reads at the ruling.
 
+    **Keyless, and this is where that is fixed** (ADR-0344 §2:3; ADR-0325 §2:1, §2:2).
+    The forecast's provider is Open-Meteo, which takes no credential, so this function
+    takes no ``Secrets`` face and constructs its
+    :class:`~ai_assistant.tools.egress.HttpsEgressTransport` with none. That transport
+    reads the connection record once, reads no credential, and refuses a record that
+    names a slot. The shape is this code's: no record, binding, ``Settings`` value or
+    remote answer chooses it.
+
     **Nothing is registered in a ``ToolRegistry``, and there is no parameter through
     which it could be** (ADR-0260 §1). This function returns no ``definition`` and
     :func:`build_default_registry` takes no forecast argument, so "the declaration is
@@ -549,24 +556,21 @@ def build_forecast_integration(  # noqa: PLR0913 — one parameter per injected 
 
     Args:
         connection: The connection reference the forecast read is registered against —
-            a reference the provisioner already minted (ADR-0151 §3). The user
-            provisioned it by ADR-0149 §4's explicit act, supplying an identity and a
-            credential; **the reference provider accepts that credential and does not
-            use it** (ADR-0260 §12), which is a fact about the far end and changes
-            nothing about ADR-0148 §6's conditions on this side.
+            a reference the provisioner already minted (ADR-0151 §3). The owner made
+            it by ADR-0325's keyless act, supplying an identity alone (ADR-0344 §3:2);
+            its record names no credential slot, and one that does is refused at the
+            read.
         origin: The one origin the configured provider names, as ``https://host[:port]``
             (ADR-0260 §6). The transport pins every call to exactly this text and opens
             a channel to no other.
         latitude: ``Settings.forecast_latitude`` — the place this deployment reads its
             forecast for (ADR-0260 §3, §11).
         longitude: ``Settings.forecast_longitude``, likewise.
-        records: The connection store, read once per call by the binding seam and twice
-            around the credential read by the transport (ADR-0148 §6). The **same**
-            store object the provisioner writes, so a provisioning act cannot commit a
-            revision this path could not yet see.
-        secrets: The ``INTEGRATION``-scoped reading face (ADR-0125 §8). Never a
-            ``SecretStore``: a transport handed the writing face could delete the
-            credential it reads.
+        records: The connection store, read once per call by the binding seam and once
+            by the keyless transport, as the last read before the first byte is
+            transmitted (ADR-0325 §2:5). The **same** store object the provisioner
+            writes, so a provisioning act cannot commit a revision this path could not
+            yet see.
         transport: The injected capability of reaching the world (ADR-0191 §1),
             **required**. The one place that constructs the real implementation is
             ``app/composition.py``; a test hands
@@ -615,7 +619,9 @@ def build_forecast_integration(  # noqa: PLR0913 — one parameter per injected 
             transport=HttpsEgressTransport(
                 registration=registration,
                 records=records,
-                secrets=secrets,
+                # Keyless (ADR-0344 §2:3): no `Secrets` face, so no credential is read
+                # and a record naming a slot is refused (ADR-0325 §2:1, §2:3).
+                secrets=None,
                 exchange=HttpsExchange(transport=transport, max_response_bytes=max_response_bytes),
             ),
             latitude=latitude,

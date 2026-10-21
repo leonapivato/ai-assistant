@@ -1,4 +1,4 @@
-"""ADR-0260's forecast seam, over the production forecaster.
+"""ADR-0260's forecast seam, over the production forecaster reading Open-Meteo (ADR-0344).
 
 §13's arms marked L1, less the two its preamble puts elsewhere: arm (a) was at the
 ``ReadAsk`` model, which retired with the old path (ADR-0309 §5), and arm (j) is at
@@ -9,14 +9,24 @@ preamble requires — "the subject is the production type or component", with ex
 assertion admitted over the canonical fake, and that one is in
 ``tests/tools/test_fake_forecaster.py``.
 
+**The arms run over Open-Meteo's format** (ADR-0344 §2:5, §8:4), and beside them each
+row of ADR-0344 §5's table, the number tokens transcribed as spelled, the request target
+asserted whole, the transport built with no ``Secrets`` face, and a record naming a slot
+refused with no channel opened. Arm (b)'s omitted-field limb is asserted as §5:8 says —
+a variable absent for every day, and a column of another length — and arm (c)'s
+credential limbs as ADR-0344 §9 restates them.
+
 **The far end is a scripted channel and never a network**, which is the harness's
 property rather than this file's: the exchange takes the outbound-transport capability
 as a required argument, so an arrangement that forgot to pass one would not construct.
+No case sends a request to Open-Meteo; every response is one the harness wrote in its
+documented format.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -24,13 +34,17 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from egress_transport_harness import Records, entry
+from egress_transport_harness import REFERENCE, SLOT, Records, entry
 from forecast_harness import (
+    KEYLESS,
     LATITUDE,
+    LOCATING,
     LONGITUDE,
     MAX_DAYS,
     ORIGIN,
     REPORTED_AT,
+    UNITS,
+    VARIABLES,
     AbsorbingTransport,
     Built,
     GatedTransport,
@@ -46,7 +60,6 @@ from forecast_harness import (
     far_end,
     request,
     response,
-    suspendable,
 )
 from forecaster_contract import (
     CannotDescribeItself,
@@ -67,6 +80,8 @@ from ai_assistant.core.types import (
     SemanticMemory,
     ToolCall,
 )
+from ai_assistant.testing import FakeOutboundTransport
+from ai_assistant.tools import build_forecast_integration
 from ai_assistant.tools.egress import TransportPinError
 from ai_assistant.tools.forecast import (
     FORECAST_READ,
@@ -89,9 +104,9 @@ _SHORT: Final = timedelta(milliseconds=50)
 #: How long a case waits for a held call to answer once released.
 _WAIT: Final = 5.0
 
-#: A content bound small enough that the boundary cases script a handful of
-#: characters rather than a paragraph. Nothing in the contract is a function of it.
-_SMALL_CONTENT_BOUND: Final = 64
+#: A content bound the conformance suite's contents fit inside. Nothing in the contract
+#: is a function of it; an Open-Meteo transcription is a few hundred characters.
+_SMALL_CONTENT_BOUND: Final = 512
 
 #: The bound a case sets when it wants the deadline to fire (ADR-0241 §1). Small
 #: enough that the wait is a fraction of a second and large enough that a loaded
@@ -103,6 +118,21 @@ _EXPIRING: Final = timedelta(milliseconds=200)
 #: :data:`~forecast_harness.REPORTED_AT`, so an implementation reading a clock of its own
 #: would have to hit this value by coincidence to pass.
 _OUR_CLOCK: Final = datetime(2031, 1, 1, 6, 30, tzinfo=UTC)
+
+#: The whole request ADR-0344 §4 says one read sends, for the harness's configured place
+#: and ``forecast_max_days``: the path, exactly five parameters in this order, and no
+#: field beyond the exchange's own two and ``Accept``. Written out as text rather than
+#: built from the module's constants, so a parameter added, dropped or reordered fails.
+_REQUEST: Final = (
+    b"GET /v1/forecast?latitude=41.1579&longitude=-8.6291"
+    b"&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,"
+    b"precipitation_probability_max,wind_speed_10m_max"
+    b"&timezone=auto&forecast_days=3 HTTP/1.1\r\n"
+    b"Host: forecast.example.invalid\r\n"
+    b"Connection: close\r\n"
+    b"Accept: application/json\r\n"
+    b"\r\n"
+)
 
 
 async def _read(subject: Built, *, timeout: timedelta = _BOUND) -> ForecastOutcome:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1); this helper only forwards the caller's bound to it
@@ -152,279 +182,569 @@ def _days(outcome: ForecastOutcome) -> list[str]:
         One ``YYYY-MM-DD`` per record, read off the first transcribed line — which is
         this adapter's own pinned form and not a cross-implementation one.
     """
-    return [record.content.split("\n", 1)[0] for record in outcome.records]
+    return [record.content.split("\n", 1)[0].removeprefix("time: ") for record in outcome.records]
 
 
-# --- ADR-0260 §13's arm (b): what the source owes, and the fallbacks not taken ---
+def _content(**values: str) -> str:
+    """The transcription this adapter pins for one day, with :data:`UNITS`' units.
 
+    Args:
+        values: ``time`` and each variable's token, as the response spelled them.
+            Unnamed ones take :func:`~forecast_harness.day`'s defaults.
 
-async def test_a_dated_day_with_a_declared_offset_mints_its_own_half_open_interval() -> None:
-    """§5: the extent is the day, computed from the provider's own declared values.
-
-    "Its ends are the half-open bounds of that day, computed **from the day the provider
-    named and the UTC offset the provider's own response declared for it**, and from
-    nothing else — never from a clock of ours, never from a timezone database of ours,
-    never from the reader's configuration, and never from the place."
-
-    The offset is ``+01:00``, so the day begins an hour *before* UTC midnight. A reader
-    that ignored the offset would produce an interval one hour off and would pass every
-    assertion about the record's shape, which is why the ends are asserted by value.
+    Returns:
+        The content a minted record carries.
     """
-    subject = await built(channels=[answering(day(date="2026-09-05", utc_offset="+01:00"))])
-
-    outcome = await _read(subject)
-
-    assert outcome.refusal is None
-    assert _extents(outcome) == [
-        (
-            datetime(2026, 9, 4, 23, 0, tzinfo=UTC),
-            datetime(2026, 9, 5, 23, 0, tzinfo=UTC),
-        )
-    ]
+    tokens = {name: value for name, value in day().items() if name != "time"}
+    tokens.update({name: value for name, value in values.items() if name != "time"})
+    date = values.get("time", "2026-09-05")
+    lines = [f"time: {date}", *(f"{name}: {tokens[name]} {UNITS[name]}" for name in VARIABLES)]
+    return "\n".join(lines)
 
 
-async def test_a_minted_record_carries_a_fully_open_validity() -> None:
-    """§5: "``validity`` is fully open and no lane sets it to the day the record is about".
+def _sent(subject: Built) -> bytes:
+    """Every octet the one channel ``subject`` opened was written.
 
-    ADR-0045 §2 makes the envelope window "a lifecycle property of the record's life in
-    the store, set operationally by the applier", and ADR-0252 §3 forbids reading it as
-    coverage "on any kind, under any fallback". A producer setting it to the forecast's
-    own day would be writing the source's testimony into the operational axis — the
-    authorship mixing ADR-0117 §2 refuses — and would hand the prohibited fallback
-    exactly the value it was written to refuse.
+    Args:
+        subject: The configured integration, built over the canonical transport.
+
+    Returns:
+        The request, as the far end received it.
+    """
+    assert isinstance(subject.transport, FakeOutboundTransport)
+    (channel,) = subject.transport.channels
+    return channel.written
+
+
+# --- ADR-0344 §4: the request, whole ----------------------------------------
+
+
+async def test_one_read_sends_exactly_the_request_adr_0344_states() -> None:
+    """§4:1 to §4:6, over the octets the far end received.
+
+    "``GET /v1/forecast`` at the configured origin, whose query carries exactly the
+    parameters ``latitude``, ``longitude``, ``daily``, ``timezone`` and
+    ``forecast_days``, and no credential", and "the adapter adds no request field beyond
+    ``Accept: application/json``". **Asserted whole**, so an added parameter, a unit
+    setting, an ``apikey``, ``Settings.timezone`` or a field of the adapter's own fails
+    (§8:4) — the two fields before ``Accept`` are the exchange's, for every integration.
     """
     subject = await built(channels=[answering(day())])
 
     outcome = await _read(subject)
 
-    assert outcome.records
-    for record in outcome.records:
-        assert record.validity.valid_from is None
-        assert record.validity.valid_until is None
+    assert outcome.refusal is None
+    assert _sent(subject) == _REQUEST
 
 
-async def test_a_day_declaring_no_offset_mints_no_record_for_that_day() -> None:
-    """§5: "A day the provider named without declaring the offset it is in declares no
-    extent", and that day is dropped.
+@pytest.mark.parametrize("max_days", [1, 2, 3])
+async def test_forecast_days_is_the_forecaster_s_own_bound(max_days: int) -> None:
+    """§4:5: ``forecast_days`` is ``Settings.forecast_max_days``, held from construction.
 
-    **Dropped rather than minted with an extent this system computed**, which is the
-    fail-closed direction: an extent derived from our own timezone database would be
-    this system stating where the provider's entry lies, and ADR-0117 §2 makes an extent
-    producer testimony.
+    Asked for what will be minted rather than Open-Meteo's default seven days, which is
+    what keeps ``forecast_max_response_bytes`` a backstop rather than the ordinary
+    outcome.
     """
-    subject = await built(
-        channels=[
-            answering(
-                day(date="2026-09-05", utc_offset=None),
-                day(date="2026-09-06", utc_offset="+01:00"),
-            )
-        ]
-    )
+    subject = await built(channels=[answering(day())], max_days=max_days)
 
-    outcome = await _read(subject)
+    await _read(subject)
 
-    assert _days(outcome) == ["2026-09-06"]
+    assert f"&timezone=auto&forecast_days={max_days} HTTP/1.1".encode() in _sent(subject)
 
 
 @pytest.mark.parametrize(
-    "unreadable",
+    ("latitude", "spelled"),
     [
-        pytest.param("Z", id="a-zulu"),
-        pytest.param("+01", id="no-minutes"),
-        pytest.param("+01:00:00", id="with-seconds"),
-        pytest.param("+99:00", id="no-day-is-in-it"),
-        pytest.param("=01:00", id="no-sign"),
-        pytest.param("+0\N{FULLWIDTH DIGIT ONE}:00", id="a-non-ascii-digit"),
+        pytest.param(0.00001, "0.00001", id="small-enough-for-repr-to-use-an-exponent"),
+        pytest.param(-90.0, "-90.0", id="a-whole-number-of-degrees"),
+        pytest.param(41.1579, "41.1579", id="the-configured-place"),
     ],
 )
-async def test_a_day_whose_offset_cannot_be_read_mints_no_record_for_that_day(
-    unreadable: str,
-) -> None:
-    """§5: an unreadable offset is not a declared one, so the day is dropped.
+async def test_the_coordinate_is_written_in_plain_decimal(latitude: float, spelled: str) -> None:
+    """§4:2: the ruled coordinate, spelled as the same float and without an exponent.
 
-    **One spelling and no other**, which this adapter pins and §5 authorises it to: "the
-    field selection, their order, the separators and the omission rule are fixed by the
-    implementation that reads that provider's documented format". A value the format does
-    not admit is read under no rule at all rather than under a looser one — the posture
-    ADR-0231 §10 takes for the obsolete HTTP date formats, one field over.
+    ``repr(0.00001)`` is ``1e-05``; the target carries ``0.00001``, which is the same
+    value in the positional notation Open-Meteo's documentation shows.
+    """
+    subject = await built(channels=[answering(day())], latitude=latitude)
 
-    The non-ASCII digit is the case a parser checking ``isdigit`` without ``isascii``
-    would read as a number: a fullwidth digit is a digit by Unicode and ``int()``
-    accepts it.
+    call = authorised_read(await request(subject, latitude=latitude))
+    await subject.forecaster.read(call, timeout=_BOUND)
+
+    assert f"/v1/forecast?latitude={spelled}&longitude=".encode() in _sent(subject)
+
+
+def test_the_daily_set_is_pinned() -> None:
+    """§4:3: the set is "a constant of the adapter's code, pinned by a test".
+
+    "Its first members are ``weather_code``, ``temperature_2m_max``,
+    ``temperature_2m_min``, ``precipitation_sum``, ``precipitation_probability_max`` and
+    ``wind_speed_10m_max``, in that order."
+    """
+    from ai_assistant.tools.forecast import _DAILY_VARIABLES  # noqa: PLC0415 — the pin
+
+    assert _DAILY_VARIABLES == VARIABLES
+
+
+# --- ADR-0344 §2:3: keyless, fixed where the transport is built --------------
+
+
+async def test_the_transport_is_built_with_no_secrets_face() -> None:
+    """§2:3, §8:4: "the transport constructed with no ``Secrets`` face".
+
+    Asserted over the object the builder built and over the builder's own signature:
+    there is no parameter through which a face could reach it, so the shape is the
+    code's and no caller's (ADR-0325 §2:2).
+    """
+    subject = await built(channels=[answering(day())])
+
+    assert subject.seam._secrets is None
+    assert "secrets" not in inspect.signature(build_forecast_integration).parameters
+
+
+async def test_a_record_naming_a_slot_is_refused_with_no_channel_opened() -> None:
+    """§8:4, ADR-0325 §2:3: "a record naming a slot returning ``PROVIDER_REFUSED`` with
+    no channel opened".
+
+    A keyless callable refuses a record that names a credential, because ignoring it
+    would leave a credential in the keyring that no call reads while the user believes
+    it is in use. The record is read **once** (ADR-0325 §2:5).
+    """
+    subject = await built(channels=[answering(day())], records=Records(entry(slot=SLOT)))
+
+    outcome = await _read(subject)
+
+    assert outcome.refusal is ForecastRefusal.PROVIDER_REFUSED
+    assert subject.transport.attempts == ()
+    assert subject.records.reads == [REFERENCE]
+
+
+async def test_a_record_re_provisioned_to_name_a_slot_before_the_one_read_is_refused() -> None:
+    """ADR-0344 §9, on ADR-0260 §13:3's arm (c): the interleaving limb, replaced.
+
+    "A record re-provisioned to name a slot before the one read, which returns
+    ``PROVIDER_REFUSED`` with no channel opened while the three checks still raise."
+    The binding was derived over the keyless record at revision 1; the record the one
+    read finds is revision 2 and names a slot. **Returned**, where the three checks
+    raise — asserted beside them below.
     """
     subject = await built(
-        channels=[
-            answering(
-                day(date="2026-09-05", utc_offset=unreadable),
-                day(date="2026-09-06", utc_offset="+01:00"),
-            )
-        ]
+        channels=[answering(day())], records=Records(entry(slot=SLOT, revision=2))
     )
 
     outcome = await _read(subject)
 
-    assert _days(outcome) == ["2026-09-06"]
+    assert outcome.refusal is ForecastRefusal.PROVIDER_REFUSED
+    assert subject.transport.attempts == ()
+    assert subject.records.reads == [REFERENCE]
 
 
-@pytest.mark.parametrize(
-    ("hours", "minutes"),
-    [
-        pytest.param("23", "59", id="the-widest-either-component-admits"),
-        pytest.param("00", "00", id="the-narrowest"),
-    ],
-)
-async def test_an_offset_at_its_component_bounds_is_read(hours: str, minutes: str) -> None:
-    """The positive arm of the component check, so the refusals below are not vacuous.
+async def test_a_provisioning_act_landing_after_the_one_read_stops_nothing() -> None:
+    """ADR-0344 §3:6, ADR-0325 §2:6: the re-read limb has no subject.
 
-    ``+23:59`` and ``+00:00`` are the widest and narrowest this documented format
-    spells, and both are offsets a day can be in — so a check that refused either would
-    be dropping days the provider described perfectly well.
+    An act landing after the one read is ADR-0148 §6:21's case and stops nothing
+    already begun: the read proceeds, mints, and reads the record exactly once — there
+    is no credential read for a second read to bracket.
     """
-    subject = await built(
-        channels=[answering(day(date="2026-09-05", utc_offset=f"+{hours}:{minutes}"))]
-    )
+    records = ReprovisioningRecords(KEYLESS, entry(slot=SLOT, revision=2))
+    transport = GatedTransport(answering(day()))
+    subject = await built(transport=transport, records=records)
+    call = authorised_read(await request(subject))
 
-    outcome = await _read(subject)
+    # Held at the channel's open, which is after the one read: the reprovisioning the
+    # read queued lands there, while the request is under way.
+    gate = transport.suspend_next()
+    running = asyncio.ensure_future(subject.forecaster.read(call, timeout=_BOUND))
+    await gate.reached()
+    assert records.reprovisioned is True
+    gate.release()
+    outcome = await asyncio.wait_for(running, _WAIT)
 
     assert _days(outcome) == ["2026-09-05"]
+    assert records.reads == [REFERENCE]
+
+
+# --- ADR-0344 §5's table, rows 1 to 6: the first that holds decides ----------
+
+
+async def test_row_1_a_response_at_the_read_bound_is_read_and_one_past_it_is_abandoned() -> None:
+    """Row 1, ADR-0260 §11:3: "A response **at** the bound is read and minted; a response
+    **beyond** it is **abandoned and refused**, never truncated".
+
+    The bound counts "the most octets one response may take off the channel — its status
+    line and headers included — enforced *on the read itself* and before any part of it is
+    parsed". **No parse is attempted on the over-large one**, which the assertion catches
+    by construction: the body is well-formed, so an implementation that buffered and then
+    measured would answer with records rather than with the refusal.
+    """
+    octets = response(payload=body(day()))
+
+    at_the_bound = await built(channels=[far_end(octets)], max_response_bytes=len(octets))
+    past_it = await built(channels=[far_end(octets)], max_response_bytes=len(octets) - 1)
+
+    admitted = await _read(at_the_bound)
+    refused = await _read(past_it)
+
+    assert admitted.refusal is None
+    assert len(admitted.records) == 1
+    assert refused.refusal is ForecastRefusal.RESPONSE_TOO_LARGE
+    assert refused.records == ()
 
 
 @pytest.mark.parametrize(
-    "normalising",
+    ("status", "payload"),
     [
-        pytest.param("+01:99", id="minutes-past-fifty-nine"),
-        pytest.param("-01:60", id="minutes-at-sixty"),
-        pytest.param("+24:00", id="hours-at-twenty-four"),
-        pytest.param("+99:99", id="both"),
+        pytest.param("HTTP/1.1 204 No Content", b"", id="no-representation"),
+        pytest.param(
+            "HTTP/1.1 400 Bad Request",
+            b'{"error": true, "reason": "Cannot initialize WeatherVariable from invalid String"}',
+            id="open-meteo-s-error-object",
+        ),
+        pytest.param("HTTP/1.1 429 Too Many Requests", b"", id="rate-limited"),
+        pytest.param("HTTP/1.1 500 Internal Server Error", b"", id="server-error"),
+        pytest.param("HTTP/1.1 201 Created", body(day()), id="a-2xx-that-is-not-200"),
     ],
 )
-async def test_an_offset_whose_components_normalise_is_not_a_declared_one(
-    normalising: str,
-) -> None:
-    """§5: the day is dropped rather than minted at an offset the provider never stated.
+async def test_row_2_a_status_other_than_200_is_refused(status: str, payload: bytes) -> None:
+    """Row 2: "a status other than ``200``, a ``400`` error object and a ``429``
+    included" is ``PROVIDER_REFUSED``.
 
-    **``timedelta`` normalises, and that is the whole of this case.** ``+01:99`` becomes
-    two hours and thirty-nine minutes — a well-formed, in-range offset — so an
-    implementation that built the duration first and range-checked afterwards cannot
-    tell it from a provider that declared ``+02:39``, and mints the day at a position
-    nothing in the response states. §5 admits an extent computed "from the day the
-    provider named and the UTC offset the provider's own response declared for it, and
-    from nothing else"; a normalised one is neither.
-
-    ``+24:00`` is the sibling case on the other component, and it is the one a check
-    resting on ``timezone``'s own ±24-hour bound would *also* miss — ``timezone`` refuses
-    it, but only after the normalisation has already merged the two fields.
+    A ``2xx`` that is not ``200`` is a response no day is read from rather than a
+    successful read of zero days — and one carrying a well-formed table is refused all
+    the same, because the status is judged first.
     """
-    subject = await built(
-        channels=[
-            answering(
-                day(date="2026-09-05", utc_offset=normalising),
-                day(date="2026-09-06", utc_offset="+01:00"),
-            )
-        ]
-    )
-
-    outcome = await _read(subject)
-
-    assert _days(outcome) == ["2026-09-06"]
-
-
-async def test_a_day_list_present_as_null_is_a_response_of_another_shape() -> None:
-    """§5: a member the documented format does not admit is ``PROVIDER_REFUSED``.
-
-    **Absence and ``null`` are two different operator facts**, and ``dict.get`` cannot
-    tell them apart: a provider with nothing to say for the coordinate omits the member,
-    where one that sent ``null`` sent a value this format does not admit. Reading the
-    second as the first would report ``NO_RESULT`` — the provider answered and had
-    nothing — about a response this system could not read at all.
-    """
-    subject = await built(channels=[far_end(response(payload=b'{"days": null}'))])
+    subject = await built(channels=[far_end(response(status=status, payload=payload))])
 
     outcome = await _read(subject)
 
     assert outcome.refusal is ForecastRefusal.PROVIDER_REFUSED
 
 
-async def test_a_response_of_many_rows_is_read_in_one_pass_over_them() -> None:
-    """§4's deadline covers the transcription and the minting, so the work under it is
-    linear.
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        pytest.param(b"not json at all", id="not-json"),
+        pytest.param(b'["a list"]', id="not-an-object"),
+        pytest.param(b"\xff\xfe", id="not-utf-8"),
+        pytest.param(b"", id="empty"),
+        # RFC 8259 has no such token. Python's decoder takes all three as an extension
+        # unless told otherwise, and a body carrying one **anywhere** — including in a
+        # member nothing reads — is a body outside the documented format.
+        pytest.param(b'{"daily": {"time": []}, "elevation": NaN}', id="a-nan-nobody-reads"),
+        pytest.param(b'{"utc_offset_seconds": Infinity}', id="an-infinity"),
+        pytest.param(b'{"utc_offset_seconds": -Infinity}', id="a-negative-infinity"),
+        pytest.param(b"[" * 200 + b"]" * 200, id="nested-past-the-decoder-s-bound"),
+    ],
+)
+async def test_row_3_a_body_that_is_not_a_json_object_is_refused(malformed: bytes) -> None:
+    """Row 3: "a body that is not a UTF-8 JSON object, as ``decoded_object`` reads one".
 
-    A response well inside ``forecast_max_response_bytes`` can carry thousands of
-    compact rows — this one does — and **no ``await`` occurs anywhere between the octets
-    arriving and the records being minted**, so there is no point at which an expiry
-    could be delivered while that work runs. A duplicate pass taken per row rather than
-    over the days would be quadratic there: tens of millions of comparisons on the event
-    loop's own thread, with the bound §4 states over "the response read and the
-    transcription" unable to fire.
-
-    What the case asserts is the outcome at that size — the cap, and §5's duplicate rule
-    still holding across the whole response rather than within a window. The linearity is
-    what makes the assertion return at all.
+    The provider answered — octets arrived — and what it answered is not something this
+    system will read, which is a different operator fact from a channel that could not be
+    opened.
     """
-    rows = [
-        day(date=f"2026-{1 + index // 28:02d}-{1 + index % 28:02d}", utc_offset="+00:00")
-        for index in range(2000)
-    ]
-    # One day named twice, at the two ends of the response: a pass that only compared
-    # neighbours, or only looked inside the cap, would keep both.
-    rows.append(day(date="2026-01-01", utc_offset="+00:00", conditions="Rain"))
-    subject = await built(channels=[answering(*rows)], max_response_bytes=4 * 1024 * 1024)
+    subject = await built(channels=[far_end(response(payload=malformed))])
 
     outcome = await _read(subject)
 
-    assert len(outcome.records) == MAX_DAYS
-    assert _days(outcome) == ["2026-01-02", "2026-01-03", "2026-01-04"]
+    assert outcome.refusal is ForecastRefusal.PROVIDER_REFUSED
 
 
 @pytest.mark.parametrize(
-    "broken",
+    "arrangement",
     [
-        pytest.param({"conditions": None}, id="null"),
-        pytest.param({"temperature_min": 11.4}, id="a-number-not-a-string"),
-        pytest.param({"temperature_max": ["19.2"]}, id="an-array"),
-        pytest.param({"precipitation": True}, id="a-boolean"),
+        pytest.param({"daily": "[]"}, id="daily-an-array"),
+        pytest.param({"daily": "null"}, id="daily-null"),
+        pytest.param({"daily": '"a table"'}, id="daily-a-string"),
+        pytest.param({"columns": {"time": "null"}}, id="time-null"),
+        pytest.param({"columns": {"time": '{"0": "2026-09-05"}'}}, id="time-an-object"),
+        pytest.param({"columns": {"time": '"2026-09-05"'}}, id="time-a-string"),
+        pytest.param({"columns": {"temperature_2m_max": "null"}}, id="a-variable-null"),
+        pytest.param({"columns": {"temperature_2m_max": "19.2"}}, id="a-variable-a-number"),
+        pytest.param({"columns": {"precipitation_sum": "{}"}}, id="a-variable-an-object"),
+        pytest.param({"columns": {"weather_code": "[3]"}}, id="a-column-one-short"),
+        pytest.param({"columns": {"weather_code": "[3, 3, 3]"}}, id="a-column-one-long"),
+        pytest.param({"columns": {"wind_speed_10m_max": "[]"}}, id="a-column-empty"),
     ],
 )
-async def test_a_day_the_response_did_not_describe_completely_mints_its_siblings_only(
-    broken: dict[str, Any],
+async def test_row_4_a_table_that_does_not_say_which_value_is_which_day_s_is_refused(
+    arrangement: dict[str, Any],
 ) -> None:
-    """§5: "A day the response does not describe completely is dropped whole".
+    """Row 4, and §13:3's arm (b) in the column-of-another-length limb ADR-0344 §5:8 gives.
 
-    "A day for which the provider omitted a documented field, supplied it as ``null``, or
-    supplied a value of a type its documented format does not admit" — and the remaining
-    days are minted, which is the half an implementation that refused the whole response
-    would get wrong.
-
-    A number is the sharpest of the four: rendering ``19.2`` as ``"19.2"`` would be this
-    system adding a word of its own, which §5 forbids in terms — "no word of this
-    system's is added".
+    "``daily`` present and not an object, ``daily.time`` present and not an array, or a
+    requested variable's member present and not an array or not of ``daily.time``'s
+    length" is ``PROVIDER_REFUSED``: "the response does not say which value belongs to
+    which day", and pairing them by position would be this system deciding what the
+    provider said. A refusal of the whole response, not a drop of the short day.
     """
-    subject = await built(
-        channels=[
-            answering(
-                day(date="2026-09-05", **broken),
-                day(date="2026-09-06"),
-            )
-        ]
-    )
+    payload = body(day(date="2026-09-05"), day(date="2026-09-06"), **arrangement)
+    subject = await built(channels=[far_end(response(payload=payload))])
+
+    outcome = await _read(subject)
+
+    assert outcome.refusal is ForecastRefusal.PROVIDER_REFUSED
+
+
+async def test_row_4_outranks_row_5() -> None:
+    """§5:1: rows 1 to 6 are taken in order. A malformed table with no ``Date`` is row 4's.
+
+    An implementation reading the instant first would answer ``UNATTESTED`` about a
+    response whose shape it could not read at all.
+    """
+    payload = body(day(), columns={"weather_code": "[]"})
+    subject = await built(channels=[far_end(response(date=None, payload=payload))])
+
+    outcome = await _read(subject)
+
+    assert outcome.refusal is ForecastRefusal.PROVIDER_REFUSED
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        pytest.param({"date": None}, id="no-date-field"),
+        pytest.param({"date": "Fri, 04 Sep 2026 12:00:00 UTC"}, id="not-gmt"),
+        pytest.param({"date": "Friday, 04-Sep-26 12:00:00 GMT"}, id="rfc-850"),
+        pytest.param({"date": "Fri Sep  4 12:00:00 2026"}, id="asctime"),
+        pytest.param({"date": "not a date at all"}, id="malformed"),
+        pytest.param({"headers": ["Date: Fri, 04 Sep 2026 12:00:01 GMT"]}, id="two-date-fields"),
+    ],
+)
+async def test_row_5_a_response_with_no_single_readable_date_mints_nothing(
+    headers: dict[str, Any],
+) -> None:
+    """Row 5, ADR-0260 §5:7: "No single readable ``Date`` field" is ``UNATTESTED``.
+
+    ADR-0092 §3 binds as written and there is **no substitute** (ADR-0344 §5:7): not the
+    instant we sent, not the instant we received, not a clock this system read. Two
+    ``Date`` fields declare two instants, so the response declares none this seam will
+    pick between.
+    """
+    subject = await built(channels=[far_end(response(payload=body(day()), **headers))])
+
+    outcome = await _read(subject)
+
+    assert outcome.refusal is ForecastRefusal.UNATTESTED
+    assert outcome.records == ()
+
+
+async def test_row_5_outranks_row_6() -> None:
+    """§5:1: a response naming no day and declaring no instant is row 5's, not row 6's."""
+    subject = await built(channels=[far_end(response(date=None, payload=body(group=False)))])
+
+    outcome = await _read(subject)
+
+    assert outcome.refusal is ForecastRefusal.UNATTESTED
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(body(group=False), id="no-daily"),
+        pytest.param(body(day(), columns={"time": None}), id="no-time"),
+        pytest.param(body(daily="{}"), id="an-empty-table"),
+    ],
+)
+async def test_row_6_a_response_naming_no_day_yields_no_result(payload: bytes) -> None:
+    """Row 6: "``daily`` absent, or ``daily.time`` absent" is ``NO_RESULT``.
+
+    A provider with nothing to say for the coordinate is not a malformed shape — reading
+    it as one would report a provider that answered perfectly well as one that answered
+    something else. With ``time`` absent no column has a length to disagree with, so the
+    variables beside it are not row 4's.
+    """
+    subject = await built(channels=[far_end(response(payload=payload))])
+
+    outcome = await _read(subject)
+
+    assert outcome.refusal is ForecastRefusal.NO_RESULT
+
+
+# --- rows 7 to 14: what drops days, and what is minted ----------------------
+
+
+async def test_a_day_mints_its_own_half_open_interval_at_the_declared_offset() -> None:
+    """§13:3's arm (b), ADR-0344 §5:4: the extent is the day at ``utc_offset_seconds``.
+
+    "A day's extent is the half-open interval from that day's midnight at that offset to
+    24 hours later, computed from the date and the offset alone." The offset here is
+    ``+05:30``, so the day begins five and a half hours *before* UTC midnight; a reader
+    that ignored the offset, or rounded it to hours, produces another interval and
+    passes every assertion about the record's shape — which is why the ends are asserted
+    by value.
+    """
+    subject = await built(channels=[far_end(response(payload=body(day(), offset="19800")))])
+
+    outcome = await _read(subject)
+
+    assert _extents(outcome) == [
+        (datetime(2026, 9, 4, 18, 30, tzinfo=UTC), datetime(2026, 9, 5, 18, 30, tzinfo=UTC))
+    ]
+
+
+@pytest.mark.parametrize(
+    ("offset", "starts"),
+    [
+        pytest.param("0", datetime(2026, 9, 5, 0, 0, tzinfo=UTC), id="utc"),
+        pytest.param("-0", datetime(2026, 9, 5, 0, 0, tzinfo=UTC), id="negative-zero"),
+        pytest.param("-14400", datetime(2026, 9, 5, 4, 0, tzinfo=UTC), id="behind-utc"),
+        pytest.param("86399", datetime(2026, 9, 4, 0, 0, 1, tzinfo=UTC), id="just-inside-a-day"),
+        pytest.param("-86399", datetime(2026, 9, 5, 23, 59, 59, tzinfo=UTC), id="just-inside-west"),
+    ],
+)
+async def test_row_7_an_integer_offset_inside_a_day_is_read(offset: str, starts: datetime) -> None:
+    """Row 7's positive arm, so its refusals below are not vacuous.
+
+    Every integer token of magnitude less than 86 400 is an offset a day can be in, and
+    the extent is a fixed 24 hours at it (ADR-0344 §5, "Why the extent is a fixed 24
+    hours, across a DST change too").
+    """
+    subject = await built(channels=[far_end(response(payload=body(day(), offset=offset)))])
+
+    outcome = await _read(subject)
+
+    assert _extents(outcome) == [(starts, starts + timedelta(days=1))]
+
+
+@pytest.mark.parametrize(
+    "offset",
+    [
+        pytest.param(None, id="absent"),
+        pytest.param("null", id="null"),
+        pytest.param('"3600"', id="a-string"),
+        pytest.param("3600.0", id="a-fraction-token"),
+        pytest.param("36e2", id="an-exponent-token"),
+        pytest.param("86400", id="a-whole-day"),
+        pytest.param("-86400", id="a-whole-day-west"),
+        # Inside the interpreter's own integer-string limit, so the body passes row 3 and
+        # what refuses it is this row's magnitude — read off the token's length, since
+        # `int` of a long token is the work the length check exists to avoid.
+        pytest.param("9" * 1000, id="a-thousand-digits"),
+    ],
+)
+async def test_row_7_an_offset_that_is_not_one_drops_every_day(offset: str | None) -> None:
+    """Row 7, ADR-0260 §5:8: every day declares no offset and is dropped.
+
+    "``utc_offset_seconds`` absent, not an integer token, or of magnitude 86 400 or
+    more." **Dropped rather than minted with an extent this system computed**, which is
+    the fail-closed direction: an extent from our own timezone database would be this
+    system stating where the provider's entry lies. ``3600.0`` names the same number of
+    seconds as ``3600`` and is still not an integer token, which is what the row says.
+    """
+    payload = body(day(date="2026-09-05"), day(date="2026-09-06"), offset=offset)
+    subject = await built(channels=[far_end(response(payload=payload))])
+
+    outcome = await _read(subject)
+
+    assert outcome.refusal is ForecastRefusal.NO_RESULT
+
+
+@pytest.mark.parametrize("variable", VARIABLES)
+async def test_row_8_a_requested_variable_absent_drops_every_day(variable: str) -> None:
+    """Row 8, and §13:3's arm (b) in the omitted-field limb ADR-0344 §5:8 restates.
+
+    "A column of Open-Meteo's table cannot be absent for one day alone, so that limb is
+    asserted as row 8, a requested variable's member absent dropping every day and
+    yielding ``NO_RESULT``." Over every variable, so none is optional by omission.
+    """
+    payload = body(day(date="2026-09-05"), day(date="2026-09-06"), columns={variable: None})
+    subject = await built(channels=[far_end(response(payload=payload))])
+
+    outcome = await _read(subject)
+
+    assert outcome.refusal is ForecastRefusal.NO_RESULT
+
+
+@pytest.mark.parametrize(
+    "units",
+    [
+        pytest.param("null", id="daily-units-null"),
+        pytest.param("[]", id="daily-units-an-array"),
+        pytest.param({**UNITS, "temperature_2m_min": None}, id="a-unit-null"),
+        pytest.param({**UNITS, "precipitation_sum": 0}, id="a-unit-a-number"),
+        pytest.param(
+            {name: unit for name, unit in UNITS.items() if name != "wind_speed_10m_max"},
+            id="a-unit-absent",
+        ),
+        pytest.param({**UNITS, "weather_code": "wmo\ncode"}, id="a-unit-carrying-a-line-break"),
+    ],
+)
+async def test_row_8_a_unit_daily_units_does_not_give_as_a_string_drops_every_day(
+    units: Any,
+) -> None:
+    """Row 8: "a requested variable … whose unit ``daily_units`` does not give as a
+    string" drops every day (ADR-0260 §5:3).
+
+    No day's transcription can carry what §5:5 says it carries — its unit "as
+    ``daily_units`` spells it". A unit carrying a line break is in every day's
+    transcription and breaks the line structure that keeps its spans apart, so it drops
+    every day by the same rule one step on.
+    """
+    payload = body(day(date="2026-09-05"), day(date="2026-09-06"), units=units)
+    subject = await built(channels=[far_end(response(payload=payload))])
+
+    outcome = await _read(subject)
+
+    assert outcome.refusal is ForecastRefusal.NO_RESULT
+
+
+async def test_row_8_daily_units_absent_drops_every_day() -> None:
+    """Row 8 with no ``daily_units`` member at all: no variable's unit is given."""
+    payload = body(day()).replace(f'"daily_units": {json.dumps(UNITS)}, '.encode(), b"")
+    assert b"daily_units" not in payload, "the case is about a response with no units"
+    subject = await built(channels=[far_end(response(payload=payload))])
+
+    outcome = await _read(subject)
+
+    assert outcome.refusal is ForecastRefusal.NO_RESULT
+
+
+@pytest.mark.parametrize(
+    "date",
+    [
+        pytest.param(None, id="null"),
+        pytest.param(20260905, id="a-number"),
+        pytest.param("2026-9-5", id="unpadded"),
+        pytest.param("20260905", id="basic-format"),
+        pytest.param("2026-W36-6", id="a-week-date"),
+        pytest.param("2026-02-30", id="no-such-day"),
+        pytest.param("2026-09-05T00:00", id="a-date-time"),
+        pytest.param("2026-09-0\N{FULLWIDTH DIGIT FIVE}", id="a-non-ascii-digit"),
+    ],
+)
+async def test_row_9_a_time_element_naming_no_calendar_day_drops_its_position(date: Any) -> None:
+    """Row 9: "a ``time`` element that is not a ``YYYY-MM-DD`` string naming a calendar
+    day" — "that position names no day and is dropped", and its siblings are minted.
+
+    **One spelling and no other.** ``date.fromisoformat`` admits the basic format and a
+    week date since 3.11, and two spellings of one day would let row 11 compare unequal
+    values naming the same day. The non-ASCII digit is the case a parser checking
+    ``isdigit`` without ``isascii`` would read as a number.
+    """
+    subject = await built(channels=[answering(day(date=date), day(date="2026-09-06"))])
 
     outcome = await _read(subject)
 
     assert _days(outcome) == ["2026-09-06"]
 
 
-async def test_a_day_omitting_a_documented_field_mints_its_siblings_only() -> None:
-    """§5's fourth form: omitted, as distinct from supplied ``null``.
+@pytest.mark.parametrize(
+    ("date", "offset"),
+    [
+        pytest.param("9999-12-31", "-3600", id="ends-past-the-representable-range"),
+        pytest.param("0001-01-01", "3600", id="starts-before-it"),
+    ],
+)
+async def test_row_10_a_day_with_no_constructible_extent_is_dropped(date: str, offset: str) -> None:
+    """Row 10, ADR-0260 §5:9: "a day whose date and offset make no constructible extent".
 
-    Two states of the same clause and one outcome, which is why the harness has a
-    sentinel for absence: ``None`` already means ``null``, so a case that could not
-    express omission would leave one of the four forms untested.
+    ``9999-12-31`` at ``-01:00`` ends past the last instant ``datetime`` holds, and
+    ``0001-01-01`` at ``+01:00`` begins before the first. Either is dropped rather than
+    given an extent trimmed to fit, and the siblings are minted.
     """
-    from forecast_harness import OMITTED  # noqa: PLC0415 — one case needs the sentinel
-
-    subject = await built(
-        channels=[answering(day(date="2026-09-05", conditions=OMITTED), day(date="2026-09-06"))]
-    )
+    payload = body(day(date=date), day(date="2026-09-06"), offset=offset)
+    subject = await built(channels=[far_end(response(payload=payload))])
 
     outcome = await _read(subject)
 
@@ -434,24 +754,18 @@ async def test_a_day_omitting_a_documented_field_mints_its_siblings_only() -> No
 @pytest.mark.parametrize(
     "second",
     [
-        pytest.param({}, id="rows-that-agree"),
-        pytest.param({"conditions": "Rain"}, id="rows-that-conflict"),
+        pytest.param({}, id="positions-that-agree"),
+        pytest.param({"weather_code": "61"}, id="positions-that-conflict"),
     ],
 )
-async def test_a_day_the_response_names_twice_mints_no_record_and_mints_its_siblings(
-    second: dict[str, Any],
+async def test_row_11_a_day_named_twice_drops_every_one_of_its_positions(
+    second: dict[str, str],
 ) -> None:
-    """§5: "A day the response names more than once is dropped in **every one of its
-    rows**".
+    """Row 11, ADR-0260 §5:3: "every one of its positions is dropped".
 
     "Whether they agree or conflict: the response has not described that day once, and
     preferring one row over another would be this system deciding what the provider
-    said." **That is not a deduplication** — nothing is merged, no row is preferred, and
-    ADR-0226 §7's whole-union rule at the supply is untouched.
-
-    The agreeing case is the one an implementation would be tempted to keep: two
-    identical rows describe the day consistently, and dropping them anyway is what the
-    clause actually says.
+    said." The agreeing case is the one an implementation would be tempted to keep.
     """
     subject = await built(
         channels=[
@@ -471,51 +785,39 @@ async def test_a_day_the_response_names_twice_mints_no_record_and_mints_its_sibl
 @pytest.mark.parametrize(
     "order",
     [
-        pytest.param(("complete", "incomplete"), id="the-complete-row-first"),
-        pytest.param(("incomplete", "complete"), id="the-incomplete-row-first"),
+        pytest.param(("complete", "incomplete"), id="the-complete-position-first"),
+        pytest.param(("incomplete", "complete"), id="the-incomplete-position-first"),
     ],
 )
-async def test_a_day_named_by_a_complete_row_and_an_incomplete_one_is_dropped(
-    order: tuple[str, str],
-) -> None:
-    """§5: the duplicate rule is over the day the response **names**, not over survivors.
+async def test_row_11_counts_every_position_that_names_a_day(order: tuple[str, str]) -> None:
+    """Row 11 is over the day the response **names**, not over the survivors of rows 12-13.
 
-    "A day the response names more than once is dropped in every one of its rows … the
-    response has not described that day **once**, and preferring one row over another
-    would be this system deciding what the provider said."
-
-    **An incomplete sibling still names its day**, so a count taken over the rows that
-    survived the *other* drops sees the day once and mints the complete row — which is
-    exactly the preference the clause forbids. Both encounter orders are cases, because
-    an implementation that dropped the row it met second would pass one of them.
+    **An incomplete position still names its day**, so a count taken over the positions
+    that survived the *other* drops sees the day once and mints the complete one — the
+    preference the clause forbids. Both encounter orders, because an implementation that
+    dropped the position it met second would pass one of them.
     """
     complete = day(date="2026-09-05")
-    incomplete = day(date="2026-09-05", conditions=None)
-    rows = [complete if name == "complete" else incomplete for name in order]
-    subject = await built(channels=[answering(*rows, day(date="2026-09-06"))])
+    incomplete = day(date="2026-09-05", temperature_2m_min="null")
+    positions = [complete if name == "complete" else incomplete for name in order]
+    subject = await built(channels=[answering(*positions, day(date="2026-09-06"))])
 
     outcome = await _read(subject)
 
     assert _days(outcome) == ["2026-09-06"]
 
 
-async def test_a_day_named_by_two_rows_one_of_them_over_the_content_bound_is_dropped() -> None:
-    """§5's duplicate clause meeting its content clause, which are two drops and one day.
-
-    The oversized row is dropped on its own account and still **named** the day, so the
-    ordinary row is a second description of a day the response described twice. An
-    implementation applying the content bound before counting the names keeps the
-    ordinary one.
-    """
+async def test_row_11_meeting_row_13_is_two_drops_and_one_day() -> None:
+    """The over-long position is dropped on its own account and still **named** the day."""
     subject = await built(
         channels=[
             answering(
                 day(date="2026-09-05"),
-                day(date="2026-09-05", conditions="x" * 4096),
+                day(date="2026-09-05", weather_code="1" + "0" * 600),
                 day(date="2026-09-06"),
             )
         ],
-        max_day_chars=64,
+        max_day_chars=_SMALL_CONTENT_BOUND,
     )
 
     outcome = await _read(subject)
@@ -523,21 +825,10 @@ async def test_a_day_named_by_two_rows_one_of_them_over_the_content_bound_is_dro
     assert _days(outcome) == ["2026-09-06"]
 
 
-async def test_a_row_naming_no_day_is_counted_toward_none() -> None:
-    """The other half of the same clause: a row with no readable date names nothing.
-
-    Two rows with no ``date`` would be two rows naming one *absence*, and counting them
-    as a duplicate of each other would drop a third row that shares nothing with them.
-    Both are dropped on their own account; the day they did not name is minted.
-    """
+async def test_row_11_positions_naming_no_day_are_counted_toward_none() -> None:
+    """Two positions naming no day name one *absence*, and that is not a duplicate."""
     subject = await built(
-        channels=[
-            answering(
-                day(date=None),
-                day(date="not a date"),
-                day(date="2026-09-06"),
-            )
-        ]
+        channels=[answering(day(date=None), day(date="not a date"), day(date="2026-09-06"))]
     )
 
     outcome = await _read(subject)
@@ -545,17 +836,11 @@ async def test_a_row_naming_no_day_is_counted_toward_none() -> None:
     assert _days(outcome) == ["2026-09-06"]
 
 
-async def test_a_duplicate_beyond_the_cap_still_drops_both_of_its_rows() -> None:
-    """§13's arm (b), stated as the arm states it, with its own reason.
+async def test_row_11_a_duplicate_beyond_the_cap_still_drops_both_positions() -> None:
+    """§13:3's arm (b), as the arm states it: the second occurrence beyond the cap.
 
-    "Asserted over agreeing rows and conflicting ones alike **and with the second
-    occurrence placed beyond ``forecast_max_days``**, because an implementation capping
-    before it looks for duplicates mints the first row and passes every arm that keeps
-    the duplicate inside the cap."
-
-    Four rows and a cap of three: the duplicate of the first day sits fourth, so an
-    implementation that capped first would never see it and would mint the first row of a
-    day the response described twice.
+    "Because an implementation capping before it looks for duplicates mints the first
+    row and passes every arm that keeps the duplicate inside the cap."
     """
     subject = await built(
         channels=[
@@ -563,7 +848,7 @@ async def test_a_duplicate_beyond_the_cap_still_drops_both_of_its_rows() -> None
                 day(date="2026-09-05"),
                 day(date="2026-09-06"),
                 day(date="2026-09-07"),
-                day(date="2026-09-05", conditions="Rain"),
+                day(date="2026-09-05", weather_code="61"),
             )
         ],
         max_days=3,
@@ -574,15 +859,130 @@ async def test_a_duplicate_beyond_the_cap_still_drops_both_of_its_rows() -> None
     assert _days(outcome) == ["2026-09-06", "2026-09-07"]
 
 
-async def test_a_response_every_day_of_which_is_dropped_yields_no_result() -> None:
-    """§5: "Where every day is dropped the read yields nothing" — ``NO_RESULT``.
+@pytest.mark.parametrize(
+    "broken",
+    [
+        pytest.param({"weather_code": "null"}, id="null"),
+        pytest.param({"temperature_2m_max": "true"}, id="a-boolean"),
+        pytest.param({"temperature_2m_min": '"11.4"'}, id="a-string"),
+        pytest.param({"precipitation_sum": "[0.0]"}, id="an-array"),
+        pytest.param({"wind_speed_10m_max": '{"value": 14.4}'}, id="an-object"),
+    ],
+)
+async def test_row_12_a_value_the_format_does_not_admit_drops_that_day_only(
+    broken: dict[str, str],
+) -> None:
+    """Row 12, and §13:3's arm (b) in its ``null`` and ill-typed limbs, which stand.
 
-    Not an empty success: ``ForecastOutcome`` refuses an outcome carrying neither, and
-    §8 maps this member to ``EMPTY`` rather than to a disposition, which is what makes a
-    read that reached the provider and was answered a completed servicing.
+    "A day whose element for a requested variable is ``null``, a boolean, a string, an
+    array or an object" is dropped, "and the remaining days are minted" — the half an
+    implementation refusing the whole response would get wrong. A number written as a
+    string is the sharpest: reading ``"11.4"`` as ``11.4`` would be this system deciding
+    what the provider meant.
     """
     subject = await built(
-        channels=[answering(day(date="2026-09-05", utc_offset=None), day(conditions=None))]
+        channels=[answering(day(date="2026-09-05", **broken), day(date="2026-09-06"))]
+    )
+
+    outcome = await _read(subject)
+
+    assert _days(outcome) == ["2026-09-06"]
+
+
+async def test_row_13_a_day_at_the_content_bound_is_minted_and_one_past_it_is_dropped() -> None:
+    """Row 13, ADR-0260 §5:3, §11: over ``forecast_max_day_chars`` is **dropped**.
+
+    "Measured as ADR-0230 §6 measures a fetched document" — on the ``json.dumps``
+    rendering at its default ``ensure_ascii=True``, its two delimiters included. The
+    degree sign is six characters there and one in the source, which is what makes the
+    measure the rendering's and not the source's.
+    """
+    exactly = len(json.dumps(_content()))
+
+    minted = await built(channels=[answering(day())], max_day_chars=exactly)
+    dropped = await built(
+        channels=[answering(day(), day(date="2026-09-06"))], max_day_chars=exactly - 1
+    )
+
+    kept = await _read(minted)
+    thinned = await _read(dropped)
+
+    assert _days(kept) == ["2026-09-05"]
+    assert thinned.refusal is ForecastRefusal.NO_RESULT
+
+
+@pytest.mark.parametrize(
+    ("offered", "expected"),
+    [
+        pytest.param(2, ["2026-09-05", "2026-09-06"], id="fewer-than-the-figure"),
+        pytest.param(3, ["2026-09-05", "2026-09-06", "2026-09-07"], id="exactly-the-figure"),
+        pytest.param(5, ["2026-09-05", "2026-09-06", "2026-09-07"], id="more-than-the-figure"),
+    ],
+)
+async def test_row_14_the_first_survivors_are_minted_in_time_s_order(
+    offered: int, expected: Sequence[str]
+) -> None:
+    """Row 14, ADR-0260 §5:1, §13's arm (b-prime): "the records minted are the **first**
+    that many".
+
+    "The last asserted over **which** days those are and over their extents rather than
+    over the count alone — taking the first and taking the last both satisfy a count
+    while minting different evidence."
+    """
+    positions = [day(date=f"2026-09-{5 + index:02d}") for index in range(offered)]
+    subject = await built(channels=[answering(*positions)], max_days=MAX_DAYS)
+
+    outcome = await _read(subject)
+
+    assert _days(outcome) == list(expected)
+    assert [start for start, _ in _extents(outcome)] == [
+        datetime(2026, 9, 4 + index, 23, 0, tzinfo=UTC) for index in range(len(expected))
+    ]
+
+
+async def test_row_14_the_cap_counts_what_survived_and_not_what_the_provider_sent() -> None:
+    """§13's arm (b-prime): "a response whose days exceed the figure only once an
+    incomplete one has been dropped mints the **first** ``forecast_max_days`` of what
+    survived"."""
+    subject = await built(
+        channels=[
+            answering(
+                day(date="2026-09-04", weather_code="null"),
+                day(date="2026-09-05"),
+                day(date="2026-09-06"),
+                day(date="2026-09-07"),
+            )
+        ],
+        max_days=3,
+    )
+
+    outcome = await _read(subject)
+
+    assert _days(outcome) == ["2026-09-05", "2026-09-06", "2026-09-07"]
+
+
+async def test_row_14_the_cap_counts_what_the_content_bound_left_too() -> None:
+    """The cap is over every drop's survivors, row 13's as well as row 12's."""
+    subject = await built(
+        channels=[
+            answering(day(date="2026-09-05", weather_code="1" + "0" * 600), day(date="2026-09-06"))
+        ],
+        max_days=1,
+        max_day_chars=_SMALL_CONTENT_BOUND,
+    )
+
+    outcome = await _read(subject)
+
+    assert _days(outcome) == ["2026-09-06"]
+
+
+async def test_row_14_none_surviving_is_no_result() -> None:
+    """ADR-0260 §5:3: "Where every day is dropped the read yields nothing" — ``NO_RESULT``.
+
+    Not an empty success: ``ForecastOutcome`` refuses an outcome carrying neither.
+    """
+    subject = await built(
+        channels=[answering(day(date="2026-02-30"), day(temperature_2m_max="null"))]
     )
 
     outcome = await _read(subject)
@@ -591,47 +991,161 @@ async def test_a_response_every_day_of_which_is_dropped_yields_no_result() -> No
     assert outcome.records == ()
 
 
-async def test_a_response_describing_no_day_at_all_yields_no_result() -> None:
-    """§5's other route to the same member: the provider answered with nothing usable.
+async def test_a_response_of_many_days_is_read_in_one_pass_over_them() -> None:
+    """§4's deadline covers the transcription and the minting, so the work under it is
+    linear.
 
-    An absent day list is a provider with nothing to say for the coordinate, not a
-    malformed shape — reading it as one would report a provider that answered perfectly
-    well as one that answered something else, and the two are different operator facts.
+    A response well inside ``forecast_max_response_bytes`` can name thousands of days —
+    this one does — and **no ``await`` occurs between the octets arriving and the records
+    being minted**, so a duplicate pass taken per position rather than over the days
+    would be quadratic with the bound unable to fire. Row 11 still holds across the whole
+    response rather than within a window.
     """
-    subject = await built(channels=[far_end(response(payload=body(group=False)))])
+    positions = [
+        day(date=f"2026-{1 + index // 28:02d}-{1 + index % 28:02d}") for index in range(2000)
+    ]
+    # One day named twice, at the two ends of the response: a pass that only compared
+    # neighbours, or only looked inside the cap, would keep both.
+    positions.append(day(date="2026-01-01", weather_code="61"))
+    subject = await built(channels=[answering(*positions)], max_response_bytes=4 * 1024 * 1024)
 
     outcome = await _read(subject)
 
-    assert outcome.refusal is ForecastRefusal.NO_RESULT
+    assert _days(outcome) == ["2026-01-02", "2026-01-03", "2026-01-04"]
+
+
+# --- the transcription (ADR-0344 §5:2, §5:5, §5:6) --------------------------
+
+
+async def test_the_transcription_form_is_pinned() -> None:
+    """§5:5: "the ``time`` value and then each requested variable in the ``daily`` order,
+    each with the provider's field name, its token as the response spelled it and, for a
+    variable, its unit as ``daily_units`` spells it. The separators are fixed by the
+    adapter and pinned by a test" — this one.
+    """
+    subject = await built(channels=[answering(day())])
+
+    outcome = await _read(subject)
+
+    minted = outcome.records[0]
+    assert isinstance(minted, SemanticMemory)
+    assert minted.content == (
+        "time: 2026-09-05\n"
+        "weather_code: 3 wmo code\n"
+        "temperature_2m_max: 19.2 \N{DEGREE SIGN}C\n"
+        "temperature_2m_min: 11.4 \N{DEGREE SIGN}C\n"
+        "precipitation_sum: 0.0 mm\n"
+        "precipitation_probability_max: 10 %\n"
+        "wind_speed_10m_max: 14.4 km/h"
+    )
+    assert minted.fact == minted.content
 
 
 @pytest.mark.parametrize(
-    "declared",
+    "token",
     [
-        pytest.param(None, id="no-date-field"),
-        pytest.param("Fri, 04 Sep 2026 12:00:00 UTC", id="not-gmt"),
-        pytest.param("Friday, 04-Sep-26 12:00:00 GMT", id="rfc-850"),
-        pytest.param("Fri Sep  4 12:00:00 2026", id="asctime"),
-        pytest.param("not a date at all", id="malformed"),
+        pytest.param("17.20", id="a-trailing-zero"),
+        pytest.param("1e1", id="an-exponent"),
+        pytest.param("1E+05", id="an-upper-case-signed-exponent"),
+        pytest.param("-0", id="negative-zero"),
+        pytest.param("-0.0", id="negative-zero-with-a-fraction"),
+        pytest.param("0.10000000000000000555", id="more-digits-than-a-float-holds"),
+        pytest.param("123456789012345678901234567890", id="a-huge-integer"),
     ],
 )
-async def test_a_response_declaring_no_readable_instant_mints_nothing(
-    declared: str | None,
-) -> None:
-    """§5: "A response declaring **no** instant … mints **no record**" — ``UNATTESTED``.
+async def test_a_number_token_is_transcribed_as_the_response_spelled_it(token: str) -> None:
+    """ADR-0344 §5:2, §8:4: "a number token transcribed as it was spelled, ``17.20`` and
+    ``1e1`` included".
 
-    ADR-0092 §3 binds as written and there is **no substitute**: not the instant we sent,
-    not the instant we received, not a clock this system read. "No implementation reads
-    an unparseable field as licence to fall back to a clock it read", and the obsolete
-    HTTP date formats land with the malformed one because RFC 9110 §5.6.7 forbids a
-    sender generating them.
+    "The body is decoded with each number token kept as the text the response carried,
+    and no transcribed value is parsed to a number or re-rendered on the way to a
+    record." Each of these is a spelling a ``float`` or ``int`` round trip would change.
     """
-    subject = await built(channels=[answering(day(), date=declared)])
+    subject = await built(channels=[answering(day(temperature_2m_max=token))])
 
     outcome = await _read(subject)
 
-    assert outcome.refusal is ForecastRefusal.UNATTESTED
-    assert outcome.records == ()
+    assert outcome.records[0].content == _content(temperature_2m_max=token)
+
+
+async def test_a_unit_carries_what_its_escape_encodes_and_not_the_escape() -> None:
+    """ADR-0260 §5:2 is ADR-0230 §5's **decoding**-not-rendering rule.
+
+    JSON's ``\\u00b0`` is that format's encoding of the degree sign, so the unit the
+    response *carried* is ``°C`` and the record carries those two characters — "no word
+    of this system's is added", and the transport's escaping is not a word of the
+    provider's either.
+    """
+    payload = body(day()).replace(b'"\\u00b0C"', b'"\\u00B0C"')
+    assert b"\\u00B0C" in payload, "the case is about an escape that reached the wire"
+    subject = await built(channels=[far_end(response(payload=payload))])
+
+    outcome = await _read(subject)
+
+    assert outcome.records[0].content == _content()
+
+
+async def test_a_duplicate_json_member_is_resolved_by_the_decoder_and_not_by_this_seam() -> None:
+    """The container format's own ambiguity is resolved by the decoding (ADR-0230 §5).
+
+    RFC 8259 admits a repeated member name and fixes no meaning for it; Python's decoder
+    resolves one deterministically, last occurrence winning. Row 11 is stated over a
+    *day* named twice in ``daily.time``, not over the transport's object members, and
+    reading it onto them would put a duplicate-detecting decoder into the reader
+    ``tools/http_reading.py`` shares with the ``WEB_SEARCH`` seam. Pinned so the reading
+    is decided rather than undecided.
+    """
+    payload = body(day(weather_code="61")).replace(
+        b'"weather_code": [61]', b'"weather_code": [3], "weather_code": [61]'
+    )
+    assert payload.count(b'"weather_code": [') == 2, "the case is about a repeated member"
+    subject = await built(channels=[far_end(response(payload=payload))])
+
+    outcome = await _read(subject)
+
+    assert outcome.records[0].content == _content(weather_code="61")
+
+
+async def test_no_other_member_of_the_response_reaches_a_record() -> None:
+    """§5:6: not ``latitude``, ``longitude``, ``elevation``, ``timezone`` or
+    ``timezone_abbreviation``, "each of which locates or names a place", and not
+    ``generationtime_ms`` or ``utc_offset_seconds``.
+
+    The response the harness writes carries each with a distinctive value, and none of
+    them — nor the members' names — appears in what was minted.
+    """
+    subject = await built(channels=[answering(day(), day(date="2026-09-06"))])
+
+    outcome = await _read(subject)
+
+    assert len(outcome.records) == 2
+    for record in outcome.records:
+        for name, value in LOCATING.items():
+            assert name not in record.content
+            assert value.strip('"') not in record.content
+        assert "utc_offset_seconds" not in record.content
+        assert "3600" not in record.content
+
+
+# --- ADR-0260 §13's arm (b) and (b-prime): what the producer owes -------------
+
+
+async def test_a_minted_record_carries_a_fully_open_validity() -> None:
+    """ADR-0260 §5: "``validity`` is fully open and no lane sets it to the day the record is
+    about".
+
+    ADR-0045 §2 makes the envelope window "a lifecycle property of the record's life in
+    the store, set operationally by the applier", and ADR-0252 §3 forbids reading it as
+    coverage "on any kind, under any fallback".
+    """
+    subject = await built(channels=[answering(day())])
+
+    outcome = await _read(subject)
+
+    assert outcome.records
+    for record in outcome.records:
+        assert record.validity.valid_from is None
+        assert record.validity.valid_until is None
 
 
 async def test_no_minted_value_equals_a_clock_this_test_controls() -> None:
@@ -658,18 +1172,13 @@ async def test_no_minted_value_equals_a_clock_this_test_controls() -> None:
         assert REPORTED_AT != _OUR_CLOCK
 
 
-# --- ADR-0260 §13's arm (b-prime), the producer's half ----------------------
-
-
 async def test_a_minted_record_carries_the_facts_the_producer_owes() -> None:
     """§13's arm (b-prime): the §5 facts ``ForecastOutcome`` cannot decide.
 
     "Over the **production** forecaster's own output, a minted record's ``confidence`` is
     ``0.9``, its ``derived_from_external`` is ``False``, its ``placement`` is the default
     that narrows nothing, and its ``Attestation.reported_by`` **equals that forecaster's
-    own ``name``** — asserted against the configured instance's ``name`` and not merely
-    against its siblings', which §4's model already enforces and which a vendor string
-    stamped consistently would satisfy."
+    own ``name``**" — which is never a vendor (ADR-0344 §7, ADR-0260 §5:6).
     """
     subject = await built(channels=[answering(day())])
 
@@ -687,328 +1196,8 @@ async def test_a_minted_record_carries_the_facts_the_producer_owes() -> None:
         assert attestation.reported_by == FORECAST_SOURCE_NAME
 
 
-async def test_a_response_at_the_read_bound_is_read_and_one_past_it_is_abandoned() -> None:
-    """§11: "A response **at** the bound is read and minted; a response **beyond** it is
-    **abandoned and refused**, never truncated".
-
-    The bound counts "the most octets one response may take off the channel — its status
-    line and headers included — enforced *on the read itself* and before any part of it is
-    parsed", which is ``search_max_response_bytes``' population word for word so that the
-    two bounds mean the same thing at two seams.
-
-    **No parse is attempted on the over-large one**, which the assertion catches by
-    construction: the body is well-formed, so an implementation that buffered and then
-    measured would answer with records rather than with the refusal.
-    """
-    octets = response(payload=body(day()))
-
-    at_the_bound = await built(channels=[far_end(octets)], max_response_bytes=len(octets))
-    past_it = await built(channels=[far_end(octets)], max_response_bytes=len(octets) - 1)
-
-    admitted = await _read(at_the_bound)
-    refused = await _read(past_it)
-
-    assert admitted.refusal is None
-    assert len(admitted.records) == 1
-    assert refused.refusal is ForecastRefusal.RESPONSE_TOO_LARGE
-    assert refused.records == ()
-
-
-async def test_a_day_at_the_content_bound_is_minted_and_one_past_it_is_dropped() -> None:
-    """§5, §11: a day over ``forecast_max_day_chars`` is **dropped**, never truncated.
-
-    "Measured as ADR-0230 §6 measures a fetched document" — on the ``json.dumps``
-    rendering at its default ``ensure_ascii=True``, its two delimiters included, which is
-    the rendering the prompt will carry. A ceiling on source characters would admit a day
-    six or twelve times this long while claiming to admit this much (ADR-0222 §4).
-    """
-    row = day(date="2026-09-05")
-    content = "\n".join(
-        str(row[field])
-        for field in ("date", "conditions", "temperature_min", "temperature_max", "precipitation")
-    )
-    exactly = len(json.dumps(content))
-
-    minted = await built(channels=[answering(row)], max_day_chars=exactly)
-    dropped = await built(
-        channels=[answering(row, day(date="2026-09-06"))], max_day_chars=exactly - 1
-    )
-
-    kept = await _read(minted)
-    thinned = await _read(dropped)
-
-    assert _days(kept) == ["2026-09-05"]
-    assert thinned.refusal is ForecastRefusal.NO_RESULT
-
-
-@pytest.mark.parametrize(
-    ("offered", "expected"),
-    [
-        pytest.param(2, ["2026-09-05", "2026-09-06"], id="fewer-than-the-figure"),
-        pytest.param(3, ["2026-09-05", "2026-09-06", "2026-09-07"], id="exactly-the-figure"),
-        pytest.param(5, ["2026-09-05", "2026-09-06", "2026-09-07"], id="more-than-the-figure"),
-    ],
-)
-async def test_the_cap_is_taken_over_the_survivors_and_taken_from_the_front(
-    offered: int, expected: Sequence[str]
-) -> None:
-    """§5, §13's arm (b-prime): "the records minted are the **first** that many".
-
-    "The last asserted over **which** days those are and over their extents rather than
-    over the count alone — taking the first and taking the last both satisfy a count
-    while minting different evidence." A cap that did not say which days it kept would
-    let two implementations mint different evidence, and different goal outcomes, from
-    one response.
-    """
-    rows = [day(date=f"2026-09-{5 + index:02d}") for index in range(offered)]
-    subject = await built(channels=[answering(*rows)], max_days=MAX_DAYS)
-
-    outcome = await _read(subject)
-
-    assert _days(outcome) == list(expected)
-    assert _extents(outcome)[0][0] == datetime(2026, 9, 4, 23, 0, tzinfo=UTC)
-
-
-async def test_the_cap_counts_what_survived_and_not_what_the_provider_sent() -> None:
-    """§13's arm (b-prime): "a response whose days exceed the figure only once an
-    incomplete one has been dropped mints the **first** ``forecast_max_days`` of what
-    survived".
-
-    Four rows, one of them incomplete and first, a cap of three: an implementation that
-    capped the *rows* before dropping would consider three rows, drop one, and mint two.
-    """
-    subject = await built(
-        channels=[
-            answering(
-                day(date="2026-09-04", conditions=None),
-                day(date="2026-09-05"),
-                day(date="2026-09-06"),
-                day(date="2026-09-07"),
-            )
-        ],
-        max_days=3,
-    )
-
-    outcome = await _read(subject)
-
-    assert _days(outcome) == ["2026-09-05", "2026-09-06", "2026-09-07"]
-
-
-async def test_the_cap_counts_what_the_content_bound_left_too() -> None:
-    """§5's cap is over **every** drop rule's survivors, not over the completeness one's.
-
-    The sibling of the case above on the other axis: an oversized first day and a cap of
-    one. An implementation that capped the rows before measuring their transcriptions
-    would spend the only slot on the day it was about to drop and answer ``NO_RESULT``
-    about a response that described a usable later one.
-    """
-    subject = await built(
-        channels=[
-            answering(
-                day(date="2026-09-05", conditions="x" * 4096),
-                day(date="2026-09-06"),
-            )
-        ],
-        max_days=1,
-        max_day_chars=64,
-    )
-
-    outcome = await _read(subject)
-
-    assert _days(outcome) == ["2026-09-06"]
-
-
-def test_the_transcription_form_is_pinned() -> None:
-    """§5: "What this clause fixes is that the form is *fixed somewhere a test asserts*".
-
-    This is that test. The field selection, their order and the separator are **this
-    adapter's** and no other's — "there is no cross-implementation form, and no
-    implementation conforms by matching another's output" — so what is pinned here is
-    that the form does not move, not that any other provider's reader produces it.
-
-    ``utc_offset`` is a documented field and is deliberately **not** transcribed: the
-    extent already carries the position, and a raw offset in prose is noise a model would
-    have to read past.
-    """
-    from ai_assistant.tools.forecast import _TRANSCRIBED_FIELDS  # noqa: PLC0415 — the pin
-
-    assert _TRANSCRIBED_FIELDS == (
-        "date",
-        "conditions",
-        "temperature_min",
-        "temperature_max",
-        "precipitation",
-    )
-
-
-async def test_a_content_is_the_provider_s_own_octets_joined_in_that_order() -> None:
-    """§5: a transcription, "each rendered **as the provider's own response spelled it**".
-
-    "The octets of the value the response carried, and never a re-rendering of a parsed
-    number." The values here carry trailing zeros and a leading zero a float round-trip
-    would eat, which is what makes the assertion about *transcription* rather than about
-    equality of meaning.
-    """
-    subject = await built(
-        channels=[
-            answering(
-                day(
-                    date="2026-09-05",
-                    conditions="Light rain",
-                    temperature_min="09.0",
-                    temperature_max="19.20",
-                    precipitation="0.00",
-                )
-            )
-        ]
-    )
-
-    outcome = await _read(subject)
-
-    minted = outcome.records[0]
-    assert isinstance(minted, SemanticMemory)
-    assert minted.content == "2026-09-05\nLight rain\n09.0\n19.20\n0.00"
-    assert minted.fact == minted.content
-
-
-async def test_a_transcription_carries_what_an_escape_encodes_and_not_the_escape() -> None:
-    """§5's transcription clause is ADR-0230 §5's **decoding**-not-rendering rule (§5).
-
-    §5 closes "This is ADR-0231 §10's transcription-not-rendering rule and ADR-0230 §5's
-    decoding-not-rendering rule at a third producer, and neither is relaxed", and ADR-0230
-    §5 defines that rule in terms: extraction from a container format is "a deterministic,
-    library-performed transformation of bytes into the text they encode". JSON's ``\\uXXXX``
-    is that format's encoding of a character, so the value the response *carried* is
-    ``Clear`` — six characters — and the record carries those six.
-
-    Pinned because the response here spells a character the format did not oblige it to
-    escape, which is where the two readings visibly differ: a producer keeping the raw
-    lexeme would put this system's reading of the transport into a record about a day the
-    provider described as ``Clear``, and §5's own closing words are "no word of this
-    system's is added".
-    """
-    escaped = body(day(conditions="Clear")).replace(b'"Clear"', b'"\\u0043lear"')
-    assert b"\\u0043lear" in escaped, "the case is about an escape that reached the wire"
-    subject = await built(channels=[far_end(response(payload=escaped))])
-
-    outcome = await _read(subject)
-
-    minted = outcome.records[0]
-    assert isinstance(minted, SemanticMemory)
-    assert minted.content == "2026-09-05\nClear\n11.4\n19.2\n0.0"
-
-
-async def test_a_duplicate_json_member_is_resolved_by_the_decoder_and_not_by_this_seam() -> None:
-    """The container format's own ambiguity is resolved by the decoding (ADR-0230 §5).
-
-    RFC 8259 admits a repeated member name and fixes no meaning for it; Python's decoder
-    resolves one deterministically, last occurrence winning. ADR-0230 §5 — which ADR-0260
-    §5 imports by name — makes "extraction from a container format" a **decoding**, "a
-    deterministic, library-performed transformation of bytes into the text they encode",
-    and §5's own hazard is a *re-rendering*, "never a re-rendering of a parsed number".
-
-    **ADR-0260 §5's duplicate clause is stated over a different object**: "A day the
-    response names more than once is dropped in every one of its rows" — a day, keyed on
-    the ``date`` field, which the suite's own case and this module's four arms pin. It is
-    not stated over the transport's object members, and reading it onto them would put a
-    duplicate-detecting decoder into the reader ``tools/http_reading.py`` shares with the
-    ``WEB_SEARCH`` seam, whose ADR-0231 asks for no such thing — machinery no decision
-    names, at a seam this lane does not own.
-
-    Pinned so the reading is decided rather than undecided, which is the whole of what is
-    owed here: what the record carries is what the decoder read.
-    """
-    payload = body(day(conditions="second")).replace(
-        b'"conditions": "second"', b'"conditions": "first", "conditions": "second"'
-    )
-    subject = await built(channels=[far_end(response(payload=payload))])
-
-    outcome = await _read(subject)
-
-    minted = outcome.records[0]
-    assert isinstance(minted, SemanticMemory)
-    assert minted.content == "2026-09-05\nsecond\n11.4\n19.2\n0.0"
-
-
-async def test_a_day_whose_transcribed_span_carries_a_line_break_is_dropped() -> None:
-    """§5's verbatim rule meeting this adapter's own separator.
-
-    The line structure is the only thing keeping the spans apart, so a break inside a
-    present span would have to be altered — which would stop it being verbatim — or would
-    produce a record whose lines no reader can assign to a span. Dropping is the one
-    answer that keeps both properties, and it is ADR-0231 §10's rule at a second producer.
-    """
-    subject = await built(
-        channels=[
-            answering(
-                day(date="2026-09-05", conditions="Clear\nthen rain"),
-                day(date="2026-09-06"),
-            )
-        ]
-    )
-
-    outcome = await _read(subject)
-
-    assert _days(outcome) == ["2026-09-06"]
-
-
-@pytest.mark.parametrize(
-    "malformed",
-    [
-        pytest.param(b"not json at all", id="not-json"),
-        pytest.param(b'["a list"]', id="not-an-object"),
-        pytest.param(b'{"days": {"not": "a list"}}', id="days-is-an-object"),
-        pytest.param(b'{"days": ["not an object"]}', id="a-row-is-not-an-object"),
-        pytest.param(b"\xff\xfe", id="not-utf-8"),
-        # RFC 8259 has no such token. Python's decoder takes all three as an extension
-        # unless told otherwise, and a body carrying one **anywhere** — including in a
-        # member neither integration reads — is a body outside the documented format.
-        pytest.param(b'{"days": [], "junk": NaN}', id="a-nan-in-a-member-nobody-reads"),
-        pytest.param(b'{"days": Infinity}', id="an-infinity"),
-        pytest.param(b'{"days": -Infinity}', id="a-negative-infinity"),
-    ],
-)
-async def test_a_response_of_another_shape_is_refused_by_the_provider(malformed: bytes) -> None:
-    """§5: a body the documented format does not admit is ``PROVIDER_REFUSED``.
-
-    The provider answered — octets arrived — and what it answered is not something this
-    system will read, which is a different operator fact from a channel that could not be
-    opened. §10 puts this member on the **nothing-either-way** side of the contact
-    partition all the same, because it carries no value separating that cause from
-    ADR-0148 §6's pre-transmit refusal.
-    """
-    subject = await built(channels=[far_end(response(payload=malformed))])
-
-    outcome = await _read(subject)
-
-    assert outcome.refusal is ForecastRefusal.PROVIDER_REFUSED
-
-
-@pytest.mark.parametrize(
-    "status",
-    [
-        pytest.param("HTTP/1.1 204 No Content", id="no-representation"),
-        pytest.param("HTTP/1.1 429 Too Many Requests", id="rate-limited"),
-        pytest.param("HTTP/1.1 500 Internal Server Error", id="server-error"),
-    ],
-)
-async def test_a_status_a_forecast_cannot_be_read_out_of_is_refused(status: str) -> None:
-    """§5: one status a read is taken out of, and the rest are the provider's answer.
-
-    A ``2xx`` that is not ``200`` carries no representation, so it is a response no day
-    can be read from rather than a successful read of zero days; calling it the latter
-    would report ``NO_RESULT`` where the honest answer is that the provider answered
-    something else.
-    """
-    subject = await built(channels=[far_end(response(status=status, payload=body(day())))])
-
-    outcome = await _read(subject)
-
-    assert outcome.refusal is ForecastRefusal.PROVIDER_REFUSED
-
-
 async def test_a_channel_that_could_not_be_opened_is_a_transport_failure() -> None:
-    """§4: ``TRANSPORT_FAILED`` is a statement about this system's own reach.
+    """ADR-0260 §4: ``TRANSPORT_FAILED`` is a statement about this system's own reach.
 
     "A refused connection, a TLS failure, a channel closed mid-response — and never about
     what the provider said, which is ``PROVIDER_REFUSED``."
@@ -1021,11 +1210,8 @@ async def test_a_channel_that_could_not_be_opened_is_a_transport_failure() -> No
 
 
 async def test_a_redirect_is_refused_and_is_never_a_second_request() -> None:
-    """§3: "One ask is one read … no implementation follows a link out of a response".
-
-    A redirect is the one shape that would tempt a second request out of a seam whose
-    whole bound is that there is exactly one, so the exchange refuses it and this seam
-    reports the refusal rather than the location.
+    """ADR-0260 §3: "One ask is one read … no implementation follows a link out of a
+    response".
     """
     subject = await built(
         channels=[far_end(response(status="HTTP/1.1 302 Found", headers=["Location: /elsewhere"]))]
@@ -1067,10 +1253,12 @@ async def test_a_bound_outside_its_domain_reaches_nothing(bound: object) -> None
     """§13's arm (c): refused "**before** the call is revalidated, before any credential
     is read and before any channel is opened, asserted over those three orderings".
 
-    **Zero cannot pass as an instant expiry**, which is the clause the three orderings
-    exist for: an implementation reading "expired" as "do not call" would be promising
-    something the event loop does not keep, and one that accepted the value and then
-    expired would have read a credential for a call it never made.
+    The forecaster reads no credential, so the second ordering is asserted as ADR-0344
+    §9 restates it: before the connection record is read. **Zero cannot pass as an
+    instant expiry**, which is the clause the three orderings exist for: an
+    implementation reading "expired" as "do not call" would be promising something the
+    event loop does not keep, and one that accepted the value and then expired would have
+    read the record for a call it never made.
     """
     subject = await built(channels=[answering(day())])
     call = authorised_read(await request(subject))
@@ -1078,7 +1266,6 @@ async def test_a_bound_outside_its_domain_reaches_nothing(bound: object) -> None
     with pytest.raises(ValueError, match=r"timeout|deadline"):
         await subject.forecaster.read(call, timeout=bound)
 
-    assert subject.keyring.reads == []
     assert subject.records.reads == []
     assert subject.transport.attempts == ()
 
@@ -1100,7 +1287,7 @@ async def test_a_call_mutated_after_construction_does_not_survive_revalidation()
     with pytest.raises(ToolBindingError):
         await subject.forecaster.read(call, timeout=_BOUND)
 
-    assert subject.keyring.reads == []
+    assert subject.records.reads == []
     assert subject.transport.attempts == ()
 
 
@@ -1126,7 +1313,7 @@ async def test_a_call_naming_another_declaration_is_refused() -> None:
     with pytest.raises(ToolBindingError, match="not the one this forecaster registered"):
         await subject.forecaster.read(call, timeout=_BOUND)
 
-    assert subject.keyring.reads == []
+    assert subject.records.reads == []
     assert subject.transport.attempts == ()
 
 
@@ -1146,7 +1333,7 @@ async def test_a_call_whose_decision_authorises_another_request_is_refused() -> 
     ``parameters`` can hold a value whose digest would raise, so checking authorisation
     first would raise a serialisation error out of a method whose contract is to answer
     a question. What the arm asserts is the outcome the ordering exists for: refused, and
-    **no credential read and no channel opened**.
+    **the connection record unread and no channel opened** (ADR-0344 §9).
     """
     subject = await built(channels=[answering(day())])
     call = authorised_read(await request(subject))
@@ -1155,7 +1342,7 @@ async def test_a_call_whose_decision_authorises_another_request_is_refused() -> 
     with pytest.raises(ToolBindingError, match="not the call that was authorised"):
         await subject.forecaster.read(call, timeout=_BOUND)
 
-    assert subject.keyring.reads == []
+    assert subject.records.reads == []
     assert subject.transport.attempts == ()
 
 
@@ -1173,7 +1360,8 @@ async def test_a_separately_authorised_call_naming_another_place_is_refused() ->
     ground — "a caller able to widen the read is a caller able to defeat the bound" —
     and §6's "every subsequent step reads the revalidated copy" says which *copy* to
     trust rather than licensing the copy to name a place. **Refused before the
-    credential and before the channel**, which the two absences below are what assert.
+    connection record is read and before the channel**, which the two absences below are
+    what assert.
     """
     subject = await built(channels=[answering(day())])
     call = authorised_read(await request(subject, latitude=0.0, longitude=0.0))
@@ -1181,7 +1369,7 @@ async def test_a_separately_authorised_call_naming_another_place_is_refused() ->
     with pytest.raises(ToolBindingError, match="not configured for"):
         await subject.forecaster.read(call, timeout=_BOUND)
 
-    assert subject.keyring.reads == []
+    assert subject.records.reads == []
     assert subject.transport.attempts == ()
 
 
@@ -1192,13 +1380,13 @@ async def test_a_separately_authorised_call_naming_another_place_is_refused() ->
         pytest.param({"transport_endpoint": "https://elsewhere.invalid"}, id="another-endpoint"),
     ],
 )
-async def test_a_call_bound_elsewhere_reaches_no_credential(elsewhere: dict[str, Any]) -> None:
+async def test_a_call_bound_elsewhere_reaches_no_record(elsewhere: dict[str, Any]) -> None:
     """ADR-0148 §6 at the seam: a call this integration is not the registration for.
 
     Refused **before** the record is read, because the record is read *by the
     registration's* reference: without the comparison, a binding for account B's
     connection is checked against account A's record, both record checks pass where the
-    two share an identity, and the request goes out under A's credential although the
+    two share an identity, and the request goes out under A's connection although the
     approval named B.
     """
     subject = await built(channels=[answering(day())])
@@ -1207,16 +1395,21 @@ async def test_a_call_bound_elsewhere_reaches_no_credential(elsewhere: dict[str,
     with pytest.raises(TransportPinError):
         await subject.forecaster.read(call, timeout=_BOUND)
 
-    assert subject.keyring.reads == []
+    assert subject.records.reads == []
     assert subject.transport.attempts == ()
 
 
 @pytest.mark.parametrize(
     ("record", "reason"),
     [
+        # A keyless entry is `ACTIVE` by construction (ADR-0325 §3), so the pending record
+        # an unconnectable reference carries is a credentialed act's that never finished
+        # — refused for its state, which the keyless read judges first.
         pytest.param(entry(state=ProvisioningState.PENDING), "pending", id="not-connectable"),
         pytest.param(
-            entry(identity="someone.else@example.invalid"), "identity", id="other-identity"
+            entry(identity="someone.else@example.invalid", slot=None),
+            "identity",
+            id="other-identity",
         ),
         pytest.param(None, "absent", id="no-record"),
     ],
@@ -1224,12 +1417,13 @@ async def test_a_call_bound_elsewhere_reaches_no_credential(elsewhere: dict[str,
 async def test_adr_0148_s_conditions_refuse_before_a_byte_is_transmitted(
     record: Any, reason: str
 ) -> None:
-    """§6: ADR-0148 §6's pre-transmit refusals are ``PROVIDER_REFUSED``, **returned**.
+    """ADR-0344 §3:5: the keyless refusals against the one read are ``PROVIDER_REFUSED``.
 
-    "Each refuses **before any byte is transmitted**, and each yields a
-    ``ForecastOutcome`` whose ``refusal`` is ``ForecastRefusal.PROVIDER_REFUSED``." That
-    is what ``WebSearcher`` does with these same limbs today, and "one fault classified
-    two ways at two seams is what ADR-0264 §13's third arm exists to catch".
+    "A reference that is not connectable, a recorded identity other than the bound one,
+    and a record that names a credential slot. Each is returned as ``PROVIDER_REFUSED``
+    before any byte is transmitted." The slot is
+    :func:`test_a_record_naming_a_slot_is_refused_with_no_channel_opened`'s; the other
+    two are here, each over the record read exactly once.
 
     **They are returned where §6's three checks raise**, which is the discrimination
     §13's arm (c) insists on: those raise because *the thing about to run is not the
@@ -1243,50 +1437,7 @@ async def test_adr_0148_s_conditions_refuse_before_a_byte_is_transmitted(
 
     assert outcome.refusal is ForecastRefusal.PROVIDER_REFUSED
     assert subject.transport.attempts == ()
-
-
-async def test_a_keyring_holding_nothing_refuses_before_a_byte_is_transmitted() -> None:
-    """ADR-0148 §6's fourth condition: a slot the keyring holds nothing under.
-
-    What an interrupted provisioning act leaves behind — an active record naming a slot
-    with no credential in it — and the read refuses rather than sending an unauthenticated
-    request under the owner's own name.
-    """
-    subject = await built(channels=[answering(day())], holds=None)
-
-    outcome = await _read(subject)
-
-    assert outcome.refusal is ForecastRefusal.PROVIDER_REFUSED
-    assert subject.transport.attempts == ()
-
-
-async def test_a_reprovisioning_across_the_credential_read_discards_and_returns() -> None:
-    """§13's arm (c): ADR-0148 §6's interleaving, "asserted **beside** them and **apart**
-    from them".
-
-    "A reprovisioning landing between the credential read and the re-read discards the
-    credential, opens no channel, and **returns ``PROVIDER_REFUSED``** where the three
-    **raise** — a seam answering either with the other's value passes every arm that
-    tests one of them alone."
-    """
-    records = ReprovisioningRecords(entry(revision=1), entry(revision=2))
-    ring = await suspendable(records=records)
-    subject = await built(channels=[answering(day())], records=records, secrets=ring)
-    call = authorised_read(await request(subject))
-
-    # Held **inside** ``Secrets.get``, which is the interleaving the clause is about and
-    # the one a fake answering immediately cannot reach: the record moves while the
-    # credential read is suspended, so §6's post-read check runs against a record that
-    # moved under it.
-    gate = ring.suspend_next()
-    running = asyncio.ensure_future(subject.forecaster.read(call, timeout=_BOUND))
-    await gate.reached()
-    await records._reprovision()
-    gate.release()
-    outcome = await running
-
-    assert outcome.refusal is ForecastRefusal.PROVIDER_REFUSED
-    assert subject.transport.attempts == ()
+    assert subject.records.reads == [REFERENCE]
 
 
 async def test_a_cancelled_read_re_raises_and_yields_no_outcome() -> None:
@@ -1426,7 +1577,7 @@ async def _arranged_for(member: ForecastRefusal) -> tuple[Built, Any]:
         raising = RaisingTransport(TransportError("refused"))
         return await built(transport=raising), lambda: len(raising.attempts)
     if member is ForecastRefusal.PROVIDER_REFUSED:
-        # ADR-0148 §6's own limb: an unconnectable record, refused before the send.
+        # The keyless read's own limb: an unconnectable record, refused before the send.
         subject = await built(channels=[answering(day())], records=Records(None))
         return subject, lambda: len(subject.transport.attempts)
     channels = {
@@ -1454,7 +1605,7 @@ def test_the_declaration_declares_what_one_read_does() -> None:
     assert FORECAST_READ.side_effecting is True
     assert FORECAST_READ.cost.basis.value == "unknown"
     assert [tier.value for tier in FORECAST_READ.discloses] == ["personal"]
-    assert [tier.value for tier in FORECAST_READ.reads] == ["secret"]
+    assert FORECAST_READ.reads == ()
     assert FORECAST_READ.writes == ()
 
 
@@ -1639,8 +1790,8 @@ class TestForecastEgressContract(ForecasterContract):
     """``ForecastEgress`` against the shared suite (ADR-0260 §12).
 
     Every subject below is the *real* forecaster over a scripted far end, so what the
-    suite drives is the production order — the bound, ADR-0029 §2's three checks and
-    ADR-0148 §6's four pre-transmit conditions — and not a stand-in for it.
+    suite drives is the production order — the bound, ADR-0029 §2's three checks and the
+    keyless connection's one record read (ADR-0325 §2:5) — and not a stand-in for it.
     """
 
     #: ADR-0260 §12: ``app/composition.py`` constructs a forecaster only where a
@@ -1666,10 +1817,9 @@ class TestForecastEgressContract(ForecasterContract):
         rows = [
             day(
                 date=f"2026-09-{5 + index:02d}",
-                conditions=f"c{index}",
-                temperature_min=f"{index}.0",
-                temperature_max=f"1{index}.0",
-                precipitation="0.0",
+                weather_code=f"{index}",
+                temperature_2m_min=f"{index}.0",
+                temperature_2m_max=f"1{index}.0",
             )
             for index in range(days)
         ]
@@ -1677,13 +1827,13 @@ class TestForecastEgressContract(ForecasterContract):
         return ScriptedRead(forecaster=forecaster, call=call)
 
     async def naming_one_day_twice(self) -> ScriptedRead:
-        # Two well-formed rows of the documented format naming one day between them, and
-        # nothing else: each would be minted alone — distinct contents, both inside the
-        # small content bound — so what drops them is only that the response named their
-        # day twice.
+        # Two well-formed positions of the documented table naming one day between
+        # them, and nothing else: each would be minted alone — distinct contents, both
+        # inside the small content bound — so what drops them is only that the response
+        # named their day twice.
         rows = [
-            day(date="2026-09-05", conditions="c0"),
-            day(date="2026-09-05", conditions="c1"),
+            day(date="2026-09-05", weather_code="0"),
+            day(date="2026-09-05", weather_code="1"),
         ]
         forecaster, call = await self._prepared(channels=[answering(*rows)])
         return ScriptedRead(forecaster=forecaster, call=call)
