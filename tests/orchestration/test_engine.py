@@ -189,6 +189,10 @@ RETENTION = timedelta(days=30)
 #: the wrong one pass.
 TRACE_RETENTION = timedelta(days=365)
 
+#: The hub chat's start wait a harness runs at unless a case varies it (ADR-0332 §5:1):
+#: short enough that a message is taken in at once, as every case before the wait wrote.
+CASE_START_WAIT = timedelta(milliseconds=1)
+
 
 CAPABILITY = "send_email"
 
@@ -319,6 +323,10 @@ class Harness:
         # ADR-0332 §6:5's `join_limit`, at the setting's own default unless a case
         # varies it.
         join_limit: int = DEFAULT_JOIN_LIMIT,
+        # ADR-0332 §5:1's start wait on the hub chat: a millisecond unless a case
+        # varies it, so a message is taken in at once, as before the wait, and a case
+        # driving the wait sets its own.
+        chat_start_wait: timedelta = CASE_START_WAIT,
     ) -> None:
         # ADR-0200's two seams, wired **together** or not at all — the engine refuses
         # half a pipeline. Defaulted to the canonical fakes, and kept on the harness so
@@ -442,6 +450,7 @@ class Harness:
             diagnostics=diagnostics,
             telegram=telegram,
             join_limit=join_limit,
+            chat_start_wait=chat_start_wait,
         )
 
 

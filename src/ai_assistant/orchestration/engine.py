@@ -73,6 +73,7 @@ from ai_assistant.core.errors import (
     ModelTimeoutError,
     NotificationBudgetError,
     OversizedValueError,
+    PlanningError,
     SpeechError,
     StoryStoreError,
     TraceStoreError,
@@ -160,7 +161,14 @@ from ai_assistant.orchestration.channels import (
     ResolvedChannelInput,
     captured_result,
 )
-from ai_assistant.orchestration.chat import CHAT_TURN_BUDGET, ChatInput, ChatReader
+from ai_assistant.orchestration.chat import (
+    CHAT_TURN_BUDGET,
+    DEFAULT_CHAT_COMPOSING_CAP,
+    DEFAULT_CHAT_COMPOSING_LAPSE,
+    DEFAULT_CHAT_START_WAIT,
+    ChatInput,
+    ChatReader,
+)
 from ai_assistant.orchestration.controller import (
     ACTIVATION_RULES,
     DEFAULT_STAGE_RECORD_LIMIT,
@@ -191,6 +199,7 @@ from ai_assistant.orchestration.joining import (
     DEFAULT_JOIN_LIMIT,
     input_standing,
     join_running,
+    place_busy,
     take_over,
     visible_running,
 )
@@ -1346,6 +1355,20 @@ def _log_chat_failure(
 _EMPTY_CHANNEL_CONTEXT = ChannelContext()
 
 
+def _check_chat_waits(start_wait: timedelta, lapse: timedelta, cap: timedelta) -> None:
+    """ADR-0332 §6:1-§6:3: both waits strictly positive, the cap no shorter than either.
+
+    Raises:
+        ConfigurationError: If they are not.
+    """
+    if start_wait <= timedelta(0) or lapse <= timedelta(0) or cap < max(start_wait, lapse):
+        msg = (
+            "chat_start_wait and chat_composing_lapse are strictly positive, and "
+            "chat_composing_cap no shorter than either (ADR-0332 §6:1-§6:3)"
+        )
+        raise ConfigurationError(msg)
+
+
 class Engine:
     """The concrete façade an interface adapter drives (ADR-0042 §1).
 
@@ -1395,6 +1418,9 @@ class Engine:
         drain_timeout: timedelta | None = None,
         chat_reader: bool = True,
         chat_turn_budget: timedelta = CHAT_TURN_BUDGET,
+        chat_start_wait: timedelta = DEFAULT_CHAT_START_WAIT,
+        chat_composing_lapse: timedelta = DEFAULT_CHAT_COMPOSING_LAPSE,
+        chat_composing_cap: timedelta = DEFAULT_CHAT_COMPOSING_CAP,
         phases: PhasePath | None = None,
         diagnostics: DiagnosticSink | None = None,
         diagnostic_retention: DiagnosticRetention | None = None,
@@ -1729,6 +1755,15 @@ class Engine:
             chat_turn_budget: The budget each activation the reader starts is given
                 (:data:`~ai_assistant.orchestration.chat.CHAT_TURN_BUDGET`); the
                 reader has no caller to hand it one (ADR-0029 §4).
+            chat_start_wait: ``Settings.chat_start_wait`` (ADR-0332 §5:1, §6:1): how
+                long the chat's reader waits after the latest message of a conversation
+                where nothing is running before it takes them in. Strictly positive;
+                defaults to the setting's own default.
+            chat_composing_lapse: ``Settings.chat_composing_lapse`` (§5:6, §6:2): how
+                long one composing signal stays live. Strictly positive.
+            chat_composing_cap: ``Settings.chat_composing_cap`` (§5:2, §6:3): the longest
+                a start wait lasts after the first waiting message; no shorter than
+                either of the two above.
             phases: The phases, which the composition root always builds (ADR-0309
                 §2:6). Every activation — each the chat's reader starts and each event
                 ``receive`` admits — runs the controller's one table,
@@ -1944,6 +1979,7 @@ class Engine:
         # ADR-0293 §6, §10: the chat's spokes in the hub, over the chat space the acts
         # in the medium relay to.
         self._chat_turn_budget = chat_turn_budget
+        _check_chat_waits(chat_start_wait, chat_composing_lapse, chat_composing_cap)
         self._chat_reader = (
             ChatReader(
                 conversations=conversations.chat_space,
@@ -1954,6 +1990,12 @@ class Engine:
                 # ADR-0303 §7:1: where the phases write messages, an assistant message
                 # links to the activation that wrote it, by its effect record.
                 written=None if phases is None else phases.written,
+                # ADR-0332 §3, §5: a message written while an activation runs joins it
+                # where it may, and one where nothing runs waits a moment first.
+                join=self._join_running,
+                start_wait=chat_start_wait,
+                composing_lapse=chat_composing_lapse,
+                composing_cap=chat_composing_cap,
             )
             if chat_reader
             else None
@@ -1993,6 +2035,10 @@ class Engine:
                 writer=self._telegram_writer,
                 memory=memory,
                 activate=self._line_read_in,
+                # ADR-0332 §3, §8: a message sent while an activation runs joins it where
+                # it may, and the line's `/stop` stops it.
+                join=self._join_running,
+                stop=self._stop_line,
                 closing=lambda: self._closing,
                 mint=self._chat_activation_id,
                 # ADR-0323 §4:13, §10: the window's messages, and a quoted one, link
@@ -4214,9 +4260,8 @@ class Engine:
 
         It writes nothing into the medium, into any store or into any episode, and
         answers nothing (§5:8). ADR-0298 §5's Writing row comes first (ADR-0332 §5:11).
-        The signal then goes nowhere yet: it only extends a start wait already running
-        for the conversation, and does nothing where none is (§5:7), and no reader runs
-        a start wait before ADR-0332 §1:3's third step builds it.
+        The signal then goes to the chat's reader, where it only extends a start wait
+        already running for the conversation, and does nothing where none is (§5:7).
 
         Raises:
             RuntimeError: If the engine is shutting down.
@@ -4234,8 +4279,10 @@ class Engine:
         await self._tracked(self._composed(device, named), "composing", checked=True, traced=False)
 
     async def _composed(self, device: RequestingDevice, conversation_id: str) -> None:
-        """ADR-0298 §5 "Writing", and then nothing: the signal has no wait to extend."""
+        """ADR-0298 §5 "Writing", then the signal to the chat's reader (ADR-0332 §5:7)."""
         await self._device_checks.writing(device, conversation_id, "composing")
+        if self._chat_reader is not None:
+            self._chat_reader.composing(conversation_id)
 
     async def delete_message(self, conversation_id: Identifier, *, position: int) -> bool:
         """Delete one message, leaving its marker (ADR-0293 §5:8, §5:12).
@@ -5707,14 +5754,12 @@ class Engine:
         Raises:
             CancelledError: If the activation, or this read, was cancelled.
         """
-        if self._closing:
-            return False
         reader = self._chat_reader
         assert reader is not None  # noqa: S101 — only the reader calls this
-        accepted = ChannelInput(
-            target=ChannelIdentity(channel_type="conversation", instance_id=taken.conversation_id),
-            payload=TextChannelPayload(text=taken.text),
-        )
+        place = ChannelIdentity(channel_type="conversation", instance_id=taken.conversation_id)
+        if self._closing or self._place_busy(place, reader="chat"):
+            return False
+        accepted = ChannelInput(target=place, payload=TextChannelPayload(text=taken.text))
         state = admit_channel(
             accepted,
             WholeTextReply(),
@@ -5777,6 +5822,38 @@ class Engine:
         # finish* message included (ADR-0307 §3), so nothing is written here.
         return True
 
+    def _place_busy(self, place: ChannelIdentity, *, reader: str) -> bool:
+        """Whether an activation started from ``place`` runs, so none is admitted there.
+
+        ADR-0332 §2:3: on a place whose kind runs one activation at a time, an activation
+        is admitted only where none started from it is running. The place's reader keeps
+        one read, so this never answers ``True`` for it; where it does, the input is not
+        admitted and waits, and the defect is logged.
+        """
+        busy = place_busy((one.state for one in self._running if one.state is not None), place)
+        if busy:
+            _log.error(f"{reader}_input_not_admitted", stage=f"{reader}_reader", reason="busy")
+        return busy
+
+    async def _stop_line(self, activation_id: str) -> bool:
+        """Stop the line's running activation for its ``/stop`` (ADR-0332 §8:4).
+
+        As :meth:`stop_activation` stops one (ADR-0295, ADR-0297): the mark, then the
+        stop record. A record that cannot be written leaves the mark set (ADR-0297 §3:7),
+        so the activation is stopped all the same.
+
+        Returns:
+            Whether it stopped one: ``False`` where it had already ended.
+        """
+        try:
+            return await self._stop(activation_id) is ActivationStop.STOPPED
+        except PlanningError:
+            _log.warning("telegram_stop_unrecorded", stage="telegram_reader", reason="store_failed")
+            return True
+        except MemoryStoreError:
+            # Not running: only then is the episode read, so nothing was stopped.
+            return False
+
     async def _chat_input_turn(self, taken: ChatInput) -> None:
         """The reader's input, planned by the phases (ADR-0309 §2:6)."""
         await self._phases_turn(taken)
@@ -5804,12 +5881,12 @@ class Engine:
         Raises:
             CancelledError: If the activation, or this read, was cancelled.
         """
-        if self._closing:
-            return False
         reader = self._telegram_reader
         writer = self._telegram_writer
         assert reader is not None  # noqa: S101 — only the line's reader calls this
         assert writer is not None  # noqa: S101 — wired with the reader
+        if self._closing or self._place_busy(taken.channel, reader="telegram"):
+            return False
         accepted = ChannelInput(target=taken.channel, payload=TextChannelPayload(text=taken.text))
         state = admit_channel(
             accepted,

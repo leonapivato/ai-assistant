@@ -52,6 +52,7 @@ from ai_assistant.core.types import (
     JoinedInput,
     RecordedInputMessage,
 )
+from ai_assistant.orchestration.channel_kinds import one_at_a_time
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 
 if TYPE_CHECKING:
@@ -71,6 +72,7 @@ __all__ = [
     "input_standing",
     "is_pure_read",
     "join_running",
+    "place_busy",
     "take_over",
     "visible_running",
 ]
@@ -218,10 +220,11 @@ def join_running(
     standing compared with ``joining``'s, and :meth:`ActivationState.join` checks its
     marks and its count and appends, all before anything yields the loop.
 
-    The place runs one activation at a time (§2:3), so at most one started from it is
-    running; where more than one is, none is joined, failing closed. A place with none
-    running joins nothing: the input starts the next activation there, as the reader
-    takes it in (§2:4).
+    Only a place whose kind runs one activation at a time takes joins (§2:3,
+    :func:`~ai_assistant.orchestration.channel_kinds.one_at_a_time`), so at most one
+    started from it is running; where more than one is, none is joined, failing closed.
+    A place with none running joins nothing: the input starts the next activation there,
+    as the reader takes it in (§2:4).
 
     Args:
         running: The activations the engine holds as running.
@@ -233,6 +236,8 @@ def join_running(
         The id of the activation it joined, which the reader marks its messages taken
         in by (§3:18); ``None`` where it joined none, and then it waits (§3:4).
     """
+    if not one_at_a_time(joining.channel.channel_type):
+        return None
     on_place = [one for one in running if one.place == joining.channel and not one.ended]
     if len(on_place) != 1:
         return None
@@ -243,6 +248,18 @@ def join_running(
         return None
     joined = JoinedInput(joined_at=at, channel=joining.channel, messages=joining.messages)
     return state.activation_id if state.join(joined, limit=limit) else None
+
+
+def place_busy(running: Iterable[ActivationState], channel: ChannelIdentity) -> bool:
+    """Whether an activation started from ``channel``'s place is running (ADR-0332 §2:3).
+
+    On a place whose kind runs one activation at a time, an activation is admitted only
+    where this answers ``False``. A place whose kind runs its activations side by side
+    is never busy.
+    """
+    return one_at_a_time(channel.channel_type) and any(
+        one.place == channel and not one.ended for one in running
+    )
 
 
 def visible_running(

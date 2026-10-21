@@ -128,16 +128,20 @@ async def test_a_stopped_chat_activation_writes_nothing_and_shows_stopped() -> N
 
 
 async def test_what_waited_behind_a_stopped_activation_is_then_taken_in() -> None:
-    """ADR-0295 §3:6: a stop holds nothing back; the correction is answered after it."""
+    """ADR-0295 §3:6: a stop holds nothing back; the correction is answered after it.
+
+    The correction is written after the stop, so it joins nothing (ADR-0332 §3:3): it
+    waits, and is taken in when the stopped activation ends.
+    """
     composer = _GatedModel("Sunday it is.")
     harness = chat_harness(composer=composer)
     conversation = await chat_conversation(harness)
     await harness.engine.write_message(conversation, message=chat_said("m-1", "book it Saturday"))
     await asyncio.wait_for(composer.entered.wait(), timeout=5)
     running = await _working(harness, conversation)
-    await harness.engine.write_message(conversation, message=chat_said("m-2", "actually Sunday"))
 
     assert await harness.engine.stop_activation(running) is ActivationStop.STOPPED
+    await harness.engine.write_message(conversation, message=chat_said("m-2", "actually Sunday"))
     composer.gate.set()
 
     written = await chat_answered(harness, conversation, 1)

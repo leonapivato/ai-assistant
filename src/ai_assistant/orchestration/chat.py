@@ -11,11 +11,26 @@ reader takes in every message waiting in that conversation that no activation ha
 taken in. The assistant's own messages are never among them, so they never start an
 activation (§6:1).
 
-**One activation at a time per conversation, for now** (§6:2, §6:3, ADR-0292 §11:5).
-The reader keeps one read running per conversation. A message written while an
-activation started from that conversation runs lands at once and waits: it is never
+**One activation at a time per conversation** (ADR-0332 §2:3-§2:4, ADR-0293 §6:2-§6:3).
+The conversation kind declares that each of its places runs one activation at a time,
+and the reader keeps one read running per conversation. A message written while an
+activation started from that conversation runs **joins it** where ADR-0332 §3:3 allows:
+the reader hands it to the engine's join (``join``), which takes it only where the
+activation has not committed and is not stopped, its author and standing are the
+running input's, and fewer than ``join_limit`` joins are taken; the reader holds the
+fourth condition itself, that no earlier input on the place is waiting, since once one
+message has not joined nothing after it joins. A joined message is marked taken in by
+the activation it joined (§3:18). A message that does not join waits: it is never
 refused, and when the activation ends the reader looks again and takes in everything
 waiting **together, as one input**.
+
+**The start wait, and composing** (ADR-0332 §5:1-§5:2, §5:6-§5:7). Where nothing is
+running, the reader takes a conversation's waiting messages in only once
+``start_wait`` has passed since the latest of them and no composing signal for the
+conversation is live, and no later than ``composing_cap`` after the first. A composing
+signal (:meth:`ChatReader.composing`) stays live for ``composing_lapse``; it only
+extends a start wait already running, and starts nothing, joins nothing and is written
+nowhere (§5:8).
 
 **The reader's bookkeeping** (§6:6-§6:9) is the conversation store's ``take_in``,
 which holds no text: the messages are marked taken in, by the activation's id, when
@@ -49,20 +64,24 @@ only through its Protocol (CLAUDE.md golden rule 1).
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+import math
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from ai_assistant.core.channel_validation import input_origin
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import (
     DeletedMessage,
     MessageAuthor,
     NewMessage,
+    RecordedInputMessage,
     TranscriptMessage,
 )
 from ai_assistant.orchestration.conversations import conversation_channel, fitted_message
+from ai_assistant.orchestration.joining import JoiningInput, input_standing
 from ai_assistant.orchestration.understanding import AskedIn, TranscriptWindow, WrittenBy
 
 if TYPE_CHECKING:
@@ -75,6 +94,9 @@ __all__ = [
     "CHAT_TURN_BUDGET",
     "CHAT_WINDOW_SIZE",
     "COULDNT_FINISH",
+    "DEFAULT_CHAT_COMPOSING_CAP",
+    "DEFAULT_CHAT_COMPOSING_LAPSE",
+    "DEFAULT_CHAT_START_WAIT",
     "ChatInput",
     "ChatReader",
     "ChatWriter",
@@ -93,6 +115,16 @@ CHAT_WINDOW_SIZE: Final = 20
 #: takes it as ``chat_turn_budget``; the composition root passes its own
 #: ``PHASES_TURN_BUDGET``, so this default holds only for an engine built without it.
 CHAT_TURN_BUDGET: Final = timedelta(seconds=60)
+
+#: ``Settings.chat_start_wait``'s default (ADR-0332 §6:1), which an engine built without
+#: the composition root's value takes.
+DEFAULT_CHAT_START_WAIT: Final = timedelta(seconds=1.5)
+
+#: ``Settings.chat_composing_lapse``'s default (ADR-0332 §6:2).
+DEFAULT_CHAT_COMPOSING_LAPSE: Final = timedelta(seconds=3)
+
+#: ``Settings.chat_composing_cap``'s default (ADR-0332 §6:3).
+DEFAULT_CHAT_COMPOSING_CAP: Final = timedelta(seconds=10)
 
 #: How many positions one ``take_in`` call marks, and one ``taken_in`` call reads: the
 #: store's own bound. Every message waiting is taken in together, as one input
@@ -153,6 +185,38 @@ class ChatInput:
         )
 
 
+@dataclass(slots=True)
+class _StartWait:
+    """A start wait running for one conversation (ADR-0332 §5:1-§5:2, §5:6).
+
+    Each instant is the reader's clock's reading: when the first waiting message was
+    noticed, when the latest was, and until when the latest composing signal is live.
+    """
+
+    first: float
+    latest: float
+    composing_until: float = -math.inf
+
+
+@dataclass(slots=True)
+class _Turn:
+    """One activation a read admitted, while it runs: what it holds, and whether one waited.
+
+    Attributes:
+        activation_id: The activation.
+        handed: The positions of the messages it was handed, its trigger's and each
+            joined one's, which no later look hands anything again.
+        due: Set by a notice while it runs: a message may be waiting to join.
+        waited: Whether a message did not join it, after which nothing joins it, since
+            no input joins past one that is waiting (ADR-0332 §3:3).
+    """
+
+    activation_id: str
+    handed: set[int]
+    due: asyncio.Event = field(default_factory=asyncio.Event)
+    waited: bool = False
+
+
 def couldnt_finish(effects: Sequence[str] = ()) -> NewMessage:
     """The fixed *couldn't finish* message, listing any effects that did happen (§9:1)."""
     text = COULDNT_FINISH
@@ -210,15 +274,16 @@ class ChatWriter:
 
 
 class ChatReader:
-    """The chat's reader, its sensor, under the interim (ADR-0293 §6, ADR-0292 §11:5).
+    """The chat's reader, its sensor (ADR-0293 §6, ADR-0332 §2-§3, §5).
 
     One read runs per conversation at a time. :meth:`notice` starts one where none is
-    running and otherwise asks the running one to look again; the read takes in every
-    waiting message as one input, runs one activation for it through ``activate``,
-    and looks again when that activation has ended, until nothing is waiting.
+    running and otherwise asks the running one to look again; the read waits out the
+    start wait, takes in every waiting message as one input, runs one activation for it
+    through ``activate``, and looks again when that activation has ended, until nothing
+    is waiting. While the activation runs, a message noticed joins it where it may.
     """
 
-    def __init__(  # noqa: PLR0913 — the medium, how an activation runs, three engine seams, and the writers' links
+    def __init__(  # noqa: PLR0913 — the medium, how an activation runs, four engine seams, the writers' links, and the waits with their clock
         self,
         *,
         conversations: ConversationStore,
@@ -229,6 +294,12 @@ class ChatReader:
         window_size: int = CHAT_WINDOW_SIZE,
         written: Callable[[str, Sequence[str], Sequence[int]], Awaitable[Mapping[int, WrittenBy]]]
         | None = None,
+        join: Callable[[JoiningInput], str | None] | None = None,
+        start_wait: timedelta | None = None,
+        composing_lapse: timedelta = DEFAULT_CHAT_COMPOSING_LAPSE,
+        composing_cap: timedelta = DEFAULT_CHAT_COMPOSING_CAP,
+        clock: Callable[[], float] | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         """Wire the reader.
 
@@ -252,7 +323,37 @@ class ChatReader:
                 message is where it is one, by position, a position no record names
                 simply missing. ``None``, the default, links no assistant message, as
                 before the phases.
+            join: The engine's join (ADR-0332 §3:3, §3:6): it joins an input to the
+                activation running on its place where that activation may take it,
+                and answers the activation's id, or ``None`` where it joined none.
+                ``None``, the default, joins nothing: every message written while an
+                activation runs waits.
+            start_wait: ``Settings.chat_start_wait`` (ADR-0332 §5:1): how long after
+                the latest waiting message the reader waits, where nothing is running,
+                before it takes them in. ``None``, the default, waits for nothing, and
+                a composing signal then extends nothing.
+            composing_lapse: ``Settings.chat_composing_lapse`` (§5:6): how long one
+                composing signal stays live.
+            composing_cap: ``Settings.chat_composing_cap`` (§5:2): the longest a start
+                wait lasts after the first waiting message.
+            clock: The monotonic clock the waits are read on, in seconds; the running
+                loop's by default.
+            sleep: How the reader waits.
+
+        Raises:
+            ValueError: If a wait is not strictly positive, or ``composing_cap`` is
+                shorter than ``start_wait`` or ``composing_lapse`` (§6:1-§6:3).
         """
+        if start_wait is not None and (
+            start_wait <= timedelta(0)
+            or composing_lapse <= timedelta(0)
+            or composing_cap < max(start_wait, composing_lapse)
+        ):
+            msg = (
+                "the start wait and the composing lapse are strictly positive, and the "
+                "cap no shorter than either (ADR-0332 §6:1-§6:3)"
+            )
+            raise ValueError(msg)
         self._conversations = conversations
         self._written = written
         self._activate = activate
@@ -270,22 +371,61 @@ class ChatReader:
         # what lets a reader of `activity` tell that an activation began and ended
         # between two of its readings (ADR-0296 §4:9).
         self._turns: dict[str, int] = {}
+        self._join = join
+        self._start_wait = None if start_wait is None else start_wait.total_seconds()
+        self._composing_lapse = composing_lapse.total_seconds()
+        self._composing_cap = composing_cap.total_seconds()
+        self._clock = clock if clock is not None else _loop_time
+        self._sleep = sleep
+        # ADR-0332 §5:1: the start wait running for each conversation where nothing is,
+        # from the first message noticed until the read takes the messages in.
+        self._waits: dict[str, _StartWait] = {}
+        # The activation each conversation's read has admitted, while it runs.
+        self._running: dict[str, _Turn] = {}
+        # ADR-0332 §3:18: per conversation, the positions a join took whose marking has
+        # not yet landed, by the activation they joined. Each later look marks them
+        # first and hands none of them to anything else, so a marking cut off or refused
+        # never lets a joined message be taken in again while this process runs.
+        self._owed: dict[str, dict[int, str]] = {}
 
     def notice(self, conversation_id: str) -> None:
         """Tell the reader a user's message was written into a conversation (§6:1).
 
         Starts a read of the conversation where none is running; otherwise the running
-        read looks again before it ends, so a message written while an activation runs
-        waits and is taken in after it (§6:2, §6:3). Nothing is started once the engine
-        is closing: the message waits, and a restart takes it in (§6:9).
+        read looks again before it ends. Where an activation the read admitted is
+        running, the message joins it where it may, and otherwise waits and is taken in
+        after it (ADR-0332 §2:4, §3:3; §6:2, §6:3). Where nothing is running, it starts
+        or extends the start wait (ADR-0332 §5:1). Nothing is started once the engine is
+        closing: the message waits, and a restart takes it in (§6:9).
         """
         if self._closing():
             return
+        turn = self._running.get(conversation_id)
+        if turn is not None:
+            turn.due.set()
+        elif self._start_wait is not None:
+            now = self._clock()
+            wait = self._waits.get(conversation_id)
+            if wait is None:
+                self._waits[conversation_id] = _StartWait(first=now, latest=now)
+            else:
+                wait.latest = now
         if conversation_id in self._reading:
             self._reading[conversation_id] = True
             return
         self._reading[conversation_id] = False
         self._spawn(self._read(conversation_id))
+
+    def composing(self, conversation_id: str) -> None:
+        """Take the hub chat page's signal that the person is typing (ADR-0332 §5:6-§5:8).
+
+        It extends the start wait running for the conversation, the signal staying live
+        for ``composing_lapse``, and does nothing where none is running (§5:7). It is not
+        input: it starts no read and no wait, joins nothing, and is written nowhere.
+        """
+        wait = self._waits.get(conversation_id)
+        if wait is not None:
+            wait.composing_until = self._clock() + self._composing_lapse
 
     async def notice_awaiting(self) -> int:
         """Notice every conversation holding a message no activation took in (§6:9).
@@ -362,10 +502,18 @@ class ChatReader:
         """Take in what waits in one conversation, one input at a time, until none does."""
         try:
             while not self._closing():
+                if not await self._waited(conversation_id):
+                    return
                 self._reading[conversation_id] = False
-                waiting = await self._conversations.untaken_messages(
-                    conversation_id, limit=_WAITING_ALL
-                )
+                await self._settle(conversation_id)
+                owed = self._owed.get(conversation_id, {})
+                waiting = [
+                    one
+                    for one in await self._conversations.untaken_messages(
+                        conversation_id, limit=_WAITING_ALL
+                    )
+                    if one.position not in owed
+                ]
                 if not waiting:
                     if self._reading[conversation_id]:
                         continue
@@ -396,6 +544,13 @@ class ChatReader:
         activation_id = self._mint()
         self._current[conversation_id] = activation_id
         self._turns[conversation_id] = self._turns.get(conversation_id, 0) + 1
+        turn = _Turn(activation_id=activation_id, handed={one.position for one in waiting})
+        self._running[conversation_id] = turn
+        joins = (
+            None
+            if self._join is None
+            else asyncio.ensure_future(self._joining(conversation_id, turn))
+        )
         try:
             return await self._activate(
                 ChatInput(
@@ -406,8 +561,121 @@ class ChatReader:
                 )
             )
         finally:
+            self._running.pop(conversation_id, None)
+            if joins is not None:
+                joins.cancel()
+                await asyncio.gather(joins, return_exceptions=True)
             self._current.pop(conversation_id, None)
             self._turns[conversation_id] = self._turns.get(conversation_id, 0) + 1
+
+    async def _waited(self, conversation_id: str) -> bool:
+        """Wait out the conversation's start wait, where one is running (ADR-0332 §5:1).
+
+        It ends once ``start_wait`` has passed since the latest message noticed and no
+        composing signal is live, and no later than ``composing_cap`` after the first
+        (§5:2). A notice or a signal only ever moves its end later, so sleeping to the
+        end as it stands and reading it again is enough.
+
+        Returns:
+            Whether the read goes on: ``False`` once the engine is closing.
+        """
+        while (wait := self._waits.get(conversation_id)) is not None:
+            if self._closing():
+                return False
+            assert self._start_wait is not None  # noqa: S101 — a wait is recorded only beside it
+            end = min(
+                wait.first + self._composing_cap,
+                max(wait.latest + self._start_wait, wait.composing_until),
+            )
+            remaining = end - self._clock()
+            if remaining <= 0:
+                break
+            await self._sleep(remaining)
+        self._waits.pop(conversation_id, None)
+        return not self._closing()
+
+    async def _joining(self, conversation_id: str, turn: _Turn) -> None:
+        """Join what is noticed to the running activation, until one message waits.
+
+        Runs beside the activation, and is cancelled when it ends. Each notice wakes it
+        (:meth:`notice`); a store that cannot be read leaves what it held waiting.
+        """
+        while not turn.waited:
+            await turn.due.wait()
+            turn.due.clear()
+            try:
+                await self._join_waiting(conversation_id, turn)
+            except ConversationStoreError:
+                _log.warning("chat_join_failed", stage="reader", reason="store_failed")
+                turn.waited = True
+
+    async def _join_waiting(self, conversation_id: str, turn: _Turn) -> None:
+        """Hand what waits, as one input, to the join; mark it taken in where it joined.
+
+        ADR-0332 §3:3: the messages not yet taken in, and handed to nothing, are one
+        input, since nothing before them is waiting; the engine's join takes it in one
+        step or not at all. Where it joined none, it waits, and so does everything after
+        it (§3:4). Where it joined, its messages are marked taken in by the activation it
+        joined (§3:18), the marking owed until it lands (:meth:`_settle`).
+        """
+        join = self._join
+        assert join is not None  # noqa: S101 — the joiner runs only beside it
+        untaken = await self._conversations.untaken_messages(conversation_id, limit=_WAITING_ALL)
+        owed = self._owed.get(conversation_id, {})
+        waiting = [
+            one for one in untaken if one.position not in turn.handed and one.position not in owed
+        ]
+        if not waiting or turn.waited:
+            return
+        channel = conversation_channel(conversation_id)
+        joined = join(
+            JoiningInput(
+                channel=channel,
+                messages=tuple(
+                    RecordedInputMessage(
+                        text=one.text, sent_at=one.written_at, position=one.position
+                    )
+                    for one in waiting
+                ),
+                standing=input_standing(
+                    origin=input_origin(channel),
+                    established=all(one.author is MessageAuthor.USER for one in waiting),
+                ),
+            )
+        )
+        if joined is None:
+            turn.waited = True
+            return
+        owed = self._owed.setdefault(conversation_id, {})
+        for one in waiting:
+            turn.handed.add(one.position)
+            owed[one.position] = joined
+        await self._settle(conversation_id)
+
+    async def _settle(self, conversation_id: str) -> None:
+        """Mark the messages a join took, where their marking has not landed (§3:18).
+
+        Raises:
+            ConversationStoreError: If the store cannot be written; the marking stays
+                owed.
+        """
+        owed = self._owed.get(conversation_id)
+        while owed:
+            activation_id = next(iter(owed.values()))
+            positions = sorted(one for one, by in owed.items() if by == activation_id)
+            for start in range(0, len(positions), _MARK_CHUNK):
+                chunk = positions[start : start + _MARK_CHUNK]
+                try:
+                    await self._conversations.take_in(
+                        conversation_id, positions=chunk, activation_id=activation_id
+                    )
+                except UnknownConversationError:
+                    # Deleted: nothing in it is taken in again, so nothing is owed.
+                    owed.clear()
+                    break
+                for one in chunk:
+                    owed.pop(one, None)
+        self._owed.pop(conversation_id, None)
 
     async def _window(
         self, conversation_id: str, waiting: Sequence[TranscriptMessage]
@@ -513,3 +781,8 @@ class ChatReader:
                 )
             )
         return links
+
+
+def _loop_time() -> float:
+    """The running loop's monotonic clock, in seconds."""
+    return asyncio.get_running_loop().time()

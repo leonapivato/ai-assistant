@@ -40,9 +40,11 @@ from ai_assistant.core.types import (
     TelegramUpdate,
 )
 from ai_assistant.orchestration.telegram import (
+    DEFAULT_TELEGRAM_START_WAIT,
     INTERRUPTED_LINE,
     NON_TEXT_LINE,
     POLL_BACKOFF,
+    RUNNING_POLL_PACE,
     UNAVAILABLE_BACKOFF,
     TelegramInput,
     TelegramLineSeams,
@@ -60,6 +62,8 @@ from ai_assistant.testing.telegram import GET_UPDATES, SEND_MESSAGE
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
+
+    from ai_assistant.orchestration.joining import JoiningInput
 
 
 class _Line:
@@ -96,6 +100,11 @@ class _Line:
         self.gate: asyncio.Event | None = None
         self.entered = asyncio.Event()
         self.closing = False
+        # ADR-0332 §3, §8: what the reader handed the join and the stop, and what each
+        # answers: no join is taken, and a stop stops what runs, unless a case says.
+        self.joins: list[JoiningInput] = []
+        self.joined: str | None = None
+        self.stops: list[str] = []
         self._ids = iter(f"act-{n}" for n in range(1, 100))
         self.reader = TelegramReader(
             seams=self.seams,
@@ -108,6 +117,8 @@ class _Line:
             ),
             memory=self.memory,
             activate=self._activate,
+            join=self._join,
+            stop=self._stop,
             closing=lambda: self.closing,
             mint=lambda: next(self._ids),
             written=written,
@@ -118,6 +129,14 @@ class _Line:
     async def _rest(self, seconds: float) -> None:
         self.rests.append(seconds)
         await asyncio.sleep(0.001)
+
+    def _join(self, joining: JoiningInput) -> str | None:
+        self.joins.append(joining)
+        return self.joined
+
+    async def _stop(self, activation_id: str) -> bool:
+        self.stops.append(activation_id)
+        return True
 
     async def _activate(self, taken: TelegramInput) -> bool:
         self.inputs.append(taken)
@@ -162,7 +181,10 @@ async def test_a_text_from_the_owner_is_one_input_taken_in_and_then_confirmed() 
     line.fake.hold(text(10, "What's on tomorrow?", message_id=55))
     line.start()
 
-    await line.until(lambda: len(line.polls()) >= 2, what="the reader polled again")
+    await line.until(
+        lambda: any(one.get("offset") == 11 for one in line.polls()),
+        what="a later poll confirmed it",
+    )
     await line.stop()
 
     (taken,) = line.inputs
@@ -174,7 +196,9 @@ async def test_a_text_from_the_owner_is_one_input_taken_in_and_then_confirmed() 
     assert line.marked == [(10,)], "taken in by its activation as it was admitted"
     (held,) = line.held_then[0].values()
     assert (held.kind, held.activation_id) == (TelegramIntakeKind.TAKEN_IN, taken.activation_id)
-    assert line.polls()[1]["offset"] == 11, "the next poll confirms what was dealt with"
+    assert line.rests[0] == DEFAULT_TELEGRAM_START_WAIT.total_seconds(), (
+        "taken in once the start wait has passed (ADR-0332 §5:3)"
+    )
     assert line.fake.held == ()
     assert (await line.intake.export()).intake == (), "dropped once Telegram forgot it"
 
@@ -248,10 +272,11 @@ async def test_a_forward_is_taken_in_with_its_original_sender_claimed() -> None:
     assert [one.author for one in taken.window.input_messages] == [MessageAuthor.USER] * 2
 
 
-# --- one activation at a time (§5:4-§5:7) -------------------------------------------------
+# --- one activation at a time (§5:4-§5:7, ADR-0332 §2:4, §8:7-§8:8) ---------------------
 
 
-async def test_nothing_is_asked_while_an_activation_runs_and_what_waits_comes_in_together() -> None:
+async def test_polling_goes_on_while_one_runs_and_what_did_not_join_comes_in_together() -> None:
+    """ADR-0332 §8:7-§8:8, amending §5:7: the reader polls, paced, while it runs."""
     line = _Line()
     line.gate = asyncio.Event()
     line.fake.hold(text(1, "first"))
@@ -260,14 +285,22 @@ async def test_nothing_is_asked_while_an_activation_runs_and_what_waits_comes_in
     polls = len(line.polls())
 
     line.fake.hold(text(2, "second", minute=1), text(3, "third", minute=2))
-    for _ in range(20):
-        await asyncio.sleep(0.001)
-    assert len(line.polls()) == polls, "nothing is asked of Telegram while it runs (§5:7)"
+    await line.until(lambda: bool(line.joins), what="the join was asked")
+    await line.until(lambda: len(line.polls()) > polls + 2, what="the reader kept polling")
     assert line.reader.working == line.inputs[0].activation_id
+    (joining,) = line.joins
+    assert [one.text for one in joining.messages] == ["second", "third"], "one input"
+    assert RUNNING_POLL_PACE.total_seconds() in line.rests, "paced, never in a loop"
+    assert {one.update_id for one in line.fake.held} == {2, 3}, "left waiting, unconfirmed"
 
     line.gate.set()
     await line.until(lambda: len(line.inputs) == 2, what="what waited was taken in")
     await line.stop()
+
+    assert line.joins == [joining], "nothing joins past what waits (ADR-0332 §3:3)"
+    assert line.rests.count(DEFAULT_TELEGRAM_START_WAIT.total_seconds()) == 1, (
+        "what waited while it ran is taken in at once, with no second start wait"
+    )
 
     later = line.inputs[1]
     assert later.text == "second\n\nthird", "taken in together, as one input"
@@ -333,7 +366,9 @@ async def test_a_poll_at_its_bound_is_polled_again_at_once_and_takes_nothing_in(
 
     first = (await line.intake.export()).calls[0]
     assert first.outcome is TelegramCallOutcome.UNKNOWN
-    assert line.rests == [], "an unknown poll is polled again at once"
+    assert line.rests == [DEFAULT_TELEGRAM_START_WAIT.total_seconds()], (
+        "an unknown poll is polled again at once; the one rest is the start wait"
+    )
 
 
 def _polled(line: _Line) -> bool:
