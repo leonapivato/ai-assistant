@@ -683,7 +683,7 @@ class HubClient:
 
         Args:
             person_id: The person, by id.
-            limit: How many entries each growing list's page holds at most.
+            limit: How many entries each list's page holds at most.
             offset: How many of each list's entries to skip.
 
         Returns:

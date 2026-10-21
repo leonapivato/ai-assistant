@@ -21017,34 +21017,23 @@ class StalePinView(BaseModel):
 
 
 class StyleMarkView(BaseModel):
-    """A standing style mark, and the memory it shows (ADR-0338 §5:3, §8:2).
+    """A standing style mark, the memory it shows, and that memory's wording (§5:3, §8:2).
 
     A mark follows its memory's successors as a pin does (§4:8), so the memory it shows
-    may be another than the one it was made on. Where its chain reaches a current
-    memory, ``shows`` names it, as the slot or what it left out names it; where it
-    reaches none, ``shows`` is ``None`` and ``content`` is the wording of the memory the
-    mark was made on, as the history read holds it, since no live read words it.
+    may be another than the one it was made on. Each mark carries the wording beside its
+    removal's id, so a page of marks is rendered with no other page.
 
     Attributes:
         mark: The mark, by the id its removal names.
         shows: The current memory it shows, or ``None`` where its chain reaches none.
-        content: The marked memory's wording; set exactly where ``shows`` is ``None``.
-
-    Raises:
-        ValueError: If ``content`` is set beside ``shows``, or neither is.
+        content: The wording of the memory it shows, or, where it shows none, of the
+            memory it was made on, as the history read holds it.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     mark: StyleMark
     shows: NonBlankEncodableText | None = None
-    content: EncodableText | None = None
-
-    @model_validator(mode="after")
-    def _shows_or_words(self) -> Self:
-        if (self.shows is None) == (self.content is None):
-            msg = "a mark shows a current memory, or carries the wording of the one it was on"
-            raise ValueError(msg)
-        return self
+    content: EncodableText
 
 
 class PersonModelView(BaseModel):
@@ -21054,12 +21043,12 @@ class PersonModelView(BaseModel):
     longer current, the style marks and the pending suggestions. The change log, which
     grows with every change, is read a page at a time by ``profile_changes``.
 
-    **The four lists that grow are each a page**: ``left_out``, ``no_longer_current``,
+    **Each list is a page**: ``kept``, ``left_out``, ``no_longer_current``,
     ``style_marks`` and ``suggestions`` each hold the entries of their own order from
     the read's ``offset``, at most its ``limit``, and each ``*_total`` says how many
-    the whole list holds, so every entry, and the control it carries, is reached by
-    bounded reads however many there are. The slot itself is bounded by its budget
-    (§6:1) and is always whole.
+    the whole list holds, so every entry is reached by bounded reads however many there
+    are. Every entry carries its own wording and the id its control names, so a page is
+    rendered with no other. ``kept_chars`` is the whole slot's fill, whatever the page.
 
     Attributes:
         person: The person.
@@ -21068,6 +21057,8 @@ class PersonModelView(BaseModel):
             first, then the style memories, the most recently marked first, each
             memory once (§6:2).
         budget_chars: The slot's budget, in characters of the wordings it shows (§6:1).
+        kept_chars: The slot's fill: the characters of every wording it shows, on this
+            page or another.
         left_out: The memories a standing pin or mark reaches that the slot leaves
             out, in the slot's order, each once, and why (§6:2, §6:4).
         no_longer_current: The standing pins whose chain reaches no current memory, in
@@ -21076,14 +21067,15 @@ class PersonModelView(BaseModel):
             memory it shows (§5:3).
         suggestions: The pending suggestions the panel shows, the most recent first
             (§7:9, §9:5).
+        kept_total: How many memories the slot shows in all.
         left_out_total: How many memories the slot left out in all.
         no_longer_current_total: How many standing pins are no longer current in all.
         style_marks_total: How many standing style marks are held in all.
         suggestions_total: How many pending suggestions the panel shows in all.
 
     Raises:
-        ValueError: If a memory is in the slot twice, left out twice, or both, or a
-            page holds more entries than its list's total.
+        ValueError: If a memory is in the slot twice, left out twice, or both, a page
+            holds more entries than its list's total, or the fill exceeds the budget.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -21091,10 +21083,12 @@ class PersonModelView(BaseModel):
     profile: Profile
     kept: tuple[KeptMemoryView, ...] = ()
     budget_chars: int = Field(strict=True, ge=1)
+    kept_chars: int = Field(default=0, strict=True, ge=0)
     left_out: tuple[LeftOutMemory, ...] = ()
     no_longer_current: tuple[StalePinView, ...] = ()
     style_marks: tuple[StyleMarkView, ...] = ()
     suggestions: tuple[SuggestionView, ...] = ()
+    kept_total: int = Field(default=0, strict=True, ge=0)
     left_out_total: int = Field(default=0, strict=True, ge=0)
     no_longer_current_total: int = Field(default=0, strict=True, ge=0)
     style_marks_total: int = Field(default=0, strict=True, ge=0)
@@ -21106,7 +21100,11 @@ class PersonModelView(BaseModel):
         if len(shown) != len(set(shown)):
             msg = "the slot shows or leaves out each memory once (ADR-0338 §6:2)"
             raise ValueError(msg)
+        if self.kept_chars > self.budget_chars:
+            msg = "the slot's fill is within its budget (ADR-0338 §6:1)"
+            raise ValueError(msg)
         pages = (
+            (self.kept, self.kept_total),
             (self.left_out, self.left_out_total),
             (self.no_longer_current, self.no_longer_current_total),
             (self.style_marks, self.style_marks_total),
@@ -21116,11 +21114,6 @@ class PersonModelView(BaseModel):
             msg = "a page holds no more entries than its list"
             raise ValueError(msg)
         return self
-
-    @property
-    def kept_chars(self) -> int:
-        """The slot's fill: the characters of the wordings it shows (§6:1)."""
-        return sum(len(one.content) for one in self.kept)
 
 
 class PersonModelEditRefusal(StrEnum):

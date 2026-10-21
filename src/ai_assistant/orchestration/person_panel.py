@@ -143,9 +143,10 @@ async def person_model_view(
     drops it before a planning round. A start held whose current end is not is a
     chain that reaches no current memory.
 
-    The four lists that grow — what the slot left out, the pins no longer current, the
-    style marks and the suggestions — are each cut to the page ``offset`` and ``limit``
-    name, beside each one's total; the slot is whole, bounded by its budget.
+    Each of the five lists — the slot, what it left out, the pins no longer current,
+    the style marks and the suggestions — is cut to the page ``offset`` and ``limit``
+    name, beside its total, and the slot's fill is the whole slot's. A budget bounds
+    characters, not entries (a memory may be worded empty), so the slot is paged too.
 
     Args:
         blocks: The person-block assembly over the two stores.
@@ -200,12 +201,14 @@ async def person_model_view(
     return PersonModelView(
         person=model.person,
         profile=model.profile,
-        kept=kept,
+        kept=kept[window],
         budget_chars=blocks.budget_chars,
+        kept_chars=sum(len(one.content) for one in kept),
         left_out=tuple(left_out[window]),
         no_longer_current=tuple(stale[window]),
         style_marks=tuple(marked[window]),
         suggestions=tuple(shown[window]),
+        kept_total=len(kept),
         left_out_total=len(left_out),
         no_longer_current_total=len(stale),
         style_marks_total=len(marked),
@@ -216,10 +219,10 @@ async def person_model_view(
 def _mark(
     mark: StyleMark, ends: Mapping[str, Memory], history: Mapping[str, Memory]
 ) -> StyleMarkView:
-    """A held mark, with the current memory it shows or the wording of the one it was on."""
+    """A held mark, with the current memory it shows and its wording, or its own memory's."""
     end = ends.get(mark.memory_id)
     if end is not None:
-        return StyleMarkView(mark=mark, shows=end.id)
+        return StyleMarkView(mark=mark, shows=end.id, content=end.content)
     return StyleMarkView(mark=mark, content=history[mark.memory_id].content)
 
 

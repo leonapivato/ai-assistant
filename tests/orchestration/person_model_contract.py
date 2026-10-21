@@ -401,7 +401,7 @@ class PersonModelContract:
         view = await _read(subject)
 
         assert [(one.mark.id, one.shows, one.content) for one in view.style_marks] == [
-            (followed.record_id, "m:short", None),
+            (followed.record_id, "m:short", "Likes short answers."),
             (ended_mark.record_id, None, "Likes puns."),
         ]
         assert [(one.memory_id, one.pinned) for one in view.kept] == [("m:short", False)]
@@ -915,6 +915,52 @@ class PersonModelContract:
 
         assert _write(accepted) == (_REFUSED, PersonModelRefusal.UNKNOWN_RECORD)
         assert _write(dismissed) == (_REFUSED, PersonModelRefusal.UNKNOWN_RECORD)
+
+    async def test_a_slot_of_many_empty_wordings_is_paged_and_its_fill_is_whole(
+        self, person_model_subject: PersonModelSubject
+    ) -> None:
+        """A budget bounds characters, not entries: the slot is paged like every list."""
+        subject = person_model_subject
+        many = 120
+        await _held(subject, *(fact(f"m:{index:03}", "") for index in range(many)))
+        await _held(subject, fact("m:diet", "Eats no meat."))
+        await subject.engine.pin_memory(OWNER_PERSON_ID, memory_id="m:diet")
+        for index in range(many):
+            assert _write(
+                await subject.engine.pin_memory(OWNER_PERSON_ID, memory_id=f"m:{index:03}")
+            ) == (_WRITTEN, None)
+
+        seen: list[str] = []
+        for offset in range(0, many + 1, 10):
+            view = await subject.engine.person_model(OWNER_PERSON_ID, limit=10, offset=offset)
+            assert view is not None
+            assert (view.kept_total, view.kept_chars) == (many + 1, len("Eats no meat."))
+            seen += [one.memory_id for one in view.kept]
+
+        assert seen == ["m:diet", *(f"m:{index:03}" for index in range(many))]
+
+    async def test_a_page_of_style_marks_carries_each_marks_wording(
+        self, person_model_subject: PersonModelSubject
+    ) -> None:
+        """A mark's control and its wording come on one page, whatever the other lists hold."""
+        subject = person_model_subject
+        await _held(
+            subject, fact("m:older", "o" * PERSON_BUDGET), fact("m:newer", "n" * PERSON_BUDGET)
+        )
+        for one in ("m:older", "m:newer"):
+            await subject.people.add_style_mark(OWNER_PERSON_ID, one)
+
+        first = await subject.engine.person_model(OWNER_PERSON_ID, limit=1)
+        second = await subject.engine.person_model(OWNER_PERSON_ID, limit=1, offset=1)
+
+        assert first is not None
+        assert second is not None
+        assert [(one.mark.memory_id, one.content) for one in first.style_marks] == [
+            ("m:older", "o" * PERSON_BUDGET)
+        ]
+        assert [(one.mark.memory_id, one.content) for one in second.style_marks] == [
+            ("m:newer", "n" * PERSON_BUDGET)
+        ]
 
     async def test_accepting_an_id_not_pending_writes_nothing(
         self, person_model_subject: PersonModelSubject
