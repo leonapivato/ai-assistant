@@ -12,6 +12,7 @@ browser lane drive, with no horizontal scroll and an empty console.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -30,7 +31,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from browser_drive import Drive
-    from playwright.async_api import Browser, ConsoleMessage, Dialog, Page, ViewportSize
+    from playwright.async_api import (
+        Browser,
+        ConsoleMessage,
+        Dialog,
+        Page,
+        Route,
+        ViewportSize,
+    )
 
     from ai_assistant.testing import FakePersonModelStore
 
@@ -415,4 +423,86 @@ async def test_a_memory_confirmed_by_a_pin_says_it_was_pinned_not_asked(
         assert len(shown) == 1
         assert "Why: You confirmed this wording by pinning it." in shown[0]
         assert "when I asked you" not in shown[0]
+        assert heard == []
+
+
+async def test_a_pin_is_refused_where_the_id_now_names_another_wording_than_the_row(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """§4:3: a pin confirms the wording shown, so it is made only on the row's wording.
+
+    The listing's id is normalised and the person model's is not (§10:4): two memories
+    whose ids differ only by padding list under one id, and a pin from the padded one's
+    row would pin, and confirm, the other (adversarial review, round 1).
+    """
+    async with driving(gateway_browser, tmp_path, viewport=PHONE) as drive:
+        heard = _complaints(drive.page)
+        people, store = switch_on(drive.engine)
+        await hold(
+            drive.engine, store, fact(" m:diet ", "Eats no meat."), fact("m:diet", "Eats meat.")
+        )
+        page = drive.page
+        async with page.expect_response("**/candidates/pending"):
+            await press(page, "#beliefs-button")
+        padded = page.locator("#belief-list > .belief-row", has_text="Eats no meat.")
+        plain = page.locator("#belief-list > .belief-row", has_text="Eats meat.")
+        outcome = page.locator("#belief-outcome")
+
+        async with page.expect_response("**/belief"):
+            await padded.get_by_role("button", name="Pin: confirms this wording").click()
+        await page.wait_for_function(
+            "() => document.getElementById('belief-outcome').textContent !== ''"
+        )
+        assert (await outcome.inner_text()).startswith("That memory is not the one shown here")
+        held = await people.read(OWNER_PERSON_ID)
+        assert held is not None
+        assert held.pins == ()
+
+        async with page.expect_response("**/person/pin"):
+            await plain.get_by_role("button", name="Pin: confirms this wording").click()
+        assert (await outcome.inner_text()).startswith("Pinned.")
+        held = await people.read(OWNER_PERSON_ID)
+        assert held is not None
+        assert [pin.memory_id for pin in held.standing_pins] == ["m:diet"]
+        assert heard == []
+
+
+async def test_a_save_keeps_what_was_typed_in_other_fields_and_while_it_was_sent(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Every write reads the panel again; a draft never sent survives it (adversarial
+    review, round 1), and so does one typed while the write was in flight."""
+    loop = asyncio.get_running_loop()
+    release: asyncio.Future[None] = loop.create_future()
+
+    async def hang(route: Route) -> None:
+        await release
+        await route.fallback()
+
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        heard = _complaints(drive.page)
+        people, _ = switch_on(drive.engine)
+        await _open(drive)
+        page = drive.page
+
+        await page.fill("#field-name", "Robin")
+        await page.fill("#field-language", "Português")
+        await page.route("**/person/field/set", hang)
+        async with page.expect_request("**/person/field/set"):
+            await page.press("#field-name", "Enter")
+        await page.fill("#field-address", "Rob")
+        async with page.expect_response("**/person/changes"):
+            release.set_result(None)
+
+        assert await page.locator("#about-outcome").inner_text() == "Saved."
+        assert await page.locator("#field-name").input_value() == "Robin"
+        assert await page.locator("#field-language").input_value() == "Português"
+        assert await page.locator("#field-address").input_value() == "Rob"
+        held = await people.read(OWNER_PERSON_ID)
+        assert held is not None
+        assert (held.profile.name, held.profile.language, held.profile.address) == (
+            "Robin",
+            None,
+            None,
+        )
         assert heard == []

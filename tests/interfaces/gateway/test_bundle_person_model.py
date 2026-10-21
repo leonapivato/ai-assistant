@@ -124,7 +124,7 @@ def test_the_pin_control_says_that_pinning_confirms_the_wording_shown() -> None:
     """§8:2: "a pin control that says that pinning confirms the wording shown"."""
     offering = _functions(_code("app.js"))["offerPinning"]
 
-    assert 'control("Pin: confirms this wording"' in offering
+    assert 'control("Pin: confirms this wording", () => pinBelief(belief))' in offering
     assert 'belief.status !== "current"' in offering, "on each current memory alone"
 
 

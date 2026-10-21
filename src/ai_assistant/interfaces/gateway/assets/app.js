@@ -5226,11 +5226,37 @@ async function readAboutList(name, run) {
   }
 }
 
+// The field a Save or a Clear last sent, and what its box held when it was sent.
+const aboutSent = { field: null, box: null };
+
 // The five fields, each its own form: a Save writes that field and no other.
+//
+// **A box the person has typed in and not saved keeps what they typed** (adversarial
+// review, round 1): every write reads the panel again, which builds every form again, and
+// a draft in another field — or one typed while the write was in flight — would be lost
+// with it though it was never sent. So each box's unsaved text is carried over. The box
+// whose value was just sent shows what the hub now holds, unless it was typed in again
+// since it was sent.
 function renderProfile(profile) {
+  const drafts = {};
+  PROFILE_FIELDS.forEach((spec) => {
+    const box = el(`field-${spec.field}`);
+    if (box === null || box.value === box.dataset.held) {
+      return;
+    }
+    if (spec.field === aboutSent.field && box.value === aboutSent.box) {
+      return;
+    }
+    drafts[spec.field] = box.value;
+  });
+  aboutSent.field = null;
+  aboutSent.box = null;
   const fields = el("profile-fields");
   clearNode(fields);
   PROFILE_FIELDS.forEach((spec) => renderField(fields, spec, profile[spec.field]));
+  Object.keys(drafts).forEach((field) => {
+    el(`field-${field}`).value = drafts[field];
+  });
 }
 
 function renderField(fields, spec, value) {
@@ -5248,6 +5274,8 @@ function renderField(fields, spec, value) {
   input.type = "text";
   input.autocomplete = "off";
   input.value = value === null ? "" : value;
+  // What the hub holds, so a box typed in since it was built is told from one that was not.
+  input.dataset.held = input.value;
   form.appendChild(input);
   const save = document.createElement("button");
   save.type = "submit";
@@ -5465,6 +5493,8 @@ async function beliefEdit(path, payload, act) {
 }
 
 function setField(field, value) {
+  aboutSent.field = field;
+  aboutSent.box = el(`field-${field}`).value;
   // An absent value is the clear: the gateway reads absent and `null` alike, and sends
   // the hub no value (ADR-0085 §10).
   const payload = value === null ? { field: field } : { field: field, value: value };
@@ -5481,6 +5511,50 @@ function removeStyleMark(markId) {
 
 function decideSuggestion(suggestionId, act) {
   return aboutEdit(`/person/suggestion/${act}`, { suggestion_id: suggestionId }, act);
+}
+
+// What the belief panel says where the memory an id now names is not the one its row
+// shows, so the pin would confirm a wording the person was not shown.
+const PIN_NOT_SHOWN =
+  "That memory is not the one shown here any more, so it was not pinned. Open What I " +
+  "believe again to see it as it is now.";
+
+// Pin the memory a row shows, which confirms the wording shown (ADR-0338 §4:3).
+//
+// **The wording is read again first, by the id the pin will name, and the pin is made
+// only where it is the row's** (adversarial review, round 1): the listing is as old as
+// the page's last read, and its id is the listing's, which a belief read normalises
+// where the person model does not (§10:4). A pin made by that id on a memory whose
+// wording is not the row's would confirm a wording the person never saw.
+async function pinBelief(belief) {
+  fault(null, "beliefs");
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  try {
+    const held = await relay(half, "/belief", { record_id: belief.id }, "beliefs");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (held === null) {
+      return;
+    }
+    if (held.belief.id !== belief.id || held.belief.content !== belief.content) {
+      el("belief-outcome").textContent = PIN_NOT_SHOWN;
+      return;
+    }
+    await beliefEdit("/person/pin", { memory_id: belief.id }, "pin");
+  } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    fault(GATEWAY_GONE, "beliefs");
+  }
 }
 
 // Whether this hub keeps a person model, read when the belief panel opens: its rows
@@ -5520,9 +5594,7 @@ function offerPinning(item, belief) {
     return;
   }
   controls(item, [
-    control("Pin: confirms this wording", () =>
-      beliefEdit("/person/pin", { memory_id: belief.id }, "pin")
-    ),
+    control("Pin: confirms this wording", () => pinBelief(belief)),
     control("Unpin", () => beliefEdit("/person/unpin", { memory_id: belief.id }, "unpin")),
   ]);
 }

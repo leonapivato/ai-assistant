@@ -20,6 +20,7 @@ person reading their model in the browser and at the terminal reads the same sen
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
@@ -177,7 +178,11 @@ def render_off(console: Console) -> None:
 
 
 def render_no_memory(console: Console, memory_id: str) -> None:
-    """Say no live memory has the id a pin named, so nothing was pinned (ADR-0338 §4:2).
+    """Say no live memory has exactly the id a pin named, so nothing was pinned (§4:2).
+
+    Exactly: the belief read normalises an id and the person model does not (§10:4), so
+    a read that answered for another id than the one typed is no read of that memory,
+    and its wording is not shown for a pin to confirm (§4:3).
 
     Args:
         console: Where to write.
@@ -185,7 +190,7 @@ def render_no_memory(console: Console, memory_id: str) -> None:
     """
     _print(
         console,
-        f"No live memory has the id {quoted(memory_id)}, so nothing was pinned. Only a "
+        f"No live memory has exactly the id {quoted(memory_id)}, so nothing was pinned. Only a "
         "current memory may be pinned; 'assistant beliefs' lists them.",
     )
 
@@ -239,25 +244,45 @@ def _page_note(console: Console, shown: int, total: int, offset: int) -> None:
         _print(console, f"  (showing {first}-{offset + shown} of {total})")
 
 
+def pasteable(command: str, value: str) -> str:
+    """A command a person can paste to act on ``value``, or why it cannot be shown.
+
+    **The shell's quoting and the terminal's escaping are two questions.** The id is
+    quoted by :func:`shlex.quote`, so a ``$``, a backtick, a quote or a space in it
+    reaches the command as itself and expands to nothing; and a command is offered only
+    where every character of the id prints as itself, because an escaped character
+    would paste as a different id. Where one does not, the id is shown escaped and no
+    command is offered: a wrong command is worse than none.
+
+    Args:
+        command: The ``assistant about`` command that takes it.
+        value: The id, verbatim.
+
+    Returns:
+        The command, or a sentence naming the id it cannot offer one for.
+    """
+    if value.isprintable():
+        return f"{command} with: assistant about {command} {shlex.quote(value)}"
+    return f"{quoted(value)} cannot be pasted as a command here"
+
+
 def _kept_line(kept: KeptMemoryView | LeftOutMemory) -> str:
     what = "pinned" if kept.pinned else "how you like me to speak"
-    return f"  - {what} · “{escaped(kept.content)}” · memory {quoted(kept.memory_id)}"
+    line = f"  - {what} · “{escaped(kept.content)}”"
+    return f"{line} · {pasteable('unpin', kept.memory_id)}" if kept.pinned else line
 
 
 def _stale_line(stale: StalePinView) -> str:
     outside = " · it rested on outside content" if stale.rests_on_outside_content else ""
     return (
         f"  - “{escaped(stale.content)}” · pinned {stale.pin.pinned_at.isoformat()}{outside}"
-        f" · unpin with: assistant about unpin {quoted(stale.pin.memory_id)}"
+        f" · {pasteable('unpin', stale.pin.memory_id)}"
     )
 
 
 def _mark_line(mark: StyleMarkView) -> str:
     gone = " · no longer current" if mark.shows is None else ""
-    return (
-        f"  - “{escaped(mark.content)}”{gone}"
-        f" · remove with: assistant about remove-style {quoted(mark.mark.id)}"
-    )
+    return f"  - “{escaped(mark.content)}”{gone} · {pasteable('remove-style', mark.mark.id)}"
 
 
 def _suggestion_line(view: SuggestionView) -> str:
@@ -272,7 +297,8 @@ def _suggestion_line(view: SuggestionView) -> str:
         field = proposed.field
         label = FIELD_WORDS[field] if field is not None else ""
         what = f"{label}: {_value(proposed.value)}"
-    return f"  - {what}{outside} · suggestion {quoted(view.suggestion.id)}"
+    named = view.suggestion.id
+    return f"  - {what}{outside} · {pasteable('accept', named)} · {pasteable('dismiss', named)}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,6 +405,7 @@ __all__ = [
     "REFUSAL_WORDS",
     "UNSET_WORDS",
     "edit_text",
+    "pasteable",
     "render_changes",
     "render_model",
     "render_no_memory",
