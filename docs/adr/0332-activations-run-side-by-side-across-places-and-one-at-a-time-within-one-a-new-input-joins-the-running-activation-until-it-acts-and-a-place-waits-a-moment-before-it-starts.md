@@ -104,7 +104,9 @@ the running activation.
 > - a full page of waiting updates on the line, then `/stop`: it is acted on once a poll
 >   returns it (§8:4);
 > - two messages on the line whose text is `/stop` and which differ only in the
->   `bot_command` entity: one is a stop and the other a message.
+>   `bot_command` entity: one is a stop and the other a message;
+> - two takeovers in one pass, one per understanding version, and a takeover refused at a
+>   `join_limit` of 0 and at an exhausted one.
 
 ### 2. Side by side, and one at a time within a place
 
@@ -274,14 +276,18 @@ and so does the line's `/stop` (§8). Typed text is still a message and never a 
 > **Normative.** `ControllerStage` gains `takeover`, and `ControllerRule` gains
 > `takeover_undecided`. `takeover_undecided` answers where the latest understanding names an
 > activation it continues and there is no takeover decision for that version, and makes
-> `takeover` due. Its row sits immediately after `story_links_unrecorded`.
+> `takeover` due. Its row sits immediately after `story_links_unrecorded`. ADR-0280 §4:6's
+> guard is scoped to the understanding version for `takeover`, so the stage runs at most
+> once for each.
 
 > **Normative.** The takeover stage, in one step with no await between, reads whether the
 > named activation is still running, uncommitted and without its stop mark, and whether its
 > input carries the same authority and the same origin as this activation's (as §3:3
-> requires of a join).
-> - Where all of these hold, the stage sets that activation's stop mark (ADR-0297) and its committed
->   mark, so it can neither commit nor take a join. It appends that activation's input to
+> requires of a join), and whether this activation has taken fewer joins than
+> `join_limit` (§6:5).
+> - Where all of these hold, the stage sets that activation's stop mark (ADR-0297) and its
+>   committed mark, so it can neither commit nor take a join.
+>   A takeover counts as one of this activation's joins. It appends that activation's input to
 >   this one as a `JoinedInput` naming it, and records the decision *taken over*.
 > - Otherwise it records *not taken*.
 
@@ -364,7 +370,7 @@ no harm, because the next activation sees it.
 > strictly positive.
 
 > **Normative.** `Settings` gains `join_limit`, an integer, default **3**, at least 0. 0
-> turns joining off.
+> turns joining off, and takeover with it (§4:6).
 
 > **Normative.** [#2589](https://github.com/leonapivato/ai-assistant/issues/2589) tunes these
 > defaults by measurement, without a new decision.
@@ -493,7 +499,7 @@ Superseded in part; every clause the middle column does not name stands:
 
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
-| ADR-0280 | §4:3's row `not_understood`, as ADR-0309 §3:1 keeps it: it answers where no understanding decision covers every input held; §4:6's loop guard, for understanding: once per input held; §7:1's record, in the addition alone: `joined` | §3:9, §3:16, §7:2 |
+| ADR-0280 | §4:3's row `not_understood`, as ADR-0309 §3:1 keeps it: it answers where no understanding decision covers every input held; §4:6's loop guard, for understanding: once per input held, and for `takeover`: once per understanding version; §7:1's record, in the addition alone: `joined` | §3:9, §3:16, §4:5, §7:2 |
 | ADR-0276 | §2:1's `ProposedActivationUnderstanding` and `ActivationUnderstanding` field sets, in the additions alone: `continues`; §3:3's label scheme, in the addition alone: the kind `R` | §7:3, §7:4 |
 | ADR-0286 | §3:3, in the addition alone: a revision may extend `joined`; §3:8, in the addition alone: `joined` is a field of the record, not a stage's result | §3:16, §7:2 |
 | ADR-0292 | §6:10, in the addition alone: an input that joins a running activation is part of its input; §10:4, in the addition alone: the same person's running activations on their other places are visible beside the window; §11:1, within a place: one activation at a time with joining, the end state staying the direction across places; §11:2's *the older is stopped*, across places, only where the older has not committed; §11:5, whole: its interim becomes §2's rule; §11:6, whole: the change reaches the controller and the readers; §12:5 and §12:6, each in the addition alone: the line's `/stop` | §2:3–§2:5, §3:3, §4:1, §4:6–§4:8, §8:1 |
