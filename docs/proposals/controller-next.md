@@ -203,24 +203,34 @@ places).
   same place that arrives before the running activation has acted joins that activation.
   The input then holds both messages, each kept with its own time (as ADR-0323 §5:4
   already keeps Telegram's).
-  - *Has acted* is the one boundary used throughout this pick. It means acting has made
-    its first claim: an effect record claimed for a call in the world or for the round's
-    message (ADR-0306 §5:2, §5:4), or an invocation claimed for a call that leaves the hub
-    (ADR-0306 §5:7). A message counts, since writing a reply or a question into the place
-    is an act (ADR-0307 §3).
-  - **The join is decided where the stop is decided.** A claim is written in one
-    indivisible plan-store step that also decides the stop (ADR-0306 §5:4). A join is
-    decided in that same step.
-    - A join that lands before the first claim refuses that claim, as a stop refuses what
-      is not yet claimed. The round's unclaimed calls never run, and its authorizing and
-      acting decisions are set aside for the new understanding.
-    - A claim that lands first closes the window, and the input waits.
+  - *Has acted* is the one boundary used throughout this pick. It means acting has
+    committed to its first call that is not a pure read, or to the round's message. A
+    pure read is a call that declares no effect and does not leave the hub, such as
+    reading the hub's own records.
+    - A write to the hub's own records counts, even where it is safe to repeat and gets
+      no effect record (`gets_effect_record` in `orchestration/acting.py`). An example is
+      noting on a story, or merging two.
+    - So does a call that leaves the hub, such as a web search, whose claim is its
+      invocation's rather than an effect record's (ADR-0306 §5:7).
+    - A message counts too, since writing a reply or a question into the place is an act
+      (ADR-0307 §3).
+  - **The join and the commitment are decided in one step, on the activation.**
+    - Before acting dispatches any call that is not a pure read, or its message, it
+      checks for a pending join and marks the activation committed, in one step with no
+      await between, on the hub's one event loop. The reader's join takes effect only
+      where that mark is unset.
+    - A join that lands first means the round's calls other than pure reads are never
+      dispatched, by any path (an effect claim, an invocation, a write to own records),
+      and its authorizing and acting decisions are set aside for the new understanding.
+    - A commitment that lands first closes the window, and the input waits.
 
-    So nothing claimed is ever overtaken by a join, and a booking claimed a moment before
-    "wait, not that" finishes as ADR-0306 §5:2 requires.
-  - A round whose only calls claim nothing, such as reading the hub's own records, has not
-    acted. A correction arriving after such a round still joins, and the results already
-    read stay on the episode for the new planning to use.
+    The step sits before every claim path, so it needs no change to the plan store's claim
+    or to the invocation ledger, and nothing committed is ever overtaken by a join. A
+    booking committed a moment before "wait, not that" finishes, as ADR-0306 §5:2
+    requires.
+  - A round whose only calls are pure reads has not acted. A correction arriving after
+    such a round still joins, and the results already read stay on the episode for the new
+    planning to use.
   - The simpler boundary, "acting has begun at all", is the alternative (question 2).
 - **What a join makes due again.** The joined input is input that no understanding covers
   yet, so `not_understood` answers again. Understanding runs over all of the input and
@@ -273,7 +283,8 @@ sequenceDiagram
 
 **What it needs.**
 
-- **Controller.** A new decision on the working set: the inputs joined, each with the
+- **Controller and acting.** Acting's commitment step and the activation's committed mark
+  (above). A new decision on the working set: the inputs joined, each with the
   understanding version that first covered it. The rules read *the latest understanding
   covers all the input*, not *understanding has run*. That is ADR-0280 §4:5's own principle
   (rules read decisions, not history), and it already holds for the other rules. The loop
@@ -281,8 +292,7 @@ sequenceDiagram
   at-most-twice (ADR-0308 §2:10) becomes once per understanding version, plus the first
   run. Both are bounded by a join limit, a number #2589 sets, after which further input
   waits.
-- **Stores.** The plan store's claim step (ADR-0306 §5:4) decides a pending join as it
-  decides a stop. The open episode (ADR-0286) gains each joined input as an append. The
+- **Stores.** The open episode (ADR-0286) gains each joined input as an append. The
   readers' bookkeeping marks a joined message as taken in by the running activation's id,
   as at admission (ADR-0293 §6:8, ADR-0323 §5:8).
 - **Channels.** The hub chat's reader must take in a message written while an activation
@@ -582,7 +592,7 @@ rest.
 | Pick | The controller | The stores | What you see |
 | --- | --- | --- | --- |
 | 1. Side by side | Nothing for the concurrency itself; running activations readable per person across places | The lock and recheck on what is acted on (#2586); nothing new for memory, stories or spend | Talk on Telegram and the web at once; a thought finished on another platform is joined to the first |
-| 2. Joining | Joined inputs on the working set; rules read *understanding covers the input*; the loop guard per joined input; a join limit | The plan store's claim step decides a join as it decides a stop; the open episode appends each joined input; the readers mark joined messages taken in | A correction a second later changes the first answer instead of chasing it |
+| 2. Joining | Joined inputs on the working set; rules read *understanding covers the input*; the loop guard per joined input; a join limit | The open episode appends each joined input; the readers mark joined messages taken in | A correction a second later changes the first answer instead of chasing it |
 | 3. The short wait | Nothing (before admission) | A per-kind wait in each reader; a composing operation (wire, gateway, ADR-0298 row, page) | One reply to a burst; on the web, the assistant waits while you type |
 | 4. Modes | A mode decision read by the rules; a modes table; recorded with the episode; each new phase an ADR | Understanding's reply gains two fields (`core/types.py`, wire); per-mode routes in `Settings`; a pending-mode effect | Quick things are quick, hard things get thought; "just blurt" works; the viewer says which mode ran and why |
 | 5. Background | A background mode; slices are ordinary activations | A task effect and its story; the slice sensor (timers milestone); the *has something to say* mark | Research continues while you talk, survives restarts, and is there when you ask |
@@ -619,8 +629,9 @@ Each is a lane or several. (a) and (b) are independent.
 1. **One at a time within a place, with joining:** is that the right rule to keep, rather
    than ADR-0292 §11:1's every-message-its-own-activation, given that long work moves to
    the background?
-2. **Where the join window closes:** at the first call with an effect, call that
-   discloses, or message (the pick), or as soon as acting begins at all, which is simpler?
+2. **Where the join window closes:** at acting's commitment to its first call that is not
+   a pure read, or to its message (the pick), or as soon as acting begins at all, which is
+   simpler?
 3. **Telegram `/stop`:** should the line take `/stop` as a command that stops the running
    activation at once, as the hub chat's stop control does? It would amend ADR-0323 §8:1,
    and the line would gain a command typed text cannot fake.
