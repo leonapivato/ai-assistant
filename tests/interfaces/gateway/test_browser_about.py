@@ -861,6 +861,44 @@ async def test_a_read_overtaken_by_a_later_save_leaves_the_focus_where_it_is(
         assert heard == []
 
 
+async def test_a_box_typed_in_before_the_panel_has_loaded_keeps_the_keyboard(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The fields are shown before the change log lands; the menu's move to the heading
+    once it has does not take the keyboard from a box typed in meanwhile (adversarial
+    review, round 11). Left alone, the heading takes it."""
+    loop = asyncio.get_running_loop()
+    release: asyncio.Future[None] = loop.create_future()
+
+    async def hang(route: Route) -> None:
+        await release
+        await route.fallback()
+
+    async with driving(gateway_browser, tmp_path, viewport=PHONE) as drive:
+        heard = _complaints(drive.page)
+        switch_on(drive.engine)
+        page = drive.page
+        address = page.locator("#field-address")
+        await page.route("**/person/changes", hang)
+        async with page.expect_request("**/person/changes"):
+            await press(page, "#about-button")
+        await page.fill("#field-address", "Rob")
+
+        async with page.expect_response("**/person/changes") as late:
+            release.set_result(None)
+        await (await late.value).finished()
+        await expect(page.locator("#change-list")).to_contain_text("No change yet.")
+        await page.evaluate("() => fetch('/').then((answer) => answer.text())")
+        await expect(address).to_be_focused()
+        await page.keyboard.type("by")
+        await expect(address).to_have_value("Robby")
+
+        await page.unroute("**/person/changes")
+        await press(page, "#about-button")
+        await expect(page.locator("#about > :first-child")).to_be_focused()
+        assert heard == []
+
+
 async def test_a_box_typed_in_while_a_clear_is_out_keeps_what_was_typed(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
