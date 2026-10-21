@@ -2666,7 +2666,11 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``pending_candidates``, and the wire carries ``PendingCandidate``, which it
 #:     returns. A hub at 111 does not route the method a peer at 112 calls
 #:     (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 112
+#: 113: ADR-0325 §5:4 advances the version once for the keyless connection, on this
+#:     ground: the promoted method set gains ``connect_keyless_account``. No type in
+#:     ``core`` changes (§5:3). A hub at 112 does not route the method a peer at 113
+#:     calls (ADR-0124 §9:2).
+PROTOCOL_VERSION: Final[int] = 113
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

@@ -495,7 +495,7 @@ async def test_a_maximal_credential_does_not_fit_the_floor_frame(tmp_path: Path)
 
 
 def test_the_guarded_set_is_exactly_the_connection_surface() -> None:
-    """``CONNECTION_METHODS`` names five methods the Protocol really declares.
+    """``CONNECTION_METHODS`` names six methods the Protocol really declares.
 
     The one place ``wire/`` departs from ``wire/surface.py``'s reflection, and it
     departs deliberately: what makes a method a *connection* operation is ADR-0151
@@ -504,14 +504,16 @@ def test_the_guarded_set_is_exactly_the_connection_surface() -> None:
     mode an enumeration has — a rename or a removal leaving a stale name that
     silently guards nothing, which is how a prohibition quietly stops applying.
 
-    The count is pinned too, because a sixth operation added by a later ADR must
-    be a deliberate edit here rather than an omission nobody notices: ADR-0151 §13
-    binds "these operations", and a new one arrives inside that phrase.
+    The count is pinned too, because an operation added by a later ADR must be a
+    deliberate edit here rather than an omission nobody notices: ADR-0151 §13 binds
+    "these operations", and a new one arrives inside that phrase — as ADR-0325
+    §5:5's ``connect_keyless_account`` did.
     """
     assert CONNECTION_METHODS <= METHODS
     assert {
         "connect_account",
         "reprovision_account",
+        "connect_keyless_account",
         "disconnect_account",
         "connected_accounts",
         "recent_connection_acts",

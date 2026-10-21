@@ -691,11 +691,13 @@ def _check_live(admission: Admission | None) -> None:
         raise DeviceExpelledError(msg)
 
 
-#: The five operations ADR-0151 §13 keeps off every transport but ADR-0084 §1's
+#: The six operations ADR-0151 §13 keeps off every transport but ADR-0084 §1's
 #: loopback socket, until a ratified decision rules the credential's hop from an
 #: enrolled device to the hub (ADR-0124 §3's accepted-disclosure list does not
 #: include a Tier 0 credential, and every disclosure argument this surface rests on
-#: is the ``0600`` socket's).
+#: is the ``0600`` socket's). ``connect_keyless_account`` is the sixth, by ADR-0325
+#: §5:5: it carries no credential, and is held here anyway so the six connection
+#: operations sit on one transport rule.
 #:
 #: **Enumerated rather than derived**, which is the one place this module departs
 #: from ``wire/surface.py``'s reflection and does so deliberately: what makes a
@@ -707,6 +709,7 @@ CONNECTION_METHODS: Final[frozenset[str]] = frozenset(
     {
         "connect_account",
         "reprovision_account",
+        "connect_keyless_account",
         "disconnect_account",
         "connected_accounts",
         "recent_connection_acts",

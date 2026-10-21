@@ -1,7 +1,8 @@
 """The connection operations: connecting, replacing, disconnecting, and the two listings.
 
-ADR-0151 §1 rules that the client surface for connections is exactly five methods
-on :class:`~ai_assistant.core.protocols.AssistantEngine`, and §10 rules that they
+ADR-0151 §1 rules that the client surface for connections is five methods on
+:class:`~ai_assistant.core.protocols.AssistantEngine` — six since ADR-0325 §5:1
+added the keyless act — and ADR-0151 §10 rules that they
 are implemented **here**, in `orchestration`, "in one object that holds the
 provisioner seam below and nothing else that reaches the keyring or the connection
 store", with ``Engine`` delegating to it. This module is that object.
@@ -81,7 +82,7 @@ if TYPE_CHECKING:
 
 
 class ConnectionOperations:
-    """The five connection operations, over one provisioner seam and nothing else."""
+    """The six connection operations, over one provisioner seam and nothing else."""
 
     def __init__(self, *, provisioner: ConnectionProvisioner) -> None:
         """Wire the operations from the provisioner seam.
@@ -170,6 +171,29 @@ class ConnectionOperations:
         return await self._provisioner.reprovision(
             reference, identity=identity, credential=credential
         )
+
+    # --- the act that carries none (ADR-0325 §3) -----------------------------
+
+    async def connect_keyless(self, *, identity: NonBlankEncodableText) -> ConnectedAccount:
+        """Connect a source that needs no credential, letting the provisioner mint.
+
+        A forward and a return, like every method here: the reference is minted by
+        the provisioner (ADR-0325 §3:4, ADR-0151 §3), the one write is its own
+        (§3:3), and nothing here touches a keyring because there is nothing for it to
+        relay.
+
+        Args:
+            identity: The name the user gives the connection, already refused by
+                the caller if it is unusable (ADR-0325 §4:3), and relayed
+                **verbatim**.
+
+        Returns:
+            The live record the act wrote, ``ACTIVE`` at revision 1 with no slot.
+
+        Raises:
+            ConnectionStoreError: Propagated unchanged (ADR-0325 §3:6).
+        """
+        return await self._provisioner.provision_keyless(identity=identity)
 
     # --- the act that removes one --------------------------------------------
 

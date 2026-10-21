@@ -1252,7 +1252,7 @@ class HubClient:
             raise HubUnavailableError(msg) from exc
         return env.decode_envelope(body)
 
-    # --- the five connection operations (ADR-0151 §16 item 5) ---------------
+    # --- the six connection operations (ADR-0151 §16 item 5, ADR-0325 §5:5) -
     #
     # **Each one refuses before it does anything, unless this client is on
     # ADR-0084 §1's loopback socket** (:meth:`_refuse_off_loopback`). ADR-0151 §13
@@ -1294,7 +1294,7 @@ class HubClient:
     def _refuse_off_loopback(self, method: str) -> None:
         """Refuse a connection operation this transport may not carry (ADR-0151 §13).
 
-        Called as the **first** statement of each of the five, so it runs before
+        Called as the **first** statement of each of the six, so it runs before
         the credential is revalidated, before it is unwrapped, and before any
         socket is opened. Nothing derived from the secret exists by the time this
         raises.
@@ -1420,6 +1420,37 @@ class HubClient:
             identity=named,
             credential=secret.get_secret_value(),
         )
+
+    async def connect_keyless_account(self, *, identity: NonBlankEncodableText) -> ConnectedAccount:
+        """Connect a source that needs no credential, hub-side, under a minted reference.
+
+        **This client takes no reference and no credential and offers no way to send
+        either** (ADR-0325 §5:1). The identity's refusals are this client's own and
+        run before the socket is opened (ADR-0325 §4:3), on
+        :meth:`connect_account`'s reason. Carried on the loopback socket only, like
+        the other five connection operations (ADR-0325 §5:5, ADR-0151 §13).
+
+        Args:
+            identity: The name the user gives the connection, sent verbatim.
+
+        Returns:
+            The record the hub wrote, ``ACTIVE`` at revision 1 under its minted
+            reference.
+
+        Raises:
+            ValueError: If ``identity`` is blank or unwritable.
+            UnusableIdentityError: If ``identity`` is one ADR-0149 §4 does not
+                admit. **No frame is sent.**
+            ConnectionStoreError: If the hub's one write did not return. It carries
+                no reference, and the outcome is not known: read
+                :meth:`connected_accounts` (ADR-0325 §3:6).
+            OversizedValueError: If the argument exceeds the limit the hub
+                published.
+        """
+        self._refuse_off_loopback("connect_keyless_account")
+        named = non_blank_text(identity, name="identity")
+        usable_identity(named, credential=None)
+        return await self._call("connect_keyless_account", identity=named)  # type: ignore[no-any-return]
 
     async def disconnect_account(self, reference: Identifier) -> ConnectedAccount | None:
         """Disconnect a reference hub-side, or report that nothing was removed.

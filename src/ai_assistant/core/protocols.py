@@ -9953,12 +9953,14 @@ class AssistantEngine(Protocol):
 
     # --- the connection surface (ADR-0151 §1) --------------------------------
     #
-    # Five operations, and five is derived rather than preferred (ADR-0151 §1):
+    # Six operations. ADR-0151 §1 derived five rather than preferring them:
     # ADR-0149 §9 names connecting, re-provisioning, disconnecting and listing,
     # and ADR-0139 §1 splits the last into *what is connected now* and *what was
     # done*, which are answered from different halves of the store and neither of
-    # which derives the other. **No other operation on any surface performs, or
-    # reports the outcome of, a provisioning act or a disconnection.**
+    # which derives the other. ADR-0325 §5:1 adds the sixth,
+    # :meth:`connect_keyless_account`, for a source that needs no credential.
+    # **No other operation on any surface performs, or reports the outcome of, a
+    # provisioning act or a disconnection.**
     #
     # **None of them is reachable by a model or a plan** (ADR-0151 §13). No
     # ``ToolDefinition`` binds one, no plan step reaches one, no model-authored
@@ -10139,6 +10141,78 @@ class AssistantEngine(Protocol):
                 names (ADR-0151 §7). No client reports it as a failed connection.
             ConnectionStoreError: On :meth:`connect_account`'s terms.
             OversizedValueError: On :meth:`connect_account`'s terms.
+        """
+        ...
+
+    async def connect_keyless_account(self, *, identity: NonBlankEncodableText) -> ConnectedAccount:
+        """Connect a source that needs no credential, under a reference the hub mints.
+
+        **A keyless connection** (ADR-0325 §2): one live record carrying the
+        identity the user names, the ``ACTIVE`` state and **no credential slot**,
+        written in one act (§3:2). Its callable is built with no key and refuses a
+        record that has one; a callable built with a key refuses a record that has
+        none.
+
+        **It takes no reference and no credential, and accepts neither under another
+        name** (§5:1). The reference is minted as :meth:`connect_account`'s is
+        (ADR-0151 §3). **It is a separate operation and not an optional credential**
+        (§4): a user who forgot their key must not get a working-looking connection
+        that every credentialed callable then refuses, so leaving the credential out
+        is a choice made on purpose. No client performs it because a credential was
+        not supplied, was blank or was refused, and none falls back to it from
+        :meth:`connect_account` (§4:4).
+
+        **The identity is the name the user gives their use of the source** — for
+        example "Open-Meteo" — supplied in this act and recorded verbatim (§4:2). No
+        component infers it from a reference, an endpoint, an origin, a ``Settings``
+        value or a remote lookup, and no client fills it in from configuration.
+        ADR-0151 §5's refusals bind it **locally and before any I/O, in every
+        implementation**, the wire client included: an identity whose UTF-8
+        encoding exceeds
+        :data:`~ai_assistant.core.types.ACCOUNT_IDENTITY_MAX_BYTES`, or that carries
+        a control character or a line break, is refused with
+        :class:`~ai_assistant.core.errors.UnusableIdentityError` (§4:3). There is no
+        credential to compare it against, and nothing replaces that comparison.
+        Every client that accepts the identity displays it to the user as part of
+        the act, and what is returned carries it byte for byte (§4:5).
+
+        **Created only by an explicit user act through a client** (§4:1): no
+        ``Settings`` value, configuration, upgrade, migration, first run, backup
+        restore, scheduler job, plan step, tool, callable or model creates one or
+        supplies its identity. It is on ADR-0151's connection surface and that
+        surface's clauses bind it as they bind the other five (§5:5): no ruling, no
+        trail, not reachable by a model or a plan, and served over ADR-0084 §1's
+        loopback socket only.
+
+        **It returns only when its one write has landed**, carrying
+        ``state=ACTIVE``, the identity supplied in this call and revision 1 (§3:5).
+        A keyless reference is otherwise ordinary: :meth:`disconnect_account` and
+        :meth:`reprovision_account` act on it unchanged, and after a
+        re-provisioning it names a slot (§3:7).
+
+        **A cancellation propagates unconverted**, on :meth:`connect_account`'s
+        terms.
+
+        Args:
+            identity: The name the user gives the connection, recorded verbatim.
+
+        Returns:
+            The live record this act wrote, ``ACTIVE`` at revision 1, carrying the
+            minted reference.
+
+        Raises:
+            UnusableIdentityError: If ``identity`` exceeds
+                :data:`~ai_assistant.core.types.ACCOUNT_IDENTITY_MAX_BYTES` once
+                UTF-8 encoded, or carries a Unicode control character or a line
+                break. Raised **locally, before any I/O**, by every implementation;
+                the message names no part of the identity and no length of it.
+            ConnectionStoreError: If the act's one write failed rather than
+                returning. It carries **no** reference, the outcome is not known,
+                and a client resolves it by reading :meth:`connected_accounts`
+                (ADR-0325 §3:6), as it would :meth:`connect_account`'s.
+            OversizedValueError: If the argument does not fit the configured frame.
+                Nothing is written, and raising ``hub_max_frame_bytes`` is the
+                operator's only remedy (ADR-0151 §11).
         """
         ...
 
@@ -11196,8 +11270,9 @@ class ConnectionProvisioner(Protocol):
     """Performs ADR-0148 §6's provisioning act, and says what is connected (ADR-0151 §10).
 
     The seam by which `orchestration` reaches the connection provisioner in
-    `tools/` (ADR-0149 §10). Five members, one per operation on
-    ``AssistantEngine``'s connection surface (ADR-0151 §1), and the placement is
+    `tools/` (ADR-0149 §10). Six members, one per operation on
+    ``AssistantEngine``'s connection surface (ADR-0151 §1, ADR-0325 §5:2 adding
+    :meth:`provision_keyless` as the sixth), and the placement is
     forced rather than chosen: those operations are engine methods,
     ``AssistantEngine`` is `orchestration`'s, the act's owner is in `tools/`
     (ADR-0149 §1), and a subsystem boundary between them is a Protocol by golden
@@ -11206,7 +11281,7 @@ class ConnectionProvisioner(Protocol):
     **Holding this seam is not holding a keyring face**, which is the distinction
     ADR-0102 §7 drew about a composition root and ``SourceGrantStore`` and
     ADR-0149 §8's tenth clause states directly for this neighbourhood. The object
-    in `orchestration` names five members that take and return `core` types; it
+    in `orchestration` names six members that take and return `core` types; it
     cannot name ``set``, ``delete`` or ``get``, and no annotation on it mentions
     :class:`Secrets` or :class:`SecretStore` — so ADR-0125 §8's fourth clause
     stays true of `orchestration` word for word.
@@ -11241,7 +11316,8 @@ class ConnectionProvisioner(Protocol):
     serialised across this boundary.
 
     **This enumeration is what ADR-0151 §10 places and is not a bar on a later
-    ADR adding a member.** ADR-0153 §2 exercised the freedom it reserved by
+    ADR adding a member.** ADR-0325 §5:2 exercised it by adding
+    :meth:`provision_keyless`; ADR-0153 §2 exercised the freedom it reserved by
     declaring :class:`ConnectionPurger` as a seam of its own rather than by taking
     the member; this Protocol gains **no** purge member, and ADR-0153 §7 records
     it as unchanged.
@@ -11399,6 +11475,48 @@ class ConnectionProvisioner(Protocol):
                 :class:`~ai_assistant.core.errors.SecretStoreError` is chained as
                 the cause.
             ConnectionStoreError: On :meth:`provision`'s terms.
+        """
+        ...
+
+    async def provision_keyless(self, *, identity: NonBlankEncodableText) -> ConnectedAccount:
+        """Connect a source that needs no credential, minting its reference (ADR-0325 §3).
+
+        **One write, not ADR-0148 §6's three** (ADR-0325 §3:2): the reference's
+        first entry, appended ``ACTIVE`` with the identity supplied, revision 1 and
+        **no credential slot**. The store's refusal of an append that would
+        introduce a reference it already holds (ADR-0151 §3:2) is the act's
+        compare-and-swap, so a fresh reference cannot lose one to another act.
+
+        **It calls neither ``set`` nor ``delete`` on the keyring and reads nothing
+        from it** (§3:3). There is no credential to write and no predecessor slot to
+        delete, because the act is always on a reference it mints and never on one
+        the store holds (§3:4); nothing re-provisions a reference into this shape.
+
+        **Takes no reference argument and no credential, and accepts neither under
+        any other name.** The reference is minted exactly as :meth:`provision`'s is,
+        from a source no fresh process resumes and never reused while the store
+        holds any entry naming it (ADR-0151 §3).
+
+        **It returns only when its write has landed** (§3:5), carrying
+        :attr:`~ai_assistant.core.types.ProvisioningState.ACTIVE`, the identity
+        supplied in this call byte-for-byte, and revision 1. A keyless reference is
+        otherwise an ordinary one: :meth:`disconnect` and :meth:`reprovision` act on
+        it unchanged, and after a re-provisioning it names a slot (§3:7).
+
+        Args:
+            identity: The name the user gives their use of the source, already
+                refused by the engine if it is unusable (ADR-0325 §4:3) and
+                recorded verbatim.
+
+        Returns:
+            The live record this act wrote, ``ACTIVE`` at revision 1.
+
+        Raises:
+            ConnectionStoreError: If the one write failed rather than returning, or
+                was refused because the store already holds the minted reference.
+                It carries **no** reference, and the act's outcome is therefore not
+                known (§3:6); the resolution is to read :meth:`connected`. No other
+                failure class is raised (ADR-0325 §5:2).
         """
         ...
 

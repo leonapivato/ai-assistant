@@ -853,8 +853,12 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     **ADR-0329 §18:2 adds one**, ``pending_candidates``, the read the belief panel calls
     to show the candidates the observer has not yet processed — so the count rises to
     fifty-nine.
+
+    **ADR-0325 §5:1 adds one**, ``connect_keyless_account``, the act connecting a
+    source that needs no credential — so the count rises to sixty. It is not a browser
+    operation (ADR-0177 §1:1 does not name it, and §5's note keeps it outside).
     """
-    assert len(_method_names()) == 59
+    assert len(_method_names()) == 60
     assert "converse_spoken" not in _method_names()
     for retired in (
         "converse",
@@ -1775,6 +1779,11 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ``PendingCandidate`` it returns. A hub at 111 does not route the method a peer at
     112 calls (ADR-0124 §9:2). **The method set moves from 58 to 59.**
 
+    **113 is ADR-0325 §5:4, on the method set.** The promoted set gains
+    ``connect_keyless_account``; no type in ``core`` changes (§5:3). A hub at 112
+    does not route the method a peer at 113 calls (ADR-0124 §9:2). **The method set
+    moves from 59 to 60.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1783,7 +1792,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (59, 112), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (60, 113), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

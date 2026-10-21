@@ -105,6 +105,18 @@ class ConnectionProvisionerContract(ABC):
     def suspend_next_credential_write(self, provisioner: ConnectionProvisioner) -> SuspendedCall:
         """Hold the subject's next credential write open."""
 
+    @abstractmethod
+    def entry_count(self, provisioner: ConnectionProvisioner) -> int:
+        """How many entries the subject's connection store holds."""
+
+    @abstractmethod
+    def keyring_becomes_unreachable(self, provisioner: ConnectionProvisioner) -> None:
+        """Put the subject's keyring into ADR-0125 §7's unavailable state.
+
+        What makes "no keyring call" observable: every member of an unreachable
+        keyring raises, so an act that completes over one called none of them.
+        """
+
     # --- ADR-0148 §6: a completed act ---------------------------------------
 
     async def test_a_fresh_connection_is_active_at_its_first_revision(
@@ -244,6 +256,133 @@ class ConnectionProvisionerContract(ABC):
 
         assert await provisioner.connected() == ()
         assert await provisioner.recent_acts(limit=10) == ()
+
+    # --- ADR-0325 §3: the keyless act --------------------------------------
+
+    async def test_a_keyless_act_writes_one_entry_and_makes_no_keyring_call(
+        self, provisioner: ConnectionProvisioner
+    ) -> None:
+        """ADR-0325 §3:2, §3:3, §5:6: one write, ``ACTIVE`` at revision 1, no keyring.
+
+        **The keyring is unreachable for the whole act**, so any ``set``, ``delete``
+        or ``get`` would raise: an act that completes over it called none of them,
+        which a count of what the keyring holds afterwards could not prove — a write
+        followed by a delete leaves the count where it started.
+
+        **One entry, not two.** The pending state stands ahead of a credential write
+        in flight, and this act has none, so a conforming implementation appends the
+        active record at once; an implementation that wrote pending then active would
+        still report one act in the history and fail here.
+        """
+        self.keyring_becomes_unreachable(provisioner)
+
+        record = await provisioner.provision_keyless(identity="  Open-Meteo  ")
+
+        assert record.state is ProvisioningState.ACTIVE
+        assert record.revision == 1
+        assert record.identity == "  Open-Meteo  "
+        assert record.reference
+        assert self.entry_count(provisioner) == 1
+        assert await provisioner.connected() == (record,)
+        assert await provisioner.recent_acts(limit=10) == (
+            ConnectionAct(reference=record.reference, revision=1, account=record),
+        )
+
+    async def test_each_keyless_act_takes_its_own_minted_reference(
+        self, provisioner: ConnectionProvisioner
+    ) -> None:
+        """ADR-0325 §3:4: always a reference it mints, never one the store holds."""
+        credentialed = await provisioner.provision(identity=IDENTITY, credential=credential())
+        first = await provisioner.provision_keyless(identity=IDENTITY)
+        second = await provisioner.provision_keyless(identity=IDENTITY)
+
+        assert len({credentialed.reference, first.reference, second.reference}) == 3
+
+    async def test_a_keyless_act_under_a_repeated_reference_writes_nothing(
+        self, provisioner: ConnectionProvisioner
+    ) -> None:
+        """ADR-0325 §3:2, §3:6: the store's refusal is the act's compare-and-swap.
+
+        The repeated reference is one a credentialed act already holds, which is the
+        case that would otherwise put a keyless entry on top of a live credentialed
+        record — a re-provisioning into the keyless shape that §3:4 forbids.
+        ``ConnectionStoreError`` carries no reference.
+        """
+        first = await provisioner.provision(identity=IDENTITY, credential=credential())
+        written = self.entry_count(provisioner)
+        self.repeat_next_reference(provisioner)
+
+        with pytest.raises(ConnectionStoreError) as caught:
+            await provisioner.provision_keyless(identity="Open-Meteo")
+
+        assert not hasattr(caught.value, "reference")
+        assert self.entry_count(provisioner) == written
+        assert await provisioner.connected() == (first,)
+
+    async def test_a_keyless_reference_the_caller_could_never_receive_is_refused(
+        self, provisioner: ConnectionProvisioner
+    ) -> None:
+        """ADR-0151 §11 binds the keyless act's mint as it binds :meth:`provision`'s."""
+        self.mint_an_unusable_reference(provisioner)
+
+        with pytest.raises(ConnectionStoreError):
+            await provisioner.provision_keyless(identity="Open-Meteo")
+
+        assert self.entry_count(provisioner) == 0
+
+    @pytest.mark.parametrize(
+        "identity",
+        [
+            pytest.param("Open\nMeteo", id="line-break"),
+            pytest.param("Open\u202eMeteo", id="bidi-override"),
+            pytest.param("o" * (ACCOUNT_IDENTITY_MAX_BYTES + 1), id="over-the-bound"),
+        ],
+    )
+    async def test_the_store_refuses_a_keyless_identity_outside_its_shape(
+        self, provisioner: ConnectionProvisioner, identity: str
+    ) -> None:
+        """ADR-0149 §4's store-side refusal reaches the keyless act's one write too."""
+        with pytest.raises(ConnectionStoreError):
+            await provisioner.provision_keyless(identity=identity)
+
+        assert self.entry_count(provisioner) == 0
+
+    async def test_a_keyless_reference_disconnects_with_nothing_to_delete(
+        self, provisioner: ConnectionProvisioner
+    ) -> None:
+        """ADR-0325 §3:7: ``disconnect`` acts on it unchanged, and names no slot.
+
+        Over an unreachable keyring, because the deletion pass has no slot to reach:
+        a disconnection that called the keyring for a keyless record would raise here
+        and leave a disconnected reference reported as a residual credential.
+        """
+        record = await provisioner.provision_keyless(identity="Open-Meteo")
+        self.keyring_becomes_unreachable(provisioner)
+
+        removed = await provisioner.disconnect(record.reference)
+
+        assert removed == record
+        assert await provisioner.connected() == ()
+
+    async def test_a_keyless_reference_reprovisions_into_a_credentialed_one(
+        self, provisioner: ConnectionProvisioner
+    ) -> None:
+        """ADR-0325 §3:7: ADR-0148 §6's three writes, unchanged, after which it names a slot.
+
+        A keyless record has no predecessor slot, so nothing is deleted and the act
+        cannot report a residual credential; the new revision holds exactly the one
+        credential this act wrote.
+        """
+        record = await provisioner.provision_keyless(identity="Open-Meteo")
+
+        rotated = await provisioner.reprovision(
+            record.reference, identity="Open-Meteo", credential=credential("paid-plan")
+        )
+
+        assert rotated.reference == record.reference
+        assert rotated.revision == 2
+        assert rotated.state is ProvisioningState.ACTIVE
+        assert self.keyring_entries(provisioner) == 1
 
     # --- ADR-0148 §6: re-provisioning ---------------------------------------
 

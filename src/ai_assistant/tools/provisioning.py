@@ -1,9 +1,9 @@
 """The one component that provisions a connection (ADR-0149 §1).
 
-It performs ADR-0148 §6's three-write act, ADR-0149 §5's disconnection and
-ADR-0149 §8's purge, over :mod:`ai_assistant.tools.connection_store` and an
-``INTEGRATION``-scoped keyring face — and nothing else in this system does any of
-them.
+It performs ADR-0148 §6's three-write act, ADR-0325 §3's one-write keyless act,
+ADR-0149 §5's disconnection and ADR-0149 §8's purge, over
+:mod:`ai_assistant.tools.connection_store` and an ``INTEGRATION``-scoped keyring
+face — and nothing else in this system does any of them.
 
 **It holds the only ``INTEGRATION``-scoped**
 :class:`~ai_assistant.core.protocols.SecretStore` **in the system**, by injection
@@ -44,7 +44,7 @@ declare, which is the contract broken rather than tightened.
 **Nothing here creates a connection from configuration** (ADR-0149 §4). There is
 no path from a ``Settings`` value, an existing file, an upgrade, a migration, a
 first run or a backup restore to a record: the only way an entry appears is a
-caller invoking one of the two provisioning methods, and ADR-0151 §13 keeps those
+caller invoking one of the three provisioning methods, and ADR-0151 §13 keeps those
 reachable only by an explicit user act through a client.
 """
 
@@ -523,6 +523,54 @@ class KeyringConnectionProvisioner:
             "was written; the reference factory repeated a value it must not repeat"
         )
         return ConnectionStoreError(msg)
+
+    # --- ConnectionProvisioner: the keyless act (ADR-0325 §3) ------------------
+
+    async def provision_keyless(self, *, identity: NonBlankEncodableText) -> ConnectedAccount:
+        """Connect a source that needs no credential, under a reference this component mints.
+
+        **One write, and the keyring is never touched** (ADR-0325 §3:2, §3:3). The
+        reference's first entry is appended ``ACTIVE`` at revision 1 with the identity
+        the user supplied and **no slot**; nothing is set, deleted or read on the
+        keyring face, because there is no credential to write and no predecessor to
+        displace. The pending state ADR-0148 §6 writes first exists for the window
+        in which the record stands ahead of a credential write in flight, and this
+        act has no such write, so it has no such window.
+
+        **The store's refusal of a reference it already holds is the act's
+        compare-and-swap** (§3:2, ADR-0151 §3:2): the append is made against an
+        observation of *no entries at all*, so a factory that repeated a value is
+        refused with nothing written, exactly as :meth:`provision`'s first write
+        is. It always writes under a reference it mints and never under one the
+        store holds (§3:4); nothing here re-provisions a reference into this shape.
+
+        Raises:
+            ConnectionStoreError: If the one write failed rather than returning, if
+                the reference factory produced a value the store already holds, or
+                if it produced one a caller could never receive (:func:`receivable`).
+                It names no reference (§3:6), so the act's outcome is not known and
+                is resolved by reading :meth:`connected`.
+        """
+        reference = receivable(self._mint_reference())
+        keyless = ConnectionEntry(
+            reference=reference,
+            revision=1,
+            identity=identity,
+            state=ProvisioningState.ACTIVE,
+            slot=None,
+        )
+        # The one write. A ``ConnectionStoreError`` from here propagates unchanged
+        # and carries no reference: the write did not return, so whether it landed
+        # cannot be asserted (ADR-0325 §3:6).
+        filed = await self._store.append(keyless, expected_latest=None)
+        if filed is None:
+            raise self._did_not_take(reference, displaceable=False, written=False)
+        return ConnectedAccount(
+            reference=reference,
+            identity=identity,
+            revision=1,
+            state=ProvisioningState.ACTIVE,
+        )
 
     # --- ConnectionProvisioner: disconnection and the two listings ------------
 

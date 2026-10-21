@@ -687,15 +687,16 @@ def grant_scope(value: Sequence[GrantScope], *, name: str) -> tuple[GrantScope, 
 _UNPRINTABLE_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
-def usable_identity(identity: str, *, credential: SecretValue) -> str:
+def usable_identity(identity: str, *, credential: SecretValue | None) -> str:
     """Refuse an account identity ADR-0149 §4 does not admit (ADR-0151 §5).
 
     **Raised locally, before any I/O, by every implementation of
-    ``connect_account`` and ``reprovision_account``** — the wire client
-    included — "so both implementations refuse the same values without a round
-    trip and neither is silently more permissive" (ADR-0085 §9). No such call
-    reaches the hub, and **no credential is sent for one**, which is the property
-    that makes this worth duplicating rather than deferring to the store.
+    ``connect_account``, ``reprovision_account`` and ``connect_keyless_account``**
+    — the wire client included — "so both implementations refuse the same values
+    without a round trip and neither is silently more permissive" (ADR-0085 §9,
+    ADR-0325 §4:3). No such call reaches the hub, and **no credential is sent for
+    one**, which is the property that makes this worth duplicating rather than
+    deferring to the store.
 
     **It is an ``AssistantError`` rather than ADR-0085 §9's ``ValueError``, and
     the distinction is §9's own** (ADR-0151 §2a). A ``ValueError`` there is "a
@@ -720,7 +721,9 @@ def usable_identity(identity: str, *, credential: SecretValue) -> str:
             blank or unencodable by :func:`non_blank_text`.
         credential: The secret supplied in the **same call**, still wrapped. It is
             read here and nowhere else in this module, and its plaintext reaches
-            no message, no log and no return value.
+            no message, no log and no return value. ``None`` for the keyless act,
+            which supplies no credential: the equality refusal has nothing to
+            compare and nothing replaces it (ADR-0325 §4).
 
     Returns:
         The identity, unchanged — never stripped, never case-folded.
@@ -745,7 +748,7 @@ def usable_identity(identity: str, *, credential: SecretValue) -> str:
     # and never after a write. Reading the plaintext here is the comparison ADR-0149
     # §4 requires; it is compared and discarded, and the branch below names neither
     # side of it.
-    if identity == credential.get_secret_value():
+    if credential is not None and identity == credential.get_secret_value():
         msg = (
             "the account identity is the same value as the credential, so the "
             "credential was very likely pasted into the identity field. Nothing was "

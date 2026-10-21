@@ -384,18 +384,52 @@ async def test_clearing_empties_the_entries_and_leaves_the_store_openable(
 # --- the entry's own shape --------------------------------------------------
 
 
-def test_an_entry_is_a_provisioning_entry_or_a_removal_and_never_a_mixture() -> None:
-    """ADR-0149 §5: a removal carries no identity, no state and no slot.
+@pytest.mark.parametrize(
+    ("identity", "state", "key"),
+    [
+        pytest.param("owner", ProvisioningState.PENDING, None, id="slotless-pending"),
+        pytest.param(None, ProvisioningState.ACTIVE, None, id="state-alone"),
+        pytest.param(None, ProvisioningState.ACTIVE, "slot-1", id="no-identity"),
+        pytest.param("owner", None, "slot-1", id="no-state"),
+        pytest.param("owner", None, None, id="identity-alone"),
+        pytest.param(None, None, "slot-1", id="slot-alone"),
+    ],
+)
+def test_an_entry_of_none_of_the_three_shapes_is_unconstructible(
+    identity: str | None, state: ProvisioningState | None, key: str | None
+) -> None:
+    """ADR-0325 §3:1, over ADR-0149 §5: three shapes, and every mixture is refused.
 
-    An entry with a state but no slot would name a record no credential read could
-    satisfy; one with a slot but no state would be a record ADR-0148 §6 has no
-    state for.
+    **The slotless pending entry is the case §5:6 names.** The pending state exists
+    for one window — the record ahead of the keyring while a credential write is in
+    flight — and a keyless act has no credential write, so a pending entry naming no
+    slot would describe a window that does not exist. The rest are the mixtures the
+    store refused before a keyless shape existed, and still refuses.
     """
-    with pytest.raises(ValueError, match="a provisioning entry"):
+    with pytest.raises(ValueError, match="a keyless entry"):
         ConnectionEntry(
             reference="ref-1",
             revision=1,
-            identity="owner",
-            state=ProvisioningState.ACTIVE,
-            slot=None,
+            identity=identity,
+            state=state,
+            slot=None if key is None else slot(key),
         )
+
+
+async def test_a_keyless_entry_is_live_and_names_no_slot(store: SqliteConnectionStore) -> None:
+    """ADR-0325 §3:1: an identity and the ``ACTIVE`` state with no slot is admitted.
+
+    And it is an ordinary record everywhere a reader looks: live, one act in the
+    history, and absent from both slot sets — so a disconnection's deletion pass and
+    the purge have nothing to delete for it, rather than a ``None`` to trip over.
+    """
+    filed = await store.append(
+        entry(state=ProvisioningState.ACTIVE, key=None), expected_latest=None
+    )
+
+    assert filed is not None
+    assert filed.entry.slot is None
+    assert [record.state for record in await store.live()] == [ProvisioningState.ACTIVE]
+    assert [act.revision for act in await store.recent(limit=10)] == [1]
+    assert await store.slots_below("ref-1", 2) == ()
+    assert await store.slots() == ()

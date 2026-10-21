@@ -3337,6 +3337,106 @@ class AssistantEngineContract(
         assert plaintext not in rendered
         assert "SecretStr" not in rendered
 
+    # --- the keyless act (ADR-0325 §4, §5:1) --------------------------------
+
+    def test_the_keyless_act_takes_an_identity_and_nothing_else(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0325 §5:1: no reference and no credential, under any name.
+
+        A separate operation rather than an optional credential (§4), so a forgotten
+        key is a refusal on :meth:`connect_account` and never a keyless connection.
+        """
+        parameters = inspect.signature(connections.engine.connect_keyless_account).parameters
+
+        assert list(parameters) == ["identity"]
+        assert parameters["identity"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    async def test_a_keyless_connection_is_active_at_its_first_revision_with_no_credential(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0325 §3:2, §3:5, §4:5: one record, ``ACTIVE`` at revision 1, verbatim.
+
+        Under a minted reference, with the identity byte-for-byte — surrounding
+        whitespace and case kept — and nothing in the keyring, because the act wrote
+        no credential. It is listed like any other live record (ADR-0139 §1).
+        """
+        record = await connections.engine.connect_keyless_account(identity=_IDENTITY)
+
+        assert record.state is ProvisioningState.ACTIVE
+        assert record.revision == 1
+        assert record.identity == _IDENTITY
+        assert record.reference
+        assert len(connections.provisioner.secrets.backing) == 0
+        assert await connections.engine.connected_accounts() == (record,)
+
+    @pytest.mark.parametrize(
+        "identity",
+        ["two\nlines", "Alice\u202ebob", "zero\u200bwidth", "a" * (ACCOUNT_IDENTITY_MAX_BYTES + 1)],
+        ids=["newline", "bidi-override", "zero-width-space", "over-the-bound"],
+    )
+    async def test_an_unusable_keyless_identity_is_refused_without_a_write(
+        self, connections: ConnectionSubject, identity: str
+    ) -> None:
+        """ADR-0325 §4:3: ADR-0151 §5's refusals, locally and before any I/O.
+
+        Every implementation, the wire client included, so nothing reaches the
+        provisioner — which the untouched log asserts.
+        """
+        with pytest.raises(UnusableIdentityError) as caught:
+            await connections.engine.connect_keyless_account(identity=identity)
+
+        assert connections.provisioner.entries == []
+        assert str(ACCOUNT_IDENTITY_MAX_BYTES + 1) not in str(caught.value)
+
+    async def test_a_blank_keyless_identity_is_refused_locally(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0085 §9: a blank value is a caller programming error, refused locally."""
+        with pytest.raises(ValueError, match=r"\w"):
+            await connections.engine.connect_keyless_account(identity="   ")
+
+        assert connections.provisioner.entries == []
+
+    async def test_a_keyless_identity_is_compared_against_no_credential(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0325 §4: the equality refusal has nothing to compare, and nothing replaces it.
+
+        A name that happens to look like a token is the user's choice to make: the
+        risk the refusal answers needs a credential in the same call, and this act
+        carries none.
+        """
+        record = await connections.engine.connect_keyless_account(identity="hunter2-correct-horse")
+
+        assert record.identity == "hunter2-correct-horse"
+
+    async def test_a_keyless_reference_is_an_ordinary_reference(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0325 §3:7: re-provisioned and disconnected through the existing operations.
+
+        After a re-provisioning it names a credential — the keyring holds exactly the
+        one the act wrote — and the history carries one row per act, the keyless
+        one first.
+        """
+        record = await connections.engine.connect_keyless_account(identity="Open-Meteo")
+
+        rotated = await connections.engine.reprovision_account(
+            record.reference, identity="Open-Meteo", credential=_credential("paid-plan")
+        )
+        removed = await connections.engine.disconnect_account(record.reference)
+
+        assert rotated.revision == 2
+        assert removed == rotated
+        assert len(connections.provisioner.secrets.backing) == 0
+        acts = await connections.engine.recent_connection_acts()
+        assert [(act.revision, act.account is None) for act in acts] == [
+            (3, True),
+            (2, False),
+            (1, False),
+        ]
+
     # --- the audit trail's two reads (ADR-0186 §11) ------------------------
     #
     # **What a store cannot exhibit**, which is what puts these here rather than in
