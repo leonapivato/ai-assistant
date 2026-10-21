@@ -2947,6 +2947,7 @@ def test_a_transfer_that_left_the_base_in_place_is_caught_by_the_digest(
             "DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=usable\nDELTA_KEEP=shared\n",
             "is not root's alone",
         ),
+        ("DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=usable\nDELTA_KEEP=linked\n", "symbolic link"),
         ("", "could not ask the box what --delta needs"),
     ],
 )
@@ -3168,16 +3169,25 @@ def test_the_real_delta_check_keeps_only_in_a_directory_no_one_else_can_write(
 
 
 @_NEEDS_SHELL
-def test_a_keep_directory_reached_through_a_link_is_judged_by_what_it_names(
-    tmp_path: Path,
+@pytest.mark.parametrize("target_mode", [0o700, 0o777])
+def test_a_keep_directory_that_is_a_link_is_refused_wherever_it_leads(
+    tmp_path: Path, target_mode: int
 ) -> None:
+    # Even to a private directory: its parent may be one another user can rename,
+    # and swapping the directory under the write is the attack the check prevents.
     home, env = _login_home(tmp_path)
-    private = tmp_path / "private"
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)
+    private = shared / "private"
     private.mkdir()
-    private.chmod(0o700)
+    private.chmod(target_mode)
     (home / "deploy-hub").symlink_to(private)
     plan = _delta_plan(tmp_path)
 
-    assert _MODULE._labelled(_sh_login(plan.probe_delta(), env)[1], "DELTA_KEEP=") == "writable"
-    private.chmod(0o777)
-    assert _MODULE._labelled(_sh_login(plan.probe_delta(), env)[1], "DELTA_KEEP=") == "shared"
+    probed = _sh_login(plan.probe_delta(), env)
+
+    assert _MODULE._labelled(probed[1], "DELTA_KEEP=") == "linked"
+    # And a dangling one, which mkdir -p cannot replace, is a link all the same.
+    private.rename(shared / "elsewhere")
+    assert _MODULE._labelled(_sh_login(plan.probe_delta(), env)[1], "DELTA_KEEP=") == "linked"

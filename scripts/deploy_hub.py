@@ -1333,7 +1333,9 @@ class Plan:
         Run as the **login** user, who seeds, receives and keeps the wheel. Three
         labelled answers: where ``rsync`` is (empty when it is not there), what the
         base is (``usable`` only for a readable, non-empty regular file), and
-        whether the next base can be kept: ``not-a-file`` when something other than
+        whether the next base can be kept: ``linked`` when its directory is a
+        symbolic link, which would put the write wherever the link leads, under
+        parents nothing here has checked; ``not-a-file`` when something other than
         a regular file is already at that path, a directory or a link to one,
         which a rename would put the wheel inside of; ``shared`` when its directory
         is not the login user's alone, owned by it and writable by no group or
@@ -1356,9 +1358,10 @@ class Plan:
             f"elif [ ! -r {base} ]; then s=unreadable; elif [ ! -s {base} ]; then s=empty; "
             "else s=usable; fi; echo DELTA_BASE=$s; "
             f"mkdir -p -m 0700 {keep_dir} 2>/dev/null; "
-            f"if [ -e {keep} ] && [ ! -f {keep} ]; then echo DELTA_KEEP=not-a-file; "
+            f"if [ -L {keep_dir} ]; then echo DELTA_KEEP=linked; "
+            f"elif [ -e {keep} ] && [ ! -f {keep} ]; then echo DELTA_KEEP=not-a-file; "
             f"elif [ ! -d {keep_dir} ] || [ ! -w {keep_dir} ]; then echo DELTA_KEEP=unwritable; "
-            f'elif [ -z "$(find -H {keep_dir} -prune -user "$(id -u)" {_PRIVATE_DIR})" ]; '
+            f'elif [ -z "$(find {keep_dir} -prune -user "$(id -u)" {_PRIVATE_DIR})" ]; '
             "then echo DELTA_KEEP=shared; else echo DELTA_KEEP=writable; fi"
         )
 
@@ -2552,6 +2555,13 @@ def _rule_on_delta(plan: Plan, ssh: Callable[[str], list[str]]) -> None:
             f"{plan.delta_keep}, where --delta keeps the next base, is not a file on the box:\n"
             "something else, a directory or a link to one, is there, and the kept wheel\n"
             f"would go inside it. Move it aside. Or: {_DELTA_INSTEAD}\n{_UNTOUCHED}"
+        )
+    if keep == "linked":
+        raise DeployError(
+            f"the directory of {plan.delta_keep} on the box is a symbolic link. The kept\n"
+            f"base is written there as {login}, and a link would put that write under\n"
+            "directories nothing has checked. Replace the link with a directory of its\n"
+            f"own. Or: {_DELTA_INSTEAD}\n{_UNTOUCHED}"
         )
     if keep == "shared":
         raise DeployError(
