@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import json
 import math
+import random
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from structlog.testing import capture_logs
 
 from ai_assistant.core.diagnostics import diagnosed_activation
@@ -28,6 +29,7 @@ from ai_assistant.core.types import (
     DiagnosticSource,
     MessageAuthor,
     ProposedActivationUnderstanding,
+    ProposedAnswer,
     ProposedReference,
     ProposedRelationship,
     TranscriptMessage,
@@ -41,8 +43,10 @@ from ai_assistant.orchestration.understanding import (
     SuppliedWindow,
     TranscriptWindow,
     UnderstandingStage,
+    _expected_fields,
     _parsed,
     _read,
+    _Sequence,
 )
 from ai_assistant.testing import FakeDiagnosticSink, FakeModelProvider, default_prompt
 
@@ -68,6 +72,7 @@ _UNPARSEABLE: Final = "not one JSON object of the required shape"
 
 _MEANING: Final = {"meaning": "The user says yes.", "meaning_ground": "stated"}
 _MATTER: Final = {"matter": "Which dates.", "why_it_matters": "Availability varies."}
+_MEANING_M: Final = {"meaning": "m", "meaning_ground": "stated"}
 
 
 def _reply(**fields: Any) -> dict[str, Any]:
@@ -330,6 +335,175 @@ async def test_the_diagnostic_entry_keeps_the_reply_as_the_model_returned_it() -
 
     (returned,) = sink.of(DiagnosticSource.UNDERSTANDING, DiagnosticKind.RETURNED)
     assert returned.model_dump(mode="json")["body"] == {"reply": text}
+
+
+@pytest.mark.parametrize("depth", [201, 5000, 100_000])
+async def test_a_dropped_value_s_depth_never_refuses_the_reply(depth: int) -> None:
+    """§2:4-§2:6: the value is skipped, never decoded, so its nesting costs nothing."""
+    deep = "[" * depth + "0" + "]" * depth
+    text = f'{{"meaning": "The user says yes.", "stray": {deep}, "meaning_ground": "stated"}}'
+    model = FakeModelProvider.scripted(text)
+
+    with capture_logs() as logs:
+        understood = await _understand(model)
+
+    assert len(model.calls) == 1
+    assert understood.meaning == "The user says yes."
+    assert [one["stray"] for one in _counted(logs)] == [1]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param('"a } ] , \\" { [ quoted"', id="a-string-holding-brackets-and-quotes"),
+        pytest.param('{"a": ["}", "]", {"b": "\\"}"}]}', id="nested-strings-holding-brackets"),
+        pytest.param("-1.5e+10", id="a-number"),
+        pytest.param("null", id="null"),
+        pytest.param('"' + "x" * 200_000 + '"', id="a-long-string"),
+    ],
+)
+def test_a_dropped_value_is_delimited_by_its_quotes_and_brackets(value: str) -> None:
+    """§2:4: whatever the value holds, the member ends where its own JSON value ends."""
+    text = (
+        '{\n  "meaning": "m",\n  "x": ' + value + ',\n  "meaning_ground": "stated",\n'
+        '  "references": [{"phrase": "p", "y": ' + value + "}]\n}"
+    )
+
+    assert _read(text) == (
+        ProposedActivationUnderstanding.model_validate(
+            {"meaning": "m", "meaning_ground": "stated", "references": [{"phrase": "p"}]}
+        ),
+        2,
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("[1,,2]", id="a-doubled-comma"),
+        pytest.param("NaN", id="a-literal-json-has-not"),
+        pytest.param('{"a" 1}', id="an-object-missing-its-colon"),
+    ],
+)
+def test_what_a_dropped_value_holds_is_never_validated(value: str) -> None:
+    """§2:4: delimited by its brackets and quotes, never read, so its content is moot.
+
+    The same reply with the key and its value removed parses (§2:5).
+    """
+    text = '{"meaning": "m", "meaning_ground": "stated", "x": ' + value + "}"
+
+    assert _strictly(text) is None
+    assert _read(text) == (ProposedActivationUnderstanding.model_validate(_MEANING_M), 1)
+
+
+def test_an_escaped_key_is_named_by_what_it_says() -> None:
+    """§2:3: ``\\u006deaning`` says ``meaning``, as the parse reads it, so it is kept."""
+    text = '{"\\u006deaning": "m", "meaning_ground": "stated", "\\u0078": 1}'
+
+    assert _read(text) == (ProposedActivationUnderstanding.model_validate(_MEANING_M), 1)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param('{"meaning": "m", "meaning_ground": "stated", "x": [1}', id="mismatched"),
+        pytest.param('{"meaning": "m", "meaning_ground": "stated", "x": [[1]', id="unclosed"),
+        pytest.param('{"meaning": "m", "meaning_ground": "stated", "x": "open}', id="open-quote"),
+        pytest.param('{"meaning": "m", "meaning_ground": "stated", "x" 1}', id="no-colon"),
+        pytest.param(
+            '{"meaning": "m", "meaning_ground": "stated", "x": 1} trailing', id="trailing"
+        ),
+        pytest.param('{"meaning": "m", "meaning_ground": "stated", "x": 1}}', id="extra-close"),
+    ],
+)
+def test_a_reply_whose_members_cannot_be_delimited_drops_nothing(text: str) -> None:
+    """The walk reads only what it can delimit: otherwise the parse judges, as before."""
+    assert _read(text) == (_strictly(text), 0) == (None, 0)
+
+
+def test_the_walk_follows_every_model_the_shape_holds() -> None:
+    """§2:1: the shape as ``core/types.py`` defines it, read when the reply is read."""
+    expected = _expected_fields(ProposedActivationUnderstanding)
+
+    assert set(expected) == set(ProposedActivationUnderstanding.model_fields)
+    assert {name: one for name, one in expected.items() if one is not None} == {
+        "references": _Sequence(ProposedReference),
+        "relationships": _Sequence(ProposedRelationship),
+        "unresolved": _Sequence(UnresolvedMatter),
+        "answers": _Sequence(ProposedAnswer),
+    }
+
+
+class _Aliased(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    named: str = Field(alias="Named")
+
+
+class _OptionalModel(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    one: UnresolvedMatter | None = None
+
+
+@pytest.mark.parametrize("shape", [_Aliased, _OptionalModel])
+def test_a_shape_the_walk_cannot_follow_is_refused_loudly(shape: type[BaseModel]) -> None:
+    """A later field in a form the walk does not follow fails, never escapes the drop."""
+    with pytest.raises(TypeError):
+        _expected_fields(shape)
+
+
+def _random_value(rng: random.Random, depth: int = 0) -> object:
+    """Any JSON value, nested, its strings holding the characters a delimiter reads."""
+    kinds = ["string", "number", "literal"] + (["array", "object"] if depth < 4 else [])
+    match rng.choice(kinds):
+        case "string":
+            return "".join(rng.choice('ab{}[],:"\\ \n\u00e9') for _ in range(rng.randint(0, 8)))
+        case "number":
+            return rng.choice([0, -1, 2.5, 1e300, 10**30])
+        case "literal":
+            return rng.choice([True, False, None])
+        case "array":
+            return [_random_value(rng, depth + 1) for _ in range(rng.randint(0, 3))]
+        case _:
+            return {
+                f"k{index}": _random_value(rng, depth + 1) for index in range(rng.randint(0, 3))
+            }
+
+
+def _with_strays(rng: random.Random, value: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """``value`` with stray keys at the top level and in each sequence's elements."""
+    added = 0
+
+    def strayed(one: dict[str, Any]) -> dict[str, Any]:
+        nonlocal added
+        items = list(one.items())
+        for _ in range(rng.randint(0, 2)):
+            items.insert(rng.randint(0, len(items)), (f"stray_{added}", _random_value(rng)))
+            added += 1
+        return dict(items)
+
+    top = strayed(value)
+    for name in ("references", "relationships", "unresolved"):
+        if name in top:
+            top[name] = [strayed(element) for element in top[name]]
+    return top, added
+
+
+def test_a_reply_parses_as_the_same_reply_with_its_unnamed_keys_removed() -> None:
+    """§2:5: over generated replies, pretty-printed or not, the drop is exactly removal."""
+    rng = random.Random(3246)  # noqa: S311 — a seeded generator of test cases, not a secret
+    base: dict[str, Any] = {
+        "meaning": "m",
+        "meaning_ground": "supplied",
+        "meaning_labels": ["H1"],
+        "references": [{"phrase": "p", "labels": ["H1"]}, {"phrase": "q"}],
+        "relationships": [{"statement": "s", "ground": "inferred"}],
+        "unresolved": [_MATTER],
+        "answers": [],
+    }
+    for case in range(300):
+        reply, added = _with_strays(rng, base)
+        text = json.dumps(reply, indent=2 if case % 2 else None, ensure_ascii=case % 3 == 0)
+        assert _read(text) == (_strictly(json.dumps(base)), added), text
 
 
 # --- a reply proposing an answer (§2:2) ---------------------------------------------------

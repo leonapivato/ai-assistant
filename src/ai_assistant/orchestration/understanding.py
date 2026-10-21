@@ -140,6 +140,7 @@ named for ``key``, which the hub's log redaction masks.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import re
 from collections import Counter
@@ -149,10 +150,10 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, get_args, get_origin
 
 import structlog
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from ai_assistant.core.channel_validation import input_origin
 from ai_assistant.core.diagnostics import write_diagnostic, write_failure
@@ -188,7 +189,6 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.channel_kinds import place_of
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
-from ai_assistant.orchestration.reply_keys import stray_keys
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_privacy import activation_of
 
@@ -1809,12 +1809,11 @@ def _read(content: str) -> tuple[ProposedActivationUnderstanding | None, int]:
 
     One enclosing Markdown code fence is removed first: a deterministic, code-owned
     normalization of a wrapper, not a repair of the object inside it. Then, unless the
-    reply proposes an answer, every key the reply shape does not name is dropped, at
-    every depth, before the parse (ADR-0339 §2): pydantic's validation-time ``extra``
-    override, so a key is named only where it is exactly a field of the model expected
-    at its position, a dropped key's value is never validated, and the types keep their
-    own ``extra="forbid"`` for every other reader (§3:1). A reply that proposes an
-    answer is parsed strictly, exactly as it was before the drop (§2:2).
+    reply proposes an answer, every key the reply shape does not name is removed from
+    the text, with its value, at every position the shape expects one of its models,
+    and what remains is parsed (ADR-0339 §2). The types keep their own
+    ``extra="forbid"`` (§3:1), so what remains is parsed exactly as before, and a reply
+    that proposes an answer, or that the walk cannot read, is parsed as it stands.
 
     The count is ``0`` where nothing was dropped or nothing parsed.
     """
@@ -1824,35 +1823,256 @@ def _read(content: str) -> tuple[ProposedActivationUnderstanding | None, int]:
         newline = body.find("\n")
         if newline != -1 and body[:newline].strip() in {"", "json", "JSON"}:
             body = body[newline + 1 :]
-    strict = _proposes_an_answer(body)
+    pruned = _pruned_reply(body)
+    text, dropped = (body, 0) if pruned is None else pruned
     try:
-        proposal = ProposedActivationUnderstanding.model_validate_json(
-            body, extra=None if strict else "ignore"
-        )
+        proposal = ProposedActivationUnderstanding.model_validate_json(text)
     except ValidationError, ValueError, RecursionError:
         return None, 0
-    return proposal, 0 if strict else stray_keys(body, proposal)
+    return proposal, dropped
 
 
-class _Pairs(list[tuple[str, object]]):
-    """One decoded JSON object as its key-value pairs in order, a repeated key kept."""
+# --- the drop (ADR-0339 §2) ------------------------------------------------------------
+#
+# The walk reads the reply's text lexically, never decoding a value it does not keep: a
+# dropped key's value is skipped by its string quotes and its matched brackets alone, so
+# no content, size or depth of it can refuse the reply (§2:4, §2:5). Its own recursion
+# follows the shape, never the reply. Where the text is not one object whose members it
+# can delimit, it returns ``None``, nothing is dropped, and the parse judges the reply
+# as it stands.
+
+_STRING: Final = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
+_SCALAR: Final = re.compile(r"[^,\]} \t\n\r\[{\"]+")
+_SPACE: Final = re.compile(r"[ \t\n\r]*")
+_STRUCTURAL: Final = re.compile(r'["\[\]{}]')
+_EMPTY_ARRAY: Final = re.compile(r"\[[ \t\n\r]*\]")
+_CLOSING: Final = {"[": "]", "{": "}"}
 
 
-def _proposes_an_answer(body: str) -> bool:
-    """Whether the reply's top level holds ``answers`` with any value but ``[]`` (ADR-0339 §2:2).
+@dataclass(frozen=True, slots=True)
+class _Sequence:
+    """A field the shape holds a sequence of one model in."""
 
-    Read from the reply's text alone. Every value a repeated top-level ``answers``
-    holds counts, not only the one the parse keeps. Text that does not decode as JSON
-    here is read as proposing one, so the drop never applies where this cannot tell:
-    the parse then judges it exactly as before.
+    model: type[BaseModel]
+
+
+#: What a field expects: one of the shape's models, a sequence of one, or neither.
+type _Expected = type[BaseModel] | _Sequence | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Member:
+    """One member of an object, as the text writes it: its key and where its value is."""
+
+    written: str
+    key: str
+    start: int
+    end: int
+
+
+def _pruned_reply(body: str) -> tuple[str, int] | None:
+    """``body`` with every unnamed key removed, and how many, or ``None`` to drop nothing.
+
+    ``None`` where the reply proposes an answer: its top level holds ``answers`` with
+    any value but an empty array, every value of a repeated key counted (§2:2).
     """
+    at = _skip_space(body, 0)
+    read = _members(body, at)
+    if read is None:
+        return None
+    members, end = read
+    if _skip_space(body, end) != len(body):
+        return None
+    if any(
+        one.key == "answers" and _EMPTY_ARRAY.fullmatch(body, one.start, one.end) is None
+        for one in members
+    ):
+        return None
+    return _kept(body, members, ProposedActivationUnderstanding)
+
+
+def _kept(text: str, members: Sequence[_Member], shape: type[BaseModel]) -> tuple[str, int] | None:
+    """The object ``members`` make, read as ``shape``: its named members, and the count dropped."""
+    expected = _expected_fields(shape)
+    kept: list[str] = []
+    dropped = 0
+    for one in members:
+        if one.key not in expected:
+            dropped += 1
+            continue
+        value = _kept_value(text, one.start, one.end, expected[one.key])
+        if value is None:
+            return None
+        kept.append(f"{one.written}:{value[0]}")
+        dropped += value[1]
+    return "{" + ",".join(kept) + "}", dropped
+
+
+def _kept_value(text: str, start: int, end: int, expected: _Expected) -> tuple[str, int] | None:
+    """The value at ``start:end`` with the drop applied where ``expected`` names a model.
+
+    A value that is not the object or the array the field expects is kept as written,
+    for the parse to judge (§2:4).
+    """
+    if isinstance(expected, type) and text.startswith("{", start):
+        read = _members(text, start)
+        return None if read is None else _kept(text, read[0], expected)
+    if isinstance(expected, _Sequence) and text.startswith("[", start):
+        return _kept_elements(text, start, expected.model)
+    return text[start:end], 0
+
+
+def _kept_elements(text: str, at: int, model: type[BaseModel]) -> tuple[str, int] | None:
+    """The array at ``at``, each object element read as ``model``, any other kept as written."""
+    elements: list[str] = []
+    dropped = 0
+    position = _skip_space(text, at + 1)
+    if text.startswith("]", position):
+        return "[]", 0
+    while True:
+        end = _value_end(text, position)
+        if end is None:
+            return None
+        if text.startswith("{", position):
+            read = _members(text, position)
+            if read is None:
+                return None
+            element = _kept(text, read[0], model)
+            if element is None:
+                return None
+            elements.append(element[0])
+            dropped += element[1]
+        else:
+            elements.append(text[position:end])
+        position = _skip_space(text, end)
+        if text.startswith(",", position):
+            position = _skip_space(text, position + 1)
+            continue
+        if text.startswith("]", position):
+            return "[" + ",".join(elements) + "]", dropped
+        return None
+
+
+def _members(text: str, at: int) -> tuple[list[_Member], int] | None:
+    """The members of the object opening at ``at``, in order, and where it ends.
+
+    ``None`` where no object opens at ``at``, or its members cannot be delimited.
+    """
+    if not text.startswith("{", at):
+        return None
+    members: list[_Member] = []
+    position = _skip_space(text, at + 1)
+    if text.startswith("}", position):
+        return members, position + 1
+    while (member := _member(text, position)) is not None:
+        members.append(member)
+        position = _skip_space(text, member.end)
+        if text.startswith(",", position):
+            position = _skip_space(text, position + 1)
+        elif text.startswith("}", position):
+            return members, position + 1
+        else:
+            return None
+    return None
+
+
+def _member(text: str, at: int) -> _Member | None:
+    """The member whose key opens at ``at``: its key decoded, its value delimited.
+
+    The key is decoded, so a key is named by what it says, escapes included; the value
+    is never decoded.
+    """
+    found = _STRING.match(text, at)
+    if found is None:
+        return None
     try:
-        top = json.loads(body, object_pairs_hook=_Pairs)
-    except ValueError, RecursionError:
+        key = json.loads(found.group())
+    except ValueError:
+        return None
+    colon = _skip_space(text, found.end())
+    if not text.startswith(":", colon):
+        return None
+    start = _skip_space(text, colon + 1)
+    end = _value_end(text, start)
+    return None if end is None else _Member(found.group(), key, start, end)
+
+
+def _value_end(text: str, at: int) -> int | None:
+    """Where the value starting at ``at`` ends, by its quotes and matched brackets alone."""
+    if text.startswith('"', at):
+        found = _STRING.match(text, at)
+        return None if found is None else found.end()
+    if at >= len(text) or text[at] not in _CLOSING:
+        scalar = _SCALAR.match(text, at)
+        return None if scalar is None else scalar.end()
+    pending: list[str] = []
+    position = at
+    while (found := _STRUCTURAL.search(text, position)) is not None:
+        char = found.group()
+        if char == '"':
+            string = _STRING.match(text, found.start())
+            if string is None:
+                return None
+            position = string.end()
+            continue
+        position = found.end()
+        if char in _CLOSING:
+            pending.append(_CLOSING[char])
+        elif not pending or pending.pop() != char:
+            return None
+        if not pending:
+            return position
+    return None
+
+
+def _skip_space(text: str, at: int) -> int:
+    """The first position at or after ``at`` that is not JSON whitespace."""
+    found = _SPACE.match(text, at)
+    return at if found is None else found.end()
+
+
+@functools.cache
+def _expected_fields(shape: type[BaseModel]) -> dict[str, _Expected]:
+    """Each field ``shape`` names, and what it expects (§2:1, §2:3).
+
+    A key is named only where it equals a field's name exactly.
+
+    Raises:
+        TypeError: If a field is read under an alias, or expects a model in a form this
+            walk does not follow, so a later shape cannot silently escape the drop.
+    """
+    if shape.model_config.get("alias_generator") is not None:
+        msg = f"{shape.__name__} reads its fields under generated aliases"
+        raise TypeError(msg)
+    expected: dict[str, _Expected] = {}
+    for name, info in shape.model_fields.items():
+        if info.alias is not None or info.validation_alias is not None:
+            msg = f"{shape.__name__}.{name} is read under an alias"
+            raise TypeError(msg)
+        expected[name] = _expected_of(shape, name, info.annotation)
+    return expected
+
+
+def _expected_of(shape: type[BaseModel], name: str, annotation: object) -> _Expected:
+    """What one field's annotation expects: a model, a sequence of one, or neither."""
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    args = get_args(annotation)
+    if get_origin(annotation) is tuple and len(args) == 2 and args[1] is Ellipsis:  # noqa: PLR2004 — ``tuple[X, ...]``
+        element = args[0]
+        if isinstance(element, type) and issubclass(element, BaseModel):
+            return _Sequence(element)
+    if _mentions_a_model(annotation):
+        msg = f"{shape.__name__}.{name} expects a model in a form the drop does not follow"
+        raise TypeError(msg)
+    return None
+
+
+def _mentions_a_model(annotation: object) -> bool:
+    """Whether a model appears anywhere in ``annotation``."""
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
         return True
-    if not isinstance(top, _Pairs):
-        return False
-    return any(not (type(value) is list and not value) for name, value in top if name == "answers")
+    return any(_mentions_a_model(one) for one in get_args(annotation))
 
 
 def _labels_of(proposal: ProposedActivationUnderstanding) -> list[str]:
