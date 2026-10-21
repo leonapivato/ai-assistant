@@ -1189,10 +1189,49 @@ class _FakeBox:
         self.rsync_sends = True
         self.keep_status = 0
         self.kept: bytes | None = None
+        #: The deploy lock: how the holder answers when it cannot hold it, whether
+        #: it still holds it, the command after which it no longer does, how often
+        #: it was released, and every ssh command that was sent unfenced.
+        self.hold_refused: tuple[int, str, str] | None = None
+        self.lease_held = True
+        self.lose_lock_after: str | None = None
+        self.released = 0
+        self.unfenced: list[str] = []
+
+    def hold(self, argv: list[str], said: str) -> Any:
+        assert said == self.plan.lock_said
+        assert argv == self.plan.holder_command()
+        self.issued.append("hold the deploy lock")
+        return self.hold_refused or _FakeLease(self)
+
+    def _unfence(self, argv: list[str]) -> list[str]:
+        """The ssh command the fence carries, recording any sent without one."""
+        if argv[0] != "ssh":
+            return argv
+        words = shlex.split(argv[-1])
+        owner, token = self.plan.owner_file, self.plan.token
+        fenced = ["flock", "--", owner, "sh", "-c", _MODULE.FENCE, "sh", owner, token]
+        if self.plan.lease is None or words[:-1] != fenced:
+            self.unfenced.append(" ".join(argv))
+            return argv
+        return [*argv[:-1], words[-1]]
+
+    def _issue(self, argv: list[str]) -> None:
+        self.issued.append(" ".join(self._unfence(argv)))
+
+    def _after(self) -> None:
+        if self.lose_lock_after is not None and self.lose_lock_after in self.issued[-1]:
+            self.lease_held = False
 
     def run_local(self, argv: list[str], *, check: bool = True, cwd: Path | None = None) -> str:
+        self._issue(argv)
+        try:
+            return self._run_local(argv, check=check, cwd=cwd)
+        finally:
+            self._after()
+
+    def _run_local(self, argv: list[str], *, check: bool, cwd: Path | None) -> str:
         del check
-        self.issued.append(" ".join(argv))
         if argv[:2] == ["uv", "build"]:
             out = Path(argv[argv.index("--out-dir") + 1])
             (out / "ai_assistant-0.1.0-py3-none-any.whl").write_bytes(b"the built wheel")
@@ -1221,8 +1260,13 @@ class _FakeBox:
         return ""
 
     def probe(self, argv: list[str]) -> tuple[int, str, str]:
-        self.issued.append(" ".join(argv))
-        text = self.issued[-1]
+        self._issue(argv)
+        try:
+            return self._probe(self.issued[-1])
+        finally:
+            self._after()
+
+    def _probe(self, text: str) -> tuple[int, str, str]:
         if "BACKUP_PROBE=" in text:
             return 0, f"Welcome\n{self.backup_probe}", ""
         if "BACKUP_BEGIN_" in text:
@@ -1261,6 +1305,19 @@ class _FakeBox:
         return [command for command in self.issued if "pip install" in command]
 
 
+class _FakeLease:
+    """The deploy lock as a fake box holds it."""
+
+    def __init__(self, box: _FakeBox) -> None:
+        self.box = box
+
+    def held(self) -> bool:
+        return self.box.lease_held
+
+    def release(self) -> None:
+        self.box.released += 1
+
+
 def _deploy_against(
     repo: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1274,9 +1331,14 @@ def _deploy_against(
     box = _FakeBox(plan, marker=marker, version=version)
     monkeypatch.setattr(_MODULE, "_run_local", box.run_local)
     monkeypatch.setattr(_MODULE, "_probe", box.probe)
+    monkeypatch.setattr(_MODULE, "_hold", box.hold)
     commit = _MODULE._deployed_commit(parsed, repo)
 
     _MODULE._deploy(plan, repo, commit)
+    # Every deploy that ends holds the lock throughout, and lets it go once.
+    assert box.issued[0] == "hold the deploy lock", box.issued
+    assert box.unfenced == []
+    assert box.released == 1
     return box
 
 
@@ -1483,6 +1545,7 @@ def test_a_failed_export_stops_the_deploy_before_the_box_is_touched(
     box = _FakeBox(plan, marker=f"commit={deployed}\n")
     monkeypatch.setattr(_MODULE, "_run_local", box.run_local)
     monkeypatch.setattr(_MODULE, "_probe", box.probe)
+    monkeypatch.setattr(_MODULE, "_hold", box.hold)
 
     with pytest.raises(_MODULE.DeployError, match="lockfile needs to be updated"):
         _MODULE._deploy(plan, repo, git(repo, "rev-parse", "HEAD"))
@@ -3191,3 +3254,163 @@ def test_a_keep_directory_that_is_a_link_is_refused_wherever_it_leads(
     # And a dangling one, which mkdir -p cannot replace, is a link all the same.
     private.rename(shared / "elsewhere")
     assert _MODULE._labelled(_sh_login(plan.probe_delta(), env)[1], "DELTA_KEEP=") == "linked"
+
+
+# --------------------------------------------------------------------------- #
+# The deploy lock (#3262): one deploy at a time, and the nightly backup off it #
+# --------------------------------------------------------------------------- #
+
+
+def _locked_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **answers: Any
+) -> tuple[Path, str, list[_FakeBox]]:
+    """A code-only change, and a fake box answering ``answers``, for a deploy to run."""
+    repo = _repo(tmp_path)
+    deployed = _code_only(repo)
+    box_init = _FakeBox.__init__
+    boxes: list[_FakeBox] = []
+
+    def _init(self: _FakeBox, *a: Any, **k: Any) -> None:
+        box_init(self, *a, **k)
+        boxes.append(self)
+        for name, value in answers.items():
+            setattr(self, name, value)
+
+    monkeypatch.setattr(_FakeBox, "__init__", _init)
+    return repo, f"commit={deployed}\n", boxes
+
+
+def test_every_box_command_runs_under_the_lock_from_the_first_to_the_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path)
+    deployed = _code_only(repo)
+
+    box = _deploy_against(repo, monkeypatch, marker=f"commit={deployed}\n")
+
+    # _deploy_against holds every deploy to it; this one is a routine deploy with
+    # a backup, so the stop, the backup, the install and the restart are among them.
+    for step in ("MARKER_BEGIN_", "systemctl --user stop", "pip install", "restart", "journalctl"):
+        assert any(step in command for command in box.issued), step
+    assert box.issued[0] == "hold the deploy lock"
+
+
+@pytest.mark.parametrize(
+    ("refused", "said"),
+    [
+        (
+            (75, "", ""),
+            r"another deploy, or the box's nightly backup, holds ~assistant/\.deploy-lock",
+        ),
+        ((78, "", ""), r"~assistant/\.deploy-lock is a directory"),
+        ((255, "", "ssh: connect to host hub.example: refused"), r"\(exit 255\):\nssh: connect"),
+    ],
+)
+def test_a_lock_that_cannot_be_had_refuses_before_the_box_is_asked_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refused: tuple[int, str, str], said: str
+) -> None:
+    repo, marker, boxes = _locked_box(tmp_path, monkeypatch, hold_refused=refused)
+
+    with pytest.raises(_MODULE.DeployError, match=said) as failed:
+        _deploy_against(repo, monkeypatch, marker=marker)
+
+    assert str(failed.value).endswith(_MODULE._UNTOUCHED)
+    assert boxes[0].issued == ["hold the deploy lock"]
+
+
+def test_a_held_lock_says_how_to_find_its_holder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, marker, _boxes = _locked_box(tmp_path, monkeypatch, hold_refused=(75, "", ""))
+
+    with pytest.raises(_MODULE.DeployError, match=r"fuser -v ~assistant/\.deploy-lock"):
+        _deploy_against(repo, monkeypatch, marker=marker)
+
+
+def test_a_lock_lost_after_the_backup_installs_nothing_and_starts_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo, marker, boxes = _locked_box(tmp_path, monkeypatch, lose_lock_after="BACKUP_BEGIN_")
+
+    with pytest.raises(_MODULE.LockLost, match="does not start the hub again"):
+        _deploy_against(repo, monkeypatch, marker=marker)
+
+    box = boxes[0]
+    after = box.issued[_index(box, "BACKUP_BEGIN_") + 1 :]
+    assert after == [], after
+    assert box.released == 1
+    # The staging directory is this run's alone, and a killed run leaves it too.
+    assert box.plan.stage_dir in capsys.readouterr().err
+
+
+def test_a_lock_lost_while_the_hub_is_stopped_does_not_start_it_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A failed backup starts the hub again on its earlier build; a lost lock does
+    # not, since whoever holds the lock now may be at work on the hub.
+    repo, marker, boxes = _locked_box(
+        tmp_path, monkeypatch, lose_lock_after="systemctl --user stop"
+    )
+
+    with pytest.raises(_MODULE.LockLost):
+        _deploy_against(repo, monkeypatch, marker=marker)
+
+    box = boxes[0]
+    assert box.issued[-1].endswith("systemctl --user stop ai-assistant-hub'"), box.issued
+    assert not any("restart" in command for command in box.issued)
+
+
+def test_a_lock_lost_before_the_copy_sends_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, marker, boxes = _locked_box(tmp_path, monkeypatch, lose_lock_after="mkdir -m 0755")
+
+    with pytest.raises(_MODULE.LockLost, match="the link to the\nbox dropped"):
+        _deploy_against(repo, monkeypatch, marker=marker)
+
+    assert not any(command.startswith("scp ") for command in boxes[0].issued)
+
+
+def test_a_command_the_box_fences_out_stops_the_deploy(tmp_path: Path) -> None:
+    fenced = f"echo '{_MODULE._FENCED_SAID}: another deploy holds the lock' >&2; exit 77"
+
+    with pytest.raises(_MODULE.LockLost, match="the box refused this deploy's command"):
+        _MODULE._run_local(["sh", "-c", fenced])
+    with pytest.raises(_MODULE.LockLost):
+        _MODULE._probe(["sh", "-c", fenced])
+    # The status alone is a command's own failure, and stays one.
+    with pytest.raises(_MODULE.DeployError, match="sh failed"):
+        _MODULE._run_local(["sh", "-c", "echo no >&2; exit 77"])
+    assert _MODULE._probe(["sh", "-c", "exit 77"])[0] == 77
+
+
+def test_a_lost_lock_is_reported_and_fails_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def _lost(*_args: object) -> None:
+        raise _MODULE._lost("the link to the box dropped.")
+
+    monkeypatch.setattr(_MODULE, "_deploy", _lost)
+
+    assert _MODULE.main(["hub.example", "--repo", str(_repo(tmp_path))]) == 1
+    assert "deploy-hub: the link to the box dropped." in capsys.readouterr().err
+
+
+def test_the_dry_run_shows_the_lock_before_any_box_command(tmp_path: Path) -> None:
+    plan = _dry_run(_repo(tmp_path), "hub")
+
+    lines = plan.splitlines()
+    lock = _line_index(plan, "lock    : ssh -o BatchMode=yes")
+    assert lock < _line_index(plan, "marker  : ssh root@hub.example")
+    assert "su - hub -c 'if [ -d ~/.deploy-lock ]" in lines[lock + 1]
+    assert "flock -- /run/deploy-hub-hub.owner sh -c" in plan
+    assert "held on ~hub/.deploy-lock" in plan
+
+
+@pytest.mark.parametrize("user", ["../etc", "-c", ".hidden", "a b", "a/b", ""])
+def test_a_service_user_that_cannot_name_a_file_is_refused(tmp_path: Path, user: str) -> None:
+    repo = str(_repo(tmp_path))
+    result = run("deploy_hub", ["--repo", repo, "--dry-run", "--", "hub.example", user])
+
+    assert result.returncode == 1
+    assert "is not a service user's name" in result.stderr
