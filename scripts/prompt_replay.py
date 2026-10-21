@@ -117,7 +117,7 @@ from ai_assistant.core.diagnostics import failure_body
 from ai_assistant.core.errors import ConfigurationError, ModelError
 from ai_assistant.core.prompts import PromptOrigin, PromptTemplate
 from ai_assistant.core.types import Message, OfferedTool, ProposedActivationUnderstanding, Role
-from ai_assistant.evaluation.diagnostic_record import OBSERVER_SUFFIX, SUFFIX
+from ai_assistant.evaluation.diagnostic_record import FOLLOW_UP_SUFFIX, OBSERVER_SUFFIX, SUFFIX
 from ai_assistant.models import (
     PydanticAIProvider,
     PydanticAIToolCallingCompleter,
@@ -535,7 +535,12 @@ def read_givens(
 
 
 def _record_files(record: Path) -> list[tuple[str, str, bool]]:
-    """Each activation's file and observer file, never a results file: name, id, observer."""
+    """Each activation's file and observer file: name, id, observer.
+
+    Never a results file (ADR-0335 §6:5), and never a follow-up file: the replay tool
+    takes no call to replay from one (ADR-0337 §8:18). A replay asks its own follow-up
+    with ``--follow-up`` instead (§7:1).
+    """
     files: list[tuple[str, str, bool]] = []
     try:
         with os.scandir(record) as listing:
@@ -543,7 +548,7 @@ def _record_files(record: Path) -> list[tuple[str, str, bool]]:
     except FileNotFoundError:
         return files
     for name in names:
-        if not name.endswith(SUFFIX) or name.endswith(REPLAY_SUFFIX):
+        if not name.endswith(SUFFIX) or name.endswith((REPLAY_SUFFIX, FOLLOW_UP_SUFFIX)):
             continue
         if name.endswith(OBSERVER_SUFFIX):
             files.append((name, name[: -len(OBSERVER_SUFFIX)], True))
