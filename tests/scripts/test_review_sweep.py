@@ -657,7 +657,8 @@ def test_an_orphan_parts_directory_is_swept(tmp_path: Path) -> None:
 
     assert status == 0, out
     assert not orphan.exists()
-    assert (repo / ".review" / "archive" / "parts" / "gone" / "part-0001-of-0002.md").exists()
+    archived = repo / ".review" / "archive" / "orphaned-parts" / "gone"
+    assert (archived / "part-0001-of-0002.md").exists()
     assert "[orphan]" in out
 
 
@@ -728,20 +729,37 @@ def test_an_artifact_skips_a_number_its_parts_could_not_take(tmp_path: Path) -> 
     assert not (taken / "part-0001-of-0002.md").exists()
 
 
-def test_an_orphan_avoids_the_name_a_companion_of_the_same_sweep_takes(tmp_path: Path) -> None:
+def test_an_orphan_is_never_filed_beside_an_archived_recording(tmp_path: Path) -> None:
+    # A sweep that predates #3184 left two recordings of one name archived and
+    # the second one's parts behind. Nothing says which recording an orphan
+    # belongs to, so it is filed apart — `archive/parts/a` would claim the first.
     repo = _repo(tmp_path)
     archive = repo / ".review" / "archive"
     archive.mkdir(parents=True)
-    (archive / "a.md").write_text("already archived\n")
-    _dead(repo, "a.md")
-    _parts(repo, "a")
-    (_parts(repo, "a-2", age=_AGED) / "part-0001-of-0002.md").write_text("the orphan\n")
+    (archive / "a.md").write_text("the first recording\n")
+    (archive / "a-2.md").write_text("the second recording\n")
+    (_parts(repo, "a", age=_AGED) / "part-0001-of-0002.md").write_text("the second's\n")
 
     status, out, _ = _sweep(repo)
 
     assert status == 0, out
-    assert (archive / "parts" / "a-2" / "part-0001-of-0002.md").read_text() == "part one of a\n"
-    assert (archive / "parts" / "a-2-2" / "part-0001-of-0002.md").read_text() == "the orphan\n"
+    assert not (archive / "parts").exists()
+    orphaned = archive / "orphaned-parts" / "a" / "part-0001-of-0002.md"
+    assert orphaned.read_text() == "the second's\n"
+
+
+def test_an_orphan_whose_archived_name_is_taken_is_numbered(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _parts(repo, "a", age=_AGED)
+    _sweep(repo)
+    (_parts(repo, "a", age=_AGED) / "part-0001-of-0002.md").write_text("again\n")
+
+    status, out, _ = _sweep(repo)
+
+    orphaned = repo / ".review" / "archive" / "orphaned-parts"
+    assert status == 0, out
+    assert (orphaned / "a" / "part-0001-of-0002.md").read_text() == "part one of a\n"
+    assert (orphaned / "a-2" / "part-0001-of-0002.md").read_text() == "again\n"
 
 
 def test_dry_run_leaves_the_parts_alone(tmp_path: Path) -> None:
@@ -894,6 +912,35 @@ def test_a_pair_whose_parts_cannot_be_claimed_is_put_back_together(
 
     assert "tree=t1" in artifact.read_text()
     assert (parts / "part-0001-of-0002.md").exists()
+    assert not (archive / "a-2.md").exists()
+
+
+def test_a_claim_that_cannot_be_checked_puts_the_pair_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The rename under the claim name landed and the identity could not be read:
+    # unproved is not proved, so the directory goes back to its own name and its
+    # artifact back beside it, rather than either being stranded.
+    repo = _repo(tmp_path)
+    archive = repo / ".review" / "archive"
+    archive.mkdir(parents=True)
+    (archive / "a.md").write_text("an earlier recording\n")
+    artifact = _dead(repo, "a.md")
+    parts = _parts(repo, "a")
+    stat_of = Path.lstat
+
+    def refuse(self: Path) -> os.stat_result:
+        if self.name.startswith(_MODULE._CLAIM_PREFIX):
+            raise PermissionError(13, "Permission denied", str(self))
+        return stat_of(self)
+
+    monkeypatch.setattr(Path, "lstat", refuse)
+    assert _MODULE.main(["--repo", str(repo)]) == 1
+    monkeypatch.undo()
+
+    assert "tree=t1" in artifact.read_text()
+    assert (parts / "part-0001-of-0002.md").exists()
+    assert [p.name for p in (repo / ".review" / "parts").iterdir()] == ["a"]
     assert not (archive / "a-2.md").exists()
 
 
