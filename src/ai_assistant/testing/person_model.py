@@ -16,6 +16,10 @@ write a test makes, as the composition root makes it.
 root's, so the check is each store's own and the shared suite holds them to one answer,
 and a consumer's test cannot pass over a write no deployment would take.
 
+**It mints each record's id once** (§10:3): an id ``new_id`` mints that a record the
+store holds already carries, removed or decided ones included, is a store fault, raised
+before anything changes, so no two records ever answer to one id.
+
 **It can be told to fail**: :meth:`FakePersonModelStore.fail_next` makes the next
 member called raise :class:`~ai_assistant.core.errors.PersonModelStoreError` before it
 reads or writes anything, as a store fault would.
@@ -156,7 +160,8 @@ class FakePersonModelStore:
             field_chars: The bound on a text field's length (§3:2).
             now: The clock every instant the store records is read from.
             new_id: Mints a record's id from its kind (``pin``, ``mark`` or
-                ``suggestion``); sequential per kind where ``None``.
+                ``suggestion``); sequential per kind where ``None``. An id it mints
+                that a held record carries is refused as a store fault.
 
         Raises:
             ValueError: If ``field_chars`` is below 1.
@@ -199,6 +204,24 @@ class FakePersonModelStore:
             self._fail = False
             msg = "the fake person-model store was told to fail"
             raise PersonModelStoreError(msg)
+
+    def _mint(self, kind: str) -> str:
+        """A new record's id, never one a held record carries, minted before any change.
+
+        Raises:
+            PersonModelStoreError: If the id minted is one a pin, mark or suggestion the
+                store holds already carries, removed or decided ones included.
+        """
+        minted = self._new_id(kind)
+        held = {
+            *(pin.id for one in self._people.values() for pin in one.pins),
+            *(mark.id for one in self._people.values() for mark in one.marks),
+            *(suggestion.id for one in self._people.values() for suggestion in one.suggestions),
+        }
+        if minted in held:
+            msg = f"the person-model store minted an id a record already carries: {kind}"
+            raise PersonModelStoreError(msg)
+        return minted
 
     # --- reads ------------------------------------------------------------------------
 
@@ -276,22 +299,29 @@ class FakePersonModelStore:
     ) -> PersonModelWrite:
         old = held.profile.value(field)
         at = self._now()
-        if value is not None:
-            self._accept_equal(held, lambda one: one.field is field and one.value == value, at=at)
-        if old == value:
-            return PersonModelWrite(kind=_UNCHANGED)
-        held.profile = held.profile.with_value(field, value)
-        held.changes.append(
-            ProfileChange(
-                person_id=held.person.id,
-                field=field,
-                old=old,
-                new=value,
-                at=at,
-                act=act,
-                suggestion_id=suggestion_id,
+        # Everything the write records is built before anything held changes (§10:2).
+        written = (
+            None
+            if old == value
+            else (
+                held.profile.with_value(field, value),
+                ProfileChange(
+                    person_id=held.person.id,
+                    field=field,
+                    old=old,
+                    new=value,
+                    at=at,
+                    act=act,
+                    suggestion_id=suggestion_id,
+                ),
             )
         )
+        if value is not None:
+            self._accept_equal(held, lambda one: one.field is field and one.value == value, at=at)
+        if written is None:
+            return PersonModelWrite(kind=_UNCHANGED)
+        held.profile, change = written
+        held.changes.append(change)
         return PersonModelWrite(kind=_WRITTEN)
 
     def _accept_equal(
@@ -322,24 +352,27 @@ class FakePersonModelStore:
 
     def _pin(self, held: _Held, memory_id: str, act: PersonModelAct) -> PersonModelWrite:
         at = self._now()
-        self._accept_equal(
-            held,
-            lambda one: one.kind is SuggestionKind.PIN and one.memory_id == memory_id,
-            at=at,
-        )
         standing = next(
             (pin for pin in held.pins if pin.memory_id == memory_id and pin.removed_at is None),
             None,
         )
+
+        def accepting(one: ProposedSuggestion) -> bool:
+            return one.kind is SuggestionKind.PIN and one.memory_id == memory_id
+
         if standing is not None:
+            self._accept_equal(held, accepting, at=at)
             return PersonModelWrite(kind=_UNCHANGED, record_id=standing.id)
+        # The pin is minted and built before any suggestion is accepted (§10:2), so a
+        # write that fails leaves every suggestion as it was.
         pin = Pin(
-            id=self._new_id("pin"),
+            id=self._mint("pin"),
             person_id=held.person.id,
             memory_id=memory_id,
             pinned_at=at,
             act=act,
         )
+        self._accept_equal(held, accepting, at=at)
         held.pins.append(pin)
         return PersonModelWrite(kind=_WRITTEN, record_id=pin.id)
 
@@ -373,7 +406,7 @@ class FakePersonModelStore:
         if existing is not None:
             return PersonModelWrite(kind=_UNCHANGED, record_id=existing.id)
         mark = StyleMark(
-            id=self._new_id("mark"),
+            id=self._mint("mark"),
             person_id=held.person.id,
             memory_id=memory_id,
             marked_at=self._now(),
@@ -430,7 +463,7 @@ class FakePersonModelStore:
         if equal is not None:
             return PersonModelWrite(kind=_UNCHANGED, record_id=equal.id)
         recorded = PersonSuggestion(
-            id=self._new_id("suggestion"),
+            id=self._mint("suggestion"),
             person_id=held.person.id,
             proposed=suggestion,
             recorded_at=self._now(),
