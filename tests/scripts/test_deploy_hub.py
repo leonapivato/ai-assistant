@@ -2758,7 +2758,7 @@ def test_the_delta_plan_checks_seeds_sends_the_difference_and_keeps_the_base(
     # installed wheel replaces it through a scratch file renamed into place.
     assert re.search(r"cp -- ~/deploy-hub/base\.whl /tmp/deploy-hub-[0-9a-f]+/w?", plan)
     assert re.search(
-        r"mv -f -- ~/deploy-hub/base\.whl\.[0-9a-f]+\.tmp ~/deploy-hub/base\.whl;", plan
+        r"mv -fT -- ~/deploy-hub/base\.whl\.[0-9a-f]+\.tmp ~/deploy-hub/base\.whl;", plan
     )
     assert "mkdir -p -m 0700 ~/deploy-hub " in plan
     # The digest check is the same check, as the service user, before the stop.
@@ -2781,7 +2781,7 @@ def test_the_delta_settings_are_parameters(tmp_path: Path) -> None:
     assert "--bwlimit=0 <the wheel above>" in plan
     assert re.search(r"cp -- '/srv/old builds/w\.whl' /tmp/deploy-hub-", plan)
     assert "[ ! -s '/srv/old builds/w.whl' ]" in plan
-    assert "mv -f -- /srv/keep/base.whl." in plan
+    assert "mv -fT -- /srv/keep/base.whl." in plan
     assert "mkdir -p -m 0700 /srv/keep " in plan
     assert "~/deploy-hub" not in plan
 
@@ -2934,6 +2934,7 @@ def test_a_transfer_that_left_the_base_in_place_is_caught_by_the_digest(
         ("DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=not-a-file\nDELTA_KEEP=writable\n", "not-a-file"),
         ("DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=unreadable\nDELTA_KEEP=writable\n", "unreadable"),
         ("DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=usable\nDELTA_KEEP=unwritable\n", "cannot write"),
+        ("DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=usable\nDELTA_KEEP=not-a-file\n", "is not a file"),
         ("", "could not ask the box what --delta needs"),
     ],
 )
@@ -3088,3 +3089,60 @@ def test_the_real_rsync_replaces_a_base_that_matches_in_size_and_time(tmp_path: 
 
     assert completed.returncode == 0, completed.stderr
     assert seeded.read_bytes() == local.read_bytes()
+
+
+@pytest.mark.parametrize("keep", ["/srv/cache/", ""])
+def test_a_keep_path_that_names_a_directory_is_refused(tmp_path: Path, keep: str) -> None:
+    result = run(
+        "deploy_hub",
+        [
+            "hub.example",
+            "--delta",
+            "--delta-keep",
+            keep,
+            "--repo",
+            str(_repo(tmp_path)),
+            "--dry-run",
+        ],
+    )
+
+    assert result.returncode == 1
+    assert "must name the file" in result.stderr
+
+
+@_NEEDS_SHELL
+@pytest.mark.parametrize("shape", ["directory", "link to a directory"])
+def test_the_real_delta_check_refuses_a_keep_path_that_is_not_a_file(
+    tmp_path: Path, shape: str
+) -> None:
+    # A rename onto a directory moves the wheel inside it and succeeds, so every
+    # later deploy would find no base there and the explicit bases would pile up.
+    home, env = _login_home(tmp_path)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    keep = home / "keep"
+    if shape == "directory":
+        keep.mkdir()
+    else:
+        keep.symlink_to(cache)
+    plan = _delta_plan(tmp_path, "--delta-keep", str(keep))
+
+    probed = _sh_login(plan.probe_delta(), env)
+
+    assert _MODULE._labelled(probed[1], "DELTA_KEEP=") == "not-a-file"
+
+
+@_NEEDS_SHELL
+def test_the_real_keep_will_not_rename_into_a_directory_that_appeared(tmp_path: Path) -> None:
+    home, env = _login_home(tmp_path)
+    keep = home / "keep"
+    plan = _delta_plan(tmp_path, "--delta-keep", str(keep))
+    Path(plan.stage_dir).mkdir()
+    Path(plan.staged).write_bytes(b"the new wheel")
+    keep.mkdir()
+
+    status, _out, _err = _sh_login(plan.keep_base(), env)
+
+    assert status != 0
+    assert list(keep.iterdir()) == []
+    assert sorted(p.name for p in home.iterdir()) == ["keep"]
