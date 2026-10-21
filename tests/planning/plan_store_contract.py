@@ -61,6 +61,11 @@ if TYPE_CHECKING:
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
+#: More ids than one SQLite statement can bind (``SQLITE_MAX_VARIABLE_NUMBER`` is 32766
+#: on every SQLite since 3.32), so a read naming this many must be read in parts
+#: (issue #3296).
+_PAST_SQLITES_BOUND = 33_000
+
 
 #: What a failure of the cancellation case below means, in one place: every
 #: assertion in it is the same invariant seen from a different side.
@@ -721,6 +726,24 @@ class PlanStoreContract:
 
         assert [one.id for one in (await store.export()).activation_effects] == ["e1"]
 
+    async def test_the_backstop_matches_however_many_activations_it_names(
+        self, store: PlanStore
+    ) -> None:
+        """§5:9: a match naming more activations than SQLite binds is read whole (#3296).
+
+        The matching record names the match's last activation, so a store that read only
+        a part of the match would claim the call again.
+        """
+        match = tuple(f"act-{index}" for index in range(_PAST_SQLITES_BOUND))
+        await store.claim_activation_effect(_effect("e1", activation=match[-1]), match=None)
+
+        answer = await store.claim_activation_effect(
+            _effect("e2", activation=match[0]), match=match
+        )
+
+        assert answer is ActivationEffectClaim.ALREADY_DONE
+        assert await store.activation_effects([match[0]]) == ()
+
     async def test_the_backstop_matches_only_the_named_activations(self, store: PlanStore) -> None:
         """§5:9: an activation outside ``match`` is not matched against."""
         await store.claim_activation_effect(_effect("e1", activation="act-9"), match=None)
@@ -1013,6 +1036,53 @@ class PlanStoreContract:
 
         with pytest.raises(PlanningError):
             await store.activation_effects(["act-1", 1])  # type: ignore[list-item]  # the refusal under test
+
+    @pytest.mark.parametrize(
+        "activations",
+        [
+            lambda: 5,
+            lambda: (one for one in ["act-1"]),
+            lambda: iter(["act-1"]),
+            lambda: {"act-1"},
+            lambda: {"act-1": None},
+            lambda: b"act-1",
+        ],
+        ids=["not-iterable", "generator", "iterator", "set", "mapping", "bytes"],
+    )
+    async def test_the_read_by_activation_takes_a_sequence_of_activations(
+        self, store: PlanStore, activations: Callable[[], object]
+    ) -> None:
+        """Anything but a sequence of ids is refused as a ``PlanningError`` (issue #3295).
+
+        A value that is not iterable would otherwise escape as ``TypeError``, and a
+        one-shot iterable would be exhausted by the check and then read nothing, so the
+        store would answer ``()`` whatever it holds. A record is held here so that an
+        empty answer could not pass for a refusal.
+        """
+        await store.claim_activation_effect(_effect("e1"), match=None)
+
+        with pytest.raises(PlanningError):
+            await store.activation_effects(activations())  # type: ignore[arg-type]  # the refusal under test
+
+    async def test_the_read_by_activation_answers_however_many_it_names(
+        self, store: PlanStore
+    ) -> None:
+        """A read naming more activations than SQLite binds is answered whole (#3296).
+
+        In claim order across the whole read, whatever the ids' places in it: the
+        first record claimed names the last activation, and the second the first.
+        """
+        named = [f"act-{index}" for index in range(_PAST_SQLITES_BOUND)]
+        await store.claim_activation_effect(_effect("e1", activation=named[-1]), match=None)
+        await store.claim_activation_effect(_effect("e2", activation=named[0]), match=None)
+        await store.claim_activation_effect(_effect("e3", activation="act-unnamed"), match=None)
+        await store.claim_activation_effect(
+            _effect("e4", activation=named[len(named) // 2]), match=None
+        )
+
+        read = await store.activation_effects(named)
+
+        assert [one.id for one in read] == ["e1", "e2", "e4"]
 
     @pytest.mark.parametrize(
         "activations",

@@ -126,11 +126,18 @@ def matched_activations(match: object) -> tuple[str, ...] | None:
     return match
 
 
-def requested_activations(activation_ids: Sequence[str]) -> tuple[str, ...]:
-    """Return the activation ids a read names, refusing a bare string.
+def requested_activations(activation_ids: object) -> tuple[str, ...]:
+    """Return the activation ids a read names, refusing a bare string or a non-sequence.
 
     A ``str`` is itself a sequence of strings, so a caller passing one activation id
     unwrapped would otherwise read the records of each of its characters.
+
+    **Anything but a sequence is refused, a one-shot iterable included** (issue #3295).
+    The check reads every element, so a generator would be exhausted by it and the read
+    would then name nothing and answer ``()`` whatever the store holds; and a value that
+    is not iterable at all would escape as ``TypeError``. ``observations`` draws the same
+    line (:func:`~ai_assistant.planning.observations.requested_episodes`), and every
+    caller passes a list or a tuple.
 
     **An id with no UTF-8 encoding is refused, not answered with nothing.** A record's
     activation is an :data:`~ai_assistant.core.types.Identifier`, so no store can hold
@@ -148,11 +155,17 @@ def requested_activations(activation_ids: Sequence[str]) -> tuple[str, ...]:
         The ids, each once, in the order given.
 
     Raises:
-        PlanningError: If ``activation_ids`` is a string, or holds a non-string, or
-            names an id with no UTF-8 encoding.
+        PlanningError: If ``activation_ids`` is a bare string, or not a sequence of
+            strings, or names an id with no UTF-8 encoding.
     """
-    if isinstance(activation_ids, str) or not all(isinstance(one, str) for one in activation_ids):
-        msg = "activation_effects reads a sequence of activation ids, not one string"
+    if (
+        not isinstance(activation_ids, Sequence)
+        or isinstance(activation_ids, (str, bytes))
+        or not all(isinstance(one, str) for one in activation_ids)
+    ):
+        msg = (
+            "activation_effects reads a sequence of activation ids, not one string or anything else"
+        )
         raise PlanningError(msg)
     for index, one in enumerate(activation_ids):
         try:

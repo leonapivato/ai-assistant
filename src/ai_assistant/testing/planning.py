@@ -128,19 +128,24 @@ def _named_activations(match: object) -> tuple[str, ...] | None:
     return match
 
 
-def _read_activations(activation_ids: Sequence[str]) -> tuple[str, ...]:
+def _read_activations(activation_ids: object) -> tuple[str, ...]:
     """Return the activation ids a read names, each once in the order given, or refuse them.
 
     Re-implemented here rather than imported from ``ai_assistant.planning``, for the
     reason this module's docstring gives (ADR-0306 §6:5). An id with no UTF-8 encoding
-    is refused, as the SQLite store must refuse it (issue #3291).
+    is refused, as the SQLite store must refuse it (issue #3291), and so is anything but
+    a sequence, which the check would exhaust or fail to iterate (issue #3295).
 
     Raises:
-        PlanningError: If ``activation_ids`` is a bare string or holds anything but
+        PlanningError: If ``activation_ids`` is a bare string, or not a sequence of
             strings, or names an id with no UTF-8 encoding.
     """
-    if isinstance(activation_ids, str) or not all(isinstance(one, str) for one in activation_ids):
-        msg = "activation_effects reads a sequence of activation ids, not one string"
+    if (
+        not isinstance(activation_ids, Sequence)
+        or isinstance(activation_ids, (str, bytes))
+        or not all(isinstance(one, str) for one in activation_ids)
+    ):
+        msg = "activation_effects reads a sequence of activation ids (ADR-0306 §6:5)"
         raise PlanningError(msg)
     for index, one in enumerate(activation_ids):
         try:
@@ -430,8 +435,8 @@ class FakePlanStore:
         """Return the named activations' effect records, in claim order (ADR-0306 §6:5).
 
         Raises:
-            PlanningError: If ``activation_ids`` is a bare string or holds anything but
-                strings, or names an id with no UTF-8 encoding.
+            PlanningError: If ``activation_ids`` is a bare string, or not a sequence
+                of strings, or names an id with no UTF-8 encoding.
         """
         named = set(_read_activations(activation_ids))
         async with self._resource.held():

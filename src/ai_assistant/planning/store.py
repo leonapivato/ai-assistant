@@ -169,8 +169,8 @@ class InMemoryPlanStore:
         """Return the named activations' effect records, in claim order (ADR-0306 §6:5).
 
         Raises:
-            PlanningError: If ``activation_ids`` is a bare string or holds anything but
-                strings, or names an id with no UTF-8 encoding.
+            PlanningError: If ``activation_ids`` is a bare string, or not a sequence
+                of strings, or names an id with no UTF-8 encoding.
         """
         named = set(requested_activations(activation_ids))
         return tuple(
