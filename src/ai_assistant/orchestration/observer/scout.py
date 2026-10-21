@@ -70,13 +70,16 @@ class ScoutReply(BaseModel):
     findings: tuple[_ProposedFinding, ...] = ()
 
 
-#: A fenced block anywhere in a reply: its tag is group 1, its body group 2. Every fence is
-#: paired, whatever its tag, so one block's closing fence never opens the next. A fence
-#: stands at the start of its line, and a closing one alone on it: a JSON string holds no
-#: raw newline, so backticks inside one are never taken for a fence.
-_FENCED: Final = re.compile(
-    r"^[ \t]*```([^\n`]*)\n(.*?)^[ \t]*```[ \t]*$", re.DOTALL | re.MULTILINE
-)
+#: A fence opening a block, its tag group 1. It is matched only where the walk stands in
+#: the reply's prose, outside any container, so never within a JSON string.
+_OPENING: Final = re.compile(r"```([^\n`]*)\n")
+
+#: The fence closing a block, alone on its line: a JSON string holds no raw newline, so
+#: backticks inside a fenced object's string never close its block.
+_CLOSING: Final = re.compile(r"^[ \t]*```[ \t]*$", re.MULTILINE)
+
+#: The tags a block holding the reply carries: none, or ``json``.
+_JSON_TAGS: Final = frozenset({"", "json", "JSON"})
 
 
 def parsed[T: BaseModel](content: str, shape: type[T]) -> T | None:
@@ -106,7 +109,8 @@ def parsed[T: BaseModel](content: str, shape: type[T]) -> T | None:
     whole = _validated(body, shape)
     if whole is not None:
         return whole
-    fenced, objects = _candidates(content)
+    # A JSON value holds no raw carriage return, so line endings are one kind for the search.
+    fenced, objects = _candidates(re.sub(r"\r\n?", "\n", content))
     for candidate in (*reversed(fenced), *reversed(objects)):
         if not _names_a_field(candidate, shape):
             continue
@@ -137,7 +141,7 @@ def _names_a_field(text: str, shape: type[BaseModel]) -> bool:
     return not named.isdisjoint(value)
 
 
-def _candidates(text: str) -> tuple[list[str], list[str]]:
+def _candidates(text: str, *, fences: bool = True) -> tuple[list[str], list[str]]:
     """The fenced blocks' bodies and the top-level JSON objects in ``text``, each in order.
 
     One walk finds both, so they share one rule: nothing inside a container, an object or
@@ -145,24 +149,27 @@ def _candidates(text: str) -> tuple[list[str], list[str]]:
     ``[`` the walk meets starts a container. One that decodes is passed whole, an object
     kept as a candidate and an array's members never; one that does not decode is skipped
     as far as its brackets balance. A container whose brackets never balance ends the
-    walk, since everything after it may be inside it. A fenced block met outside any
-    container, untagged or tagged ``json``, yields its body, and the walk goes on through
-    that body, so an object in it is met as any other; a block tagged as anything else is
-    passed whole, since what it quotes is not the reply.
+    walk, since everything after it may be inside it.
+
+    A fence the walk meets outside any container opens a block that runs to its closing
+    fence, alone on its line, or, where none closes it, to the end. A block untagged
+    or tagged ``json`` yields its body, and the objects in that body are met as any
+    others; a block tagged as anything else is passed whole, since what it quotes is not
+    the reply. A fence inside a block's body opens nothing (``fences`` is false there).
     """
-    fences = {match.start(): match for match in _FENCED.finditer(text)}
     decoder = json.JSONDecoder()
     fenced: list[str] = []
     objects: list[str] = []
     index = 0
     while index < len(text):
-        fence = fences.get(index)
-        if fence is not None:
-            if fence.group(1).strip() in {"", "json", "JSON"}:
-                fenced.append(fence.group(2))
-                index = fence.start(2)
-            else:
-                index = fence.end()
+        opening = _OPENING.match(text, index) if fences else None
+        if opening is not None:
+            closing = _CLOSING.search(text, opening.end())
+            body = text[opening.end() : len(text) if closing is None else closing.start()]
+            if opening.group(1).strip() in _JSON_TAGS:
+                fenced.append(body)
+                objects.extend(_candidates(body, fences=False)[1])
+            index = len(text) if closing is None else closing.end()
             continue
         if text[index] not in "{[":
             index += 1
