@@ -396,6 +396,50 @@ async def test_a_store_failure_at_the_first_write_names_no_reference(
     assert _entries(harness.store) == []
 
 
+async def test_a_keyless_write_that_fails_before_committing_writes_nothing(
+    harness: ProvisionerHarness,
+) -> None:
+    """ADR-0325 §3:6: the one write raised, so it names no reference and leaves nothing.
+
+    One append attempted and none retried: the act's outcome is not known to the
+    caller, and nothing here may resolve it by trying again.
+    """
+    provisioner = _subject(harness)
+    harness.store.fail_append_at = {1}
+
+    with pytest.raises(ConnectionStoreError) as caught:
+        await provisioner.provision_keyless(identity="Open-Meteo")
+
+    assert not hasattr(caught.value, "reference")
+    assert harness.store.appends == 1
+    assert _entries(harness.store) == []
+    assert await provisioner.connected() == ()
+
+
+async def test_a_keyless_write_that_commits_then_fails_leaves_one_active_record(
+    harness: ProvisionerHarness,
+) -> None:
+    """ADR-0325 §3:6: committed and then raised — still no reference, never a retry.
+
+    The case the class's "outcome not known" exists for: a following read shows the
+    reference ``ACTIVE``, so an implementation that retried on the assumption the
+    write had failed would leave two keyless connections where the user made one.
+    """
+    provisioner = _subject(harness)
+    harness.store.commit_then_fail_at = {1}
+
+    with pytest.raises(ConnectionStoreError) as caught:
+        await provisioner.provision_keyless(identity="Open-Meteo")
+
+    assert not hasattr(caught.value, "reference")
+    assert harness.store.appends == 1
+    assert len(_entries(harness.store)) == 1
+    live = await provisioner.connected()
+    assert [(record.identity, record.state, record.revision) for record in live] == [
+        ("Open-Meteo", ProvisioningState.ACTIVE, 1)
+    ]
+
+
 async def test_a_store_failure_at_the_first_re_read_is_incomplete(
     harness: ProvisionerHarness,
 ) -> None:
