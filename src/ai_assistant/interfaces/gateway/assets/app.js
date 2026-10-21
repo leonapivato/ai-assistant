@@ -5416,7 +5416,14 @@ function renderChange(list, change) {
 // One write to the person's model from the About you panel, said on its outcome line,
 // and then the panel read again. Nothing is retried: a write that did not land is said,
 // and the person decides again.
-async function aboutEdit(path, payload, act) {
+async function aboutEdit(path, payload, act, landed) {
+  // **One write at a time** (adversarial review, round 3): two saves of one field in
+  // flight could land in either order, and the older could overwrite the newer choice
+  // with nothing on screen saying so. A second act while one is out is said and not sent.
+  if (aboutWriting.busy) {
+    el("about-outcome").textContent = ABOUT_BUSY;
+    return;
+  }
   fault(null, "about");
   const half = headerHalf();
   if (half === null) {
@@ -5428,6 +5435,7 @@ async function aboutEdit(path, payload, act) {
   // replaced; the focus goes back to its successor, by id, so a keyboard is not sent
   // back to the top of the page.
   const focused = document.activeElement === null ? "" : document.activeElement.id;
+  aboutWriting.busy = true;
   try {
     const asked = Object.assign({ person_id: OWNER_PERSON_ID }, payload);
     const body = await relay(half, path, asked, "about");
@@ -5440,6 +5448,9 @@ async function aboutEdit(path, payload, act) {
     }
     el("about-outcome").textContent =
       body.off === true ? PERSON_MODEL_OFF : editWords(act, body.edit);
+    if (body.off !== true && editLanded(body.edit) && landed !== undefined) {
+      landed();
+    }
     await openAbout(true);
     const again = focused === "" ? null : el(focused);
     if (again !== null) {
@@ -5451,7 +5462,19 @@ async function aboutEdit(path, payload, act) {
       return;
     }
     fault(GATEWAY_GONE, "about");
+  } finally {
+    aboutWriting.busy = false;
   }
+}
+
+// Whether an About you write is in flight, and what a second act meanwhile is told.
+const aboutWriting = { busy: false };
+const ABOUT_BUSY = "Your last change is still being made, so this one was not sent. Try again.";
+
+// Whether a write did what was asked, or changed nothing as the contract says such a
+// write does; a refusal, before the store or by it, did neither.
+function editLanded(edit) {
+  return edit.refused === null && edit.write.kind !== "refused";
 }
 
 // One pin or unpin from the belief panel, said on its outcome line. The listing is not
@@ -5487,12 +5510,21 @@ async function beliefEdit(path, payload, act) {
 }
 
 function setField(field, value) {
-  // What is in the box now is what is sent; typing from here on is a new draft.
-  delete el(`field-${field}`).dataset.typed;
+  // **A box stays a draft until its write lands** (adversarial review, round 3): a value
+  // the hub refused is what the person corrects, and a write that never arrived is
+  // theirs to send again, so neither may be replaced by what the hub held. Once the
+  // write lands the box shows what the hub now holds, unless it was typed in since.
+  const sent = el(`field-${field}`).value;
+  const landed = () => {
+    const box = el(`field-${field}`);
+    if (box !== null && box.value === sent) {
+      delete box.dataset.typed;
+    }
+  };
   // An absent value is the clear: the gateway reads absent and `null` alike, and sends
   // the hub no value (ADR-0085 §10).
   const payload = value === null ? { field: field } : { field: field, value: value };
-  return aboutEdit("/person/field/set", payload, value === null ? "clear" : "set");
+  return aboutEdit("/person/field/set", payload, value === null ? "clear" : "set", landed);
 }
 
 function unpinFromAbout(memoryId) {
@@ -5571,16 +5603,27 @@ async function readPinning() {
       return;
     }
     if (body === null) {
+      // Refused, and said in the panel's fault slot — which the listing read next
+      // clears, so the state line says it too (adversarial review, round 3).
+      el("belief-pin-state").textContent = PINNING_UNREAD;
       return;
     }
     pinning.on = body.off !== true && body.person_model !== null;
     el("belief-pin-state").textContent = body.off === true ? PINNING_OFF : PINNING_SAYS;
   } catch (_) {
-    // Nothing of its own to say: the listing read next says the gateway is gone, and
-    // without an answer the rows offer no pin.
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
     pinning.on = false;
+    el("belief-pin-state").textContent = PINNING_UNREAD;
   }
 }
+
+// What the belief panel says where it could not read whether pinning is on.
+const PINNING_UNREAD =
+  "I could not read whether pinning is switched on, so no memory below offers it. Open " +
+  "What I believe again to try again.";
 
 // A current memory's pin and unpin (ADR-0338 §8:2), the pin control saying that pinning
 // confirms the wording shown (§4:3).

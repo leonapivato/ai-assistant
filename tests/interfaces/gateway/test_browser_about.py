@@ -241,6 +241,8 @@ async def test_a_field_is_saved_cleared_and_refused_in_words(
         async with page.expect_response("**/person/changes"):
             await page.press("#field-time_zone", "Enter")
         assert (await outcome.inner_text()).startswith("That value was not saved. The rule is:")
+        # What was refused is what the person corrects, so it stays in the box.
+        assert await page.locator("#field-time_zone").input_value() == "Mars/Olympus"
 
         await page.fill("#field-time_zone", "Europe/Lisbon")
         async with page.expect_response("**/person/changes"):
@@ -559,3 +561,91 @@ async def test_a_box_typed_back_to_its_old_value_while_saving_keeps_what_was_typ
         assert held is not None
         assert held.profile.name == "Rob"
         assert heard == []
+
+
+async def test_a_second_save_while_one_is_out_is_said_and_not_sent(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Two saves in flight could land in either order; the second is not sent, and
+    what it carried stays in the box (adversarial review, round 3)."""
+    loop = asyncio.get_running_loop()
+    release: asyncio.Future[None] = loop.create_future()
+    sent: list[str] = []
+
+    async def hang(route: Route) -> None:
+        sent.append(route.request.post_data or "")
+        await release
+        await route.fallback()
+
+    async with driving(gateway_browser, tmp_path, viewport=PHONE) as drive:
+        heard = _complaints(drive.page)
+        people, _ = switch_on(drive.engine)
+        await _open(drive)
+        page = drive.page
+        await page.route("**/person/field/set", hang)
+
+        await page.fill("#field-name", "Rob")
+        async with page.expect_request("**/person/field/set"):
+            await page.press("#field-name", "Enter")
+        await page.fill("#field-name", "Robert")
+        await page.press("#field-name", "Enter")
+        assert (await page.locator("#about-outcome").inner_text()).startswith(
+            "Your last change is still being made"
+        )
+        async with page.expect_response("**/person/changes"):
+            release.set_result(None)
+
+        assert len(sent) == 1
+        assert await page.locator("#about-outcome").inner_text() == "Saved."
+        assert await page.locator("#field-name").input_value() == "Robert"
+        held = await people.read(OWNER_PERSON_ID)
+        assert held is not None
+        assert held.profile.name == "Rob"
+        assert heard == []
+
+
+async def test_a_save_that_never_arrived_leaves_its_text_for_sending_again(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A transport failure says so, and the panel read again keeps the unsent text."""
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        switch_on(drive.engine)
+        await _open(drive)
+        page = drive.page
+        await page.route("**/person/field/set", lambda route: route.abort())
+
+        await page.fill("#field-language", "Português")
+        await page.press("#field-language", "Enter")
+        await page.wait_for_selector("#about > .fault:not([hidden])")
+        async with page.expect_response("**/person/changes"):
+            await press(page, "#about-button")
+
+        assert await page.locator("#field-language").input_value() == "Português"
+
+
+async def test_a_belief_panel_that_could_not_read_the_switch_says_so(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A failed read of the person model is said on the panel's state line, which the
+    listing read after it does not clear, and no row offers a pin (round 3)."""
+    async with driving(gateway_browser, tmp_path, viewport=PHONE) as drive:
+        _, store = switch_on(drive.engine)
+        await hold(drive.engine, store, fact("m:diet", "Eats no meat."))
+        page = drive.page
+        await page.route(
+            "**/person",
+            lambda route: route.fulfill(
+                status=422,
+                content_type="application/json",
+                body='{"fault": "assistant-declined", "detail": "the store could not be read"}',
+            ),
+        )
+
+        async with page.expect_response("**/candidates/pending"):
+            await press(page, "#beliefs-button")
+
+        assert (await page.locator("#belief-pin-state").inner_text()).startswith(
+            "I could not read whether pinning is switched on"
+        )
+        assert await page.locator("#belief-list button", has_text="Pin").count() == 0
+        assert await page.locator("#belief-list .belief-row").count() == 1
