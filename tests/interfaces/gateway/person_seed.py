@@ -13,11 +13,7 @@ memory.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import TYPE_CHECKING
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "orchestration"))
 
 from person_model_contract import (
     PERSON_AT,

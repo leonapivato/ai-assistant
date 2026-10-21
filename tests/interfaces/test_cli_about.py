@@ -8,17 +8,10 @@ answers the hub would give, in the page's words (``person_inspection``).
 from __future__ import annotations
 
 import asyncio
-import sys
 from io import StringIO
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from rich.console import Console
-from typer.testing import CliRunner
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "orchestration"))
-
 from person_model_contract import (
     PERSON_AT,
     ended,
@@ -28,6 +21,8 @@ from person_model_contract import (
     person_model_stores,
     pin_suggestion,
 )
+from rich.console import Console
+from typer.testing import CliRunner
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.types import (
