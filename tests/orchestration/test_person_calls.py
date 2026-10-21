@@ -34,6 +34,7 @@ from ai_assistant.core.types import (
     PermissionRuling,
     PersonActHow,
     PersonModelAct,
+    PersonModelWriteKind,
     ProfileField,
     ProposedSuggestion,
     QuestionPart,
@@ -44,7 +45,7 @@ from ai_assistant.core.types import (
     YesToQuestion,
 )
 from ai_assistant.orchestration.activation_state import CURRENT_ACTIVATION, ActivationScope
-from ai_assistant.orchestration.person_block import PersonBlocks
+from ai_assistant.orchestration.person_block import PersonBlocks, PinRefusal
 from ai_assistant.orchestration.person_calls import (
     PERSON_MODEL_CALLS,
     PIN,
@@ -55,6 +56,7 @@ from ai_assistant.orchestration.person_calls import (
     worded_argument,
 )
 from ai_assistant.testing import FakePersonModelStore
+from ai_assistant.testing.memories import memory, remembered_support
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -513,3 +515,33 @@ async def test_an_unpin_left_part_done_says_so_and_is_not_done(owners: None) -> 
     model = await world.people.read(OWNER_PERSON_ID)
     assert model is not None
     assert model.standing_pins == ()
+
+
+async def test_a_successor_the_slot_does_not_show_takes_none_of_the_budget(owners: None) -> None:
+    """§6:3-§6:4: a pin's successor resting on outside content is shown in no slot."""
+    world = _World(budget=30)
+    await world.held(
+        _ended("m:old", "Listens to jazz.", successor="m:new"),
+        memory("m:new", "The newsletter says they love jazz.", remembered_support(outside=True)),
+        _fact("m:diet", "Eats meat."),
+    )
+    await world.pin("m:old")
+
+    answer = await _run(world, PIN, memory="m:diet")
+
+    assert _done(answer) == "pinned"
+
+
+async def test_the_panel_pins_through_the_same_checks() -> None:
+    """One place checks and writes a pin, for planning's call and the panel's alike (§8:2)."""
+    world = _World(budget=20)
+    await world.held(_fact("m:diet", "Eats no meat."), _fact("m:sister", "Has a sister, Ada."))
+
+    first = await world.blocks.pin(OWNER_PERSON_ID, "m:diet", act=_PANEL)
+    second = await world.blocks.pin(OWNER_PERSON_ID, "m:sister", act=_PANEL)
+    gone = await world.blocks.pin(OWNER_PERSON_ID, "m:none", act=_PANEL)
+
+    assert first.write is not None
+    assert first.write.kind is PersonModelWriteKind.WRITTEN
+    assert (second.write, second.refused) == (None, PinRefusal.OVER_BUDGET)
+    assert gone.refused is PinRefusal.NOT_CURRENT

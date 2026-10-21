@@ -251,6 +251,7 @@ from ai_assistant.core.types import (
     LabelKind,
     Memory,
     MemoryKind,
+    MemoryStatus,
     MessageAuthor,
     Modality,
     NewMessage,
@@ -3180,11 +3181,13 @@ class PhasePath:
         """What came of every round's calls, a pin's or an unpin's memory worded.
 
         ADR-0338 §8:6: the question about a ``pin`` or an ``unpin`` call that needs the
-        user shows the memory's wording as the memory store holds it, read here for the
-        round that may ask, in place of its label. Where it cannot be read, the memory is
-        gone, or it rests on outside content, which no question shows (ADR-0307 §9:2),
-        the call is handed on with no request, and cannot be asked about. A wording read
-        for a question is among what the activation obtained (ADR-0309 §5:10).
+        user shows the memory's wording as the memory store holds it, read live here for
+        the round that may ask, in place of its label. Only a memory the live read
+        returns current is shown so (ADR-0342 §5:1): one that is gone, retired since it
+        was shown, or rests on outside content, which no question shows (ADR-0307 §9:2),
+        or one that cannot be read, leaves the call handed on with no request, so it
+        cannot be asked about. A wording read for a question is among what the
+        activation obtained (ADR-0309 §5:10).
         """
         outcomes = working.outcomes()
         if self._person_calls is None:
@@ -3200,16 +3203,20 @@ class PhasePath:
                 named[index] = (argument, memory_id)
         if not named:
             return outcomes
-        held: Mapping[str, Memory]
+        held: Mapping[str, MemoryRecord]
         try:
-            held = await self._memory.get_history(sorted({one for _, one in named.values()}))
+            held = await self._memory.get_many(sorted({one for _, one in named.values()}))
         except MemoryStoreError:
             _log.warning("planning_wording_unread", stage="planning", reason="memory_fault")
             held = {}
         worded = list(outcomes)
         for index, (argument, memory_id) in named.items():
             record = held.get(memory_id)
-            if record is None or record.rests_on_outside_content:
+            if (
+                not isinstance(record, Memory)
+                or record.status is not MemoryStatus.CURRENT
+                or record.rests_on_outside_content
+            ):
                 worded[index] = replace(outcomes[index], request=None, deliberate_repeat=False)
                 continue
             working.supplied.obtained((record,))

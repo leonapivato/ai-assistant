@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -59,6 +60,7 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     Memory,
     MemoryStatus,
+    PersonModelWriteKind,
     SuggestionKind,
 )
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
@@ -71,6 +73,8 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         MemoryRecord,
         PersonModel,
+        PersonModelAct,
+        PersonModelWrite,
         PersonSuggestion,
         Pin,
         Profile,
@@ -86,7 +90,10 @@ __all__ = [
     "KeptInMind",
     "PersonBlock",
     "PersonBlocks",
+    "PinRefusal",
+    "Pinned",
     "ShownSuggestion",
+    "Unpinned",
     "activation_person",
     "still_held",
 ]
@@ -209,6 +216,49 @@ class PersonBlock:
         )
 
 
+class PinRefusal(StrEnum):
+    """Why a pin was refused before any write (ADR-0338 §4:2, §6:3)."""
+
+    NOT_CURRENT = "not_current"
+    """Only a current memory may be pinned (§4:2)."""
+    OVER_BUDGET = "over_budget"
+    """The pins' wordings, with the new one's, would exceed the slot's budget (§6:3)."""
+    UNKNOWN_PERSON = "unknown_person"
+    """The person-model store holds no such person."""
+
+
+@dataclass(frozen=True, slots=True)
+class Pinned:
+    """What :meth:`PersonBlocks.pin` did: the store's write, or why it was refused first.
+
+    Attributes:
+        write: The store's write: ``written``, ``unchanged`` or its own refusal.
+        refused: Why the pin was refused before any write.
+    """
+
+    write: PersonModelWrite | None = None
+    refused: PinRefusal | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Unpinned:
+    """What :meth:`PersonBlocks.unpin` did (ADR-0338 §4:7).
+
+    Attributes:
+        showing: How many standing pins showed the memory.
+        removed: How many of them were removed.
+        refused: The store's refusal that stopped the removal, where one did.
+        faulted: Whether a store fault stopped it after a pin was removed.
+        unknown_person: Whether the store holds no such person.
+    """
+
+    showing: int = 0
+    removed: int = 0
+    refused: PersonModelWrite | None = None
+    faulted: bool = False
+    unknown_person: bool = False
+
+
 class PersonBlocks:
     """Assemble an activation's person block, with no model call (ADR-0338 §7:1)."""
 
@@ -258,22 +308,97 @@ class PersonBlocks:
         """The kept-in-mind slot's budget, which a pin is checked against (ADR-0338 §6:3)."""
         return self._budget
 
-    def pinning(self, person_id: str) -> asyncio.Lock:
-        """The lock a person's pins are changed under, by every caller through this assembly.
+    async def pin(self, person_id: str, memory_id: str, *, act: PersonModelAct) -> Pinned:
+        """Pin a current memory where the pins' wordings stay within the budget (§4:2, §6:3).
 
-        A pin is refused where it would take the pins' wordings past the budget, and the
-        store leaves that check to its caller (ADR-0338 §6:3), so a caller holds this
-        lock from its read of the person's pins to its write: two pins checked at once
-        cannot both pass a budget only one of them fits. The hub is one process per data
-        directory, so one lock per person here serializes every such caller.
+        The one place a pin is checked and written, for every caller: planning's ``pin``
+        under the person's yes, and the panel's (§8:2). The store leaves both checks to
+        its caller, against the memory store, before the write (§4:2, §6:3):
+
+        - the memory is read live, and pinned only where it is current;
+        - the wordings of the memories the person's standing pins show in the slot, each
+          once, at its chain's current end and not resting on outside content (§4:8,
+          §6:4), together with the new one's where it is not among them already, must
+          stay within the slot's budget.
+
+        The read, the checks and the write are made under one lock per person, so two
+        pins checked at once cannot both pass a budget only one of them fits. The hub is
+        one process per data directory, so the lock serializes every caller through this
+        assembly. A write the store makes accepts any pending pin suggestion of that
+        memory in the same step (§8:8).
+
+        Args:
+            person_id: Whose pin.
+            memory_id: The memory, by id.
+            act: Who pinned it, and how: on the panel, or by a yes.
+
+        Returns:
+            The store's write, or why the pin was refused before any write.
+
+        Raises:
+            PersonModelStoreError: If the person-model store cannot be read or written.
+            MemoryStoreError: If the memory store cannot be read.
+            ValueError: If ``memory_id`` is blank.
+        """
+        async with self._pinning.setdefault(person_id, asyncio.Lock()):
+            live = await self._memory.get_many([memory_id])
+            record = live.get(memory_id)
+            if not isinstance(record, Memory) or record.status is not MemoryStatus.CURRENT:
+                return Pinned(refused=PinRefusal.NOT_CURRENT)
+            model = await self._store.read(person_id)
+            if model is None:
+                return Pinned(refused=PinRefusal.UNKNOWN_PERSON)
+            ends = await self._reached(pin.memory_id for pin in model.standing_pins)
+            shown = {end.id: end for end in ends.values() if not end.rests_on_outside_content}
+            shown.setdefault(record.id, record)
+            if sum(len(one.content) for one in shown.values()) > self._budget:
+                return Pinned(refused=PinRefusal.OVER_BUDGET)
+            return Pinned(write=await self._store.add_pin(person_id, memory_id, act=act))
+
+    async def unpin(self, person_id: str, memory_id: str) -> Unpinned:
+        """Remove every standing pin that shows the memory, erasing nothing (§4:7).
+
+        The one place an unpin is resolved and written, for every caller. A memory a pin
+        shows is the one it was made on or the current successor its chain reached
+        (§4:8), so every standing pin whose memory, or whose chain's current end, is
+        ``memory_id`` is removed, under the person's pinning lock. Where one cannot be
+        removed after another was, the removal stops there and says how far it got.
 
         Args:
             person_id: Whose pins.
+            memory_id: The memory, by id.
 
         Returns:
-            That person's lock.
+            How many pins showed the memory, how many were removed, and the store's
+            refusal or fault that stopped it, where one did.
+
+        Raises:
+            PersonModelStoreError: If the person-model store cannot be read, or fails
+                before any pin is removed.
+            MemoryStoreError: If the memory store cannot be read.
         """
-        return self._pinning.setdefault(person_id, asyncio.Lock())
+        async with self._pinning.setdefault(person_id, asyncio.Lock()):
+            model = await self._store.read(person_id)
+            if model is None:
+                return Unpinned(unknown_person=True)
+            standing = model.standing_pins
+            ends = await self._reached(pin.memory_id for pin in standing)
+            showing = [
+                pin
+                for pin in standing
+                if pin.memory_id == memory_id
+                or (pin.memory_id in ends and ends[pin.memory_id].id == memory_id)
+            ]
+            for removed, pin in enumerate(showing):
+                try:
+                    written = await self._store.remove_pin(person_id, pin.id)
+                except PersonModelStoreError:
+                    if not removed:
+                        raise
+                    return Unpinned(showing=len(showing), removed=removed, faulted=True)
+                if written.kind is PersonModelWriteKind.REFUSED:
+                    return Unpinned(showing=len(showing), removed=removed, refused=written)
+            return Unpinned(showing=len(showing), removed=len(showing))
 
     async def current_ends(self, memory_ids: Iterable[str]) -> dict[str, Memory]:
         """Each memory's chain's current end, where it has one (ADR-0338 §4:8).
