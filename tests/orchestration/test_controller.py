@@ -1526,3 +1526,96 @@ async def test_a_cancelled_pass_awaits_no_write_on_its_way_out() -> None:
 
     assert record.entries[-1].due is ControllerRule.INTERRUPTED
     assert sink.of(DiagnosticSource.CONTROLLER) == ()
+
+
+# --- ADR-0332: a join, and the takeover ---------------------------------------------
+
+
+def test_the_takeover_row_answers_after_the_story_links_and_before_recall_runs_again() -> None:
+    """ADR-0332 §4:5: ``takeover_undecided`` sits immediately after ``story_links_unrecorded``."""
+    facts = replace(
+        _PHASE_PASS,
+        recall_wired=True,
+        recall_decided=True,
+        takeover_undecided=True,
+        understanding_version=1,
+    )
+    rule = _phase_due(_Phases(), facts)
+    assert (rule.name, rule.makes_due) == (
+        ControllerRule.TAKEOVER_UNDECIDED,
+        ControllerStage.TAKEOVER,
+    )
+    linking = replace(facts, story_links_wired=True)
+    assert _phase_due(_Phases(), linking).name is ControllerRule.STORY_LINKS_UNRECORDED
+    decided = replace(facts, takeover_undecided=False)
+    assert _phase_due(_Phases(), decided).name is ControllerRule.UNDERSTOOD_NOT_RECALLED
+
+
+@dataclass
+class _JoiningStage:
+    """Understanding, over a pass an input joins while its first run is in flight."""
+
+    name: ControllerStage = ControllerStage.UNDERSTANDING
+    runs: int = 0
+    decides: bool = True
+
+    async def run(self, state: _Facts) -> StageResult:
+        self.runs += 1
+        state.understanding_decided = self.decides
+        if self.runs == 1:
+            # §3:9: the join lands while the stage runs, so no decision covers it.
+            state.inputs_held += 1
+            state.understanding_decided = False
+        return StageResult(StageOutcome.DONE)
+
+
+async def test_a_join_makes_understanding_due_again_once_for_each_count_of_inputs_held() -> None:
+    """ADR-0332 §3:9: ``not_understood`` answers again, its guard scoped to the count."""
+    facts = _Facts(informational_event=True, understanding_wired=True, windows_decided=True)
+    stage = _JoiningStage()
+    record = await _run(facts, stage)  # type: ignore[arg-type]  # a fake stage over the fake facts
+    assert stage.runs == 2
+    assert _shape(record) == [
+        (ControllerStage.UNDERSTANDING, ControllerRule.NOT_UNDERSTOOD, StageOutcome.DONE),
+        (ControllerStage.UNDERSTANDING, ControllerRule.NOT_UNDERSTOOD, StageOutcome.DONE),
+        (ControllerStage.END, ControllerRule.NOTHING_DUE, StageOutcome.DONE),
+    ]
+
+    # Once per count: a stage that decides nothing for the new count is not run again.
+    stuck = _JoiningStage(decides=False)
+    record = await _run(
+        _Facts(informational_event=True, understanding_wired=True, windows_decided=True),
+        stuck,  # type: ignore[arg-type]  # a fake stage over the fake facts
+    )
+    assert stuck.runs == 2
+    assert record.entries[-1].due is ControllerRule.STAGE_REPEATED
+
+
+async def test_the_takeover_runs_once_for_each_understanding_version() -> None:
+    """ADR-0332 §4:5: ADR-0280 §4:6's guard, scoped to the version, for ``takeover``."""
+    rules = (
+        *(rule for rule in ACTIVATION_RULES if rule.name is ControllerRule.TAKEOVER_UNDECIDED),
+        Rule(ControllerRule.NOTHING_DUE, lambda _: True, ControllerStage.END),
+    )
+
+    @dataclass
+    class _Takeover:
+        name: ControllerStage = ControllerStage.TAKEOVER
+        runs: int = 0
+
+        async def run(self, state: _Facts) -> StageResult:
+            self.runs += 1
+            # The first decides nothing for version 1 and a join records version 2;
+            # the second decides nothing for version 2, which the guard then ends.
+            state.understanding_version = 2
+            return StageResult(StageOutcome.DONE)
+
+    stage = _Takeover()
+    facts = _Facts(takeover_undecided=True, understanding_version=1)
+    record = await _run(facts, stage, rules=rules)  # type: ignore[arg-type]  # a fake stage over the fake facts
+    assert stage.runs == 2
+    assert _shape(record) == [
+        (ControllerStage.TAKEOVER, ControllerRule.TAKEOVER_UNDECIDED, StageOutcome.DONE),
+        (ControllerStage.TAKEOVER, ControllerRule.TAKEOVER_UNDECIDED, StageOutcome.DONE),
+        (ControllerStage.END, ControllerRule.STAGE_REPEATED, StageOutcome.DONE),
+    ]
