@@ -24,6 +24,7 @@ from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.prompts import PromptDeclaration, PromptOrigin
 from ai_assistant.memory._reconciler import MEMORY_RECONCILER_PROMPT
+from ai_assistant.models.follow_up import FOLLOW_UP_PROMPT
 from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
 from ai_assistant.orchestration.matters_pass import MATTERS_PASS_PROMPT
 from ai_assistant.orchestration.observer.prompts import (
@@ -101,8 +102,8 @@ def test_each_default_ships_in_the_wheel_beside_its_module() -> None:
         assert f"{declaration.package.replace('.', '/')}/{declaration.filename}" in shipped
 
 
-def test_the_eight_prompts_carry_their_flags_and_values() -> None:
-    """§2:1: all eight of §2's prompts, each with §2's flags and values."""
+def test_the_nine_prompts_carry_their_flags_and_values() -> None:
+    """§2:1: all nine prompts, ADR-0337 §6:1's follow-up the ninth, with their flags and values."""
     assert PROMPTS == (
         UNDERSTANDING_PROMPT,
         PLANNING_PROMPT,
@@ -112,6 +113,7 @@ def test_the_eight_prompts_carry_their_flags_and_values() -> None:
         OBSERVER_SCOUT_PROMPT,
         OBSERVER_COMMIT_PROMPT,
         MEMORY_RECONCILER_PROMPT,
+        FOLLOW_UP_PROMPT,
     )
     assert UNDERSTANDING_PROMPT.flags == frozenset({"recalled", "stories"})
     assert UNDERSTANDING_PROMPT.values == frozenset()
@@ -130,6 +132,7 @@ def test_the_eight_prompts_carry_their_flags_and_values() -> None:
         OBSERVER_SCOUT_PROMPT,
         OBSERVER_COMMIT_PROMPT,
         MEMORY_RECONCILER_PROMPT,
+        FOLLOW_UP_PROMPT,
     ):
         assert declaration.values == frozenset()
 

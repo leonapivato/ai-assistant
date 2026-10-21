@@ -69,6 +69,7 @@ from ai_assistant.models import (
     ensure_credential_available,
     ensure_vendor_available,
 )
+from ai_assistant.models.follow_up import FOLLOW_UP_PROMPT
 from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.orchestration import (
     ConnectionOperations,
@@ -197,7 +198,9 @@ _log = structlog.get_logger(__name__)
 #: module that sends it. A lane that moves a prompt into its template adds its
 #: declaration here and hands the module ``prompts[<declaration>.name]``; nothing else
 #: in this layer changes. An override is read only for a prompt listed here, so a file
-#: naming a prompt not yet moved names no prompt and refuses the start (§5:1).
+#: naming a prompt not yet moved names no prompt and refuses the start (§5:1). The
+#: follow-up's (ADR-0337 §6:1) is listed so its override is read as any prompt's; no
+#: module is handed it until the hub-side asker (§8:5) is wired.
 PROMPTS: Final[tuple[PromptDeclaration, ...]] = (
     UNDERSTANDING_PROMPT,
     PLANNING_PROMPT,
@@ -207,6 +210,7 @@ PROMPTS: Final[tuple[PromptDeclaration, ...]] = (
     OBSERVER_SCOUT_PROMPT,
     OBSERVER_COMMIT_PROMPT,
     MEMORY_RECONCILER_PROMPT,
+    FOLLOW_UP_PROMPT,
 )
 
 #: What a template file read from the override directory may not be: writable by
