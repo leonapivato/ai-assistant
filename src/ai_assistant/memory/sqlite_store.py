@@ -300,23 +300,33 @@ def _band_values(bands: Sequence[BeliefBand]) -> frozenset[str]:
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
-def _stored_row(row: Sequence[object]) -> tuple[str, int]:
-    """A ``(data, revision)`` row as read, refusing a revision that is not an integer.
+def _stored_revision(revision: object) -> int:
+    """A stored ``revision`` column as read, refusing one that is not an integer.
 
     ``records`` is not a ``STRICT`` table, so a damaged file can hold a ``TEXT`` or a
     ``REAL`` in the ``INTEGER`` revision column. ``int()`` would raise ``ValueError``
     on the first, which no transaction translates, and silently truncate the second
-    into a stamp the store never issued. Either is a corrupt record, which a read
-    reports as ``MemoryStoreError`` (ADR-0342 §2:5, ADR-0086 §6).
+    into a stamp the store never issued. Either is a corrupt record, which every
+    read reports as ``MemoryStoreError`` (ADR-0342 §2:5, ADR-0086 §6), and so does a
+    conditional write that compares against it. A ``bool`` is no stamp either, so
+    the test is on the exact type.
 
     Raises:
         MemoryStoreError: If the stored revision is not an integer.
     """
-    data, revision = row[0], row[1]
     if type(revision) is not int:
         msg = f"stored memory could not be decoded: its revision is {revision!r}"
         raise MemoryStoreError(msg)
-    return str(data), revision
+    return revision
+
+
+def _stored_row(row: Sequence[object]) -> tuple[str, int]:
+    """A ``(data, revision)`` row as read, through :func:`_stored_revision`.
+
+    Raises:
+        MemoryStoreError: If the stored revision is not an integer.
+    """
+    return str(row[0]), _stored_revision(row[1])
 
 
 def _to_micros(instant: datetime) -> int:
@@ -1663,10 +1673,11 @@ class SqliteMemoryStore:
                 f"no record is stored under that id"
             )
             raise MemoryStoreStaleError(msg)
-        if int(row[0]) != expected:
+        stored = _stored_revision(row[0])
+        if stored != expected:
             msg = (
                 f"cannot write {record_id!r} at revision {expected}: "
-                f"the stored record is at revision {int(row[0])}"
+                f"the stored record is at revision {stored}"
             )
             raise MemoryStoreStaleError(msg)
 
@@ -1757,7 +1768,7 @@ class SqliteMemoryStore:
             "AND (valid_until IS NULL OR valid_until > ?)",
             (record_id, now, now),
         ).fetchone()
-        return None if row is None else (str(row[0]), int(row[1]))
+        return None if row is None else _stored_row(row)
 
     async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
         """Return the readable records among ``record_ids``, keyed by id (ADR-0086 §6).
@@ -2211,7 +2222,11 @@ class SqliteMemoryStore:
         # at or below ``k``, which is one sufficient condition rather than the
         # mechanism — a store of any size serves one written early enough.
         results = [
-            (str(data), int(revision), 0.0 if distance is None else max(0.0, 1.0 - distance))
+            (
+                str(data),
+                _stored_revision(revision),
+                0.0 if distance is None else max(0.0, 1.0 - distance),
+            )
             for data, revision, distance in rows[:limit]
         ]
         # The ceiling bound this read only if the KNN filled its whole budget *and*
@@ -2307,7 +2322,7 @@ class SqliteMemoryStore:
             "ORDER BY occurred_at DESC, id COLLATE BINARY DESC LIMIT ?"
         )
         try:
-            return [(str(row[0]), int(row[1])) for row in self._conn.execute(sql, params)]
+            return [_stored_row(row) for row in self._conn.execute(sql, params)]
         except sqlite3.Error as exc:
             msg = "failed to inspect episodes"
             raise MemoryStoreError(msg) from exc
@@ -2401,7 +2416,7 @@ class SqliteMemoryStore:
         with self._transaction("read a channel's episodes", immediate=False) as conn:
             (total,) = conn.execute(count_sql, params).fetchone()
             rows = [
-                (int(row[0]), str(row[1]), int(row[2]))
+                (int(row[0]), str(row[1]), _stored_revision(row[2]))
                 for row in conn.execute(page_sql, page_params)
             ]
         if after is None:
@@ -2487,7 +2502,8 @@ class SqliteMemoryStore:
         params.append(limit)
         try:
             return [
-                (int(row[0]), str(row[1]), int(row[2])) for row in self._conn.execute(sql, params)
+                (int(row[0]), str(row[1]), _stored_revision(row[2]))
+                for row in self._conn.execute(sql, params)
             ]
         except sqlite3.Error as exc:
             msg = "failed to enumerate the open episodes"
@@ -2596,7 +2612,7 @@ class SqliteMemoryStore:
         except sqlite3.Error as exc:
             msg = f"failed to list beliefs: {exc}"
             raise MemoryStoreError(msg) from exc
-        return [(str(row[0]), int(row[1])) for row in rows]
+        return [_stored_row(row) for row in rows]
 
     async def walk_records(self, walk: str, *, limit: int) -> RecordChunk:
         """Read the next chunk of ``walk`` without changing anything (ADR-0114 §1).
@@ -2677,7 +2693,7 @@ class SqliteMemoryStore:
             sql += " ORDER BY rowid LIMIT ?"
             params.append(limit)
             return [
-                (int(rowid), str(data), int(revision))
+                (int(rowid), str(data), _stored_revision(revision))
                 for rowid, data, revision in conn.execute(sql, params)
             ]
 
@@ -2822,7 +2838,7 @@ class SqliteMemoryStore:
         except sqlite3.Error as exc:
             msg = f"failed to export memories: {exc}"
             raise MemoryStoreError(msg) from exc
-        return [(str(row[0]), int(row[1])) for row in rows]
+        return [_stored_row(row) for row in rows]
 
     async def purge_expired(self) -> int:
         """Physically remove expired records, returning the number removed."""

@@ -1998,26 +1998,66 @@ async def test_export_wraps_corrupt_stored_record(
         await store.export()
 
 
-@pytest.mark.parametrize("read", ["get_many", "get_history"])
+#: Every read that hands back a stored record, and the conditional write that compares
+#: against one, each with the record it needs seeded and the call that meets it.
+_REVISION_READS: dict[
+    str, tuple[Callable[[], MemoryRecord], Callable[[SqliteMemoryStore], Awaitable[object]]]
+] = {
+    "get": (lambda: _semantic("1", "fine"), lambda store: store.get("1")),
+    "get_many": (lambda: _semantic("1", "fine"), lambda store: store.get_many(["1"])),
+    "get_history": (lambda: _semantic("1", "fine"), lambda store: store.get_history(["1"])),
+    "search": (lambda: _semantic("1", "fine"), lambda store: store.search("fine")),
+    "list_beliefs": (lambda: _semantic("1", "fine"), lambda store: store.list_beliefs()),
+    "export": (lambda: _semantic("1", "fine"), lambda store: store.export()),
+    "walk_records": (
+        lambda: _semantic("1", "fine"),
+        lambda store: store.walk_records("corrupt-revision", limit=10),
+    ),
+    "episodes": (lambda: _on_channel("1"), lambda store: store.episodes()),
+    "channel_episodes": (
+        lambda: _on_channel("1"),
+        lambda store: store.channel_episodes(_CHANNEL_A, limit=10),
+    ),
+    "open_episodes": (lambda: _open_episode("1"), lambda store: store.open_episodes(limit=10)),
+    # The real case's truncation would meet this expectation and let the write land.
+    "write_if_unchanged": (
+        lambda: _semantic("1", "fine"),
+        lambda store: store.write_atomic(
+            [
+                MemoryWrite(
+                    record=_semantic("1", "rewritten"),
+                    mode=MemoryWriteMode.IF_UNCHANGED,
+                    expected_revision=1,
+                )
+            ]
+        ),
+    ),
+}
+
+
+@pytest.mark.parametrize("read", list(_REVISION_READS))
 @pytest.mark.parametrize("revision", ["broken", 1.5], ids=["text", "real"])
-async def test_a_batch_read_reports_a_corrupt_revision_as_a_store_error(
+async def test_a_read_reports_a_corrupt_revision_as_a_store_error(
     make_store: Callable[..., SqliteMemoryStore], read: str, revision: object
 ) -> None:
-    """A revision column holding no integer is a corrupt record (ADR-0342 §2:5).
+    """A revision column holding no integer is a corrupt record (ADR-0342 §2:5, #3322).
 
     ``records`` is not ``STRICT``, so a damaged file can hold text or a real in the
     ``INTEGER`` column. Text once surfaced as a bare ``ValueError`` from ``int()``,
     past the transaction's translation, and a real was truncated into a stamp the
-    store never issued; both batch reads now refuse either as ``MemoryStoreError``.
+    store never issued. Every read, and the conditional write's comparison, now
+    refuses either as ``MemoryStoreError`` that is not a stale refusal.
     """
+    seed, call = _REVISION_READS[read]
     store = make_store()
-    await store.add(_semantic("1", "fine"))
+    await store.add(seed())
     store._conn.execute("UPDATE records SET revision = ? WHERE id = ?", (revision, "1"))
+    store._conn.commit()
 
-    call = store.get_many(["1"]) if read == "get_many" else store.get_history(["1"])
+    with pytest.raises(MemoryStoreError, match="could not be decoded: its revision") as raised:
+        await call(store)
 
-    with pytest.raises(MemoryStoreError, match="revision"):
-        await call
+    assert not isinstance(raised.value, MemoryStoreStaleError)
 
 
 async def test_persists_across_reopen(make_store: Callable[..., SqliteMemoryStore]) -> None:
