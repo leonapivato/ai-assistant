@@ -1007,6 +1007,33 @@ class PlanStoreContract:
         with pytest.raises(PlanningError):
             await store.activation_effects("act-1")
 
+    async def test_the_read_by_activation_takes_strings_alone(self, store: PlanStore) -> None:
+        """A read naming anything but a string is refused, not matched against nothing."""
+        await store.claim_activation_effect(_effect("e1"), match=None)
+
+        with pytest.raises(PlanningError):
+            await store.activation_effects(["act-1", 1])  # type: ignore[list-item]  # the refusal under test
+
+    @pytest.mark.parametrize(
+        "activations",
+        [["\ud800"], ["act-1", "act-\udfff"]],
+        ids=["lone-surrogate", "after-a-valid-id"],
+    )
+    async def test_the_read_by_activation_refuses_an_id_with_no_utf8_encoding(
+        self, store: PlanStore, activations: list[str]
+    ) -> None:
+        """An id no store could hold is refused as a ``PlanningError`` (issue #3291).
+
+        A record's activation is an identifier, so the id names nothing; but a SQLite
+        store cannot bind it, and its driver's ``UnicodeEncodeError`` would otherwise
+        escape as something other than the error the Protocol raises. Every store
+        refuses it alike, whatever it holds.
+        """
+        await store.claim_activation_effect(_effect("e1"), match=None)
+
+        with pytest.raises(PlanningError, match="index"):
+            await store.activation_effects(activations)
+
     async def test_the_export_carries_the_records_and_clear_erases_them(
         self, store: PlanStore
     ) -> None:

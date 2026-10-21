@@ -128,6 +128,32 @@ def _named_activations(match: object) -> tuple[str, ...] | None:
     return match
 
 
+def _read_activations(activation_ids: Sequence[str]) -> tuple[str, ...]:
+    """Return the activation ids a read names, each once in the order given, or refuse them.
+
+    Re-implemented here rather than imported from ``ai_assistant.planning``, for the
+    reason this module's docstring gives (ADR-0306 §6:5). An id with no UTF-8 encoding
+    is refused, as the SQLite store must refuse it (issue #3291).
+
+    Raises:
+        PlanningError: If ``activation_ids`` is a bare string or holds anything but
+            strings, or names an id with no UTF-8 encoding.
+    """
+    if isinstance(activation_ids, str) or not all(isinstance(one, str) for one in activation_ids):
+        msg = "activation_effects reads a sequence of activation ids, not one string"
+        raise PlanningError(msg)
+    for index, one in enumerate(activation_ids):
+        try:
+            encodable_text(one)
+        except ValueError as exc:
+            msg = (
+                f"activation_effects reads activation ids, and the one at index {index} "
+                f"is not: {exc}"
+            )
+            raise PlanningError(msg) from exc
+    return tuple(dict.fromkeys(activation_ids))
+
+
 def _refuses_as_done(held: ActivationEffect, effect: ActivationEffect, *, deliberate: bool) -> bool:
     """Whether ``held`` refuses ``effect`` as already done (ADR-0306 §5:9, §5:11).
 
@@ -404,12 +430,10 @@ class FakePlanStore:
         """Return the named activations' effect records, in claim order (ADR-0306 §6:5).
 
         Raises:
-            PlanningError: If ``activation_ids`` is a bare string.
+            PlanningError: If ``activation_ids`` is a bare string or holds anything but
+                strings, or names an id with no UTF-8 encoding.
         """
-        if isinstance(activation_ids, str):
-            msg = "activation_effects reads a sequence of activation ids, not one string"
-            raise PlanningError(msg)
-        named = set(activation_ids)
+        named = set(_read_activations(activation_ids))
         async with self._resource.held():
             return tuple(
                 held.model_copy(deep=True)

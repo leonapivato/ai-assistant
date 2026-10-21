@@ -166,7 +166,12 @@ class InMemoryPlanStore:
     async def activation_effects(
         self, activation_ids: Sequence[str], /
     ) -> tuple[ActivationEffect, ...]:
-        """Return the named activations' effect records, in claim order (ADR-0306 §6:5)."""
+        """Return the named activations' effect records, in claim order (ADR-0306 §6:5).
+
+        Raises:
+            PlanningError: If ``activation_ids`` is a bare string or holds anything but
+                strings, or names an id with no UTF-8 encoding.
+        """
         named = set(requested_activations(activation_ids))
         return tuple(
             held.model_copy(deep=True)

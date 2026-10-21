@@ -990,7 +990,9 @@ class SqlitePlanStore:
         """Return the named activations' effect records, in claim order (ADR-0306 §6:5).
 
         Raises:
-            PlanningError: If ``activation_ids`` is a bare string, or the backend fails.
+            PlanningError: If ``activation_ids`` is a bare string or holds anything but
+                strings, names an id with no UTF-8 encoding (which SQLite could not
+                bind), or the backend fails.
         """
         named = requested_activations(activation_ids)
         if not named:

@@ -132,6 +132,15 @@ def requested_activations(activation_ids: Sequence[str]) -> tuple[str, ...]:
     A ``str`` is itself a sequence of strings, so a caller passing one activation id
     unwrapped would otherwise read the records of each of its characters.
 
+    **An id with no UTF-8 encoding is refused, not answered with nothing.** A record's
+    activation is an :data:`~ai_assistant.core.types.Identifier`, so no store can hold
+    one for such an id; but a SQLite store cannot even bind it, and the driver's
+    ``UnicodeEncodeError`` is no ``sqlite3.Error``, so it would escape the store as
+    something other than the ``PlanningError`` the Protocol raises (issue #3291). Refusing
+    it here, before any store's I/O, is what keeps every store agreeing. The message names
+    the id's place and the code point, and never echoes the id, which could not be
+    written down (:func:`~ai_assistant.core.types.encodable_text`).
+
     Args:
         activation_ids: What the caller passed.
 
@@ -139,11 +148,21 @@ def requested_activations(activation_ids: Sequence[str]) -> tuple[str, ...]:
         The ids, each once, in the order given.
 
     Raises:
-        PlanningError: If ``activation_ids`` is a string, or holds a non-string.
+        PlanningError: If ``activation_ids`` is a string, or holds a non-string, or
+            names an id with no UTF-8 encoding.
     """
     if isinstance(activation_ids, str) or not all(isinstance(one, str) for one in activation_ids):
         msg = "activation_effects reads a sequence of activation ids, not one string"
         raise PlanningError(msg)
+    for index, one in enumerate(activation_ids):
+        try:
+            encodable_text(one)
+        except ValueError as exc:
+            msg = (
+                f"activation_effects reads activation ids, and the one at index {index} "
+                f"is not: {exc}"
+            )
+            raise PlanningError(msg) from exc
     return tuple(dict.fromkeys(activation_ids))
 
 
