@@ -20387,7 +20387,9 @@ class TelegramIntakeExport(BaseModel):
 # pins and style marks that point at memories, and the observer's suggestions. Every
 # record here is the person-model store's alone, behind ``PersonModelStore``: nothing
 # here holds a memory's wording, an episode's text or a copy of another store's record,
-# only ids pointing at them (§10:3).
+# only ids pointing at them (§10:3). Every id is held **verbatim**, as
+# :data:`NonBlankEncodableText`, never as the stripping :data:`Identifier`: a pointer that
+# normalised what it was handed could point at another record than the one named.
 
 #: The one person's id: the owner's, the one person the store holds before a decision on
 #: members (ADR-0338 §2:1, #691). Stable, since the store creates the owner once, when it
@@ -20412,7 +20414,7 @@ class Person(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    id: Identifier
+    id: NonBlankEncodableText
     role: PersonRole
     created_at: UtcInstant
 
@@ -20549,9 +20551,9 @@ class PersonModelAct(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     how: PersonActHow
-    by: Identifier | None = None
+    by: NonBlankEncodableText | None = None
     approval: QuestionPart | None = None
-    episode_id: Identifier | None = None
+    episode_id: NonBlankEncodableText | None = None
 
     @model_validator(mode="after")
     def _names_what_its_how_needs(self) -> Self:
@@ -20583,13 +20585,13 @@ class ProfileChange(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    person_id: Identifier
+    person_id: NonBlankEncodableText
     field: ProfileField
     old: EncodableText | None
     new: EncodableText | None
     at: UtcInstant
     act: PersonModelAct
-    suggestion_id: Identifier | None = None
+    suggestion_id: NonBlankEncodableText | None = None
 
     @model_validator(mode="after")
     def _a_change_changes(self) -> Self:
@@ -20619,9 +20621,9 @@ class Pin(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    id: Identifier
-    person_id: Identifier
-    memory_id: Identifier
+    id: NonBlankEncodableText
+    person_id: NonBlankEncodableText
+    memory_id: NonBlankEncodableText
     pinned_at: UtcInstant
     act: PersonModelAct
     removed_at: UtcInstant | None = None
@@ -20649,9 +20651,9 @@ class StyleMark(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    id: Identifier
-    person_id: Identifier
-    memory_id: Identifier
+    id: NonBlankEncodableText
+    person_id: NonBlankEncodableText
+    memory_id: NonBlankEncodableText
     marked_at: UtcInstant
     removed_at: UtcInstant | None = None
 
@@ -20698,8 +20700,8 @@ class ProposedSuggestion(BaseModel):
     kind: SuggestionKind
     field: ProfileField | None = None
     value: EncodableText | None = None
-    memory_id: Identifier | None = None
-    episode_id: Identifier
+    memory_id: NonBlankEncodableText | None = None
+    episode_id: NonBlankEncodableText
     part: SupportPart | None = None
     origin: SupportOrigin | None = None
 
@@ -20750,8 +20752,8 @@ class PersonSuggestion(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
-    id: Identifier
-    person_id: Identifier
+    id: NonBlankEncodableText
+    person_id: NonBlankEncodableText
     proposed: ProposedSuggestion
     recorded_at: UtcInstant
     state: SuggestionState = SuggestionState.PENDING
@@ -20810,7 +20812,7 @@ class PersonModelExport(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     persons: tuple[Person, ...] = ()
-    profiles: tuple[tuple[Identifier, Profile], ...] = ()
+    profiles: tuple[tuple[NonBlankEncodableText, Profile], ...] = ()
     changes: tuple[ProfileChange, ...] = ()
     pins: tuple[Pin, ...] = ()
     style_marks: tuple[StyleMark, ...] = ()
@@ -20865,7 +20867,7 @@ class PersonModelWrite(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     kind: PersonModelWriteKind
-    record_id: Identifier | None = None
+    record_id: NonBlankEncodableText | None = None
     refusal: PersonModelRefusal | None = None
     reason: EncodableText | None = None
 

@@ -56,7 +56,7 @@ from ai_assistant.testing.memories import (
 )
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import ChannelTarget, Memory
+    from ai_assistant.core.types import ChannelTarget, Memory, PersonModel
 
 pytestmark = pytest.mark.anyio
 
@@ -472,6 +472,47 @@ async def test_suggestions_are_newest_first_up_to_the_count() -> None:
 
     assert block is not None
     assert [one.value for one in block.suggestions] == ["Bobbin", "Rob"]
+
+
+async def test_equal_instants_keep_the_order_the_store_made_them_in() -> None:
+    """§6:2, §7:3: newest first even where the clock read the same for each."""
+    people = FakePersonModelStore(now=lambda: NOW)
+    memory_store = FakeMemoryStore(now=lambda: NOW)
+    blocks = PersonBlocks(store=people, memory=memory_store, budget_chars=20, suggestions=1)
+    for record in (
+        _fact("m:a", "a" * 10),
+        _fact("m:b", "b" * 10),
+        _fact("m:older", "o" * 15),
+        _fact("m:newer", "n" * 15),
+    ):
+        await memory_store.add(record)
+    for one in ("m:a", "m:b"):
+        await people.add_pin(OWNER_PERSON_ID, one, act=PANEL)
+    pins_only = await blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    for one in ("m:a", "m:b"):
+        pin = next(pin for pin in (await _model(people)).standing_pins if pin.memory_id == one)
+        await people.remove_pin(OWNER_PERSON_ID, pin.id)
+    for one in ("m:older", "m:newer"):
+        await people.add_style_mark(OWNER_PERSON_ID, one)
+    for value in ("first", "second"):
+        await people.record_suggestion(
+            OWNER_PERSON_ID, _field(ProfileField.ADDRESS, value, SupportOrigin.USER_MESSAGE)
+        )
+
+    block = await blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+
+    assert pins_only is not None
+    assert [one.memory.id for one in pins_only.kept] == ["m:a", "m:b"]
+    assert block is not None
+    assert [one.memory.id for one in block.kept] == ["m:newer"]
+    assert block.left_out == 1
+    assert [one.value for one in block.suggestions] == ["second"]
+
+
+async def _model(people: FakePersonModelStore) -> PersonModel:
+    model = await people.read(OWNER_PERSON_ID)
+    assert model is not None
+    return model
 
 
 def test_the_composition_root_constants() -> None:
