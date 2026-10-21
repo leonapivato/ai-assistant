@@ -7048,12 +7048,19 @@ function closeMenu() {
   el("menu").open = false;
 }
 
+// A panel opened from the menu takes the keyboard to its heading once it has loaded —
+// **unless the person has put the focus somewhere since** (adversarial review of #3363,
+// round 11): a panel can be shown, and typed in, before the last of its reads lands, and
+// a transfer then would take the keyboard out of the box they are typing in.
 function fromMenu(panelId, act) {
   return async () => {
     closeMenu();
+    const before = document.activeElement;
     await act();
+    const now = document.activeElement;
+    const moved = now !== null && now !== before && now !== document.body;
     const panel = el(panelId);
-    if (!panel.hidden) {
+    if (!panel.hidden && !moved) {
       const heading = panel.firstElementChild;
       heading.tabIndex = -1;
       heading.focus();
