@@ -2883,8 +2883,9 @@ def _take_backup(plan: Plan, target: BackupTarget, ssh: Callable[[str], list[str
 def _restart_earlier_build(plan: Plan, ssh: Callable[[str], list[str]]) -> str:
     """Start the hub again on the build it was running, and say how that went.
 
-    Never raises: it runs on the way out of a failure, and the failure is the
-    thing the operator must see.
+    Raises nothing but :class:`LockLost`: it runs on the way out of a failure,
+    and the failure is the thing the operator must see. Without the lock it
+    starts nothing, since whoever holds it now may be at work on the hub.
 
     Args:
         plan: The plan.
@@ -2998,7 +2999,8 @@ def _keep_base(plan: Plan, ssh: Callable[[str], list[str]]) -> None:
 
     After the install a failure here must not fail a deploy that worked, so it
     warns, as :func:`_discard_stage` does: the next ``--delta`` deploy then finds
-    the previous base, or none, and the cost is bandwidth.
+    the previous base, or none, and the cost is bandwidth. A lost lock is not
+    such a failure: :class:`LockLost` stops the deploy here as anywhere else.
 
     Args:
         plan: The plan.
