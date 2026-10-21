@@ -110,12 +110,13 @@ through the same record.
 > the clock, which declares its origin per input (ADR-0284 §2:2) and establishes no author
 > as the user in any place of its own.
 
-> **Normative.** Each reminder is a place on the clock, so a reminder's episodes are indexed
-> by the clock and that reminder (ADR-0292 §10:5).
+> **Normative.** A clock input's place is the place its reminders speak into (§3:1), so the
+> episodes of the reminders said into one place are indexed by the clock and that place
+> (ADR-0292 §10:5).
 
-> **Normative.** A reminder coming due is one input. It holds the reminder's text, when and
-> in which place it was set, each occurrence it says with the instant that occurrence was
-> due, whether it is late (§8) or a second try (§7:5), and the reminder's rule.
+> **Normative.** A clock input says one or more occurrences, grouped under §6:4. For each it
+> holds the reminder's text, when and in which place it was set, the instant the occurrence
+> was due, whether it is late (§8) or a second try (§7:5), and the reminder's rule.
 
 > **Normative.** Its author is the person who set the reminder, written when they set it
 > (ADR-0292 §5's table), and it carries no authority (ADR-0292 §5:6).
@@ -150,7 +151,7 @@ through the same record.
 
 > **Normative.** An activation the clock starts is its reminder's place's running
 > activation for that place's current state and for a stop (ADR-0295, ADR-0332 §8). A stop
-> ends the occurrence it was saying as *stopped*, and the clock never pushes it again.
+> ends each occurrence it was saying as *stopped*, and the clock never pushes one again.
 
 > **Normative.** Planning in an activation the clock starts is offered no capability whose
 > effect is the world or that leaves the hub, and none of the reminder calls (§4:6). Its
@@ -260,8 +261,10 @@ for that occurrence, so it is not said.
 > occurrence due at or before now whose state is pending, snoozed and due, or uncertain and
 > due for its second try (§7:5), is pushed.
 
-> **Normative.** Occurrences due for one place when the clock looks are pushed together, as
-> one input and one activation.
+> **Normative.** Occurrences due when the clock looks are pushed together, as one input and
+> one activation, where they speak into the same place and their reminders have the same
+> kind, the same author and the same origin (§2:5–§2:6). Every other occurrence is pushed
+> in an input of its own, so each input has one place, one author and one origin.
 
 > **Normative.** An occurrence is marked *pushed*, naming its activation, when that
 > activation is admitted.
@@ -276,10 +279,11 @@ for that occurrence, so it is not said.
 > messages its activations claimed into its reminder's place (ADR-0306 §5:3), and from
 > nothing else, by one rule:
 >
-> - **said**, where any message is done, or any part of one was written, whatever its
->   outcome;
-> - **uncertain**, where none is said and any message's outcome is unknown, or any message
->   was claimed and given no outcome;
+> - **said**, where any message is done, or where any part of one was written, whatever its
+>   outcome, and the activation was saying that occurrence alone;
+> - **uncertain**, where none is said and any message's outcome is unknown, any message was
+>   claimed and given no outcome, or any part of one was written in an activation saying
+>   more than one occurrence;
 > - **not said**, where no message was claimed, or every message claimed is *not done* with
 >   no part written.
 
@@ -298,20 +302,23 @@ for that occurrence, so it is not said.
 > activation.
 
 > **Normative.** An occurrence set *uncertain* for the first time is pushed once more, a
-> `Settings` wait (§11:5) after it was set so, as a second try, and its message says that it
-> is sent in case the last one did not reach the person. An occurrence is tried a second
-> time once at most: after its second try it is *said*, whatever its messages' outcomes.
+> `Settings` wait (§11:5) after it was set so, as a second try, whatever pushes it has had,
+> and its message says that it is sent in case the last one did not reach the person. An
+> occurrence is tried a second time once at most: after its second try it is *said*,
+> whatever its messages' outcomes.
 
 > **Normative.** §7:5 replaces ADR-0306 §5:6's *never resolved by guessing* and §5:13's
 > *never retried, done another way* for the message of an activation the clock starts
 > alone. Every other effect keeps both clauses, and no outcome is ever reported as done.
 
 > **Normative.** An occurrence *not said* at the end of its activation is pushed again after
-> the same wait, and pushed at most a `Settings` number of times in all (§11:5). One still
-> *not said* after the last is set *undelivered* and shown so in the person's list.
+> the same wait, and pushed at most a `Settings` number of times in all (§11:5), §7:5's
+> second try not counted. One still *not said* after the last is set *undelivered* and shown
+> so in the person's list.
 
-**Why.** A split Telegram message whose first part arrived reached the person, so it is
-said. For a reminder, a duplicate costs far less than a miss, so a message that may not
+**Why.** A split Telegram message whose first part arrived reached the person, so a
+reminder said alone in it is said. Where one message said several, nothing records which
+part carried which, so each is treated as possibly missed. For a reminder, a duplicate costs far less than a miss, so a message that may not
 have arrived is tried once more and marked, and never a third time. Nothing reached the
 person where every message is *not done* with nothing written, so trying again repeats
 nothing they saw.
@@ -329,7 +336,7 @@ nothing they saw.
 > once per occurrence.
 
 > **Normative.** Several reminders missed for one place are said in one activation and one
-> message (§6:4).
+> message, where §6:4 groups them.
 
 ### 9. Recurrence
 
