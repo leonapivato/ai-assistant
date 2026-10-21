@@ -207,29 +207,30 @@ days those of the place the forecast is for.
 
 ### 5. The response, and what it mints
 
-| What the response carries | What the read yields |
-| --- | --- |
-| More than `forecast_max_response_bytes` octets | `RESPONSE_TOO_LARGE`, abandoned while reading (ADR-0260 §11:3) |
-| A status other than `200`, a `400` error object and a `429` included | `PROVIDER_REFUSED` |
-| A body that is not a UTF-8 JSON object | `PROVIDER_REFUSED` |
-| `daily` absent, or `daily.time` absent | `NO_RESULT`: the response names no day |
-| `daily` not an object, `daily.time` not an array, or a requested variable's member present but not an array or not of `daily.time`'s length | `PROVIDER_REFUSED`: the response does not say which value belongs to which day |
-| No single readable `Date` field | `UNATTESTED` (ADR-0260 §5:7), judged after the shape |
-| `utc_offset_seconds` absent, not an integer token, or of magnitude 86 400 or more | Every day declares no offset and is dropped (ADR-0260 §5:8), so `NO_RESULT` |
-| A `time` element that is not a `YYYY-MM-DD` string naming a calendar day | That position names no day and is dropped |
-| A day named more than once in `daily.time` | Every one of its positions is dropped (ADR-0260 §5:3) |
-| A requested variable whose member is absent, or whose unit `daily_units` does not give as a string | Every day is dropped, so `NO_RESULT` |
-| A day whose element for a requested variable is `null`, a boolean, a string, an array, an object or a non-JSON number token | That day is dropped (ADR-0260 §5:3) |
-| A day whose transcription exceeds `forecast_max_day_chars` | That day is dropped (ADR-0260 §5:3) |
-| Surviving days | The first `forecast_max_days` of them are minted, in `daily.time`'s order (ADR-0260 §5:1) |
+| | What the response read off the channel carries | What the read yields |
+| --- | --- | --- |
+| 1 | More than `forecast_max_response_bytes` octets | `RESPONSE_TOO_LARGE`, abandoned while reading (ADR-0260 §11:3) |
+| 2 | A status other than `200`, a `400` error object and a `429` included | `PROVIDER_REFUSED` |
+| 3 | A body that is not a UTF-8 JSON object, as `decoded_object` reads one | `PROVIDER_REFUSED` |
+| 4 | `daily` present and not an object, `daily.time` present and not an array, or a requested variable's member present and not an array or not of `daily.time`'s length | `PROVIDER_REFUSED`: the response does not say which value belongs to which day |
+| 5 | No single readable `Date` field | `UNATTESTED` (ADR-0260 §5:7) |
+| 6 | `daily` absent, or `daily.time` absent | `NO_RESULT`: the response names no day |
+| 7 | `utc_offset_seconds` absent, not an integer token, or of magnitude 86 400 or more | Every day declares no offset and is dropped (ADR-0260 §5:8) |
+| 8 | A requested variable whose member is absent, or whose unit `daily_units` does not give as a string | Every day is dropped (ADR-0260 §5:3) |
+| 9 | A `time` element that is not a `YYYY-MM-DD` string naming a calendar day | That position names no day and is dropped |
+| 10 | A day named more than once in `daily.time` | Every one of its positions is dropped (ADR-0260 §5:3) |
+| 11 | A day whose element for a requested variable is `null`, a boolean, a string, an array or an object | That day is dropped (ADR-0260 §5:3) |
+| 12 | A day whose transcription exceeds `forecast_max_day_chars` | That day is dropped (ADR-0260 §5:3) |
+| 13 | Days surviving rows 7 to 12 | The first `forecast_max_days` of them are minted, in `daily.time`'s order (ADR-0260 §5:1); none surviving is `NO_RESULT` |
 
 > **Normative.** The production forecaster maps a response onto `ForecastOutcome` as the
-> table above states, and the table is total over the outcomes it names. No refusal class is
+> table above states. Rows 1 to 6 are taken in order and the first that holds decides the
+> read; rows 7 to 12 each drop days, and row 13 mints what survives them. No refusal class is
 > added: `ForecastRefusal`'s six members say each case (ADR-0260 §4:6).
 
 > **Normative.** The body is decoded with each number token kept as the text the response
-> carried, and no number is parsed to a float or re-rendered on the way to a record
-> (ADR-0260 §5:2).
+> carried, and no transcribed value is parsed to a number or re-rendered on the way to a
+> record (ADR-0260 §5:2).
 
 > **Normative.** Day *i* is the *i*-th element of `daily.time`, and its value for a requested
 > variable is that variable's *i*-th element. No value is assigned to a day by any other
@@ -251,6 +252,11 @@ days those of the place the forecast is for.
 
 > **Normative.** `reported_at` is the instant the response's `Date` field declares, read by
 > `declared_instant`, and there is no substitute (ADR-0260 §5:7).
+
+**The order is the reference adapter's.** The status and the shape are judged first, then the
+declared instant, then the days, which is how `ForecastEgress._read` orders them today. A
+transport failure, an expired deadline and a pre-transmit refusal end the read before any row
+applies, as they do now.
 
 **Why the extent is a fixed 24 hours, across a DST change too.** Open-Meteo aggregates each
 day over "daily boundaries" set by the one offset, and ignores DST changes inside the range.
@@ -315,12 +321,11 @@ one box. One pull is one request (ADR-0260 §2:3), against a limit of ten thousa
 > its origin. Its existing refusals are the whole of the validation.
 
 > **Normative.** A deployment on the free API states its cost as `forecast_cost_per_call`
-> zero in the currency `forecast_cost_currency` names, which ADR-0260 §11:5 prescribes for a
+> zero in the currency `forecast_cost_currency` names, as ADR-0260 §11:5 describes for a
 > free provider. Unset, the unknown-cost floor binds unchanged.
 
 > **Normative.** The connection's identity is the name the owner types in the keyless act,
-> recorded verbatim (ADR-0325 §4:2). No client, configuration, default or lane supplies or
-> suggests it.
+> recorded verbatim (ADR-0325 §4:2). No client, configuration, default or lane supplies it.
 
 > **Normative.** The keyless act reaches the owner through a CLI command of its own, separate
 > from `assistant connect`, built under ADR-0325 §4:1–§4:5 in the lane §8:1 names, and served
