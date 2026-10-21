@@ -658,6 +658,18 @@ class FollowUpAsker:
                     await self._ask(item)
                 else:
                     await self._write(item.call, item.target)
+            except asyncio.CancelledError as exc:
+                if _cancelled():
+                    raise  # the asker is closing: nothing more is sent (§8:16)
+                _log.warning(
+                    FOLLOW_UP_NOT_ASKED,
+                    activation_id=item.target.activation_id
+                    if isinstance(item, _Copy)
+                    else item.given.activation_id,
+                    source=DiagnosticSource.FOLLOW_UP.value,
+                    reason="fault",
+                    error_class=type(exc).__name__,
+                )
             except Exception as exc:  # one follow-up's fault never stops the next
                 _log.warning(
                     FOLLOW_UP_NOT_ASKED,
@@ -674,6 +686,11 @@ class FollowUpAsker:
         self._budget.sent.append(self._clock())
         try:
             answer = await self._send(call)
+        except asyncio.CancelledError as exc:
+            if _cancelled():
+                raise  # the asker is closing: the follow-up is not sent (§8:16)
+            # A cancellation the model raised of its own, not the asker's: a failure.
+            call.outcome = {"failure": failure_body(exc)}
         except Exception as exc:  # recorded, never retried (§8:15)
             call.outcome = {"failure": failure_body(exc)}
         else:
@@ -691,10 +708,10 @@ class FollowUpAsker:
         returned = call.returned.model_dump(mode="json")["body"]
         messages = [Message.model_validate(one) for one in given["messages"]]
         once = _Once(await self._model(call.model))
-        async with asyncio.timeout(self._timeout):
+        async with asyncio.timeout(self._timeout) as deadline:
             if call.given.source is DiagnosticSource.PLANNING:
                 tools = [OfferedTool.model_validate(one) for one in given["tools"]]
-                return await follow_up_round(
+                answer = await follow_up_round(
                     messages,
                     tools,
                     returned["response"],
@@ -702,14 +719,20 @@ class FollowUpAsker:
                     model=once,
                     thinking=self._thinking,
                 )
-            reply = await PydanticAIProvider(once).complete(
-                [
-                    *messages,
-                    Message(role=Role.ASSISTANT, content=returned["reply"]),
-                    Message(role=Role.USER, content=self._question),
-                ]
-            )
-        return reply.content
+            else:
+                reply = await PydanticAIProvider(once).complete(
+                    [
+                        *messages,
+                        Message(role=Role.ASSISTANT, content=returned["reply"]),
+                        Message(role=Role.USER, content=self._question),
+                    ]
+                )
+                answer = reply.content
+        if deadline.expired():
+            # A model that swallowed the deadline's cancellation and answered anyway
+            # answered past it: the follow-up failed, whatever came back.
+            raise TimeoutError
+        return answer
 
     async def _model(self, spec: str) -> models.Model:
         """The model ``spec`` names: built at its first follow-up, then kept until closed.
@@ -762,6 +785,12 @@ class FollowUpAsker:
                 source=DiagnosticSource.FOLLOW_UP.value,
                 error_class=fault_class_of(exc),
             )
+
+
+def _cancelled() -> bool:
+    """Whether the running task itself is being cancelled, not merely handed a cancellation."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
 
 
 def _call_key(entry: DiagnosticEntry) -> _CallKey | None:
