@@ -41,7 +41,7 @@ from ai_assistant.core.types import (
     SupportDirection,
     SupportOrigin,
 )
-from ai_assistant.memory import SqliteMemoryStore
+from ai_assistant.memory import SqliteMemoryStore, sqlite_store
 from ai_assistant.memory._episode_format import EPISODE_RECORD_FORMAT, MEMORY_RECORD_FORMAT
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.testing import FakeTraceSink
@@ -362,3 +362,77 @@ def test_an_upgrade_that_cannot_finish_leaves_the_file_as_it_found_it(legacy: Pa
 
     assert legacy.read_bytes() == before
     assert _label(legacy) == EPISODE_RECORD_FORMAT
+
+
+#: A batch small enough that the fixture's rows span three (#3188 item 1): the upgrade
+#: reads the file in batches of ``_BACKFILL_CHUNK`` rows, which at its own size holds the
+#: whole fixture in its first.
+_SMALL_BATCH = 4
+
+
+@pytest.fixture
+def small_batches(monkeypatch: pytest.MonkeyPatch) -> int:
+    """Lower the upgrade's batch size, so the fixture spans more than two batches."""
+    rows = len(_raw_rows(_FIXTURE))
+    assert rows > 2 * _SMALL_BATCH, "the fixture no longer spans three batches"
+    monkeypatch.setattr(sqlite_store, "_BACKFILL_CHUNK", _SMALL_BATCH)
+    return _SMALL_BATCH
+
+
+def _rowid(path: Path, record_id: str) -> int:
+    with sqlite3.connect(path) as conn:
+        (rowid,) = conn.execute("SELECT rowid FROM records WHERE id = ?", (record_id,)).fetchone()
+    return int(rowid)
+
+
+async def test_the_upgrade_continues_past_its_first_batch(legacy: Path, small_batches: int) -> None:
+    """Every batch is upgraded, not the first alone, and the label advances after the last.
+
+    The fixture's legacy records run through all three batches, the last of them in the
+    last, so an upgrade that stopped after one batch, or skipped a row between two,
+    would leave a legacy record unconverted under the advanced label.
+    """
+    assert _rowid(legacy, "procedural-bare") > 2 * small_batches
+
+    _open(legacy).close()
+
+    after = _raw_rows(legacy)
+    assert {record_id for record_id, (kind, _, _) in after.items() if kind == "memory"} == set(
+        _WORDINGS
+    )
+    with sqlite3.connect(legacy) as conn:
+        unbanded = [row for (row,) in conn.execute("SELECT id FROM records WHERE band IS NULL")]
+    assert unbanded == []
+    assert _label(legacy) == MEMORY_RECORD_FORMAT
+    exported = await _upgraded(legacy)
+    assert {record_id: exported[record_id].content for record_id in _WORDINGS} == _WORDINGS
+
+
+def test_a_failure_in_a_later_batch_rolls_back_the_batches_before_it(
+    legacy: Path, small_batches: int
+) -> None:
+    """ADR-0326 §4:3, across batches: a later batch's failure leaves the file as it was.
+
+    The undecodable record is in the last batch, after two whole batches have been
+    upgraded, so an upgrade that committed batch by batch would keep them, and one that
+    read the first batch alone would never reach the record and advance the label over
+    it.
+    """
+    assert _rowid(legacy, "procedural-bare") > 2 * small_batches
+    with sqlite3.connect(legacy) as conn:
+        conn.execute(
+            "UPDATE records SET data = ? WHERE id = 'procedural-bare'", ('{"kind": "procedural"}',)
+        )
+    before = legacy.read_bytes()
+
+    with pytest.raises(MemoryStoreError, match="ADR-0328"):
+        _open(legacy)
+
+    assert legacy.read_bytes() == before
+    assert _label(legacy) == EPISODE_RECORD_FORMAT
+    assert {kind for kind, _, _ in _raw_rows(legacy).values()} == {
+        "episodic",
+        "semantic",
+        "preference",
+        "procedural",
+    }
