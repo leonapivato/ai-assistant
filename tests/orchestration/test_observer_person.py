@@ -759,12 +759,13 @@ class _FailingMarksOnce:
         return getattr(self._store, name)
 
 
-async def test_a_mark_the_store_failed_is_made_on_the_retry_after_a_restart() -> None:
+async def test_a_mark_the_store_failed_is_made_when_the_retry_adds_to_the_memory() -> None:
     """§9:4-§9:5, ADR-0329 §16:4: the attempt fails, and the episode stays to be retried.
 
-    The memory the first attempt created is on the finding's ``written``, so the retry,
-    by an observer built afresh over the same stores, marks it, though its model now
-    keeps nothing new: style and pin are judged of the claim, whatever the action.
+    The memory the first attempt created is found again by the retry's search, by an
+    observer built afresh over the same stores, and the commit step adds to it, as its
+    instruction has it for a memory that already states the claim: that memory, as the
+    step judged it, is marked.
     """
     harness = Harness()
     store = _store(harness)
@@ -782,7 +783,17 @@ async def test_a_mark_the_store_failed_is_made_on_the_retry_after_a_restart() ->
     (created,) = [one for one in await harness.memory.export() if isinstance(one, Memory)]
     harness.clock.advance(timedelta(minutes=2))  # past the first backoff
     restarted = harness.observer(
-        commit=FakeModelProvider.scripted(reply(action="nothing", style=True, pin=True)),
+        commit=FakeModelProvider.scripted(
+            reply(
+                action="add",
+                memory="M1",
+                supports=[
+                    {"part": "P1", "direction": "for", "backs_as_worded": True, "how_sure": "sure"}
+                ],
+                style=True,
+                pin=True,
+            )
+        ),
         person_model=store,
     )
 

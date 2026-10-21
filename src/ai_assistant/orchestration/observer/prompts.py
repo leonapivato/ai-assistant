@@ -74,8 +74,8 @@ OBSERVER_SCOUT_PROMPT: Final = PromptDeclaration(
 #: confirmation (§10:1-§10:2). That every value of the message is quoted source data, and
 #: who said something is stated by the keys around it, is ADR-0098 §2's. Under
 #: :data:`PERSON_FLAG`, also: that ``person`` holds the person's own current choices
-#: (ADR-0338 §3:1, §3:9); whatever the action, whether the claim, and so any memory kept
-#: from it, states how the person wants to be spoken to, a request about the present
+#: (ADR-0338 §3:1, §3:9); whether the memory the action creates or adds supports to, as
+#: worded, states how the person wants to be spoken to, a request about the present
 #: exchange alone not being one (§5:4, §9:4); and whether it matters in every
 #: conversation, which only suggests a pin (§9:5).
 OBSERVER_COMMIT_PROMPT: Final = PromptDeclaration(

@@ -722,14 +722,16 @@ class Observer:
         if earlier != finding.written:
             _set(attempt, _updated(finding, written=earlier))
         decided = await self._decision(finding_id, reading, attempt, earlier, person)
+        if person is not None and decided.person is not None:
+            # On the memory this commit kept, before the outcome is recorded: a store that
+            # fails fails the attempt, and the retry decides the finding again, the
+            # memory already kept shown to it as one stating the claim, to add to.
+            await self._marked(
+                person, decided.person, decided.outcome, episode=attempt.record.episode
+            )
         outcome = decided.outcome
         if earlier:
             outcome = _with_writes(outcome, earlier)
-        if person is not None and decided.person is not None:
-            # On every memory this finding wrote, an earlier attempt's included, before
-            # the outcome is recorded: a store that fails fails the attempt, and the
-            # retry, judging the same claim, marks the memories ``written`` holds.
-            await self._marked(person, decided.person, outcome, episode=attempt.record.episode)
         _log.info(
             "observer_commit",
             stage="commit",
@@ -841,13 +843,11 @@ class Observer:
     ) -> None:
         """The style mark and the pin suggestion a commit asked for (ADR-0338 §9:4-§9:5).
 
-        Each on every memory the finding created or added supports to, as its outcome
-        names them, an earlier attempt's writes included, never one it only retired,
-        questioned or recorded a use of. The step judges both of the claim, whatever its
-        action, so a retry that finds its memory already written judges them again. The
-        store keeps a memory already marked, or whose mark the person removed, unmarked
-        again, and records no pin suggestion for a memory pinned or one equal to a
-        pending or dismissed one.
+        Each on the memory this commit created or added supports to, as its outcome names
+        it, never one it only retired, questioned or recorded a use of: the step judged
+        both of that memory as worded. The store keeps a memory already marked, or whose
+        mark the person removed, unmarked again, and records no pin suggestion for a
+        memory pinned or one equal to a pending or dismissed one.
 
         Raises:
             PersonModelStoreError: If the store cannot be written: the attempt fails, and
