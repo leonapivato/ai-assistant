@@ -14,12 +14,19 @@ the gateway in ``ai_assistant.interfaces.gateway.exits``):
    author knows a restart can get past it is raised as :class:`ClearableRefusalError`
    — a ``ConfigurationError`` still, so every caller catching the family is
    unchanged — and is a ``1``: an overlay agent that would not answer at start, which
-   is also an agent that timed out or has not come up yet at boot.
+   is also an agent that timed out or has not come up yet at boot. **The mark lowers
+   only the refusal's own verdict**: the chain beneath it is still read, so a
+   permission fault under it stays down, as §5 requires of one "wherever in startup
+   it surfaces".
 2. **What it retypes.** A ``ConfigurationError`` raised *from* an ``OSError`` says
    "the operating system refused while this was being read", and whether that clears
    is the errno's to say, not the refusal's. A path that names nothing, a
    permission, an address this machine does not hold: ``78``. Descriptors
-   exhausted, an I/O error, anything else: ``1``.
+   exhausted, an I/O error, any other errno: ``1``. An ``OSError`` with **no**
+   errno — a shared library the loader cannot open — is no kernel verdict at all,
+   so the refusal's own ``78`` stands. That is narrower than the gateway's reading,
+   on purpose: the hub's start wraps an unloadable on-device runtime this way, and
+   reinstalling it is a human act.
 """
 
 from __future__ import annotations
@@ -120,8 +127,12 @@ def _retypes_a_fault_that_clears(refusal: ConfigurationError) -> bool:
     ``ssl.SSLError`` is an ``OSError`` whose ``errno`` is the TLS library's own code
     rather than the kernel's, and it says the material is unusable, so it is the
     refusal's verdict that stands, not an errno. The hub reads no TLS material at
-    start today; the exception is kept so this reads a refusal exactly as the
+    start today; the exception is kept so this reads a TLS refusal as the
     gateway's ``exit_code`` does.
+
+    An ``OSError`` with no errno is not a kernel verdict either — ``ctypes`` and the
+    import machinery raise one for a shared library that will not load, which no
+    restart repairs — so it too leaves the refusal's verdict standing.
 
     Args:
         refusal: A refusal at start.
@@ -132,7 +143,7 @@ def _retypes_a_fault_that_clears(refusal: ConfigurationError) -> bool:
     cause = refusal.__cause__
     if not isinstance(cause, OSError) or isinstance(cause, ssl.SSLError):
         return False
-    return cause.errno not in _CONFIGURED_ERRNOS
+    return cause.errno is not None and cause.errno not in _CONFIGURED_ERRNOS
 
 
 def _causes(exc: BaseException) -> list[BaseException]:
@@ -177,8 +188,11 @@ def classify(exc: BaseException) -> tuple[int, str]:
       cannot serve correctly (ADR-0083 §6). It carries its own operator action,
       which is why it is checked first and why nothing here has to invent one.
     * :class:`ClearableRefusalError` — a refusal its author knows a restart can get
-      past, such as an overlay agent that would not answer at start (#3171). It is
-      :data:`EXIT_RESTART`.
+      past, such as an overlay agent that would not answer at start (#3171). It
+      decides nothing itself: the walk goes on beneath it, and where nothing below
+      stays down it ends at :data:`EXIT_RESTART`. So an agent socket that refused
+      with ``EACCES`` is still a ``78``, while one that is absent or timed out is a
+      ``1``.
     * :class:`~ai_assistant.core.errors.ConfigurationError` — every startup
       misconfiguration already arrives as this class: settings that will not load,
       a model spec naming an uninstalled vendor, a vendor with no credential
@@ -209,7 +223,7 @@ def classify(exc: BaseException) -> tuple[int, str]:
         if isinstance(cause, IncompatibleStateError):
             return EXIT_DEPLOYMENT, cause.operator_action
         if isinstance(cause, ClearableRefusalError):
-            return EXIT_RESTART, ""
+            continue
         if isinstance(cause, ConfigurationError):
             if _retypes_a_fault_that_clears(cause):
                 return EXIT_RESTART, ""
