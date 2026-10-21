@@ -91,9 +91,12 @@ with a wheel already on the box, the **base**, and ``rsync`` sends the differenc
 onto it, at ``--bwlimit`` KB/s. Everything after the copy is unchanged. The staged
 file is digested against the local wheel as before, so a base that has nothing in
 common with the new build costs bandwidth and never correctness. After a
-successful install the deploy **keeps** the wheel it installed at ``--delta-keep``,
-one file in the login user's home, replaced each time, which is where the next
-``--delta`` deploy finds its base. The very first ``--delta`` deploy has no kept
+successful install the deploy **keeps** the wheel it installed at
+``~/deploy-hub/base.whl``, one file in the login user's home, replaced each time,
+which is where the next ``--delta`` deploy finds its base. That path is fixed, not
+a parameter: the keep is a write as the login user, root on the box that exists,
+and a directory chain anyone else could rename or create names in would let them
+point that write elsewhere. The very first ``--delta`` deploy has no kept
 base, so ``--delta-base`` names a wheel already on the box. Asked for and not
 possible, the delta is **refused, never replaced by a whole-file copy**: no
 ``rsync`` here or on the box, a base that is absent, empty or unreadable, or nowhere
@@ -199,8 +202,11 @@ DEFAULT_STAGE_DIR = "/tmp"  # noqa: S108  # world-readable by design: root write
 _STAGE_PREFIX = "deploy-hub-"
 #: Where a ``--delta`` deploy keeps the wheel it installed, as the next one's base.
 #: In the **login** user's home, because that user stages and keeps it: the
-#: path survives a reboot, as ``/tmp`` need not, and needs no setup to write.
-DEFAULT_DELTA_KEEP = "~/deploy-hub/base.whl"
+#: path survives a reboot, as ``/tmp`` need not, and needs no setup to write. Not
+#: a parameter, because the keep writes there as that user — root, by default —
+#: and only a home's own chain of directories is one no other user can replace
+#: under the write without a parameter's every ancestor being checked.
+DELTA_KEEP = "~/deploy-hub/base.whl"
 #: ``rsync --bwlimit`` for ``--delta``, in KB/s: a rate that has left a 0.5 Mbps
 #: uplink usable while a wheel crossed it. ``0`` is rsync's "no limit".
 DEFAULT_BWLIMIT = 40
@@ -1062,9 +1068,9 @@ class Plan:
         """Where a ``--delta`` deploy keeps the wheel it installed, for the next one.
 
         Returns:
-            The path on the box, in the login user's terms.
+            The path on the box, in the login user's terms (:data:`DELTA_KEEP`).
         """
-        return str(self.args.delta_keep or DEFAULT_DELTA_KEEP)
+        return DELTA_KEEP
 
     @property
     def delta_base(self) -> str:
@@ -2543,23 +2549,23 @@ def _rule_on_delta(plan: Plan, ssh: Callable[[str], list[str]]) -> None:
         )
     if keep == "not-a-file":
         raise DeployError(
-            f"--delta-keep {plan.delta_keep} is not a file on the box: something else, a\n"
-            "directory or a link to one, is already there, and the kept wheel would go\n"
-            f"inside it. Pass --delta-keep with a file's path. Or: {_DELTA_INSTEAD}\n{_UNTOUCHED}"
+            f"{plan.delta_keep}, where --delta keeps the next base, is not a file on the box:\n"
+            "something else, a directory or a link to one, is there, and the kept wheel\n"
+            f"would go inside it. Move it aside. Or: {_DELTA_INSTEAD}\n{_UNTOUCHED}"
         )
     if keep == "shared":
         raise DeployError(
             f"the directory of {plan.delta_keep} on the box is not {login}'s alone: it is\n"
             "someone else's, or a group or others can write it, and this deploy writes a\n"
             f"file there as {login}, which anyone who can create names there could redirect.\n"
-            f"Make it {login}'s with no group or other write (chmod go-w), or pass\n"
-            f"--delta-keep elsewhere. Or: {_DELTA_INSTEAD}\n{_UNTOUCHED}"
+            f"Make it {login}'s with no group or other write (chmod go-w).\n"
+            f"Or: {_DELTA_INSTEAD}\n{_UNTOUCHED}"
         )
     if keep != "writable":
         raise DeployError(
             f"{login} cannot write the directory of {plan.delta_keep} on the box, so this\n"
-            "deploy could not keep the wheel it installs as the next deploy's base. Pass\n"
-            f"--delta-keep with a path it can write. Or: {_DELTA_INSTEAD}\n{_UNTOUCHED}"
+            "deploy could not keep the wheel it installs as the next deploy's base.\n"
+            f"Or: {_DELTA_INSTEAD}\n{_UNTOUCHED}"
         )
     print(
         f"delta: sending the difference against {plan.delta_base} at {plan.bwlimit} KB/s\n"
@@ -2856,19 +2862,17 @@ def _check_delta_options(args: argparse.Namespace) -> None:
         args: The parsed arguments.
 
     Raises:
-        DeployError: If ``--delta-base``, ``--delta-keep`` or ``--bwlimit`` is given
-            without ``--delta``, which would otherwise send the whole wheel while
-            looking like a delta was asked for; if ``--delta-keep`` names a
-            directory rather than a file, or ``--delta-base`` is empty; or if
-            ``--delta`` has a relative
-            ``--stage-dir``, which rsync would not expand (:data:`_RSYNC_OPTIONS`).
+        DeployError: If ``--delta-base`` or ``--bwlimit`` is given without
+            ``--delta``, which would otherwise send the whole wheel while looking
+            like a delta was asked for; if ``--delta-base`` is empty; or if
+            ``--delta`` has a relative ``--stage-dir``, which rsync would not
+            expand (:data:`_RSYNC_OPTIONS`).
     """
     if not args.delta:
         given = [
             flag
             for flag, value in (
                 ("--delta-base", args.delta_base),
-                ("--delta-keep", args.delta_keep),
                 ("--bwlimit", args.bwlimit),
             )
             if value is not None
@@ -2879,11 +2883,6 @@ def _check_delta_options(args: argparse.Namespace) -> None:
                 "goes whole by scp. Pass --delta, or leave it out."
             )
         return
-    if args.delta_keep is not None and (not args.delta_keep or args.delta_keep.endswith("/")):
-        raise DeployError(
-            f"--delta-keep {args.delta_keep!r} names a directory; it must name the file\n"
-            "the installed wheel is kept as."
-        )
     if args.delta_base == "":
         raise DeployError("--delta-base is empty; name the wheel on the box, or leave it out.")
     if not PurePosixPath(args.stage_dir).is_absolute():
@@ -2979,14 +2978,8 @@ def _parser() -> argparse.ArgumentParser:
         "--delta-base",
         help=(
             "with --delta: the wheel on the box to send the difference against, for a"
-            " box with none kept yet (default: the one --delta-keep names)"
-        ),
-    )
-    parser.add_argument(
-        "--delta-keep",
-        help=(
-            "with --delta: where the installed wheel is kept, replacing the last one, as"
-            f" the next deploy's base; the login user's path (default: {DEFAULT_DELTA_KEEP})"
+            " box with none kept yet (default: the one the last --delta deploy kept, in"
+            f" the login user's {DELTA_KEEP})"
         ),
     )
     parser.add_argument(
