@@ -299,6 +299,25 @@ def _band_values(bands: Sequence[BeliefBand]) -> frozenset[str]:
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
+def _stored_row(row: Sequence[object]) -> tuple[str, int]:
+    """A ``(data, revision)`` row as read, refusing a revision that is not an integer.
+
+    ``records`` is not a ``STRICT`` table, so a damaged file can hold a ``TEXT`` or a
+    ``REAL`` in the ``INTEGER`` revision column. ``int()`` would raise ``ValueError``
+    on the first, which no transaction translates, and silently truncate the second
+    into a stamp the store never issued. Either is a corrupt record, which a read
+    reports as ``MemoryStoreError`` (ADR-0342 §2:5, ADR-0086 §6).
+
+    Raises:
+        MemoryStoreError: If the stored revision is not an integer.
+    """
+    data, revision = row[0], row[1]
+    if type(revision) is not int:
+        msg = f"stored memory could not be decoded: its revision is {revision!r}"
+        raise MemoryStoreError(msg)
+    return str(data), revision
+
+
 def _to_micros(instant: datetime) -> int:
     """Exact integer microsecond UTC epoch for an aware datetime (issue #289).
 
@@ -1794,9 +1813,7 @@ class SqliteMemoryStore:
             for start in range(0, len(record_ids), chunk):
                 ids = record_ids[start : start + chunk]
                 sql = base + f" AND id IN ({', '.join('?' * len(ids))})"
-                rows.extend(
-                    (str(row[0]), int(row[1])) for row in conn.execute(sql, [*params, *ids])
-                )
+                rows.extend(_stored_row(row) for row in conn.execute(sql, [*params, *ids]))
         return rows
 
     async def get_history(self, record_ids: Sequence[str]) -> Mapping[str, Memory]:
