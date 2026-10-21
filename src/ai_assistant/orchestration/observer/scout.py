@@ -25,12 +25,20 @@ is retried (§16:4). A key the reply's shape does not name is dropped rather tha
 the reply: every field it does name is validated as before, so a reply missing a required
 field, or carrying a value of the wrong kind, still fails whole. A model's stray key, such
 as a ``"command": null`` beside a finding's own, is no reason to discard its findings.
+
+A reply with prose around its object is read for that object, not refused for the prose:
+the whole reply first, then a fenced block, then the last object standing on its own in
+the text. Each is validated exactly as a bare reply is. An object found in the text is
+taken only where it names a field of the shape, so a stray ``{}`` or an unrelated object
+in the prose is never read as an empty answer; and an object is never looked inside, so a
+nested piece of a malformed answer is never read as the answer.
 """
 
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+import re
+from typing import TYPE_CHECKING, Final
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -61,18 +69,28 @@ class ScoutReply(BaseModel):
     findings: tuple[_ProposedFinding, ...] = ()
 
 
+#: A fenced block anywhere in a reply: its tag is group 1, its body group 2. Every fence is
+#: paired, whatever its tag, so one block's closing fence never opens the next.
+_FENCED: Final = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
+
+
 def parsed[T: BaseModel](content: str, shape: type[T]) -> T | None:
     """A reply as one object of ``shape``, or ``None``: never a partial one.
 
-    One enclosing Markdown code fence is removed first, as the understanding stage and
-    the tidy-up remove it: a deterministic normalization of a wrapper, not a repair.
+    The whole reply is read first, with one enclosing Markdown code fence removed, as the
+    understanding stage and the tidy-up remove it: a deterministic normalization of a
+    wrapper, not a repair. Where the whole reply is not that object, because the model
+    wrote prose around it, the object is looked for in the text: a fenced block, the last
+    that validates; else an object standing on its own in the text, the last that
+    validates. An object found in the text counts only where it names a field of
+    ``shape``, and a nested object is never a candidate, only one standing at the top.
 
     Args:
         content: The model's reply.
         shape: The model the reply must validate as.
 
     Returns:
-        The object, or ``None`` where the reply does not validate.
+        The object, or ``None`` where neither the reply nor any object in it validates.
     """
     body = content.strip()
     if body.startswith("```") and body.endswith("```") and len(body) >= 6:  # noqa: PLR2004 — two fences
@@ -80,10 +98,96 @@ def parsed[T: BaseModel](content: str, shape: type[T]) -> T | None:
         newline = body.find("\n")
         if newline != -1 and body[:newline].strip() in {"", "json", "JSON"}:
             body = body[newline + 1 :]
+    whole = _validated(body, shape)
+    if whole is not None:
+        return whole
+    fenced = [
+        match.group(2)
+        for match in _FENCED.finditer(content)
+        if match.group(1).strip() in {"", "json", "JSON"}
+    ]
+    for candidate in (*reversed(fenced), *reversed(_top_level_objects(content))):
+        if not _names_a_field(candidate, shape):
+            continue
+        found = _validated(candidate, shape)
+        if found is not None:
+            return found
+    return None
+
+
+def _validated[T: BaseModel](text: str, shape: type[T]) -> T | None:
+    """``text`` validated as ``shape``, or ``None``: the one validation every reading uses."""
     try:
-        return shape.model_validate_json(body)
+        return shape.model_validate_json(text)
     except ValidationError, ValueError, RecursionError:
         return None
+
+
+def _names_a_field(text: str, shape: type[BaseModel]) -> bool:
+    """Whether ``text`` is a JSON object carrying a key ``shape`` names."""
+    try:
+        value = json.loads(text)
+    except ValueError, RecursionError:
+        return False
+    if not isinstance(value, dict):
+        return False
+    named = set(shape.model_fields)
+    named.update(f.alias for f in shape.model_fields.values() if f.alias is not None)
+    return not named.isdisjoint(value)
+
+
+def _top_level_objects(text: str) -> list[str]:
+    """The JSON objects standing on their own in ``text``, in order; none nested.
+
+    Each ``{`` outside an object found so far starts a candidate. One that decodes is
+    taken whole and the scan resumes after it; one that does not is skipped as far as its
+    braces balance, so nothing inside a malformed object is ever a candidate. A ``{``
+    whose braces never balance ends the scan, since what follows may be inside it.
+    """
+    decoder = json.JSONDecoder()
+    found: list[str] = []
+    start = text.find("{")
+    while start != -1:
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except ValueError, RecursionError:
+            balanced = _balanced_end(text, start)
+            if balanced is None:
+                break
+            end = balanced
+        else:
+            if isinstance(value, dict):
+                found.append(text[start:end])
+        start = text.find("{", end)
+    return found
+
+
+def _balanced_end(text: str, start: int) -> int | None:
+    """The index just past the ``}`` closing the ``{`` at ``start``, or ``None``.
+
+    Braces inside a JSON string, with its backslash escapes, are not counted.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return None
 
 
 def scout_messages(reading: Reading, instruction: RenderedPrompt) -> list[Message]:
