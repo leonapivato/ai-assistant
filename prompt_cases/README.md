@@ -37,6 +37,27 @@ tools = [ ... ]                # a planning case's offered tools, and only a pla
 # or: file = "<case>.json", holding {"messages": [...], "tools": [...]}
 ```
 
+A case of the prompt `follow_up` (§3:5) asks the follow-up question about a call that has
+completed, so its input is that call whole, and its instruction is rendered as the request's
+last user message, as the hub sends it (§6:3). It declares no `[flags]`, since `follow_up`
+declares none, and its property is `read`. Its input, best held in a JSON file beside it:
+
+```json
+{
+  "followed": {"prompt": "understanding", "flags": {"recalled": false, "stories": false}},
+  "messages": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}],
+  "response": "<the followed call's reply as text>"
+}
+```
+
+`followed` names the followed call's prompt and, only as a record of where the case came
+from, its flags. `messages` is its request whole, with its one system message. For a
+planning round, `tools` holds the tools it offered, and `response` its whole response as
+pydantic-ai serialises it, the form planning's returned entry keeps it in: the run sends it
+back whole, and closes each call it proposed with a result saying it was not run (§6:4).
+An invented round's response cannot carry thinking a provider accepts, since a provider
+refuses a signature it did not issue, so the seed case follows a completion.
+
 A `read` property names, in `read`, what a person reading the reply looks for:
 
 ```toml
@@ -71,6 +92,10 @@ uv run python scripts/prompt_replay.py suite --model <provider:model> --count
 uv run python scripts/prompt_replay.py suite --model <provider:model> \
     --candidate <draft>/planning.txt --results <results-dir>
 ```
+
+`--follow-up` asks the follow-up after every sample's response, of every case but a
+`follow_up` case, with the package's default or `--follow-up <draft>/follow_up.txt`, and
+writes its answer into that sample's line (§7:1); each follow-up counts against the bound.
 
 The run prints, for each case and version, how many samples passed the case's code check of
 how many were sent, or that the case is to be read, and writes each reply to

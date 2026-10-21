@@ -254,10 +254,12 @@ class Model:
     users: list[str] = field(default_factory=list)
     tools: list[list[str]] = field(default_factory=list)
     during: list[Any] = field(default_factory=list)
+    requests: list[list[ModelMessage]] = field(default_factory=list)
 
     def answer(self, messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         for hook in self.during:
             hook()
+        self.requests.append(list(messages))
         self.tools.append([one.name for one in info.function_tools])
         for message in messages:
             if isinstance(message, ModelRequest):
