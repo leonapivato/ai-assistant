@@ -856,10 +856,19 @@ def _command(length: int, *, offset: int = 0, kind: str = "bot_command") -> dict
         ("/stop@line_bot", [_command(14)], "/stop@line_bot"),
         # Bold over the whole text beside the command changes nothing.
         ("/stop", [_command(5, kind="bold"), _command(5)], "/stop"),
+        # Nor does a type of the documented shape this line has never heard of.
+        ("/stop", [_command(5, kind="someday_new"), _command(5)], "/stop"),
         # UTF-16: the emoji is two code units, and the command spans it whole.
         ("/s\U0001f600p x", [_command(5)], "/s\U0001f600p"),
     ],
-    ids=["bare", "with-words", "addressed", "beside-another-entity", "utf-16-units"],
+    ids=[
+        "bare",
+        "with-words",
+        "addressed",
+        "beside-another-entity",
+        "beside-a-later-type",
+        "utf-16-units",
+    ],
 )
 async def test_a_command_is_the_span_its_entity_covers(
     text: str, entities: list[dict[str, Any]], expected: str
@@ -885,6 +894,9 @@ async def test_a_command_is_the_span_its_entity_covers(
         [{"type": "bot_command", "offset": 0, "length": "5"}],
         [{"type": "bot_command", "offset": True, "length": 5}],
         [{"type": 7, "offset": 0, "length": 5}],
+        [_command(5), _command(5, kind="")],
+        [_command(5), _command(5, kind=" bot_command")],
+        [_command(5), _command(5, kind="Bot_Command")],
         [_command(0)],
         [_command(6)],
         [_command(5, offset=-1)],
@@ -904,6 +916,9 @@ async def test_a_command_is_the_span_its_entity_covers(
         "text-length",
         "flag-offset",
         "non-text-type",
+        "empty-type-beside",
+        "spaced-type-beside",
+        "capitalised-type-beside",
         "empty-span",
         "past-the-text",
         "negative-offset",

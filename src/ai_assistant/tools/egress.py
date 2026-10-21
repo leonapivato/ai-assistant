@@ -113,6 +113,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 import ssl
 import string
 import unicodedata
@@ -4077,6 +4078,12 @@ _CLIENT_ERRORS: Final = range(400, 500)
 #: wait anyone means, and the outcome carries none.
 _MAX_RETRY_AFTER: Final = 2**31
 
+#: The shape of a ``MessageEntity`` type the Bot API documents: lower-case words joined
+#: by underscores, as ``bot_command`` and ``text_link`` are (ADR-0332 §7:9). The shape and
+#: not the list, so a type Telegram adds later is read as an entity, while a type in no
+#: documented shape voids the message's command.
+_ENTITY_TYPE: Final = re.compile(r"[a-z]+(?:_[a-z]+)*")
+
 #: The four ``MessageOrigin`` kinds a forward's origin may name, as text.
 _FORWARD_KINDS: Final = frozenset(kind.value for kind in TelegramForwardKind)
 
@@ -4950,8 +4957,9 @@ def _command_of(text: str | None, entities: object) -> str | None:
     units, so the text is measured in them rather than in code points.
 
     **Anything not in the shape the Bot API documents is no command**, and never drops
-    the message: ``entities`` that are not a list of objects each carrying a text
-    ``type`` and an in-range ``int`` ``offset`` and ``length``, two ``bot_command``
+    the message: ``entities`` that are not a list of objects each carrying a ``type``
+    in the shape of the Bot API's type names and an in-range ``int`` ``offset`` and
+    ``length``, two ``bot_command``
     entities at the first character, or one whose span ends inside a character.
 
     Args:
@@ -4995,13 +5003,16 @@ def _entity_span(entity: object, *, units: int) -> tuple[str, int, int] | None:
         units: The text's length in UTF-16 code units.
 
     Returns:
-        The three, or ``None`` where it is not an object carrying a text ``type`` and
-        ``int`` ``offset`` and ``length`` that name a non-empty span inside the text.
+        The three, or ``None`` where it is not an object carrying a ``type`` in the shape
+        of the Bot API's type names and ``int`` ``offset`` and ``length`` that name a
+        non-empty span inside the text.
     """
     if not isinstance(entity, Mapping):
         return None
     kind, offset, length = entity.get("type"), entity.get("offset"), entity.get("length")
     if type(kind) is not str or type(offset) is not int or type(length) is not int:
+        return None
+    if _ENTITY_TYPE.fullmatch(kind) is None:
         return None
     if offset < 0 or length < 1 or offset + length > units:
         return None
