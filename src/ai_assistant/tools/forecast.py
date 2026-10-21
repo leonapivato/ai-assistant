@@ -7,9 +7,10 @@ response shape ADR-0260 §6 puts "inside ``ai_assistant.tools``", and the
 :mod:`ai_assistant.tools.egress` — the module ADR-0154 §1 designates and where §6 rules
 a forecast request leaves from — holds
 :class:`~ai_assistant.tools.egress.HttpsEgressTransport`, which is the thing that reads
-the account's credential and opens a channel to the world. **Nothing here reads a
-secret, holds a ``Secrets`` face or constructs a transport**; the credential is the
-seam's, at the position ADR-0148 §7 puts it, and this module never holds one.
+the connection record and opens a channel to the world. **Nothing here reads a secret,
+holds a ``Secrets`` face or constructs a transport**, and the forecast reads no secret
+anywhere: its transport is **keyless** (ADR-0344 §2:3, ADR-0325 §2:1), built with no
+``Secrets`` face, so there is no credential for this module or the seam to hold.
 
 **This declaration is registered in no ``ToolRegistry``** (ADR-0260 §1), which is the
 hinge ADR-0231 §5's design rests on and which this decision takes for its own reason: a
@@ -37,14 +38,14 @@ its own configuration, and written into a request the policy and the trail see. 
 rendered to no model and accepted from none, and a planner cannot name it — so the
 failure mode ADR-0231 §1 is built against is unreachable rather than forbidden.
 
-**The reference provider, and what it is for** (ADR-0260 §12, §14). The documented
-format below is *this lane's* reference provider — the M33 walkthrough's forecast half
-until a real one lands. ADR-0260 §14 names the intended first **real** provider,
-Open-Meteo, and gates it on #2396: it needs no credential, and no connection shape in
-this corpus carries an identity without one. So the reference provider is a source that
-**accepts a credential and does not use it**, reached exactly as any other integration
-is, and replacing the adapter is replacing the constants below and
-:func:`_provider_days` in this one module.
+**The provider is Open-Meteo, and its documented format is the only one read here**
+(ADR-0344 §2:1). The request is ADR-0344 §4's — ``GET /v1/forecast`` with the
+coordinate, a fixed set of daily variables, ``timezone=auto`` and the forecaster's own
+horizon, and nothing else — and the response is read under §5's table, row by row. No
+setting selects the provider, its format or its connection shape (§2:4): the format is
+the constants and functions below, and the keyless shape is fixed where
+:func:`~ai_assistant.tools.builtin.build_forecast_integration` constructs the transport
+(ADR-0325 §2:2).
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ import json
 import math
 from collections import Counter
 from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
 from typing import TYPE_CHECKING, Final, final
 from uuid import uuid4
 
@@ -183,7 +185,7 @@ FORECAST_READ: Final = ToolDefinition(
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.REVERSIBLE,
     side_effecting=True,
-    reads=(DataTier.SECRET,),
+    reads=(),
     writes=(),
     discloses=(DataTier.PERSONAL,),
     cost=ToolCost(basis=CostBasis.UNKNOWN),
@@ -218,10 +220,11 @@ what the integration is called:
   reaches an ``ALLOW`` through, rather than a narrowed declaration. Naming ``SECRET``
   would declare that this integration may select a Tier 0 value for a third party,
   which ADR-0146 §3 forbids outright.
-- ``reads=(SECRET,)``. The callable reads an ``INTEGRATION``-scoped credential, which
-  is Tier 0, and ADR-0148 §7 makes that read part of this call — **including for the
-  reference provider, which accepts a credential and does not use it** (ADR-0260 §12).
-  ``reads=()`` would be the false claim ADR-0016 §1 names.
+- ``reads=()`` (ADR-0344 §3:7). The callable is keyless: its transport holds no
+  ``Secrets`` face, reads no credential and refuses a connection record that names a
+  slot (ADR-0325 §2:1, §2:3), so it reads no Tier 0 value — and ADR-0016 §1 makes every
+  field of a declaration a claim, so naming ``SECRET`` here would claim a read no call
+  performs.
 - ``writes=()``. A forecast read changes nothing this system stores, and ADR-0260 §11
   stores nothing it returns.
 - ``side_effecting=True``, which a non-empty ``discloses`` makes structurally
@@ -254,109 +257,105 @@ and ADR-0148 §2 refuse.
 
 
 # --------------------------------------------------------------------------- #
-# The reference provider's documented format, chosen inside `tools/`.
+# Open-Meteo's documented format (ADR-0344 §4, §5), chosen inside `tools/`.
 # --------------------------------------------------------------------------- #
 # ADR-0260 §5 leaves the transcription's form to the implementation and says so in
 # terms: "**The form is the provider's, and each implementation pins its own**: the
 # field selection, their order, the separators and the omission rule are fixed by the
 # implementation that reads that provider's documented format, and are pinned by a
-# test of its own. There is no cross-implementation form, and no implementation
-# conforms by matching another's output."
+# test of its own." ADR-0344 §4 fixes the request and §5 the reading of the response,
+# row by row; the constants below are that decision as code, and the origin is the
+# only part of the request a deployment configures.
 #
-# **So the constants below are this lane's documented adapter for the reference
-# provider**, and the origin is the only part of the request a deployment configures.
-#
-# **Every transcribed field is a JSON *string* in this format, and that is a decision
-# §5 forces.** A record's content is "the octets of the value the response carried,
-# and never a re-rendering of a parsed number", so a documented format carrying
-# `19.2` as a JSON number would oblige this module to render a parsed float — the one
-# thing that clause forbids. A provider stating its numbers as strings is a provider
-# this system can transcribe verbatim.
+# **Open-Meteo carries its values as JSON numbers, and that forces nothing.** §5:2
+# asks for "the octets of the value the response carried, and never a re-rendering of
+# a parsed number", and a decoder can keep each number token as the text the response
+# carried (ADR-0344 §5:9): :func:`_tokens` hands the decoder hooks that wrap the token's
+# own text and never build a ``float``.
 
-#: The provider's documented request path.
+#: The provider's documented request path (ADR-0344 §4:1).
 _PROVIDER_PATH: Final = "/v1/forecast"
 
-#: The parameters it documents. The coordinate is the ruled call's, read off the
-#: revalidated copy; the day count is the forecaster's own bound, which ADR-0260 §3
-#: makes "the forecaster's own bound, not a caller's". Asking for what will be minted
-#: rather than taking a default page is what keeps the response small enough that
-#: ``forecast_max_response_bytes`` stays a backstop rather than the ordinary outcome.
+#: The five query parameters §4:1 admits, in the order the target carries them, and
+#: no other. The coordinate is the ruled call's, read off the revalidated copy (§4:2);
+#: the daily set, the zone and the horizon are constants of this forecaster (§4:3 to §4:5),
+#: which is why no ruling ranges over them and none needs to.
 _PROVIDER_LATITUDE_PARAMETER: Final = "latitude"
 _PROVIDER_LONGITUDE_PARAMETER: Final = "longitude"
-_PROVIDER_DAYS_PARAMETER: Final = "days"
+_PROVIDER_DAILY_PARAMETER: Final = "daily"
+_PROVIDER_TIMEZONE_PARAMETER: Final = "timezone"
+_PROVIDER_DAYS_PARAMETER: Final = "forecast_days"
 
-#: The field the account's credential rides in. Its *value* is supplied by the seam
-#: and never by this module (ADR-0148 §7). **The reference provider accepts it and
-#: does not use it** (ADR-0260 §12) — which is a fact about the far end and changes
-#: nothing about this side: the credential is read under the slot the connection
-#: record names, because ADR-0148 §6's third pre-transmit condition obliges it.
-_PROVIDER_CREDENTIAL_FIELD: Final = "X-Forecast-Token"
+#: ``timezone=auto`` (§4:4): the provider resolves the zone from the coordinate, and the
+#: hub sends no zone of its own — not ``Settings.timezone``, which no ruling ranges over.
+_PROVIDER_TIMEZONE: Final = "auto"
 
-#: The fields this integration wants beside the credential. Stated, so that a far end
-#: content-negotiating its way to HTML is answering a request this seam did not make.
-_PROVIDER_FIELDS: Final = (("Accept", "application/json"),)
-
-#: Where the documented response carries its day list: ``{"days": [ … ]}``.
-_PROVIDER_DAYS_KEY: Final = "days"
-
-#: The day the row is about, as ``YYYY-MM-DD``, and the UTC offset that day is in, as
-#: ``+HH:MM`` or ``-HH:MM`` (ADR-0260 §12: "dated days, each declaring the UTC offset
-#: it is in"). **One spelling and no other**: ``Z``, a bare ``+HH`` and an offset with
-#: seconds are values this documented format does not admit, and a row carrying one is
-#: dropped rather than read under a rule the provider was not told to use. The pair is
-#: what §5's extent is computed from, "and from nothing else — never from a clock of
-#: ours, never from a timezone database of ours, never from the reader's configuration,
-#: and never from the place".
-_DATE_FIELD: Final = "date"
-_OFFSET_FIELD: Final = "utc_offset"
-
-#: The spans this adapter transcribes, in the fixed order §5 fixes them, joined by a
-#: single newline with no other byte added. ``date`` is transcribed as well as read
-#: for the extent, so a reader of the content can tell which day a record is about
-#: without decoding an attestation; ``utc_offset`` is **not**, because the extent
-#: already carries the position and a raw offset in prose is noise.
-_TRANSCRIBED_FIELDS: Final = (
-    _DATE_FIELD,
-    "conditions",
-    "temperature_min",
-    "temperature_max",
-    "precipitation",
+#: The daily variables asked for, in the order §4:3 names them and the order every
+#: record transcribes them (§5:5). A constant of this code, pinned by a test, and
+#: widened or narrowed by no ``Settings`` value, caller or response.
+_DAILY_VARIABLES: Final = (
+    "weather_code",
+    "temperature_2m_max",
+    "temperature_2m_min",
+    "precipitation_sum",
+    "precipitation_probability_max",
+    "wind_speed_10m_max",
 )
 
-#: Every field the documented format names for a day. **There is no omission rule**:
-#: a row missing any of these, supplying one as ``null``, or supplying one as a type
-#: this format does not admit is dropped whole (ADR-0260 §5).
-_DOCUMENTED_FIELDS: Final = (_OFFSET_FIELD, *_TRANSCRIBED_FIELDS)
+#: The one field this integration adds to the request (§4:6). Stated, so that a far end
+#: content-negotiating its way to HTML is answering a request this seam did not make.
+#: **There is no credential field**: the transport is keyless (§2:3), and
+#: :meth:`~ai_assistant.tools.egress.HttpsEgressTransport.fetch` is handed ``None`` for
+#: it, which a credentialed transport would refuse.
+_PROVIDER_FIELDS: Final = (("Accept", "application/json"),)
 
-#: The one status a forecast is read out of. A ``2xx`` that is not ``200`` — a ``204``,
-#: say — carries no representation, so it is a response no day can be read from rather
-#: than a successful read of zero days; calling it the latter would report ``NO_RESULT``
-#: where the honest answer is that the provider answered something else.
+#: The response members §5's table reads, and no other (§5:6). ``daily`` is the table,
+#: ``time`` its day column, ``daily_units`` each variable's unit, and
+#: ``utc_offset_seconds`` the one offset every day of the response is in (§5:4).
+_DAILY_KEY: Final = "daily"
+_TIME_KEY: Final = "time"
+_UNITS_KEY: Final = "daily_units"
+_OFFSET_KEY: Final = "utc_offset_seconds"
+
+#: The magnitude at which an offset stops being one a day can be in (§5's row 7):
+#: ``datetime.timezone`` admits strictly less than a day either way.
+_OFFSET_CEILING_SECONDS: Final = 86_400
+
+#: The one status a forecast is read out of (§5's row 2). A ``2xx`` that is not ``200``
+#: — a ``204``, say — carries no representation, so it is a response no day can be read
+#: from rather than a successful read of zero days; calling it the latter would report
+#: ``NO_RESULT`` where the honest answer is that the provider answered something else.
+#: Open-Meteo's own error object arrives under ``400``, and a ``429`` is its rate limit:
+#: both are the provider's answer and both are ``PROVIDER_REFUSED``.
 _PROVIDER_OK: Final = 200
 
-#: The ASCII line breaks a day is dropped for carrying at any position in any
-#: transcribed span. The line structure is the only thing keeping the spans apart, so a
-#: break inside one would have to be altered — which would stop it being verbatim — or
-#: would produce a record whose lines no reader can assign to a span.
+#: The transcription's fixed separators (§5:5): one line per transcribed member, the
+#: provider's field name and its value joined by ``": "``, and a variable's token and
+#: its unit joined by a single space. **Pinned by a test**, and no byte of this system's
+#: is added beyond them.
+_LINE_SEPARATOR: Final = "\n"
+_NAME_SEPARATOR: Final = ": "
+_UNIT_SEPARATOR: Final = " "
+
+#: The ASCII line breaks a transcription is refused for carrying inside a span. The line
+#: structure is the only thing keeping the spans apart, so a break inside one would have
+#: to be altered — which would stop it being verbatim — or would produce a record whose
+#: lines no reader can assign to a span. Only a unit can carry one: a field name is a
+#: constant here, a token is a JSON number and a date is checked against ``YYYY-MM-DD``.
 _LINE_BREAKS: Final = frozenset("\n\r")
 
-#: How long a documented date is, and how long a documented offset is.
+#: How long a documented date is.
 _DATE_LENGTH: Final = 10
-_OFFSET_LENGTH: Final = 6
-
-#: The widest each component of a documented offset may be. **Judged separately, and
-#: before either reaches a ``timedelta``**, because ``timedelta`` normalises: a check
-#: made after it cannot tell ``+01:99`` from the ``+02:39`` it becomes, and would mint
-#: a day at a position the provider never declared.
-_MAX_OFFSET_HOURS: Final = 23
-_MAX_OFFSET_MINUTES: Final = 59
 
 #: ADR-0038 §2a's figure for an attested producer, which ADR-0260 §5 names for this
 #: one.
 _ATTESTED_CONFIDENCE: Final = 0.9
 
 #: How long one day is. The extent's upper end is its lower end plus this, which is
-#: the half-open interval ADR-0117 §2 asks for.
+#: the half-open interval ADR-0117 §2 asks for — and a **fixed** 24 hours across a DST
+#: change too, because Open-Meteo aggregates each day over boundaries set by the one
+#: offset and ignores DST changes inside the range (ADR-0344 §5, "Why the extent is a
+#: fixed 24 hours").
 _ONE_DAY: Final = timedelta(days=1)
 
 
@@ -372,64 +371,202 @@ def _refused(refusal: ForecastRefusal) -> ForecastOutcome:
     return ForecastOutcome(refusal=refusal)
 
 
-def _provider_days(body: bytes) -> tuple[Mapping[str, FrozenJson], ...] | None:
-    """The documented response's day list, or ``None`` where it is another shape.
+@final
+class _Token:
+    """One JSON number token, as the text the response spelled it (ADR-0344 §5:2).
 
-    What the documented format admits, exactly: a UTF-8 JSON object, whose ``days``
-    member — where it has one — is an array of objects.
+    What the decoder hands back in place of an ``int`` or a ``float``, so that no
+    transcribed value is ever parsed to a number or re-rendered on the way to a record:
+    ``17.20`` stays ``17.20`` and ``1e1`` stays ``1e1``.
 
-    **An absent list is a response describing no day and not a refusal.** A provider
-    with nothing to say for the coordinate omits the member, so reading that as a
-    malformed shape would report a provider that answered perfectly well as one that
-    answered something else — and the two are different operator facts. What is
-    refused is a list of the wrong *type*, which no documented response carries.
+    Attributes:
+        text: The token's characters, exactly as the response carried them.
+        integral: Whether the token is an integer token — no fraction and no exponent —
+            which is the one thing §5's row 7 asks of ``utc_offset_seconds``.
+    """
+
+    __slots__ = ("integral", "text")
+
+    def __init__(self, text: str, *, integral: bool) -> None:
+        """Hold one token.
+
+        Args:
+            text: The token's characters.
+            integral: Whether the decoder read it as an integer token.
+        """
+        self.text = text
+        self.integral = integral
+
+
+def _integer_token(text: str) -> _Token:
+    """The decoder's ``parse_int`` hook: an integer token, kept as spelled.
+
+    Args:
+        text: The token's characters.
+
+    Returns:
+        The token.
+    """
+    return _Token(text, integral=True)
+
+
+def _fraction_token(text: str) -> _Token:
+    """The decoder's ``parse_float`` hook: a token with a fraction or an exponent.
+
+    Args:
+        text: The token's characters, ``17.20`` and ``1e1`` alike.
+
+    Returns:
+        The token.
+    """
+    return _Token(text, integral=False)
+
+
+def _no_constant(token: str) -> object:
+    """The decoder's ``parse_constant`` hook: ``NaN`` and the infinities are not JSON.
+
+    :func:`~ai_assistant.tools.http_reading.decoded_object` has already refused a body
+    carrying one, so this is the guard behind that guard rather than a reachable branch.
+
+    Args:
+        token: The constant the decoder met.
+
+    Returns:
+        Nothing: this function always raises.
+
+    Raises:
+        ValueError: Always, which :func:`_tokens` answers with ``None``.
+    """
+    msg = f"{token!r} is not a JSON value (RFC 8259)"
+    raise ValueError(msg)
+
+
+def _tokens(body: bytes) -> dict[str, object] | None:
+    """The body as a JSON object whose numbers are tokens, or ``None`` (§5's row 3).
+
+    **Row 3 is judged by** :func:`~ai_assistant.tools.http_reading.decoded_object`,
+    exactly as the table words it — "a body that is not a UTF-8 JSON object, as
+    ``decoded_object`` reads one" — so the depth bound, the refusal of ``NaN`` and the
+    UTF-8 rule are that function's and not a second copy of them. Only a body it admits
+    is decoded again, with hooks that keep each number token as its text (§5:2), so the
+    second decode is of a body already known to be one well-formed object.
 
     Args:
         body: The response's octets.
 
     Returns:
-        The rows, in the order the provider returned them — possibly empty — or
-        ``None`` where the response is not the documented shape.
+        The object, its numbers :class:`_Token` values, or ``None`` where row 3 holds.
     """
-    decoded = decoded_object(body)
-    if decoded is None:
+    if decoded_object(body) is None:
         return None
-    if _PROVIDER_DAYS_KEY not in decoded:
-        # **Membership, not retrieval**: a provider with nothing to say for the
-        # coordinate omits the member, and ``get`` cannot tell that from a member
-        # present as ``null`` — which is a value this documented format does not
-        # admit and is therefore a response of another shape.
-        return ()
-    rows = decoded[_PROVIDER_DAYS_KEY]
-    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+    try:
+        decoded: object = json.loads(
+            body.decode("utf-8"),
+            parse_int=_integer_token,
+            parse_float=_fraction_token,
+            parse_constant=_no_constant,
+        )
+    except ValueError:  # pragma: no cover — `decoded_object` above admitted these octets
         return None
-    return tuple(rows)
+    return decoded if isinstance(decoded, dict) else None
 
 
-def _documented_text(row: Mapping[str, FrozenJson], field: str) -> str | None:
-    """One documented field's value, or ``None`` where §5 drops the day for it.
+def _table_admitted(decoded: Mapping[str, object]) -> bool:
+    """Whether §5's row 4 leaves the response readable as a table of days.
 
-    ADR-0260 §5's drop rule is **total over every value a well-formed response can
-    carry in one of these positions**: omitted, ``null``, a string, or something else.
-    The first three of those are one answer here and the fourth is the same answer,
-    because this format admits no omission — "a day for which the provider omitted a
-    documented field, supplied it as ``null``, or supplied a value of a type its
-    documented format does not admit" is one clause and one outcome.
+    Row 4 refuses the response where ``daily`` is present and not an object, where
+    ``daily.time`` is present and not an array, and where a requested variable's member
+    is present and not an array or not of ``daily.time``'s length: the response then
+    does not say which value belongs to which day, and pairing them by position would
+    be this system deciding what the provider said (ADR-0344 §5, "Why a missing array
+    drops days and a short one refuses the response").
+
+    **Membership, not retrieval**, throughout: an absent member is row 6's or row 8's
+    case, and a member present as ``null`` is a value the format does not admit, which
+    ``dict.get`` cannot tell apart.
 
     Args:
-        row: One day object.
-        field: The provider's field name.
+        decoded: The decoded body.
 
     Returns:
-        The string, transcribed byte for byte and with its surrounding whitespace
-        kept, or ``None`` where the day is dropped.
+        ``False`` where row 4 holds, ``True`` otherwise.
     """
-    value = row.get(field)
-    return value if isinstance(value, str) else None
+    if _DAILY_KEY not in decoded:
+        return True
+    daily = decoded[_DAILY_KEY]
+    if not isinstance(daily, dict):
+        return False
+    times = daily.get(_TIME_KEY)
+    if _TIME_KEY in daily and not isinstance(times, list):
+        return False
+    for variable in _DAILY_VARIABLES:
+        if variable not in daily:
+            continue
+        column = daily[variable]
+        if not isinstance(column, list):
+            return False
+        if isinstance(times, list) and len(column) != len(times):
+            return False
+    return True
+
+
+def _declared_offset(value: object) -> timedelta | None:
+    """The one offset every day of the response is in, or ``None`` (§5's row 7).
+
+    **This is the value ADR-0260 §5 makes the extent depend on, and there is no
+    substitute**: an absent ``utc_offset_seconds``, one that is not an integer token,
+    and one of a magnitude of a day or more each leave every day declaring no offset,
+    and every day is dropped rather than minted with an extent this system computed from
+    a clock or a timezone database of its own (ADR-0260 §5:8).
+
+    Args:
+        value: The member as decoded, or ``None`` where it is absent.
+
+    Returns:
+        The offset, or ``None``.
+    """
+    if not isinstance(value, _Token) or not value.integral:
+        return None
+    digits = value.text.removeprefix("-")
+    if len(digits) > len(str(_OFFSET_CEILING_SECONDS)):
+        # Refused on its length before `int` is reached: a token of thousands of
+        # digits is past the ceiling on any reading, and `int` would raise on the
+        # interpreter's own digit limit rather than answer.
+        return None
+    seconds = int(value.text)
+    if abs(seconds) >= _OFFSET_CEILING_SECONDS:
+        return None
+    return timedelta(seconds=seconds)
+
+
+def _declared_units(decoded: Mapping[str, object]) -> dict[str, str] | None:
+    """Each requested variable's unit, as ``daily_units`` spells it, or ``None``.
+
+    §5's row 8: a variable whose unit ``daily_units`` does not give as a string drops
+    every day, because no day's transcription can carry what §5:5 says it carries. A
+    unit carrying a line break is in **every** day's transcription and would break each
+    one's line structure, so it drops every day by the same rule one step on.
+
+    Args:
+        decoded: The decoded body.
+
+    Returns:
+        The units by variable, or ``None`` where every day is dropped for them.
+    """
+    units = decoded.get(_UNITS_KEY)
+    if not isinstance(units, dict):
+        return None
+    declared: dict[str, str] = {}
+    for variable in _DAILY_VARIABLES:
+        unit = units.get(variable)
+        if not isinstance(unit, str) or any(character in _LINE_BREAKS for character in unit):
+            return None
+        declared[variable] = unit
+    return declared
 
 
 def _declared_day(text: str) -> tuple[int, int, int] | None:
-    """The ``YYYY-MM-DD`` the provider named, as a year, month and day.
+    """The ``YYYY-MM-DD`` the provider named, as a year, month and day (§5's row 9).
 
     Written out rather than taken from :meth:`datetime.date.fromisoformat`, which
     since 3.11 also accepts ``YYYYMMDD`` and a week date: two spellings of one day
@@ -437,7 +574,7 @@ def _declared_day(text: str) -> tuple[int, int, int] | None:
     which is exactly what ADR-0260 §5 drops a day *for*.
 
     Args:
-        text: The value the ``date`` field carried.
+        text: The value a ``time`` element carried.
 
     Returns:
         The triple, or ``None`` where the value is not this format's one spelling or
@@ -456,83 +593,36 @@ def _declared_day(text: str) -> tuple[int, int, int] | None:
     return year, month, day
 
 
-def _named_day(row: Mapping[str, FrozenJson]) -> tuple[int, int, int] | None:
-    """The day one row names, whatever else that row carries (ADR-0260 §5).
+def _named_day(element: object) -> tuple[int, int, int] | None:
+    """The day one ``time`` element names, whatever else its position carries.
 
-    **Read independently of every other drop rule, and that is the point.** §5's
-    duplicate clause is stated over the day *the response names* — "A day the response
-    names more than once is dropped in every one of its rows" — so a row that names a
-    day and is then dropped for some other reason has still named it. A count taken over
-    the *surviving* rows would let a complete row through beside an incomplete sibling
-    naming the same day, which is the response describing that day twice and this system
-    preferring one of the two.
-
-    A row whose ``date`` is absent, ``null``, of a type the format does not admit, or not
-    this format's one spelling names **no** day and is counted toward none.
+    **Read independently of every other drop rule, and that is the point** (§5's
+    row 11). "A day the response names more than once is dropped in every one of its
+    rows", so a position that names a day and is then dropped for another reason has
+    still named it. A count taken over the *surviving* positions would let a complete
+    position through beside an incomplete sibling naming the same day, which is the
+    response describing that day twice and this system preferring one of the two.
 
     Args:
-        row: One day object from the documented response.
+        element: One element of ``daily.time``.
 
     Returns:
-        The year, month and day, or ``None`` where the row names none.
+        The year, month and day, or ``None`` where the position names none.
     """
-    text = _documented_text(row, _DATE_FIELD)
-    return None if text is None else _declared_day(text)
-
-
-def _declared_offset(text: str) -> timedelta | None:
-    """The ``+HH:MM`` the provider declared for that day, as an offset from UTC.
-
-    **This is the value ADR-0260 §5 makes the extent depend on, and there is no
-    substitute**: "A day the provider named without declaring the offset it is in
-    declares no extent", and that day is dropped rather than minted with an extent this
-    system computed from a clock or a timezone database of its own.
-
-    Args:
-        text: The value the ``utc_offset`` field carried.
-
-    Returns:
-        The offset, or ``None`` where the value is not this format's one spelling or
-        is not an offset :class:`datetime.timezone` admits.
-    """
-    if len(text) != _OFFSET_LENGTH or text[0] not in {"+", "-"} or text[3] != ":":
-        return None
-    fields = (text[1:3], text[4:6])
-    if not all(field.isdigit() and field.isascii() for field in fields):
-        return None
-    hours, minutes = (int(field) for field in fields)
-    if hours > _MAX_OFFSET_HOURS or minutes > _MAX_OFFSET_MINUTES:
-        # **Each component is judged on its own, before either reaches a
-        # ``timedelta``.** ``timedelta`` *normalises*, so ``+01:99`` would arrive as
-        # two hours and thirty-nine minutes — a well-formed, in-range offset the
-        # provider never declared, and a day minted at a position nothing in the
-        # response states. §5 drops a day whose offset cannot be read rather than
-        # minting it at one this system computed, and a check made after the
-        # normalisation cannot tell the two apart.
-        return None
-    magnitude = timedelta(hours=hours, minutes=minutes)
-    offset = -magnitude if text[0] == "-" else magnitude
-    try:
-        timezone(offset)
-    except ValueError:  # pragma: no cover — the component bounds above already refuse it
-        # `timezone` admits strictly between -24 and +24 hours. The component bounds
-        # are strictly narrower, so this is the guard behind the guard rather than a
-        # reachable branch — kept because the bound it enforces is the library's and
-        # not this module's to restate.
-        return None
-    return offset
+    return _declared_day(element) if isinstance(element, str) else None
 
 
 def _extent_of(day: tuple[int, int, int], offset: timedelta) -> ReportedExtent | None:
     """The half-open bounds of ``day`` in the zone ``offset`` names (ADR-0260 §5).
 
     **Computed from the day the provider named and the offset its own response
-    declared for it, and from nothing else.** No clock of ours, no timezone database of
-    ours, no reader configuration and no place contributes a value here.
+    declared, and from nothing else** (ADR-0344 §5:4): the day's midnight at that offset
+    and 24 hours later. No clock of ours, no timezone database of ours, no reader
+    configuration and no place contributes a value here.
 
     Args:
         day: The year, month and day the provider named.
-        offset: The offset that day declared it is in.
+        offset: The ``utc_offset_seconds`` the response declared for every day.
 
     Returns:
         The extent, or ``None`` where the provider's own values would not make a
@@ -554,32 +644,25 @@ def _extent_of(day: tuple[int, int, int], offset: timedelta) -> ReportedExtent |
 
 @final
 class _Day:
-    """One day of a response that survived every clause of ADR-0260 §5 but the cap.
+    """One day of a response that survived rows 7 to 13 of ADR-0344 §5 (row 14's input).
 
-    A small value rather than a tuple, so that the duplicate pass below reads the day
-    it is keying on by name.
+    A small value rather than a tuple, so that the cap below reads what it keeps by
+    name.
 
     Attributes:
-        named: The year, month and day the provider named, as the duplicate rule's
-            key. Two rows naming one day are two rows about that day whatever else
-            they carry.
-        extent: The half-open bounds §5 computed for it.
+        extent: The half-open bounds §5:4 computed for it.
         content: The transcription, verbatim.
     """
 
-    __slots__ = ("content", "extent", "named")
+    __slots__ = ("content", "extent")
 
-    def __init__(
-        self, *, named: tuple[int, int, int], extent: ReportedExtent, content: str
-    ) -> None:
+    def __init__(self, *, extent: ReportedExtent, content: str) -> None:
         """Hold one surviving day.
 
         Args:
-            named: The day the provider named.
             extent: Its extent.
             content: Its transcription.
         """
-        self.named = named
         self.extent = extent
         self.content = content
 
@@ -600,9 +683,9 @@ class ForecastEgress:
     ``ToolInvoker.invoke`` would have supplied is here instead, and why it is here in a
     stated order rather than in a convenient one:
 
-    1. ADR-0241 §1's guard on the bound, **first** — before the revalidation, before any
-       credential is read and before any channel is opened, so a value no deployment
-       could pass reaches nothing.
+    1. ADR-0241 §1's guard on the bound, **first** — before the revalidation, before the
+       connection record is read and before any channel is opened, so a value no
+       deployment could pass reaches nothing.
     2. ADR-0029 §2's three, in its order (§6). The call is **revalidated and detached**,
        so a mutation landed after construction cannot survive into execution. The
        definition on that detached copy is compared for equality against **this
@@ -613,10 +696,13 @@ class ForecastEgress:
        because ``ToolCall``'s own validator runs at construction and
        ``object.__setattr__`` defeats ``frozen=True``. Every subsequent step reads the
        revalidated copy and never the argument.
-    3. Inside the deadline the **caller** stated: ADR-0148 §6's one-step credential read,
-       its four pre-transmit conditions and its post-read discard, and **one** exchange
-       — all of them :class:`~ai_assistant.tools.egress.HttpsEgressTransport`'s, at the
-       seam ADR-0154 §1 designates. Then §5's transcription and minting, here.
+    3. Inside the deadline the **caller** stated: the keyless connection's one record
+       read and its refusals — a reference that is not connectable, a record naming a
+       credential slot, an identity other than the bound one (ADR-0325 §2:3 to §2:5,
+       ADR-0344 §3:5) — and **one** exchange, all of them
+       :class:`~ai_assistant.tools.egress.HttpsEgressTransport`'s, at the seam ADR-0154
+       §1 designates. No credential is read: the transport holds no ``Secrets`` face
+       (ADR-0344 §3:1). Then ADR-0344 §5's reading of the response, here.
 
     **No spend gate and no invocation ledger, and that is ADR-0260 §6 read rather than
     skipped.** That section enumerates what ``read`` performs and states that this seam
@@ -639,8 +725,9 @@ class ForecastEgress:
     :class:`~ai_assistant.tools.egress.TransportPinError` or a ``ValueError``.
 
     **One ask is one read, and the count is this class's** (§3). Exactly one exchange is
-    opened on every outcome read off the wire, and **none** on the ADR-0148 §6 refusal
-    that reaches ``PROVIDER_REFUSED`` before any byte is transmitted. Nothing here
+    opened on every outcome read off the wire, and **none** on the pre-transmit refusal
+    against the connection record that reaches ``PROVIDER_REFUSED`` before any byte is
+    transmitted. Nothing here
     retries, paginates, follows a link out of a response or re-issues with a different
     window, on any outcome.
     """
@@ -670,8 +757,9 @@ class ForecastEgress:
 
         Args:
             transport: The egress seam this integration's requests leave through
-                (ADR-0260 §6). It holds the registration, reads the credential and
-                opens the channel; this object holds none of the three.
+                (ADR-0260 §6). It holds the registration, reads the connection record
+                and opens the channel; this object holds none of the three. Keyless:
+                built with no ``Secrets`` face (ADR-0344 §2:3).
             latitude: ``Settings.forecast_latitude`` — the place this deployment reads
                 its forecast for (§3, §11). Finite and from -90 to 90 inclusive.
             longitude: ``Settings.forecast_longitude``, likewise, from -180 to 180.
@@ -768,8 +856,8 @@ class ForecastEgress:
             call: The authorised call. Read only through the revalidated copy this
                 method makes of it, never as handed.
             timeout: The caller's bound on this call (ADR-0241 §1). Checked **first**,
-                before the revalidation, before the credential read and before any
-                channel — so a refused value reads nothing and opens nothing. The
+                before the revalidation, before the connection record is read and
+                before any channel — so a refused value reads nothing and opens nothing. The
                 window it opens starts there too, so the revalidation is inside it.
 
         Returns:
@@ -784,7 +872,8 @@ class ForecastEgress:
             ValueError: If ``timeout`` is not a ``timedelta`` or is not strictly
                 positive (ADR-0241 §1). Refused before anything is read.
             ToolBindingError: If the call does not survive ADR-0029 §2's three checks
-                (§6). No credential is read and no channel is opened for any of them.
+                (§6). The connection record is not read and no channel is opened for
+                any of them.
             ToolError: If the transport raised a ``CancelledError`` with **nothing
                 cancelled** — ADR-0031 §2's invented cancellation, which ADR-0241 §7
                 makes a fault rather than a teardown.
@@ -932,8 +1021,9 @@ class ForecastEgress:
         Raises:
             ToolBindingError: If the call does not survive revalidation, carries a
                 definition unequal to this forecaster's registered original, is not
-                authorised by its decision, or carries no egress binding. **No
-                credential is read and no channel is opened for any of them.**
+                authorised by its decision, or carries no egress binding. **The
+                connection record is not read and no channel is opened for any of
+                them.**
         """
         checked = revalidated_call(call)
         if checked.request.tool != self._declaration:
@@ -977,9 +1067,9 @@ class ForecastEgress:
             # place this forecaster was not configured for: a validly authorised call
             # carrying another coordinate passes all three checks and would send it.
             #
-            # Refused **before** the credential is read and before any channel is
-            # opened, and synchronously with the three above, so nothing observed here
-            # can move between the check and the send.
+            # Refused **before** the connection record is read and before any channel
+            # is opened, and synchronously with the three above, so nothing observed
+            # here can move between the check and the send.
             msg = (
                 f"{self._declaration.id}: this call names a place this forecaster is not "
                 f"configured for, so the request would ask about somewhere the "
@@ -1010,10 +1100,15 @@ class ForecastEgress:
             CancelledError: Re-raised unchanged, after the seam has released its
                 channel (ADR-0060 §1).
         """
+        # ADR-0344 §4:1's target, whole: the five parameters in this order and no
+        # other, the coordinate the ruled call carries, and nothing of a person, the
+        # hub, the connection or its identity (§4:6).
         target = (
             f"{_PROVIDER_PATH}"
             f"?{_PROVIDER_LATITUDE_PARAMETER}={_decimal(latitude)}"
             f"&{_PROVIDER_LONGITUDE_PARAMETER}={_decimal(longitude)}"
+            f"&{_PROVIDER_DAILY_PARAMETER}={','.join(_DAILY_VARIABLES)}"
+            f"&{_PROVIDER_TIMEZONE_PARAMETER}={_PROVIDER_TIMEZONE}"
             f"&{_PROVIDER_DAYS_PARAMETER}={self._max_days}"
         )
         try:
@@ -1021,18 +1116,21 @@ class ForecastEgress:
                 binding,
                 origin=origin,
                 target=target,
-                credential_field=_PROVIDER_CREDENTIAL_FIELD,
+                # Keyless (ADR-0344 §2:3): no field carries a credential, and a
+                # transport built with a `Secrets` face would refuse this call.
+                credential_field=None,
                 fields=_PROVIDER_FIELDS,
             )
         except HttpsResponseTooLargeError:
+            # §5's row 1, decided by the seam while reading (ADR-0260 §11:3).
             return _refused(ForecastRefusal.RESPONSE_TOO_LARGE)
         except BoundCallChangedError:
-            # ADR-0148 §6's four pre-transmit conditions, whose refusal ADR-0260 §6
-            # names: a reference that is not connectable, a record recorded for another
-            # identity, one that moved across the credential read, a slot the keyring
-            # holds nothing under, and a credential no request field will carry. Every
-            # one of them discarded the credential and wrote nothing to any channel —
-            # **none was opened**, which is why §13(i)'s count for this outcome is zero.
+            # The keyless connection's pre-transmit refusals against its one record
+            # read (ADR-0325 §2:3 to §2:5), which ADR-0344 §3:5 maps here: a reference
+            # that is not connectable, a record that names a credential slot, and an
+            # identity other than the bound one — and a target the exchange will not
+            # write. **None opened a channel**, which is why §13(i)'s count for this
+            # outcome is zero.
             return _refused(ForecastRefusal.PROVIDER_REFUSED)
         except HttpsRedirectRefusedError, MalformedHttpResponseError, TransportError:
             # Statements about this system's own reach or about the far end's HTTP
@@ -1044,10 +1142,13 @@ class ForecastEgress:
         return self._read(response)
 
     def _read(self, response: HttpsResponse) -> ForecastOutcome:
-        """Read one documented response into records, or into the class that refuses it.
+        """Read one Open-Meteo response under ADR-0344 §5's table.
 
-        The order is ADR-0260 §5's own: the response's **shape** is decided first, and
-        only then its declared instant, which §5 states after the transcription rule.
+        **Rows 1 to 6 are taken in order, and the first that holds decides the read**
+        (§5:1): row 1 is the seam's, decided while reading; then the status (row 2), the
+        body (row 3) and the table's shape (row 4), then the declared instant (row 5),
+        and only then whether the response names any day at all (row 6): shape first,
+        instant second, days last.
 
         Args:
             response: What the seam read off the channel, under its bound.
@@ -1057,116 +1158,135 @@ class ForecastEgress:
         """
         if response.status != _PROVIDER_OK:
             return _refused(ForecastRefusal.PROVIDER_REFUSED)
-        rows = _provider_days(response.body)
-        if rows is None:
+        decoded = _tokens(response.body)
+        if decoded is None or not _table_admitted(decoded):
             return _refused(ForecastRefusal.PROVIDER_REFUSED)
         reported_at = declared_instant(response.headers)
         if reported_at is None:
-            # ADR-0260 §5, ADR-0092 §3: "A response declaring **no** instant, or
+            # ADR-0260 §5:7, ADR-0092 §3: "A response declaring **no** instant, or
             # carrying in that position a value that cannot be read as one, mints **no
-            # record**". There is no substitute, and none is reached for.
+            # record**". There is no substitute, and none is reached for (ADR-0344 §5:7).
             _log.info("forecast_response_declared_no_instant", tool_id=self._declaration.id)
             return _refused(ForecastRefusal.UNATTESTED)
-        return self._minted(rows, reported_at=reported_at)
+        # Row 6. Row 4 has already refused a `daily` that is not an object and a `time`
+        # that is not an array, so what fails these two tests is an absent member.
+        daily = decoded.get(_DAILY_KEY)
+        if not isinstance(daily, dict):
+            return _refused(ForecastRefusal.NO_RESULT)
+        times = daily.get(_TIME_KEY)
+        if not isinstance(times, list):
+            return _refused(ForecastRefusal.NO_RESULT)
+        return self._minted(decoded, daily, times, reported_at=reported_at)
 
     def _minted(
-        self, rows: Sequence[Mapping[str, FrozenJson]], *, reported_at: datetime
+        self,
+        decoded: Mapping[str, object],
+        daily: Mapping[str, object],
+        times: Sequence[object],
+        *,
+        reported_at: datetime,
     ) -> ForecastOutcome:
-        """Apply §5's drop rules and mint one record per surviving day.
+        """Apply rows 7 to 13 of ADR-0344 §5's table, and mint row 14's survivors.
 
-        **The order of the clauses is the decision** (ADR-0260 §5, §13(b-prime)):
+        **Day *i* is the *i*-th element of ``daily.time``, and its value for a variable
+        is that variable's *i*-th element** (§5:3); row 4 has already refused a column of
+        another length, so no value is assigned to a day by any other rule.
 
-        1. Each row is read into a day or dropped — an omitted, ``null`` or ill-typed
-           documented field, an undeclared or unreadable offset, a date this format
-           does not spell, a transcribed span carrying a line break, an extent the
-           provider's values would not make, and a transcription over
-           ``forecast_max_day_chars`` all end here.
-        2. **Every row of a day the response named more than once is dropped**, over
-           the whole response and **before** the cap. §13(b-prime) requires exactly this
-           ordering and says why: "an implementation capping before it looks for
-           duplicates mints the first row and passes every arm that keeps the duplicate
-           inside the cap". It is not a deduplication — nothing is merged and no row is
-           preferred — because the response has not described that day *once*.
-        3. **The cap is taken over the survivors and taken from the front** (§5),
-           because a cap that did not say which days it kept would let two
-           implementations mint different evidence, and different goal outcomes, from
-           one response.
+        - Rows 7 and 8 are facts about the whole response — the one offset, a variable's
+          column and its unit — so each drops **every** day.
+        - Row 11, a day named at more than one position, drops every one of its
+          positions, counted over **every** position that names a day and not over the
+          survivors of the other rows: a day named once by a complete position and again
+          by an incomplete one has not been described *once*.
+        - Rows 9, 10, 12 and 13 drop one position each.
+        - Row 14 takes the **first** ``forecast_max_days`` survivors in ``daily.time``'s
+          order (ADR-0260 §5:1); none surviving is ``NO_RESULT``.
 
         Args:
-            rows: The documented response's day rows, in order.
+            decoded: The decoded body, read here for ``utc_offset_seconds`` and
+                ``daily_units`` and for nothing else.
+            daily: Its ``daily`` table.
+            times: Its ``daily.time`` column.
             reported_at: The instant the response declared.
 
         Returns:
-            The outcome: the records, or ``NO_RESULT`` where the response described no
-            day and where §5 dropped every one it did.
+            The outcome: the records, or ``NO_RESULT`` where every day was dropped.
         """
-        # **The duplicate rule is taken over the day each row *names*, and over every
-        # row that names one** — not over the rows that survived the other drops. §5
-        # says "the response has not described that day **once**", so a day named by a
-        # complete row and again by an incomplete one is a day described twice; keeping
-        # the complete row would be this system preferring one of the provider's rows
-        # over another, which is the one thing the clause forbids in terms.
-        #
-        # **Counted in one pass, not one pass per row.** A response well inside
-        # ``forecast_max_response_bytes`` can carry thousands of compact rows, and a
-        # membership count taken per row would be quadratic — tens of millions of
-        # comparisons on the event loop's own thread, with no ``await`` anywhere in this
-        # method for the deadline to be delivered at. The bound §4 puts over "the
-        # response read and the transcription" is only as good as the work under it
-        # being linear.
-        named = [_named_day(row) for row in rows]
+        # **Counted in one pass, not one pass per position.** A response well inside
+        # ``forecast_max_response_bytes`` can name thousands of days, and a membership
+        # count taken per position would be quadratic — on the event loop's own thread,
+        # with no ``await`` anywhere in this method for the deadline to be delivered at.
+        named = [_named_day(element) for element in times]
         seen = Counter(day for day in named if day is not None)
-        kept = [
-            read
-            for row, day in zip(rows, named, strict=True)
-            if day is not None and seen[day] == 1 and (read := self._day_of(row)) is not None
-        ]
+        offset = _declared_offset(decoded.get(_OFFSET_KEY))
+        units = _declared_units(decoded)
+        columns = [daily.get(variable) for variable in _DAILY_VARIABLES]
+        kept: list[_Day] = []
+        if offset is not None and units is not None:
+            present = [column for column in columns if isinstance(column, list)]
+            if len(present) == len(_DAILY_VARIABLES):
+                for position, (element, day) in enumerate(zip(times, named, strict=True)):
+                    if day is None or seen[day] != 1 or not isinstance(element, str):
+                        continue
+                    read = self._day_at(
+                        position, element, day, columns=present, units=units, offset=offset
+                    )
+                    if read is not None:
+                        kept.append(read)
         minted = tuple(self._record(day, reported_at) for day in kept[: self._max_days])
         if not minted:
             return _refused(ForecastRefusal.NO_RESULT)
         return ForecastOutcome(reported_at=reported_at, records=minted)
 
-    def _day_of(self, row: Mapping[str, FrozenJson]) -> _Day | None:
-        """One row read into a day, or ``None`` where ADR-0260 §5 drops it whole.
+    def _day_at(  # noqa: PLR0913 — the position, its date as spelled and as read, and the three response-wide facts §5's rows 7 and 8 already judged
+        self,
+        position: int,
+        date: str,
+        day: tuple[int, int, int],
+        *,
+        columns: Sequence[Sequence[object]],
+        units: Mapping[str, str],
+        offset: timedelta,
+    ) -> _Day | None:
+        """One position read into a day, or ``None`` where §5's rows 10, 12 or 13 drop it.
 
-        **The duplicate rule is not applied here**, deliberately: it is a fact about the
-        *response* rather than about one row, and §5 states it over the day a row names
-        — which :func:`_named_day` reads without regard to whether the rest of the row
-        survives. Folding it in here would make a complete row survive a day an
-        incomplete sibling also named.
+        **Row 11 is not applied here**, deliberately: it is a fact about the response
+        rather than about one position, and :meth:`_minted` counts it over every position
+        that names a day, before this is reached.
 
         Args:
-            row: One day object from the documented response.
+            position: The day's index in ``daily.time``.
+            date: The ``time`` element, as the response spelled it.
+            day: The day it names.
+            columns: Each requested variable's column, in ``_DAILY_VARIABLES``' order.
+            units: Each requested variable's unit.
+            offset: The one offset the response declared.
 
         Returns:
             The day, or ``None``.
         """
-        values = {field: _documented_text(row, field) for field in _DOCUMENTED_FIELDS}
-        if any(value is None for value in values.values()):
-            return None
-        present = {field: value for field, value in values.items() if value is not None}
-        if any(
-            character in _LINE_BREAKS
-            for field in _TRANSCRIBED_FIELDS
-            for character in present[field]
-        ):
-            return None
-        named = _named_day(row)
-        offset = _declared_offset(present[_OFFSET_FIELD])
-        if named is None or offset is None:
-            return None
-        extent = _extent_of(named, offset)
+        extent = _extent_of(day, offset)
         if extent is None:
             return None
-        content = "\n".join(present[field] for field in _TRANSCRIBED_FIELDS)
+        lines = [f"{_TIME_KEY}{_NAME_SEPARATOR}{date}"]
+        for variable, column in zip(_DAILY_VARIABLES, columns, strict=True):
+            token = column[position]
+            if not isinstance(token, _Token):
+                # Row 12: `null`, a boolean, a string, an array or an object, each of
+                # which the format does not admit as a daily value.
+                return None
+            lines.append(
+                f"{variable}{_NAME_SEPARATOR}{token.text}{_UNIT_SEPARATOR}{units[variable]}"
+            )
+        content = _LINE_SEPARATOR.join(lines)
         if len(json.dumps(content)) > self._max_day_chars:
-            # Measured as ADR-0230 §6 measures a fetched document — on the `json.dumps`
-            # rendering at its default `ensure_ascii=True`, its two delimiters included,
-            # which is the rendering the prompt will carry. A ceiling on source
-            # characters would admit a day six or twelve times this long while claiming
-            # to admit this much (ADR-0222 §4).
+            # Row 13, measured as ADR-0230 §6 measures a fetched document — on the
+            # `json.dumps` rendering at its default `ensure_ascii=True`, its two
+            # delimiters included, which is the rendering the prompt will carry. A
+            # ceiling on source characters would admit a day six or twelve times this
+            # long while claiming to admit this much (ADR-0222 §4).
             return None
-        return _Day(named=named, extent=extent, content=content)
+        return _Day(extent=extent, content=content)
 
     def _record(self, day: _Day, reported_at: datetime) -> SemanticMemory:
         """One ``SEMANTIC``, ``EXTERNAL``-sourced record carrying one day (§5).
@@ -1327,14 +1447,17 @@ def _real(value: object) -> float | None:
 
 
 def _decimal(value: float) -> str:
-    """``value`` as a decimal this seam will write into a request target.
+    """``value`` as a plain decimal this seam will write into a request target.
 
-    ``repr`` rather than ``str(round(...))``: it is the shortest spelling that reads
-    back as the same float, so the provider is asked about the coordinate the ruling
-    carried rather than about a rounded neighbour of it. Every character it can produce
-    for a finite float — digits, ``-``, ``.``, ``e``, ``+`` — is either RFC 3986 §2.3
-    unreserved or, for ``+``, a sub-delim a query component admits; the exchange's own
-    origin-form check is the authority and refuses rather than encodes.
+    The digits are ``repr``'s — the shortest spelling that reads back as the same
+    float, so the provider is asked about the coordinate the ruling carried rather than
+    about a rounded neighbour of it — written out in positional notation rather than
+    in ``repr``'s exponent form. ``repr(0.00001)`` is ``1e-05``, which Open-Meteo's
+    documentation does not show it reading as a coordinate, and an exponent's ``+``
+    would be read as a space by a form-encoded query reader; ``0.00001`` is the same
+    value and needs neither. So the characters are digits, ``-`` and ``.`` only, each
+    RFC 3986 §2.3 unreserved; the exchange's own origin-form check is the authority and
+    refuses rather than encodes.
 
     Args:
         value: The coordinate, already known finite by
@@ -1344,7 +1467,7 @@ def _decimal(value: float) -> str:
     Returns:
         Its decimal spelling.
     """
-    return repr(value)
+    return format(Decimal(repr(value)), "f")
 
 
 __all__ = [
