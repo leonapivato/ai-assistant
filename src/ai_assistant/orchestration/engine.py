@@ -5544,6 +5544,9 @@ class Engine:
         run exactly once.
         """
         self._closing = True  # stop accepting new work at once (§2)
+        if self._chat_reader is not None:
+            # ADR-0332 §5:1: a start wait under way ends now, and takes nothing in.
+            self._chat_reader.close()
         if self._telegram_reader is not None:
             # ADR-0323 §11:11: a poll the line holds open ends now, its record unknown;
             # an activation it runs is drained as any other.
@@ -5749,7 +5752,8 @@ class Engine:
 
         Returns:
             Whether the activation marked anything taken in; ``False`` too where the
-            engine was already closing, and nothing was admitted.
+            engine was already closing, or an activation started from the conversation
+            still runs (ADR-0332 §2:3), and nothing was admitted.
 
         Raises:
             CancelledError: If the activation, or this read, was cancelled.
@@ -5876,7 +5880,8 @@ class Engine:
 
         Returns:
             Whether the activation marked anything taken in; ``False`` too where the
-            engine was already closing, and nothing was admitted.
+            engine was already closing, or an activation started from the line's chat
+            still runs (ADR-0332 §2:3), and nothing was admitted.
 
         Raises:
             CancelledError: If the activation, or this read, was cancelled.

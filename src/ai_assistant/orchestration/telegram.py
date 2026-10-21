@@ -93,7 +93,11 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
-from ai_assistant.core.errors import MemoryStoreError, TelegramIntakeRecordError
+from ai_assistant.core.errors import (
+    MemoryStoreError,
+    TelegramIntakeRecordError,
+    TraceStoreError,
+)
 from ai_assistant.core.types import (
     TELEGRAM_MESSAGE_LIMIT,
     ApprovalGiver,
@@ -1162,16 +1166,19 @@ class TelegramReader:
                 break
             messages = [one.message for one in run if one.message is not None]
             forward = any(one.forward_origin is not None for one in messages)
-            into = self._join(
-                JoiningInput(
-                    channel=self._channel,
-                    messages=_recorded(messages),
-                    standing=input_standing(
-                        origin=TELEGRAM.input_origin(self._channel, takes_in_forward=forward),
-                        established=not forward,
-                    ),
-                )
+            joining = JoiningInput(
+                channel=self._channel,
+                messages=_recorded(messages),
+                standing=input_standing(
+                    origin=TELEGRAM.input_origin(self._channel, takes_in_forward=forward),
+                    established=not forward,
+                ),
             )
+            try:
+                into = self._join(joining)
+            except TraceStoreError:
+                _log.warning("telegram_join_failed", stage="reader", reason="clock")
+                into = None
             if into is None:
                 turn.waited = True
                 break

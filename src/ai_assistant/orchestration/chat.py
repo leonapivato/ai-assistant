@@ -72,7 +72,11 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from ai_assistant.core.channel_validation import input_origin
-from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
+from ai_assistant.core.errors import (
+    ConversationStoreError,
+    TraceStoreError,
+    UnknownConversationError,
+)
 from ai_assistant.core.types import (
     DeletedMessage,
     MessageAuthor,
@@ -380,6 +384,8 @@ class ChatReader:
         # ADR-0332 §5:1: the start wait running for each conversation where nothing is,
         # from the first message noticed until the read takes the messages in.
         self._waits: dict[str, _StartWait] = {}
+        # Set by :meth:`close`: every start wait ends at once, and nothing is taken in.
+        self._closed = asyncio.Event()
         # The activation each conversation's read has admitted, while it runs.
         self._running: dict[str, _Turn] = {}
         # ADR-0332 §3:18: per conversation, the positions a join took whose marking has
@@ -415,6 +421,13 @@ class ChatReader:
             return
         self._reading[conversation_id] = False
         self._spawn(self._read(conversation_id))
+
+    def close(self) -> None:
+        """End every start wait at once: the engine is closing, so nothing is taken in.
+
+        The messages stay waiting, and a restart takes them in (§6:9).
+        """
+        self._closed.set()
 
     def composing(self, conversation_id: str) -> None:
         """Take the hub chat page's signal that the person is typing (ADR-0332 §5:6-§5:8).
@@ -540,12 +553,19 @@ class ChatReader:
         Returns:
             Whether the activation marked anything taken in.
         """
-        window = await self._window(conversation_id, waiting)
+        # What it takes in ends any start wait; a message noticed from here on is one
+        # for this activation to join, where it may, or to wait behind.
+        self._waits.pop(conversation_id, None)
         activation_id = self._mint()
-        self._current[conversation_id] = activation_id
-        self._turns[conversation_id] = self._turns.get(conversation_id, 0) + 1
         turn = _Turn(activation_id=activation_id, handed={one.position for one in waiting})
         self._running[conversation_id] = turn
+        try:
+            window = await self._window(conversation_id, waiting)
+        except BaseException:
+            self._running.pop(conversation_id, None)
+            raise
+        self._current[conversation_id] = activation_id
+        self._turns[conversation_id] = self._turns.get(conversation_id, 0) + 1
         joins = (
             None
             if self._join is None
@@ -590,9 +610,20 @@ class ChatReader:
             remaining = end - self._clock()
             if remaining <= 0:
                 break
-            await self._sleep(remaining)
+            await self._nap(remaining)
         self._waits.pop(conversation_id, None)
         return not self._closing()
+
+    async def _nap(self, seconds: float) -> None:
+        """Sleep ``seconds``, or until :meth:`close`, whichever comes first."""
+        napping = asyncio.ensure_future(self._sleep(seconds))
+        closed = asyncio.ensure_future(self._closed.wait())
+        try:
+            await asyncio.wait((napping, closed), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for one in (napping, closed):
+                one.cancel()
+            await asyncio.gather(napping, closed, return_exceptions=True)
 
     async def _joining(self, conversation_id: str, turn: _Turn) -> None:
         """Join what is noticed to the running activation, until one message waits.
@@ -605,7 +636,8 @@ class ChatReader:
             turn.due.clear()
             try:
                 await self._join_waiting(conversation_id, turn)
-            except ConversationStoreError:
+            except ConversationStoreError, TraceStoreError:
+                # What it held waits, and so does everything after it.
                 _log.warning("chat_join_failed", stage="reader", reason="store_failed")
                 turn.waited = True
 
