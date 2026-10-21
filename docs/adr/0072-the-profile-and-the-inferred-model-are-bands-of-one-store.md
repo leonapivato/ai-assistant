@@ -1,6 +1,6 @@
 # 72. The profile and the inferred user model are bands of one store
 
-- Status: Partially superseded by ADR-0328 (§1's definition of the profile and the inferred model by `MemorySource` and confidence; §2's partition of `MemorySource` into bands, as it applies to a memory; §3; and §6's rendering of a belief's confidence)
+- Status: Partially superseded by ADR-0328 (§1's definition of the profile and the inferred model by `MemorySource` and confidence; §2's partition of `MemorySource` into bands, as it applies to a memory; §3; and §6's rendering of a belief's confidence) and ADR-0338 (§1's no `UserProfile` type, no `UserProfileStore` Protocol and no second collection of user facts, and §8's first two declines, for the five set fields of a person's profile alone)
 - Date: 2026-07-27
 - **This is a contract change.** §2 adds a `BeliefBand` enum and a total
   `band_of(MemorySource) -> BeliefBand` mapping to `core/types.py` — a `core`
@@ -27,6 +27,7 @@
   (the supersession law §4 restates), ADR-0004 (the tiering and retention rules
   observation runs inside), ADR-0068 (the freeze §2's additions must respect).
 - Partially superseded: 2026-10-18 by ADR-0328 — §1's definition of the profile and the inferred model by `MemorySource` and confidence; §2's partition of `MemorySource` into bands, as it applies to a memory; §3; and §6's rendering of a belief's confidence: a memory's band is the group of its computed standing, and a memory carries no confidence (ADR-0328 §6, §10). §4's rule that standing is never keyed on confidence, §5, §7 and §9 stand. This replacement takes effect on ratification of ADR-0328. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-21 by ADR-0338 — §1's *no `UserProfile` type, no `UserProfileStore` Protocol, and no second collection of user facts*, and §8's first two declines (a `UserProfile` type or artifact; a second store or store Protocol), for the five fields of a person's profile alone, which the person sets and nothing else holds (ADR-0338 §3:1, §10:1). Pins and style marks point at memories and copy no fact, so they are no second collection (ADR-0338 §4:1, §5:3, §10:3). Every other clause stands. This replacement takes effect on ratification of ADR-0338. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

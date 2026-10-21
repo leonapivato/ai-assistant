@@ -1,6 +1,6 @@
 # 130. A notification is a proposal, and only a perishable one earns an interruption
 
-- Status: Partially superseded by ADR-0215 (the population §8's duplicate lookup reads — §3's atomicity phrase naming the absence of an actionable record for one key, §5's third `DROP` condition, §7's sentence "§8's duplicate rule reads the same population" in its **dismissed** half, §7's purge clause, §8's duplicate-lookup clause, and the two clauses of §9's conformance list that pin them) and ADR-0313 (§2:1's `Goal` reference)
+- Status: Partially superseded by ADR-0215 (the population §8's duplicate lookup reads — §3's atomicity phrase naming the absence of an actionable record for one key, §5's third `DROP` condition, §7's sentence "§8's duplicate rule reads the same population" in its **dismissed** half, §7's purge clause, §8's duplicate-lookup clause, and the two clauses of §9's conformance list that pin them) and ADR-0313 (§2:1's `Goal` reference) and ADR-0338 (§6:4's *read in `Settings.timezone`* and *no second timezone source*: quiet windows are read in the zone of the person they are for, and in `Settings.timezone` where that is empty)
 - Date: 2026-08-10
 - Partially superseded: 2026-08-29 by ADR-0215 — **a dismissal ended the
   suppression §8 promised, and a delivery is a dismissal.** ADR-0131 §3b rules
@@ -41,6 +41,7 @@
   This replacement takes effect on ratification of ADR-0313. This reciprocal header
   record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-21 by ADR-0338 — §6:4's *read in `Settings.timezone`* and *no second timezone source is introduced*: quiet windows are read in the zone of the person they are for, from that person's profile, and in `Settings.timezone` where that zone is empty (ADR-0338 §3:6). Every other clause stands. This replacement takes effect on ratification of ADR-0338. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
