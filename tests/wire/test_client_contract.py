@@ -19,12 +19,10 @@ which is the failure the suite exists to catch in the direction nobody looks.
 **The suite is imported rather than copied**, which is the whole point of a
 *shared* suite: a clause either binds every implementation or binds none. It lives
 beside the Protocol's first implementation, at
-``tests/orchestration/assistant_engine_contract.py``, and pytest puts only a test
-module's *own* directory on the path — hence the one line of ``sys.path`` below.
-The tidier fix is to move the suite to ``tests/``, which ``tests/conftest.py``
-already puts on the path, and it is filed rather than taken here: it would edit
-``tests/orchestration/**`` and break two existing bindings while another lane holds
-that directory.
+``tests/orchestration/assistant_engine_contract.py``. pytest puts only a test
+module's *own* directory on the path, so ``tests/conftest.py`` pins
+``tests/orchestration/`` for every module that imports a suite from it (issue
+#3337).
 
 **The size clause is held in both directions**, which is the one ADR-0084 §4
 insisted on: an oversized *argument* is refused in the client, locally, against the
@@ -41,38 +39,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path as _Path
 from typing import TYPE_CHECKING, ClassVar
 
 import pytest
-from chat_surface_contract import (
-    CHAT_LIMIT,
-    CHAT_SURFACE_AT,
-    ChatReaderSubject,
-    ChatSurfaceSubject,
-)
-from episode_inspection_contract import (
-    INSPECTION_AT,
-    INSPECTION_LIMIT,
-    EpisodeInspectionSubject,
-)
-from pending_candidates_contract import PENDING_AT, PENDING_LIMIT, PendingCandidatesSubject
-from person_model_contract import (
-    PERSON_BUDGET,
-    PERSON_LIMIT,
-    PersonModelSubject,
-    person_model_stores,
-)
-from story_surface_contract import STORY_LIMIT, STORY_SURFACE_AT, StorySurfaceSubject
-
-from ai_assistant.orchestration.person_block import PersonBlocks
-from ai_assistant.testing import FakeMemoryStore, FakePlanStore
-
-sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "orchestration"))
-
 from assistant_engine_contract import (
     _DECISION_LIMIT,
     _INVOCATION_LIMIT,
@@ -106,6 +77,25 @@ from assistant_engine_contract import (
     seeded_spend_ledger,
     seeded_trail,
 )
+from chat_surface_contract import (
+    CHAT_LIMIT,
+    CHAT_SURFACE_AT,
+    ChatReaderSubject,
+    ChatSurfaceSubject,
+)
+from episode_inspection_contract import (
+    INSPECTION_AT,
+    INSPECTION_LIMIT,
+    EpisodeInspectionSubject,
+)
+from pending_candidates_contract import PENDING_AT, PENDING_LIMIT, PendingCandidatesSubject
+from person_model_contract import (
+    PERSON_BUDGET,
+    PERSON_LIMIT,
+    PersonModelSubject,
+    person_model_stores,
+)
+from story_surface_contract import STORY_LIMIT, STORY_SURFACE_AT, StorySurfaceSubject
 
 from ai_assistant.core.types import (
     GrantScope,
@@ -113,7 +103,8 @@ from ai_assistant.core.types import (
     PlacementReach,
     PlacementSetter,
 )
-from ai_assistant.testing import FakeAssistantEngine
+from ai_assistant.orchestration.person_block import PersonBlocks
+from ai_assistant.testing import FakeAssistantEngine, FakeMemoryStore, FakePlanStore
 from ai_assistant.wire import (
     ENVELOPE_RESERVE_BYTES,
     HubEngineClient,

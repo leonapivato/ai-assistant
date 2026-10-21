@@ -18,7 +18,6 @@ import asyncio
 import os
 import re
 import stat
-import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING, Final
@@ -26,6 +25,7 @@ from typing import TYPE_CHECKING, Final
 import pypdf
 import pytest
 from fetch_fixtures import fetcher as build
+from fetcher_contract import ClockedFetcher, Dial, FetcherContract, GatedFetch, wall_of
 from hostile_values import (
     UNNAMEABLE_KINDS,
     ClassRaises,
@@ -36,10 +36,6 @@ from hostile_values import (
     unnameable,
 )
 from pdf_fixtures import amplified_page_tree_pdf, extracted_text_of, minimal_pdf
-
-sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "core"))
-
-from fetcher_contract import ClockedFetcher, Dial, FetcherContract, GatedFetch, wall_of
 
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import FetchRefusal
