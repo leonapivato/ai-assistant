@@ -1,6 +1,6 @@
 # 308. Recall runs again on what understanding found, and outside content reaches planning only as a digest's evidence
 
-- Status: Partially superseded by ADR-0312 (§5:6's placement, for the activation's own evidence shown to its own planning) and ADR-0314 (§6:4's *and go when the activation ends*, for the copy of a held result's text a digest's prompt carries into the diagnostic record, until the record's window deletes it) and ADR-0332 (§2:9, §2:10 and §4:4–§4:6: recall's second run and its digest, once per understanding version)
+- Status: Partially superseded by ADR-0312 (§5:6's placement, for the activation's own evidence shown to its own planning) and ADR-0314 (§6:4's *and go when the activation ends*, for the copy of a held result's text a digest's prompt carries into the diagnostic record, until the record's window deletes it)
 - Date: 2026-10-11
 - Scope: the phases after understanding ([#2723](https://github.com/leonapivato/ai-assistant/pull/2723)), milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)), the third of their four decisions: recall's second run and what planning is shown of recall's finds, and digesting, which turns outside content into evidence. ADR-0306 decided capabilities, authorizing and acting, and ADR-0307 planning; the cutover decision is the fourth.
 - Dependency: [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md) and [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md), both Accepted and merged at `1978419a`; recall (ADR-0281, ADR-0282, ADR-0300 §7), implemented at `5166d5bc`.
@@ -28,7 +28,6 @@
   effect on ratification of ADR-0314. This reciprocal header record accompanies the
   numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
   below are preserved.
-- Partially superseded: 2026-10-21 by ADR-0332 — §2:9 and §2:10: recall's second run runs once per understanding version (ADR-0332 §3:12). §4:4–§4:6: recall's digest is made once per understanding version, over the first run's outside records and the latest version's run (ADR-0332 §3:13, §3:14). Every other clause stands. This replacement takes effect on ratification of ADR-0332. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

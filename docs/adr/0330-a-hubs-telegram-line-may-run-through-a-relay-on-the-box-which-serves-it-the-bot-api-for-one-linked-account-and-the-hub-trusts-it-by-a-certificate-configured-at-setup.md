@@ -1,12 +1,13 @@
 # 330. A hub's Telegram line may run through a relay on the box, which serves it the Bot API for one linked account, and the hub trusts it by a certificate configured at setup
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0332 (§4:3's members a relay hands unaltered, in the addition alone: a message's `entities`)
 - Date: 2026-10-18
 - Scope: the hub's side of the shared Telegram bot: what a hub requires of a relay that holds the bot, and how the line changes when it reaches one. Tracker: [#3140](https://github.com/leonapivato/ai-assistant/issues/3140), acceptance [#3133](https://github.com/leonapivato/ai-assistant/issues/3133), the client-side implementation [#3141](https://github.com/leonapivato/ai-assistant/issues/3141). The relay itself and the account-linking flow are the private repository's.
 - Dependency: ADR-0323, ADR-0327, ADR-0191, ADR-0231, ADR-0125 and ADR-0154, as their status lines leave them.
 - Authorization: the owner's ruling of 2026-10-18 on #879 ([the ruling](https://github.com/leonapivato/ai-assistant/issues/879#issuecomment-6252766646)): each hosted person has "one hub per person, reached through one shared Telegram bot and the web. The bot is linked to each person's account", and the router is built now, in milestone 13. The owner closed the Telegram line's acceptance on 2026-10-19 ([#3118](https://github.com/leonapivato/ai-assistant/issues/3118#issuecomment-6258451363)). What remains is technical, and this ADR settles it. The dispatcher assigned 0330 for Hosted setup C1.
 - **Changes a `core` contract, so it is a contract-surface decision.** It restates the `TelegramBotClient` contract's fixed-origin rule and its credential rule for a relayed line, and adds two `Settings` fields (§12). No member, argument, result or `core/types.py` shape changes, and `PROTOCOL_VERSION` does not advance (§12:5).
 - **Partially supersedes** [ADR-0323](0323-a-telegram-chat-with-the-owners-bot-is-a-line-to-the-assistant-and-connecting-it-approves-what-the-line-carries.md), for a line in relayed mode alone and in the scopes §14 lists, and no clause of any other ADR.
+- Partially superseded: 2026-10-21 by ADR-0332 — §4:3, in the addition alone: a message's `entities` are among the members the hub reads that a relay hands unaltered, so the line's `/stop` reads alike in direct and relayed mode (ADR-0332 §7:9, §7:10). Every other clause stands. This replacement takes effect on ratification of ADR-0332. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

@@ -53,7 +53,7 @@
   reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082;
   prior supersessions and the ratified body below are preserved.
 - Partially superseded: 2026-10-14 by ADR-0319 — §2:3 and §9:1. They governed `resume`'s admission write and its episode. Every other clause stands. The code they governed is deleted, or is deleted by a lane in flight, which they bind until it merges (ADR-0319 §1:3). This replacement takes effect on ratification of ADR-0319. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
-- Partially superseded: 2026-10-21 by ADR-0332 — §3:3, in the addition alone: a revision may extend the processing record's `joined` by inputs appended in order. §3:8, in the addition alone: `joined` is a field of the record, not a stage's result (ADR-0332 §3:19, §7:2). Every other clause stands. This replacement takes effect on ratification of ADR-0332. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-21 by ADR-0332 — §3:3, in the addition alone: a revision may extend the processing record's `joined` by inputs appended in order. §3:8, in the addition alone: `joined` is a field of the record, not a stage's result (ADR-0332 §3:16, §7:2). Every other clause stands. This replacement takes effect on ratification of ADR-0332. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

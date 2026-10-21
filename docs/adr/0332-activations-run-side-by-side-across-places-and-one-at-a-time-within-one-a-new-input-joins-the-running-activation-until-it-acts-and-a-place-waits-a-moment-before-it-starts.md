@@ -3,10 +3,10 @@
 - Status: Proposed
 - Date: 2026-10-21
 - Scope: how the hub takes in several inputs at once. Activations run side by side across places and across people, and one at a time within a place. A new input joins an activation on its place that has not yet acted, and the same person's other places see that activation and may take it over before it acts. A messaging place waits a moment before it starts, which the hub chat's *composing* signal extends. The line takes `/stop`. These are picks 1 to 3 of proposal [#3257](https://github.com/leonapivato/ai-assistant/pull/3257), with the walk's answers 1 to 4 and 9. Its modes and background work are named in §9 as not decided here.
-- Dependency: [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md), [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md), [ADR-0293](0293-the-hubs-chat-is-a-hosted-medium-and-a-conversation-keeps-its-own-transcript.md), [ADR-0295](0295-stopping-an-activation-is-a-command-that-starts-nothing-new-and-cuts-off-nothing-already-sent.md), [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md), [ADR-0308](0308-recall-runs-again-on-what-understanding-found-and-outside-content-reaches-planning-only-as-a-digests-evidence.md), [ADR-0309](0309-the-phases-are-built-beside-the-old-path-and-one-cutover-switches-the-controller-over-deletes-the-old-path-and-goes-live-in-one-deploy.md), [ADR-0323](0323-a-telegram-chat-with-the-owners-bot-is-a-line-to-the-assistant-and-connecting-it-approves-what-the-line-carries.md) and [ADR-0326](0326-a-persons-memory-carries-across-every-upgrade-each-schema-change-ships-its-migration-and-a-fresh-data-directory-is-the-owners-ruling.md), as their status lines leave them.
+- Dependency: [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md), [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md), [ADR-0293](0293-the-hubs-chat-is-a-hosted-medium-and-a-conversation-keeps-its-own-transcript.md), [ADR-0295](0295-stopping-an-activation-is-a-command-that-starts-nothing-new-and-cuts-off-nothing-already-sent.md), [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md), [ADR-0308](0308-recall-runs-again-on-what-understanding-found-and-outside-content-reaches-planning-only-as-a-digests-evidence.md), [ADR-0309](0309-the-phases-are-built-beside-the-old-path-and-one-cutover-switches-the-controller-over-deletes-the-old-path-and-goes-live-in-one-deploy.md), [ADR-0323](0323-a-telegram-chat-with-the-owners-bot-is-a-line-to-the-assistant-and-connecting-it-approves-what-the-line-carries.md), [ADR-0330](0330-a-hubs-telegram-line-may-run-through-a-relay-on-the-box-which-serves-it-the-bot-api-for-one-linked-account-and-the-hub-trusts-it-by-a-certificate-configured-at-setup.md) and [ADR-0326](0326-a-persons-memory-carries-across-every-upgrade-each-schema-change-ships-its-migration-and-a-fresh-data-directory-is-the-owners-ruling.md), as their status lines leave them.
 - Authorization: the owner set the direction on 2026-10-21 (Context). The coordinator walked proposal #3257 the same day under the owner's standing delegation, and the walk record on #3257 holds the answers this decision converts. The owner's words on that delegation, verbatim: "Dont draw the line who ratifies what, Ill just check in and if I see something wrong I'll give input to you." Answer 1 changes the end state the owner walked on 2026-10-04, and is marked on the walk record as the owner's to object to. The dispatcher assigned 0332, and ratifies it under that delegation.
-- **Changes `core`, so it is a contract-surface decision, and adds a `Protocol` member: a breaking change under golden rule 5.** `AssistantEngine` gains `composing` (§5:9), and `TelegramIntakeRecord.claim_reply`'s documented contract widens to a stop command (§8:6). `core/types.py` gains `JoinedInput`, a field on `EpisodeProcessingRecord`, a field on each of `ProposedActivationUnderstanding` and `ActivationUnderstanding`, and a member on each of `ControllerStage` and `ControllerRule` (§7). `Settings` gains five fields (§6). The wire carries the new method and the changed record, so `PROTOCOL_VERSION` advances.
-- **Partially supersedes**, in the clauses §10's first table names: ADR-0276, ADR-0280, ADR-0286, ADR-0292, ADR-0293, ADR-0295, ADR-0298, ADR-0300, ADR-0306, ADR-0308, ADR-0309 and ADR-0323.
+- **Changes `core`, so it is a contract-surface decision, and adds a `Protocol` member: a breaking change under golden rule 5.** `AssistantEngine` gains `composing` (§5:9), and `TelegramIntakeRecord.claim_reply`'s documented contract widens to a stop command (§8:6). `core/types.py` gains `JoinedInput`, a field on `EpisodeProcessingRecord`, a field on each of `ProposedActivationUnderstanding` and `ActivationUnderstanding`, a field on `TelegramMessage`, and a member on each of `ControllerStage` and `ControllerRule` (§7). `Settings` gains five fields (§6). The wire carries the new method and the changed record, so `PROTOCOL_VERSION` advances.
+- **Partially supersedes**, in the clauses §10's first table names: ADR-0276, ADR-0280, ADR-0286, ADR-0292, ADR-0293, ADR-0295, ADR-0298, ADR-0306, ADR-0309, ADR-0323 and ADR-0330.
 
 ## Context
 
@@ -83,11 +83,13 @@ the running activation.
 
 > **Normative.** The implementation ships as separate pull requests in this order.
 >
-> 1. **`core`, `wire`, `testing` and `memory`, permitted expressly here as one unit.**
->    §7's types, §6's settings, `AssistantEngine.composing` with its wire method, its
->    canonical fake and its conformance case, §5:11's row, the `PROTOCOL_VERSION` advance,
->    the episode store's upgrade under ADR-0326 §4:1–§4:2 for §7's record field, and
->    `TelegramIntakeRecord.claim_reply`'s contract widened to a stop command (§8:6).
+> 1. **`core`, `wire`, `testing`, `memory` and `tools`, permitted expressly here as one
+>    unit.** §7's types, §6's settings, `AssistantEngine.composing` with its wire method,
+>    its canonical fake and its conformance case, §5:11's row, the `PROTOCOL_VERSION`
+>    advance, the episode store's upgrade under ADR-0326 §4:1–§4:2 for §7's record field,
+>    `TelegramIntakeRecord.claim_reply`'s contract widened to a stop command (§8:6), and
+>    `TelegramMessage.command` (§7:9) with its parsing in `tools/egress.py`, the Telegram
+>    fake's and the client's conformance cases.
 > 2. **`orchestration`, the activation:** §3's rules, the join's entry point and the
 >    commitment step, §4's visibility and takeover, and the record.
 > 3. **`orchestration`, the readers:** §2's per-place rule as the kinds declare it, §3's
@@ -95,6 +97,14 @@ the running activation.
 > 4. **`interfaces`:** §5:10's gateway route and the hub chat page's sender.
 >
 > Step 2 depends on step 1, step 3 on step 2, and step 4 on step 1.
+
+> **Normative.** The tests of the step that builds each include these cases:
+> - a stop while understanding runs, then a message, then the stage's end: the message
+>   joins nothing, waits, and is taken in when the stopped activation ends;
+> - a full page of waiting updates on the line, then `/stop`: it is acted on once a poll
+>   returns it (§8:4);
+> - two messages on the line whose text is `/stop` and which differ only in the
+>   `bot_command` entity: one is a stop and the other a message.
 
 ### 2. Side by side, and one at a time within a place
 
@@ -147,6 +157,7 @@ question into the place.
 > **Normative.** A new input on a place that runs one activation at a time joins the
 > activation running there where all of these hold:
 > - the activation has not committed;
+> - the activation's stop mark (ADR-0297) is unset;
 > - the input's author is the running activation's input's author, established in the same
 >   way, and the input carries the same authority (ADR-0292 §5:5) and the same origin
 >   (ADR-0284 §2:2);
@@ -158,7 +169,9 @@ question into the place.
 A forward on the line, whose author is claimed (ADR-0323 §4:10), therefore never joins a
 user's activation. A user's message never joins one a forward started. Because no input
 joins past one that is waiting, the place's messages are understood in the order they
-arrived.
+arrived. A message sent after a stop joins nothing: it waits, and is taken in when the
+stopped activation ends, so the stop holds none back (ADR-0295 §3:6). An input that joined
+before the stop is the stopped activation's input, as its trigger is.
 
 **The commitment step.**
 
@@ -167,9 +180,9 @@ arrived.
 > planned from does not cover. Where there is none, it marks the activation committed.
 > The check and the mark are one step with no await between, on the hub's one event loop.
 
-> **Normative.** A join is taken only where the activation's committed mark is unset, in
-> one step with no await between that check and appending the input to the activation's
-> state.
+> **Normative.** A join is taken only where the activation's committed mark and its stop
+> mark are both unset, in one step with no await between that check and appending the
+> input to the activation's state.
 
 > **Normative.** Where the commitment step finds joined input not covered, acting
 > dispatches none of the round's calls and not its message, by any path. Its acting
@@ -183,9 +196,9 @@ invocation's (ADR-0306 §5:7) and a write to own records. So it changes neither 
 store's claim nor the invocation ledger, and nothing committed is overtaken by a join.
 
 **What a join makes due again.** The joined input is input no understanding covers yet, so
-the rules start it over from understanding. Each rule below reads the latest understanding
-version rather than the pass, which is ADR-0280 §4:5's own principle: rules read decisions,
-not history.
+the rules start it over from understanding and planning, and from nothing else. The rules
+below read the latest understanding version rather than the pass, which is ADR-0280 §4:5's
+own principle: rules read decisions, not history.
 
 > **Normative.** `not_understood` answers where understanding is wired and no understanding
 > decision covers every input the activation holds. ADR-0280 §4:6's guard is scoped to the
@@ -195,21 +208,18 @@ not history.
 > messages and every joined one, each kept apart and dated. It records a new version
 > (ADR-0276 §7:3).
 
-> **Normative.** The story-links decision (ADR-0300 §6:10) is made once per understanding
-> version. `story_links_unrecorded` answers where the latest version has none, and links an
-> earlier version recorded stand.
+> **Normative.** A join makes neither recall's second run (ADR-0308 §2:9), nor recall's
+> digest (ADR-0308 §4:4–§4:6), nor the story-links decision (ADR-0300 §6:10) due again.
+> Each runs at most once on the pass, as its row states, and reads the understanding
+> version that is latest when it runs.
 
-> **Normative.** Recall's second run (ADR-0308 §2:9) runs once per understanding version.
-> `understood_not_recalled` answers where the latest version has no second-run decision, so
-> recall runs at most once for the first run and once for each version.
-
-> **Normative.** Recall's digest (ADR-0308 §4:4–§4:6) is made once per understanding version.
-> It covers the first run's outside records and the latest version's run, and answers the
-> latest version's meaning. `recall_undigested` answers where the latest version has no
-> recall digest, and ADR-0309 §3:5's guard on it is scoped to the version.
-
-> **Normative.** A digest an earlier version recorded stays on the episode as evidence
-> already recorded, and planning is shown it beside the latest one.
+So the record's single slots stand as they are: `recall_second_run` takes its value once
+(ADR-0308 §7), and a field that carries a value keeps it (ADR-0286 §3:3). Each of the
+three that has not yet run when a join arrives reads the version that covers it, since
+`not_understood` sits above their rows. Where one has already run, the joined input's
+new matter gets nothing from it on that pass, whether a second recall run, a digest of
+its own or story links. Planning for the new version is shown what the pass already recalled
+and digested. §9 names the measurement that would reopen it.
 
 > **Normative.** Planning starts over for each understanding version. `first_round_due`
 > answers where no round has been planned from the latest version. `round_due` and
@@ -267,9 +277,10 @@ and so does the line's `/stop` (§8). Typed text is still a message and never a 
 > `takeover` due. Its row sits immediately after `story_links_unrecorded`.
 
 > **Normative.** The takeover stage, in one step with no await between, reads whether the
-> named activation is still running and uncommitted, and whether its input carries the same
-> authority and the same origin as this activation's (as §3:3 requires of a join).
-> - Where all three hold, the stage sets that activation's stop mark (ADR-0297) and its committed
+> named activation is still running, uncommitted and without its stop mark, and whether its
+> input carries the same authority and the same origin as this activation's (as §3:3
+> requires of a join).
+> - Where all of these hold, the stage sets that activation's stop mark (ADR-0297) and its committed
 >   mark, so it can neither commit nor take a join. It appends that activation's input to
 >   this one as a `JoinedInput` naming it, and records the decision *taken over*.
 > - Otherwise it records *not taken*.
@@ -277,8 +288,9 @@ and so does the line's `/stop` (§8). Typed text is still a message and never a 
 > **Normative.** A taken-over activation is stopped under ADR-0295 §5:1 and carries every
 > guarantee of ADR-0295 §§2–4. It writes nothing new into its place.
 
-> **Normative.** Where the named activation has committed or ended, nothing is stopped. Both
-> go on, and the newer sees in what it was shown how far the older got.
+> **Normative.** Where the named activation has committed, been stopped or ended, nothing is
+> stopped or taken over. This activation goes on, and sees in what it was shown how far
+> the older got.
 
 A takeover is §3's join across places. The older one's input becomes the newer one's
 joined input, so `not_understood` answers again, and understanding reads both messages
@@ -393,23 +405,44 @@ no reply separated give the burst distribution, and the wait is a percentile of 
 > **Normative.** §7:2's field is a schema change under ADR-0326 §2:3, and ships ADR-0326
 > §4:1–§4:2's upgrade and its test in the same pull request.
 
+> **Normative.** `TelegramMessage` gains `command: EncodableText | None = None`: the part of
+> the message's text that a `bot_command` entity starting at its first character covers, by
+> the entity's offset and length; `None` where the message has no such entity. An
+> `entities` member not in the shape the Bot API documents leaves `command` `None` and the
+> rest of the message read as it is. It never drops the message and never makes one a
+> command.
+
+> **Normative.** The client reads `command` in both of its modes (ADR-0330 §3). A relay
+> hands a message's `entities` unaltered, among the members ADR-0330 §4:3 names.
+
+A line whose relay withheld the member would read every `/stop` as an ordinary message,
+which is the safe side of the predicate (§8:1).
+
 ### 8. The line's `/stop`
 
 > **Normative.** On the line, a message is a stop command where all of these hold:
 > - it is the user's, established, under ADR-0323 §4:1: from the configured account, in its
 >   private chat with the bot, and not forwarded;
-> - its whole text is `/stop`, or `/stop@` followed by the bot's username;
-> - Telegram marks that text as one `bot_command` entity starting at its first character.
+> - its whole text is `/stop`;
+> - its `command` (§7:9) is `/stop`: Telegram marked that text as a `bot_command` entity
+>   starting at its first character.
 
-> **Normative.** Nothing else is a stop. A forward, a reply quoting `/stop`, and text that
-> mentions `/stop` anywhere but as its whole text are messages like any other.
+> **Normative.** Nothing else is a stop. A forward, a reply quoting `/stop`, `/stop@`
+> followed by any name, `/stop` without the entity, and text that mentions `/stop` anywhere
+> but as its whole text are messages like any other.
 
-> **Normative.** A stop command is not input. It starts no activation, joins none, and
-> never waits behind the running activation.
+The addressed form `/stop@name` is for group chats, where several bots may read one chat.
+In a private chat Telegram's clients send the bare command, and the line reads no group
+(ADR-0323 §5:2), so the predicate needs no bot identity.
 
-> **Normative.** The reader acts on a stop command as soon as it fetches it. Where an
+> **Normative.** A stop command is not input. It starts no activation and joins none.
+
+> **Normative.** The reader acts on a stop command as soon as a poll returns it. Where an
 > activation started from the line's chat is running, it stops that activation as
-> `AssistantEngine.stop_activation` does (ADR-0295, ADR-0297).
+> `AssistantEngine.stop_activation` does (ADR-0295, ADR-0297). A poll returns it only while
+> it is within the one page of updates Telegram returns past the confirmed offset (§8:7).
+> Behind a full page of updates left waiting, it waits with them, and the reader acts on it
+> when a poll first returns it.
 
 > **Normative.** The line answers a stop command with one fixed line by rule, from the
 > writer and never from the activation: "Stopped." where it stopped one, and "Nothing was
@@ -417,12 +450,14 @@ no reply separated give the burst distribution, and the wait is a percentile of 
 
 > **Normative.** The reader records a stop command in the intake record as an update it
 > answered, as it records a non-text message it answered (ADR-0323 §5:8,
-> `TelegramIntakeRecord.claim_reply`). A fetch that returns it again then acts on it and
-> answers it once (ADR-0323 §5:9).
+> `TelegramIntakeRecord.claim_reply`), before it acts on it. A poll that returns it again,
+> as one does while the updates before it wait unconfirmed, neither stops anything nor
+> answers it again (ADR-0323 §5:9).
 
 > **Normative.** While an activation started from the line's chat runs, the reader keeps
-> polling, so that it sees joins and stop commands. An update it does not take in is left
-> unconfirmed, so it waits in Telegram (ADR-0323 §5:6).
+> polling, so that it sees joins and stop commands within the page Telegram returns. An
+> update it does not take in is left unconfirmed, so it waits in Telegram (ADR-0323 §5:6),
+> and a poll returns at most one page of updates past the confirmed offset.
 
 > **Normative.** The reader paces those polls so that updates left unconfirmed never make it
 > poll in a loop. How it paces them is the implementation's.
@@ -446,6 +481,8 @@ fixed line plays that part, as ADR-0323 §6:10's line does after a restart.
 | Showing the person's composing to their other devices | Nothing needs it yet |
 | Shared places with several authors | The household design (the walk's answer 9) |
 | The values of §6 | #2589 (§6:6) |
+| A durable store of pending input, so the line can confirm the updates waiting behind a running activation and see a `/stop` past a full page of them | Its own decision, since it amends ADR-0323 §5:8's *holding no message text*; [#3267](https://github.com/leonapivato/ai-assistant/issues/3267) |
+| Recall again per understanding version, if measurement shows joined inputs missing memory context (§3:11) | #2589's measurements first, then its own decision, with a per-version recall history and its upgrade under ADR-0326; [#3268](https://github.com/leonapivato/ai-assistant/issues/3268) |
 
 > **Normative.** Each item the table names takes a decision of its own before any lane
 > builds it.
@@ -456,18 +493,17 @@ Superseded in part; every clause the middle column does not name stands:
 
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
-| ADR-0280 | §4:3's row `not_understood`, as ADR-0309 §3:1 keeps it: it answers where no understanding decision covers every input held; §4:6's loop guard, for understanding: once per input held; §7:1's record, in the addition alone: `joined` | §3:9, §3:19, §7:2 |
+| ADR-0280 | §4:3's row `not_understood`, as ADR-0309 §3:1 keeps it: it answers where no understanding decision covers every input held; §4:6's loop guard, for understanding: once per input held; §7:1's record, in the addition alone: `joined` | §3:9, §3:16, §7:2 |
 | ADR-0276 | §2:1's `ProposedActivationUnderstanding` and `ActivationUnderstanding` field sets, in the additions alone: `continues`; §3:3's label scheme, in the addition alone: the kind `R` | §7:3, §7:4 |
-| ADR-0286 | §3:3, in the addition alone: a revision may extend `joined`; §3:8, in the addition alone: `joined` is a field of the record, not a stage's result | §3:19, §7:2 |
+| ADR-0286 | §3:3, in the addition alone: a revision may extend `joined`; §3:8, in the addition alone: `joined` is a field of the record, not a stage's result | §3:16, §7:2 |
 | ADR-0292 | §6:10, in the addition alone: an input that joins a running activation is part of its input; §10:4, in the addition alone: the same person's running activations on their other places are visible beside the window; §11:1, within a place: one activation at a time with joining, the end state staying the direction across places; §11:2's *the older is stopped*, across places, only where the older has not committed; §11:5, whole: its interim becomes §2's rule; §11:6, whole: the change reaches the controller and the readers; §12:5 and §12:6, each in the addition alone: the line's `/stop` | §2:3–§2:5, §3:3, §4:1, §4:6–§4:8, §8:1 |
-| ADR-0293 | §6:1, in the addition alone: the reader waits before taking in; §6:2 and §6:3: a message joins where §3 allows, and otherwise waits; §6:8, in the addition alone: a message is marked taken in when it joins | §2:4, §3:3, §3:21, §5:1 |
+| ADR-0293 | §6:1, in the addition alone: the reader waits before taking in; §6:2 and §6:3: a message joins where §3 allows, and otherwise waits; §6:8, in the addition alone: a message is marked taken in when it joins | §2:4, §3:3, §3:18, §5:1 |
 | ADR-0295 | §1:4 and §1:5, each in the addition alone: the line's `/stop` is a stop; §3:3, in the addition alone: the line's fixed answer to it | §8:1, §8:4, §8:5 |
 | ADR-0298 | §5:1's table, in the addition alone: `composing` in the Writing row | §5:11 |
-| ADR-0300 | §6:10's story-links decision and §6:11's row: once per understanding version | §3:11 |
 | ADR-0306 | §5:1, in the addition alone: a round set aside by a join runs none of its calls | §3:5, §3:7 |
-| ADR-0308 | §2:9 and §2:10: the second run once per understanding version; §4:4–§4:6: recall's digest once per version | §3:12, §3:13 |
-| ADR-0309 | §3:1's table, in the addition alone: the row `takeover_undecided`; and its rows `understood_not_recalled`, `recall_undigested`, `first_round_due`, `round_limit_reached` and `round_due`, read per understanding version; §3:5's guard on recall's digest, per version | §3:12, §3:13, §3:15, §4:5 |
+| ADR-0309 | §3:1's table, in the addition alone: the row `takeover_undecided`; and its rows `first_round_due`, `round_limit_reached` and `round_due`, read per understanding version | §3:12, §4:5 |
 | ADR-0323 | §5:1, in the addition alone: a stop command is not input; §5:8, in the addition alone: a stop command is recorded as answered; §5:5: a message joins where §3 allows, the start wait included; §5:7, whole: the reader polls while an activation runs; §6:11, in the addition alone: the line's fixed answer to `/stop`; §8:1, whole: the line takes `/stop` | §3:3, §5:3, §8:1–§8:8 |
+| ADR-0330 | §4:3, in the addition alone: a message's `entities` are among the members a relay hands unaltered | §7:10 |
 
 Read through and not superseded:
 
@@ -475,15 +511,16 @@ Read through and not superseded:
 | --- | --- |
 | ADR-0276 §7:3, §7:4 | Nothing: a join adds a version, and `join_limit`'s default keeps an activation inside the version bound |
 | ADR-0295 §1:5, ADR-0292 §12:6 | Nothing for the hub chat: typed text is a message and never a stop |
-| ADR-0297 | Nothing: the stop mark is read as it is, and a takeover sets it |
+| ADR-0297 | Nothing: the stop mark is read as it is, a join and a takeover read it, and a takeover sets it |
 | ADR-0306 §5:2–§5:13 | Nothing: everything claimed finishes, and the commitment step sits before every claim |
-| ADR-0307 §8:6 | Nothing: planning's first round for a version follows that version's understanding and recall |
+| ADR-0300 §6:10–§6:11, ADR-0308 §2:9–§2:10, §4:4–§4:6 and §7 | Nothing: the story-links decision, recall's second run and its digest stay once per pass, in their single slots (§3:11) |
+| ADR-0307 §8:6 | Nothing: planning's first round for a version follows that version's understanding, and recall's second run, which ran once on the pass |
 | ADR-0323 §4 | Nothing: the line's authors are as it establishes them, and §3:3 joins only the same author and authority |
 | ADR-0329 | Nothing: the observer stays memory's one writer |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
 > dated header note of ADR-0276, ADR-0280, ADR-0286, ADR-0292, ADR-0293, ADR-0295, ADR-0298,
-> ADR-0300, ADR-0306, ADR-0308, ADR-0309 and ADR-0323, atomically with this ADR under
+> ADR-0306, ADR-0309, ADR-0323 and ADR-0330, atomically with this ADR under
 > ADR-0070 and ADR-0082, preserving their ratified bodies. The replacements take effect on
 > this ADR's ratification.
 
@@ -496,7 +533,8 @@ Read through and not superseded:
 - On the hub chat, the assistant waits while you type.
 - A thought begun on Telegram and finished on the web is one activation, provided the first
   had not yet acted.
-- `/stop` on the line works while work is running.
+- `/stop` on the line works while work is running, unless a full page of messages is
+  waiting before it.
 - Every join and takeover is on the episode, so the viewer shows why an answer covered
   two messages.
 
@@ -505,7 +543,10 @@ Read through and not superseded:
 - A `Protocol` member and a wire method.
 - Fields in `core/types.py` and a schema change to the episode store, with its upgrade.
 - Five settings.
-- A second understanding call, and its recall, for each join.
+- A second understanding call for each join, and the planning rounds that follow it.
+- A joined input that arrives after the story links, recall's second run or its digest
+  has run gets nothing from that stage on that pass (§3:11).
+- On the line, a `/stop` behind a full page of waiting messages waits with them (§8:4).
 - A start wait of a second or two before any reply on a messaging place.
 - The line polls while an activation runs, which ADR-0323 had it avoid.
 - A taken-over activation's messages appear in two episodes, the stopped one and the one
