@@ -1998,6 +1998,28 @@ async def test_export_wraps_corrupt_stored_record(
         await store.export()
 
 
+@pytest.mark.parametrize("read", ["get_many", "get_history"])
+@pytest.mark.parametrize("revision", ["broken", 1.5], ids=["text", "real"])
+async def test_a_batch_read_reports_a_corrupt_revision_as_a_store_error(
+    make_store: Callable[..., SqliteMemoryStore], read: str, revision: object
+) -> None:
+    """A revision column holding no integer is a corrupt record (ADR-0342 §2:5).
+
+    ``records`` is not ``STRICT``, so a damaged file can hold text or a real in the
+    ``INTEGER`` column. Text once surfaced as a bare ``ValueError`` from ``int()``,
+    past the transaction's translation, and a real was truncated into a stamp the
+    store never issued; both batch reads now refuse either as ``MemoryStoreError``.
+    """
+    store = make_store()
+    await store.add(_semantic("1", "fine"))
+    store._conn.execute("UPDATE records SET revision = ? WHERE id = ?", (revision, "1"))
+
+    call = store.get_many(["1"]) if read == "get_many" else store.get_history(["1"])
+
+    with pytest.raises(MemoryStoreError, match="revision"):
+        await call
+
+
 async def test_persists_across_reopen(make_store: Callable[..., SqliteMemoryStore]) -> None:
     store = make_store()
     await store.add(_semantic("1", "durable memory"))
