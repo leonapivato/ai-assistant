@@ -659,6 +659,11 @@ class PlanningInputs:
             by its id, the facts of the candidates its own rounds recorded, in order
             (ADR-0329 §6:9); none where nothing is pending or candidates are not
             recorded.
+        overtaken: The ids of earlier rounds that new input overtook before they acted
+            (ADR-0332 §3:7, §3:12-§3:13): planned from an earlier understanding version,
+            so their message was never written and nothing they asked about was shown.
+            Each stays in ``rounds``, its text shown as not written, and what it asked
+            about is not taken as asked (ADR-0321 §2:2).
     """
 
     activation_id: str
@@ -679,6 +684,7 @@ class PlanningInputs:
     stories: PlanningStories | None = None
     approved: tuple[ApprovedAction, ...] = ()
     pending: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    overtaken: frozenset[str] = frozenset()
 
 
 # --- the round's decision ----------------------------------------------------------------
@@ -1121,6 +1127,11 @@ _ALREADY_ASKED: Final = (
     "user's answer, so it is not asked about again. It is not approved: never say it is "
     "going through or being done"
 )
+#: ADR-0332 §3:7, §3:12: an earlier round's text, where new input overtook the round
+#: before it acted, so it was never written and asked the user nothing.
+_OVERTAKEN: Final = (
+    "not written: new input joined before this round acted, so the user never saw it"
+)
 #: A call that needs the user but whose request was not handed on cannot be shown exactly,
 #: so it is never asked about (§2:5).
 _UNSHOWABLE: Final = "needs the user, and it cannot be asked about, so it will not run"
@@ -1175,9 +1186,14 @@ class _Request:
         # The calls this round may ask about, by the reference each is shown with
         # (ADR-0321 §2:3), filled as the earlier rounds are rendered.
         self.askable: dict[str, CallOutcome] = {}
-        # The calls this activation's earlier rounds asked about, by their round's number.
+        # The calls this activation's earlier rounds asked about, by their round's number:
+        # a round new input overtook asked nothing, since its message was never written
+        # (ADR-0332 §3:7, ADR-0321 §2:2).
         self._asked_before: tuple[tuple[int, AskedCall], ...] = tuple(
-            (number, asked) for number, one in enumerate(inputs.rounds, 1) for asked in one.asked
+            (number, asked)
+            for number, one in enumerate(inputs.rounds, 1)
+            if one.id not in inputs.overtaken
+            for asked in one.asked
         )
         # Whether a story read is offered this round, set as the request is rendered.
         self._reads_stories = False
@@ -1697,6 +1713,8 @@ class _Request:
         shown: dict[str, object] = {"round": number}
         if one.text.strip():
             where = "written into the place" if self._inputs.place.takes_message else "kept"
+            if one.id in self._inputs.overtaken:
+                where = _OVERTAKEN
             shown["text"] = one.text
             shown["text_was"] = where
         shown["calls"] = [

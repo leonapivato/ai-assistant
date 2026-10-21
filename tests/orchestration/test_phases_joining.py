@@ -36,19 +36,27 @@ from phases_support import (
     written,
 )
 from test_engine import AT
+from test_engine_phases import _BOOK
 from understanding_support import STATED_PROPOSAL, understanding_stage
 
 from ai_assistant.core.types import (
     ActivationStop,
+    CapabilityEffect,
     ControllerRule,
     ControllerStage,
     EpisodicMemory,
+    Idempotency,
     InputOrigin,
+    Memory,
     Message,
     MessageAuthor,
+    ProposedCall,
     RecordedInputMessage,
+    Reversibility,
+    RiskLevel,
     RoundResponse,
     StageOutcome,
+    ToolDefinition,
 )
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.joining import JoiningInput, input_standing
@@ -123,6 +131,55 @@ def _held_acting(entered: asyncio.Event, release: asyncio.Event) -> type[PhasePa
             await super()._act(given)
 
     return _Held
+
+
+def _held_after_acting(entered: asyncio.Event, release: asyncio.Event) -> type[PhasePath]:
+    """A path that waits for ``release`` once the first round's acting has ended."""
+
+    class _Held(PhasePath):
+        async def _act(self, given: PhasePass) -> None:
+            await super()._act(given)
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+
+    return _Held
+
+
+#: A pure read (§3:1): its capability changes nothing and it does not leave the hub. No
+#: capability the hub offers today declares that — the look-ups declare their class's
+#: ``own_records`` effect (ADR-0306 §3:1) — so the case declares its own.
+_HOURS: Final = ToolDefinition.model_validate(
+    {
+        **_BOOK.model_dump(),
+        "id": "hours",
+        "capability": "hours",
+        "description": "Read the restaurant's opening hours.",
+        "risk_level": RiskLevel.LOW,
+        "reversibility": Reversibility.REVERSIBLE,
+        "side_effecting": False,
+        "writes": (),
+        "idempotency": Idempotency.NATURAL,
+        "effect": CapabilityEffect.NONE,
+        "leaves_hub": False,
+        "outcome_can_be_unknown": False,
+        "safe_to_repeat": True,
+        "parameters_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    }
+)
+
+
+def _call(call_id: str, name: str, **arguments: object) -> ProposedCall:
+    return ProposedCall(call_id=call_id, name=name, arguments=arguments)  # type: ignore[arg-type]  # JSON values
+
+
+def _shown(completer: FakeToolCallingCompleter, index: int) -> str:
+    """What planning's round ``index``, counted across the case, was shown."""
+    return completer.calls[index].messages[-1].content
+
+
+async def _remembered(harness: Harness) -> list[Memory]:
+    return [one for one in await harness.memory.export() if isinstance(one, Memory)]
 
 
 def _held_message(entered: asyncio.Event, release: asyncio.Event) -> type[PhasePath]:
@@ -459,3 +516,129 @@ async def test_episodes_record_nothing_joined_where_nothing_joins() -> None:
     assert _ran(record, ControllerStage.TAKEOVER) == []
     assert [one.continues for one in record.understanding] == [None]
     assert len(await episodes(harness.memory)) == 1
+
+
+# --- §3:2, §3:5-§3:7: what commits, and what a set-aside round runs --------------------
+
+
+async def test_a_set_aside_round_runs_none_of_its_calls_a_look_up_and_a_write_alike() -> None:
+    """§3:7: nothing of the round is dispatched by any path, and planning is told why."""
+    entered, release = asyncio.Event(), asyncio.Event()
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            calls=(
+                _call("c1", "search_memory", query="dentist", looking_for="when it is"),
+                _call("c2", "remember", statement="The user likes green tea."),
+            )
+        ),
+        RoundResponse(text="Noted."),
+    )
+    harness = phases_harness(
+        completer, phases={"path": _held_acting(entered, release), "look_ups": True}
+    )
+    conversation = await open_conversation(harness)
+    await harness.engine.write_message(conversation, message=said("m-1", "remember tea"))
+    await asyncio.wait_for(entered.wait(), SETTLE)
+    running = await working(harness, conversation)
+
+    assert harness.engine._join_running(_joining(conversation, "and coffee")) == running
+    release.set()
+    (episode,) = await _all_frozen(harness, 1)
+
+    assert await _remembered(harness) == []
+    assert [one.is_call for one in await harness.plans.activation_effects([running])] == [False]
+    assert _shown(completer, 1).count("new input joined before this round acted") == 2
+    record = processing(episode)
+    assert _ran(record, ControllerStage.PLANNING) == [ControllerRule.FIRST_ROUND_DUE] * 2
+    assert await _assistant(harness, conversation) == ["Noted."]
+
+
+async def test_a_round_of_writes_commits_so_an_input_after_it_waits() -> None:
+    """§3:2: a write to the hub's own records commits, with no message beside it."""
+    entered, release = asyncio.Event(), asyncio.Event()
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_call("c1", "remember", statement="The user likes green tea."),)),
+        RoundResponse(text="Noted."),
+    )
+    harness = phases_harness(completer, phases={"path": _held_after_acting(entered, release)})
+    conversation = await open_conversation(harness)
+    await harness.engine.write_message(conversation, message=said("m-1", "remember tea"))
+    await asyncio.wait_for(entered.wait(), SETTLE)
+
+    joined = harness.engine._join_running(_joining(conversation, "and coffee"))
+    release.set()
+    (episode,) = await _all_frozen(harness, 1)
+
+    assert joined is None
+    assert processing(episode).joined == ()
+    assert len(await _remembered(harness)) == 1
+    assert await _assistant(harness, conversation) == ["Noted."]
+
+
+async def test_a_round_of_pure_reads_commits_nothing_so_an_input_still_joins() -> None:
+    """§3:1-§3:2: looking something up is not acting, so the activation folds the input in."""
+    entered, release = asyncio.Event(), asyncio.Event()
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_call("c1", "hours"),)),
+        RoundResponse(text="Open until ten."),
+    )
+    harness = phases_harness(
+        completer,
+        phases={
+            "path": _held_after_acting(entered, release),
+            "capabilities": ("hours", "book"),
+        },
+        tools=(_BOOK, _HOURS),
+    )
+    conversation = await open_conversation(harness)
+    await harness.engine.write_message(conversation, message=said("m-1", "is it open late?"))
+    await asyncio.wait_for(entered.wait(), SETTLE)
+    running = await working(harness, conversation)
+
+    joined = harness.engine._join_running(_joining(conversation, "on Saturday?"))
+    release.set()
+    (episode,) = await _all_frozen(harness, 1)
+
+    assert joined == running
+    record = processing(episode)
+    assert [one.messages[0].text for one in record.joined] == ["on Saturday?"]
+    assert [one.version for one in record.understanding] == [1, 2]
+    # The read ran and its result stays for the new version's first round (§3:13).
+    assert _ran(record, ControllerStage.PLANNING) == [ControllerRule.FIRST_ROUND_DUE] * 2
+    assert [str(one.request.tool.capability) for one in harness.invoker.invocations] == ["hours"]
+    assert "new input joined" not in _shown(completer, 1)
+    assert await _assistant(harness, conversation) == ["Open until ten."]
+
+
+async def test_a_question_a_join_set_aside_is_asked_again_with_its_exact_line() -> None:
+    """ADR-0321 §2:2 beside §3:7: the user never saw it, so nothing waits on it.
+
+    The booking needs a yes; the round asking about it is set aside by a join; the next
+    version's round is told that message was never written, is offered the booking to ask
+    about again, and its question records the asked call.
+    """
+    entered, release = asyncio.Event(), asyncio.Event()
+    asking = "Shall I book Friday?"
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_call("c1", "book", date="Friday"),)),
+        RoundResponse(text=asking, asks=("1.1",)),
+        RoundResponse(text=asking, asks=("1.1",)),
+    )
+    harness = phases_harness(completer, phases={"path": _held_acting(entered, release)})
+    conversation = await open_conversation(harness)
+    await harness.engine.write_message(conversation, message=said("m-1", "book Friday"))
+    await asyncio.wait_for(entered.wait(), SETTLE)
+
+    assert harness.engine._join_running(_joining(conversation, "for two"))
+    release.set()
+    (episode,) = await _all_frozen(harness, 1)
+
+    shown = _shown(completer, 2)
+    assert "the user never saw it" in shown
+    assert "needs the user's yes, and is not yet asked" in shown
+    assert "already asked about" not in shown
+    record = processing(episode)
+    assert [len(one.asked) for one in record.rounds] == [0, 1, 1]
+    (question,) = await _assistant(harness, conversation)
+    assert question.startswith(asking)
+    assert question != asking, "the question carries its exact line below the prose"
