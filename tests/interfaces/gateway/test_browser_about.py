@@ -501,6 +501,47 @@ async def test_a_pin_is_refused_where_the_id_now_names_another_wording_than_the_
         assert heard == []
 
 
+async def test_a_belief_act_while_one_is_out_is_said_and_not_sent(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A Pin whose read is slow holds the write lock from before that read, so an Unpin
+    pressed meanwhile is refused in words, never sent ahead of it (adversarial review,
+    round 6)."""
+    loop = asyncio.get_running_loop()
+    release: asyncio.Future[None] = loop.create_future()
+    sent: list[str] = []
+
+    async def hang(route: Route) -> None:
+        sent.append(route.request.url)
+        await release
+        await route.fallback()
+
+    async with driving(gateway_browser, tmp_path, viewport=PHONE) as drive:
+        heard = _complaints(drive.page)
+        people, store = switch_on(drive.engine)
+        await hold(drive.engine, store, fact("m:diet", "Eats no meat."))
+        page = drive.page
+        async with page.expect_response("**/candidates/pending"):
+            await press(page, "#beliefs-button")
+        diet = page.locator("#belief-list > .belief-row", has_text="Eats no meat.")
+        outcome = page.locator("#belief-outcome")
+        await page.route("**/belief", hang)
+
+        async with page.expect_request("**/belief"):
+            await diet.get_by_role("button", name="Pin: confirms this wording").click()
+        await diet.get_by_role("button", name="Unpin").click()
+        await expect(outcome).to_have_text(_opening("Your last change is still being made"))
+        async with page.expect_response("**/person/pin"):
+            release.set_result(None)
+
+        await expect(outcome).to_have_text(_opening("Pinned."))
+        assert len(sent) == 1
+        held = await people.read(OWNER_PERSON_ID)
+        assert held is not None
+        assert [pin.memory_id for pin in held.standing_pins] == ["m:diet"]
+        assert heard == []
+
+
 async def test_a_save_keeps_what_was_typed_in_other_fields_and_while_it_was_sent(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
