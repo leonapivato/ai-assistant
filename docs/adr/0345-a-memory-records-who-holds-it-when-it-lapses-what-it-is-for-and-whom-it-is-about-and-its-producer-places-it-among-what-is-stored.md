@@ -197,13 +197,18 @@ derivable, costs one field and spares an upgrade that would have to guess.
 > `for` support backing it as worded remains on it. A memory some other holder still
 > holds stays current.
 
-> **Normative.** Supports whose holder is the assistant are the assistant's own beliefs.
-> They stop counting under §3:1 where the proposal's backing support's holder is a person,
-> as well as where it is the assistant.
+> **Normative.** Supports whose holder is the assistant are the assistant's own beliefs, and
+> they change only by the assistant's own judgement. They stop counting under §3:1 where
+> the proposal's backing support's holder is the assistant, or where the placement records
+> the assistant convinced (§4:1).
+
+> **Normative.** A placement records the assistant convinced only for a stored memory the
+> assistant holds, and never where the proposal's backing support's holder is unknown.
 
 > **Normative.** A retiring relation from a holder that holds none of the stored memory's
-> counted supports stops nothing and retires nothing. The writer installs the proposal
-> beside the stored memory, as for `independent`.
+> counted supports, and that does not convince the assistant, stops nothing and retires
+> nothing. The writer installs the proposal beside the stored memory and adds the
+> proposal's backing support to the stored memory as `against`.
 
 > **Normative.** ADR-0328 §6:5's refusal by standing does not bind the write a placed
 > proposal yields. The clauses above are its guard.
@@ -212,19 +217,28 @@ derivable, costs one field and spares an upgrade that would have to guess.
 blue" held by Sam are both true as beliefs. Retiring either would destroy a fact about
 what someone believes, on a ranking that usage, not capture, should apply. Inside one
 holder's beliefs a change is real: the owner's "I eat meat again" ends the owner's
-"vegetarian", and a page that updates ends what that page said. The assistant's own
-inferences are revised by what a person tells it, because they were only ever the
-assistant's reading.
+"vegetarian", and a page that updates ends what that page said.
 
 A memory held by several people, Sam's and Tom's "blue", outlives one of them changing
 their mind: Sam's support stops counting, Tom's keeps it current.
 
+**Saying something versus convincing the assistant.** The assistant is a holder like any
+other, so nobody's word removes its belief by rule: saying something records the
+speaker's belief, and adds it to what it contradicts as evidence against, so the dispute
+is visible from either memory. The assistant drops a belief of its own only when it is
+convinced, a judgement its producer makes weighing who is speaking. Anyone with an
+identifier can convince it, as anyone can convince a person with a good reason. The
+worst a manipulator can do is make the assistant drop one of its own guesses, which
+stays in the history with its evidence. Convincing never touches another holder's
+belief, and no belief, convinced or not, is authority to act.
+
 ### 4. A placed proposal
 
 > **Normative.** `MemoryUpdateProposal` gains an optional placement: for each stored memory
-> its producer retrieved, the memory's id, the revision the producer read it at, and one
-> relation; and, optionally, one open question on one of those memories that the proposal
-> answers.
+> its producer retrieved, the memory's id, the revision the producer read it at, one
+> relation, and, for a memory the assistant holds, whether the proposal convinces the
+> assistant; and, optionally, one open question on one of those memories that the
+> proposal answers.
 
 | Relation | The proposed memory, against the stored one |
 | --- | --- |
@@ -274,9 +288,9 @@ producer writes a memory today.
 | `supports` | Adds the proposal's backing support to it as `for`, not backing it as worded |
 | `weakens` | Adds the proposal's backing support to it as `against` |
 | `recheck` | Raises a `recheck` question on it, resting on the proposal's backing support |
-| `no_longer_true` | §3; where it retires, an end, closed at the backing support's about-when where it carries one and at the write's instant otherwise |
-| `never_true` | §3; where it retires, a mark wrong |
-| `claimed_too_much` | §3; where it retires, a replace naming the proposed memory |
+| `no_longer_true` | §3: within the holder's own beliefs, or the assistant's where it is convinced, stops their supports, and where it retires, an end, closed at the backing support's about-when where it carries one and at the write's instant otherwise; from another holder, an `against` support and the proposal beside it |
+| `never_true` | §3, as above; where it retires, a mark wrong |
+| `claimed_too_much` | §3, as above; where it retires, a replace naming the proposed memory |
 | `independent` | Nothing |
 
 > **Normative.** The writer applies, to each memory a placement names, what the table's
@@ -472,9 +486,12 @@ and store maintenance would merge one.
 > projections and the wire, and their tests.
 
 > **Normative.** That lane's tests include, each failing on a writer that implements only
-> the others: Sam's `no_longer_true` against the owner's memory installs beside and stops
-> nothing; the owner's against the owner's memory retires it; one of two holders
-> withdrawing leaves the memory current; a person's word stops the assistant's inference;
+> the others: Sam's `no_longer_true` against the owner's memory installs beside, stops
+> nothing and adds an `against` support; the owner's against the owner's memory retires
+> it; one of two holders withdrawing leaves the memory current; a placement recording the
+> assistant convinced stops the assistant's supports, and one that does not adds an
+> `against` support only; an unknown holder's placement never records the assistant
+> convinced;
 > a `restates` that would raise standing installs beside; a `restates` at equal standing
 > folds with no new memory; a `contained` adds supports without raising standing; a stale
 > revision refuses the whole proposal; a create with a future validity end drops out of
@@ -536,6 +553,10 @@ Superseded in part; every clause the middle column does not name stands:
 - **Keeping the reconciler as a second judge.** Not chosen: it answers the question the
   producer already answered, with a narrower view, and the two can disagree. The safety
   it was kept for, a write never ending a fact on resemblance alone, is §3 and §5's.
+- **A person's word withdrawing the assistant's belief by rule**, by anyone or by the
+  subject and the owner alone. Withdrawn: an inference is a belief like any other, so it
+  changes only by its holder's own judgement, and an `against` support keeps the dispute
+  visible either way.
 - **A ranking across holders for retirement**, the owner above sources above inference.
   Withdrawn: that is usage's choice, and capture that applies it destroys a belief usage
   might need.
