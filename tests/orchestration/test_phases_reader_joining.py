@@ -886,11 +886,11 @@ async def test_a_takeover_reads_the_deadline_again_before_its_step(
     engine = harness.engine
     settled = engine._takeover_settled
 
-    async def expiring(named: str | None, working: Any) -> None:
+    async def expiring(named: str | None, taker: Any, working: Any) -> None:
         # After the stage's entry checked the deadline; with no join pending, the wait
         # returns without yielding, so only the check after it finds the deadline.
         working.deadline = asyncio.get_running_loop().time()
-        await settled(named, working)
+        await settled(named, taker, working)
 
     monkeypatch.setattr(engine, "_takeover_settled", expiring)
     first = await open_conversation(harness)
@@ -913,6 +913,89 @@ async def test_a_takeover_reads_the_deadline_again_before_its_step(
     assert record.joined == ()
     assert _of(found, older).status is ProcessingStatus.COMPLETED, "it was not taken over"
     assert older not in (await harness.plans.export()).stopped_activations
+
+
+async def test_a_takeover_joins_after_a_join_of_the_takers_own_taken_before_it() -> None:
+    """ADR-0332 §3:16, ADR-0343 §2:1: the episode records the joins in the order taken.
+
+    Both activations hold a join pending its marking while the taker's takeover waits:
+    the named one's is released first, and the taker's own, taken before the takeover's
+    step, is confirmed before the takeover joins.
+    """
+    store = _HeldPositions()
+    completer = _Counting()
+    harness = phases_harness(
+        completer,
+        understanding=understanding_stage(model=_routed()),
+        conversation_store=store,
+    )
+    engine = harness.engine
+    first = await open_conversation(harness)
+    await engine.write_message(first, message=said("a-1", "book Riverside"))
+    await asyncio.wait_for(completer.entered.wait(), SETTLE)
+    older = await working(harness, first)
+    await engine.write_message(first, message=said("a-2", "make it Saturday"))
+    await asyncio.wait_for(store.holding(first).wait(), SETTLE)
+
+    second = (await engine.start_conversation()).id
+    await engine.write_message(second, message=said("b-1", "finish it: for two"))
+    taker = await working(harness, second)
+
+    async def understood() -> bool:
+        return any(
+            one.state is not None
+            and one.state.activation_id == taker
+            and bool(one.state.understanding)
+            for one in engine._running
+        )
+
+    await until(understood, what="the taker to name the running one")
+    await engine.write_message(second, message=said("b-2", "and a tent"))
+    await asyncio.wait_for(store.holding(second).wait(), SETTLE)
+    store.release(first)
+    for _ in range(20):
+        await asyncio.sleep(0.001)
+    store.release(second)
+
+    async def taken_over() -> bool:
+        return older in (await harness.plans.export()).stopped_activations
+
+    await until(taken_over, what="the takeover")
+    completer.release.set()
+    found = await _frozen(harness, 2)
+    await engine.aclose()
+
+    stopped(_episode_of(found, older))
+    joined = _of(found, taker).joined
+    assert [(one.taken_over_from, [m.text for m in one.messages]) for one in joined] == [
+        (None, ["and a tent"]),
+        (older, ["book Riverside", "make it Saturday"]),
+    ]
+
+
+class _HeldPositions(FakeConversationStore):
+    """A store whose marking of a conversation's second message waits for its release."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+        self._holding: dict[str, asyncio.Event] = {}
+        self._released: dict[str, asyncio.Event] = {}
+
+    def holding(self, conversation_id: str) -> asyncio.Event:
+        return self._holding.setdefault(conversation_id, asyncio.Event())
+
+    def release(self, conversation_id: str) -> None:
+        self._released.setdefault(conversation_id, asyncio.Event()).set()
+
+    async def take_in(
+        self, conversation_id: str, *, positions: Sequence[int], activation_id: str
+    ) -> tuple[int, ...]:
+        if 2 in positions:
+            self.holding(conversation_id).set()
+            await self._released.setdefault(conversation_id, asyncio.Event()).wait()
+        return await super().take_in(
+            conversation_id, positions=positions, activation_id=activation_id
+        )
 
 
 async def test_a_shutdown_reaches_a_joiner_suspended_in_its_read() -> None:
