@@ -173,7 +173,20 @@ async def test_the_person_section_comes_first_with_the_fields_as_the_persons_own
     # §3:9: an assistant's name not set is not set, never Aether presented as their choice.
     assert profile["assistant_name"]["value"].startswith("not set")
     # §3:11: understanding is shown the language as a hint for reading their input.
-    assert "hint for reading their input" in profile["language"]["is"]
+    assert "hint for reading what they write" in profile["language"]["is"]
+
+
+async def test_the_section_names_whom_the_work_is_for_and_leaves_authorship_to_the_input() -> None:
+    """ADR-0284 §2:3: a connected source's event is the owner's, and never their words."""
+    model = FakeModelProvider(_proposal())
+
+    await _understand(model, person=BLOCK)
+
+    payload = _payload(model)
+    assert "working for" in payload["person"]["item"]
+    assert "Who wrote the input is said with the input" in payload["person"]["item"]
+    assert "never something the user said" in payload["input"]["received_as"]
+    assert "this input is from" not in model.calls[0].messages[0].content
 
 
 async def test_understanding_is_shown_the_pinned_memories_and_nothing_else_of_the_block() -> None:

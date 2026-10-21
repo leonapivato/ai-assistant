@@ -56,7 +56,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
     from datetime import datetime
 
     from ai_assistant.core.protocols import MemoryStore, PersonModelStore
@@ -64,9 +64,11 @@ if TYPE_CHECKING:
         MemoryRecord,
         PersonModel,
         PersonSuggestion,
+        Pin,
         Profile,
         ProfileField,
         RecordedChannelTrigger,
+        StyleMark,
     )
     from ai_assistant.orchestration.disclosure import TurnSupply
 
@@ -267,9 +269,17 @@ class PersonBlocks:
         return block
 
     async def _assembled(self, model: PersonModel, supply: TurnSupply) -> PersonBlock:
-        pins = sorted(model.standing_pins, key=lambda pin: pin.pinned_at)
-        marks = sorted(model.standing_marks, key=lambda mark: mark.marked_at, reverse=True)
-        pending = sorted(model.suggestions, key=lambda one: one.recorded_at, reverse=True)
+        # The store reads each in the order made, so its position breaks a tie in time:
+        # oldest pin first, and the most recent mark and suggestion first (§6:2, §7:3).
+        pins = [pin for _, pin in sorted(enumerate(model.standing_pins), key=_made(_pinned))]
+        marks = [
+            mark
+            for _, mark in sorted(enumerate(model.standing_marks), key=_made(_marked), reverse=True)
+        ]
+        pending = [
+            one
+            for _, one in sorted(enumerate(model.suggestions), key=_made(_recorded), reverse=True)
+        ]
         suggested = [
             one.proposed.memory_id
             for one in pending
@@ -383,6 +393,23 @@ class PersonBlocks:
                 following[start] = successor
             at = following
         return reached
+
+
+def _made[R](when: Callable[[R], datetime]) -> Callable[[tuple[int, R]], tuple[datetime, int]]:
+    """A sort key: a record's instant, then its place in the order the store made it."""
+    return lambda pair: (when(pair[1]), pair[0])
+
+
+def _pinned(pin: Pin) -> datetime:
+    return pin.pinned_at
+
+
+def _marked(mark: StyleMark) -> datetime:
+    return mark.marked_at
+
+
+def _recorded(suggestion: PersonSuggestion) -> datetime:
+    return suggestion.recorded_at
 
 
 def _successor(record: Memory) -> str | None:

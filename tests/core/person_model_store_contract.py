@@ -385,6 +385,28 @@ class PersonModelStoreContract:
         assert second.record_id != first.record_id
         assert [pin.id for pin in (await owner(store)).standing_pins] == [second.record_id]
 
+    async def test_every_pointer_is_held_verbatim_and_compared_as_given(
+        self, store: PersonModelStore
+    ) -> None:
+        """Two ids that differ only in surrounding space name two memories (§4:1-§4:2)."""
+        spaced = f" {MEMORY} "
+
+        first = await store.add_pin(OWNER_PERSON_ID, spaced, act=PANEL)
+        again = await store.add_pin(OWNER_PERSON_ID, spaced, act=PANEL)
+        other = await store.add_pin(OWNER_PERSON_ID, MEMORY, act=PANEL)
+        marked = await store.add_style_mark(OWNER_PERSON_ID, spaced)
+        suggested = await store.record_suggestion(OWNER_PERSON_ID, pin_suggestion(MEMORY))
+
+        assert again == PersonModelWrite(kind=UNCHANGED, record_id=first.record_id)
+        assert other.kind is WRITTEN
+        assert other.record_id != first.record_id
+        assert marked.kind is WRITTEN
+        # A pin on the spaced id does not stand for the other memory's suggestion.
+        assert suggested.kind is UNCHANGED
+        model = await owner(store)
+        assert [pin.memory_id for pin in model.pins] == [spaced, MEMORY]
+        assert [mark.memory_id for mark in model.style_marks] == [spaced]
+
     async def test_removing_a_pin_not_held_is_refused(self, store: PersonModelStore) -> None:
         refused = await store.remove_pin(OWNER_PERSON_ID, "pin:never")
 
