@@ -1021,6 +1021,30 @@ class PlanStoreContract:
         (held,) = await store.activation_effects(["act-1"])
         assert held.outcome is None
 
+    @pytest.mark.parametrize(
+        "reason", ["", "   ", "\ud800"], ids=["empty", "whitespace", "lone-surrogate"]
+    )
+    async def test_a_reason_that_is_blank_or_unencodable_is_refused(
+        self, store: PlanStore, reason: str
+    ) -> None:
+        """§6:4: a blank reason, or one with no UTF-8 encoding, is refused, writing nothing.
+
+        The Protocol's ``Raises:`` names this refusal, and a record's reason is
+        ``NonBlankEncodableText``, so no store may write such a reason through
+        (issue #3326). The record stays claimed and unfinished, so a finish with a
+        reason it can hold still lands afterwards.
+        """
+        record = _effect("e1")
+        await store.claim_activation_effect(record, match=None)
+
+        with pytest.raises(PlanningError):
+            await store.finish_activation_effect("e1", ToolOutcome.FAILED, reason=reason)
+
+        assert await store.activation_effects(["act-1"]) == (record,)
+        await store.finish_activation_effect("e1", ToolOutcome.FAILED, reason="refused")
+        (held,) = await store.activation_effects(["act-1"])
+        assert (held.outcome, held.reason) == (ToolOutcome.FAILED, "refused")
+
     async def test_a_position_rides_only_on_a_message_done(self, store: PlanStore) -> None:
         """§6:4: a position on a call, or on a message not done, is refused."""
         await store.claim_activation_effect(_effect("e1"), match=None)
