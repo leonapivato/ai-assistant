@@ -466,11 +466,11 @@ def _render(record: MemoryRecord, consulted: Sequence[MemoryRecord]) -> str:
     (ADR-0098 §2, #1454). The block form this replaced — a ``STORED BELIEF <id>``
     line, a ``kind:`` line and the content, separated by blank lines — is a syntax an
     interpolated span could itself write, and a reader's belief reaches here on the
-    ordinary ingest path: ``_may_reconcile`` fires when neither side is
-    ``USER_ASSERTED``, and a reader's proposal and a stored reader belief are both
-    ``EXTERNAL`` (ADR-0183 §8). With :func:`_quoted_span` the span is single-line
-    printable ASCII, so it cannot reach the start of a line, and each belief is one
-    line whose keyword is the assembler's first token — the construction
+    ordinary ingest path: ``_may_reconcile`` fires on every admissible, unconfirmed
+    ingest whatever its band (ADR-0336 §2), a reader's proposal among them. With
+    :func:`_quoted_span` the span is single-line printable ASCII, so it cannot reach
+    the start of a line, and each belief is one line whose keyword is the assembler's
+    first token — the construction
     ``orchestration.consolidation._render`` already carries, one subsystem over.
 
     ``kind`` is not escaped and does not need to be: every member of

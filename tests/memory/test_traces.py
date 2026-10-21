@@ -678,13 +678,15 @@ async def test_a_supersede_files_the_correction_written_and_the_target_supersede
 
     A ``SUPERSEDE``'s live id is a **written** record — ADR-0045 §4 installs the
     correction fresh at a minted id — and what it displaced is the retirement set,
-    which is the whole supersedable conflict set and not just the ruling's
-    ``target_id`` (ADR-0050 §1). Reporting only the named one would under-count
-    exactly the event this trace exists to record.
+    which is not just the ruling's ``target_id`` (ADR-0050 §1, ADR-0336 §5).
+    Reporting only the named one would under-count exactly the event this trace
+    exists to record. The ruling is injected: ``DefaultMemoryPolicy`` supersedes only
+    a member the writer labels a contradiction (ADR-0336 §3(b)), and this case is
+    about what the trace files, not about how the label was reached.
     """
     store = await _store()
     await store.add(_preference("stale", "the office is on the third floor"))
-    writer = _writer(store, sink)
+    writer = _writer(store, sink, policy=FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE))
 
     result = await writer.ingest(
         _proposal(_asserted("correction", "the office is on the fifth floor"))

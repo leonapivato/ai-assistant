@@ -23,6 +23,7 @@ from ai_assistant.core.types import (
     AnsweredQuestion,
     AskedCall,
     ConfirmationPart,
+    ConflictRelation,
     EpisodicMemory,
     FindingUnwritten,
     InputPart,
@@ -811,12 +812,23 @@ def _keep_confirmed(shown: dict[str, Any]) -> str:
 
 
 async def test_a_confirmed_candidate_the_policy_asks_about_raises_its_question() -> None:
-    """§13:1-§13:2: a ``policy_ask`` on the memory named, resting on the yes's input."""
-    harness = Harness(ruling=MemoryDecisionKind.ASK_USER)
-    fact = await _confirmed_case(harness)
+    """§13:1-§13:2: a ``policy_ask`` on the memory named, resting on the yes's input.
+
+    The memory named is the assertion the writer labels contradicted (ADR-0336 §7:4),
+    so it states what the confirmed fact contradicts rather than the fact itself,
+    which the certain rung would call a restatement.
+    """
+    harness = Harness(
+        ruling=MemoryDecisionKind.ASK_USER, labels={"m-seat": ConflictRelation.CONTRADICTS}
+    )
+    await _confirmed_case(harness)
     await harness.hold(
-        episode("past", at=AT - timedelta(days=2), text="I like window seats."),
-        Memory.model_validate(memory("m-seat", fact, said_support(address("past"))).model_dump()),
+        episode("past", at=AT - timedelta(days=2), text="I like aisle seats."),
+        Memory.model_validate(
+            memory(
+                "m-seat", "The user prefers aisle seats.", said_support(address("past"))
+            ).model_dump()
+        ),
     )
     observer = harness.observer(
         scout=FakeModelProvider(reply=reply(findings=[])), commit=_answering(_keep_confirmed)
@@ -1126,7 +1138,9 @@ async def test_a_supersession_whose_retirements_were_unread_records_them_on_the_
         Memory.model_validate(
             memory(
                 "m-old",
-                "The user prefers window seats.",
+                # A claim the finding corrects, not one it restates: a restatement is
+                # never retired (ADR-0159 §5), and every ingest is labelled (ADR-0336 §2).
+                "The user prefers aisle seats.",
                 sourced_support(episode=address("past")),
             ).model_dump()
         ),

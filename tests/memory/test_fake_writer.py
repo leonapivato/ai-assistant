@@ -17,6 +17,7 @@ from ai_assistant.core.errors import MemoryStoreError, MemoryStoreStaleError
 from ai_assistant.core.types import (
     Attestation,
     BeliefBand,
+    ConflictRelation,
     DataTier,
     EpisodicMemory,
     Memory,
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, MemoryWriter
-    from ai_assistant.core.types import ConflictRelation, MemoryRecord
+    from ai_assistant.core.types import MemoryRecord
 
 #: The episode every memory below rests on, planted by :func:`_store` (ADR-0328 §4:7).
 _EPISODE = "cited-episode"
@@ -351,8 +352,21 @@ class _AdvancingClock:
         return reading
 
 
+class _AllContradicted:
+    """A stub labelling every member it is shown ``CONTRADICTS`` (ADR-0336 §5:1)."""
+
+    async def reconcile(
+        self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
+    ) -> Mapping[str, ConflictRelation]:
+        return dict.fromkeys((c.id for c in conflicts), ConflictRelation.CONTRADICTS)
+
+
 async def test_a_multi_target_supersede_reads_its_close_instant_exactly_once() -> None:
-    """One instant for the whole retirement set (ADR-0080 §1), on the fake."""
+    """One instant for the whole retirement set (ADR-0080 §1), on the fake.
+
+    The set is several members only where each is a labelled contradiction
+    (ADR-0336 §5:1), so the stub labels all three.
+    """
     store = await _store(lambda: datetime(2026, 1, 1, tzinfo=UTC))
     for stale_id in ("first", "second", "third"):
         await store.add(_inferred(stale_id))
@@ -362,6 +376,7 @@ async def test_a_multi_target_supersede_reads_its_close_instant_exactly_once() -
         policy=FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE),
         now=clock,
         id_factory=lambda: "corrected",
+        reconciler=_AllContradicted(),
     )
 
     result = await writer.ingest(

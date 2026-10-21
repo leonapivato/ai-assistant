@@ -392,8 +392,16 @@ class FindingWriter:
     async def _asked(
         self, create: Create, result: MemoryIngestResult, ledger: _Ledger
     ) -> FindingUnwritten | None:
-        """§13:1, §13:3: a ``policy_ask`` on each stored memory the ruling names, or none."""
-        named = await self._memory.get_many(list(result.conflicts)) if result.conflicts else {}
+        """§13:1, §13:3: a ``policy_ask`` on each stored memory the ruling names, or none.
+
+        The memories named are the result's ``contradicted`` — the assertions the writer
+        holds the finding contradicts — and never its ``conflicts``, which are a
+        similarity set: a question is not a neutral write, so one raised on a memory the
+        finding says nothing about would be a false mark on it (ADR-0336 §7:4).
+        """
+        named = (
+            await self._memory.get_many(list(result.contradicted)) if result.contradicted else {}
+        )
         memories = [one for one in named.values() if isinstance(one, Memory)]
         if any(narrows(create.memory.placement, one) for one in memories):
             # §12:6: a question carries the supply onto the memory it is raised on, which
