@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from browser_drive import Drive
-    from playwright.async_api import Browser, ViewportSize
+    from playwright.async_api import Browser, Route, ViewportSize
 
     from ai_assistant.core.types import Identifier
 
@@ -284,6 +284,53 @@ async def test_a_refused_signal_says_nothing_on_the_page(
         await expect(drive.page.locator("#chat .fault")).to_be_hidden()
         await expect(drive.page.locator("#console")).to_be_visible()
         assert await drive.page.locator("#chat-text").input_value() == "hello"
+
+
+@pytest.mark.parametrize("viewport", _VIEWPORTS)
+async def test_a_signal_lost_at_the_network_holds_nothing_back(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """A lost request is a signal not sent, and the next key past the cadence sends again.
+
+    The refusal case above is answered, so its ``fetch`` resolves; this one rejects. The
+    first signal is reset at the network, before the gateway ever sees it, and the page
+    still clears its one-out guard: typing on past a second sends the next signal, the
+    panel says nothing, and the draft is the person's, untouched. A guard cleared only on
+    an answer would leave this tab silent from the first lost request on.
+    """
+    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
+        conversation = await _open(drive)
+        signals = _Signals(drive)
+        asked: list[str] = []
+
+        async def lose_the_first(route: Route) -> None:
+            asked.append(route.request.url)
+            if len(asked) == 1:
+                await route.abort("connectionreset")
+            else:
+                await route.fallback()
+
+        await drive.page.route("**/chat/composing", lose_the_first)
+        try:
+            await _pause(drive)
+
+            await _key(drive, "h")
+            assert len(asked) == 1
+            assert signals.arrived == []
+
+            for key in "ello":
+                await drive.page.clock.run_for(_EVERY // 5)
+                await _key(drive, key)
+            await drive.page.clock.run_for(_EVERY)
+            await _key(drive, "!")
+
+            assert len(asked) == 2
+            assert signals.arrived == [conversation]
+            await expect(drive.page.locator("#chat .fault")).to_be_hidden()
+            await expect(drive.page.locator("#console")).to_be_visible()
+            assert await drive.page.locator("#chat-text").input_value() == "hello!"
+        finally:
+            await drive.page.unroute("**/chat/composing", lose_the_first)
 
 
 async def test_sending_the_message_sends_no_signal(
