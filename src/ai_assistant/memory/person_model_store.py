@@ -60,7 +60,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import PersonModelStoreError
@@ -260,6 +260,22 @@ def _checked_instance[T](value: object, kind: type[T], *, name: str) -> T:
         msg = f"{name} must be a {kind.__name__}, got {describe_untrusted(value)}"
         raise ValueError(msg)
     return value
+
+
+def _validated[M: BaseModel](value: object, kind: type[M], *, name: str) -> M:
+    """``value`` as a ``kind`` whose every field passes validation, or a ``ValueError``.
+
+    An instance is not proof of its own validity: ``model_copy(update=…)`` and
+    ``model_construct`` skip validation, and a record the store committed from one would
+    fail to read back, which would leave the person model unreadable (§10:5). So the
+    instance's contents are validated again, nested models included, before any I/O.
+    """
+    held = _checked_instance(value, kind, name=name)
+    try:
+        return kind.model_validate(held.model_dump())
+    except ValidationError as exc:
+        msg = f"{name} is not a valid {kind.__name__}"
+        raise ValueError(msg) from exc
 
 
 def _checked_value(value: object) -> str | None:
@@ -760,7 +776,7 @@ class SqlitePersonModelStore:
         person = _checked(person_id, name="person_id")
         named = _checked_instance(field, ProfileField, name="field")
         written = _checked_value(value)
-        made = _checked_instance(act, PersonModelAct, name="act")
+        made = _validated(act, PersonModelAct, name="act")
         return await self._run(self._set_field_sync, person, named, written, made)
 
     def _set_field_sync(
@@ -829,7 +845,7 @@ class SqlitePersonModelStore:
         """
         person = _checked(person_id, name="person_id")
         memory = _checked(memory_id, name="memory_id")
-        made = _checked_instance(act, PersonModelAct, name="act")
+        made = _validated(act, PersonModelAct, name="act")
         return await self._run(self._add_pin_sync, person, memory, made)
 
     def _add_pin_sync(
@@ -952,7 +968,7 @@ class SqlitePersonModelStore:
             PersonModelStoreError: If the store cannot be read or written.
         """
         person = _checked(person_id, name="person_id")
-        proposed = _checked_instance(suggestion, ProposedSuggestion, name="suggestion")
+        proposed = _validated(suggestion, ProposedSuggestion, name="suggestion")
         return await self._run(self._record_sync, person, proposed)
 
     def _record_sync(self, person_id: str, proposed: ProposedSuggestion) -> PersonModelWrite:
