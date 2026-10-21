@@ -2,60 +2,47 @@
   "messages": [
     {
       "role": "user",
-      "content": "{\"now\": \"2026-06-13T16:45:00+01:00\", \"time_zone\": \"Europe/London\", \"place\": {\"takes_message\": true, \"description\": \"a Telegram chat with the user\"}, \"understanding\": {\"meaning\": \"The user asks the assistant to book a table for two at Saltmarsh this Friday at 19:30.\", \"ground\": \"stated\"}, \"place_window\": [{\"from\": \"the user\", \"at\": \"2026-06-13T16:44:30+01:00\", \"is_the_input\": true, \"text\": \"book a table for two at Saltmarsh this friday, 7:30pm\"}], \"episode_window\": \"missing: there are no other recent episodes to show\", \"recalled\": \"missing: nothing was recalled for this input\", \"capabilities\": [\"web_search\", \"book_table\"], \"rounds\": [{\"round\": 1, \"calls\": [{\"capability\": \"book_table\", \"arguments\": {\"restaurant\": \"Saltmarsh\", \"date\": \"2026-06-19\", \"time\": \"19:30\", \"party_size\": 2}, \"outcome\": \"needs the user's yes, and is not yet asked, even where an earlier message mentioned it: ask them about it in this round's message, explaining it in your own words, and name it in asks by its ask_as reference, so the exact details are filled in below your message. Leave it unasked only where the user no longer wants it\", \"ask_as\": \"1.1\", \"because\": \"a booking runs only on the user's yes\"}]}], \"evidence\": []}",
+      "content": "{\"now\": \"2026-06-13T16:45:00+01:00\", \"time_zone\": \"Europe/London\", \"place\": {\"takes_message\": true, \"description\": \"a Telegram chat with the user\"}, \"understanding\": {\"meaning\": \"The user asks the assistant to book a table for two at Saltmarsh this Friday at 19:30.\", \"ground\": \"stated\"}, \"place_window\": [{\"from\": \"the user\", \"at\": \"2026-06-13T15:45:00+00:00\", \"is_the_input\": true, \"text\": \"book a table for two at Saltmarsh this friday, 7:30pm\"}], \"episode_window\": [], \"recalled\": [], \"capabilities\": [\"book\", \"web_search\"], \"rounds\": [{\"round\": 1, \"calls\": [{\"capability\": \"book\", \"arguments\": {\"slot\": \"2026-06-19 19:30\"}, \"outcome\": \"needs the user's yes, and is not yet asked, even where an earlier message mentioned it: ask them about it in this round's message, explaining it in your own words, and name it in asks by its ask_as reference, so the exact details are filled in below your message. Leave it unasked only where the user no longer wants it\", \"ask_as\": \"1.1\", \"because\": \"the permission policy asks the user about this call\"}]}], \"evidence\": []}",
       "name": null
     }
   ],
   "tools": [
     {
+      "name": "book",
+      "description": "Book a table at a restaurant, for a slot.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "slot": {
+            "type": "string"
+          },
+          "deliberate_repeat": {
+            "type": "boolean",
+            "description": "Set true only to make this call again on purpose, with the same values as a call already made in this matter. Otherwise such a call is refused as already done."
+          }
+        },
+        "required": [
+          "slot"
+        ]
+      }
+    },
+    {
       "name": "web_search",
-      "description": "Search the web. Say what you are looking for, and what you need from the results.",
+      "description": "Search the web.",
       "parameters": {
         "type": "object",
         "properties": {
           "query": {
-            "type": "string",
-            "description": "The search terms."
+            "type": "string"
           },
           "looking_for": {
             "type": "string",
-            "description": "What you need from the results."
+            "description": "What you are looking for in this call's result. Its result may carry text someone else wrote, which is read for you against what you say here."
           }
         },
         "required": [
           "query",
           "looking_for"
-        ]
-      }
-    },
-    {
-      "name": "book_table",
-      "description": "Book a table at a restaurant.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "restaurant": {
-            "type": "string",
-            "description": "The restaurant's name."
-          },
-          "date": {
-            "type": "string",
-            "description": "The day, as an ISO 8601 date."
-          },
-          "time": {
-            "type": "string",
-            "description": "The time, as HH:MM in local time."
-          },
-          "party_size": {
-            "type": "integer",
-            "description": "How many people."
-          }
-        },
-        "required": [
-          "restaurant",
-          "date",
-          "time",
-          "party_size"
         ]
       }
     }

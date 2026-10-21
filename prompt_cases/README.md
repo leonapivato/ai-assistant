@@ -55,8 +55,14 @@ outside them:
   and the parameters it takes. Prefer a code check wherever code can decide; everything else
   is `read` (§3:5).
 
-A case asserts what a reply does, never what an instruction says. A rendered request goes
-stale when the code changes how it renders data; a stale case is rewritten, not trusted.
+A code check reads a reply as the prompt's own stage reads it, so a reply the hub would
+refuse passes no check. A case asserts what a reply does, never what an instruction says.
+
+A case's input is best the request the package's own stage renders, from invented records,
+kept beside the case as the JSON a given entry records: a hand-written request can miss a
+field the stage shows, and a case that does not show it guards nothing about it. A rendered
+request goes stale when the code changes how it renders data; a stale case is rewritten, not
+trusted.
 
 ## Running them
 

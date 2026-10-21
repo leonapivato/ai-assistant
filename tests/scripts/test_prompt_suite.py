@@ -45,6 +45,9 @@ pytestmark = pytest.mark.integration
 #: Text a case's input and a reply hold that nothing the run prints may carry (§4:5).
 PRIVATE: Final = "private-words-the-run-must-never-print"
 
+#: An understanding reply its stage reads, carrying :data:`PRIVATE`.
+MEANING: Final = json.dumps({"meaning": PRIVATE, "meaning_ground": "stated"})
+
 #: The planning flags, every one declared, as a case gives them.
 PLANNING_FLAGS: Final = {
     "takes_message": True,
@@ -143,7 +146,7 @@ class Model:
     """A fake model: each request's system message, and a reply chosen from it."""
 
     reply: Callable[[str], ModelResponse] = field(
-        default=lambda system: ModelResponse(parts=[TextPart('{"meaning": "' + PRIVATE + '"}')])
+        default=lambda system: ModelResponse(parts=[TextPart(MEANING)])
     )
     fail: Exception | None = None
     systems: list[str] = field(default_factory=list)
@@ -377,76 +380,128 @@ def test_a_defect_quotes_nothing_of_the_input(tmp_path: Path) -> None:
 # --- §3:5: the code checks --------------------------------------------------------------------
 
 
-def _judge(check: str, params: dict[str, object], **reply: Any) -> str | None:
-    judged: str | None = replay_tool.CODE_CHECKS[check].judge(replay_tool.Reply(**reply), params)
+def _judge(check: str, params: dict[str, object], prompt: str, text: str) -> str | None:
+    reply = replay_tool.completion_reply(prompt, text)
+    judged: str | None = replay_tool.CODE_CHECKS[check].judge(reply, params)
     return judged
+
+
+def _round(check: str, params: dict[str, object], round_: RoundResponse | None) -> str | None:
+    judged: str | None = replay_tool.CODE_CHECKS[check].judge(
+        replay_tool.Reply(round=round_), params
+    )
+    return judged
+
+
+def _meaning(**fields: object) -> str:
+    return json.dumps({"meaning": "asks which venue fits", "meaning_ground": "stated", **fields})
 
 
 def test_no_label_reads_the_named_fields_anywhere_in_the_reply() -> None:
     params: dict[str, object] = {"fields": ["meaning", "phrase"], "labels": ["H", "P"]}
-    clean = {"meaning": "asks which venue fits", "references": [{"phrase": "that venue"}]}
-    leaked = {"meaning": "asks which venue fits", "references": [{"phrase": "the one in H1"}]}
-    elsewhere = {"meaning": "asks which venue fits", "meaning_labels": ["H1"]}
+    clean = _meaning(references=[{"phrase": "that venue", "labels": ["H1"]}])
+    leaked = _meaning(references=[{"phrase": "the one in H1", "labels": ["H1"]}])
+    elsewhere = _meaning(meaning_labels=["H1"])
 
-    assert _judge("no_label", params, text=json.dumps(clean)) is None
-    assert _judge("no_label", params, text=json.dumps(leaked)) == "a label stands in phrase"
-    assert _judge("no_label", params, text=json.dumps(elsewhere)) is None
-    assert _judge("no_label", params, text="```json\n" + json.dumps(leaked) + "\n```") == (
-        "a label stands in phrase"
-    )
-    assert _judge("no_label", params, text="not json") == "the reply is not one JSON object"
-    assert _judge("no_label", params, text=json.dumps(["H1"])) == (
-        "the reply is not one JSON object"
-    )
+    assert _judge("no_label", params, "understanding", clean) is None
+    assert _judge("no_label", params, "understanding", leaked) == "a label stands in phrase"
+    assert _judge("no_label", params, "understanding", elsewhere) is None
+    fenced = "```json\n" + leaked + "\n```"
+    assert _judge("no_label", params, "understanding", fenced) == "a label stands in phrase"
+
+
+@pytest.mark.parametrize(
+    ("prompt", "text"),
+    [
+        ("understanding", "not json"),
+        ("understanding", json.dumps(["H1"])),
+        ("understanding", "{}"),
+        ("understanding", json.dumps({"meaning": None})),
+        ("understanding", json.dumps({"meaning": "x", "meaning_ground": "guessed"})),
+        ("observer_scout", json.dumps({"findings": [{"rests_on": ["P1"]}]})),
+        ("observer_commit", json.dumps({"action": "bogus"})),
+        ("observer_commit", json.dumps({"action": [], "memory": "M1"})),
+    ],
+)
+def test_a_reply_its_stage_would_refuse_passes_no_check(prompt: str, text: str) -> None:
+    checks = [one for one in replay_tool.CODE_CHECKS.values() if prompt in one.prompts]
+    params: dict[str, dict[str, object]] = {
+        "no_label": {"fields": ["meaning", "claim", "wording"], "labels": ["H"]},
+        "action_in": {"actions": ["nothing"]},
+        "memory_kept": {"memory": "M1"},
+    }
+
+    for check in checks:
+        assert _judge(check.name, params[check.name], prompt, text) == (
+            "the reply is not one its stage reads"
+        ), check.name
+
+
+def test_a_key_the_stage_drops_is_not_read() -> None:
+    params: dict[str, object] = {"fields": ["claim", "aside"], "labels": ["P"]}
+    reply = json.dumps({"findings": [{"claim": "prefers window seats", "aside": "see P1"}]})
+
+    assert _judge("no_label", params, "observer_scout", reply) is None
 
 
 def test_no_label_takes_a_label_as_a_whole_word_alone() -> None:
     params: dict[str, object] = {"fields": ["claim"], "labels": ["P", "M"]}
 
+    def scouted(claim: str) -> str:
+        return json.dumps({"findings": [{"claim": claim, "rests_on": ["P1"]}]})
+
     for text in ("MP3 player", "H2O", "uses P", "PM2.5 levels"):
-        assert _judge("no_label", params, text=json.dumps({"claim": text})) is None, text
+        assert _judge("no_label", params, "observer_scout", scouted(text)) is None, text
     for text in ("as P2 says", "(M1)", "P10."):
-        assert _judge("no_label", params, text=json.dumps({"claim": text})) is not None, text
+        assert _judge("no_label", params, "observer_scout", scouted(text)) is not None, text
 
 
 def test_no_label_reads_a_rounds_message_and_notes() -> None:
-    params: dict[str, object] = {"fields": ["notes"], "labels": ["S"]}
     noted = RoundResponse(text="Booked S1", notes="see S1")
 
-    assert _judge("no_label", params, round=noted) == "a label stands in notes"
-    assert _judge("no_label", {"fields": ["message"], "labels": ["S"]}, round=noted) == (
+    assert _round("no_label", {"fields": ["notes"], "labels": ["S"]}, noted) == (
+        "a label stands in notes"
+    )
+    assert _round("no_label", {"fields": ["message"], "labels": ["S"]}, noted) == (
         "a label stands in message"
     )
-    assert _judge("no_label", params, round=RoundResponse(text="hi")) is None
-    assert _judge("no_label", params) == "the response reads as no round"
+    assert _round("no_label", {"fields": ["notes"], "labels": ["S"]}, RoundResponse(text="hi")) is (
+        None
+    )
+    assert _round("no_label", {"fields": ["notes"], "labels": ["S"]}, None) == (
+        "the reply is not one its stage reads"
+    )
 
 
 def test_asks_about_needs_a_message_and_every_call_named() -> None:
     params: dict[str, object] = {"calls": ["1.1"]}
 
-    assert _judge("asks_about", params, round=RoundResponse(text="Shall I?", asks=("1.1",))) is None
-    assert _judge("asks_about", params, round=RoundResponse(text="", asks=("1.1",))) == (
+    assert _round("asks_about", params, RoundResponse(text="Shall I?", asks=("1.1",))) is None
+    assert _round("asks_about", params, RoundResponse(text="", asks=("1.1",))) == (
         "the round writes no message"
     )
-    assert _judge("asks_about", params, round=RoundResponse(text="It waits for your yes.")) == (
+    assert _round("asks_about", params, RoundResponse(text="It waits for your yes.")) == (
         "the round's asks leave out 1 of the calls that need a yes"
     )
-    assert _judge("asks_about", params) == "the response reads as no round"
+    assert _round("asks_about", params, None) == "the response reads as no round"
 
 
 def test_the_commit_checks_read_the_action_and_its_memory() -> None:
     nothing = json.dumps({"action": "nothing"})
+    empty = "{}"
     replaced = json.dumps({"action": "replace", "memory": "M1", "wording": "narrower"})
     replaced_other = json.dumps({"action": "replace", "memory": "M2"})
 
-    assert _judge("action_in", {"actions": ["nothing"]}, text=nothing) is None
-    assert _judge("action_in", {"actions": ["nothing"]}, text=replaced) == (
+    assert _judge("action_in", {"actions": ["nothing"]}, "observer_commit", nothing) is None
+    assert _judge("action_in", {"actions": ["nothing"]}, "observer_commit", empty) is None
+    assert _judge("action_in", {"actions": ["nothing"]}, "observer_commit", replaced) == (
         "the reply takes another action"
     )
-    assert _judge("memory_kept", {"memory": "M1"}, text=nothing) is None
-    assert _judge("memory_kept", {"memory": "M1"}, text=replaced) == "the reply retires the memory"
-    assert _judge("memory_kept", {"memory": "M1"}, text=replaced_other) is None
-    assert _judge("memory_kept", {"memory": "M1"}, text="{") == "the reply is not one JSON object"
+    assert _judge("memory_kept", {"memory": "M1"}, "observer_commit", nothing) is None
+    assert _judge("memory_kept", {"memory": "M1"}, "observer_commit", replaced) == (
+        "the reply retires the memory"
+    )
+    assert _judge("memory_kept", {"memory": "M1"}, "observer_commit", replaced_other) is None
 
 
 # --- §4, §5: running the suite ------------------------------------------------------------------
@@ -482,7 +537,7 @@ def test_each_case_is_sent_for_each_sample_under_the_candidate_and_the_control(
     assert first["check"] == "no_label"
     assert first["passed"] is True
     assert first["reason"] is None
-    assert first["reply"] == '{"meaning": "' + PRIVATE + '"}'
+    assert first["reply"] == MEANING
     assert first["version"]["origin"] == "override"
     assert lines[2]["version"]["origin"] == "default"
     assert lines[2]["version"]["version"] == control.template.version
@@ -609,7 +664,8 @@ def test_the_report_says_where_the_candidate_passes_fewer_samples_than_the_contr
 
     def reply(system: str) -> ModelResponse:
         meaning = "the one in H1" if system == "Candidate." else "the venue"
-        return ModelResponse(parts=[TextPart(json.dumps({"meaning": meaning}))])
+        reading = {"meaning": meaning, "meaning_ground": "stated"}
+        return ModelResponse(parts=[TextPart(json.dumps(reading))])
 
     reports: list[str] = []
 
@@ -703,7 +759,7 @@ def test_a_reply_a_check_cannot_read_fails_its_sample_and_the_run_goes_on(
     replies = iter(
         [
             {"action": [], "memory": "M1"},
-            {"action": {"x": 1}, "memory": "M1"},
+            {"action": "bogus", "memory": "M1"},
             {"action": "add", "memory": "M1"},
         ]
     )
@@ -715,7 +771,7 @@ def test_a_reply_a_check_cannot_read_fails_its_sample_and_the_run_goes_on(
     assert status == 0
     lines = _lines(tmp_path / "results")
     assert [one["passed"] for one in lines] == [False, False, True]
-    assert lines[0]["reason"] == "the reply's action is not a string"
+    assert lines[0]["reason"] == "the reply is not one its stage reads"
     assert any("memory_kept passed: default 1 of 3" in one for one in reports)
 
 

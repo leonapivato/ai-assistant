@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "{\"claim\": \"The user runs on Tuesday mornings and swims on Friday evenings.\", \"under_review\": \"E1\", \"parts\": [{\"part\": \"P1\", \"exchange\": \"E1\", \"occurred_at\": \"2026-08-04T06:10:00+00:00\", \"from\": \"the user\", \"outside\": false, \"at\": null, \"text\": \"out for my Tuesday morning run, back by 8 if anything comes up\"}, {\"part\": \"P2\", \"exchange\": \"E2\", \"occurred_at\": \"2026-08-07T13:30:00+00:00\", \"from\": \"the user\", \"outside\": false, \"at\": null, \"text\": \"can't do Friday evening, that's my swim\"}], \"memories\": []}",
+      "name": null
+    }
+  ]
+}
