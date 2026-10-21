@@ -23,8 +23,10 @@ from io import StringIO
 from typing import TYPE_CHECKING
 
 import pytest
+import typer
 from cli_open_recorder import wire_recording_opens
 from rich.console import Console
+from typer.core import TyperGroup
 from typer.testing import CliRunner
 
 from ai_assistant.core.config import Settings
@@ -36,13 +38,18 @@ from ai_assistant.core.errors import (
     ProvisioningOutcomeUnknownError,
     ResidualCredentialError,
 )
-from ai_assistant.core.types import SECRET_VALUE_MAX_BYTES, ProvisioningState
+from ai_assistant.core.types import (
+    ACCOUNT_IDENTITY_MAX_BYTES,
+    SECRET_VALUE_MAX_BYTES,
+    ProvisioningState,
+)
 from ai_assistant.interfaces import cli
 from ai_assistant.testing import FakeAssistantEngine, FakeConnectionProvisioner
-from ai_assistant.wire import ProtocolError, TransportError
+from ai_assistant.wire import ProtocolError, RemoteHubEngineClient, TransportError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from pydantic import SecretStr
 
@@ -74,6 +81,11 @@ class _ScriptedConnectionEngine(FakeAssistantEngine):
         self.connect_raises: BaseException | None = None
         #: Raised instead of answering ``reprovision_account``.
         self.reprovision_raises: BaseException | None = None
+        #: Raised instead of answering ``connect_keyless_account``.
+        self.keyless_raises: BaseException | None = None
+        #: Called as ``connect_keyless_account`` is entered, so a case can observe
+        #: what was on screen at the moment the act was sent.
+        self.on_keyless: Callable[[], None] | None = None
         #: Raised instead of answering ``disconnect_account``.
         self.disconnect_raises: BaseException | None = None
         #: Raised instead of answering ``connected_accounts``, so the client's
@@ -101,6 +113,15 @@ class _ScriptedConnectionEngine(FakeAssistantEngine):
         return await super().reprovision_account(
             reference, identity=identity, credential=credential
         )
+
+    async def connect_keyless_account(self, *, identity: str) -> ConnectedAccount:
+        """Connect with no credential, or raise what was scripted having recorded the call."""
+        if self.on_keyless is not None:
+            self.on_keyless()
+        if self.keyless_raises is not None:
+            self.calls.append(("connect_keyless_account", {"identity": identity}))
+            raise self.keyless_raises
+        return await super().connect_keyless_account(identity=identity)
 
     async def disconnect_account(self, reference: str) -> ConnectedAccount | None:
         """Disconnect, or raise what was scripted having recorded the call."""
@@ -1181,6 +1202,8 @@ def test_a_transport_that_does_not_carry_the_operations_is_reported(
     [
         ["connect", "   "],
         ["connect", "\udce9"],
+        ["connect-keyless", "   "],
+        ["connect-keyless", "\udce9"],
         ["reconnect", "   ", "--identity", "me@example.com"],
         ["reconnect", "conn-1", "--identity", "   "],
         ["disconnect", "   "],
@@ -1290,7 +1313,7 @@ def test_every_connection_command_reports_a_closed_door_rather_than_falling_back
 ) -> None:
     """ADR-0084 §9: a closed door is an instruction, never a fallback.
 
-    Each command's single error boundary (ADR-0042 §7) is asserted over all five, so
+    Each command's single error boundary (ADR-0042 §7) is asserted over all six, so
     a hub that is not running produces a controlled exit code and a rendered message
     rather than a traceback — including on the two that would otherwise have
     prompted for a credential first.
@@ -1306,6 +1329,7 @@ def test_every_connection_command_reports_a_closed_door_rather_than_falling_back
 
     for argv in (
         ["connect", "me@example.com"],
+        ["connect-keyless", "Open-Meteo"],
         ["reconnect", "conn-1", "--identity", "me@example.com"],
         ["disconnect", "conn-1"],
         ["connections"],
@@ -1328,3 +1352,304 @@ def test_the_connection_state_phrase_is_total_over_the_enum() -> None:
         "connected",
         "not connectable — the act that wrote it never finished",
     }
+
+
+# --- ADR-0325 §4, ADR-0344 §7:5: the keyless act's own command ----------------
+
+
+def test_connect_keyless_records_the_name_verbatim_and_writes_no_slot(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0325 §4:2: the name is the person's, supplied in the act and recorded verbatim.
+
+    Surrounding whitespace and case are the bytes an author's ``.strip()`` or
+    ``.lower()`` would eat, so they are what the case types. The act is the keyless
+    one and nothing else: one call, one ``ACTIVE`` entry at revision 1 with **no
+    slot** (§3:2), and the keyring made unavailable beforehand so that an act which
+    touched it would fail rather than pass (§3:3).
+    """
+    engine = _ScriptedConnectionEngine()
+    engine.connections.secrets.become_unavailable()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["connect-keyless", "  Open-Meteo "])
+
+    assert result.exit_code == 0
+    assert engine.calls == [("connect_keyless_account", {"identity": "  Open-Meteo "})]
+    [entry] = engine.connections.entries
+    assert entry.identity == "  Open-Meteo "
+    assert entry.state is ProvisioningState.ACTIVE
+    assert entry.revision == 1
+    assert entry.slot is None
+    assert engine.credentials == []
+
+
+def test_connect_keyless_shows_the_name_before_the_act_and_back_after_it(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0325 §4:5: a client that accepts the name displays it as part of the act.
+
+    Observed from inside the call, as ``connect``'s ordering case observes it from
+    inside the credential prompt: the name is on screen at the moment the act is
+    sent, and it is shown back in the report with the reference the hub minted.
+    """
+    engine = _ScriptedConnectionEngine()
+    _wire(monkeypatch, engine)
+    at_call: list[str] = []
+    engine.on_keyless = lambda: at_call.append(output.getvalue())
+
+    result = CliRunner().invoke(cli.app, ["connect-keyless", "Open-Meteo"])
+
+    assert result.exit_code == 0
+    assert len(at_call) == 1
+    assert "Open-Meteo" in at_call[0]
+    assert "needs no key" in _flat(at_call[0])
+    [entry] = engine.connections.entries
+    after = _flat(output.getvalue()[len(at_call[0]) :])
+    assert "Open-Meteo is connected with no key, at revision 1." in after
+    assert entry.reference in after
+    assert _pasted(after, "assistant disconnect") == ["assistant", "disconnect", entry.reference]
+    # No credential to replace, so no hint to replace one.
+    assert "reconnect" not in after
+
+
+def test_connect_keyless_has_no_parameter_but_the_name() -> None:
+    """ADR-0325 §5:1: no credential is taken, **under any name**.
+
+    Stated over the command's whole parameter list rather than over a list of
+    spellings a case thought of: whatever a later edit calls a new option, it is a
+    second parameter here, and this fails.
+    """
+    command = typer.main.get_command(cli.app)
+    assert isinstance(command, TyperGroup)
+    keyless = command.commands["connect-keyless"]
+    assert [parameter.name for parameter in keyless.params] == ["identity"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--credential-stdin"],
+        ["--credential", "hunter2"],
+        ["--key", "hunter2"],
+        ["hunter2"],
+    ],
+)
+def test_connect_keyless_refuses_a_credential_offered_any_way(
+    extra: list[str], output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A credential offered anyway is a usage error, before any client is built.
+
+    Including as a second positional argument, which is the shape a person who
+    reached for ``connect``'s muscle memory would type.
+    """
+    engine = _ScriptedConnectionEngine()
+    opened = _wire_recording_opens(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["connect-keyless", "Open-Meteo", *extra])
+
+    assert result.exit_code == 2
+    assert opened == []
+    assert engine.calls == []
+
+
+def test_connect_keyless_never_reads_a_credential(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither of the credential doors is opened, even with a line waiting on stdin."""
+    engine = _ScriptedConnectionEngine()
+    _wire(monkeypatch, engine)
+
+    def _never() -> str:
+        raise AssertionError
+
+    monkeypatch.setattr(cli, "_prompt_for_credential", _never)
+    monkeypatch.setattr(cli, "_credential_from_stdin", _never)
+
+    result = CliRunner().invoke(cli.app, ["connect-keyless", "Open-Meteo"], input="hunter2\n")
+
+    assert result.exit_code == 0
+    assert engine.credentials == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["Open\nMeteo", "Open\x07Meteo", "Open\x1b[2JMeteo", "x" * (ACCOUNT_IDENTITY_MAX_BYTES + 1)],
+    ids=["line-break", "control-character", "escape", "over-bound"],
+)
+def test_an_unusable_keyless_name_is_refused_before_any_client_is_built(
+    name: str, output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0325 §4:3: the name's refusals are local and come before any I/O.
+
+    Before the hub is reached at all, which is stronger than ``connect``'s order and
+    is free here: there is no credential to ask for, so reaching the hub first buys
+    nothing. The refusal is said in ``connect``'s words less the clause about a
+    credential, and the name is neutralised for the terminal it is shown on.
+    """
+    engine = _ScriptedConnectionEngine()
+    opened = _wire_recording_opens(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["connect-keyless", name])
+
+    assert result.exit_code == 1
+    assert opened == []
+    assert engine.calls == []
+    assert engine.connections.entries == []
+    rendered = _flat(output.getvalue())
+    assert "known not to have landed" in rendered
+    assert "refused the name before anything was sent" in rendered
+    assert "credential never left" not in rendered
+    assert "\x1b" not in output.getvalue()
+
+
+def test_a_keyless_store_failure_is_not_known_and_names_no_reference(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0325 §3:6: a failed write carries no reference and its outcome is not known.
+
+    The client says so and points at ``connected_accounts`` — it neither reads a
+    reference it does not have nor runs the act again.
+    """
+    engine = _ScriptedConnectionEngine()
+    engine.keyless_raises = ConnectionStoreError("the connection store could not be written")
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["connect-keyless", "Open-Meteo"])
+
+    assert result.exit_code == 1
+    rendered = _flat(output.getvalue())
+    assert "The outcome of the keyless connection is not known" in rendered
+    assert "I am not saying it landed" in rendered
+    assert "no reference to name" in rendered
+    assert [call[0] for call in engine.calls] == ["connect_keyless_account"]
+
+
+def test_a_cancelled_keyless_act_starts_no_call_and_lets_the_cancellation_leave(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``connect``'s cancellation clause, on the keyless act (ADR-0151 §7, ADR-0060)."""
+    engine = _ScriptedConnectionEngine()
+    engine.keyless_raises = asyncio.CancelledError()
+    _wire(monkeypatch, engine)
+
+    with pytest.raises(asyncio.CancelledError):
+        CliRunner().invoke(cli.app, ["connect-keyless", "Open-Meteo"])
+
+    rendered = _flat(output.getvalue())
+    assert "not known" in rendered
+    assert "cancelled" in rendered
+    assert [call[0] for call in engine.calls] == ["connect_keyless_account"]
+
+
+def test_connect_keyless_is_not_carried_to_a_remote_hub(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ADR-0325 §5:5: the keyless act is served over the loopback socket only.
+
+    The command reaches the hub the way every connection command does — through
+    :func:`cli._client_for`, which builds the loopback client unless configuration
+    names a remote hub. Here configuration names one, and the client it builds is
+    the real remote one: it refuses the act before any socket is dialled, so nothing
+    reaches the remote listener (whose own refusal of the same method is
+    ``tests/service/test_remote_listener.py``'s). The probe is skipped, so the only
+    dial this command could make is the act's.
+    """
+    settings = Settings(data_dir=tmp_path, remote_hub_address="100.64.0.1")
+    client = cli._client_for(settings)
+    assert isinstance(client, RemoteHubEngineClient)
+    dialled: list[object] = []
+
+    async def _recorded(*args: object, **kwargs: object) -> object:
+        dialled.append(args)
+        raise AssertionError
+
+    monkeypatch.setattr(asyncio, "open_connection", _recorded)
+    monkeypatch.setattr(asyncio, "open_unix_connection", _recorded)
+    _wire(monkeypatch, client)
+
+    result = CliRunner().invoke(cli.app, ["connect-keyless", "Open-Meteo"])
+
+    assert result.exit_code == 1
+    rendered = _flat(output.getvalue())
+    assert "connect_keyless_account() is not carried on this transport" in rendered
+    assert "not known" in rendered
+    assert dialled == []
+
+
+def test_connect_keyless_help_says_which_command_a_keyed_source_uses() -> None:
+    """The choice is plain where it is made: no key here, a key is ``connect``."""
+    result = CliRunner().invoke(cli.app, ["connect-keyless", "--help"])
+
+    assert result.exit_code == 0
+    rendered = _flat(result.output)
+    assert "needs no key" in rendered
+    assert "weather" in rendered
+    assert "'assistant connect'" in rendered
+
+
+# --- ADR-0325 §4:4: connect never falls back to the keyless act --------------
+
+
+def _closed_prompt() -> str:
+    msg = "the terminal could not be read"
+    raise OSError(msg)
+
+
+@pytest.mark.parametrize(
+    ("argv", "credential", "raises"),
+    [
+        (["connect", "Open-Meteo"], "   ", None),
+        (["connect", "Open-Meteo"], "", None),
+        (["connect", "Open-Meteo", "--credential-stdin"], "", None),
+        (["connect", "Open-Meteo", "--credential-stdin"], "\n", None),
+        (["connect", "Open-Meteo"], _closed_prompt, None),
+        (["connect", "hunter2"], "hunter2", None),
+        (["connect", "Open-Meteo"], "hunter2", ConnectionStoreError("refused")),
+        (["connect", "Open-Meteo"], "hunter2", ProtocolError("not carried")),
+    ],
+    ids=[
+        "blank",
+        "empty",
+        "empty-stdin",
+        "empty-line",
+        "prompt-failed",
+        "identity-equals-credential",
+        "store-refused",
+        "transport-refused",
+    ],
+)
+def test_connect_never_offers_or_performs_the_keyless_act(
+    argv: list[str],
+    credential: str | Callable[[], str],
+    raises: BaseException | None,
+    output: StringIO,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0325 §4:4: no client falls back to the keyless act from ``connect_account``.
+
+    Every way a credential can be missing, blank or refused on ``connect`` — at the
+    prompt, on standard input, locally, and by the hub — and in each the keyless act
+    is neither performed nor offered: no ``connect_keyless_account`` call, no slotless
+    entry, and no line pointing at the keyless command or saying the source needs no
+    key. Under ``--credential-stdin`` the credential is what standard input carries.
+    """
+    engine = _ScriptedConnectionEngine()
+    engine.connect_raises = raises
+    _wire(monkeypatch, engine)
+    stdin: str | None = None
+    if callable(credential):
+        monkeypatch.setattr(cli, "_prompt_for_credential", credential)
+    elif "--credential-stdin" in argv:
+        stdin = credential
+    else:
+        monkeypatch.setattr(cli, "_prompt_for_credential", lambda: credential)
+
+    result = CliRunner().invoke(cli.app, argv, input=stdin)
+
+    assert result.exit_code == 1
+    assert "connect_keyless_account" not in [call[0] for call in engine.calls]
+    assert all(entry.slot is not None for entry in engine.connections.entries)
+    rendered = _flat(output.getvalue())
+    assert "connect-keyless" not in rendered
+    assert "no key" not in rendered

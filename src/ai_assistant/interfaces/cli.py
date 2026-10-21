@@ -331,6 +331,7 @@ from ai_assistant.wire import (
     store_enrolment,
 )
 from ai_assistant.wire.address import check_socket_path
+from ai_assistant.wire.codec import usable_identity
 from ai_assistant.wire.envelope import CHANGE_STREAM_HEARTBEAT
 
 if TYPE_CHECKING:
@@ -3370,6 +3371,31 @@ def connect(
     raise typer.Exit(code)
 
 
+@app.command("connect-keyless")
+def connect_keyless(
+    identity: str = typer.Argument(
+        ...,
+        metavar="NAME",
+        callback=_present_identity,
+        help="The name you give the source, as you recognise it — for example Open-Meteo.",
+    ),
+) -> None:
+    """Connect a source that needs no key, such as a weather service.
+
+    **A source that needs a key, a token or a password uses 'assistant connect'
+    instead.** This command never asks for a credential and takes none, so use it
+    only for a source that has none to give.
+
+    The name is yours to choose, and I record it exactly as you typed it and show it
+    back to you. The reference is minted here, as on ``connect``, and
+    ``assistant connections`` is where you read it back.
+
+    **This is not 'assistant grant'.** A connection authorises nothing.
+    """
+    code = asyncio.run(_connect_keyless_account(identity))
+    raise typer.Exit(code)
+
+
 @app.command()
 def reconnect(
     reference: str = typer.Argument(
@@ -4717,6 +4743,37 @@ async def _connect_account(identity: str, *, credential_stdin: bool) -> int:
     return await _drive_connect(engine, identity, read_credential=read)
 
 
+async def _connect_keyless_account(identity: str) -> int:
+    """Show the name, refuse it locally if it is unusable, obtain a client, and connect.
+
+    **The name's refusals run before any I/O** (ADR-0325 §4:3), and here that is
+    stronger than :func:`_connect_account`'s ordering: there is no credential to
+    ask for, so nothing is gained by reaching the hub first, and a name the act
+    could never record is refused before settings are loaded or a socket is dialled.
+    The check is :func:`~ai_assistant.wire.codec.usable_identity` with no
+    credential to compare against, the one the wire client itself runs before its
+    socket is opened — so this refuses exactly what the client would, a step
+    earlier, and nothing more.
+
+    **It is reached only by its own command** (ADR-0325 §4:4): nothing on the
+    credentialed path calls it, offers it, or falls back to it when a credential
+    is missing, blank or refused.
+    """
+    _render_keyless_intent(identity)
+    try:
+        usable_identity(identity, credential=None)
+    except UnusableIdentityError as exc:
+        _render_refused_keyless_name(exc)
+        return _EXIT_ERROR
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_connect_keyless(engine, identity)
+
+
 async def _reprovision_account(reference: str, *, identity: str, credential_stdin: bool) -> int:
     """Obtain a client, show the identity, take the credential, and re-provision."""
     read = _credential_from_stdin if credential_stdin else _prompt_for_credential
@@ -5470,6 +5527,34 @@ async def _drive_connect(
     except (AssistantError, TransportError) as exc:
         return await _report_provisioning_failure(engine, "connection", exc, reference=None)
     _render_connected("Connected", connected)
+    return _EXIT_OK
+
+
+async def _drive_connect_keyless(engine: AssistantEngine, identity: str) -> int:
+    """Connect a source that needs no credential, and report the outcome (ADR-0325 §3).
+
+    :func:`_drive_connect` with no credential to take, so with one fewer step and
+    fewer outcomes. The act is one write under a reference it mints (§3:2, §3:4), so
+    of ADR-0151 §7's partial classes only the not-known one is reachable: a
+    :class:`~ai_assistant.core.errors.ConnectionStoreError` carries no reference,
+    and the client says so and points at ``connected_accounts`` rather than reading
+    or re-running anything (§3:6). The identity's refusal is
+    :func:`_connect_keyless_account`'s, already run; one raised here anyway is
+    rendered in the same words.
+    """
+    try:
+        connected = await engine.connect_keyless_account(identity=identity)
+    except asyncio.CancelledError:
+        # :func:`_drive_connect`'s arm, for ADR-0151 §7's cancellation clause.
+        _render_cancelled_act("keyless connection")
+        _render_connections_unread()
+        raise
+    except UnusableIdentityError as exc:
+        _render_refused_keyless_name(exc)
+        return _EXIT_ERROR
+    except (AssistantError, TransportError) as exc:
+        return await _report_provisioning_failure(engine, "keyless connection", exc, reference=None)
+    _render_keyless_connected(connected)
     return _EXIT_OK
 
 
@@ -9264,6 +9349,58 @@ def _render_connected(verb: str, record: ConnectedAccount) -> None:
     _print_hint(
         "  [dim]Read it back any time with 'assistant connections'. Replace its "
         "credential with 'assistant reconnect', or end it with "
+        f"{_reference_hint(record.reference, 'assistant disconnect')}[/]"
+    )
+    _print(
+        "\n[dim]This is a connection, not a permission: it authorises nothing on its "
+        "own. What I am allowed to read is 'assistant granted'.[/]"
+    )
+
+
+def _render_keyless_intent(identity: str) -> None:
+    """Show the name of a keyless connection as part of the act (ADR-0325 §4:5).
+
+    :func:`_render_connection_intent`'s display, for an act with no credential:
+    there is no field beside the name for a secret to be pasted into, so the
+    sentence does not warn about one, and it says that no key is involved so a
+    person who meant ``connect`` sees that before anything is written. Neutralised
+    for this terminal by :func:`_safe`, and echoed nowhere else (ADR-0149 §3).
+    """
+    _print(f"About to connect [bold cyan]{_safe(identity)}[/] as a source that needs no key.\n")
+    _print(
+        "[dim]That is the name I will record and show you, exactly as you typed it — "
+        "I normalise nothing. A source that needs a key is 'assistant connect'.[/]\n"
+    )
+
+
+def _render_refused_keyless_name(exc: UnusableIdentityError) -> None:
+    """Report a keyless name refused before anything was sent (ADR-0325 §4:3).
+
+    :func:`_render_provisioning_outcome`'s sentence for the same refusal on
+    ``connect``, less its clause about a credential, which this act has none of.
+    The message is :func:`~ai_assistant.wire.codec.usable_identity`'s, which names
+    neither the value nor its length.
+    """
+    _print(
+        "[red]The keyless connection is known not to have landed[/] — I refused the "
+        f"name before anything was sent: {_safe(str(exc))}."
+    )
+
+
+def _render_keyless_connected(record: ConnectedAccount) -> None:
+    """Report a completed keyless act, with the reference the hub minted (ADR-0325 §3:5).
+
+    :func:`_render_connected`'s report, with the name shown back byte for byte as
+    the act returned it (§4:5), and with no hint to replace a credential the
+    connection does not hold.
+    """
+    _print(
+        f"[green]Connected.[/] [bold cyan]{_safe(record.identity)}[/] is connected with "
+        f"no key, at revision {record.revision}."
+    )
+    _print(f"  Its reference is [bold]{_safe(record.reference)}[/]")
+    _print_hint(
+        "  [dim]Read it back any time with 'assistant connections', or end it with "
         f"{_reference_hint(record.reference, 'assistant disconnect')}[/]"
     )
     _print(
