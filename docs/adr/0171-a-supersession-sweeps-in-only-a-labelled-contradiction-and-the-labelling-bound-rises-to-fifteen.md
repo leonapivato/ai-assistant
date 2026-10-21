@@ -1,6 +1,6 @@
 # 171. A supersession sweeps in only a labelled contradiction, and the labelling bound rises to fifteen
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0336 (§2:3)
 - Date: 2026-08-21
 - **Partially supersedes:**
   [ADR-0159](0159-a-conflict-is-labelled-before-it-is-ruled-on-and-similarity-alone-folds-nothing.md)
@@ -45,6 +45,7 @@
   against §1 or §2 until this has merged (ADR-0015 §5, golden rule 5).
   `CONTRIBUTING.md` → "Finishing an ADR PR" holds that sequence and is pointed at
   rather than re-argued here.
+- Partially superseded: 2026-10-21 by ADR-0336 — §2:3: where the writer holds a `CONTRADICTS` relation for no member, a `SUPERSEDE` retires the named target alone, besides what ADR-0078 §5b's confirmation covers, rather than ADR-0079 §3's whole set (ADR-0336 §5:1–§5:2). Every other part stands. This replacement takes effect on ratification of ADR-0336. This reciprocal header record lands with ADR-0336 under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
