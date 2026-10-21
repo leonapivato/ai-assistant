@@ -181,9 +181,15 @@ if TYPE_CHECKING:
         PendingCandidate,
         PermissionDecision,
         PermissionRuling,
+        PersonModel,
+        PersonModelAct,
+        PersonModelExport,
+        PersonModelWrite,
         Placement,
         PlanExport,
         ProcessingStatus,
+        ProfileField,
+        ProposedSuggestion,
         QuestionPart,
         RecordChunk,
         RecordedInvocation,
@@ -12586,5 +12592,269 @@ class TelegramIntakeRecord(Protocol):
 
         Raises:
             TelegramIntakeRecordError: If the record cannot be written.
+        """
+        ...
+
+
+@runtime_checkable
+class PersonModelStore(Protocol):
+    """The only route to the person model (ADR-0338 §10:1).
+
+    **What it holds** (§10:3): the people, keyed by id (§2:1); each one's profile of
+    five set fields (§3:1) and its append-only change log (§3:5); the pins (§4:1) and
+    the style marks (§5:3), each a pointer to a memory; and the observer's suggestions
+    (§9:2, §9:5). No memory wording, no episode text and no copy of any record of
+    another store: only those, and the ids of the memories and episodes they point at.
+    So nothing here checks a memory: whether it is current, whether a pin would exceed
+    the kept-in-mind slot's budget (§6:3) and whether it rests on outside content are
+    each the caller's, against the memory store, before the write.
+
+    **One person, the owner** (§2:1): the store holds exactly the person
+    :data:`~ai_assistant.core.types.OWNER_PERSON_ID`, with the role ``owner``, created
+    when the store is first created, and no member adds another before a decision on
+    members (#691). Every member is keyed by a person's id all the same, and a write
+    naming a person the store does not hold is refused ``unknown_person``.
+
+    **Each member that writes does so in one atomic step** (§10:2), observing the
+    store, deciding and writing against every other member, across processes as well
+    as coroutines: a field's write records its change-log entry in the same step, and
+    a write that takes a pending suggestion's field to its value, or pins its memory,
+    marks the suggestion accepted in that step too (§8:9). A refused write writes
+    nothing, and a write the contract says changes nothing writes nothing either
+    (``unchanged``).
+
+    **The writers are the callers'** (§3:4, §9:7): a field is written by the person, or
+    the owner, on the panel or under the person's yes, and once by the hub's seed; the
+    observer writes only suggestions and style marks. The store records the act it is
+    handed and judges only what it holds.
+
+    **Every read returns a detached snapshot**: the exchanged types are frozen pydantic
+    models.
+
+    Every member raises :class:`~ai_assistant.core.errors.PersonModelStoreError` for a
+    store fault. A malformed argument is a ``ValueError``, raised before anything is
+    read. Cancelling any member is governed by this module's cancellation clause
+    (ADR-0060).
+
+    A store under ADR-0326, in the hub's data directory and outside ``MemoryStore``'s
+    contract (§10:1, §10:6), whose export carries every record it holds and whose
+    clear erases them all (§10:5).
+
+    **A BREAKING contract change under golden rule 5**, decided by ADR-0338 §10 and
+    landing with its conformance suite, its canonical fake in :mod:`ai_assistant.testing`
+    and its primary production caller, orchestration's person block (``CONTRIBUTING.md``
+    → "Adding a Protocol", ADR-0137 §2).
+    """
+
+    async def read(self, person_id: str) -> PersonModel | None:
+        """Read one person's model: their profile, change log, pins, marks and suggestions.
+
+        Args:
+            person_id: The person, by id.
+
+        Returns:
+            Their model, with every pin and mark, removed ones included, and the
+            pending suggestions; ``None`` where the store holds no such person.
+
+        Raises:
+            ValueError: If ``person_id`` is blank.
+            PersonModelStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def set_field(
+        self,
+        person_id: str,
+        field: ProfileField,
+        value: str | None,
+        *,
+        act: PersonModelAct,
+    ) -> PersonModelWrite:
+        """Set one field to ``value``, or clear it with ``None`` (ADR-0338 §3:2-§3:5).
+
+        In one step: the value is validated (§3:2) against the store's bound on a text
+        field, which a composition-root constant holds; the field is written; its
+        change-log entry is appended with the old value, the new, the act and the
+        instant; and every pending field suggestion of that field and value is marked
+        accepted (§8:9). A value equal to the one held changes and logs nothing
+        (§3:3), and still marks such a suggestion accepted.
+
+        Args:
+            person_id: Whose field.
+            field: Which field.
+            value: Its new value, or ``None`` to clear it.
+            act: Who made the change, and how; never a suggestion's, which only
+                :meth:`accept_suggestion` writes.
+
+        Returns:
+            ``written``; ``unchanged``; or ``refused`` with ``unknown_person``,
+            ``invalid_value`` and its reason, or ``invalid_act``.
+
+        Raises:
+            PersonModelStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def add_pin(
+        self, person_id: str, memory_id: str, *, act: PersonModelAct
+    ) -> PersonModelWrite:
+        """Pin ``memory_id`` for ``person_id`` (ADR-0338 §4:1-§4:2).
+
+        The caller has checked that the memory is current and that the slot's budget
+        holds it (§4:2, §6:3). Pinning a memory the person already has a standing pin
+        on changes nothing (§4:2). A pin marks every pending pin suggestion of that
+        memory accepted in the same step (§8:9).
+
+        Args:
+            person_id: Whose pin.
+            memory_id: The memory, by id.
+            act: Who pinned it, and how: on the panel, or by a yes.
+
+        Returns:
+            ``written`` with the new pin's id; ``unchanged`` with the standing pin's;
+            or ``refused`` with ``unknown_person`` or ``invalid_act``.
+
+        Raises:
+            ValueError: If ``memory_id`` is blank.
+            PersonModelStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def remove_pin(self, person_id: str, pin_id: str) -> PersonModelWrite:
+        """Unpin: mark the pin removed, erasing nothing (ADR-0338 §4:7).
+
+        Args:
+            person_id: Whose pin.
+            pin_id: The pin.
+
+        Returns:
+            ``written``; ``unchanged`` where it was already removed; or ``refused`` with
+            ``unknown_person`` or ``unknown_record``.
+
+        Raises:
+            ValueError: If ``pin_id`` is blank.
+            PersonModelStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def add_style_mark(self, person_id: str, memory_id: str) -> PersonModelWrite:
+        """Mark ``memory_id`` as stating how the person wants Aether to speak (§5:3, §9:4).
+
+        A memory already marked, or whose mark the person removed, is not marked again
+        (``unchanged``).
+
+        Args:
+            person_id: Whose.
+            memory_id: The memory, by id.
+
+        Returns:
+            ``written`` with the mark's id; ``unchanged`` with the existing mark's; or
+            ``refused`` with ``unknown_person``.
+
+        Raises:
+            ValueError: If ``memory_id`` is blank.
+            PersonModelStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def remove_style_mark(self, person_id: str, mark_id: str) -> PersonModelWrite:
+        """Remove a style mark, keeping it as removed so it is never made again (§5:3).
+
+        Args:
+            person_id: Whose.
+            mark_id: The mark.
+
+        Returns:
+            ``written``; ``unchanged`` where it was already removed; or ``refused`` with
+            ``unknown_person`` or ``unknown_record``.
+
+        Raises:
+            ValueError: If ``mark_id`` is blank.
+            PersonModelStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def record_suggestion(
+        self, person_id: str, suggestion: ProposedSuggestion
+    ) -> PersonModelWrite:
+        """Record a suggestion as pending (ADR-0338 §9:2, §9:5).
+
+        Not recorded (``unchanged``) where the profile already holds a field
+        suggestion's value, a pin suggestion's memory has a standing pin, an equal
+        suggestion is pending, or the person dismissed an equal one. A field
+        suggestion's value is validated as a field's is (§9:2).
+
+        Args:
+            person_id: Whose.
+            suggestion: What it proposes, and what it rests on.
+
+        Returns:
+            ``written`` with its id; ``unchanged`` with the equal suggestion's id where
+            one stopped it; or ``refused`` with ``unknown_person`` or ``invalid_value``.
+
+        Raises:
+            PersonModelStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def accept_suggestion(
+        self, person_id: str, suggestion_id: str, *, by: str
+    ) -> PersonModelWrite:
+        """Accept a pending suggestion: take its field to its value, or pin its memory.
+
+        In one step. A field suggestion writes its field as an accepted suggestion,
+        naming the episode it rests on, and logs the change; a pin suggestion pins its
+        memory as made on the panel (ADR-0338 §4:1). Either marks the suggestion, and
+        every pending one equal to it, accepted (§8:9). The caller has checked a pin's
+        memory as :meth:`add_pin` requires.
+
+        Args:
+            person_id: Whose.
+            suggestion_id: The suggestion.
+            by: The person accepting it, by id.
+
+        Returns:
+            ``written`` with the suggestion's id; or ``refused`` with
+            ``unknown_person``, ``unknown_record`` or ``already_decided``.
+
+        Raises:
+            ValueError: If ``suggestion_id`` or ``by`` is blank.
+            PersonModelStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def dismiss_suggestion(self, person_id: str, suggestion_id: str) -> PersonModelWrite:
+        """Dismiss a pending suggestion, so an equal one is never recorded again (§9:2).
+
+        Args:
+            person_id: Whose.
+            suggestion_id: The suggestion.
+
+        Returns:
+            ``written``; or ``refused`` with ``unknown_person``, ``unknown_record`` or
+            ``already_decided``.
+
+        Raises:
+            ValueError: If ``suggestion_id`` is blank.
+            PersonModelStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def export(self) -> PersonModelExport:
+        """Return every record the store holds (ADR-0338 §10:5).
+
+        Raises:
+            PersonModelStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def clear(self) -> int:
+        """Erase every record the store holds, returning how many went (ADR-0338 §10:5).
+
+        Every person, profile, change-log entry, pin, mark and suggestion counts, the
+        owner included: afterwards the store holds nothing.
+
+        Raises:
+            PersonModelStoreError: If the store cannot be written.
         """
         ...

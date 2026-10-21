@@ -89,6 +89,7 @@ from ai_assistant.testing.permissions import (
     FakeSpendGate,
     FakeSpendLedger,
 )
+from ai_assistant.testing.person_model import DEFAULT_PROFILE_FIELD_CHARS, FakePersonModelStore
 from ai_assistant.testing.planning import FakePlanStore
 from ai_assistant.testing.policy import FakeMemoryPolicy, PolicyCall
 from ai_assistant.testing.prompts import (
@@ -189,6 +190,7 @@ __all__ = [
     "DEFAULT_MAX_RESULT_CHARS",
     "DEFAULT_MAX_ROWS",
     "DEFAULT_OCCURRED_AT",
+    "DEFAULT_PROFILE_FIELD_CHARS",
     "DEFAULT_READER_NAME",
     "DEFAULT_READ_SOURCE",
     "DEFAULT_REPORTED_AT",
@@ -238,6 +240,7 @@ __all__ = [
     "FakeNotificationStore",
     "FakeNotificationWriter",
     "FakeOutboundTransport",
+    "FakePersonModelStore",
     "FakePlanStore",
     "FakeReader",
     "FakeSecretStore",

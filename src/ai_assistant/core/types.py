@@ -31,6 +31,7 @@ from threading import Lock
 from typing import Annotated, Any, Final, Literal, Self, assert_never
 from urllib.parse import unquote
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jsonschema.exceptions import SchemaError, ValidationError
 from jsonschema.validators import Draft202012Validator
@@ -20378,3 +20379,502 @@ class TelegramIntakeExport(BaseModel):
     offset: int | None = Field(default=None, strict=True, ge=0, lt=_TELEGRAM_ID_CEILING)
     intake: tuple[TelegramIntake, ...] = ()
     calls: tuple[TelegramCallRecord, ...] = ()
+
+
+# --- the person model (ADR-0338 §10:4) ---------------------------------------------
+#
+# A person, their profile of five set fields, the log of every change to a field, the
+# pins and style marks that point at memories, and the observer's suggestions. Every
+# record here is the person-model store's alone, behind ``PersonModelStore``: nothing
+# here holds a memory's wording, an episode's text or a copy of another store's record,
+# only ids pointing at them (§10:3).
+
+#: The one person's id: the owner's, the one person the store holds before a decision on
+#: members (ADR-0338 §2:1, #691). Stable, since the store creates the owner once, when it
+#: is first created, and every read and write is keyed by a person's id from the start.
+OWNER_PERSON_ID: Final = "person:owner"
+
+
+class PersonRole(StrEnum):
+    """A person's role (ADR-0338 §2:1). Closed, **added to and never renamed**."""
+
+    OWNER = "owner"
+    """The hub's owner: the one person the store holds before a decision on members."""
+
+
+class Person(BaseModel):
+    """One person the person model is keyed by (ADR-0338 §2:1).
+
+    Attributes:
+        id: The person's stable id.
+        role: Their role.
+        created_at: When the store created them.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: Identifier
+    role: PersonRole
+    created_at: UtcInstant
+
+
+class ProfileField(StrEnum):
+    """The five fields a person sets (ADR-0338 §3's table, §10:4).
+
+    A **closed** enumeration, **added to and never renamed** (§10:4): a further field
+    takes a decision of its own (§12).
+    """
+
+    NAME = "name"
+    """What the person is called, as they write it."""
+    ADDRESS = "address"
+    """How Aether addresses them: a nickname, their first name, or by no name."""
+    ASSISTANT_NAME = "assistant_name"
+    """What this person calls the assistant; empty means ``Aether``."""
+    TIME_ZONE = "time_zone"
+    """The person's zone: an IANA name that ``zoneinfo`` resolves."""
+    LANGUAGE = "language"
+    """The language Aether writes to the person in."""
+
+
+#: What an empty assistant's name means (ADR-0338 §3's table).
+DEFAULT_ASSISTANT_NAME: Final = "Aether"
+
+
+class Profile(BaseModel):
+    """A person's five fields, each set or empty (ADR-0338 §3:1).
+
+    Each is the source of truth for itself: no memory holds it and nothing derives it.
+    ``None`` is a field that is not set, which reaches the models as not set and never
+    as a default presented as the person's own (§3:9).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    name: EncodableText | None = None
+    address: EncodableText | None = None
+    assistant_name: EncodableText | None = None
+    time_zone: EncodableText | None = None
+    language: EncodableText | None = None
+
+    def value(self, field: ProfileField) -> str | None:
+        """The value ``field`` holds, or ``None`` where it is not set.
+
+        Args:
+            field: One of the five fields.
+
+        Returns:
+            Its value.
+        """
+        held: str | None = getattr(self, field.value)
+        return held
+
+    def with_value(self, field: ProfileField, value: str | None) -> Profile:
+        """This profile with ``field`` set to ``value``, or cleared by ``None``.
+
+        Args:
+            field: One of the five fields.
+            value: Its new value.
+
+        Returns:
+            The new profile.
+        """
+        return self.model_copy(update={field.value: value})
+
+
+def profile_value_fault(field: ProfileField, value: str | None, *, chars: int) -> str | None:
+    """Why ``value`` is no valid value of ``field``, or ``None`` where it is (ADR-0338 §3:2).
+
+    One rule for every writer of a field, the store's own check included: ``None``
+    clears the field; a time zone is a name ``zoneinfo`` resolves; every other field is
+    text, not blank, within ``chars`` characters, the bound a composition-root constant
+    holds.
+
+    Args:
+        field: The field written.
+        value: The value written, or ``None`` to clear it.
+        chars: The bound on a text field's length.
+
+    Returns:
+        A code-owned reason, or ``None``.
+    """
+    if value is None:
+        return None
+    if not value.strip():
+        return "a field is cleared, never set to blank text"
+    if len(value) > chars:
+        return f"a field's value is at most {chars} characters"
+    try:
+        encodable_text(value)
+    except ValueError:
+        return "a field's value is text with a UTF-8 encoding"
+    if field is ProfileField.TIME_ZONE:
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError, ValueError:
+            return "a time zone is a name zoneinfo resolves"
+    return None
+
+
+class PersonActHow(StrEnum):
+    """How a change to the person model was made (ADR-0338 §3:5, §4:1).
+
+    Closed, **added to and never renamed**.
+    """
+
+    PANEL = "panel"
+    """By the person, or the owner, on a panel (§8:2)."""
+    APPROVAL = "approval"
+    """By a call run under the person's yes, naming the approval and its episode (§8:5)."""
+    SUGGESTION = "suggestion"
+    """By an accepted suggestion, naming the episode it rests on (§3:5). A field's
+    change alone: a pin made by accepting a pin suggestion is the panel's."""
+    SEED = "seed"
+    """The hub's seed, once, when the store is first created (§3:7). A field's alone."""
+
+
+class PersonModelAct(BaseModel):
+    """Who made a change, and how (ADR-0338 §3:5, §4:1).
+
+    Attributes:
+        how: How it was made.
+        by: The person who made it, by id; ``None`` exactly for the hub's seed.
+        approval: The approval a yes gave, by the question part it spent (ADR-0321
+            §2:6); set exactly where ``how`` is ``approval``.
+        episode_id: The episode the yes was given in, or the accepted suggestion rests
+            on; set exactly where ``how`` is ``approval`` or ``suggestion``.
+
+    Raises:
+        ValueError: If a field is set that ``how`` does not name, or one it names is
+            missing.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    how: PersonActHow
+    by: Identifier | None = None
+    approval: QuestionPart | None = None
+    episode_id: Identifier | None = None
+
+    @model_validator(mode="after")
+    def _names_what_its_how_needs(self) -> Self:
+        how = self.how
+        if (how is PersonActHow.SEED) != (self.by is None):
+            msg = "a change names the person who made it, except the hub's seed"
+            raise ValueError(msg)
+        if (how is PersonActHow.APPROVAL) != (self.approval is not None):
+            msg = "a change names an approval exactly when it was made by a yes"
+            raise ValueError(msg)
+        named = how in {PersonActHow.APPROVAL, PersonActHow.SUGGESTION}
+        if named != (self.episode_id is not None):
+            msg = "a change names an episode exactly when a yes or a suggestion made it"
+            raise ValueError(msg)
+        return self
+
+
+class ProfileChange(BaseModel):
+    """One logged change to a field (ADR-0338 §3:5): append-only, kept until deletion.
+
+    Attributes:
+        person_id: Whose field.
+        field: Which field.
+        old: Its value before, or ``None`` where it was not set.
+        new: Its value after, or ``None`` where it was cleared.
+        at: When.
+        act: Who made it, and how.
+        suggestion_id: The suggestion whose acceptance made it, where one did.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    person_id: Identifier
+    field: ProfileField
+    old: EncodableText | None
+    new: EncodableText | None
+    at: UtcInstant
+    act: PersonModelAct
+    suggestion_id: Identifier | None = None
+
+    @model_validator(mode="after")
+    def _a_change_changes(self) -> Self:
+        if self.old == self.new:
+            msg = "a write that sets a field to the value it holds logs nothing (ADR-0338 §3:3)"
+            raise ValueError(msg)
+        if (self.act.how is PersonActHow.SUGGESTION) != (self.suggestion_id is not None):
+            msg = "a change names a suggestion exactly when accepting one made it"
+            raise ValueError(msg)
+        return self
+
+
+class Pin(BaseModel):
+    """A pin: a pointer to a memory the person keeps in mind (ADR-0338 §4:1).
+
+    It copies nothing of its memory. Unpinning marks it removed and keeps it, so a
+    ``pinned`` support pointing at it still resolves (§4:7).
+
+    Attributes:
+        id: The pin's id, which a ``pinned`` support's part names (§4:4).
+        person_id: Whose pin.
+        memory_id: The memory it was made on, as it was then; never rewritten to a
+            successor (§4:8).
+        pinned_at: When it was made.
+        act: Who made it, and how: on the panel, or by a yes.
+        removed_at: When it was removed, or ``None`` while it stands.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: Identifier
+    person_id: Identifier
+    memory_id: Identifier
+    pinned_at: UtcInstant
+    act: PersonModelAct
+    removed_at: UtcInstant | None = None
+
+    @model_validator(mode="after")
+    def _made_on_the_panel_or_by_a_yes(self) -> Self:
+        if self.act.how not in {PersonActHow.PANEL, PersonActHow.APPROVAL}:
+            msg = "a pin is made on the panel or by a yes (ADR-0338 §4:1)"
+            raise ValueError(msg)
+        return self
+
+
+class StyleMark(BaseModel):
+    """A style mark: a pointer to a memory stating how the person wants Aether to speak.
+
+    The observer marks it (ADR-0338 §5:3, §9:4), the person removes it on the panel, and
+    a memory whose mark was removed is not marked again, so a removed mark is kept.
+
+    Attributes:
+        id: The mark's id.
+        person_id: Whose.
+        memory_id: The memory marked.
+        marked_at: When.
+        removed_at: When the person removed it, or ``None`` while it stands.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: Identifier
+    person_id: Identifier
+    memory_id: Identifier
+    marked_at: UtcInstant
+    removed_at: UtcInstant | None = None
+
+
+class SuggestionKind(StrEnum):
+    """What a suggestion proposes (ADR-0338 §9:2, §9:5). Closed, added to, never renamed."""
+
+    FIELD = "field"
+    """A field and a value."""
+    PIN = "pin"
+    """Pinning a memory."""
+
+
+class SuggestionState(StrEnum):
+    """Where a suggestion stands. Closed, added to, never renamed."""
+
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    """Its field took its value, or its memory was pinned, by any route (ADR-0338 §8:9)."""
+    DISMISSED = "dismissed"
+    """The person dismissed it on the panel (§12)."""
+
+
+class ProposedSuggestion(BaseModel):
+    """A suggestion as the observer records it (ADR-0338 §9:2, §9:5).
+
+    Attributes:
+        kind: What it proposes.
+        field: A field suggestion's field.
+        value: A field suggestion's value.
+        memory_id: A pin suggestion's memory.
+        episode_id: The episode it rests on.
+        part: A field suggestion's part, the one it rests on.
+        origin: That part's origin, as code sets it from the episode's record (ADR-0328
+            §4:2): what decides whether the suggestion rests on outside content
+            (ADR-0338 §7:9).
+
+    Raises:
+        ValueError: If a field suggestion lacks its field, value, part or origin, or a
+            pin suggestion its memory, or either carries the other's.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: SuggestionKind
+    field: ProfileField | None = None
+    value: EncodableText | None = None
+    memory_id: Identifier | None = None
+    episode_id: Identifier
+    part: SupportPart | None = None
+    origin: SupportOrigin | None = None
+
+    @model_validator(mode="after")
+    def _carries_what_its_kind_needs(self) -> Self:
+        field_parts = (self.field, self.value, self.part, self.origin)
+        if self.kind is SuggestionKind.FIELD:
+            if any(one is None for one in field_parts) or self.memory_id is not None:
+                msg = "a field suggestion names a field, a value and the part it rests on"
+                raise ValueError(msg)
+        elif self.memory_id is None or any(one is not None for one in field_parts):
+            msg = "a pin suggestion names its memory, and nothing of a field"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def rests_on_outside_content(self) -> bool:
+        """Whether its part has an outside origin (ADR-0338 §7:9); a pin's is its memory's."""
+        return self.origin is not None and origin_is_outside(self.origin)
+
+    def equals(self, other: ProposedSuggestion) -> bool:
+        """Whether ``other`` proposes the same thing: one field and value, or one memory.
+
+        Args:
+            other: Another suggestion.
+
+        Returns:
+            ``True`` where the two are equal in ADR-0338 §9:2's and §9:5's sense.
+        """
+        return (self.kind, self.field, self.value, self.memory_id) == (
+            other.kind,
+            other.field,
+            other.value,
+            other.memory_id,
+        )
+
+
+class PersonSuggestion(BaseModel):
+    """A recorded suggestion, and where it stands (ADR-0338 §9:2, §9:5).
+
+    Attributes:
+        id: Its id.
+        person_id: Whose.
+        proposed: What it proposes and rests on.
+        recorded_at: When it was recorded.
+        state: Where it stands.
+        decided_at: When it was accepted or dismissed, or ``None`` while pending.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: Identifier
+    person_id: Identifier
+    proposed: ProposedSuggestion
+    recorded_at: UtcInstant
+    state: SuggestionState = SuggestionState.PENDING
+    decided_at: UtcInstant | None = None
+
+    @model_validator(mode="after")
+    def _decided_when_not_pending(self) -> Self:
+        if (self.state is SuggestionState.PENDING) != (self.decided_at is None):
+            msg = "a suggestion is dated as decided exactly when it is no longer pending"
+            raise ValueError(msg)
+        return self
+
+
+class PersonModel(BaseModel):
+    """One person's model, as the store reads it (ADR-0338 §10:2).
+
+    Attributes:
+        person: The person.
+        profile: Their five fields.
+        changes: The change log, in the order written.
+        pins: Every pin, removed ones included, in the order made.
+        style_marks: Every style mark, removed ones included, in the order made.
+        suggestions: The pending suggestions, in the order recorded.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    person: Person
+    profile: Profile = Field(default_factory=Profile)
+    changes: tuple[ProfileChange, ...] = ()
+    pins: tuple[Pin, ...] = ()
+    style_marks: tuple[StyleMark, ...] = ()
+    suggestions: tuple[PersonSuggestion, ...] = ()
+
+    @property
+    def standing_pins(self) -> tuple[Pin, ...]:
+        """The pins not removed, oldest first."""
+        return tuple(pin for pin in self.pins if pin.removed_at is None)
+
+    @property
+    def standing_marks(self) -> tuple[StyleMark, ...]:
+        """The style marks not removed, in the order made."""
+        return tuple(mark for mark in self.style_marks if mark.removed_at is None)
+
+
+class PersonModelExport(BaseModel):
+    """Every record the person-model store holds, for its export (ADR-0338 §10:5).
+
+    Attributes:
+        persons: Every person.
+        profiles: Each person's profile, by their id.
+        changes: Every change-log entry, in the order written.
+        pins: Every pin, in the order made.
+        style_marks: Every style mark, in the order made.
+        suggestions: Every suggestion, whatever its state, in the order recorded.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    persons: tuple[Person, ...] = ()
+    profiles: tuple[tuple[Identifier, Profile], ...] = ()
+    changes: tuple[ProfileChange, ...] = ()
+    pins: tuple[Pin, ...] = ()
+    style_marks: tuple[StyleMark, ...] = ()
+    suggestions: tuple[PersonSuggestion, ...] = ()
+
+
+class PersonModelWriteKind(StrEnum):
+    """What a write to the person-model store did. Closed, added to, never renamed."""
+
+    WRITTEN = "written"
+    """It wrote, in one step."""
+    UNCHANGED = "unchanged"
+    """It changed nothing, as the contract says such a write does: a field set to the
+    value it holds (ADR-0338 §3:3), a memory already pinned (§4:2) or marked or whose
+    mark was removed (§5:3, §9:4), a suggestion the profile already holds or an equal
+    one pending or dismissed (§9:2, §9:5), or a removal of what is already removed."""
+    REFUSED = "refused"
+    """It was refused, and nothing was written."""
+
+
+class PersonModelRefusal(StrEnum):
+    """Why a write to the person-model store was refused. Closed, added to, never renamed.
+
+    A refused write writes nothing; a refusal is an outcome, never a
+    :class:`~ai_assistant.core.errors.PersonModelStoreError`, which is reserved for a
+    store that could not read or write.
+    """
+
+    UNKNOWN_PERSON = "unknown_person"
+    """The store holds no person of that id (ADR-0338 §2:1)."""
+    INVALID_VALUE = "invalid_value"
+    """A field's value failed validation (§3:2)."""
+    INVALID_ACT = "invalid_act"
+    """The act is not one that may make this change: a pin made other than on the panel
+    or by a yes (§4:1), or a field written by a suggestion except by accepting one."""
+    UNKNOWN_RECORD = "unknown_record"
+    """The pin, the mark or the suggestion named is not this person's, or not held."""
+    ALREADY_DECIDED = "already_decided"
+    """The suggestion named is no longer pending."""
+
+
+class PersonModelWrite(BaseModel):
+    """What a write to the person-model store did.
+
+    Attributes:
+        kind: What it did.
+        record_id: The pin, mark or suggestion it wrote or found standing, where it
+            names one.
+        refusal: Why it was refused; set exactly where ``kind`` is ``refused``.
+        reason: A refused value's code-owned reason, where the refusal has one.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: PersonModelWriteKind
+    record_id: Identifier | None = None
+    refusal: PersonModelRefusal | None = None
+    reason: EncodableText | None = None
+
+    @model_validator(mode="after")
+    def _refused_with_a_reason(self) -> Self:
+        if (self.kind is PersonModelWriteKind.REFUSED) != (self.refusal is not None):
+            msg = "a write names its refusal exactly when it was refused"
+            raise ValueError(msg)
+        if self.reason is not None and self.refusal is None:
+            msg = "only a refused write carries a reason"
+            raise ValueError(msg)
+        return self
