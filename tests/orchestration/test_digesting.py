@@ -161,6 +161,30 @@ async def test_the_records_are_quoted_data_under_a_local_label_attributed_by_the
     assert _PAGE not in messages[0].content
 
 
+async def test_a_pulls_answer_is_attributed_by_the_hubs_channel_and_author() -> None:
+    """ADR-0324 §2:4: the hub's attribution of a pull stands where a result's would.
+
+    Given as the record's ``from``, the hub's own statement, and never inside the quoted
+    text, which stays the answer exactly as it arrived.
+    """
+    provider = _Provider(lambda _: _reply())
+    stage, _ = _stage(provider)
+    attribution = 'outside content: the weather channel "forecast"; a service, claimed'
+
+    await stage.digest_result(
+        _held(),
+        question=_QUESTION,
+        labels=ActivationLabels(),
+        deadline=_DEADLINE,
+        attribution=attribution,
+    )
+
+    ((messages, _),) = provider.calls
+    (record,) = _document(messages)["records"]
+    assert record["from"] == attribution
+    assert record["text"] == _PAGE
+
+
 async def test_the_system_message_is_what_the_template_renders() -> None:
     """ADR-0334 §3:5: the instruction is the template handed in, default or override."""
     provider = _Provider(lambda _: _reply())

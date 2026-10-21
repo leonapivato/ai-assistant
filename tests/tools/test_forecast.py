@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 from egress_transport_harness import REFERENCE, SLOT, Records, entry
 from forecast_harness import (
+    DECIDED_AT,
     KEYLESS,
     LATITUDE,
     LOCATING,
@@ -70,17 +71,29 @@ from forecaster_contract import (
     ScriptedRefusal,
 )
 
-from ai_assistant.core.errors import ToolBindingError, ToolError, TransportError
+from ai_assistant.core.errors import (
+    ToolBindingError,
+    ToolError,
+    TransportError,
+    UnrecordedAuthorisationError,
+)
 from ai_assistant.core.protocols import Forecaster
 from ai_assistant.core.types import (
+    CostBasis,
     ForecastRefusal,
     MemorySource,
+    PermissionDecision,
+    PermissionOutcome,
+    PermissionRuling,
     Placement,
     ProvisioningState,
     SemanticMemory,
     ToolCall,
+    ToolInvocation,
+    ToolOutcome,
 )
 from ai_assistant.testing import FakeOutboundTransport
+from ai_assistant.testing.cancellation import settle
 from ai_assistant.tools import build_forecast_integration
 from ai_assistant.tools.egress import TransportPinError
 from ai_assistant.tools.forecast import (
@@ -145,7 +158,7 @@ async def _read(subject: Built, *, timeout: timedelta = _BOUND) -> ForecastOutco
     Returns:
         The outcome.
     """
-    call = authorised_read(await request(subject))
+    call = await authorised_read(subject.trail, await request(subject))
     outcome: ForecastOutcome = await subject.forecaster.read(call, timeout=timeout)
     return outcome
 
@@ -268,7 +281,7 @@ async def test_the_coordinate_is_written_in_plain_decimal(latitude: float, spell
     """
     subject = await built(channels=[answering(day())], latitude=latitude)
 
-    call = authorised_read(await request(subject, latitude=latitude))
+    call = await authorised_read(subject.trail, await request(subject, latitude=latitude))
     await subject.forecaster.read(call, timeout=_BOUND)
 
     assert f"/v1/forecast?latitude={spelled}&longitude=".encode() in _sent(subject)
@@ -349,7 +362,7 @@ async def test_a_provisioning_act_landing_after_the_one_read_stops_nothing() -> 
     records = ReprovisioningRecords(KEYLESS, entry(slot=SLOT, revision=2))
     transport = GatedTransport(answering(day()))
     subject = await built(transport=transport, records=records)
-    call = authorised_read(await request(subject))
+    call = await authorised_read(subject.trail, await request(subject))
 
     # Held at the channel's open, which is after the one read: the reprovisioning the
     # read queued lands there, while the request is under way.
@@ -1041,7 +1054,7 @@ async def test_a_long_shared_unit_is_measured_once_and_not_once_per_day(
     subject = await built(
         channels=[far_end(response(payload=payload))], max_response_bytes=4 * 1024 * 1024
     )
-    call = authorised_read(await request(subject))
+    call = await authorised_read(subject.trail, await request(subject))
     encoded: list[int] = []
     real = json.dumps
 
@@ -1278,7 +1291,7 @@ async def test_the_timeout_keyword_is_required() -> None:
     about this seam.
     """
     subject = await built(channels=[answering(day())])
-    call = authorised_read(await request(subject))
+    call = await authorised_read(subject.trail, await request(subject))
 
     with pytest.raises(TypeError):
         await subject.forecaster.read(call)
@@ -1305,7 +1318,7 @@ async def test_a_bound_outside_its_domain_reaches_nothing(bound: object) -> None
     read the record for a call it never made.
     """
     subject = await built(channels=[answering(day())])
-    call = authorised_read(await request(subject))
+    call = await authorised_read(subject.trail, await request(subject))
 
     with pytest.raises(ValueError, match=r"timeout|deadline"):
         await subject.forecaster.read(call, timeout=bound)
@@ -1324,7 +1337,7 @@ async def test_a_call_mutated_after_construction_does_not_survive_revalidation()
     validator fails here.
     """
     subject = await built(channels=[answering(day())])
-    call = authorised_read(await request(subject))
+    call = await authorised_read(subject.trail, await request(subject))
     rewritten = call.request.model_copy(update={"parameters": {"origin": "https://elsewhere"}})
     call.__dict__["request"] = rewritten
 
@@ -1352,7 +1365,7 @@ async def test_a_call_naming_another_declaration_is_refused() -> None:
     # into a still-valid state — ADR-0018 §4's case — whose `discloses`, `cost` or
     # `risk_level` the policy never ruled on.
     weakened = FORECAST_READ.model_copy(update={"description": "a description nobody registered"})
-    call = authorised_read(await request(subject, tool=weakened))
+    call = await authorised_read(subject.trail, await request(subject, tool=weakened))
 
     with pytest.raises(ToolBindingError, match="not the one this forecaster registered"):
         await subject.forecaster.read(call, timeout=_BOUND)
@@ -1380,7 +1393,7 @@ async def test_a_call_whose_decision_authorises_another_request_is_refused() -> 
     **the connection record unread and no channel opened** (ADR-0344 §9).
     """
     subject = await built(channels=[answering(day())])
-    call = authorised_read(await request(subject))
+    call = await authorised_read(subject.trail, await request(subject))
     call.__dict__["request"] = await request(subject, latitude=0.0, longitude=0.0)
 
     with pytest.raises(ToolBindingError, match="not the call that was authorised"):
@@ -1408,7 +1421,7 @@ async def test_a_separately_authorised_call_naming_another_place_is_refused() ->
     what assert.
     """
     subject = await built(channels=[answering(day())])
-    call = authorised_read(await request(subject, latitude=0.0, longitude=0.0))
+    call = await authorised_read(subject.trail, await request(subject, latitude=0.0, longitude=0.0))
 
     with pytest.raises(ToolBindingError, match="not configured for"):
         await subject.forecaster.read(call, timeout=_BOUND)
@@ -1434,7 +1447,7 @@ async def test_a_call_bound_elsewhere_reaches_no_record(elsewhere: dict[str, Any
     approval named B.
     """
     subject = await built(channels=[answering(day())])
-    call = authorised_read(await request(subject, elsewhere=elsewhere))
+    call = await authorised_read(subject.trail, await request(subject, elsewhere=elsewhere))
 
     with pytest.raises(TransportPinError):
         await subject.forecaster.read(call, timeout=_BOUND)
@@ -1496,7 +1509,7 @@ async def test_a_cancelled_read_re_raises_and_yields_no_outcome() -> None:
     """
     transport = GatedTransport(answering(day()))
     subject = await built(transport=transport)
-    call = authorised_read(await request(subject))
+    call = await authorised_read(subject.trail, await request(subject))
     gate = transport.suspend_next()
     running = asyncio.ensure_future(subject.forecaster.read(call, timeout=_BOUND))
     await gate.reached()
@@ -1519,16 +1532,27 @@ async def test_a_transport_that_absorbs_the_cancellation_still_delivers_it() -> 
     """
     transport = AbsorbingTransport(3600.0, answering(day()))
     subject = await built(transport=transport)
-    call = authorised_read(await request(subject))
+    call = await authorised_read(subject.trail, await request(subject))
     running = asyncio.ensure_future(subject.forecaster.read(call, timeout=_BOUND))
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    # Cancelled once the open has demonstrably been reached: the ledger claim is awaited
+    # first (ADR-0324 §5:8), so a fixed count of yields would cancel ahead of the
+    # transport. `settle` yields in turns rather than for a duration.
+    await settle()
+    assert transport.attempts, "the open was reached before the cancellation"
 
     running.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await running
     assert transport.absorbed == 1
+    # The claim was completed on the way past, with the declaration's interrupted
+    # outcome (ADR-0192 §3).
+    completions = [
+        row.invocation
+        for row in await subject.trail.export_invocations()
+        if row.invocation.completes is not None
+    ]
+    assert [row.outcome for row in completions] == [FORECAST_READ.interrupted_outcome]
 
 
 async def test_a_transport_that_invents_a_cancellation_raises_a_fault() -> None:
@@ -1539,7 +1563,7 @@ async def test_a_transport_that_invents_a_cancellation_raises_a_fault() -> None:
     the ``CancelledError`` out would tear down a turn nobody cancelled.
     """
     subject = await built(transport=RaisingTransport(asyncio.CancelledError()))
-    call = authorised_read(await request(subject))
+    call = await authorised_read(subject.trail, await request(subject))
 
     with pytest.raises(ToolError, match="nothing cancelled"):
         await subject.forecaster.read(call, timeout=_BOUND)
@@ -1746,6 +1770,7 @@ async def test_a_forecaster_is_refused_where_it_is_configured(field: str, value:
     subject = await built(channels=[answering(day())])
     fields: dict[str, Any] = {
         "transport": subject.seam,
+        "ledger": subject.trail,
         "latitude": LATITUDE,
         "longitude": LONGITUDE,
         "max_days": MAX_DAYS,
@@ -1781,6 +1806,7 @@ async def test_a_coordinate_too_large_to_be_a_float_is_refused_as_a_value_error(
     with pytest.raises(ValueError, match="latitude"):
         ForecastEgress(
             transport=subject.seam,
+            ledger=subject.trail,
             latitude=enormous,
             longitude=LONGITUDE,
             max_days=MAX_DAYS,
@@ -1805,6 +1831,7 @@ async def test_a_forecaster_named_something_identifier_would_strip_is_refused(
     with pytest.raises(ValueError, match="name"):
         ForecastEgress(
             transport=subject.seam,
+            ledger=subject.trail,
             latitude=LATITUDE,
             longitude=LONGITUDE,
             max_days=MAX_DAYS,
@@ -1902,7 +1929,9 @@ class TestForecastEgressContract(ForecasterContract):
         subject = await built(max_day_chars=_SMALL_CONTENT_BOUND, channels=[answering(day())])
         weakened = FORECAST_READ.model_copy(update={"description": "nobody registered this"})
         proposal = await request(subject, tool=weakened)
-        return ScriptedRead(forecaster=subject.forecaster, call=authorised_read(proposal))
+        return ScriptedRead(
+            forecaster=subject.forecaster, call=await authorised_read(subject.trail, proposal)
+        )
 
     async def elsewhere(self) -> ScriptedRead:
         # **Bound by the real seam and authorised over itself.** The binding is derived
@@ -1911,7 +1940,9 @@ class TestForecastEgressContract(ForecasterContract):
         # shared case about the place rather than about a missing binding.
         subject = await built(max_day_chars=_SMALL_CONTENT_BOUND, channels=[answering(day())])
         proposal = await request(subject, latitude=0.0, longitude=0.0)
-        return ScriptedRead(forecaster=subject.forecaster, call=authorised_read(proposal))
+        return ScriptedRead(
+            forecaster=subject.forecaster, call=await authorised_read(subject.trail, proposal)
+        )
 
     async def configured(self) -> ConfiguredProvider:
         forecaster, _ = await self._prepared(channels=[answering(day())])
@@ -1936,7 +1967,7 @@ class TestForecastEgressContract(ForecasterContract):
             The forecaster and the call.
         """
         subject = await built(max_day_chars=_SMALL_CONTENT_BOUND, **arrangement)
-        return subject.forecaster, authorised_read(await request(subject))
+        return subject.forecaster, await authorised_read(subject.trail, await request(subject))
 
     async def _refusing(self, refusal: ForecastRefusal) -> tuple[Any, ToolCall]:
         """A subject whose read refuses with ``refusal``, and the call that reaches it.
@@ -1975,3 +2006,132 @@ class TestForecastEgressContract(ForecasterContract):
             ForecastRefusal.NO_RESULT: {"channels": [far_end(response(payload=body(group=False)))]},
         }
         return await self._prepared(**arrangements[refusal])
+
+
+# --- ADR-0324 §5:8: the weather pull's ledger claim and completion ---------------------
+
+
+async def _rows(subject: Built) -> tuple[list[ToolInvocation], list[ToolInvocation]]:
+    """The ledger's claims and its completions, in order."""
+    rows = [row.invocation for row in await subject.trail.export_invocations()]
+    return (
+        [row for row in rows if row.completes is None],
+        [row for row in rows if row.completes is not None],
+    )
+
+
+async def test_a_read_leaves_one_claim_taken_from_its_decision_and_completed_succeeded() -> None:
+    """ADR-0324 §5:8, ADR-0306 §5:7: the attempt and its outcome are the ledger's rows.
+
+    One claim, taken from the recorded decision, and one completion of it, as the
+    searcher's are; the call's ``SUCCEEDED`` is what the read did, and the records are
+    what it brought back.
+    """
+    subject = await built(channels=[answering(day())])
+
+    outcome = await _read(subject)
+
+    assert outcome.records
+    claims, completions = await _rows(subject)
+    assert [row.decision_id for row in claims] == ["d-forecast-1"]
+    assert [row.completes for row in completions] == [claims[0].id]
+    assert completions[0].outcome is ToolOutcome.SUCCEEDED
+
+
+@pytest.mark.parametrize(
+    ("arrangement", "expected"),
+    [
+        pytest.param(
+            {"refusal": TransportError("this file connects to nothing")},
+            ToolOutcome.FAILED,
+            id="a-transport-failure-completes-failed",
+        ),
+        pytest.param(
+            {"channels": [far_end(response(status="HTTP/1.1 400 Bad Request"))]},
+            ToolOutcome.FAILED,
+            id="a-provider-refusal-completes-failed",
+        ),
+        pytest.param(
+            {"channels": [far_end(response(payload=body(group=False)))]},
+            ToolOutcome.SUCCEEDED,
+            id="an-answer-describing-no-day-completes-succeeded",
+        ),
+        pytest.param(
+            {"channels": [answering(day(), date=None)]},
+            ToolOutcome.SUCCEEDED,
+            id="an-unattested-answer-completes-succeeded",
+        ),
+    ],
+)
+async def test_the_completion_says_what_happened_to_the_call_and_not_to_the_forecast(
+    arrangement: dict[str, Any], expected: ToolOutcome
+) -> None:
+    """The split ``_result_of`` states: an answer the provider *gave* completed the call.
+
+    ``NO_RESULT`` and ``UNATTESTED`` are the provider answering, so the row says
+    ``SUCCEEDED`` while the read yields nothing; a call that did not complete as a call
+    says ``FAILED``. The searcher's split, one integration along.
+    """
+    subject = await built(**arrangement)
+
+    await _read(subject)
+
+    claims, completions = await _rows(subject)
+    assert len(claims) == 1
+    assert [row.outcome for row in completions] == [expected]
+
+
+async def test_a_read_cut_short_by_its_deadline_completes_unknown_at_an_unknown_cost() -> None:
+    """ADR-0324 §8:1 and ADR-0241 §5: the outcome is the declaration's ``interrupted_outcome``.
+
+    A read cut short may have reached the provider, so its completion says unknown, and
+    its cost is what nothing measured, never the declared figure.
+    """
+    subject = await built(transport=StallingTransport())
+
+    outcome = await _read(subject, timeout=_SHORT)
+
+    assert outcome.refusal is ForecastRefusal.DEADLINE_EXPIRED
+    claims, completions = await _rows(subject)
+    assert len(claims) == 1
+    assert [row.outcome for row in completions] == [ToolOutcome.INDETERMINATE]
+    assert FORECAST_READ.interrupted_outcome is ToolOutcome.INDETERMINATE
+    assert completions[0].incurred_cost is not None
+    assert completions[0].incurred_cost.basis is CostBasis.UNKNOWN
+
+
+async def test_a_call_that_is_not_the_one_authorised_appends_no_claim() -> None:
+    """ADR-0192 §1's placement: the three checks come before the claim.
+
+    So a call refused at them leaves no row at all, as it opens no channel.
+    """
+    subject = await built(channels=[answering(day())])
+    call = await authorised_read(subject.trail, await request(subject, latitude=0.0))
+
+    with pytest.raises(ToolBindingError):
+        await subject.forecaster.read(call, timeout=_BOUND)
+
+    assert await subject.trail.export_invocations() == []
+    assert subject.transport.attempts == ()
+
+
+async def test_a_call_whose_decision_was_never_recorded_is_refused_before_the_send() -> None:
+    """ADR-0192 §1: the ledger requires the decision the trail holds under its id.
+
+    A forecast read is the recorded decision's to claim (ADR-0306 §5:7), so one carrying
+    a decision the trail never recorded is refused at the claim and nothing is sent.
+    """
+    subject = await built(channels=[answering(day())])
+    proposal = await request(subject)
+    decision = PermissionDecision.from_request(
+        proposal,
+        PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="never recorded"),
+        id="d-unrecorded",
+        decided_at=DECIDED_AT,
+    )
+    call = ToolCall(request=proposal, decision=decision)
+
+    with pytest.raises(UnrecordedAuthorisationError):
+        await subject.forecaster.read(call, timeout=_BOUND)
+
+    assert subject.transport.attempts == ()

@@ -81,9 +81,13 @@ from ai_assistant.core.types import (
     SemanticMemory,
     ToolCost,
     ToolDefinition,
+    ToolFailure,
+    ToolFailureKind,
+    ToolOutcome,
+    ToolResult,
     describe_untrusted,
 )
-from ai_assistant.tools.consume import pending_cancellations
+from ai_assistant.tools.consume import consumed_call, pending_cancellations
 from ai_assistant.tools.egress import (
     BoundCallChangedError,
     HttpsRedirectRefusedError,
@@ -92,11 +96,13 @@ from ai_assistant.tools.egress import (
 )
 from ai_assistant.tools.egress_declaration import DESTINATION_KEYWORD, TIER_KEYWORD
 from ai_assistant.tools.http_reading import declared_instant, decoded_object
+from ai_assistant.tools.invocation import expiry_failure
 from ai_assistant.tools.registry import checked_timeout, revalidated_call
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from ai_assistant.core.protocols import InvocationLedger
     from ai_assistant.core.types import EgressBinding, FrozenJson, ToolCall
     from ai_assistant.tools.egress import HttpsEgressTransport, HttpsResponse
 
@@ -746,25 +752,35 @@ class ForecastEgress:
        §1 designates. No credential is read: the transport holds no ``Secrets`` face
        (ADR-0344 §3:1). Then ADR-0344 §5's reading of the response, here.
 
-    **No spend gate and no invocation ledger, and that is ADR-0260 §6 read rather than
-    skipped.** That section enumerates what ``read`` performs and states that this seam
-    "is likewise **not** ``ToolInvoker.invoke`` and inherits nothing written about
-    ``WEB_SEARCH``"; neither ADR-0194 §3's admission nor ADR-0192's claim is named there,
-    in §4's member contract, or in any of §13's fifteen arms, and ``ForecastRefusal``
-    carries no ``SPEND_REFUSED`` member where ADR-0231 §17 gave ``SearchRefusal`` one.
-    What the configured cost pair reaches is the **declaration** (ADR-0236 §1), which is
-    what ADR-0236 §4's unknown-cost floor reads at the ruling — and §11 says exactly
-    that.
+    **The invocation ledger's claim and completion, and no spend gate** (ADR-0324 §5:8).
+    The weather pull transmits as ADR-0306 §5:7 decides for a call that leaves the hub:
+    its attempt and its outcomes are its ``InvocationLedger`` claim and completion, as
+    the searcher's are. So once the three checks above have passed, and before the
+    exchange, ADR-0192's claim is appended, and a completion follows on **every exit this
+    frame observes**, through the same :func:`~ai_assistant.tools.consume.consumed_call`
+    the registry and the searcher use, so there is one implementation of it and not
+    three. The two appends are outside the deadline, which ADR-0192 §3 leaves unbounded
+    by this seam. **No spend gate**: ADR-0260 §6 names no admission, ADR-0324 §5:8 names
+    only the ledger, and ``ForecastRefusal`` carries no ``SPEND_REFUSED`` member where
+    ADR-0231 §17 gave ``SearchRefusal`` one. What the configured cost pair reaches is the
+    **declaration** (ADR-0236 §1), which is what ADR-0236 §4's unknown-cost floor reads
+    at the ruling.
+
+    **A claim left open states that the read may have reached the provider**, the
+    searcher's posture one integration along: a fault raised inside the claim — a
+    connection-record read that failed, a call bound elsewhere, an invented
+    cancellation — leaves it open, the honest state for a send that may have happened.
 
     **Every source reason is returned and none is raised** (§4). What *does* leave
     :meth:`read` is a fault that no :class:`ForecastRefusal` member names: a ``timeout``
     outside its domain, a call that does not survive revalidation, one carrying a
     definition this forecaster did not register, one its decision does not authorise,
-    one bound to another account or another origin, and a ``CancelledError`` the
-    transport invented with nothing cancelled. Each is
+    one bound to another account or another origin, a ledger fault on the claim, and a
+    ``CancelledError`` the transport invented with nothing cancelled. Each is
     :class:`~ai_assistant.core.errors.ToolBindingError`,
     :class:`~ai_assistant.core.errors.ToolError`,
-    :class:`~ai_assistant.tools.egress.TransportPinError` or a ``ValueError``.
+    :class:`~ai_assistant.tools.egress.TransportPinError`, one of ADR-0192's or a
+    ``ValueError``.
 
     **One ask is one read, and the count is this class's** (§3). Exactly one exchange is
     opened on every outcome read off the wire, and **none** on the pre-transmit refusal
@@ -777,6 +793,7 @@ class ForecastEgress:
     __slots__ = (
         "_declaration",
         "_latitude",
+        "_ledger",
         "_longitude",
         "_max_day_chars",
         "_max_days",
@@ -784,10 +801,11 @@ class ForecastEgress:
         "_transport",
     )
 
-    def __init__(  # noqa: PLR0913 — the seam ADR-0260 §6 names, the place §3 makes this forecaster's own, the two bounds §11 adds, the declaration §6's second check compares against and the identity §5 attests to; each is one thing this forecaster is handed rather than reaches for
+    def __init__(  # noqa: PLR0913 — the seam ADR-0260 §6 names, the ledger ADR-0324 §5:8 adds, the place §3 makes this forecaster's own, the two bounds §11 adds, the declaration §6's second check compares against and the identity §5 attests to; each is one thing this forecaster is handed rather than reaches for
         self,
         *,
         transport: HttpsEgressTransport,
+        ledger: InvocationLedger,
         latitude: float,
         longitude: float,
         max_days: int,
@@ -802,6 +820,12 @@ class ForecastEgress:
                 (ADR-0260 §6). It holds the registration, reads the connection record
                 and opens the channel; this object holds none of the three. Keyless:
                 built with no ``Secrets`` face (ADR-0344 §2:3).
+            ledger: The ``InvocationLedger`` this forecaster claims and completes
+                each read through (ADR-0324 §5:8, ADR-0192 §1, §3). Required, so a
+                forecaster that transmits without its claim cannot be constructed.
+                Never an ``AuditTrail``: the decision was recorded before this object
+                was reached, and a forecaster that could record one would be deciding
+                as well as acting.
             latitude: ``Settings.forecast_latitude`` — the place this deployment reads
                 its forecast for (§3, §11). Finite and from -90 to 90 inclusive.
             longitude: ``Settings.forecast_longitude``, likewise, from -180 to 180.
@@ -841,6 +865,7 @@ class ForecastEgress:
         self._latitude = _checked_coordinate("latitude", latitude, maximum=_MAX_LATITUDE)
         self._longitude = _checked_coordinate("longitude", longitude, maximum=_MAX_LONGITUDE)
         self._transport = transport
+        self._ledger = ledger
         self._max_days = max_days
         self._max_day_chars = max_day_chars
         self._declaration = declaration
@@ -905,7 +930,9 @@ class ForecastEgress:
         Returns:
             One outcome carrying records or a refusal.
             :attr:`~ai_assistant.core.types.ForecastRefusal.DEADLINE_EXPIRED` where
-            **this** deadline fired (ADR-0241 §4). An interruption the transport
+            **this** deadline fired (ADR-0241 §4): during the revalidation, where no
+            claim was appended, or inside the claim, where the completion carries the
+            declaration's ``interrupted_outcome``. An interruption the transport
             **absorbed** is read off this frame's own deadline and its own task rather
             than off what came back, so a transport that catches the cancellation and
             answers anyway is not recorded as having succeeded.
@@ -914,16 +941,24 @@ class ForecastEgress:
             ValueError: If ``timeout`` is not a ``timedelta`` or is not strictly
                 positive (ADR-0241 §1). Refused before anything is read.
             ToolBindingError: If the call does not survive ADR-0029 §2's three checks
-                (§6). The connection record is not read and no channel is opened for
-                any of them.
+                (§6). The connection record is not read, no channel is opened and **no
+                claim is appended** for any of them.
+            AuthorisationSpentError: If the ledger refuses the claim because the
+                authorisation is spent (ADR-0192 §1).
+            UnrecordedAuthorisationError: If the trail holds no decision equal to this
+                call's under its id, or holds one that is not an ``ALLOW``.
+            AuditError: If the claim append failed with anything that is not an
+                ``AssistantError``. A failure of the **completion** append is absorbed
+                and reaches the operator as a diagnostic (ADR-0192 §3).
             ToolError: If the transport raised a ``CancelledError`` with **nothing
                 cancelled** — ADR-0031 §2's invented cancellation, which ADR-0241 §7
-                makes a fault rather than a teardown.
+                makes a fault rather than a teardown. The claim is left open.
             CancelledError: Re-raised unchanged when this call is cancelled from
                 outside while suspended, and converted into neither an outcome nor a
-                refusal (ADR-0060 §1). Raised **freshly** where the transport absorbed
-                one, because a cancellation answered with a value is the absorption
-                ADR-0060 §1 says a method never performs.
+                refusal (ADR-0060 §1); the claim is completed with the declaration's
+                ``interrupted_outcome`` first. Raised **freshly** where the transport
+                absorbed one, because a cancellation answered with a value is the
+                absorption ADR-0060 §1 says a method never performs.
         """
         # **First, and that is ADR-0241 §1's placement**: `checked_timeout` is
         # ADR-0029 §4's own guard — one implementation of the rule, reached from every
@@ -931,26 +966,101 @@ class ForecastEgress:
         # base class's fields, so a subclass whose `total_seconds` raises decides
         # nothing later.
         duration = checked_timeout(timeout)
-        entered_with = pending_cancellations()
         # **The window opens ahead of the revalidation** (ADR-0241 §1): the bound
         # covers the seam's own work, and a clock started after the checks would hand
-        # the exchange a *fresh* budget.
-        deadline = asyncio.timeout(duration.total_seconds())
+        # the exchange a *fresh* budget. It does not cover the two ledger appends,
+        # which ADR-0192 §3 leaves unbounded by this seam, so what is left of it after
+        # the checks is what the exchange is handed.
+        loop = asyncio.get_running_loop()
+        expires_at = loop.time() + duration.total_seconds()
+        checked, binding, origin, latitude, longitude = self._authorised(call)
+        remaining = expires_at - loop.time()
+        if remaining <= 0:
+            # The window closed while this frame was revalidating. **No claim was
+            # appended and no channel was opened**, so no completion is owed and none
+            # is written — the searcher's before-the-claim exit, one seam over.
+            return _refused(ForecastRefusal.DEADLINE_EXPIRED)
+
+        outcome: ForecastOutcome | None = None
+
+        async def act() -> ToolResult:
+            nonlocal outcome
+            outcome = await self._bounded(
+                binding,
+                origin=origin,
+                latitude=latitude,
+                longitude=longitude,
+                remaining=remaining,
+            )
+            return _result_of(outcome, self._declaration, duration)
+
+        # **ADR-0192's claim, the read, and a completion on every exit this frame
+        # observes** (ADR-0324 §5:8): after the three checks above, so a call that is
+        # not the one authorised appends no claim, and taken from the recorded decision
+        # on the revalidated copy (ADR-0306 §5:7). An external cancellation is
+        # completed with the declaration's `interrupted_outcome` and re-raised there.
+        await consumed_call(
+            ledger=self._ledger,
+            definition=self._declaration,
+            decision=checked.decision,
+            act=act,
+        )
+        if outcome is None:
+            # Unreachable: `consumed_call` returns only once `act` has, and `act` sets
+            # the outcome before it returns. Checked rather than asserted, because what
+            # would otherwise stand here is a `cast` over the value this method returns.
+            msg = f"{self._declaration.id}: the read returned without an outcome"
+            raise ToolError(msg)
+        return outcome
+
+    async def _bounded(
+        self,
+        binding: EgressBinding,
+        *,
+        origin: str,
+        latitude: float,
+        longitude: float,
+        remaining: float,
+    ) -> ForecastOutcome:
+        """Make the one exchange inside what is left of the caller's window, and classify it.
+
+        Inside the claim. Every exit but a raised fault is an outcome the completion is
+        written from; an external cancellation is re-raised for ``consumed_call`` to
+        complete with the declaration's ``interrupted_outcome``.
+
+        Args:
+            binding: The authorised binding.
+            origin: The origin the ruled call carries.
+            latitude: The latitude the ruled call carries.
+            longitude: The longitude it carries.
+            remaining: The seconds left of the caller's window, strictly positive.
+
+        Returns:
+            The outcome.
+
+        Raises:
+            ToolError: If the transport raised a ``CancelledError`` with nothing
+                cancelled.
+            CancelledError: Re-raised unchanged when this call is cancelled from
+                outside, and raised freshly where the transport absorbed one.
+        """
+        entered_with = pending_cancellations()
+        deadline = asyncio.timeout(remaining)
         try:
             async with deadline:
-                binding, origin, latitude, longitude = self._authorised(call)
                 answered = await self._asked(
                     binding, origin=origin, latitude=latitude, longitude=longitude
                 )
         except asyncio.CancelledError as cancellation:
             if pending_cancellations() > entered_with:
-                # An external cancellation: delivered onward unchanged (ADR-0060 §1).
+                # An external cancellation: delivered onward unchanged (ADR-0060 §1),
+                # and `consumed_call` completes the claim before it leaves.
                 raise
             # ADR-0031 §2's invented cancellation — the count did not move, so nothing
             # was cancelled and this is a fault the transport raised. ADR-0241 §7 says
             # what it must *not* become: not a teardown that ends the turn, and not an
-            # outcome. So it leaves as an `AssistantError`, which is what reaches
-            # ADR-0226 §5's degradation.
+            # outcome. So it leaves as an `AssistantError`, and the claim is left open,
+            # the honest state for a send that may have happened.
             msg = (
                 f"{self._declaration.id}: the forecaster raised a cancellation with "
                 f"nothing cancelled, so the read did not complete"
@@ -1038,7 +1148,7 @@ class ForecastEgress:
             )
             raise asyncio.CancelledError(swallowed)
 
-    def _authorised(self, call: ToolCall) -> tuple[EgressBinding, str, float, float]:
+    def _authorised(self, call: ToolCall) -> tuple[ToolCall, EgressBinding, str, float, float]:
         """Run ADR-0029 §2's three checks, and hand back what survived them (§6).
 
         **Inside the caller's window and before anything else** (ADR-0241 §1): the call
@@ -1057,7 +1167,8 @@ class ForecastEgress:
             call: The call as handed, read only through the copy this makes of it.
 
         Returns:
-            Its binding and the three arguments its schema declares — each already
+            The revalidated copy, whose decision the ledger claim is taken from, its
+            binding and the three arguments its schema declares — each already
             narrowed, so no later frame carries a ``cast``.
 
         Raises:
@@ -1118,7 +1229,7 @@ class ForecastEgress:
                 f"deployment did not choose (ADR-0260 §3, §6)"
             )
             raise ToolBindingError(msg)
-        return binding, origin, latitude, longitude
+        return checked, binding, origin, latitude, longitude
 
     async def _asked(
         self, binding: EgressBinding, *, origin: str, latitude: float, longitude: float
@@ -1399,6 +1510,58 @@ class ForecastEgress:
             topics=(),
             about_person=None,
         )
+
+
+#: The refusals a **completed** call produced: the provider answered, and what it
+#: answered is not something this system will carry.
+_COMPLETED_REFUSALS: Final = frozenset({ForecastRefusal.NO_RESULT, ForecastRefusal.UNATTESTED})
+
+#: How a refusal that failed the invocation is classified for ADR-0029 §3's row, as the
+#: searcher classifies the same three: a channel that could not be opened or continued
+#: is the world being unavailable, and a response this system declined to buy, or one a
+#: forecast cannot be read from, is a refusal.
+_FAILURE_KINDS: Final[Mapping[ForecastRefusal, ToolFailureKind]] = {
+    ForecastRefusal.TRANSPORT_FAILED: ToolFailureKind.UNAVAILABLE,
+    ForecastRefusal.PROVIDER_REFUSED: ToolFailureKind.REFUSED,
+    ForecastRefusal.RESPONSE_TOO_LARGE: ToolFailureKind.REFUSED,
+}
+
+
+def _result_of(
+    outcome: ForecastOutcome, definition: ToolDefinition, timeout: timedelta
+) -> ToolResult:
+    """The invocation result ADR-0192's completion is written from (ADR-0324 §5:8).
+
+    The searcher's ``_result_of`` one integration along, for its reasons. ``NO_RESULT``
+    and ``UNATTESTED`` are answers the provider gave, so the invocation ``SUCCEEDED``;
+    ``TRANSPORT_FAILED``, ``PROVIDER_REFUSED`` and ``RESPONSE_TOO_LARGE`` did not complete
+    as calls, so they are ``FAILED``. ``DEADLINE_EXPIRED`` is the declaration's own
+    ``interrupted_outcome`` (ADR-0029 §4, ADR-0241 §5), read from **this forecaster's
+    own registered declaration**, through the invocation seam's own
+    :func:`~ai_assistant.tools.invocation.expiry_failure`; its cost is left unset, which
+    ``consumed_call`` records as ``UNKNOWN``. The message is the seam's own: a class
+    and a rule, never a provider's body, an origin or a coordinate.
+
+    Args:
+        outcome: What the read produced.
+        definition: This forecaster's declaration.
+        timeout: The bound the **caller** stated, which an expiry's message names.
+
+    Returns:
+        The result, whose ``outcome`` and ``failure`` the completion transcribes.
+    """
+    refusal = outcome.refusal
+    if refusal is None or refusal in _COMPLETED_REFUSALS:
+        return ToolResult(outcome=ToolOutcome.SUCCEEDED)
+    if refusal is ForecastRefusal.DEADLINE_EXPIRED:
+        return expiry_failure(definition, timeout)
+    return ToolResult(
+        outcome=ToolOutcome.FAILED,
+        failure=ToolFailure(
+            kind=_FAILURE_KINDS[refusal],
+            message=f"{definition.id}: the forecast read was refused, class {refusal.value}",
+        ),
+    )
 
 
 def _checked_bound(label: str, value: int, *, ceiling: int | None) -> None:

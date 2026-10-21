@@ -94,7 +94,14 @@ against the assistant's own records (ADR-0306 §3:3), so :class:`PhaseTools` put
 declarations in front of authorizing's selection beside the deployment's registry, and
 routes a search call to the ``WebSearcher`` that proposes and performs it. The search's
 ``origin`` is the connected account's: planning is offered the search without it, and
-the hub fills it from the searcher's own proposal (``WebSearcher.request``). **The clock
+the hub fills it from the searcher's own proposal (``WebSearcher.request``). **The
+weather pull** (ADR-0324 §5) is offered beside them where a forecaster is configured, as
+the search is: the forecast read is in no ``ToolRegistry`` either (§5:5), planning writes
+none of its arguments (§3:1), the hub fills them all from the forecaster's own proposal
+(``Forecaster.request``), and a forecast read is routed to ``Forecaster.read``. Its
+answer reaches planning only as a digest's evidence (§2:3), the digest given its channel
+and author as the hub's attribution (§2:4), and a digest that answered marks the
+activation as having read outside content (§9:1). **The clock
 apart** (#2942): planning's input carries the current time, so it is never offered
 ``report_current_time``, which would spend a round (ADR-0315 §2:1) reading what it has
 (ADR-0211's decline test). The registry keeps the tool (ADR-0048 §1), and a call naming
@@ -204,7 +211,8 @@ its question shows the memory's wording in place of its label (§8:6); one whose
 is gone, or rests on outside content, which no question shows (ADR-0307 §9:2), cannot be
 asked about.
 
-**Left to later lanes:** pulls (ADR-0292 §13:3), which nothing builds yet.
+**Left to later lanes:** the calendar pull (ADR-0324 §4, §6), which needs its grant use,
+``PULL``; the weather pull is built (§5).
 
 **It logs stage and code-owned reason only** (ADR-0275 §8), and a defect by its class
 and the frames it passed through, never its message (:func:`log_defect`).
@@ -215,6 +223,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import json
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, Protocol
@@ -247,6 +256,7 @@ from ai_assistant.core.types import (
     DeletedMessage,
     DigestOutcome,
     EpisodicMemory,
+    ForecastRefusal,
     InputOrigin,
     LabelKind,
     Memory,
@@ -353,11 +363,20 @@ from ai_assistant.orchestration.supplied_records import SuppliedRecords
 from ai_assistant.orchestration.understanding import AskedIn, WrittenBy, fetch_held
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
+    from collections.abc import (
+        Awaitable,
+        Callable,
+        Coroutine,
+        Iterator,
+        Mapping,
+        MutableMapping,
+        Sequence,
+    )
 
     from ai_assistant.core.prompts import PromptTemplate
     from ai_assistant.core.protocols import (
         DiagnosticSink,
+        Forecaster,
         MemoryStore,
         ModelProvider,
         PlanStore,
@@ -372,6 +391,7 @@ if TYPE_CHECKING:
         ActivationUnderstanding,
         AnsweredQuestion,
         ChannelIdentity,
+        ForecastOutcome,
         FrozenJson,
         JoinedInput,
         MemoryRecord,
@@ -463,8 +483,9 @@ _ACTED_OUTCOMES: Final = {
 }
 _GONE: Final = "the place took no message: the conversation is gone or refused it"
 
-#: The search refusals that leave a search's outcome unknown: it may have reached the
-#: provider, and an unknown outcome is reported as unknown (ADR-0312 §2, ADR-0306 §5:13).
+#: The search and forecast refusals that leave a call's outcome unknown: it may have
+#: reached the provider, and an unknown outcome is reported as unknown (ADR-0312 §2,
+#: ADR-0306 §5:13, ADR-0324 §8:1). Both vocabularies spell them alike.
 _UNKNOWN_SEARCHES: Final = frozenset({"deadline_expired", "transport_failed"})
 
 #: The capabilities planning is never offered, though a registry holds them: the clock,
@@ -476,6 +497,12 @@ _NOT_OFFERED: Final = frozenset({"report_current_time"})
 #: a search's records are handed to it as the search returns them (ADR-0309 §5:10).
 _HOLDING: Final[contextvars.ContextVar[SuppliedRecords | None]] = contextvars.ContextVar(
     "phase_tools_holding", default=None
+)
+
+#: Where a pull's attribution is noted, by its call's decision id, for the digest that
+#: reads its answer (ADR-0324 §2:4).
+_ATTRIBUTING: Final[contextvars.ContextVar[MutableMapping[str, str] | None]] = (
+    contextvars.ContextVar("phase_tools_attributing", default=None)
 )
 
 #: The activation whose round planning is deciding, set around planning's call, which
@@ -702,26 +729,40 @@ class PhaseTools:
     Structurally a :class:`~ai_assistant.core.protocols.ToolRegistry` and a
     :class:`~ai_assistant.core.protocols.ToolInvoker`. The registry answers what the
     deployment's answers, and also each own-records declaration it is handed, such as
-    remembering, and the configured search's declaration, so authorizing's selection
-    reaches them. The invoker sends a search call to the ``WebSearcher`` and every other
-    call to the deployment's invoker. A call to the assistant's own records never
-    reaches it: acting runs those directly (ADR-0306 §3:3).
+    remembering, the configured search's declaration and the configured forecast read's,
+    so authorizing's selection reaches them. Neither of the last two is in the
+    deployment's registry (ADR-0231 §5, ADR-0260 §1:4, ADR-0324 §5:5): each is offered
+    beside the registry's capabilities here, the forecast read as the search is (§5:4).
+    The invoker sends a search call to the ``WebSearcher``, a forecast read to the
+    ``Forecaster`` (the weather pull, ADR-0324 §5), and every other call to the
+    deployment's invoker. A call to the assistant's own records never reaches it: acting
+    runs those directly (ADR-0306 §3:3).
 
     **The arguments the hub fills.** A connected account's destination is the hub's,
     never a model's: the search's ``origin`` is its searcher's own proposal, and a
     registered tool's, such as the booking act's, is the configured value ``fills``
     names. Planning is offered each capability without them, as it is offered none the
     declaration names in ``system_supplied`` (ADR-0306 §2:10), and they are filled
-    before authorizing selects and rules.
+    before authorizing selects and rules. **The forecast read takes no argument planning
+    writes** beyond the *looking for* the hub adds (ADR-0324 §3:1): its origin and its
+    coordinate are all the forecaster's own proposal (``Forecaster.request``), so no
+    place crosses the planning seam (§3:4, ADR-0260 §3:2).
+
+    **A pull's answer is attributed by the hub** (ADR-0324 §2:4, §5:3). A forecast read
+    that brought records back notes, under its call's decision, its channel and its
+    author — the forecaster's ``name``, and the provider, a service, claimed, as of the
+    ``reported_at`` the provider declared — where a :meth:`holding` scope is open, so the
+    digest reading it is given them as the hub's attribution, never from its text.
     """
 
-    def __init__(  # noqa: PLR0913 — the deployment's pair, the added declarations, the searcher, and the two ways the hub fills an argument
+    def __init__(  # noqa: PLR0913 — the deployment's pair, the added declarations, the searcher, the forecaster, and the two ways the hub fills an argument
         self,
         *,
         registry: ToolRegistry,
         invoker: ToolInvoker,
         own_records: Sequence[ToolDefinition] = (),
         searcher: WebSearcher | None = None,
+        forecaster: Forecaster | None = None,
         search_query: str = "query",
         fills: Mapping[str, Mapping[str, FrozenJson]] | None = None,
         reliance: ToolDefinition | None = None,
@@ -734,6 +775,8 @@ class PhaseTools:
             own_records: The declarations of capabilities on the assistant's own
                 records, which no registry holds.
             searcher: The configured search, or ``None`` where no account is connected.
+            forecaster: The configured forecast read, the weather pull's sensor
+                (ADR-0324 §5:1), or ``None`` where no provider is configured.
             search_query: The one argument of the search planning writes; the hub
                 fills every other from the searcher's own proposal.
             fills: For a registered capability, the arguments the hub fills and their
@@ -746,12 +789,14 @@ class PhaseTools:
         self._invoker = invoker
         self._own_records = tuple(own_records)
         self._searcher = searcher
+        self._forecaster = forecaster
         self._search_query = search_query
         self._fills = {
             capability: dict(arguments) for capability, arguments in (fills or {}).items()
         }
         self._reliance = reliance
         self._search: ToolDefinition | None = None
+        self._forecast: ToolDefinition | None = None
 
     def add_own_records(self, declarations: Sequence[ToolDefinition]) -> None:
         """Advertise further declarations on the assistant's own records.
@@ -783,10 +828,26 @@ class PhaseTools:
                 self._search = proposed.tool
         return self._search
 
+    async def forecast_declaration(self) -> ToolDefinition | None:
+        """The configured forecast read's declaration, as its forecaster proposes it.
+
+        Read from the forecaster's own proposal, once, as the search's is: the
+        declaration a deployment registered carries its configured cost (ADR-0236 §1),
+        so no copy is made here. ``None`` where no forecaster is configured, or where it
+        proposes no read, which is a configuration fact (ADR-0260 §4).
+        """
+        if self._forecast is None and self._forecaster is not None:
+            proposed = await self._forecaster.request()
+            if proposed is not None:
+                self._forecast = proposed.tool
+        return self._forecast
+
     async def _extra(self) -> list[ToolDefinition]:
         search = await self.search_declaration()
+        forecast = await self.forecast_declaration()
         reliance = () if self._reliance is None else (self._reliance,)
-        return [*self._own_records, *reliance, *(() if search is None else (search,))]
+        configured = tuple(one for one in (search, forecast) if one is not None)
+        return [*self._own_records, *reliance, *configured]
 
     async def get(self, tool_id: str) -> ToolDefinition | None:
         """The definition registered as ``tool_id``, the added ones included."""
@@ -821,11 +882,16 @@ class PhaseTools:
         offered.
         """
         search = await self.search_declaration()
+        forecast = await self.forecast_declaration()
         offered: list[ToolDefinition] = []
         for name in capabilities:
             for one in await self.find(name):
                 if search is not None and one == search:
                     hidden = _properties(one) - {self._search_query}
+                elif forecast is not None and one == forecast:
+                    # Every argument the forecast read takes is the hub's (ADR-0324
+                    # §3:1, §3:4): planning writes only the *looking for*.
+                    hidden = _properties(one)
                 else:
                     hidden = set(self._fills.get(name, {}))
                 offered.append(_without(one, hidden))
@@ -835,12 +901,16 @@ class PhaseTools:
         """``call`` with the arguments the hub fills.
 
         A search's are its searcher's proposal for the query planning wrote, so its
-        ``origin`` is the connected account's and never a model's; any other's are the
-        configured ``fills``. Whatever else planning wrote is kept, so an argument the
-        tool does not take still fails its schema at authorizing. A search whose query
-        is missing is handed on as it was, and authorizing finds it fits no tool.
+        ``origin`` is the connected account's and never a model's; a forecast read's are
+        its forecaster's proposal whole, the origin and the configured coordinate
+        (ADR-0324 §3:4); any other's are the configured ``fills``. Whatever else planning
+        wrote is kept, so an argument the tool does not take still fails its schema at
+        authorizing, and an argument the hub fills is the hub's value whatever planning
+        wrote for it. A search whose query is missing is handed on as it was, and
+        authorizing finds it fits no tool.
         """
         search = await self.search_declaration()
+        forecast = await self.forecast_declaration()
         filled: Mapping[str, FrozenJson] | None = self._fills.get(call.name)
         if (
             search is not None
@@ -850,6 +920,13 @@ class PhaseTools:
             query = call.arguments.get(self._search_query)
             proposed = None if not isinstance(query, str) else await self._searcher.request(query)
             filled = None if proposed is None else proposed.parameters
+        elif (
+            forecast is not None
+            and self._forecaster is not None
+            and call.name == str(forecast.capability)
+        ):
+            proposal = await self._forecaster.request()
+            filled = None if proposal is None else proposal.parameters
         if not filled:
             return call
         arguments: dict[str, FrozenJson] = {**call.arguments, **filled}
@@ -857,35 +934,48 @@ class PhaseTools:
 
     @staticmethod
     @contextlib.contextmanager
-    def holding(supplied: SuppliedRecords) -> Iterator[None]:
-        """Hand every search run inside this scope's records to ``supplied``.
+    def holding(
+        supplied: SuppliedRecords, attributions: MutableMapping[str, str] | None = None
+    ) -> Iterator[None]:
+        """Hand every search and forecast read run inside this scope's records to ``supplied``.
 
-        The glue opens it around acting for a round, so the records a search returns
-        are held by the activation that ran it, as the call returns them, before they
-        are rendered to text (ADR-0309 §5:10).
+        The glue opens it around acting for a round, so the records a search or a
+        forecast read returns are held by the activation that ran it, as the call
+        returns them, before they are rendered to text (ADR-0309 §5:10). A forecast
+        read's attribution is noted in ``attributions`` under its call's decision id
+        (ADR-0324 §2:4).
 
         Args:
             supplied: The activation's record of what it was given or obtained.
+            attributions: Where a pull's attribution is noted, by decision id, or
+                ``None`` where nothing reads them.
 
         Yields:
             Nothing: the scope is the context it runs in.
         """
         token = _HOLDING.set(supplied)
+        noted = _ATTRIBUTING.set(attributions)
         try:
             yield
         finally:
+            _ATTRIBUTING.reset(noted)
             _HOLDING.reset(token)
 
     async def invoke(self, call: ToolCall, *, timeout: timedelta) -> ToolResult:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4)
-        """Invoke ``call``: a search through its searcher, any other through the invoker.
+        """Invoke ``call`` through its searcher, its forecaster or the invoker.
 
-        A search's records are memory records the call returned, so they are handed to
-        the activation running it, where a :meth:`holding` scope is open, before they
-        become the result's texts. A call noting reliance is answered done and reaches
-        nothing: the round records it, and nothing else does (ADR-0329 §6:7).
+        A search goes to its searcher, a forecast read to its forecaster, and any other
+        call to the deployment's invoker. A search's or a forecast read's records are
+        memory records the call returned, so they are handed to the activation running
+        it, where a :meth:`holding` scope is open, before they become the result's texts.
+        A call noting reliance is answered done and reaches nothing: the round records
+        it, and nothing else does (ADR-0329 §6:7).
         """
         if self._reliance is not None and call.request.tool == self._reliance:
             return noted()
+        forecast = await self.forecast_declaration()
+        if forecast is not None and self._forecaster is not None and call.request.tool == forecast:
+            return await self._forecast_read(self._forecaster, call, timeout=timeout)
         search = await self.search_declaration()
         if search is None or self._searcher is None or call.request.tool != search:
             return await self._invoker.invoke(call, timeout=timeout)
@@ -893,6 +983,66 @@ class PhaseTools:
         if (supplied := _HOLDING.get()) is not None:
             supplied.obtained(outcome.records)
         return _searched(outcome)
+
+    @staticmethod
+    async def _forecast_read(
+        forecaster: Forecaster,
+        call: ToolCall,
+        *,
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, ADR-0324 §8:1)
+    ) -> ToolResult:
+        """The weather pull: ``call`` sent to ``Forecaster.read`` (ADR-0324 §5:4).
+
+        Under the call's own deadline, which the forecaster enforces: at it the read is
+        cut short and its outcome is unknown (§8:1), so nothing it would have answered
+        later reaches the activation (§8:2). Its records are handed to the activation,
+        and its attribution is noted under the call's decision, where a
+        :meth:`holding` scope is open.
+        """
+        outcome = await forecaster.read(call, timeout=timeout)
+        if (supplied := _HOLDING.get()) is not None:
+            supplied.obtained(outcome.records)
+        if (attributions := _ATTRIBUTING.get()) is not None:
+            attributions[call.decision.id] = _forecast_attribution(
+                forecaster.name, outcome.reported_at
+            )
+        return _forecasted(outcome)
+
+
+def _forecast_attribution(channel: str, reported_at: datetime | None) -> str:
+    """The hub's attribution of a forecast read's answer (ADR-0324 §2:4, §5:3).
+
+    Its channel, the weather channel the forecaster's ``name`` identifies (§5's table),
+    and its author: a service, the provider, claimed and not established, written when
+    the provider reported it. Stated from the hub's own data and never from the
+    answer's text (ADR-0292 §5:1, §5:8).
+    """
+    when = "" if reported_at is None else f", as of {reported_at.astimezone(UTC).isoformat()}"
+    return (
+        f"outside content: the weather channel {json.dumps(channel)}; its author is a "
+        f"service, the forecast provider, claimed and not established, and it is what the "
+        f"provider reported{when}"
+    )
+
+
+def _forecasted(outcome: ForecastOutcome) -> ToolResult:
+    """A forecast read's outcome as a call's result: its records' texts, or why none.
+
+    A read whose answer described no day completed, with nothing in it; one cut short,
+    at the deadline or mid-exchange, may have reached the provider, so its outcome is
+    unknown (ADR-0324 §8:1); any other refusal is not done. The search's mapping, one
+    seam over.
+    """
+    if outcome.refusal is None or outcome.refusal is ForecastRefusal.NO_RESULT:
+        texts: list[FrozenJson] = [record.content for record in outcome.records]
+        return ToolResult(outcome=ToolOutcome.SUCCEEDED, output=texts)
+    failure = ToolFailure(
+        kind=ToolFailureKind.UNAVAILABLE,
+        message=f"the forecast read was refused: {outcome.refusal.value}",
+    )
+    if outcome.refusal.value in _UNKNOWN_SEARCHES:
+        return ToolResult(outcome=ToolOutcome.INDETERMINATE, failure=failure)
+    return ToolResult(outcome=ToolOutcome.FAILED, failure=failure)
 
 
 def _properties(tool: ToolDefinition) -> set[str]:
@@ -1404,6 +1554,11 @@ class PhaseWorking:
         self._round_limit = round_limit
         self.labels = ActivationLabels(labels)
         self.held = HeldResults(on_hold=self._on_hold)
+        # A pull's attribution, by the decision id of the call that brought it, as the
+        # tools note it (ADR-0324 §2:4); and by the result it is held under, once held,
+        # so a follow-up offering that result again is digested under it too.
+        self.attributions: dict[str, str] = {}
+        self._attributed: dict[str, str] = {}
         self.digests: list[ActivationDigest] = []
         self.evidence: list[DigestedEvidence] = []
         self.messages: list[str] = []
@@ -1635,8 +1790,20 @@ class PhaseWorking:
             latest.step = _Step(deadline=at + wait)
         return latest.step
 
+    def attribution(self, held: HeldResult) -> str | None:
+        """The hub's attribution of ``held``, where a pull brought it (ADR-0324 §2:4)."""
+        return self._attributed.get(held.result_id)
+
     def _on_hold(self, held: HeldResult) -> None:
-        """Hand a result acting holds to the step digesting it (ADR-0308 §4:2)."""
+        """Hand a result acting holds to the step digesting it (ADR-0308 §4:2).
+
+        A pull's attribution is taken, as the result is first held, from its call's
+        decision; a follow-up's offer keeps the result's id and names another decision,
+        so the result's id is what carries it on (ADR-0308 §6:7).
+        """
+        noted = self.attributions.get(held.decision_id)
+        if noted is not None:
+            self._attributed.setdefault(held.result_id, noted)
         for one in reversed(self._rounds):
             if one.planned.round.id == held.round_id and one.step is not None:
                 one.step.held.put_nowait(held)
@@ -3591,7 +3758,7 @@ class PhasePath:
         if not rest:
             return ActedRound(round_id=decided.round_id)
         authorized = authorized_round(replace(decided, allowed=rest))
-        with self._tools.holding(working.supplied):
+        with self._tools.holding(working.supplied, working.attributions):
             if self._look_ups is None:
                 return await self._acting.act(authorized, held=working.held)
             with self._look_ups.scope(
@@ -3712,7 +3879,11 @@ class PhasePath:
         records = held.records
         if records is None:
             digested: Digested | None = await self._digesting.digest_result(
-                held, question=question, labels=working.labels, deadline=deadline
+                held,
+                question=question,
+                labels=working.labels,
+                deadline=deadline,
+                attribution=working.attribution(held),
             )
         else:
 

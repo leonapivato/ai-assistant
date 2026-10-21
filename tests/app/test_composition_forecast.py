@@ -2,12 +2,12 @@
 
 ADR-0260 §1's whole design turns on the two halves of "registered" coming apart: the
 forecast integration is registered at the egress seam, so ``EgressBinder.bind`` derives
-a binding for it, and in **no** ``ToolRegistry``, so the planner never sees a
-capability, cannot name a plan step, and the turn cannot drive a tool whose result is a
-payload with no per-span provenance (ADR-0170 §5a, ADR-0208 §1). Every case here is one
-of the ways that could be broken by a **wiring** rather than by a rule: an integration
-built where none was configured, a registration that reached the wrong table, a
-transport constructed unconditionally.
+a binding for it, and in **no** ``ToolRegistry``. ADR-0324 §5:4 then has the phases'
+tools offer it beside the registry's capabilities as the weather pull, as they offer the
+search, and §5:8 has it claim through the one ledger. Every case here is one of the ways
+that could be broken by a **wiring** rather than by a rule: an integration built where
+none was configured, a registration that reached the wrong table, a transport
+constructed unconditionally, a forecaster the phases do not hold.
 
 **Nothing here opens a socket.** Every case builds the engine over a hashing embedder
 and closes it; the forecaster's transport is never driven, and the configured provider
@@ -20,7 +20,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from phases_composition_support import wired_binder, wired_policy, wired_registry
+from phases_composition_support import wired_binder, wired_phases, wired_policy, wired_registry
 
 from ai_assistant.app import build_engine
 from ai_assistant.app import composition as composition_module
@@ -135,11 +135,9 @@ async def test_a_deployment_that_configured_no_provider_builds_no_forecaster(
 ) -> None:
     """ADR-0260 §12: "constructed only where a provider is configured".
 
-    **Asserted over the builder rather than over a held reference**, because L1 wires
-    the forecaster into no servicing yet — §12 gives that to L3 — so what this root
-    produces today is an integration and a seam registration. A root that built one
-    unconditionally would open an exchange, and with it a transport, for a deployment
-    that configured nothing.
+    **Asserted over the builder** as well as over the reference the phases hold (below).
+    A root that built one unconditionally would open an exchange, and with it a
+    transport, for a deployment that configured nothing.
     """
     built: list[ForecastIntegration] = []
 
@@ -425,3 +423,52 @@ async def test_an_origin_with_no_canonical_form_leaves_the_forecast_pair_unbuilt
     assert composition_module._forecast_destinations(None) == ()
     assert composition_module._configured_forecast(CONNECTION, ()) is None
     assert composition_module._configured_forecast(None, ()) is None
+
+
+async def test_the_forecaster_reaches_the_phases_tools_and_claims_through_the_one_trail(
+    tmp_path: Path,
+) -> None:
+    """ADR-0324 §5:4, §5:8, §10: the root wires the weather pull, and nothing else does.
+
+    The forecaster the builder returned is the one the phases' tools hold; it claims
+    through the trail authorizing records in, so the ledger finds the decision; the
+    tools offer the forecast read while the deployment's registry never holds it
+    (§5:5); and authorizing is told it is the deployment's forecast read, so its calls
+    carry ``forecast_reach`` (ADR-0260 §6).
+    """
+    built: list[ForecastIntegration] = []
+
+    def counted(**arguments: Any) -> ForecastIntegration:
+        integration = build_forecast_integration(**arguments)
+        built.append(integration)
+        return integration
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(composition_module, "build_forecast_integration", counted)
+        engine = build_engine(_settings(configured=True), data_dir=tmp_path)
+
+    try:
+        (integration,) = built
+        phases = wired_phases(engine)
+        assert phases._tools._forecaster is integration.forecaster
+        ledger: object = integration.forecaster._ledger
+        assert ledger is phases._authorizing._trail
+        assert FORECAST_READ.capability in await phases._tools.capabilities()
+        assert FORECAST_READ.capability not in await wired_registry(engine).capabilities()
+        assert phases._authorizing._registered_forecast == frozenset({FORECAST_READ_ID})
+    finally:
+        await engine.aclose()
+
+
+async def test_a_deployment_that_configured_no_provider_offers_no_weather_pull(
+    tmp_path: Path,
+) -> None:
+    """ADR-0324 §5:4: no forecaster is held, so none is offered, and none is registered."""
+    engine = build_engine(_settings(configured=False), data_dir=tmp_path)
+    try:
+        phases = wired_phases(engine)
+        assert phases._tools._forecaster is None
+        assert FORECAST_READ.capability not in await phases._tools.capabilities()
+        assert phases._authorizing._registered_forecast == frozenset()
+    finally:
+        await engine.aclose()

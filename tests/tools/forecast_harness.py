@@ -59,7 +59,7 @@ from ai_assistant.core.types import (
     SpanCoverage,
     ToolCall,
 )
-from ai_assistant.testing import FakeByteChannel, FakeOutboundTransport
+from ai_assistant.testing import FakeAuditTrail, FakeByteChannel, FakeOutboundTransport, authorised
 from ai_assistant.tools import build_forecast_integration, egress_registrations
 from ai_assistant.tools.egress_binder import EgressBindingSeam
 from ai_assistant.tools.forecast import FORECAST_READ
@@ -329,6 +329,8 @@ class Built:
             — including the case whose whole assertion is that there were none.
         records: The connection store, whose answers a case scripts read by read, and
             whose ``reads`` say whether the one record read happened at all.
+        trail: The one object wired as the ``InvocationLedger`` the forecaster claims
+            through (ADR-0324 §5:8), and where a case's decision is recorded.
     """
 
     integration: ForecastIntegration
@@ -341,6 +343,7 @@ class Built:
         | AbsorbingTransport
     )
     records: Records | ReprovisioningRecords
+    trail: FakeAuditTrail
 
     @property
     def declaration(self) -> ToolDefinition:
@@ -429,6 +432,7 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
             served.refuse_with(refusal)
         capability = served
     store = Records(KEYLESS) if records is None else records
+    trail = FakeAuditTrail()
     integration = build_forecast_integration(
         connection=REFERENCE,
         origin=origin,
@@ -436,6 +440,7 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
         longitude=longitude,
         records=store,
         transport=capability,
+        ledger=trail,
         max_days=max_days,
         max_day_chars=max_day_chars,
         max_response_bytes=max_response_bytes,
@@ -446,6 +451,7 @@ async def built(  # noqa: PLR0913 — one knob per double a case arranges, and e
         integration=integration,
         transport=capability,  # type: ignore[arg-type]  # the union above is the set of doubles this harness serves
         records=store,
+        trail=trail,
     )
 
 
@@ -571,20 +577,23 @@ async def request(  # noqa: PLR0913 — one knob per thing a case varies about t
     )
 
 
-def authorised_read(
+async def authorised_read(
+    trail: FakeAuditTrail,
     proposal: ActionRequest,
     *,
     decision_id: str = "d-forecast-1",
     outcome: PermissionOutcome = PermissionOutcome.ALLOW,
 ) -> ToolCall:
-    """One authorised call for ``proposal``.
+    """One authorised call for ``proposal``, with its decision recorded in ``trail``.
 
-    **No trail is recorded and none is needed**, which is the one place this harness is
-    simpler than the search's: ADR-0260 §6 enumerates what ``read`` performs and names no
-    ledger, so nothing here requires the decision to be findable in a store before the
-    send.
+    ADR-0324 §5:8 has the forecaster claim through the ledger, and ADR-0192 §1 has the
+    ledger require the decision it is passed to equal the one the store holds under that
+    id, so a call whose authorisation was never recorded is refused before the send —
+    correctly, and unhelpfully for a case about something else. The search harness's
+    ``authorised_search``, one integration along.
 
     Args:
+        trail: The trail the forecaster claims through.
         proposal: The request to authorise.
         decision_id: The decision's id.
         outcome: The ruling. Only an ``ALLOW`` constructs a ``ToolCall``.
@@ -598,4 +607,4 @@ def authorised_read(
         id=decision_id,
         decided_at=DECIDED_AT,
     )
-    return ToolCall(request=proposal, decision=decision)
+    return await authorised(trail, ToolCall(request=proposal, decision=decision))

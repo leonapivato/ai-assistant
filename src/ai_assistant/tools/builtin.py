@@ -496,8 +496,10 @@ class ForecastIntegration:
     nothing needs a registry entry.
 
     Attributes:
-        forecaster: The ``Forecaster`` a servicer drives. It carries the declaration by
-            value and compares against it on every call (ADR-0029 §2, ADR-0260 §6).
+        forecaster: The ``Forecaster`` the weather pull drives (ADR-0324 §5:4). It
+            carries the declaration by value and compares against it on every call
+            (ADR-0029 §2, ADR-0260 §6), and claims and completes each call's
+            ``InvocationLedger`` row (ADR-0324 §5:8).
         registration: The configured connection and the origin, as the binding seam
             reads them. The **same object** the transport inside ``forecaster`` holds,
             so the origin a ruled call is pinned against and the reference a record is
@@ -508,7 +510,7 @@ class ForecastIntegration:
     registration: EgressRegistration
 
 
-def build_forecast_integration(  # noqa: PLR0913 — one parameter per injected seam ADR-0260 §6 names, plus the account's two configured facts, the place §3 makes the forecaster's own, the three bounds §11 adds and its per-call figure; each is one thing a deployment supplies on its own
+def build_forecast_integration(  # noqa: PLR0913 — one parameter per injected seam ADR-0260 §6 and ADR-0324 §5:8 name, plus the account's two configured facts, the place §3 makes the forecaster's own, the three bounds §11 adds and its per-call figure; each is one thing a deployment supplies on its own
     *,
     connection: str,
     origin: str,
@@ -516,6 +518,7 @@ def build_forecast_integration(  # noqa: PLR0913 — one parameter per injected 
     longitude: float,
     records: ConnectionRecords,
     transport: OutboundTransport,
+    ledger: InvocationLedger,
     max_days: int,
     max_day_chars: int,
     max_response_bytes: int,
@@ -535,10 +538,12 @@ def build_forecast_integration(  # noqa: PLR0913 — one parameter per injected 
     per call is the ruled call's origin against this registration's *as text, before
     parsing* (ADR-0154's condition 5), so two spellings of one host stay two origins.
 
-    **No ledger and no spend gate are taken, which is ADR-0260 §6 read rather than
-    skipped**: that section enumerates what ``read`` performs and this seam "inherits
-    nothing written about ``WEB_SEARCH``". What the configured cost pair reaches is the
-    **declaration**, which is what ADR-0236 §4's unknown-cost floor reads at the ruling.
+    **A ledger is taken and no spend gate** (ADR-0324 §5:8): the weather pull's attempt
+    and outcomes are its ``InvocationLedger`` claim and completion, as the searcher's
+    are, so the forecaster is handed the ledger and claims through it. ADR-0260 §6 names
+    no admission and ADR-0324 §5:8 names only the ledger, so no gate is taken. What the
+    configured cost pair reaches is the **declaration**, which is what ADR-0236 §4's
+    unknown-cost floor reads at the ruling.
 
     **Keyless, and this is where that is fixed** (ADR-0344 §2:3; ADR-0325 §2:1, §2:2).
     The forecast's provider is Open-Meteo, which takes no credential, so this function
@@ -576,6 +581,8 @@ def build_forecast_integration(  # noqa: PLR0913 — one parameter per injected 
             ``app/composition.py``; a test hands
             :class:`~ai_assistant.testing.FakeOutboundTransport` by that same route,
             and there is no other route.
+        ledger: The ``InvocationLedger`` the forecaster claims and completes each
+            read through (ADR-0324 §5:8, ADR-0192 §1, §3).
         max_days: ``Settings.forecast_max_days``.
         max_day_chars: ``Settings.forecast_max_day_chars``.
         max_response_bytes: ``Settings.forecast_max_response_bytes``.
@@ -624,6 +631,7 @@ def build_forecast_integration(  # noqa: PLR0913 — one parameter per injected 
                 secrets=None,
                 exchange=HttpsExchange(transport=transport, max_response_bytes=max_response_bytes),
             ),
+            ledger=ledger,
             latitude=latitude,
             longitude=longitude,
             max_days=max_days,
