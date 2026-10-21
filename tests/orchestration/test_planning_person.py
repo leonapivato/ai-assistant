@@ -7,8 +7,9 @@ be not set and a zone not set shown beside the hub's default; the whole kept-in-
 slot, each memory by its label and why it is kept, with the count left out; and the
 suggestions, each marked as one. A found memory the block shows is named by its label
 alone. The template's ``person`` and ``suggestions`` flags are set exactly where there is
-a block, and where it shows a suggestion; the default template's instruction for them
-says what §7:8 and §5:6 say. With no block, nothing of the person model is shown.
+a block, and where it shows a suggestion; what the instruction says under them is the
+template's, which no test reads (ADR-0334 §9:1-§9:2). With no block, nothing of the
+person model is shown.
 """
 
 from __future__ import annotations
@@ -126,7 +127,6 @@ async def test_no_block_shows_nothing_of_the_person_model() -> None:
     await stage.plan(_inputs())
 
     assert "person" not in _sent(completer)
-    assert "never recite it" not in completer.last_call.messages[0].content
 
 
 async def test_the_block_comes_first_before_what_changes_from_round_to_round() -> None:
@@ -230,31 +230,6 @@ async def test_the_person_flags_follow_the_block(
     await stage.plan(_inputs(person=person))
 
     assert _flags(completer) & {"person", "suggestions"} == handed
-
-
-async def test_the_default_instruction_says_what_the_block_is_for() -> None:
-    """§7:8, §3:10, §5:6: the default template's words, read where a block is shown."""
-    stage, completer, _ = _stage()
-
-    await stage.plan(_inputs(person=BLOCK))
-
-    instruction = completer.last_call.messages[0].content
-    assert "outweighs any memory stating another value for it" in instruction
-    assert "never recite it" in instruction
-    assert "not in every message" in instruction
-    assert "you never claim to be human" in instruction
-    assert "only by asking, with a set_profile or pin call" in instruction
-
-
-async def test_without_suggestions_the_instruction_says_nothing_of_them() -> None:
-    stage, completer, _ = _stage()
-    block = PersonBlock(person_id=OWNER_PERSON_ID, profile=Profile(name="Robin Vale"))
-
-    await stage.plan(_inputs(person=block))
-
-    instruction = completer.last_call.messages[0].content
-    assert "never recite it" in instruction
-    assert "set_profile" not in instruction
 
 
 async def test_a_kept_memory_is_shown_whole_however_long_beside_the_excerpt_bound() -> None:

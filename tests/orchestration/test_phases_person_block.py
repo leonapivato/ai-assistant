@@ -2,9 +2,9 @@
 
 An engine with the phases wired, over the canonical fakes: where no person-model store is
 wired, as on every hub until lane 2, nothing of the person model reaches understanding or
-planning, and neither instruction speaks of it. Wired, an activation that is the owner's
-is given its block, assembled once before understanding, and the same block reaches its
-planning round, first in the request.
+planning, and neither template is handed a person flag set. Wired, an activation that is
+the owner's is given its block, assembled once before understanding, and the same block
+reaches its planning round, first in the request, with the flags set.
 """
 
 from __future__ import annotations
@@ -18,10 +18,13 @@ import pytest
 from phases_support import chat_turn, event, phases_harness
 from test_activation_state import _admitted
 from test_engine import AT as HARNESS_AT
-from understanding_support import STATED_PROPOSAL, understanding_stage
+from test_engine import Harness
+from understanding_support import EXCERPT_CHARS, STATED_PROPOSAL, understanding_stage
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
+    DiagnosticKind,
+    DiagnosticSource,
     PersonActHow,
     PersonModelAct,
     PlacementReach,
@@ -29,11 +32,14 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.person_block import PersonBlocks
+from ai_assistant.orchestration.understanding import UNDERSTANDING_PROMPT, UnderstandingStage
 from ai_assistant.testing import (
+    FakeDiagnosticSink,
     FakeMemoryStore,
     FakeModelProvider,
     FakePersonModelStore,
     FakeToolCallingCompleter,
+    default_prompt,
 )
 from ai_assistant.testing.memories import memory, said_support
 
@@ -84,29 +90,53 @@ def _planned(completer: FakeToolCallingCompleter) -> dict[str, Any]:
     return loaded
 
 
+def _recorded(
+    model: FakeModelProvider, completer: FakeToolCallingCompleter, **knobs: Any
+) -> tuple[Harness, FakeDiagnosticSink]:
+    """The phases harness with the diagnostic record on, which records each call's flags."""
+    sink = FakeDiagnosticSink()
+    understanding = UnderstandingStage(
+        model=model,
+        excerpt_chars=EXCERPT_CHARS,
+        prompt=default_prompt(UNDERSTANDING_PROMPT),
+        diagnostics=sink,
+    )
+    harness = phases_harness(
+        completer,
+        understanding=understanding,
+        phases={"diagnostics": sink},
+        diagnostics=sink,
+        **knobs,
+    )
+    return harness, sink
+
+
+def _flags(sink: FakeDiagnosticSink, source: DiagnosticSource) -> dict[str, bool]:
+    """The person flags the code handed the stage's template (ADR-0335 §9:1)."""
+    given = sink.of(source, DiagnosticKind.GIVEN)[-1]
+    flags: dict[str, bool] = given.model_dump(mode="json")["body"]["prompt"]["flags"]
+    return {name: flags[name] for name in ("person", "suggestions") if name in flags}
+
+
 async def test_with_no_store_wired_nothing_of_the_person_model_reaches_a_model() -> None:
     model = FakeModelProvider(reply=STATED_PROPOSAL)
     completer = FakeToolCallingCompleter()
-    harness = phases_harness(completer, understanding=understanding_stage(model=model))
+    harness, sink = _recorded(model, completer)
 
     await chat_turn(harness, "What should I cook tonight?")
 
     assert "person" not in _understood(model)
-    assert "person section" not in model.calls[0].messages[0].content
     assert "person" not in _planned(completer)
-    assert "never recite it" not in completer.last_call.messages[0].content
+    # ADR-0338 §11:2: no flag set, so no instruction about the person model either.
+    assert _flags(sink, DiagnosticSource.UNDERSTANDING) == {"person": False}
+    assert _flags(sink, DiagnosticSource.PLANNING) == {"person": False, "suggestions": False}
 
 
 async def test_an_owners_turn_is_given_its_block_in_understanding_and_planning() -> None:
     memory_store, counting, blocks = await _wired()
     model = FakeModelProvider(reply=STATED_PROPOSAL)
     completer = FakeToolCallingCompleter()
-    harness = phases_harness(
-        completer,
-        memory=memory_store,
-        understanding=understanding_stage(model=model),
-        person_blocks=blocks,
-    )
+    harness, sink = _recorded(model, completer, memory=memory_store, person_blocks=blocks)
 
     await chat_turn(harness, "What should I cook tonight?")
 
@@ -117,7 +147,8 @@ async def test_an_owners_turn_is_given_its_block_in_understanding_and_planning()
     planned = _planned(completer)
     assert next(iter(planned)) == "person"
     assert [one["fact"] for one in planned["person"]["kept_in_mind"]] == ["Eats no meat."]
-    assert "never recite it" in completer.last_call.messages[0].content
+    assert _flags(sink, DiagnosticSource.UNDERSTANDING) == {"person": True}
+    assert _flags(sink, DiagnosticSource.PLANNING) == {"person": True, "suggestions": False}
     assert counting.reads == 1
 
 

@@ -152,7 +152,6 @@ async def test_no_block_renders_nothing_of_the_person_model() -> None:
     await _understand(model, person=None)
 
     assert "person" not in _payload(model)
-    assert "person section" not in model.calls[0].messages[0].content
 
 
 async def test_the_person_section_comes_first_with_the_fields_as_the_persons_own() -> None:
@@ -186,7 +185,6 @@ async def test_the_section_names_whom_the_work_is_for_and_leaves_authorship_to_t
     assert "working for" in payload["person"]["item"]
     assert "Who wrote the input is said with the input" in payload["person"]["item"]
     assert "never something the user said" in payload["input"]["received_as"]
-    assert "this input is from" not in model.calls[0].messages[0].content
 
 
 async def test_understanding_is_shown_the_pinned_memories_and_nothing_else_of_the_block() -> None:
