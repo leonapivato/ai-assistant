@@ -57,11 +57,13 @@ from ai_assistant.core.errors import (
     MemoryStoreError,
     NotificationOutboxError,
     NotificationStoreError,
+    PersonModelStoreError,
     PlanningError,
     StoryStoreError,
     TraceStoreError,
 )
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     ActionRequest,
     CapabilityEffect,
     CapabilityResult,
@@ -78,7 +80,10 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    PersonActHow,
+    PersonModelAct,
     PlanningRound,
+    ProfileField,
     ProposedCall,
     Provenance,
     Reversibility,
@@ -169,6 +174,7 @@ from ai_assistant.testing import (
     FakeNotificationPolicy,
     FakeNotificationStore,
     FakeNotificationWriter,
+    FakePersonModelStore,
     FakePlanStore,
     FakeReader,
     FakeSourceGrants,
@@ -809,6 +815,14 @@ async def _fake_story_store(now: Clock) -> None:
     )
 
 
+async def _fake_person_model_store(now: Clock) -> None:
+    """A field's write stamps its change from the store's own clock (ADR-0338 §3:5)."""
+    act = PersonModelAct(how=PersonActHow.PANEL, by=OWNER_PERSON_ID)
+    await FakePersonModelStore(now=now).set_field(
+        OWNER_PERSON_ID, ProfileField.NAME, "Robin", act=act
+    )
+
+
 async def _sqlite_story_store(now: Clock) -> None:
     """A create stamps the story and its log lines from the store's own clock."""
     with tempfile.TemporaryDirectory() as directory:
@@ -934,6 +948,7 @@ SEAMS = [
     Seam("SqliteAuditTrail", _sqlite_audit_trail, AuditError),
     Seam("SqliteConversationStore", _sqlite_conversation_store, ConversationStoreError),
     Seam("FakeStoryStore", _fake_story_store, StoryStoreError),
+    Seam("FakePersonModelStore", _fake_person_model_store, PersonModelStoreError),
     Seam("SqliteStoryStore", _sqlite_story_store, StoryStoreError),
     Seam("SqliteNotificationOutbox", _sqlite_notification_outbox, NotificationOutboxError),
     Seam("SqliteNotificationStore", _sqlite_notification_store, NotificationStoreError),
