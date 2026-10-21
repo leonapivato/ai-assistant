@@ -669,6 +669,79 @@ def test_every_sample_counts_against_the_bound_before_anything_is_sent(tmp_path:
     assert reports[-1] == "refused: 6 calls exceed the bound of 5"
 
 
+def test_the_bound_is_counted_from_the_samples_before_any_call_is_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = _cases(tmp_path, ("understanding/one.toml", _understanding(samples=10**9)))
+    planned: list[object] = []
+
+    def plan(*args: object) -> list[object]:
+        planned.append(args)
+        return []
+
+    monkeypatch.setattr(replay_tool, "plan_suite", plan)
+    reports: list[str] = []
+
+    status = _suite(directory, Model(), reports, results=None, count_only=True)
+
+    assert status == 1
+    assert planned == []
+    assert reports[-1] == "refused: 1000000000 calls exceed the bound of 100"
+
+
+def test_a_reply_a_check_cannot_read_fails_its_sample_and_the_run_goes_on(
+    tmp_path: Path,
+) -> None:
+    case = _understanding(
+        prompt="observer_commit",
+        guards="narrower_write_loses_fact",
+        samples=3,
+        flags={},
+        property={"check": "memory_kept", "memory": "M1"},
+    )
+    directory = _cases(tmp_path, ("observer_commit/one.toml", case))
+    replies = iter(
+        [
+            {"action": [], "memory": "M1"},
+            {"action": {"x": 1}, "memory": "M1"},
+            {"action": "add", "memory": "M1"},
+        ]
+    )
+    model = Model(reply=lambda system: ModelResponse(parts=[TextPart(json.dumps(next(replies)))]))
+    reports: list[str] = []
+
+    status = _suite(directory, model, reports, results=tmp_path / "results")
+
+    assert status == 0
+    lines = _lines(tmp_path / "results")
+    assert [one["passed"] for one in lines] == [False, False, True]
+    assert lines[0]["reason"] == "the reply's action is not a string"
+    assert any("memory_kept passed: default 1 of 3" in one for one in reports)
+
+
+def test_a_check_that_raises_fails_its_sample_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = _cases(tmp_path, ("understanding/one.toml", _understanding()))
+
+    def broken(reply: object, params: object) -> str | None:
+        raise RecursionError
+
+    check = replay_tool.CODE_CHECKS["no_label"]
+    monkeypatch.setitem(
+        replay_tool.CODE_CHECKS,
+        "no_label",
+        replay_tool.CodeCheck(check.name, check.what, check.prompts, check.params, broken),
+    )
+
+    _suite(directory, Model(), [], results=tmp_path / "results")
+
+    lines = _lines(tmp_path / "results")
+    assert [one["reason"] for one in lines] == [
+        "the check could not read the reply (RecursionError)"
+    ] * 2
+
+
 def test_count_sends_nothing_and_needs_no_results_directory(tmp_path: Path) -> None:
     directory = _cases(tmp_path, ("understanding/one.toml", _understanding()))
     model = Model()
