@@ -333,6 +333,7 @@ _UNDERSTANDING_EXPIRED: Final = "the pass's deadline expired during understandin
 _RECALL_EXPIRED: Final = "the pass's deadline expired during recall"
 _WINDOWS_EXPIRED: Final = "the pass's deadline expired while assembling the windows"
 _STORY_LINKS_EXPIRED: Final = "the pass's deadline expired while recording the story links"
+_TAKEOVER_EXPIRED: Final = "the pass's deadline expired before the takeover"
 
 
 class _NothingTakenInError(Exception):
@@ -1090,6 +1091,18 @@ def _recall_expired(working: _ActivationPass) -> Exception | None:
     if not working.deadline_passed:
         return None
     return ModelTimeoutError(_RECALL_EXPIRED)
+
+
+def _takeover_expired(working: _ActivationPass) -> Exception | None:
+    """ADR-0280 §5: the takeover stage is not entered past the pass's deadline.
+
+    A pass whose time is up takes nothing over: it would stop the other activation and
+    then end itself (ADR-0332 §4:6). Classified as each pass kind classifies its expiry,
+    as recall's is; ``None`` while there is time.
+    """
+    if not working.deadline_passed:
+        return None
+    return ModelTimeoutError(_TAKEOVER_EXPIRED)
 
 
 def _windows_expired(working: _ActivationPass) -> Exception | None:
@@ -5915,7 +5928,7 @@ class Engine:
             TolerantStage(
                 ControllerStage.STORY_LINKS, self._story_links_stage, expired=_story_links_expired
             ),
-            Stage(ControllerStage.TAKEOVER, self._takeover_stage),
+            Stage(ControllerStage.TAKEOVER, self._takeover_stage, expired=_takeover_expired),
             *phases.stages(),
         ]
         await phases.run(
@@ -5985,7 +5998,7 @@ class Engine:
             TolerantStage(
                 ControllerStage.STORY_LINKS, self._story_links_stage, expired=_story_links_expired
             ),
-            Stage(ControllerStage.TAKEOVER, self._takeover_stage),
+            Stage(ControllerStage.TAKEOVER, self._takeover_stage, expired=_takeover_expired),
             *phases.stages(),
         ]
         await phases.run(
@@ -6057,7 +6070,7 @@ class Engine:
             TolerantStage(
                 ControllerStage.STORY_LINKS, self._story_links_stage, expired=_story_links_expired
             ),
-            Stage(ControllerStage.TAKEOVER, self._takeover_stage),
+            Stage(ControllerStage.TAKEOVER, self._takeover_stage, expired=_takeover_expired),
             *phases.stages(),
         ]
         await phases.run(
@@ -6800,10 +6813,11 @@ class Engine:
         version either way, so ``takeover_undecided`` does not answer again.
 
         **The taken-over activation is stopped as a stop is** (§4:7, ADR-0297 §3): its
-        mark is set first, in that step, and only then is its stop record written. A
-        record that cannot be written is logged and the pass goes on: the marks are set,
-        so the other activation runs no further stage, commits nothing and takes no
-        join, and nothing it holds is claimed (§3:5).
+        mark is set first, in that step, and only then is its stop record written,
+        inside the pass's deadline. A record that cannot be written in time is logged
+        and the pass goes on: the marks are set, so the other activation runs no further
+        stage, commits nothing and takes no join, and nothing it holds is claimed
+        (§3:5). The stage is not entered past the deadline (:func:`_takeover_expired`).
         """
         understanding = working.understanding
         assert understanding is not None  # noqa: S101 — the rule makes the stage due only once a version is recorded
@@ -6825,7 +6839,8 @@ class Engine:
         if not taken or named is None:
             return
         try:
-            await self._plans.record_stop(named)
+            async with asyncio.timeout_at(working.deadline):
+                await self._plans.record_stop(named)
         except Exception as exc:  # the marks hold it: logged, never the pass's failure
             if is_defect(exc):
                 log_defect(
@@ -6853,6 +6868,10 @@ class Engine:
             The id of the activation joined, which the reader marks the input's messages
             taken in by (§3:18); ``None`` where it joined none, and the input waits
             (§3:4).
+
+        Raises:
+            TraceStoreError: If the clock's reading of when it joins is not usable, as
+                admission's own reading raises; nothing is joined.
         """
         if self._closing:
             return None
