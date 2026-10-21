@@ -127,6 +127,17 @@ def test_a_reply_parses_whole_or_not_at_all() -> None:
     assert parsed(reply(findings=[{"claim": ["x"]}]), ScoutReply) is None
 
 
+def test_a_scout_reply_with_prose_around_its_object_is_read() -> None:
+    """The scout's parser is the commit step's: an object in prose is read and validated."""
+    findings = reply(findings=[{"claim": _CLAIM, "rests_on": ["P1"]}])
+    expected = ScoutReply.model_validate(json.loads(findings))
+
+    assert parsed(f"Here is what I found.\n{findings}", ScoutReply) == expected
+    assert parsed(f"{findings}\nThat is all.", ScoutReply) == expected
+    assert parsed('I found nothing; {"seat": 1}', ScoutReply) is None
+    assert parsed(f"Here: {reply(findings=[{'rests_on': ['P1']}])}", ScoutReply) is None
+
+
 def test_a_key_the_shape_does_not_name_is_dropped_and_the_reply_kept() -> None:
     """A stray key is no reason to discard a reply whose every named field is valid."""
     proposal = parsed(_DRY_RUN_REPLY, ScoutReply)

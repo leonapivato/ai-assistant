@@ -1242,6 +1242,94 @@ def test_a_commit_reply_still_validates_every_field_it_names() -> None:
     assert parsed(reply(resolves={"memory": "M1", "question": "Q1"}), CommitReply) is None
 
 
+#: Reasoning a commit reply opened with in a learner rerun on a copy of live data
+#: (2026-10-21), where the reply should have been the bare object alone.
+_REASONING = (
+    "The user's own words in P1 state the claim, and the memory M1 already holds it, "
+    "so the action is add."
+)
+_ADD = {"action": "add", "memory": "M1", "supports": [_support("P1")]}
+
+
+def test_a_commit_reply_with_prose_before_its_object_is_read() -> None:
+    expected = CommitReply.model_validate(_ADD)
+
+    assert parsed(f"{_REASONING}\n\n{reply(**_ADD)}", CommitReply) == expected
+    assert parsed(f"{_REASONING}\n```json\n{reply(**_ADD)}\n```", CommitReply) == expected
+
+
+def test_a_commit_reply_with_prose_after_its_object_is_read() -> None:
+    expected = CommitReply.model_validate(_ADD)
+
+    assert parsed(f"{reply(**_ADD)}\n\nThat is my decision.", CommitReply) == expected
+
+
+def test_of_two_objects_in_a_reply_the_one_that_validates_is_read() -> None:
+    """An object that does not validate is passed over; where both validate, the last."""
+    bad = reply(action="keep", memory="M1")
+    end = {"action": "end", "memory": "M1", "supports": [_support("P1", direction="against")]}
+
+    assert parsed(f"{reply(**_ADD)} or perhaps {bad}", CommitReply) == CommitReply.model_validate(
+        _ADD
+    )
+    assert parsed(f"{bad}, no: {reply(**_ADD)}", CommitReply) == CommitReply.model_validate(_ADD)
+    assert parsed(
+        f"First {reply(**_ADD)}, then on reflection {reply(**end)}", CommitReply
+    ) == CommitReply.model_validate(end)
+
+
+def test_a_fenced_object_is_read_before_a_bare_one() -> None:
+    end = {"action": "end", "memory": "M1", "supports": [_support("P1", direction="against")]}
+    content = f"```json\n{reply(**_ADD)}\n```\nOr else {reply(**end)}"
+
+    assert parsed(content, CommitReply) == CommitReply.model_validate(_ADD)
+
+
+def test_a_reply_with_no_object_in_it_still_fails() -> None:
+    assert parsed(_REASONING, CommitReply) is None
+    assert parsed(f"{_REASONING} {{ and }} nothing more", CommitReply) is None
+
+
+def test_an_object_in_prose_that_does_not_validate_still_fails() -> None:
+    assert parsed(f"{_REASONING}\n{reply(action='keep', memory='M1')}", CommitReply) is None
+    support = {"part": "P1", "how_sure": "sure"}  # no direction
+    assert parsed(f"{_REASONING}\n{reply(action='add', supports=[support])}", CommitReply) is None
+
+
+def test_an_object_in_prose_naming_no_field_of_the_shape_is_not_an_answer() -> None:
+    """Every field has a default, so ``{}`` validates: in prose it is no decision to take."""
+    assert parsed(f"{_REASONING} The view held {{}} for P2.", CommitReply) is None
+    assert parsed(f'{_REASONING} It said {{"seat": "window"}}.', CommitReply) is None
+    assert parsed("{}", CommitReply) == CommitReply()  # the whole reply reads as before
+
+
+def test_nothing_inside_a_malformed_object_is_read_as_the_answer() -> None:
+    """A support nested in a broken decision names ``note``, a field of the whole shape too."""
+    support = json.dumps(_support("P1", note="the user said so"))
+    broken = '{"action": "add", "memory": "M1", "supports": [' + support + "],}"
+    truncated = '{"action": "add", "memory": "M1", "supports": [' + support
+
+    assert parsed(f"{_REASONING}\n{broken}", CommitReply) is None
+    assert parsed(f"{_REASONING}\n{truncated}", CommitReply) is None
+
+
+def test_braces_inside_an_objects_strings_do_not_end_it() -> None:
+    """A brace in a string, past an escaped quote too, neither ends an object nor opens one."""
+    decision = {**_ADD, "note": 'the user wrote "{" and "}"'}
+    support = json.dumps(_support("P1", note="the user said so"))
+    broken = '{"note": "a \\" } b", "supports": [' + support + "],}"
+
+    assert parsed(f"{_REASONING}\n{reply(**decision)}", CommitReply) == (
+        CommitReply.model_validate(decision)
+    )
+    assert parsed(f"{_REASONING}\n{broken}", CommitReply) is None
+
+
+def test_a_brace_that_never_closes_ends_the_search() -> None:
+    """What follows an unclosed ``{`` may be inside it, so none of it is read."""
+    assert parsed(f"A set {{P1, P2 and then {reply(**_ADD)}", CommitReply) is None
+
+
 async def _three(harness: Harness) -> None:
     """Three episodes, a minute apart: with a window of two, the oldest has left it."""
     await harness.hold(
@@ -1266,6 +1354,30 @@ async def test_a_commit_reply_with_a_stray_key_is_written() -> None:
     )
     observer = harness.observer(
         scout=FakeModelProvider.scripted(_SCOUTED), commit=FakeModelProvider.scripted(decision)
+    )
+
+    outcome = await observer.run()
+
+    assert outcome.processed == 1
+    (record,) = await harness.plans.observations(["activation:one"])
+    (finding,) = record.findings
+    assert finding.outcome is not None
+    (write,) = finding.outcome.writes
+    stored = await harness.memory.get(write.memory)
+    assert isinstance(stored, Memory)
+    assert stored.content == "The user prefers window seats."
+
+
+async def test_a_commit_reply_with_prose_around_its_object_is_written() -> None:
+    """End to end: the object is the decision, and the reasoning around it is set aside."""
+    harness = Harness()
+    await _three(harness)
+    decision = reply(
+        action="create", wording="The user prefers window seats.", supports=[_support("P1")]
+    )
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_SCOUTED),
+        commit=FakeModelProvider.scripted(f"{_REASONING}\n\n{decision}\n\nDone."),
     )
 
     outcome = await observer.run()
