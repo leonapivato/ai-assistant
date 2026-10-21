@@ -335,6 +335,35 @@ def test_a_call_the_observer_wrote_under_two_activations_is_sent_once_and_writte
         assert only["body"]["replays"]["stage"] == "scout"
 
 
+def test_no_call_is_taken_to_replay_from_a_follow_up_file(tmp_path: Path) -> None:
+    """ADR-0337 §8:18: a follow-up file is read for nothing, even a line shaped as a call."""
+    copy = make_copy(tmp_path)
+    record = copy / "diagnostics"
+    before = [(one.file, one.line) for one in replay_tool.read_givens(record)]
+    shaped = {
+        "activation_id": ACT_A,
+        "source": "understanding",
+        "kind": "given",
+        "recorded_at": "2026-10-19T09:00:00Z",
+        "body": {
+            "messages": [
+                {"role": "system", "content": "Not a call.", "name": None},
+                {"role": "user", "content": "Not an input.", "name": None},
+            ]
+        },
+    }
+    followed = record / f"{ACT_A}.followup.jsonl"
+    followed.write_text(json.dumps(shaped) + "\n", encoding="utf-8")
+    followed.chmod(0o600)
+    model = Model()
+
+    _replay(copy, model)
+
+    assert [(one.file, one.line) for one in replay_tool.read_givens(record)] == before
+    assert "Not a call." not in model.systems
+    assert f"{ACT_A}.followup.replay.jsonl" not in _results(copy)
+
+
 def test_a_template_is_rendered_under_stated_flags_where_the_entry_records_none(
     tmp_path: Path,
 ) -> None:
