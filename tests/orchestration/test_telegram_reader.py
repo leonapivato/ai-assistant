@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     EpisodicMemory,
     InputOrigin,
+    JoinedInput,
     MessageAuthor,
     PlanningRound,
     ProcessingReason,
@@ -82,6 +83,8 @@ from ai_assistant.testing.telegram import GET_UPDATES, SEND_MESSAGE
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
+
+    import pytest
 
     from ai_assistant.orchestration.joining import JoiningInput
 
@@ -401,13 +404,18 @@ def _polled(line: _Line) -> bool:
 
 
 async def _cut_off(
-    status: ProcessingStatus, reason: ProcessingReason
+    status: ProcessingStatus, reason: ProcessingReason, *, confirmed: bool = False
 ) -> tuple[FakeTelegramIntakeRecord, FakeMemoryStore]:
-    """A record an activation took update 4 in, whose episode closed as given."""
+    """The line's last episode, closed as given; its update 4 still held unless ``confirmed``.
+
+    A confirmed update has left the intake record (§5:6), as the reader confirms an
+    activation's updates while it runs (ADR-0332 §8:7): the episode is what remains.
+    """
     intake = FakeTelegramIntakeRecord()
-    await intake.take_in([4], activation_id="act-cut")
+    if not confirmed:
+        await intake.take_in([4], activation_id="act-cut")
     memory = FakeMemoryStore(now=lambda: AT)
-    record = episode("act-cut")
+    record = episode("act-cut", channel=line_channel(REFERENCE, CHAT))
     assert record.processing_record is not None
     await memory.add(
         record.model_copy(
@@ -440,6 +448,72 @@ async def test_after_a_restart_the_activation_it_cut_off_gets_one_fixed_message(
         one for one in (await intake.export()).calls if one.kind is TelegramCallKind.INTERRUPTED
     ]
     assert [one.activation_id for one in restart] == ["act-cut"]
+
+
+async def test_a_restart_after_its_updates_were_confirmed_still_sends_it() -> None:
+    """§6:10 under ADR-0332 §8:7: read from the newest episode, not the intake record."""
+    intake, memory = await _cut_off(
+        ProcessingStatus.INTERRUPTED, ProcessingReason.HUB_STOPPED, confirmed=True
+    )
+    line = _Line(intake=intake, memory=memory)
+    line.start()
+    await line.until(lambda: bool(line.polls()), what="the reader polled")
+    await line.stop()
+
+    assert line.sent() == [INTERRUPTED_LINE]
+
+
+async def test_only_the_lines_newest_episode_is_the_one_a_restart_cut_off() -> None:
+    """An older interrupted episode, behind one that finished, sends nothing."""
+    intake, memory = await _cut_off(ProcessingStatus.INTERRUPTED, ProcessingReason.HUB_STOPPED)
+    await memory.add(episode("act-later", channel=line_channel(REFERENCE, CHAT)))
+    line = _Line(intake=intake, memory=memory)
+    line.start()
+    await line.until(lambda: bool(line.polls()), what="the reader polled")
+    await line.stop()
+
+    assert line.sent() == []
+
+
+async def test_an_update_an_episode_records_as_joined_is_marked_and_not_taken_in_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0332 §3:18: a joined update whose marking a restart lost is taken in by its join."""
+    memory = FakeMemoryStore(now=lambda: AT)
+    record = _line_episode(
+        "act-joined",
+        (RecordedInputMessage(text="book Riverside", sent_at=AT, position=59),),
+        channel=line_channel(REFERENCE, CHAT),
+    )
+    processing = record.processing_record
+    assert processing is not None
+    joined = JoinedInput(
+        joined_at=AT,
+        channel=line_channel(REFERENCE, CHAT),
+        messages=(RecordedInputMessage(text="for Saturday", sent_at=AT, position=60),),
+    )
+    await memory.add(
+        record.model_copy(
+            update={"processing_record": processing.model_copy(update={"joined": (joined,)})}
+        )
+    )
+    line = _Line(memory=memory)
+    marks: list[tuple[tuple[int, ...], str]] = []
+    take_in = line.intake.take_in
+
+    async def spy(update_ids: Sequence[int], *, activation_id: str) -> tuple[int, ...]:
+        marks.append((tuple(update_ids), activation_id))
+        return await take_in(update_ids, activation_id=activation_id)
+
+    monkeypatch.setattr(line.intake, "take_in", spy)
+    line.fake.hold(text(2, "for Saturday", message_id=60), text(3, "and at seven"))
+    line.start()
+    await line.until(lambda: bool(line.inputs), what="the reader took the rest in")
+    await line.stop()
+
+    assert marks[0] == ((2,), "act-joined"), "marked by its join, before anything is admitted"
+    (taken,) = line.inputs
+    assert taken.update_ids == (3,), "the joined update is not taken in again"
 
 
 async def test_a_restart_that_cut_off_a_cancelled_activation_sends_it_too() -> None:

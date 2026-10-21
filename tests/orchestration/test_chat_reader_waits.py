@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     InputOrigin,
     MessageAuthor,
     NewMessage,
+    TranscriptMessage,
 )
 from ai_assistant.orchestration.chat import ChatInput, ChatReader
 from ai_assistant.orchestration.conversations import conversation_channel
@@ -36,7 +37,7 @@ from ai_assistant.orchestration.joining import THE_USER
 from ai_assistant.testing import FakeConversationStore
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 
     from ai_assistant.orchestration.joining import JoiningInput
 
@@ -93,6 +94,7 @@ class _Reader:
         store: FakeConversationStore | None = None,
         start_wait: timedelta | None = _START,
         join: Callable[[JoiningInput], str | None] | None = None,
+        joined: Mapping[int, str] | None = None,
     ) -> None:
         self.store = store or FakeConversationStore()
         self.clock = _Clock()
@@ -118,7 +120,16 @@ class _Reader:
             composing_cap=_CAP,
             clock=self.clock,
             sleep=self.clock.sleep,
+            joined=None if joined is None else self._joined_of(joined),
         )
+
+    @staticmethod
+    def _joined_of(joined: Mapping[int, str]) -> Callable[[str], Awaitable[Mapping[int, str]]]:
+        async def read(conversation_id: str) -> Mapping[int, str]:
+            del conversation_id
+            return joined
+
+        return read
 
     def _spawn(self, read: Coroutine[None, None, None]) -> None:
         self.tasks.append(asyncio.ensure_future(read))
@@ -415,3 +426,74 @@ async def test_a_joined_message_whose_marking_failed_is_marked_later_and_never_t
 
     assert await store.taken_in(conversation, positions=[position]) == {position: "act-1"}
     assert len(chat.inputs) == 1, "the joined message was not taken in again"
+
+
+async def test_after_a_restart_a_message_an_episode_records_as_joined_is_marked_by_it() -> None:
+    """§3:18: the marking a restart lost is made from the episode; nothing takes it in."""
+    store = FakeConversationStore()
+    first = _Reader(store=store)
+    conversation = await first.conversation()
+    await store.append_message(
+        conversation,
+        NewMessage(
+            author=MessageAuthor.USER, text="book Riverside", device_id="phone", message_id="a"
+        ),
+    )
+    joined = await store.append_message(
+        conversation,
+        NewMessage(
+            author=MessageAuthor.USER, text="for Saturday", device_id="phone", message_id="b"
+        ),
+    )
+    assert joined.position is not None
+    await store.take_in(conversation, positions=[1], activation_id="act-before")
+
+    chat = _Reader(store=store, joined={joined.position: "act-before"})
+    assert await chat.reader.notice_awaiting() == 0, "nothing is left to take in"
+    assert await store.taken_in(conversation, positions=[joined.position]) == {
+        joined.position: "act-before"
+    }
+    assert chat.tasks == []
+
+
+class _HeldQuery(FakeConversationStore):
+    """A store whose next read of the waiting messages waits for :attr:`release`."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hold = False
+        self.held = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def untaken_messages(
+        self, conversation_id: str, *, limit: int = 100
+    ) -> tuple[TranscriptMessage, ...]:
+        if self.hold:
+            self.hold = False
+            self.held.set()
+            await self.release.wait()
+        return await super().untaken_messages(conversation_id, limit=limit)
+
+
+async def test_a_message_and_a_signal_during_the_read_of_what_waits_extend_the_wait() -> None:
+    """§5:1-§5:2: the wait is read again after the read, its cap still the first's."""
+    store = _HeldQuery()
+    chat = _Reader(store=store)
+    conversation = await chat.conversation()
+    await chat.say(conversation, "book Riverside")
+    store.hold = True
+    await chat.clock.wake()
+    await asyncio.wait_for(store.held.wait(), _SETTLE)
+
+    chat.clock.now = 1.6
+    await chat.say(conversation, "for Saturday")
+    chat.reader.composing(conversation)
+    store.release.set()
+    await chat.clock.wake()
+    await chat.idle()
+
+    (taken,) = chat.inputs
+    assert _texts(taken) == ["book Riverside", "for Saturday"]
+    assert chat.taken_at == [pytest.approx(1.6 + _LAPSE.total_seconds())], (
+        "held until the signal lapsed"
+    )

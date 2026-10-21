@@ -74,6 +74,7 @@ import structlog
 from ai_assistant.core.channel_validation import input_origin
 from ai_assistant.core.errors import (
     ConversationStoreError,
+    MemoryStoreError,
     TraceStoreError,
     UnknownConversationError,
 )
@@ -304,6 +305,7 @@ class ChatReader:
         composing_cap: timedelta = DEFAULT_CHAT_COMPOSING_CAP,
         clock: Callable[[], float] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        joined: Callable[[str], Awaitable[Mapping[int, str]]] | None = None,
     ) -> None:
         """Wire the reader.
 
@@ -343,6 +345,10 @@ class ChatReader:
             clock: The monotonic clock the waits are read on, in seconds; the running
                 loop's by default.
             sleep: How the reader waits.
+            joined: Reads the positions the conversation's recent episodes record as
+                joined, by the activation each joined (ADR-0332 §3:16): what tells the
+                reader, after a restart, that a joined message whose marking never
+                landed was taken in. ``None`` reads none.
 
         Raises:
             ValueError: If a wait is not strictly positive, or ``composing_cap`` is
@@ -381,6 +387,7 @@ class ChatReader:
         self._composing_cap = composing_cap.total_seconds()
         self._clock = clock if clock is not None else _loop_time
         self._sleep = sleep
+        self._joined = joined
         # ADR-0332 §5:1: the start wait running for each conversation where nothing is,
         # from the first message noticed until the read takes the messages in.
         self._waits: dict[str, _StartWait] = {}
@@ -458,10 +465,53 @@ class ChatReader:
             limit=_AWAITING_PAGE, after_id=after
         ):
             for conversation_id in page:
+                if conversation_id not in self._reading and not await self._reconciled(
+                    conversation_id
+                ):
+                    continue
                 self.notice(conversation_id)
                 noticed += 1
             after = page[-1]
         return noticed
+
+    async def _reconciled(self, conversation_id: str) -> bool:
+        """Mark what a recent episode records as joined, where its marking never landed.
+
+        ADR-0332 §3:18: a joined message is marked taken in by the activation it joined,
+        as at admission, so after a restart it is not taken in again (ADR-0293 §6:9).
+        The episode records each joined input before any stage acts on it (§3:16), so it
+        is what says so where the marking was lost with the process.
+
+        Returns:
+            Whether the conversation is to be read: ``False`` where nothing is left
+            waiting in it, or where its episodes could not be read, and a later sweep
+            looks again, so nothing joined is taken in twice.
+
+        Raises:
+            ConversationStoreError: If the store cannot be written.
+        """
+        if self._joined is None:
+            return True
+        try:
+            joined = await self._joined(conversation_id)
+        except MemoryStoreError:
+            _log.warning("chat_joins_unread", stage="reader", reason="store_failed")
+            return False
+        untaken = {
+            one.position
+            for one in await self._conversations.untaken_messages(
+                conversation_id, limit=_WAITING_ALL
+            )
+        }
+        owed = {position: by for position, by in joined.items() if position in untaken}
+        if owed:
+            _log.info("chat_join_marked_late", stage="reader", messages=len(owed))
+            self._owed.setdefault(conversation_id, {}).update(owed)
+            try:
+                await self._settle(conversation_id)
+            except UnknownConversationError:
+                return False
+        return bool(untaken - owed.keys())
 
     def working(self, conversation_id: str) -> str | None:
         """The activation this reader has an input in for, until its reply is written.
@@ -527,6 +577,10 @@ class ChatReader:
                     )
                     if one.position not in owed
                 ]
+                if self._wait_end(conversation_id) > self._clock():
+                    # A message noticed during those reads moved the wait's end, its cap
+                    # still the first message's (ADR-0332 §5:1-§5:2).
+                    continue
                 if not waiting:
                     if self._reading[conversation_id]:
                         continue
@@ -546,6 +600,7 @@ class ChatReader:
             _log.exception("chat_read_failed", stage="reader")
         finally:
             self._reading.pop(conversation_id, None)
+            self._waits.pop(conversation_id, None)
 
     async def _admit(self, conversation_id: str, waiting: Sequence[TranscriptMessage]) -> bool:
         """Bring the waiting messages in, with the window, as one activation's input.
@@ -599,20 +654,28 @@ class ChatReader:
         Returns:
             Whether the read goes on: ``False`` once the engine is closing.
         """
-        while (wait := self._waits.get(conversation_id)) is not None:
-            if self._closing():
-                return False
-            assert self._start_wait is not None  # noqa: S101 — a wait is recorded only beside it
-            end = min(
-                wait.first + self._composing_cap,
-                max(wait.latest + self._start_wait, wait.composing_until),
-            )
-            remaining = end - self._clock()
+        while not self._closing():
+            remaining = self._wait_end(conversation_id) - self._clock()
             if remaining <= 0:
-                break
+                return True
             await self._nap(remaining)
-        self._waits.pop(conversation_id, None)
-        return not self._closing()
+        return False
+
+    def _wait_end(self, conversation_id: str) -> float:
+        """When the conversation's start wait ends; minus infinity where none is running.
+
+        ``start_wait`` after the latest message noticed or the end of the live composing
+        signal, whichever is later, and no later than ``composing_cap`` after the first
+        (§5:1-§5:2). The wait stays recorded until the read admits what it covers, so a
+        message noticed meanwhile still extends it, under the first message's cap.
+        """
+        wait = self._waits.get(conversation_id)
+        if wait is None or self._start_wait is None:
+            return -math.inf
+        return min(
+            wait.first + self._composing_cap,
+            max(wait.latest + self._start_wait, wait.composing_until),
+        )
 
     async def _nap(self, seconds: float) -> None:
         """Sleep ``seconds``, or until :meth:`close`, whichever comes first."""

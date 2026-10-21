@@ -163,6 +163,7 @@ from ai_assistant.orchestration.channels import (
 )
 from ai_assistant.orchestration.chat import (
     CHAT_TURN_BUDGET,
+    CHAT_WINDOW_SIZE,
     DEFAULT_CHAT_COMPOSING_CAP,
     DEFAULT_CHAT_COMPOSING_LAPSE,
     DEFAULT_CHAT_START_WAIT,
@@ -183,6 +184,7 @@ from ai_assistant.orchestration.controller import (
 from ai_assistant.orchestration.conversations import (
     check_devices_fit,
     check_message_fits,
+    conversation_channel,
     episode_conversation,
     fit_changes,
     fit_transcript,
@@ -199,6 +201,7 @@ from ai_assistant.orchestration.joining import (
     DEFAULT_JOIN_LIMIT,
     input_standing,
     join_running,
+    joined_positions,
     place_busy,
     take_over,
     visible_running,
@@ -1996,6 +1999,9 @@ class Engine:
                 start_wait=chat_start_wait,
                 composing_lapse=chat_composing_lapse,
                 composing_cap=chat_composing_cap,
+                # ADR-0332 §3:18: what tells it, after a restart, that a joined
+                # message whose marking was lost was taken in.
+                joined=self._joined_in,
             )
             if chat_reader
             else None
@@ -6933,6 +6939,17 @@ class Engine:
                 )
             else:
                 _log.warning("takeover_stop_unrecorded", stage="takeover", reason="store_failed")
+
+    async def _joined_in(self, conversation_id: str) -> dict[int, str]:
+        """The positions a conversation's recent episodes record as joined (ADR-0332 §3:16).
+
+        Raises:
+            MemoryStoreError: If the episodes cannot be read.
+        """
+        page = await self._memory.channel_episodes(
+            conversation_channel(conversation_id), limit=CHAT_WINDOW_SIZE
+        )
+        return joined_positions(page)
 
     def _join_running(self, joining: JoiningInput) -> str | None:
         """The join's entry point (ADR-0332 §3:3, §3:6): join a place's running activation.

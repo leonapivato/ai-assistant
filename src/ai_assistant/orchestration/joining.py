@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Final
 from ai_assistant.core.types import (
     CapabilityEffect,
     ChannelIdentity,
+    EpisodicMemory,
     InputOrigin,
     JoinedInput,
     RecordedInputMessage,
@@ -59,7 +60,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from datetime import datetime
 
-    from ai_assistant.core.types import ToolDefinition
+    from ai_assistant.core.types import ChannelEpisodePage, ToolDefinition
     from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.orchestration.disclosure import TurnSupply
 
@@ -72,6 +73,7 @@ __all__ = [
     "input_standing",
     "is_pure_read",
     "join_running",
+    "joined_positions",
     "place_busy",
     "take_over",
     "visible_running",
@@ -248,6 +250,30 @@ def join_running(
         return None
     joined = JoinedInput(joined_at=at, channel=joining.channel, messages=joining.messages)
     return state.activation_id if state.join(joined, limit=limit) else None
+
+
+def joined_positions(page: ChannelEpisodePage) -> dict[int, str]:
+    """The positions a page's episodes record as joined, by the activation each joined.
+
+    ADR-0332 §3:16, §3:18: an episode records each joined input before any stage acts on
+    it, so where a reader's marking of a joined message never landed before a restart,
+    this is what tells it the message was taken in, and by which activation. A takeover's
+    joined input is its own place's, and its messages carry that place's positions, so
+    only the inputs that joined from the page's own place are read.
+    """
+    joined: dict[int, str] = {}
+    for entry in page.entries:
+        record = entry.record
+        if not isinstance(record, EpisodicMemory) or record.processing_record is None:
+            continue
+        processing = record.processing_record
+        for one in processing.joined:
+            if one.taken_over_from is not None or one.channel != processing.trigger.channel:
+                continue
+            for message in one.messages:
+                if message.position is not None:
+                    joined[message.position] = processing.activation_id
+    return joined
 
 
 def place_busy(running: Iterable[ActivationState], channel: ChannelIdentity) -> bool:
