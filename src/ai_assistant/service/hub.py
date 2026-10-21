@@ -790,6 +790,9 @@ async def _build_devices(
             without anyone acting, and nothing here can tell the two apart (a
             missing socket is what both look like at boot). ADR-0083 §5: "where a
             new fault does not obviously answer the question, the answer is ``1``".
+            A permission fault beneath it — a socket the hub may not open — is
+            still read by :func:`~ai_assistant.service.exits.classify` and stays
+            down.
         ConfigurationError: If ``hub_overlay_agent_socket`` names a path that fails
             the custody conditions ``local_agent`` holds a configured socket to. A
             stay-down deployment fault (ADR-0083 §5), unless the custody check met

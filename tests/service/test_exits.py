@@ -26,6 +26,7 @@ from ai_assistant.service.exits import (
     ClearableRefusalError,
     classify,
 )
+from ai_assistant.service.overlay import OverlayIdentityUnavailableError
 
 
 def _state_fault() -> IncompatibleStateError:
@@ -224,6 +225,42 @@ def test_a_refusal_marked_clearable_comes_back() -> None:
     assert classify(refusal) == (EXIT_RESTART, "")
 
 
+def _agent_refusal(cause: OSError) -> ClearableRefusalError:
+    """The hub's refusal over an agent query that met ``cause``, chained as at start."""
+    unavailable = OverlayIdentityUnavailableError("the overlay agent did not answer")
+    unavailable.__cause__ = cause
+    refusal = ClearableRefusalError("the overlay agent could not be asked")
+    refusal.__cause__ = unavailable
+    return refusal
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [
+        FileNotFoundError(errno.ENOENT, "missing", "/var/run/tailscale/tailscaled.sock"),
+        ConnectionRefusedError(errno.ECONNREFUSED, "refused"),
+        TimeoutError(),
+    ],
+)
+def test_an_agent_not_up_yet_comes_back(cause: OSError) -> None:
+    """At boot an agent not started yet is a socket that is missing or refuses, and a
+    hung one times out: each clears, so the mark's ``1`` stands."""
+    assert classify(_agent_refusal(cause)) == (EXIT_RESTART, "")
+
+
+@pytest.mark.parametrize("code", [errno.EACCES, errno.EPERM])
+def test_an_agent_socket_the_hub_may_not_open_stays_down(code: int) -> None:
+    """The mark lowers only the refusal's own verdict: a permission fault beneath it
+    is ADR-0083 §5's "``78`` wherever in startup it surfaces", and opening the socket
+    again does not make it the hub's to open."""
+    socket = "/var/run/tailscale/tailscaled.sock"
+
+    verdict, action = classify(_agent_refusal(OSError(code, "denied", socket)))
+
+    assert verdict == EXIT_DEPLOYMENT
+    assert socket in action
+
+
 def test_a_clearable_refusal_beneath_a_store_fault_still_comes_back() -> None:
     """The chain walk reaches the mark, as it reaches every other refusal."""
     wrapped = MemoryStoreError("failed to open memory store")
@@ -232,17 +269,30 @@ def test_a_clearable_refusal_beneath_a_store_fault_still_comes_back() -> None:
     assert classify(wrapped) == (EXIT_RESTART, "")
 
 
-@pytest.mark.parametrize("code", [errno.ENFILE, errno.EMFILE, errno.EIO, errno.ENOSPC, None])
-def test_a_refusal_retyping_a_fault_that_clears_comes_back(code: int | None) -> None:
+@pytest.mark.parametrize("code", [errno.ENFILE, errno.EMFILE, errno.EIO, errno.ENOSPC])
+def test_a_refusal_retyping_a_fault_that_clears_comes_back(code: int) -> None:
     """A ``ConfigurationError`` raised from ``ENFILE`` takes the errno's verdict (#3171).
 
     Without this, a custody check that met descriptor exhaustion would leave a
     correctly configured hub down for good, while the same errno raw is a ``1``.
     Whether the fault clears is the errno's to say, not the wrapper's.
     """
-    cause = OSError("no errno at all") if code is None else OSError(code, "transient")
+    assert classify(_retyping(OSError(code, "transient"))) == (EXIT_RESTART, "")
 
-    assert classify(_retyping(cause)) == (EXIT_RESTART, "")
+
+def test_a_refusal_retyping_an_errno_less_fault_stays_down() -> None:
+    """An ``OSError`` with no errno is no kernel verdict, so the refusal's ``78`` stands.
+
+    The composition root wraps an on-device runtime whose shared library will not
+    load exactly this way, and reinstalling it is a human act: a restart loop would
+    be ADR-0083 §5's "crash loop wearing a diagnosis".
+    """
+    unloadable = OSError("libonnxruntime_providers_shared.so: cannot open shared object file")
+
+    verdict, action = classify(_retyping(unloadable))
+
+    assert verdict == EXIT_DEPLOYMENT
+    assert action
 
 
 @pytest.mark.parametrize(

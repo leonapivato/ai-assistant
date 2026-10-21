@@ -1632,6 +1632,29 @@ async def test_a_configured_hub_that_cannot_ask_its_agent_refuses_and_comes_back
     assert code == EXIT_RESTART
 
 
+async def test_a_configured_hub_that_may_not_open_its_agent_socket_stays_down(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent refusal's ``1`` is not a permission fault's: an ``EACCES`` on the
+    agent socket, beneath the refusal, keeps ADR-0083 §5's ``78`` through the hub's
+    own start — "wherever in startup it surfaces"."""
+    from ai_assistant.service import overlay as overlay_module  # noqa: PLC0415 - one call site
+
+    async def _denied(self: overlay_module.TailscaleAgent, path: str) -> bytes:
+        del path
+        raise PermissionError(errno.EACCES, "permission denied", self.socket_path)
+
+    monkeypatch.setattr(overlay_module.TailscaleAgent, "_request", _denied)
+    configured = settings.model_copy(update={"hub_remote_address": "100.64.0.9"})
+
+    code = await hub.serve(configured)
+
+    assert code == EXIT_DEPLOYMENT
+
+
 async def test_a_configured_hub_whose_agent_holds_another_address_stays_down(
     settings: Settings,
     wired: dict[str, list[Any]],
