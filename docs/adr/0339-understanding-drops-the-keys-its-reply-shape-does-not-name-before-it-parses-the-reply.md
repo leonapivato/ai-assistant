@@ -1,6 +1,6 @@
 # 339. Understanding drops the keys its reply shape does not name before it parses the reply
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-21
 - Scope: how the understanding stage reads one completion's reply before ADR-0276 §6:2's checks run, and what it logs about that reading. The problem is [#3246](https://github.com/leonapivato/ai-assistant/issues/3246), and the clauses that make it a decision were found by the stop recorded on it ([comment](https://github.com/leonapivato/ai-assistant/issues/3246#issuecomment-6308698408)). Schema-constrained output, #3246's second option, and the other three stages' readers are not decided here (§5).
 - Dependency: [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md), as its status line leaves it.
