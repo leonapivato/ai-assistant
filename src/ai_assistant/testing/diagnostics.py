@@ -54,6 +54,16 @@ DEFAULT_RECORDED_AT: Final = datetime(2026, 10, 13, 12, 0, tzinfo=UTC)
 #: The longest name a file system takes for one entry, as the durable store bounds it.
 _NAME_BYTES: Final = 255
 
+#: Each activation's own file's suffix, as the durable store names it (§6:1).
+_SUFFIX: Final = ".jsonl"
+
+#: Each source writing to a file of its own beside the activation's, by that file's
+#: suffix: the observer's (ADR-0333 §3:1) and the follow-up asker's (ADR-0337 §8:12).
+_SECOND_FILES: Final = {
+    DiagnosticSource.OBSERVER: ".observer" + _SUFFIX,
+    DiagnosticSource.FOLLOW_UP: ".followup" + _SUFFIX,
+}
+
 #: The activation :func:`diagnostic_entry` writes for unless a case says otherwise.
 DEFAULT_DIAGNOSED_ACTIVATION: Final = "3f2b8c4e-1d5a-4e7b-9c0d-2a6f8e1b7c35"
 
@@ -92,10 +102,13 @@ def diagnostic_entry(
 def plain_file_name(activation_id: str, source: DiagnosticSource | None = None) -> bool:
     """Whether ``activation_id`` names a plain file, as the durable store decides it (§6:1).
 
-    An observer entry's file is the activation's second one, ``<id>.observer.jsonl``
-    (ADR-0333 §3:1), and an id ending ``.observer`` names no file, so the two names never
-    meet. Duplicated from the store, because ``ai_assistant.testing`` may not import
-    ``evaluation``; the shared suite holds the two to one answer.
+    An observer entry's file is a second one beside the activation's,
+    ``<id>.observer.jsonl`` (ADR-0333 §3:1), and a follow-up entry's a third,
+    ``<id>.followup.jsonl`` (ADR-0337 §8:12). An id ending ``.observer`` or ``.followup``
+    names no file, so an activation's own name never meets another's second one, and an
+    entry's name is bounded with the suffix of the file it goes to. Duplicated from the
+    store, because ``ai_assistant.testing`` may not import ``evaluation``; the shared
+    suite holds the two to one answer.
 
     Args:
         activation_id: The id.
@@ -103,11 +116,14 @@ def plain_file_name(activation_id: str, source: DiagnosticSource | None = None) 
             activation's own file.
     """
     separators = {os.sep, "\0"} | ({os.altsep} if os.altsep else set())
-    suffix = ".observer.jsonl" if source is DiagnosticSource.OBSERVER else ".jsonl"
+    suffix = _SUFFIX if source is None else _SECOND_FILES.get(source, _SUFFIX)
     return (
         activation_id not in {"", ".", ".."}
         and not any(one in activation_id for one in separators)
-        and not activation_id.endswith(".observer")
+        and not any(
+            activation_id.endswith(second.removesuffix(_SUFFIX))
+            for second in _SECOND_FILES.values()
+        )
         and len(f"{activation_id}{suffix}".encode("utf-8", errors="replace")) <= _NAME_BYTES
     )
 

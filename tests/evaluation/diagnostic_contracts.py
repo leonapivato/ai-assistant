@@ -51,9 +51,29 @@ _RELEASED_EARLY = (
 #: A second activation, so a case can say "another file".
 _OTHER = "9a1c7e52-6b3d-4f80-8e2a-1c5d7b9f0e46"
 
-#: Ids no file may be named by (§6:1); one ending ``.observer`` would name its own file
-#: like an observer's (ADR-0333 §3:1).
-_NOT_PLAIN = ("", ".", "..", "../escape", "a/b", "x\0y", "e" * 250, "x.observer")
+#: Ids no file may be named by (§6:1); one ending ``.observer`` or ``.followup`` would
+#: name its own file like an observer's (ADR-0333 §3:1) or a follow-up's (ADR-0337 §8:12).
+_NOT_PLAIN = (
+    "",
+    ".",
+    "..",
+    "../escape",
+    "a/b",
+    "x\0y",
+    "e" * 250,
+    "x.observer",
+    "x.followup",
+)
+
+#: The longest name a file system takes for one entry (§6:1).
+_NAME_BYTES = 255
+
+#: Each source writing to a file of its own beside the activation's, with a kind it
+#: writes and that file's suffix (ADR-0333 §3:1, ADR-0337 §8:12).
+_SECOND_FILES = (
+    (DiagnosticSource.OBSERVER, DiagnosticKind.STEP, ".observer.jsonl"),
+    (DiagnosticSource.FOLLOW_UP, DiagnosticKind.RETURNED, ".followup.jsonl"),
+)
 
 #: Text an entry's body carries, which no log record may (§2:4, ADR-0004 §5).
 _CONTENT = "the user's private words"
@@ -125,11 +145,16 @@ class DiagnosticSinkContract(_Cancellation):
         raise NotImplementedError
 
     async def recorded(
-        self, sink: DiagnosticSink, activation_id: str
+        self,
+        sink: DiagnosticSink,
+        activation_id: str,
+        source: DiagnosticSource | None = None,
     ) -> tuple[DiagnosticEntry, ...]:
         """What ``sink`` holds for ``activation_id``, in the order written.
 
-        The suite's window, not a seam: the Protocol has no read.
+        The suite's window, not a seam: the Protocol has no read. ``source`` names a
+        source with a file of its own (``_SECOND_FILES``) to read that file; ``None``
+        reads the activation's own.
         """
         raise NotImplementedError
 
@@ -191,6 +216,32 @@ class DiagnosticSinkContract(_Cancellation):
         records = _not_written(captured)
         assert len(records) == 1
         assert records[0]["activation_id"] == UNREADABLE_DIAGNOSTIC_FIELD
+        assert _CONTENT not in repr(captured)
+
+    @pytest.mark.parametrize(("source", "kind", "suffix"), _SECOND_FILES)
+    async def test_an_entry_in_a_second_file_is_bounded_with_that_files_name(
+        self,
+        sink: DiagnosticSink,
+        source: DiagnosticSource,
+        kind: DiagnosticKind,
+        suffix: str,
+    ) -> None:
+        """§6:1 over a second file's name: the bound counts the suffix the entry goes to."""
+        at_bound = "e" * (_NAME_BYTES - len(suffix))
+        over = f"{at_bound}e"
+        kept = diagnostic_entry(at_bound, source=source, kind=kind, body={"n": 1})
+        refused = diagnostic_entry(over, source=source, kind=kind, body={"text": _CONTENT})
+
+        with structlog.testing.capture_logs() as captured:
+            await sink.write(kept)
+            await sink.write(refused)
+
+        assert await self.recorded(sink, at_bound, source) == (kept,)
+        assert await self.recorded(sink, over, source) == ()
+        records = _not_written(captured)
+        assert [(one["activation_id"], one["source"]) for one in records] == [
+            (UNREADABLE_DIAGNOSTIC_FIELD, source.value)
+        ]
         assert _CONTENT not in repr(captured)
 
     async def test_a_store_fault_does_not_escape_and_is_logged_without_content(self) -> None:
