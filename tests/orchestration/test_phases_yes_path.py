@@ -141,6 +141,7 @@ if TYPE_CHECKING:
         PermissionDecision,
     )
     from ai_assistant.orchestration.disclosure import TurnSupply
+    from ai_assistant.orchestration.person_block import PersonBlocks
     from ai_assistant.orchestration.recall import Recalled
     from ai_assistant.orchestration.story_links import Candidates
     from ai_assistant.orchestration.understanding import Fetched, Windows
@@ -435,7 +436,7 @@ class _Hub:
     runner reads the memory store for what a write-time conflict would replace.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one keyword per seam a case varies
         self,
         *,
         recall: bool = False,
@@ -443,6 +444,7 @@ class _Hub:
         plans: FakePlanStore | None = None,
         stories_shown: bool = False,
         telegram: TelegramLineSeams | None = None,
+        person: Callable[[FakeMemoryStore], PersonBlocks] | None = None,
     ) -> None:
         self.planner = _Planner()
         self.reader = _Reader()
@@ -476,6 +478,9 @@ class _Hub:
             else None,
             story_links=StoryLinksStage(stories=self.stories) if stories_shown else None,
             telegram=telegram,
+            # ADR-0338 §7:1, §8:4: the person block's assembly over the hub's memory
+            # store, where a case wires a person-model store.
+            person_blocks=None if person is None else person(self.memory),
         )
         for tool in _TOOLS:
             self.harness.invoker.register(tool, self.world.handler(str(tool.capability)))
