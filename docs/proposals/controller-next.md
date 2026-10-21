@@ -121,7 +121,7 @@ the hub chat, because that page is ours (pick 3).
    by becoming background work.
 2. **Joining in flight.** A new input from the same author on the same place, arriving
    before the running activation has acted, joins it, and understanding reads both. Once
-   acting has begun, the new input starts the next activation.
+   it has acted, the new input starts the next activation.
 3. **The short wait.** After an input on a messaging place, the hub waits a per-kind
    moment before starting. On the hub chat, our page's *composing* signal extends the wait.
    On Telegram, which gives no such signal, the wait is fixed.
@@ -199,16 +199,18 @@ places).
 
 **Pick.**
 
-- **Before acting, a new input joins.** A new input from the same author on the same place
-  that arrives before the running activation has acted joins that activation. The input
-  then holds both messages, each kept with its own time (as ADR-0323 §5:4 already keeps
-  Telegram's).
-  - *Acted* means acting has run for any round. That covers a call with an effect, and also
-    the round's message, since writing a reply or a question into the place is an act
-    (ADR-0307 §3).
-  - Reads with no effect do not count as having acted. A call that only discloses and
-    declares no effect (ADR-0312) does count, because something left the hub. The simple
-    boundary is "acting has begun", and the walk can pick it instead (question 2).
+- **Until it has acted, a new input joins.** A new input from the same author on the
+  same place that arrives before the running activation has acted joins that activation.
+  The input then holds both messages, each kept with its own time (as ADR-0323 §5:4
+  already keeps Telegram's).
+  - *Has acted* is the one boundary used throughout this pick. It means acting has run a
+    call with an effect, or a call that discloses (ADR-0312), because something left the
+    hub, or it has written the round's message, since writing a reply or a question into
+    the place is an act (ADR-0307 §3).
+  - A round whose only calls are reads with no effect, such as the current time or a
+    memory search, has not acted. A correction arriving after such a round still joins,
+    and the results already read stay on the episode for the new planning to use.
+  - The simpler boundary, "acting has begun at all", is the alternative (question 2).
 - **What a join makes due again.** The joined input is input that no understanding covers
   yet, so `not_understood` answers again. Understanding runs over all of the input and
   records a new version (ADR-0276 §7:3 already accumulates versions). Recall runs again on
@@ -216,18 +218,19 @@ places).
   wiki's own row: *"a new understanding version, searched with → planning starts over."*
   Planning rounds already run for the older version are kept in the record and not
   reused.
-- **Once acting has begun, the new input waits** and starts the next activation when this
-  one ends, taken in with everything else waiting (ADR-0293 §6:3, ADR-0323 §5:5). The next
+- **Once it has acted, the new input waits** and starts the next activation when this one
+  ends, taken in with everything else waiting (ADR-0293 §6:3, ADR-0323 §5:5). The next
   activation sees in its window what the first one did, and its effects.
 - **Withdrawing.**
-  - *Before acting*, a typed "wait, not that" or "stop" joins like any message.
+  - *Before it has acted*, a typed "wait, not that" or "stop" joins like any message.
     Understanding reads it as withdrawing the request. Planning then writes a short
     acknowledgement or nothing (ADR-0317), and no effect ever happened.
-  - *After acting has begun*, the hub chat's stop control stops the activation at once
+  - *Once it has acted*, the hub chat's stop control stops the activation at once
     (ADR-0295). No further step starts, and an act already running finishes and is
     recorded. Typed text is still a message and never a stop (ADR-0295 §1:5), so it waits.
-  - On Telegram, which has no stop command (ADR-0323 §8:1), a typed withdrawal after acting
-    has begun waits. Whether the line should take `/stop` as a command is question 3.
+  - On Telegram, which has no stop command (ADR-0323 §8:1), a typed withdrawal after the
+    activation has acted waits. Whether the line should take `/stop` as a command is
+    question 3.
 - **Tie to #2584.** Joining and stopping are safe only where nothing has an effect yet, and
   the boundary above is drawn there. The cases #2584 leaves open sit on the far side of it:
   - an act running when the stop lands finishes;
@@ -252,7 +255,7 @@ sequenceDiagram
     A->>A: understanding v2, recall, planning round 1
     A->>U: acting: the question "Riverside, Sunday 14th, $40: book it?"
     U->>P: "and bring the dog"
-    Note over P: acting has begun, so this waits
+    Note over P: activation 1 has acted, so this waits
     A-->>P: activation 1 ends
     P->>P: activation 2 takes in "and bring the dog"
 ```
@@ -589,8 +592,8 @@ Each is a lane or several. (a) and (b) are independent.
 1. **One at a time within a place, with joining:** is that the right rule to keep, rather
    than ADR-0292 §11:1's every-message-its-own-activation, given that long work moves to
    the background?
-2. **Where the join window closes:** at the first act with an effect or message (the pick),
-   or as soon as acting begins at all, which is simpler?
+2. **Where the join window closes:** at the first call with an effect, call that
+   discloses, or message (the pick), or as soon as acting begins at all, which is simpler?
 3. **Telegram `/stop`:** should the line take `/stop` as a command that stops the running
    activation at once, as the hub chat's stop control does? It would amend ADR-0323 §8:1,
    and the line would gain a command typed text cannot fake.
