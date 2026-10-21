@@ -160,6 +160,49 @@ before the restart leaves it **stopped**, and says so: the venv may hold part of
 the new build, and starting that on a person's directory could upgrade it with
 no deploy having verified anything.
 
+**One deploy at a time, and the box's nightly backup stays off it** (#3262). From
+its first box command to its last, a deploy holds a ``flock`` on
+``~<service user>/.deploy-lock``, ``~assistant/.deploy-lock`` by default, as
+``scripts/deploy_container.py`` holds ``<person>/.deploy-lock`` (#3208). The
+deploy's box commands are separate ssh sessions, so the lock is held by one more:
+:meth:`Plan.hold_lock`, whose ssh session reads a pipe from this process alone to
+its end. The deploy releases the lock by closing that pipe; a deploy killed
+outright closes it by dying, and the lock goes with it. So no run ever finds a dead
+deploy's lock, and the file's existence means nothing. A deploy that finds the lock
+held refuses at once, before it has asked the hub anything, and so does one that
+finds a directory there: a lock made with ``mkdir``, which takes no ``flock``.
+
+**What anything else that takes the lock relies on**, the hosting repository's
+nightly backup of this hub first among them. These two paths and what they mean
+are a contract with it:
+
+* ``~<service user>/.deploy-lock`` is a regular file in the service user's home,
+  and holding it is an exclusive ``flock`` on it, for as long as the holder works
+  on the hub. The file is opened **only as the service user** (``su - <user>``),
+  never as root: it sits in a directory the service user can put any name in, so
+  a name root opened there could be pointed anywhere. A taker that cannot have the
+  lock at once is held off: a deploy refuses, and the backup waits or skips.
+* ``/run/deploy-hub-<service user>.owner`` names the holder. It is root's, in a
+  directory only root can create names in. Once the holder holds the lock, it
+  takes this file's ``flock``, writes its run's token there and lets the file go;
+  every box command a deploy sends runs under the file's ``flock``, and only while
+  the file names its token (:data:`FENCE`). So a holder waits for a command a dead
+  deploy left running, and a command a dead deploy sent is refused on the box
+  however late it arrives. Anything else that takes the lock does the same before
+  it touches the hub, writing what names no deploy (an empty file does).
+
+The copies, ``scp`` or ``rsync``, are not box commands, and no fence holds them:
+each is checked here against the lock before it starts, and writes only this run's
+staging directory, which nothing else reads. If the link drops under the holder
+alone, its ssh exits, and every command after that checks for it first; a command
+the box fences out says so. Either way the deploy stops there, as if killed:
+:class:`LockLost` escapes every handler that would otherwise stop, start or install
+something, the restart on the earlier build among them, because whoever holds the
+lock now may be at work on the hub. Running the deploy again finishes it or
+refuses. The holder's ssh runs with ``BatchMode``, so it needs a key or an agent,
+never a typed password; it runs in a session of its own, so a Ctrl-C at the
+terminal reaches the deploy, whose handling of it still runs under the lock.
+
 ``--dry-run`` prints the exact commands the run would issue and contacts nothing.
 It is what the tests drive, because the remote half cannot be exercised from a
 gate that has no box to talk to.
@@ -182,7 +225,7 @@ import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -407,6 +450,230 @@ class BackupTarget:
 
     data_dir: str
     artifact: str
+
+
+# --------------------------------------------------------------------------- #
+# The deploy lock: one deploy at a time, and the nightly backup off it (#3262) #
+# --------------------------------------------------------------------------- #
+
+
+#: The deploy lock's file, in the service user's home: the contract with anything
+#: else that takes the lock (the module docstring has it whole).
+DEPLOY_LOCK = ".deploy-lock"
+#: Where the owner file goes: a directory only root can create names in.
+_OWNER_DIR = "/run"
+#: A service user's name as this script will put it in a path: no ``/``, and no
+#: leading ``-`` or ``.``, so ``/run/deploy-hub-<user>.owner`` is one file there.
+_SERVICE_USER = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
+#: How the holder's ssh session runs: never a prompt, since it runs in a session of
+#: its own with no terminal to prompt on, and with keepalives, so a link that drops
+#: ends it here within a minute and a half rather than whenever TCP notices.
+_HOLDER_SSH = (
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=30",
+    "-o",
+    "ServerAliveInterval=30",
+)
+#: The exit status of a holder that could not have the lock, sysexits'
+#: ``EX_TEMPFAIL`` (as ``flock --conflict-exit-code`` is told to say); of one that
+#: found a directory where the lock file goes, a lock taken with ``mkdir``, which
+#: takes no ``flock`` and so is refused; and of a box command the fence refused.
+_BUSY = 75
+_LEGACY = 78
+_FENCED = 77
+_FENCED_SAID = "deploy-hub: fenced"
+#: How long a released holder has to end before it is killed.
+_RELEASE_SECONDS = 30
+#: The lock's holder, the half that runs as root: ``sh -c HOLDER sh <owner file>
+#: <run token>``, reading on its standard input what the service user's half
+#: (:meth:`Plan.hold_lock`) printed. Once that half says it holds the lock, it
+#: takes the owner file's ``flock``, which every box command of a deploy holds
+#: while it runs (:data:`FENCE`), so it waits for a command a dead deploy left
+#: running; writes the run's token there, so a command a dead deploy sent is
+#: refused however late it arrives; and says ``held``. It then reads the pipe to
+#: its end, which comes when the service user's half ends: when this deploy closes
+#: the session's standard input, or dies. Whatever stops it short, it says so on a
+#: line of its own, so the deploy closes the session rather than waiting on a
+#: service user's half that still holds the lock and still reads.
+HOLDER = """said=deploy-lock-$2
+state=
+while IFS= read -r line; do
+  case $line in
+    "$said="*) state=${line#*=}; break ;;
+  esac
+done
+case $state in
+  held|[0-9]|[0-9][0-9]|[0-9][0-9][0-9]) ;;
+  dir) state=78 ;;
+  *) state=1 ;;
+esac
+if [ "$state" = held ]; then
+  if flock -- "$1" sh -c 'printf "%s\\n" "$2" > "$1"' sh "$1" "$2"; then
+    echo "$said=held"
+    exec cat >/dev/null
+  fi
+  state=1
+fi
+echo "$said=$state"
+exit "$state"
+"""
+#: Every box command of a deploy that holds the lock: under ``flock <owner file>``,
+#: as ``sh -c FENCE sh <owner file> <run token> <the command line>``. It runs the
+#: command, in the shell ssh would have run it in, only while the owner file names
+#: the deploy's token, and holds the file's lock throughout, so no other holder
+#: takes over while it runs.
+FENCE = """if [ "$(cat -- "$1")" != "$2" ]; then
+  echo 'deploy-hub: fenced: another deploy, or the nightly backup, holds the lock' >&2
+  exit 77
+fi
+exec "${SHELL:-/bin/sh}" -c "$3"
+"""
+
+
+class LockLost(BaseException):
+    """This deploy no longer holds the deploy lock: it stops, as if killed there.
+
+    A ``BaseException``, so no handler of a failure catches it and goes on to
+    stop, start or install anything, the hub's restart on its earlier build
+    among them: another deploy, or the nightly backup, may hold the lock now,
+    and whatever this one did next could undo that one's work.
+    """
+
+
+def _lost(why: str) -> LockLost:
+    """Say that the lock is gone, and that the deploy stopped where it was.
+
+    Args:
+        why: How this deploy knows.
+
+    Returns:
+        The exception to raise.
+    """
+    return LockLost(
+        f"{why} Another deploy, or the box's nightly backup, may hold the\n"
+        "lock now. This deploy stopped there, as one killed there would, and changes\n"
+        "nothing more: it does not start the hub again either. The lines above say\n"
+        "where it stopped. Deploy again once the link is back; that finishes the job or\n"
+        "refuses."
+    )
+
+
+class Lease(Protocol):
+    """The deploy lock, held by a process that lives as long as this deploy."""
+
+    def held(self) -> bool:
+        """Whether the process holding it still runs.
+
+        Returns:
+            ``False`` once it has ended, and the lock with it.
+        """
+        ...
+
+    def release(self) -> None:
+        """End the holding process, and the lock with it. Never raises."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessLease:
+    """The deploy lock, held by the local ``ssh`` running the box's holder.
+
+    Its standard input is a pipe from this process alone, so it ends when this
+    deploy does, however it ends: a kill closes the pipe, the holder on the box
+    reads its end and exits, and the kernel releases the lock with its
+    descriptor. It runs in a session of its own, so a Ctrl-C at the terminal is
+    the deploy's to handle, and its handling still runs under the lock.
+    """
+
+    process: subprocess.Popen[bytes]
+
+    def held(self) -> bool:
+        """Whether the holder still runs.
+
+        Returns:
+            ``False`` once it has exited, as it does when its link to the box drops.
+        """
+        return self.process.poll() is None
+
+    def release(self) -> None:
+        """Close the holder's standard input and wait for it to end."""
+        _end(self.process)
+
+
+def _end(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
+    """Close a holder's standard input and collect what it printed once it ends.
+
+    Args:
+        process: The holder.
+
+    Returns:
+        The rest of its standard output and its standard error.
+    """
+    try:
+        return process.communicate(timeout=_RELEASE_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return process.communicate()
+
+
+def _hold(argv: list[str], said: str) -> ProcessLease | tuple[int, str, str]:
+    """Start the lock's holder, and wait until it holds the lock or says it cannot.
+
+    Args:
+        argv: The holder's local argv.
+        said: What the holder's answer starts with, :attr:`Plan.lock_said`: then
+            ``=held``, or ``=`` and the status it exits with.
+
+    Returns:
+        Its lease once it says ``held``, else its exit status and output.
+
+    Raises:
+        DeployError: If the executable cannot be started.
+    """
+    try:
+        process = subprocess.Popen(  # noqa: S603  # an argv, never a shell line
+            [_binary(argv[0]), *argv[1:]],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise DeployError(f"could not run {argv[0]}: {exc.strerror or exc}") from exc
+    assert process.stdout is not None  # noqa: S101  # a pipe, asked for above
+    held, answered = f"{said}=held\n".encode(), f"{said}=".encode()
+    printed = b""
+    while line := process.stdout.readline():
+        if line == held:
+            return ProcessLease(process)
+        if line.startswith(answered):
+            break
+        printed += line
+    out, err = _end(process)
+    return (
+        process.returncode,
+        (printed + out).decode("utf-8", "replace"),
+        err.decode("utf-8", "replace"),
+    )
+
+
+def _raise_if_fenced(status: int, error: str) -> None:
+    """Stop the deploy where the box refused its command for want of the lock.
+
+    Args:
+        status: The command's exit status.
+        error: Its standard error.
+
+    Raises:
+        LockLost: If :data:`FENCE` refused it.
+    """
+    if status == _FENCED and _FENCED_SAID in error:
+        raise _lost(
+            "the box refused this deploy's command: another holder took the deploy lock\n"
+            "once this deploy's session holding it ended."
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -1062,6 +1329,118 @@ class Plan:
         #: Whether the wheel goes as an rsync delta onto a base already on the box,
         #: rather than whole by `scp`. Only ever what `--delta` said.
         self.delta: bool = bool(args.delta)
+        #: The deploy lock while this run holds it (:func:`_deploy`); from then on
+        #: every box command is sent only while it is held, and fenced on the box.
+        self.lease: Lease | None = None
+
+    # -- the deploy lock --------------------------------------------------------
+
+    @property
+    def lock_file(self) -> str:
+        """The deploy lock's file, in the service user's home.
+
+        Returns:
+            The path as an operator writes it, ``~<user>/.deploy-lock``.
+        """
+        return f"~{self.args.user}/{DEPLOY_LOCK}"
+
+    @property
+    def owner_file(self) -> str:
+        """The file naming the run that holds the lock, which fences box commands.
+
+        Returns:
+            ``/run/deploy-hub-<user>.owner``: root's, in a directory only root can
+            create names in, so nothing that root opens or writes here can be
+            pointed elsewhere by another user.
+        """
+        return f"{_OWNER_DIR}/deploy-hub-{self.args.user}.owner"
+
+    @property
+    def lock_said(self) -> str:
+        """What the holder's answers start with: this run's own, so no banner is one.
+
+        Returns:
+            The prefix.
+        """
+        return f"deploy-lock-{self.token}"
+
+    def hold_lock(self) -> str:
+        """Return the remote command line that takes and holds the deploy lock.
+
+        Two halves, one pipe. The **service user's**, in its login shell, refuses a
+        directory where the lock file goes, then takes the file's ``flock`` without
+        waiting, says whether it has it, and holds it while it copies the
+        session's standard input to the pipe, which ends when this deploy closes
+        it or dies. The file is opened by the service user alone, never by root:
+        it sits in the service user's home, where root opening a name could be
+        pointed anywhere. The **root** half, :data:`HOLDER`, reads that answer,
+        writes the run's token to the owner file under its ``flock``, and says
+        ``held``, or says why not.
+
+        Returns:
+            The remote command line, run as the login user.
+        """
+        said = self.lock_said
+        lock = f"~/{DEPLOY_LOCK}"
+        taker = (
+            f"if [ -d {lock} ]; then echo {said}=dir; exit 0; fi\n"
+            f"flock --nonblock --conflict-exit-code {_BUSY} {lock}"
+            f" sh -c {shlex.quote(f'echo {said}=held; exec cat')}\n"
+            f"echo {said}=$?\n"
+        )
+        holder = shlex.join(["sh", "-c", HOLDER, "sh", self.owner_file, self.token])
+        return f"{as_service_user(taker, self.args.user)} | {holder}"
+
+    def holder_command(self) -> list[str]:
+        """Return the local argv that holds the lock for as long as this deploy runs.
+
+        Returns:
+            The ssh invocation, with :data:`_HOLDER_SSH`'s options.
+        """
+        return ["ssh", *_HOLDER_SSH, f"{self.args.ssh_user}@{self.args.host}", self.hold_lock()]
+
+    def fence(self, remote: str) -> str:
+        """Return a box command as it runs under the lock (:data:`FENCE`).
+
+        Args:
+            remote: The command line, as the login user's shell would run it.
+
+        Returns:
+            The command line that runs it only while this run holds the lock.
+        """
+        owner = self.owner_file
+        return shlex.join(
+            ["flock", "--", owner, "sh", "-c", FENCE, "sh", owner, self.token, remote]
+        )
+
+    def guard(self) -> None:
+        """Refuse to send anything more once the lock's holder has ended.
+
+        Raises:
+            LockLost: If this run took the lock and its holder has since ended.
+        """
+        if self.lease is not None and not self.lease.held():
+            raise _lost(
+                f"the session holding {self.lock_file} on the box ended: the link to the\n"
+                "box dropped."
+            )
+
+    def remote(self, remote: str) -> list[str]:
+        """Return the local argv that runs one command on the box.
+
+        Args:
+            remote: The command line, as the login user's shell runs it.
+
+        Returns:
+            The ssh invocation: fenced (:meth:`fence`) while this run holds the lock.
+
+        Raises:
+            LockLost: If this run took the lock and its holder has since ended.
+        """
+        if self.lease is None:
+            return ssh_command(self.args.host, self.args.ssh_user, remote)
+        self.guard()
+        return ssh_command(self.args.host, self.args.ssh_user, self.fence(remote))
 
     @property
     def delta_keep(self) -> str:
@@ -1639,6 +2018,7 @@ def render(plan: Plan, commit: str) -> list[str]:
     """
     args = plan.args
     lines = [f"# deploying {commit} to {args.ssh_user}@{args.host} as service user {args.user}"]
+    lines.extend(_lock_lines(plan))
     if plan.locked:
         lines.extend(_mode_lines(plan, commit))
         return lines
@@ -1650,6 +2030,28 @@ def render(plan: Plan, commit: str) -> list[str]:
     lines.append("# otherwise — uv.lock moved, no marker, a commit this clone lacks, an empty")
     lines.append("# venv, or a lockfile modified in the tree — the locked set goes first:")
     lines.extend(_mode_lines(locked, commit))
+    return lines
+
+
+def _lock_lines(plan: Plan) -> list[str]:
+    """Render the deploy lock: its holder, and the fence every box command runs under.
+
+    Args:
+        plan: The plan.
+
+    Returns:
+        The lines to print.
+    """
+    holder = plan.holder_command()
+    lines = _step_lines(" ".join(holder[:-1]), [("lock    ", holder[-1])])
+    lines.append(f"          (held on {plan.lock_file} from the first box command to the last,")
+    lines.append("          refused at once while another deploy or the box's nightly backup")
+    lines.append("          holds it, and released when this run ends, however it ends)")
+    lines.append(
+        f"fence   : every ssh {plan.args.ssh_user}@{plan.args.host} command below is sent as"
+    )
+    lines.extend(f"          {part}" for part in plan.fence("<the command>").splitlines())
+    lines.append("          and every copy is checked against the lock before it starts")
     return lines
 
 
@@ -1770,6 +2172,7 @@ def _run_local(argv: list[str], *, check: bool = True, cwd: Path | None = None) 
 
     Raises:
         DeployError: If the command fails and ``check`` is set.
+        LockLost: If the box refused it for want of the deploy lock.
     """
     resolved = [_binary(argv[0]), *argv[1:]]
     completed = subprocess.run(  # noqa: S603  # fixed argv, no shell, resolved binary
@@ -1779,6 +2182,7 @@ def _run_local(argv: list[str], *, check: bool = True, cwd: Path | None = None) 
         text=True,
         check=False,
     )
+    _raise_if_fenced(completed.returncode, completed.stderr)
     if check and completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise DeployError(f"{argv[0]} failed: {detail}")
@@ -1796,10 +2200,12 @@ def _probe(argv: list[str]) -> tuple[int, str, str]:
 
     Raises:
         DeployError: If the executable is not on PATH.
+        LockLost: If the box refused it for want of the deploy lock.
     """
     completed = subprocess.run(  # noqa: S603  # fixed argv, no shell, resolved binary
         [_binary(argv[0]), *argv[1:]], capture_output=True, text=True, check=False
     )
+    _raise_if_fenced(completed.returncode, completed.stderr)
     return completed.returncode, completed.stdout, completed.stderr
 
 
@@ -1879,11 +2285,14 @@ def _discard_stage(plan: Plan) -> None:
     Args:
         plan: The plan, carrying the staging directory to remove.
     """
-    command = ssh_command(plan.args.host, plan.args.ssh_user, plan.unstage())
     try:
-        status, out, error = _probe(command)
+        status, out, error = _probe(plan.remote(plan.unstage()))
     except DeployError as exc:  # ssh itself is unavailable
         status, out, error = 1, "", str(exc)
+    except LockLost:
+        # The deploy stops at its next command, as a killed one would, and a
+        # killed one leaves its staging directory too: it is this run's alone.
+        status, out, error = 1, "", "the deploy lock is gone, so this deploy sends nothing more"
     if status != 0:
         print(
             f"warning: could not remove the staging directory {plan.stage_dir} on\n"
@@ -1913,8 +2322,7 @@ def _assert_staged(plan: Plan, digest: str, requirements_digest: str | None = No
         DeployError: If the check could not run, a staged file is unreadable,
             or its digest is not the local file's.
     """
-    command = ssh_command(plan.args.host, plan.args.ssh_user, plan.verify_staged())
-    probed = _probe(command)
+    probed = _probe(plan.remote(plan.verify_staged()))
     _check_staged(plan, probed, digest, requirements=False)
     if not plan.locked:
         return
@@ -1983,8 +2391,7 @@ def _assert_active(plan: Plan) -> None:
     Raises:
         DeployError: If the check could not run, or the unit is not active.
     """
-    command = ssh_command(plan.args.host, plan.args.ssh_user, plan.is_active())
-    status, out, error = _probe(command)
+    status, out, error = _probe(plan.remote(plan.is_active()))
     active = _labelled(out, "UNIT_STATE=")
     if active is None:
         raise DeployError(
@@ -2009,6 +2416,8 @@ def _wait_for_ready(plan: Plan, invocation: str) -> None:
         DeployError: If ``hub_ready`` does not appear within the bound.
     """
     deadline = time.monotonic() + plan.args.ready_timeout
+    # What an operator runs by hand: the command itself, never the fence this run
+    # sends it under, which names this run's token.
     command = ssh_command(plan.args.host, plan.args.ssh_user, plan.journal_for(invocation))
     while True:
         # A failed poll is NOT an empty journal. `journalctl` exits 0 when a match
@@ -2016,7 +2425,7 @@ def _wait_for_ready(plan: Plan, invocation: str) -> None:
         # here is ssh, su or journalctl failing, and swallowing it would spend the
         # whole timeout and then report the one thing that is not wrong: that the
         # unit never logged hub_ready.
-        status, out, err = _probe(command)
+        status, out, err = _probe(plan.remote(plan.journal_for(invocation)))
         if status != 0:
             raise DeployError(
                 f"could not read the unit's journal (exit {status}):\n"
@@ -2610,10 +3019,72 @@ def _keep_base(plan: Plan, ssh: Callable[[str], list[str]]) -> None:
 
 
 def _deploy(plan: Plan, repo: Path, commit: str) -> None:
-    """Run the deploy and verify it.
+    """Take the deploy lock, run the deploy under it and verify it, and release it.
 
     Args:
         plan: The plan.
+        repo: The repository root.
+        commit: The commit being deployed.
+
+    Raises:
+        DeployError: If the lock cannot be had, any step fails, or verification
+            does not pass.
+    """
+    if plan.delta:
+        _require_local_rsync()
+    # Before the box is asked anything: what this deploy rules on is the box as it
+    # stands, and nothing else may change it until the deploy ends.
+    lease = _take_lock(plan)
+    plan.lease = lease
+    try:
+        _deploy_held(plan, repo, commit)
+    finally:
+        plan.lease = None
+        lease.release()
+
+
+def _take_lock(plan: Plan) -> Lease:
+    """Take the deploy lock, held until released or this deploy ends.
+
+    Args:
+        plan: The plan.
+
+    Returns:
+        The lease.
+
+    Raises:
+        DeployError: If another holds it, a directory stands where its file goes,
+            or it could not be taken. Nothing has been asked of the hub then.
+    """
+    taken = _hold(plan.holder_command(), plan.lock_said)
+    if not isinstance(taken, tuple):
+        return taken
+    status, out, error = taken
+    lock = plan.lock_file
+    if status == _LEGACY:
+        raise DeployError(
+            f"{lock} is a directory, where this deploy takes a flock on a file: a lock\n"
+            "made with mkdir, which takes no flock, by a deploy or a backup that may still\n"
+            f"run. Once none runs, remove it (rmdir {lock}) and deploy again.\n{_UNTOUCHED}"
+        )
+    if status == _BUSY:
+        raise DeployError(
+            f"another deploy, or the box's nightly backup, holds {lock}.\n"
+            "Each holds it for as long as it runs, and the kernel releases it when the\n"
+            "holder ends, however it ends, so one that was killed holds nothing. Wait for\n"
+            f"the one running, or find it on the box with `fuser -v {lock}`.\n{_UNTOUCHED}"
+        )
+    detail = error.strip() or out.strip() or "(no output)"
+    raise DeployError(
+        f"could not take the deploy lock, {lock} (exit {status}):\n{detail}\n{_UNTOUCHED}"
+    )
+
+
+def _deploy_held(plan: Plan, repo: Path, commit: str) -> None:
+    """Run the deploy and verify it, under the lock.
+
+    Args:
+        plan: The plan, holding the lock.
         repo: The repository root.
         commit: The commit being deployed.
 
@@ -2623,10 +3094,8 @@ def _deploy(plan: Plan, repo: Path, commit: str) -> None:
     args = plan.args
 
     def ssh(remote: str) -> list[str]:
-        return ssh_command(args.host, args.ssh_user, remote)
+        return plan.remote(remote)
 
-    if plan.delta:
-        _require_local_rsync()
     before_marker = marker_body(_run_local(ssh(plan.read_marker())), plan.token)
     version_output = _run_local(ssh(plan.read_version()))
     before_version = version_output.strip()
@@ -2708,8 +3177,13 @@ def _stage(
     """
     if plan.delta:
         _run_local(ssh(plan.seed()))
+    # The copies are not box commands, and the fence cannot hold them: each is
+    # checked against the lock before it starts, and writes this run's staging
+    # directory alone, which nothing else reads and every command after it fences.
+    plan.guard()
     _run_local(plan.stage())
     if plan.locked:
+        plan.guard()
         _run_local(plan.stage_requirements())
     _run_local(ssh(plan.make_readable()))
     # Unchanged under --delta, and the reason a base can never make a wrong install:
@@ -2748,7 +3222,7 @@ def _install_and_verify(
     args = plan.args
 
     def ssh(remote: str) -> list[str]:
-        return ssh_command(args.host, args.ssh_user, remote)
+        return plan.remote(remote)
 
     # Streamed: the wheel carries a vendored model (ADR-0024 §4) and is tens of
     # megabytes today, with no ceiling that says it stays there.
@@ -3019,6 +3493,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         _check_delta_options(args)
+        if _SERVICE_USER.fullmatch(args.user) is None:
+            raise DeployError(
+                f"{args.user!r} is not a service user's name: letters, digits, '_', '.'"
+                " and '-', not starting with '.' or '-'"
+            )
         repo = Path(args.repo).resolve()
         # Only ever a *prediction*, used to render the plan and to name the file
         # on the box. A real run replaces it with the build's actual output.
@@ -3030,7 +3509,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(line)
             return 0
         _deploy(plan, repo, commit)
-    except DeployError as exc:
+    except (DeployError, LockLost) as exc:
         print(f"deploy-hub: {exc}", file=sys.stderr)
         return 1
     return 0

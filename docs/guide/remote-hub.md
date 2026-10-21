@@ -326,6 +326,17 @@ for the next one to start from; a box that has none yet is given one with
 `--delta-base`. A delta that cannot run is refused rather than sent whole.
 `--help` has the defaults, and `--dry-run` shows every step.
 
+One deploy runs at a time. For the whole deploy it holds a `flock` on
+`.deploy-lock` in the service user's home (`~assistant/.deploy-lock` by
+default), so a second deploy, or a nightly backup that takes the same lock,
+refuses at once instead of working on the hub mid-install. The kernel releases
+the lock when the deploy ends, however it ends, so a deploy that was killed
+holds nothing and there is nothing to remove. To see who holds it, run
+`fuser -v ~assistant/.deploy-lock` on the box. If the ssh link drops under the
+session holding it, the deploy stops before its next command and changes
+nothing more; deploy again once the link is back. The session that holds the
+lock never prompts, so the box takes a key or an agent, not a typed password.
+
 ## When it does not work
 
 **The address and the identity disagree.** This is the common one, and nothing
