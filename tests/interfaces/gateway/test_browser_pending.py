@@ -12,20 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import sys
 from datetime import timedelta
-from pathlib import Path as _Path
 from typing import TYPE_CHECKING
 
 import pytest
 from browser_drive import DESKTOP, PHONE, driving, press
+from pending_candidates_contract import PENDING_AT, PendingCandidatesSubject, hold_episode
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import expect
 from test_browser_session_loss import _ends_the_session
-
-sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "orchestration"))
-
-from pending_candidates_contract import PENDING_AT, PendingCandidatesSubject, hold_episode
 
 from ai_assistant.testing import FakeMemoryStore, FakePlanStore
 
