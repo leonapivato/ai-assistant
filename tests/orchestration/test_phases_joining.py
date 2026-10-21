@@ -13,6 +13,9 @@ join's entry point, as a reader will hand it.
 - A takeover stops the same person's uncommitted work on another place and brings its
   input in, naming it (§4:4-§4:7); two in one pass, one per understanding version; and
   one refused at a ``join_limit`` of 0 and at an exhausted one (§1:4's last case).
+- A look-up is a pure read (ADR-0341 §2): a round of look-ups alone commits nothing and
+  an input after it joins; a round mixing one with a story write runs the commitment
+  step before either, and a join sets it aside whole (ADR-0341 §3).
 """
 
 from __future__ import annotations
@@ -61,7 +64,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.joining import JoiningInput, input_standing
 from ai_assistant.orchestration.phase_path import PhasePath
-from ai_assistant.testing import FakeModelProvider, FakeToolCallingCompleter
+from ai_assistant.testing import FakeModelProvider, FakeStoryStore, FakeToolCallingCompleter
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -146,9 +149,10 @@ def _held_after_acting(entered: asyncio.Event, release: asyncio.Event) -> type[P
     return _Held
 
 
-#: A pure read (§3:1): its capability changes nothing and it does not leave the hub. No
-#: capability the hub offers today declares that — the look-ups declare their class's
-#: ``own_records`` effect (ADR-0306 §3:1) — so the case declares its own.
+#: A pure read run through ``ToolInvoker`` (ADR-0341 §2:1): its capability changes
+#: nothing and it does not leave the hub. The look-ups are pure reads too, but run
+#: against the store under their class's ``own_records`` effect (ADR-0306 §3:1), so a
+#: case that reads the invoker's own record of the call declares its own.
 _HOURS: Final = ToolDefinition.model_validate(
     {
         **_BOOK.model_dump(),
@@ -642,3 +646,92 @@ async def test_a_question_a_join_set_aside_is_asked_again_with_its_exact_line() 
     (question,) = await _assistant(harness, conversation)
     assert question.startswith(asking)
     assert question != asking, "the question carries its exact line below the prose"
+
+
+# --- ADR-0341 §2-§3: a look-up is a pure read --------------------------------------------
+
+
+async def test_a_round_of_look_ups_alone_commits_nothing_so_an_input_after_it_joins() -> None:
+    """ADR-0341 §2:1, §3: a look-up writes nothing and stays in the hub, so no step runs.
+
+    The round searching memory runs, the activation stays uncommitted, and an input
+    sent once it has run joins; the look-up's result stays on the episode for the round
+    planned from the new understanding version (ADR-0332 §3:13).
+    """
+    entered, release = asyncio.Event(), asyncio.Event()
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            calls=(_call("c1", "search_memory", query="dentist", looking_for="when it is"),)
+        ),
+        RoundResponse(text="Tuesday at ten."),
+    )
+    harness = phases_harness(
+        completer, phases={"path": _held_after_acting(entered, release), "look_ups": True}
+    )
+    conversation = await open_conversation(harness)
+    await harness.engine.write_message(conversation, message=said("m-1", "when's the dentist?"))
+    await asyncio.wait_for(entered.wait(), SETTLE)
+    running = await working(harness, conversation)
+
+    joined = harness.engine._join_running(_joining(conversation, "the kids' one"))
+    release.set()
+    (episode,) = await _all_frozen(harness, 1)
+
+    assert joined == running
+    record = processing(episode)
+    assert [one.messages[0].text for one in record.joined] == ["the kids' one"]
+    assert [one.version for one in record.understanding] == [1, 2]
+    assert _ran(record, ControllerStage.PLANNING) == [ControllerRule.FIRST_ROUND_DUE] * 2
+    # The look-up ran and nothing set it aside: the new version's round is shown its
+    # result (§3:13), and the one effect claimed is the message's.
+    shown = _shown(completer, 1)
+    assert "new input joined" not in shown
+    (looked,) = json.loads(shown)["rounds"][0]["calls"]
+    assert (looked["capability"], looked["outcome"]) == ("search_memory", "done")
+    assert [one.is_call for one in await harness.plans.activation_effects([running])] == [False]
+    assert await _assistant(harness, conversation) == ["Tuesday at ten."]
+
+
+async def test_a_round_mixing_a_look_up_and_a_story_write_runs_the_step_and_is_set_aside() -> None:
+    """ADR-0341 §3: the story write commits, so the step runs before either call.
+
+    A join that lands before acting is found by that step, which sets the whole round
+    aside, the look-up planned ahead of the write included (ADR-0332 §3:7): no story is
+    started, nothing is claimed, and planning is told why for both calls.
+    """
+    entered, release = asyncio.Event(), asyncio.Event()
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(
+            calls=(
+                _call("c1", "search_memory", query="Riverside", looking_for="past trips"),
+                _call("c2", "start_story", notes=["A camping trip to Riverside."]),
+            )
+        ),
+        RoundResponse(text="Noted."),
+    )
+    stories = FakeStoryStore(now=lambda: AT)
+    harness = phases_harness(
+        completer,
+        phases={
+            "path": _held_acting(entered, release),
+            "look_ups": True,
+            "stories": stories,
+            "story_calls": True,
+        },
+    )
+    conversation = await open_conversation(harness)
+    await harness.engine.write_message(conversation, message=said("m-1", "plan Riverside"))
+    await asyncio.wait_for(entered.wait(), SETTLE)
+    running = await working(harness, conversation)
+
+    assert harness.engine._join_running(_joining(conversation, "in August")) == running
+    release.set()
+    (episode,) = await _all_frozen(harness, 1)
+
+    assert (await stories.stories()).stories == ()
+    assert [one.is_call for one in await harness.plans.activation_effects([running])] == [False]
+    assert _shown(completer, 1).count("new input joined before this round acted") == 2
+    record = processing(episode)
+    assert [one.messages[0].text for one in record.joined] == ["in August"]
+    assert _ran(record, ControllerStage.PLANNING) == [ControllerRule.FIRST_ROUND_DUE] * 2
+    assert await _assistant(harness, conversation) == ["Noted."]

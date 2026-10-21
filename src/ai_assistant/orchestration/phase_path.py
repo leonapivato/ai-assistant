@@ -2059,8 +2059,12 @@ _SET_ASIDE: Final = "not run: new input joined before this round acted, so it wa
 def _commits(latest: _Round, decided: RoundAuthorization) -> bool:
     """Whether acting would dispatch something of the round that commits (ADR-0332 §3:2).
 
-    A call that is not a pure read, a tidy-up's write to the hub's own records among
-    them, or the round's message where it would be written.
+    A call that is not a pure read as ADR-0341 §2:1 defines it (:func:`is_pure_read`),
+    or the round's message where it would be written. A call whose capability declares
+    a write is not a pure read, a story call, ``remember`` and a tidy-up's write to the
+    hub's own records among them, and neither is one that leaves the hub or one in the
+    world. A look-up in memory or of a story writes nothing and stays in the hub, so it
+    does not commit.
     """
     verdict = decided.message
     message = (

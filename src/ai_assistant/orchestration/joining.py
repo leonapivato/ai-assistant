@@ -1,9 +1,12 @@
 """Joining a running activation, and taking one over from another place (ADR-0332 §3, §4).
 
-**The boundary** (§3:1-§3:2). An activation folds in new input until it commits to
-something it cannot take back: acting's first call that is not a *pure read* — a call
-whose capability declares :attr:`~ai_assistant.core.types.CapabilityEffect.NONE` and
-does not leave the hub — or the round's message (:func:`is_pure_read`). The mark is
+**The boundary** (§3:2, ADR-0341 §2). An activation folds in new input until it commits
+to something it cannot take back: acting's first call that is not a *pure read* — a
+call whose capability declares no ``writes``, declares its effect as
+:attr:`~ai_assistant.core.types.CapabilityEffect.NONE` or
+:attr:`~ai_assistant.core.types.CapabilityEffect.OWN_RECORDS`, and does not leave the
+hub, so a look-up in memory or of a story is one — or the round's message
+(:func:`is_pure_read`). The mark is
 :attr:`~ai_assistant.orchestration.activation_state.ActivationState.committed`, set by
 acting's commitment step (:meth:`~ai_assistant.orchestration.activation_state.
 ActivationState.commit`), in one step with no await between the check and the mark.
@@ -223,14 +226,24 @@ class RunningActivation:
     committed: bool
 
 
-def is_pure_read(tool: ToolDefinition) -> bool:
-    """Whether a call under ``tool`` is a pure read (ADR-0332 §3:1).
+#: The effects a pure read may declare (ADR-0341 §2:1): none, or the assistant's own
+#: records, which a look-up in memory or of a story declares (ADR-0306 §3:1).
+_READ_EFFECTS: Final = frozenset({CapabilityEffect.NONE, CapabilityEffect.OWN_RECORDS})
 
-    Its capability declares that it changes nothing, and it does not leave the hub. A
-    write to the hub's own records is not one, even one safe to repeat that gets no
-    effect record, and neither is a call that leaves the hub, a web search among them.
+
+def is_pure_read(tool: ToolDefinition) -> bool:
+    """Whether a call under ``tool`` is a pure read (ADR-0341 §2, superseding ADR-0332 §3:1).
+
+    Its capability declares an empty ``writes``, declares its effect as none or as the
+    assistant's own records, and declares that it does not leave the hub: a look-up in
+    memory or of a story is one. A write to the hub's own records is not, even one safe
+    to repeat that gets no effect record, and neither is a call that leaves the hub, a
+    web search among them, nor a call in the world.
+
+    It reads ``tool``'s declaration, the one tool selection picked for the call, and
+    nothing else: never the call's name, its capability's name or its arguments (§2:2).
     """
-    return tool.effect is CapabilityEffect.NONE and not tool.leaves_hub
+    return not tool.writes and tool.effect in _READ_EFFECTS and not tool.leaves_hub
 
 
 def _running(state: ActivationState) -> bool:
