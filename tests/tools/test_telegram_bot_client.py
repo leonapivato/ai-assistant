@@ -445,6 +445,7 @@ async def test_another_chat_reads_no_record_and_no_token() -> None:
     [
         (Records(None), TOKEN),
         (Records(entry(state=ProvisioningState.PENDING)), TOKEN),
+        (Records(entry(slot=None)), TOKEN),
         (Records(entry(), entry(revision=2)), TOKEN),
         (Records(entry(), entry(identity="someone-else")), TOKEN),
         (Records(entry(), entry(state=None)), TOKEN),
@@ -457,6 +458,7 @@ async def test_another_chat_reads_no_record_and_no_token() -> None:
     ids=[
         "no-record",
         "not-active",
+        "keyless-record",
         "revision-moved",
         "identity-moved",
         "removed-across-the-read",

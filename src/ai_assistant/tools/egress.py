@@ -3576,6 +3576,25 @@ class HttpsEgressTransport:
     checks, ADR-0231 §15's spend admission, ADR-0192's claim and completion and
     ADR-0241 §1's deadline are all decided *before* :meth:`fetch` is entered, by the
     one component that has the authorised call in hand.
+
+    **Two shapes, fixed at construction** (ADR-0325 §2). Built with a ``Secrets``
+    face it is **credentialed**, and everything above holds. Built with ``None`` it
+    is **keyless**: it reads no credential, and ADR-0148 §6:5's third condition reads
+    as ADR-0325 §2:3 restates it for every callable — the record's shape is the
+    callable's. A credentialed transport refuses a record that names no slot; a
+    keyless one refuses a record that names one, because ignoring it would leave a
+    credential in the keyring that no call reads while the user believes it is in
+    use. Which shape a transport is comes from the integration's own code where the
+    composition root constructs it, and never from a record, a binding, a
+    ``Settings`` value or a remote answer (§2:2).
+
+    **A keyless transport reads the record once** (§2:5): steps 2 and 3 above become
+    one read, made after the pinning and as the last read of that record before the
+    first byte is transmitted, and it refuses unless the bound reference is
+    connectable, the record names no slot, and the identity recorded is the bound
+    one. There is no credential read for a provisioning act to land inside, so there
+    is nothing for a second read to bracket. An act landing after the read is
+    ADR-0148 §6:21's case and stops nothing already begun (§2:6).
     """
 
     __slots__ = ("_exchange", "_records", "_registration", "_secrets")
@@ -3585,7 +3604,7 @@ class HttpsEgressTransport:
         *,
         registration: EgressRegistration,
         records: ConnectionRecords,
-        secrets: Secrets,
+        secrets: Secrets | None,
         exchange: HttpsExchange,
     ) -> None:
         """Bind a transport to one registered integration and one connected account.
@@ -3606,7 +3625,10 @@ class HttpsEgressTransport:
             secrets: The ``INTEGRATION``-scoped reading face ADR-0125 §8 injects at
                 the integration that needs one. Never a ``SecretStore``: provisioning
                 is not this object's, and a transport handed a writing face could
-                delete the credential it reads.
+                delete the credential it reads. ``None`` builds a **keyless**
+                transport (ADR-0325 §2:1), which reads no credential and refuses a
+                record naming a slot. Required, with no default, so that which shape
+                an integration is stays a choice written at its construction site.
             exchange: The HTTPS exchange, which holds ADR-0231 §5's five properties
                 and the integration's own read bound —
                 ``Settings.search_max_response_bytes`` for the search,
@@ -3636,7 +3658,7 @@ class HttpsEgressTransport:
         *,
         origin: str,
         target: str,
-        credential_field: str,
+        credential_field: str | None,
         fields: Sequence[tuple[str, str]] = (),
     ) -> HttpsResponse:
         """Ask the bound account's origin for ``target``, or refuse without asking.
@@ -3665,7 +3687,8 @@ class HttpsEgressTransport:
                 percent-encoded.
             credential_field: The field name the account's credential rides in. Its
                 value is supplied here and by nothing else, so no caller of this
-                method ever holds one.
+                method ever holds one. ``None`` on a keyless transport, which has no
+                credential to place, and on no other.
             fields: Any further request fields the integration wants, in order.
                 Credential-free by construction: the one field that carries a secret
                 is the one named above.
@@ -3683,8 +3706,11 @@ class HttpsEgressTransport:
                 identity is not the bound one, the record moved across the credential
                 read, the keyring holds nothing under the slot the record names, or
                 the credential is not a value this seam will write into a request
-                field. Each is one operator fact — this integration cannot ask under
-                this account — and none of them transmitted anything.
+                field — or, on either shape, if the record's shape is not this
+                transport's: a slot on a keyless transport's record, none on a
+                credentialed one's (ADR-0325 §2:3). Each is one operator fact — this
+                integration cannot ask under this account — and none of them
+                transmitted anything.
             HttpsRedirectRefusedError: If the far end answered ``3xx``.
             HttpsResponseTooLargeError: If the response passed the read bound.
             MalformedHttpResponseError: If it was not an HTTP/1.1 response this seam
@@ -3695,12 +3721,25 @@ class HttpsEgressTransport:
                 read is different, and an unanswerable one there is treated as a
                 change.
             CancelledError: Re-raised after the channel is released (ADR-0060 §1).
+            ValueError: If ``credential_field`` is ``None`` on a credentialed
+                transport or a name on a keyless one — the integration's own code
+                disagreeing with how it was constructed. Raised before anything is
+                read.
         """
+        if (credential_field is None) != (self._secrets is None):
+            msg = (
+                f"{self._registration.tool_id}: a keyless transport takes no credential "
+                f"field and a credentialed one takes one (ADR-0325 §2:2); this call and "
+                f"the construction site disagree"
+            )
+            raise ValueError(msg)
         # Every refusal decidable from the binding and the arguments alone runs
         # first, so a call that cannot be performed as bound never reaches a
         # credential read at all — strictly better than ADR-0148 §6 requires, and
         # here rather than in a docstring claiming a bound nobody has.
         self._pinned_origin(binding, origin)
+        if self._secrets is None or credential_field is None:
+            return await self._fetch_keyless(binding, origin=origin, target=target, fields=fields)
 
         before = await self._records.latest(self._registration.reference)
         slot = self._slot_of(before, binding)
@@ -3715,12 +3754,64 @@ class HttpsEgressTransport:
             )
             raise _refuse_changed(msg)
 
+        return await self._ask(
+            origin=origin,
+            target=target,
+            headers=((credential_field, credential.get_secret_value()), *fields),
+        )
+
+    async def _fetch_keyless(
+        self,
+        binding: EgressBinding,
+        *,
+        origin: str,
+        target: str,
+        fields: Sequence[tuple[str, str]],
+    ) -> HttpsResponse:
+        """Ask under a keyless connection: one record read, then the request (ADR-0325 §2).
+
+        Entered only once :meth:`_pinned_origin` has passed, which holds two of
+        ADR-0148 §6:5's four conditions (§2:4). The record is read **once**, as the
+        last read of it before the first byte is transmitted (§2:5), and
+        :meth:`_keyless_record` decides the other two over what that read returned —
+        nothing carried over from the binding seam's own read or an earlier call.
+
+        Args:
+            binding: The authorised binding.
+            origin: The origin the ruled call carries, already pinned.
+            target: The request target the integration composed.
+            fields: The request fields, none of which carries a credential.
+
+        Returns:
+            The response.
+
+        Raises:
+            BoundCallChangedError: On :meth:`_keyless_record`'s terms, or where the
+                exchange will not write the composed request.
+            ConnectionStoreError: If the one record read failed. Propagated, as the
+                credentialed shape's first read is: an outage asserts nothing.
+        """
+        self._keyless_record(await self._records.latest(self._registration.reference), binding)
+        return await self._ask(origin=origin, target=target, headers=tuple(fields))
+
+    async def _ask(
+        self, *, origin: str, target: str, headers: Sequence[tuple[str, str]]
+    ) -> HttpsResponse:
+        """Hand the composed request to the exchange, converting a field it will not write.
+
+        Args:
+            origin: The pinned origin.
+            target: The request target.
+            headers: The request fields, the credential's first where there is one.
+
+        Returns:
+            The response.
+
+        Raises:
+            BoundCallChangedError: If the exchange refused a target or a field value.
+        """
         try:
-            return await self._exchange.get(
-                origin=origin,
-                target=target,
-                headers=((credential_field, credential.get_secret_value()), *fields),
-            )
+            return await self._exchange.get(origin=origin, target=target, headers=headers)
         except TransportPinError as exc:
             # The exchange refuses a target or a field value it will not write, and
             # by this point the origin has already been pinned — so what is left is
@@ -3736,6 +3827,47 @@ class HttpsEgressTransport:
                 f"target nor the field value is named"
             )
             raise _refuse_changed(msg) from exc
+
+    def _keyless_record(self, stored: StoredEntry | None, binding: EgressBinding) -> None:
+        """Refuse unless the record is connectable, keyless and the bound account's.
+
+        ADR-0325 §2:3 and §2:4 over the one read §2:5 allows: the bound reference is
+        connectable (an ``ACTIVE`` record, ADR-0148 §6:16), the record's shape is
+        this transport's — **it names no slot** — and the identity currently recorded
+        is the one the binding carries.
+
+        Args:
+            stored: What the one read returned for the bound reference.
+            binding: The authorised binding.
+
+        Raises:
+            BoundCallChangedError: If any of the three does not hold.
+        """
+        entry = _entry_of(stored)
+        if entry is None or entry.state is not ProvisioningState.ACTIVE:
+            state = "absent" if entry is None or entry.state is None else entry.state.value
+            msg = (
+                f"{self._registration.tool_id}: connection "
+                f"{self._registration.reference!r} is not connectable — its record is "
+                f"{state}. Nothing is asked under it (ADR-0148 §6)"
+            )
+            raise _refuse_changed(msg)
+        if entry.slot is not None:
+            msg = (
+                f"{self._registration.tool_id}: connection "
+                f"{self._registration.reference!r} names a credential, and this "
+                f"integration reads none, so nothing is asked under it; connect it "
+                f"without a credential and disconnect this one (ADR-0325 §2:3)"
+            )
+            raise _refuse_changed(msg)
+        if entry.identity != binding.account.identity:
+            msg = (
+                f"{self._registration.tool_id}: connection "
+                f"{self._registration.reference!r} is recorded for a different account "
+                f"than the ruling was taken over, so nothing is asked under it "
+                f"(ADR-0148 §6)"
+            )
+            raise _refuse_changed(msg)
 
     def _pinned_origin(self, binding: EgressBinding, origin: str) -> None:
         """Refuse a call this integration is not the registration for (ADR-0148 §6).
