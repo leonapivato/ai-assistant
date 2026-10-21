@@ -12672,8 +12672,10 @@ class PersonModelStore(Protocol):
     ) -> PersonModelWrite:
         """Set one field to ``value``, or clear it with ``None`` (ADR-0338 §3:2-§3:5).
 
-        In one step: the value is validated (§3:2) against the store's bound on a text
-        field, which a composition-root constant holds; the field is written; its
+        In one step: the value is validated (§3:2) — ``None`` clears the field, and any
+        other value is text with a UTF-8 encoding, not blank, within the store's bound
+        on a field's length, which a composition-root constant holds, and for a time
+        zone a name ``zoneinfo`` resolves; the field is written; its
         change-log entry is appended with the old value, the new, the act and the
         instant; and every pending field suggestion of that field and value is marked
         accepted (§8:9). A value equal to the one held changes and logs nothing

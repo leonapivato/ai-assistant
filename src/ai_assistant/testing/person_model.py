@@ -11,9 +11,10 @@ would do.
 with an empty profile, as the store is when first created. The hub's seed (§3:7) is a
 write a test makes, as the composition root makes it.
 
-**It checks its arguments exactly as the store does**, with ``core``'s one rule for a
-field's value (:func:`~ai_assistant.core.types.profile_value_fault`), so a consumer's
-test cannot pass over a write no deployment would take.
+**It checks a field's value exactly as the contract says every store does** (ADR-0338
+§3:2), in :func:`profile_value_fault`: the bound on a text field is the composition
+root's, so the check is each store's own and the shared suite holds them to one answer,
+and a consumer's test cannot pass over a write no deployment would take.
 
 **It can be told to fail**: :meth:`FakePersonModelStore.fail_next` makes the next
 member called raise :class:`~ai_assistant.core.errors.PersonModelStoreError` before it
@@ -29,6 +30,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from itertools import count
 from typing import TYPE_CHECKING, Final, final
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ai_assistant.core.errors import PersonModelStoreError
 from ai_assistant.core.types import (
@@ -50,7 +52,7 @@ from ai_assistant.core.types import (
     StyleMark,
     SuggestionKind,
     SuggestionState,
-    profile_value_fault,
+    encodable_text,
 )
 
 if TYPE_CHECKING:
@@ -58,7 +60,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import ProposedSuggestion
 
-__all__ = ["DEFAULT_PROFILE_FIELD_CHARS", "FakePersonModelStore"]
+__all__ = ["DEFAULT_PROFILE_FIELD_CHARS", "FakePersonModelStore", "profile_value_fault"]
 
 #: The fake's bound on a text field's length, where a test names none. The deployment's
 #: is a composition-root constant (ADR-0338 §3:2); this is only the fake's default.
@@ -69,6 +71,39 @@ _UNCHANGED: Final = PersonModelWriteKind.UNCHANGED
 
 #: The acts that may make a pin (ADR-0338 §4:1).
 _PIN_ACTS: Final = frozenset({PersonActHow.PANEL, PersonActHow.APPROVAL})
+
+
+def profile_value_fault(field: ProfileField, value: str | None, *, chars: int) -> str | None:
+    """Why ``value`` is no valid value of ``field``, or ``None`` where it is (ADR-0338 §3:2).
+
+    The contract's rule, as ``PersonModelStore.set_field`` states it: ``None`` clears the
+    field; any other value is text, not blank, within ``chars`` characters, the bound a
+    composition-root constant holds; and a time zone is a name ``zoneinfo`` resolves.
+
+    Args:
+        field: The field written.
+        value: The value written, or ``None`` to clear it.
+        chars: The bound on a text field's length.
+
+    Returns:
+        A code-owned reason, or ``None``.
+    """
+    if value is None:
+        return None
+    if not value.strip():
+        return "a field is cleared, never set to blank text"
+    if len(value) > chars:
+        return f"a field's value is at most {chars} characters"
+    try:
+        encodable_text(value)
+    except ValueError:
+        return "a field's value is text with a UTF-8 encoding"
+    if field is ProfileField.TIME_ZONE:
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError, ValueError:
+            return "a time zone is a name zoneinfo resolves"
+    return None
 
 
 def _utcnow() -> datetime:

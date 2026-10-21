@@ -11,14 +11,23 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 from phases_support import chat_turn, event, phases_harness
+from test_activation_state import _admitted
 from test_engine import AT as HARNESS_AT
 from understanding_support import STATED_PROPOSAL, understanding_stage
 
-from ai_assistant.core.types import OWNER_PERSON_ID, PersonActHow, PersonModelAct, ProfileField
+from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
+    PersonActHow,
+    PersonModelAct,
+    PlacementReach,
+    ProfileField,
+)
+from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.person_block import PersonBlocks
 from ai_assistant.testing import (
     FakeMemoryStore,
@@ -30,7 +39,7 @@ from ai_assistant.testing.memories import memory, said_support
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import PersonModelStore
-    from ai_assistant.core.types import PersonModel
+    from ai_assistant.core.types import Memory, PersonModel
 
 pytestmark = pytest.mark.anyio
 
@@ -51,13 +60,13 @@ class _Counting:
         return await self.store.read(person_id)
 
 
-async def _wired() -> tuple[FakeMemoryStore, _Counting, PersonBlocks]:
+async def _wired(pinned: Memory = DIET) -> tuple[FakeMemoryStore, _Counting, PersonBlocks]:
     # The harness's own clock, which its episodes are captured at.
     memory_store = FakeMemoryStore(now=lambda: HARNESS_AT)
-    await memory_store.add(DIET)
+    await memory_store.add(pinned)
     people = FakePersonModelStore()
     await people.set_field(OWNER_PERSON_ID, ProfileField.ADDRESS, "Robin", act=PANEL)
-    await people.add_pin(OWNER_PERSON_ID, DIET.id, act=PANEL)
+    await people.add_pin(OWNER_PERSON_ID, pinned.id, act=PANEL)
     counting = _Counting(people)
     blocks = PersonBlocks(store=cast("PersonModelStore", counting), memory=memory_store)
     return memory_store, counting, blocks
@@ -121,3 +130,46 @@ async def test_a_connected_sources_event_is_the_owners_too() -> None:
 
     assert _understood(model)["person"]["profile"]["address"]["value"] == "Robin"
     assert counting.reads == 1
+
+
+#: A pin placed for the owner alone: a memory about someone else (ADR-0199 §3).
+ABOUT_ADA: Final = memory(
+    "m:ada", "Ada is allergic to nuts.", said_support(when=AT, added_at=AT), about_person="Ada"
+)
+
+
+@pytest.mark.parametrize(
+    ("pinned", "reach"),
+    [(DIET, PlacementReach.ANYONE), (ABOUT_ADA, PlacementReach.OWNER)],
+    ids=["unrestricted-pin", "restricted-pin"],
+)
+async def test_the_episode_inherits_the_placement_of_what_the_block_gave_it(
+    pinned: Memory, reach: PlacementReach
+) -> None:
+    """ADR-0309 §5:10, ADR-0217 §3: a pin is a record the activation was given."""
+    memory_store, _, blocks = await _wired(pinned)
+    harness = phases_harness(memory=memory_store, person_blocks=blocks)
+
+    _, episode = await chat_turn(harness, "What should I cook tonight?")
+
+    assert episode.placement.reach is reach
+
+
+async def test_an_understanding_run_again_is_given_no_memory_forgotten_since() -> None:
+    """§7:10: joined input runs understanding again over the block less what is gone."""
+    memory_store, counting, blocks = await _wired()
+    harness = phases_harness(memory=memory_store, person_blocks=blocks)
+    state = _admitted()
+    working = SimpleNamespace(supply=BoundedAudienceSupply(speakable_attested_sources=frozenset()))
+    first = await harness.engine._person_block(state, working)  # type: ignore[arg-type]
+
+    await memory_store.delete(DIET.id)
+    again = await harness.engine._person_block(state, working)  # type: ignore[arg-type]
+
+    assert first is not None
+    assert [one.memory.id for one in first.kept] == [DIET.id]
+    assert again is not None
+    assert again.kept == ()
+    assert again.profile == first.profile
+    assert counting.reads == 1
+    assert state.person_block is again
