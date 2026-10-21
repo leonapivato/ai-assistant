@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     EpisodicMemory,
     InputOrigin,
+    JoinedInput,
     MessageAuthor,
     PlanningRound,
     ProcessingReason,
@@ -599,6 +600,52 @@ async def test_the_window_is_the_lines_recent_episodes_and_a_reply_brings_its_qu
     assert window.asked == {21: AskedIn(round="round:1", parts=(1,))}
     (input_message,) = window.input_messages
     assert (input_message.position, input_message.replies_to) == (30, 21)
+
+
+async def test_the_window_shows_a_message_that_joined_an_earlier_activation() -> None:
+    """ADR-0332 §3:16: a joined message is the activation's input, so the window shows it.
+
+    One a takeover brought from another place is that place's, and is not shown.
+    """
+    memory = FakeMemoryStore(now=lambda: AT)
+    channel = line_channel(REFERENCE, CHAT)
+    earlier = _line_episode(
+        "act-a",
+        (RecordedInputMessage(text="book Riverside", sent_at=AT, position=20),),
+        channel=channel,
+    )
+    processing = earlier.processing_record
+    assert processing is not None
+    joined = (
+        JoinedInput(
+            joined_at=AT,
+            channel=channel,
+            messages=(RecordedInputMessage(text="actually Saturday", sent_at=AT, position=21),),
+        ),
+        JoinedInput(
+            joined_at=AT,
+            channel=ChannelIdentity(channel_type="conversation", instance_id="c-1"),
+            messages=(RecordedInputMessage(text="for two", sent_at=AT, position=3),),
+            taken_over_from="act-z",
+        ),
+    )
+    await memory.add(
+        earlier.model_copy(
+            update={"processing_record": processing.model_copy(update={"joined": joined})}
+        )
+    )
+    line = _Line(memory=memory)
+    line.fake.hold(text(30, "and a table outside", message_id=30))
+    line.start()
+    await line.until(lambda: bool(line.inputs), what="the input was taken in")
+    await line.stop()
+
+    window = line.inputs[0].window
+    assert [(one.position, one.author, one.text) for one in window.messages] == [
+        (20, MessageAuthor.USER, "book Riverside"),
+        (21, MessageAuthor.USER, "actually Saturday"),
+    ]
+    assert window.links == {20: "act-a", 21: "act-a"}
 
 
 async def test_a_reply_to_a_message_older_than_the_window_is_brought_in_from_its_quote() -> None:

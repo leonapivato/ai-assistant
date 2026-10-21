@@ -1373,12 +1373,24 @@ class TelegramReader:
         links: dict[int, str],
         forwarded: dict[int, ClaimedAuthor],
     ) -> None:
-        """One episode's messages: the user's from its trigger, the assistant's by record."""
+        """One episode's messages: the user's from its input, the assistant's by record.
+
+        Its input is its trigger's messages and each joined on the line's chat
+        (ADR-0332 §3:16): a joined message is the activation's input as its trigger's
+        are, so the window shows it, linked to that activation. One a takeover brought
+        from another place is not the line's, and is not shown here.
+        """
         processing = episode.processing_record
         if processing is None:
             return
         activation_id = processing.activation_id
-        for one in processing.trigger.messages:
+        joined = (
+            one
+            for each in processing.joined
+            if each.channel == self._channel and each.taken_over_from is None
+            for one in each.messages
+        )
+        for one in (*processing.trigger.messages, *joined):
             if one.position is None or one.position < 1 or not one.text.strip():
                 continue
             shown[one.position] = LineMessage(
