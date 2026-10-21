@@ -32,7 +32,8 @@ the text. Each is validated exactly as a bare reply is. An object found in the t
 taken only where it names a field of the shape, so a stray ``{}`` or an unrelated object
 in the prose is never read as an empty answer; and no container, an object or an array, is
 ever looked inside, nor a fence opened within one, so a nested piece of a malformed answer
-is never read as the answer.
+is never read as the answer. A fence only marks a block as a candidate: it never cuts the
+search, so a container left open inside a block still holds what follows the block.
 """
 
 from __future__ import annotations
@@ -71,14 +72,15 @@ class ScoutReply(BaseModel):
 
 
 #: A fence opening a block, its tag group 1. It is matched only where the walk stands in
-#: the reply's prose, outside any container, so never within a JSON string.
-_OPENING: Final = re.compile(r"```([^\n`]*)\n")
+#: the reply's prose, outside any container, so never within a JSON string. Its tag is one
+#: word, so no bracket of the reply is ever taken for part of a tag.
+_OPENING: Final = re.compile(r"```[ \t]*([\w.+-]*)[ \t]*\n")
 
 #: The fence closing a block, alone on its line: a JSON string holds no raw newline, so
 #: backticks inside a fenced object's string never close its block.
 _CLOSING: Final = re.compile(r"^[ \t]*```[ \t]*$", re.MULTILINE)
 
-#: The tags a block holding the reply carries: none, or ``json``.
+#: The tags a block offered as the reply carries: none, or ``json``.
 _JSON_TAGS: Final = frozenset({"", "json", "JSON"})
 
 
@@ -141,7 +143,7 @@ def _names_a_field(text: str, shape: type[BaseModel]) -> bool:
     return not named.isdisjoint(value)
 
 
-def _candidates(text: str, *, fences: bool = True) -> tuple[list[str], list[str]]:
+def _candidates(text: str) -> tuple[list[str], list[str]]:
     """The fenced blocks' bodies and the top-level JSON objects in ``text``, each in order.
 
     One walk finds both, so they share one rule: nothing inside a container, an object or
@@ -151,41 +153,58 @@ def _candidates(text: str, *, fences: bool = True) -> tuple[list[str], list[str]
     as far as its brackets balance. A container whose brackets never balance ends the
     walk, since everything after it may be inside it.
 
-    A fence the walk meets outside any container opens a block that runs to its closing
-    fence, alone on its line, or, where none closes it, to the end. A block untagged
-    or tagged ``json`` yields its body, and the objects in that body are met as any
-    others; a block tagged as anything else is passed whole, since what it quotes is not
-    the reply. A fence inside a block's body opens nothing (``fences`` is false there).
+    A fence the walk meets outside any container opens a block, which runs to its closing
+    fence, alone on its line, or where none closes it to the end. A block untagged or
+    tagged ``json`` offers its body as a candidate. A fence changes nothing else: the walk
+    goes on through the block as through any other text, a container opened in it still
+    open past its closing fence, and steps over that closing fence rather than taking it
+    for an opening one.
     """
     decoder = json.JSONDecoder()
     fenced: list[str] = []
     objects: list[str] = []
+    closings: dict[int, int] = {}
     index = 0
     while index < len(text):
-        opening = _OPENING.match(text, index) if fences else None
+        if index in closings:
+            index = closings[index]
+            continue
+        opening = _OPENING.match(text, index)
         if opening is not None:
             closing = _CLOSING.search(text, opening.end())
-            body = text[opening.end() : len(text) if closing is None else closing.start()]
+            if closing is not None:
+                closings[closing.start()] = closing.end()
             if opening.group(1).strip() in _JSON_TAGS:
-                fenced.append(body)
-                objects.extend(_candidates(body, fences=False)[1])
-            index = len(text) if closing is None else closing.end()
+                fenced.append(
+                    text[opening.end() : len(text) if closing is None else closing.start()]
+                )
+            index = opening.end()
             continue
         if text[index] not in "{[":
             index += 1
             continue
-        try:
-            value, end = decoder.raw_decode(text, index)
-        except ValueError, RecursionError:
-            balanced = _balanced_end(text, index)
-            if balanced is None:
-                break
-            end = balanced
-        else:
-            if isinstance(value, dict):
-                objects.append(text[index:end])
+        end = _past_container(decoder, text, index, objects)
+        if end is None:
+            break
         index = end
     return fenced, objects
+
+
+def _past_container(
+    decoder: json.JSONDecoder, text: str, start: int, objects: list[str]
+) -> int | None:
+    """The index past the container at ``start``, keeping it in ``objects`` if an object.
+
+    One that decodes is passed whole, an array's members never kept; one that does not is
+    skipped as far as its brackets balance. ``None`` where they never balance.
+    """
+    try:
+        value, end = decoder.raw_decode(text, start)
+    except ValueError, RecursionError:
+        return _balanced_end(text, start)
+    if isinstance(value, dict):
+        objects.append(text[start:end])
+    return end
 
 
 #: Each closing bracket, and the opening one it closes.
