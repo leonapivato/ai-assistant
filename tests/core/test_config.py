@@ -6,6 +6,7 @@ from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, get_args
+from zoneinfo import ZoneInfo
 
 import numpy
 import pytest
@@ -34,6 +35,21 @@ def test_defaults_are_valid() -> None:
 def test_unknown_timezone_is_rejected() -> None:
     with pytest.raises(ValidationError, match="unknown timezone"):
         Settings(timezone="Mars/Olympus_Mons")
+
+
+@pytest.mark.parametrize("zone", ["é" * 200, "a" * 256], ids=["non-ascii", "ascii"])
+def test_a_timezone_the_file_system_refuses_is_rejected_as_unknown(
+    monkeypatch: pytest.MonkeyPatch, zone: str
+) -> None:
+    """#3328: a name too long for a path is an unknown zone, never raised as OSError."""
+    with pytest.raises(OSError, match="too long"):
+        ZoneInfo(zone)  # the premise: the lookup itself raises OSError (ENAMETOOLONG)
+
+    with pytest.raises(ValidationError, match="unknown timezone"):
+        Settings(timezone=zone)
+    monkeypatch.setenv("ASSISTANT_TIMEZONE", zone)
+    with pytest.raises(ConfigurationError, match="invalid configuration"):
+        load_settings()
 
 
 def test_load_settings_wraps_invalid_config_as_configuration_error(
