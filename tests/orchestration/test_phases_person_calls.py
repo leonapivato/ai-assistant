@@ -27,6 +27,8 @@ from test_phases_yes_path import (
     _run_approved,
 )
 
+from ai_assistant.app import build_engine
+from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     PersonActHow,
@@ -42,6 +44,8 @@ from ai_assistant.testing import FakePersonModelStore
 from ai_assistant.testing.memories import memory, said_support
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from ai_assistant.testing import FakeMemoryStore
 
 pytestmark = pytest.mark.anyio
@@ -82,6 +86,28 @@ async def test_with_no_store_wired_none_of_the_three_is_offered() -> None:
     await hub.turn("Hello.")
 
     assert hub.planner.offered(0).isdisjoint(PERSON_MODEL_CAPABILITIES)
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["switch-on", "switch-off"])
+async def test_the_composition_roots_switch_decides_whether_the_three_are_offered(
+    tmp_path: Path, *, on: bool
+) -> None:
+    """§11:2 as deployed: ``Settings.person_model`` wires the store, and so the calls.
+
+    Nothing here opens a socket: the engine is built over a hashing embedder and closed.
+    """
+    engine = build_engine(
+        Settings(embedder=EmbedderKind.HASHING, person_model=on), data_dir=tmp_path
+    )
+    try:
+        phases = engine._phases
+        assert isinstance(phases, PhasePath)
+        offered = {str(tool.capability) for tool in await phases._offered()}
+    finally:
+        await engine.aclose()
+
+    assert (offered >= PERSON_MODEL_CAPABILITIES) is on
+    assert offered.isdisjoint(PERSON_MODEL_CAPABILITIES) is not on
 
 
 async def test_wired_the_three_are_offered_and_only_to_an_activation_given_a_block() -> None:

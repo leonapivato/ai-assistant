@@ -5,7 +5,9 @@ sending a value for every argument its selected declaration takes is asked about
 its exact line must show every one of them but those §2:5 leaves out: the arguments the
 offered declaration names in ``system_supplied``, the *looking for* and the *deliberate
 repeat* mark. The capabilities are read from a deployment that configures every
-provider, so a capability added later is covered without a change here.
+provider and keeps the person model, so a capability added later is covered without a
+change here. An argument naming a memory by its id, as a ``pin``'s does, is read as the
+memory's wording, which its line shows in the id's place (ADR-0338 §8:6).
 
 **Nothing here opens a socket.** The engine is built over a hashing embedder and closed;
 every configured origin is an ``.invalid`` one (RFC 6761 §6.4), and no transport is
@@ -24,6 +26,7 @@ from test_planning import _earlier, _inputs, _stage
 from ai_assistant.app import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import ActionRequest, ProposedCall, RoundResponse
+from ai_assistant.orchestration.person_calls import worded_argument
 from ai_assistant.orchestration.phase_path import PhasePath
 from ai_assistant.orchestration.planning import (
     DELIBERATE_REPEAT,
@@ -40,8 +43,20 @@ if TYPE_CHECKING:
 #: The capabilities a deployment configuring every provider must offer, so this test
 #: cannot pass over a configuration that registered none of them.
 _FLOOR: Final = frozenset(
-    {"send_email", "book_stay", "booking_availability", "web_search", "remember"}
+    {
+        "send_email",
+        "book_stay",
+        "booking_availability",
+        "web_search",
+        "remember",
+        "set_profile",
+        "pin",
+        "unpin",
+    }
 )
+
+#: The wording a memory an argument names by id is shown by (ADR-0338 §8:6).
+_WORDING: Final = "Eats no meat."
 
 
 def _everything() -> Settings:
@@ -61,6 +76,8 @@ def _everything() -> Settings:
         booking_billed_amount=Decimal("140.00"),
         booking_billed_currency="EUR",
         booking_retained_records=3,
+        # ADR-0338 §11:2: the person model's switch, which offers its three calls.
+        person_model=True,
     )
 
 
@@ -122,14 +139,16 @@ async def test_every_capabilitys_exact_line_shows_every_argument_it_sends(
     )
     earlier = _earlier(calls=calls)
     sent = [_every_argument(selected) for _, selected in pairs]
+    worded = [worded_argument(str(offered.capability)) for offered, _ in pairs]
     outcomes = tuple(
         CallOutcome(
             earlier.id,
             call.call_id,
             CallOutcomeKind.NEEDS_YOU,
             request=ActionRequest(tool=selected, parameters=values),
+            worded=() if argument is None else ((argument, _WORDING),),
         )
-        for call, (_, selected), values in zip(calls, pairs, sent, strict=True)
+        for call, (_, selected), values, argument in zip(calls, pairs, sent, worded, strict=True)
     )
     asks = tuple(f"1.{n}" for n in range(1, len(pairs) + 1))
     stage, _, _ = _stage(RoundResponse(text="Shall I?", asks=asks))
@@ -143,12 +162,16 @@ async def test_every_capabilitys_exact_line_shows_every_argument_it_sends(
     assert len(planned.round.asked) == len(pairs)
     lines = planned.round.text.splitlines()[-len(pairs) :]
     missing: dict[str, list[str]] = {}
-    for number, ((offered, _), values, line) in enumerate(zip(pairs, sent, lines, strict=True), 1):
+    for number, ((offered, _), values, line, by_wording) in enumerate(
+        zip(pairs, sent, lines, worded, strict=True), 1
+    ):
         name = str(offered.capability)
         assert line.startswith(f"{number}. {name}"), line
         left_out = {*offered.system_supplied, LOOKING_FOR, DELIBERATE_REPEAT}
         for argument, value in values.items():
-            shown = f"{argument}: {json.dumps(value, ensure_ascii=False)}" in line
+            # §8:6: the memory an argument names is read as its wording, the argument sent.
+            read_as = _WORDING if argument == by_wording else value
+            shown = f"{argument}: {json.dumps(read_as, ensure_ascii=False)}" in line
             if shown is (argument in left_out):
                 missing.setdefault(name, []).append(argument)
     assert missing == {}, "arguments shown or left out wrongly, by capability"
