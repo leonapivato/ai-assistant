@@ -212,6 +212,8 @@ DEFAULT_BWLIMIT = 40
 #: modification time, and rsync's quick check would then skip the copy and leave
 #: the base in place. ``--no-whole-file`` because the delta is the point.
 _RSYNC_OPTIONS = ("-s", "--ignore-times", "--no-whole-file")
+#: ``find`` tests for a directory no group and no other can write, in POSIX form.
+_PRIVATE_DIR = "! -perm -020 ! -perm -002"
 #: Seconds to wait for ``hub_ready`` after the restart before calling it a failure.
 DEFAULT_READY_TIMEOUT = 60
 #: Seconds between journal polls while waiting for it.
@@ -1327,10 +1329,14 @@ class Plan:
         base is (``usable`` only for a readable, non-empty regular file), and
         whether the next base can be kept: ``not-a-file`` when something other than
         a regular file is already at that path, a directory or a link to one,
-        which a rename would put the wheel inside of; otherwise whether its
-        directory exists and can be written. That directory is created here when
-        it is missing, which is the only change the check makes, and it is the
-        deploy's own.
+        which a rename would put the wheel inside of; ``shared`` when its directory
+        is not the login user's alone, owned by it and writable by no group or
+        other, because the deploy writes a scratch file there as that user, root on
+        the default box, and anyone else who can create names in the directory can
+        put a link at the scratch path first; otherwise whether the directory
+        exists and can be written. It is created here, ``0700``, when it is
+        missing, which is the only change the check makes, and it is the deploy's
+        own.
 
         Returns:
             The remote command line.
@@ -1345,8 +1351,9 @@ class Plan:
             "else s=usable; fi; echo DELTA_BASE=$s; "
             f"mkdir -p -m 0700 {keep_dir} 2>/dev/null; "
             f"if [ -e {keep} ] && [ ! -f {keep} ]; then echo DELTA_KEEP=not-a-file; "
-            f"elif [ -d {keep_dir} ] && [ -w {keep_dir} ]; then echo DELTA_KEEP=writable; "
-            "else echo DELTA_KEEP=unwritable; fi"
+            f"elif [ ! -d {keep_dir} ] || [ ! -w {keep_dir} ]; then echo DELTA_KEEP=unwritable; "
+            f'elif [ -z "$(find -H {keep_dir} -prune -user "$(id -u)" {_PRIVATE_DIR})" ]; '
+            "then echo DELTA_KEEP=shared; else echo DELTA_KEEP=writable; fi"
         )
 
     def seed(self) -> str:
@@ -1355,12 +1362,17 @@ class Plan:
         rsync sends a file's difference against the file already at its
         destination, under that name. The base's name need not be the new wheel's,
         so the base is copied to the staged path rather than named in place, and
-        the base itself is never written by the transfer.
+        the base itself is never written by the transfer. The copy is made under
+        ``umask 077``: until the transfer replaces it, the staged file holds
+        whatever the base held, in a directory everyone can read, and the base
+        may be a path the operator named anywhere on the box. ``rsync`` keeps the
+        mode of the file it replaces, and :meth:`make_readable` opens the wheel
+        to the service user only once it is the wheel.
 
         Returns:
             The remote command line, run as the login user.
         """
-        return f"cp -- {remote_path(self.delta_base)} {remote_path(self.staged)}"
+        return f"umask 077 && cp -- {remote_path(self.delta_base)} {remote_path(self.staged)}"
 
     def keep_base(self) -> str:
         """Return the command that keeps the installed wheel as the next base.
@@ -2534,6 +2546,14 @@ def _rule_on_delta(plan: Plan, ssh: Callable[[str], list[str]]) -> None:
             f"--delta-keep {plan.delta_keep} is not a file on the box: something else, a\n"
             "directory or a link to one, is already there, and the kept wheel would go\n"
             f"inside it. Pass --delta-keep with a file's path. Or: {_DELTA_INSTEAD}\n{_UNTOUCHED}"
+        )
+    if keep == "shared":
+        raise DeployError(
+            f"the directory of {plan.delta_keep} on the box is not {login}'s alone: it is\n"
+            "someone else's, or a group or others can write it, and this deploy writes a\n"
+            f"file there as {login}, which anyone who can create names there could redirect.\n"
+            f"Make it {login}'s with no group or other write (chmod go-w), or pass\n"
+            f"--delta-keep elsewhere. Or: {_DELTA_INSTEAD}\n{_UNTOUCHED}"
         )
     if keep != "writable":
         raise DeployError(

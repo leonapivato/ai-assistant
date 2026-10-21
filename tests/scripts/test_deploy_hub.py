@@ -2935,6 +2935,10 @@ def test_a_transfer_that_left_the_base_in_place_is_caught_by_the_digest(
         ("DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=unreadable\nDELTA_KEEP=writable\n", "unreadable"),
         ("DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=usable\nDELTA_KEEP=unwritable\n", "cannot write"),
         ("DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=usable\nDELTA_KEEP=not-a-file\n", "is not a file"),
+        (
+            "DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=usable\nDELTA_KEEP=shared\n",
+            "is not root's alone",
+        ),
         ("", "could not ask the box what --delta needs"),
     ],
 )
@@ -3015,6 +3019,8 @@ def _sh_login(command: str, env: dict[str, str]) -> tuple[int, str, str]:
 def _login_home(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     home = tmp_path / "root"
     home.mkdir()
+    # Explicit, so a shell whose umask leaves group write does not make it shared.
+    home.chmod(0o755)
     return home, {"HOME": str(home), "PATH": os.environ["PATH"]}
 
 
@@ -3054,6 +3060,8 @@ def test_the_real_seed_keep_and_unstage_leave_one_base_and_no_stage(tmp_path: Pa
     assert _sh_login(plan.make_stage_dir(), env)[0] == 0
     assert _sh_login(plan.seed(), env)[0] == 0
     assert (stage / plan.wheel).read_bytes() == b"an earlier wheel"
+    # Whatever the base held is the login user's alone until the wheel replaces it.
+    assert (stage / plan.wheel).stat().st_mode & 0o777 == 0o600
     (stage / plan.wheel).write_bytes(b"the new wheel")
     # What an rsync cut short leaves beside the wheel.
     (stage / f".{plan.wheel}.Ab12Cd").write_bytes(b"half")
@@ -3146,3 +3154,39 @@ def test_the_real_keep_will_not_rename_into_a_directory_that_appeared(tmp_path: 
     assert status != 0
     assert list(keep.iterdir()) == []
     assert sorted(p.name for p in home.iterdir()) == ["keep"]
+
+
+@_NEEDS_SHELL
+@pytest.mark.parametrize(
+    ("mode", "state"), [(0o777, "shared"), (0o775, "shared"), (0o755, "writable")]
+)
+def test_the_real_delta_check_keeps_only_in_a_directory_no_one_else_can_write(
+    tmp_path: Path, mode: int, state: str
+) -> None:
+    # Anyone who can create names there could put a link at the scratch path the
+    # keep step copies onto, as root, before it does.
+    home, env = _login_home(tmp_path)
+    shared = home / "shared"
+    shared.mkdir()
+    shared.chmod(mode)
+    plan = _delta_plan(tmp_path, "--delta-keep", str(shared / "base.whl"))
+
+    probed = _sh_login(plan.probe_delta(), env)
+
+    assert _MODULE._labelled(probed[1], "DELTA_KEEP=") == state
+
+
+@_NEEDS_SHELL
+def test_a_keep_directory_reached_through_a_link_is_judged_by_what_it_names(
+    tmp_path: Path,
+) -> None:
+    home, env = _login_home(tmp_path)
+    private = tmp_path / "private"
+    private.mkdir()
+    private.chmod(0o700)
+    (home / "kept").symlink_to(private)
+    plan = _delta_plan(tmp_path, "--delta-keep", str(home / "kept" / "base.whl"))
+
+    assert _MODULE._labelled(_sh_login(plan.probe_delta(), env)[1], "DELTA_KEEP=") == "writable"
+    private.chmod(0o777)
+    assert _MODULE._labelled(_sh_login(plan.probe_delta(), env)[1], "DELTA_KEEP=") == "shared"
