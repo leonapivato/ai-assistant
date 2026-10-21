@@ -13,10 +13,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 from person_model_store_contract import (
+    FIELD_CHARS,
     MEMORY,
     PANEL,
     PersonModelStoreContract,
     PersonModelStoreFactory,
+    ticking,
 )
 
 from ai_assistant.core.errors import PersonModelStoreError
@@ -38,6 +40,10 @@ _FIELD_CHARS_DEFAULT = 200
 
 class TestFakePersonModelStoreContract(PersonModelStoreContract):
     """Runs FakePersonModelStore through the shared PersonModelStore suite."""
+
+    @pytest.fixture
+    def store(self) -> PersonModelStore:
+        return FakePersonModelStore(field_chars=FIELD_CHARS, now=ticking())
 
     @pytest.fixture
     def factory(self) -> PersonModelStoreFactory:

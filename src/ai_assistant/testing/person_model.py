@@ -159,8 +159,9 @@ class FakePersonModelStore:
                 ``suggestion``); sequential per kind where ``None``.
 
         Raises:
-            ValueError: If ``field_chars`` is below 1, or the clock's first reading is not
-                an aware instant.
+            ValueError: If ``field_chars`` is below 1.
+            PersonModelStoreError: If the clock's first reading, the owner's creation, is
+                not an aware instant, as a store's creation would fail.
         """
         if field_chars < 1:
             msg = "a field's bound is at least one character"
@@ -170,7 +171,7 @@ class FakePersonModelStore:
         self._clock = checked_clock(now, owner="FakePersonModelStore")
         numbers = count(1)
         self._new_id = new_id or (lambda kind: f"{kind}:{next(numbers)}")
-        owner = Person(id=OWNER_PERSON_ID, role=PersonRole.OWNER, created_at=self._clock())
+        owner = Person(id=OWNER_PERSON_ID, role=PersonRole.OWNER, created_at=self._now())
         self._people: dict[str, _Held] = {owner.id: _Held(person=owner)}
         self._fail = False
 
@@ -186,7 +187,7 @@ class FakePersonModelStore:
         try:
             return self._clock()
         except ClockReadingError as exc:
-            msg = "the fake person-model store's clock gave a reading it cannot record"
+            msg = f"the person-model store cannot record its clock's reading: {exc}"
             raise PersonModelStoreError(msg) from exc
 
     def fail_next(self) -> None:
