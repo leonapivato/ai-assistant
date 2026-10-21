@@ -1285,6 +1285,21 @@ def test_a_fenced_object_is_read_before_a_bare_one() -> None:
     assert parsed(content, CommitReply) == CommitReply.model_validate(_ADD)
 
 
+def test_backticks_inside_a_fenced_objects_string_do_not_close_its_fence() -> None:
+    """The last fenced decision wins whole, though its note quotes a fence."""
+    nothing = {"action": "nothing", "note": "The user quoted ``` as source text."}
+    create = {"action": "create", "wording": "x", "supports": [_support("P1")]}
+    content = f"```json\n{reply(**create)}\n```\nOn reflection:\n```json\n{reply(**nothing)}\n```"
+
+    assert parsed(content, CommitReply) == CommitReply.model_validate(nothing)
+
+
+def test_a_block_fenced_as_another_language_is_not_the_reply() -> None:
+    content = f"{_REASONING}\n```python\n{reply(**_ADD)}\n```\nThat is the code."
+
+    assert parsed(content, CommitReply) is None
+
+
 def test_a_reply_with_no_object_in_it_still_fails() -> None:
     assert parsed(_REASONING, CommitReply) is None
     assert parsed(f"{_REASONING} {{ and }} nothing more", CommitReply) is None

@@ -71,8 +71,12 @@ class ScoutReply(BaseModel):
 
 
 #: A fenced block anywhere in a reply: its tag is group 1, its body group 2. Every fence is
-#: paired, whatever its tag, so one block's closing fence never opens the next.
-_FENCED: Final = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
+#: paired, whatever its tag, so one block's closing fence never opens the next. A fence
+#: stands at the start of its line, and a closing one alone on it: a JSON string holds no
+#: raw newline, so backticks inside one are never taken for a fence.
+_FENCED: Final = re.compile(
+    r"^[ \t]*```([^\n`]*)\n(.*?)^[ \t]*```[ \t]*$", re.DOTALL | re.MULTILINE
+)
 
 
 def parsed[T: BaseModel](content: str, shape: type[T]) -> T | None:
@@ -142,8 +146,9 @@ def _candidates(text: str) -> tuple[list[str], list[str]]:
     kept as a candidate and an array's members never; one that does not decode is skipped
     as far as its brackets balance. A container whose brackets never balance ends the
     walk, since everything after it may be inside it. A fenced block met outside any
-    container yields its body, untagged or tagged ``json``, and the walk goes on through
-    that body, so an object in it is met as any other.
+    container, untagged or tagged ``json``, yields its body, and the walk goes on through
+    that body, so an object in it is met as any other; a block tagged as anything else is
+    passed whole, since what it quotes is not the reply.
     """
     fences = {match.start(): match for match in _FENCED.finditer(text)}
     decoder = json.JSONDecoder()
@@ -155,7 +160,9 @@ def _candidates(text: str) -> tuple[list[str], list[str]]:
         if fence is not None:
             if fence.group(1).strip() in {"", "json", "JSON"}:
                 fenced.append(fence.group(2))
-            index = fence.start(2)
+                index = fence.start(2)
+            else:
+                index = fence.end()
             continue
         if text[index] not in "{[":
             index += 1
