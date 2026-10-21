@@ -152,8 +152,8 @@ _WRITE_PRODUCING_KINDS = frozenset(MemoryDecisionKind) - {
 }
 
 #: The relations that put a conflict **beyond retirement**, by any ruling (ADR-0159
-#: §5). ``CONTRADICTS`` is deliberately absent, and its presence anywhere in a crossing
-#: is what puts that crossing under ADR-0171 §2's narrowing.
+#: §5). ``CONTRADICTS`` is deliberately absent: it is the one relation that puts a
+#: member other than the named target into a retirement set (ADR-0336 §5:1).
 _UNRETIRABLE_RELATIONS = frozenset({ConflictRelation.RESTATES, ConflictRelation.ADDS})
 
 
@@ -291,27 +291,29 @@ def _refuse_unsafe_fold(
         raise MemoryStoreError(msg)
 
 
-def _may_reconcile(proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]) -> bool:
-    """ADR-0159 §2's invocation condition, in full and in one place.
+def _may_reconcile(proposal: MemoryUpdateProposal) -> bool:
+    """ADR-0336 §2's invocation condition, in full and in one place.
 
-    A reconciler is invoked **exactly when** all three hold: the proposed memory is not
-    ``ASSERTED``; no member of the conflict set is; and the proposal clears the
-    admissibility floor. On every other ingest none is invoked and ``decide`` is called
-    with ``None``. A correctness boundary, not a cost heuristic, and it binds this writer
-    whatever ``MemoryPolicy`` it holds.
+    A reconciler is invoked **exactly when** both hold: the proposal clears the
+    admissibility floor, and it carries no ``UserConfirmation``. Neither the proposed
+    memory's band nor any member's band enters the condition, so an asserted proposal
+    and a set holding an assertion are labelled like any other (ADR-0336 §2:1,
+    replacing ADR-0159 §2:2's first two conditions). On every other ingest none is
+    invoked and ``decide`` is called with ``None``. A correctness boundary, not a cost
+    heuristic, and it binds this writer whatever ``MemoryPolicy`` it holds (§2:2).
+
+    **Why a confirmed proposal is left unlabelled.** Its retirement is ADR-0078 §5b's,
+    and a ``RESTATES`` or ``ADDS`` label on an assertion it covers would meet ADR-0159
+    §5:1's "never retired" on one crossing, the precedence #1326 left unruled. Leaving
+    it unlabelled keeps that meeting unreachable (ADR-0336 §2).
 
     Args:
         proposal: The proposal being ingested.
-        conflicts: The resolved conflict set.
 
     Returns:
         Whether relations may be determined for this ingest.
     """
-    return (
-        proposal.proposed.band is not BeliefBand.ASSERTED
-        and not any(_asserted(conflict) for conflict in conflicts)
-        and clears_admissibility_floor(proposal)
-    )
+    return proposal.confirmation is None and clears_admissibility_floor(proposal)
 
 
 def _refuse_retiring_a_related_conflict(
@@ -604,15 +606,21 @@ def _retirement_set(
     resolved: tuple[str, ...],
     relations: Mapping[str, ConflictRelation],
 ) -> list[MemoryRecord]:
-    """The full set of conflicting memories a ``SUPERSEDE`` retires (ADR-0050 §1, #244).
+    """The full set of conflicting memories a ``SUPERSEDE`` retires (ADR-0336 §5).
 
-    The named ``target`` plus every other conflict in the retirement class
-    (``DERIVED`` or ``ATTESTED``, ADR-0079 §3, ADR-0092 §4), less every member this
-    writer holds a ``RESTATES`` or ``ADDS`` relation for (ADR-0159 §5) and, where this
-    crossing produced a labelled contradiction at all, less every member not labelled
-    ``CONTRADICTS`` (ADR-0171 §2). An ``ASSERTED`` member is swept in only where the
-    proposal's confirmation genuinely covers it (ADR-0078 §5b), on its own footing.
-    ``target`` leads the list and the rest follow ``conflicts``' order.
+    The named ``target`` and, beyond it, only those other conflicts whose band is in
+    the retirement class (``DERIVED`` or ``ATTESTED``, ADR-0079 §3, ADR-0092 §4)
+    **and** which this writer holds a ``CONTRADICTS`` relation for (§5:1, ADR-0171
+    §2:1 with its condition dropped). A member it holds no relation for is left live,
+    whatever its band, so a ``SUPERSEDE`` over a crossing nothing labelled retires its
+    target alone; a ``RESTATES`` or ``ADDS`` member is never retired (ADR-0159 §5). An
+    ``ASSERTED`` member is swept in only where the proposal's confirmation genuinely
+    covers it (ADR-0078 §5b, §5:2), on its own footing. ``target`` leads the list and
+    the rest follow ``conflicts``' order.
+
+    **Read from this writer's own relations, never off the ruling** (§5:4): the writer
+    takes rulings from any injected ``MemoryPolicy``, so the bound on what one ruling
+    reaches has to hold at the boundary that performs the write.
 
     Args:
         target: The conflict the ruling names.
@@ -624,24 +632,18 @@ def _retirement_set(
     Returns:
         The named target followed by every other conflict warranted for retirement.
     """
-    labelled_contradiction = any(
-        relations.get(conflict.id) is ConflictRelation.CONTRADICTS for conflict in conflicts
-    )
     others = [
         conflict
         for conflict in conflicts
         if conflict.id != target.id
-        and relations.get(conflict.id) not in _UNRETIRABLE_RELATIONS
         and (
             (
                 record_band(conflict) in _RETIREMENT_CLASS
-                and (
-                    not labelled_contradiction
-                    or relations.get(conflict.id) is ConflictRelation.CONTRADICTS
-                )
+                and relations.get(conflict.id) is ConflictRelation.CONTRADICTS
             )
             or (
                 _asserted(conflict)
+                and relations.get(conflict.id) not in _UNRETIRABLE_RELATIONS
                 and _confirmation_covers(
                     conflict, proposal, MemoryDecisionKind.SUPERSEDE, resolved=resolved
                 )
@@ -649,6 +651,35 @@ def _retirement_set(
         )
     ]
     return [target, *others]
+
+
+def _contradicted(
+    decision: MemoryDecision,
+    conflicts: Sequence[MemoryRecord],
+    relations: Mapping[str, ConflictRelation],
+) -> tuple[str, ...]:
+    """The assertions a deferral rests on: ADR-0336 §7's field, from this writer's relations.
+
+    On an ``ASK_USER`` ruling, the members in band ``ASSERTED`` this writer holds a
+    ``CONTRADICTS`` relation for, in the conflict set's order; on every other ruling,
+    nothing. Computed here and never read off the ruling (§7:2), so an ``ASK_USER``
+    from the admissibility floor, which runs no reconciler, names no memory (§7).
+
+    Args:
+        decision: The ruling.
+        conflicts: The resolved conflict set, best-ranked first.
+        relations: The relations this writer determined, keyed by record id.
+
+    Returns:
+        The ids a question about the deferral is raised on.
+    """
+    if decision.kind is not MemoryDecisionKind.ASK_USER:
+        return ()
+    return tuple(
+        conflict.id
+        for conflict in conflicts
+        if _asserted(conflict) and relations.get(conflict.id) is ConflictRelation.CONTRADICTS
+    )
 
 
 def _supersede(incoming: Memory, new_id: str, retired: Sequence[str]) -> Memory:
@@ -871,7 +902,7 @@ class _Applied:
     Attributes:
         record_id: The id the ruling left live, or ``None`` if nothing was stored.
         superseded: Every id a ``SUPERSEDE`` closed the window of — the whole
-            retirement set (ADR-0050 §1), not just the ruling's ``target_id`` — and
+            retirement set (ADR-0336 §5), not just the ruling's ``target_id`` — and
             the memory a proposal's retiring operation retired, where the ruling
             applied it (ADR-0329 §12:4).
     """
@@ -1415,7 +1446,10 @@ class MemoryIngestor:
         )
         return _Ingested(
             result=MemoryIngestResult(
-                decision=decision, record_id=applied.record_id, conflicts=resolved
+                decision=decision,
+                record_id=applied.record_id,
+                conflicts=resolved,
+                contradicted=_contradicted(decision, conflicts, relations or {}),
             ),
             superseded=applied.superseded,
             reconciliation=determined,
@@ -1470,7 +1504,7 @@ class MemoryIngestor:
         """The relations **this writer** holds for one ingest, and what it observed.
 
         A ``relations`` of ``None`` means no relation was determined at all —
-        ADR-0159 §2's condition excluded this ingest — and it is the value ADR-0159
+        ADR-0336 §2's condition excluded this ingest — and it is the value ADR-0159
         §8 distinguishes from an empty mapping, which says something ran and
         labelled nothing. Both rule identically under §4; only one of them is a fact
         a ``reason`` or a later trace can report, and erasing the distinction at the
@@ -1543,7 +1577,7 @@ class MemoryIngestor:
                 cancellation — it is the self-issued kind ADR-0060 §1 distinguishes
                 — and is classified into unlabelled like any other timeout.
         """
-        if not _may_reconcile(proposal, conflicts):
+        if not _may_reconcile(proposal):
             return _Reconciliation(relations=None)
         record = proposal.proposed
         own = {

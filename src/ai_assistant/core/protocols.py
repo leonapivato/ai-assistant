@@ -2001,11 +2001,14 @@ class MemoryWriter(Protocol):
         (ADR-0079 §3); and one §5 refuses on the retired memory as :meth:`apply` would.
 
         **What a ``SUPERSEDE`` retires** is the write path's law read through
-        ADR-0328 §12: the target and every other conflict whose band is retirable —
-        ``DERIVED`` or ``ATTESTED`` (ADR-0079 §3, ADR-0092 §4) — less every conflict
-        the writer holds a ``RESTATES`` or ``ADDS`` relation for (ADR-0159 §5), and
-        narrowed to the labelled contradictions where the writer holds any
-        (ADR-0171 §2). An ``ASSERTED`` memory is retired only where the proposal's
+        ADR-0328 §12, whatever relations the writer holds (ADR-0336 §5): the target
+        the ruling names and, beyond it, only those other conflicts whose band is in
+        the retirement class — ``DERIVED`` or ``ATTESTED`` (ADR-0079 §3, ADR-0092 §4)
+        — **and** which the writer holds a ``CONTRADICTS`` relation for. A conflict
+        the writer holds no relation for is left live, whatever its band, so a
+        ``SUPERSEDE`` over a set nothing labelled retires its target alone; a conflict
+        it holds a ``RESTATES`` or ``ADDS`` relation for is never retired
+        (ADR-0159 §5). An ``ASSERTED`` memory is retired only where the proposal's
         confirmation genuinely covers it (ADR-0078 §5b), and nothing folds onto an
         ``ASSERTED`` target but an agreeing ``REINFORCE`` (ADR-0121 §5, ADR-0214 §3),
         which only adds supports. A ``REINFORCE`` of an ``ASSERTED`` proposal onto an
@@ -2029,6 +2032,13 @@ class MemoryWriter(Protocol):
         Args:
             proposal: The candidate memory and why it was proposed. Its ``conflicts``
                 are resolved here, not supplied by the caller.
+
+        **What a deferral names** (ADR-0336 §7). The result's ``conflicts`` are every
+        conflict the policy ruled against, on every ruling (ADR-0078 §4). On an
+        ``ASK_USER`` ruling its ``contradicted`` holds, in the conflict set's order,
+        the conflicts in band ``ASSERTED`` the writer holds a ``CONTRADICTS`` relation
+        for, computed from the writer's own relations and never read off the ruling;
+        on every other ruling it is empty. It is what a caller raises a question on.
 
         Returns:
             The policy's decision and the id left live, or ``None`` if nothing was

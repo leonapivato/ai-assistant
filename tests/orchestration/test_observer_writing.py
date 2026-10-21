@@ -8,13 +8,14 @@ the outcome naming what was written, by memory and operation, or why nothing was
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import NoReturn
+from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 from observer_support import AT, Harness, address, episode
 
 from ai_assistant.core.errors import MemoryStoreError, MemoryStoreStaleError
 from ai_assistant.core.types import (
+    ConflictRelation,
     FindingUnwritten,
     InputPart,
     Memory,
@@ -50,8 +51,18 @@ from ai_assistant.orchestration.observer.commit import (
 from ai_assistant.orchestration.observer.writing import FindingWriter, WriteBlocked
 from ai_assistant.testing.memories import memory, said_support, sourced_support
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
 _NOW = AT + timedelta(hours=1)
 _CLAIM = "The user prefers window seats."
+
+#: A claim :data:`_CLAIM` contradicts rather than restates. A supersession retires it,
+#: since a restatement is never retired by any ruling (ADR-0159 §5); and a question is
+#: raised on it, since a deferral names only a contradicted assertion (ADR-0336 §7). The
+#: writer labels every ingest since ADR-0336 §2, and the certain rung would call
+#: :data:`_CLAIM` itself a restatement whatever a stub said.
+_OLD_CLAIM = "The user prefers aisle seats."
 
 
 def _writer(harness: Harness) -> FindingWriter:
@@ -92,8 +103,12 @@ def _new(content: str = _CLAIM, *supports: MemorySupport) -> Memory:
     )
 
 
-async def _harness(ruling: MemoryDecisionKind = MemoryDecisionKind.ACCEPT) -> Harness:
-    harness = Harness(ruling=ruling)
+async def _harness(
+    ruling: MemoryDecisionKind = MemoryDecisionKind.ACCEPT,
+    *,
+    labels: Mapping[str, ConflictRelation] | None = None,
+) -> Harness:
+    harness = Harness(ruling=ruling, labels=labels)
     harness.clock.at = _NOW
     await harness.hold(episode("leaving"), episode("past", at=AT - timedelta(days=1)))
     return harness
@@ -146,9 +161,14 @@ async def test_an_ask_naming_no_memory_is_asked_and_raises_nothing() -> None:
 
 
 async def test_an_ask_raises_a_policy_ask_on_each_memory_it_names() -> None:
-    """§13:1: ``policy_ask`` on each stored memory the ruling names, never dropped."""
-    harness = await _harness(MemoryDecisionKind.ASK_USER)
-    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
+    """§13:1: ``policy_ask`` on each stored memory the ruling names, never dropped.
+
+    The ruling names what the writer labels a contradicted assertion (ADR-0336 §7:4).
+    """
+    harness = await _harness(
+        MemoryDecisionKind.ASK_USER, labels={"m-seat": ConflictRelation.CONTRADICTS}
+    )
+    held = await _stored(harness, memory("m-seat", _OLD_CLAIM, said_support(address("past"))))
     against = _said(direction=SupportDirection.AGAINST)
 
     outcome = await _writer(harness).write(Checked(primary=Create(memory=_new(), asked_on=against)))
@@ -161,6 +181,57 @@ async def test_an_ask_raises_a_policy_ask_on_each_memory_it_names() -> None:
     assert question.kind is OpenQuestionKind.POLICY_ASK
     assert question.rests_on == (against.points_at,)
     assert question.raised_by is MemoryWriterName.OBSERVER
+
+
+async def test_an_ask_raises_no_question_on_a_memory_it_does_not_contradict() -> None:
+    """ADR-0336 §7:4: a question lands on what the deferral rests on, and nowhere else.
+
+    Two stored memories resemble the finding; the writer labels one a contradiction.
+    The other is in the result's ``conflicts`` and gains no question, and no
+    ``against`` support either (ADR-0329 §13:2): a question raised on a memory the
+    finding says nothing about would be a false mark on it.
+    """
+    harness = await _harness(
+        MemoryDecisionKind.ASK_USER, labels={"m-seat": ConflictRelation.CONTRADICTS}
+    )
+    held = await _stored(harness, memory("m-seat", _OLD_CLAIM, said_support(address("past"))))
+    bystander = await _stored(
+        harness,
+        memory(
+            "m-bystander", "The user prefers window seats on trains.", said_support(address("past"))
+        ),
+    )
+
+    outcome = await _writer(harness).write(
+        Checked(primary=Create(memory=_new(), asked_on=_said(direction=SupportDirection.AGAINST)))
+    )
+
+    assert [(one.memory, one.operations) for one in outcome.writes] == [
+        (held.id, (MemoryOperationKind.RAISE_QUESTION,))
+    ]
+    after = await harness.memory.get(bystander.id)
+    assert after == bystander
+
+
+async def test_an_ask_resting_on_no_labelled_contradiction_raises_nothing() -> None:
+    """ADR-0336 §7:4 with §13:3: an ``ASK_USER`` whose field is empty raises nothing.
+
+    The stored assertion is in the ruled-on set, but the writer holds no relation
+    for it, so it is not what the deferral rests on.
+    """
+    harness = await _harness(MemoryDecisionKind.ASK_USER)
+    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
+
+    outcome = await _writer(harness).write(
+        Checked(primary=Create(memory=_new(), asked_on=_said(direction=SupportDirection.AGAINST)))
+    )
+
+    assert (outcome.ruling, outcome.unwritten) == (
+        MemoryDecisionKind.ASK_USER,
+        FindingUnwritten.ASKED,
+    )
+    assert outcome.writes == ()
+    assert await harness.memory.get(held.id) == held
 
 
 async def test_a_reinforced_memory_gains_the_supports() -> None:
@@ -407,8 +478,10 @@ async def test_an_ask_on_a_memory_wider_than_the_supply_is_blocked_not_dropped()
     """§12:6, §13:6: no question carries the owner-only supply onto an ``anyone`` memory,
     and the ask is retried rather than recorded as asked.
     """
-    harness = await _harness(MemoryDecisionKind.ASK_USER)
-    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
+    harness = await _harness(
+        MemoryDecisionKind.ASK_USER, labels={"m-seat": ConflictRelation.CONTRADICTS}
+    )
+    held = await _stored(harness, memory("m-seat", _OLD_CLAIM, said_support(address("past"))))
     narrow = _new().model_copy(
         update={"placement": Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)}
     )
@@ -558,7 +631,7 @@ async def test_a_write_that_lands_is_kept_though_its_verification_fails() -> Non
 async def test_a_supersession_records_the_end_of_each_memory_it_replaced() -> None:
     """§12:2, §16:1: a ``SUPERSEDE`` installs the replacement and ends what it replaced."""
     harness = await _harness(MemoryDecisionKind.SUPERSEDE)
-    await _stored(harness, memory("m-old", _CLAIM, sourced_support(episode=address("past"))))
+    await _stored(harness, memory("m-old", _OLD_CLAIM, sourced_support(episode=address("past"))))
     writer = _writer(harness)
 
     outcome = await writer.write(Checked(primary=Create(memory=_new())))
@@ -574,7 +647,7 @@ async def test_a_supersession_records_the_end_of_each_memory_it_replaced() -> No
 async def test_a_supersession_whose_replacement_cannot_be_read_keeps_it_to_read_again() -> None:
     """§16:1: the supersession landed whole, so what it retired is recovered on a retry."""
     harness = await _harness(MemoryDecisionKind.SUPERSEDE)
-    await _stored(harness, memory("m-old", _CLAIM, sourced_support(episode=address("past"))))
+    await _stored(harness, memory("m-old", _OLD_CLAIM, sourced_support(episode=address("past"))))
     get_many = harness.memory.get_many
     write = harness.writes.write
     failing = False
@@ -648,7 +721,7 @@ async def test_a_question_already_raised_is_recorded_rather_than_raised_twice() 
 async def test_retirements_are_read_from_a_replacement_retired_since() -> None:
     """§16:1: a replacement a later write retired still names what it replaced."""
     harness = await _harness(MemoryDecisionKind.SUPERSEDE)
-    await _stored(harness, memory("m-old", _CLAIM, sourced_support(episode=address("past"))))
+    await _stored(harness, memory("m-old", _OLD_CLAIM, sourced_support(episode=address("past"))))
     first = await _writer(harness).write(Checked(primary=Create(memory=_new())))
     installed = first.writes[0].memory
     replacement = await harness.memory.get(installed)
@@ -679,7 +752,7 @@ async def test_a_recovered_retirement_stands_beside_an_earlier_operation_on_its_
     finding wrote on that memory earlier.
     """
     harness = await _harness(MemoryDecisionKind.SUPERSEDE)
-    await _stored(harness, memory("m-old", _CLAIM, sourced_support(episode=address("past"))))
+    await _stored(harness, memory("m-old", _OLD_CLAIM, sourced_support(episode=address("past"))))
     installed = (
         (await _writer(harness).write(Checked(primary=Create(memory=_new())))).writes[0].memory
     )

@@ -37,7 +37,7 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     Provenance,
 )
-from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
+from ai_assistant.memory import InMemoryMemoryStore, MemoryIngestor
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryWriter, FakeTraceSink
 from ai_assistant.testing.memories import memory, message_support, remembered_support, said_support
 
@@ -305,13 +305,13 @@ async def test_a_supersede_carries_the_correction_and_inherits_nothing(
         remembered_support(_EPISODE, effect="effect-stale", when=_JANUARY),
     )
     store = await _seeded(stale)
-    # A user assertion contradicting a derived belief is what `DefaultMemoryPolicy`
-    # rules `SUPERSEDE` on (ADR-0038 §1), so the ruling is the policy's rather than a
-    # fake's.
+    # The ruling is injected: `DefaultMemoryPolicy` supersedes only a member the
+    # writer labels `CONTRADICTS` (ADR-0336 §3(b)), and this case is about the
+    # applier's currency, not about how the label was reached.
     correction = memory(
         "correction", "user prefers afternoon meetings", said_support(_EPISODE, when=_MARCH)
     )
-    writer = make_writer(store, DefaultMemoryPolicy(), _fixed_now)
+    writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), _fixed_now)
 
     result = await writer.ingest(_proposal(correction))
 

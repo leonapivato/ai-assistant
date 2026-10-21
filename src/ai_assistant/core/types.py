@@ -6448,11 +6448,17 @@ class ConflictRelation(StrEnum):
     ruling. Exactly three values, and the middle one carries the finding the whole
     ADR rests on:
 
-    - ``RESTATES`` — the proposed record says what the named record already says.
-    - ``ADDS`` — the proposed record says something the named record does not say
-      and does not deny. Two dated facts about one person's employment are this —
+    - ``RESTATES`` — the proposed record and the named record make the same claim, so
+      each says everything the other says, whatever the wording (ADR-0336 §8).
+    - ``ADDS`` — the two records do not make the same claim and neither denies what
+      the other says: the proposed record says more than the named one, less, or
+      something different. Two dated facts about one person's employment are this —
       neither a restatement nor a contradiction — and naming the case explicitly is
-      what lets a policy do the correct thing with them, which is nothing at all.
+      what lets a policy do the correct thing with them, which is nothing at all. **A
+      narrower claim is ``ADDS``**: a proposed record stating part of what the named
+      record states, and nothing it does not, is not a restatement, because a fold
+      would lift the broader record's whole wording on evidence for part of it
+      (ADR-0336 §8).
     - ``CONTRADICTS`` — the two cannot both be true of the same subject at the
       same time.
 
@@ -6539,6 +6545,11 @@ class MemoryIngestResult(BaseModel):
     the **bound on what an answer authorises** (ADR-0078 §5), so the ids are
     load-bearing for correctness rather than decoration.
 
+    ``contradicted`` is a separate, narrower field rather than a second meaning of
+    ``conflicts`` (ADR-0336 §7): ``conflicts`` is a similarity set and keeps ADR-0078
+    §4's meaning, while ``contradicted`` names only the assertions a deferral rests on,
+    so a question is raised on those and on no memory the proposal says nothing about.
+
     Nothing new is computed for it. The writer already resolves conflicts onto its
     own copy of the proposal before the policy rules; the value simply now crosses
     the writer seam as well as the policy one, which is what lets a coordinator
@@ -6563,6 +6574,17 @@ class MemoryIngestResult(BaseModel):
         description=(
             "Ids of the existing records this ingest resolved and the policy ruled "
             "against, on every ruling (ADR-0078 §4). Empty when nothing conflicted."
+        ),
+    )
+    contradicted: tuple[EncodableText, ...] = Field(
+        default=(),
+        description=(
+            "On an ASK_USER ruling, the ids of the conflicts in band ASSERTED the writer "
+            "holds a CONTRADICTS relation for, in the conflict set's order: what the "
+            "deferral rests on, and the memories a question about it is raised on "
+            "(ADR-0336 §7). Computed from the writer's own relations, never read off the "
+            "ruling. Empty on every other ruling, and on an ASK_USER that rests on no "
+            "labelled contradiction."
         ),
     )
 

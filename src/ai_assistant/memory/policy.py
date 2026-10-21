@@ -404,16 +404,31 @@ def _rule_on_relations(
     return None
 
 
-def _rule_on_a_prior_assertion(memory: Memory, conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
-    """Rule on a **non-asserted** proposal whose conflict set holds an assertion.
+def _contradicting(
+    conflicts: Sequence[MemoryRecord], effective: Mapping[str, ConflictRelation]
+) -> list[MemoryRecord]:
+    """The members labelled ``CONTRADICTS``, best-ranked first (ADR-0336 §3, §4)."""
+    return [c for c in conflicts if effective.get(c.id) is ConflictRelation.CONTRADICTS]
 
-    An agreeing derived memory folds (ADR-0214 §1, :func:`_rule_on_agreeing_observation`);
-    otherwise the proposal defers (ADR-0038 §3, ADR-0050): an inference never silently
-    overrides an assertion.
+
+def _rule_on_a_prior_assertion(
+    memory: Memory,
+    conflicts: Sequence[MemoryRecord],
+    relations: Mapping[str, ConflictRelation] | None,
+) -> MemoryDecision:
+    """Rule on a **non-asserted** proposal whose conflict set holds an assertion (ADR-0336 §4).
+
+    An agreeing derived memory folds (ADR-0214 §1, :func:`_rule_on_agreeing_observation`),
+    evaluated first and exactly as it stands. Otherwise the proposal defers exactly when
+    an ``ASSERTED`` member is labelled ``CONTRADICTS`` — an inference never silently
+    overrides an assertion (ADR-0038 §3) — and is installed beside the set otherwise.
+    An assertion that only shares a subject with the proposal is no question, and an
+    unlabelled one is never the ground of one (§6:1).
 
     Args:
         memory: The proposed memory, not in the ``ASSERTED`` band.
         conflicts: The conflict set, holding at least one asserted member.
+        relations: What the writer determined about members of that set.
 
     Returns:
         The ruling.
@@ -421,26 +436,44 @@ def _rule_on_a_prior_assertion(memory: Memory, conflicts: Sequence[MemoryRecord]
     agreeing = _rule_on_agreeing_observation(memory, conflicts)
     if agreeing is not None:
         return agreeing
+    effective = _effective_relations(memory, conflicts, relations)
+    if any(_asserted(c) for c in _contradicting(conflicts, effective)):
+        return MemoryDecision(
+            kind=MemoryDecisionKind.ASK_USER,
+            reason="contradicts a user-asserted memory; defer to the user (ADR-0336 §4)",
+        )
     return MemoryDecision(
-        kind=MemoryDecisionKind.ASK_USER,
-        reason="conflicts with a user-asserted memory",
+        kind=MemoryDecisionKind.ACCEPT,
+        reason=("installed beside a user-asserted memory it does not contradict (ADR-0336 §4)"),
     )
 
 
-def _rule_on_assertion(memory: Memory, conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
-    """Rule on an asserted proposal: agree, defer, supersede stale memories, or accept.
+def _rule_on_assertion(
+    memory: Memory,
+    conflicts: Sequence[MemoryRecord],
+    relations: Mapping[str, ConflictRelation] | None,
+) -> MemoryDecision:
+    """Rule on an asserted proposal (ADR-0336 §3): agree, defer, supersede, or accept.
 
-    0. **An agreeing restatement → ``REINFORCE``** (ADR-0121 §2).
-    1. **A contradictory prior assertion → ``ASK_USER``** (ADR-0050 §2, #245): two
-       things the user said cannot both stay live, and neither may be destroyed on a
-       topical-similarity signal.
-    2. **A retirable conflict → ``SUPERSEDE``** the best-ranked conflict in the
-       retirement class; the writer retires the whole retirement set it leads (#244).
-    3. **Nothing retirable → ``ACCEPT``.**
+    0. **An agreeing restatement → ``REINFORCE``** (ADR-0121 §2), evaluated first and
+       exactly as it stands. It is the only ``REINFORCE`` this arm rules (§3:3): a
+       model-labelled ``RESTATES`` is installed beside, since a fold would lift the
+       target to "you said it" on a model's judgement.
+    1. **An ``ASSERTED`` member labelled ``CONTRADICTS`` → ``ASK_USER``** (§3(a)): two
+       contradictory assertions cannot both stay live, and neither is destroyed here.
+    2. **Otherwise a member labelled ``CONTRADICTS`` in the retirement class →
+       ``SUPERSEDE``** at the best-ranked one (§3(b)); the writer retires it and the
+       other labelled contradictions in that class, and nothing else (§5).
+    3. **Otherwise ``ACCEPT``** (§3(c)), installed beside whatever the set holds, with
+       a ``reason`` telling an empty set from one nothing in contradicts.
+
+    Every arm reads relations and bands, never a score or a threshold, and rank only
+    breaks a tie among members the relations already selected (§3:2).
 
     Args:
         memory: The proposed memory, in the ``ASSERTED`` band.
         conflicts: The conflict set, best-ranked first.
+        relations: What the writer determined about members of that set.
 
     Returns:
         The ruling.
@@ -448,19 +481,28 @@ def _rule_on_assertion(memory: Memory, conflicts: Sequence[MemoryRecord]) -> Mem
     agreed = _rule_on_agreement(memory, conflicts)
     if agreed is not None:
         return agreed
-    if any(_asserted(conflict) for conflict in conflicts):
+    contradicting = _contradicting(conflicts, _effective_relations(memory, conflicts, relations))
+    if any(_asserted(c) for c in contradicting):
         return MemoryDecision(
             kind=MemoryDecisionKind.ASK_USER,
-            reason="contradicts a prior user assertion; defer to the user (ADR-0050)",
+            reason="contradicts a prior user assertion; defer to the user (ADR-0336 §3)",
         )
-    superseded = next((c for c in conflicts if record_band(c) in _RETIREMENT_CLASS), None)
-    if superseded is None:
-        return MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="user-asserted")
-    return MemoryDecision(
-        kind=MemoryDecisionKind.SUPERSEDE,
-        target_id=superseded.id,
-        reason="user assertion supersedes the conflicting memories",
-    )
+    superseded = next((c for c in contradicting if record_band(c) in _RETIREMENT_CLASS), None)
+    if superseded is not None:
+        return MemoryDecision(
+            kind=MemoryDecisionKind.SUPERSEDE,
+            target_id=superseded.id,
+            reason="user assertion supersedes the memories it contradicts (ADR-0336 §3)",
+        )
+    if conflicts:
+        return MemoryDecision(
+            kind=MemoryDecisionKind.ACCEPT,
+            reason=(
+                "user-asserted; similar memories exist but none is contradicted, so it is "
+                "installed beside them (ADR-0336 §3)"
+            ),
+        )
+    return MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="user-asserted; no conflict")
 
 
 class DefaultMemoryPolicy:
@@ -479,13 +521,20 @@ class DefaultMemoryPolicy:
     5. A ``DERIVED`` proposal agreeing with every assertion in its conflict set
        rules ``REINFORCE`` (ADR-0214 §1), evaluated only where the set holds an
        assertion.
-    6. Otherwise a non-asserted proposal whose set holds an assertion defers.
+    6. Otherwise a non-asserted proposal whose set holds an assertion defers exactly
+       when an ``ASSERTED`` member is labelled ``CONTRADICTS``, and is accepted
+       beside the set otherwise (ADR-0336 §4).
     7. An asserted proposal agreeing with what it conflicts with rules ``REINFORCE``
-       (ADR-0121 §2).
-    8. An asserted proposal contradicting a prior assertion defers (ADR-0050 §2).
-    9. An asserted proposal supersedes the best-ranked ``DERIVED`` or ``ATTESTED``
-       conflict (ADR-0038, ADR-0092 §4, #244).
-    10. An asserted proposal with nothing to supersede is accepted.
+       (ADR-0121 §2) — the only ``REINFORCE`` an asserted proposal is ruled
+       (ADR-0336 §3:3).
+    8. An asserted proposal defers exactly when an ``ASSERTED`` member is labelled
+       ``CONTRADICTS`` (ADR-0336 §3(a), narrowing ADR-0050 §2).
+    9. Otherwise an asserted proposal supersedes the best-ranked ``DERIVED`` or
+       ``ATTESTED`` member labelled ``CONTRADICTS`` (ADR-0336 §3(b), narrowing
+       ADR-0038 §1 and ADR-0092 §4).
+    10. Otherwise an asserted proposal is accepted, installed beside what it
+        resembles, with a ``reason`` telling "no conflict" from "conflicts, none
+        contradicted" (ADR-0336 §3(c)).
     11. A non-asserted proposal rules ``REINFORCE`` at an eligible member
         (ADR-0159 §4a as ADR-0161 §1 replaced it).
     12. Otherwise a member labelled ``CONTRADICTS``, and none ``RESTATES``, is
@@ -509,8 +558,9 @@ class DefaultMemoryPolicy:
         """Rule on a proposed memory. See the class docstring for rules.
 
         A total function of its three arguments — no store, no clock, no model, no
-        network (ADR-0159 §2). ``relations`` is read by rules 11 and 12 alone and is
-        never mutated.
+        network (ADR-0159 §2). ``relations`` is read by rules 6, 8, 9, 11 and 12, and
+        is never mutated. An unlabelled member supplies ground for no supersession and
+        no deferral (ADR-0336 §6).
         """
         inadmissible = _rule_on_admissibility(proposal)
         if inadmissible is not None:
@@ -531,9 +581,9 @@ class DefaultMemoryPolicy:
         memory = proposal.proposed
         is_asserted = memory.band is BeliefBand.ASSERTED
         if not is_asserted and any(_asserted(conflict) for conflict in conflicts):
-            return _rule_on_a_prior_assertion(memory, conflicts)
+            return _rule_on_a_prior_assertion(memory, conflicts, relations)
         if is_asserted:
-            return _rule_on_assertion(memory, conflicts)
+            return _rule_on_assertion(memory, conflicts, relations)
         related = _rule_on_relations(memory, conflicts, relations)
         if related is not None:
             return related

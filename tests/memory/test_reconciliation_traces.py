@@ -35,6 +35,7 @@ import pytest
 from ai_assistant.core.errors import UnresolvedEvidenceError
 from ai_assistant.core.types import (
     ConflictRelation,
+    DataTier,
     EpisodicMemory,
     Memory,
     MemoryDecisionKind,
@@ -791,18 +792,24 @@ async def test_the_shapes_the_guard_already_absorbs_are_counted_as_failed(
 async def test_a_proposal_the_invocation_condition_excludes_contributes_zero_to_the_ten(
     sink: FakeTraceSink,
 ) -> None:
-    """ADR-0159 §2's condition excluded it, so nothing was determined about it.
+    """The invocation condition excluded it, so nothing was determined about it.
 
     ``proposals`` still counts it, and the complement of ``reconciled`` is therefore
     already on the trace — which is why ADR-0164 §3 emits no key for a difference of
-    two the trace carries. A ``USER_ASSERTED`` proposal is ADR-0121 §2's arm: no
-    relation is computed, no request is made, and ``decide`` is called with ``None``.
+    two the trace carries. A secret-tier proposal fails the admissibility floor, which
+    is the condition's first half (ADR-0336 §2:1): no relation is computed, no request
+    is made, and ``decide`` is called with ``None``. An asserted one no longer is
+    excluded, since no band enters the condition.
     """
     store = await _planted(_belief("same", _MORNING))
     reconciler = _Reporting({"same": ConflictRelation.ADDS})
 
     await _writer(store, sink, reconciler=reconciler).ingest(
-        _proposal(_belief("new", _MORNING, asserted=True))
+        MemoryUpdateProposal(
+            proposed=_belief("new", _MORNING, asserted=True),
+            rationale="because",
+            sensitivity=DataTier.SECRET,
+        )
     )
 
     trace = _only(sink)

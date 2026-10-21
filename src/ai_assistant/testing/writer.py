@@ -176,26 +176,21 @@ def _cited_ids(memory: Memory) -> frozenset[str]:
     )
 
 
-def _may_reconcile(proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]) -> bool:
-    """ADR-0159 §2's invocation condition, mirroring ``MemoryIngestor``'s.
+def _may_reconcile(proposal: MemoryUpdateProposal) -> bool:
+    """ADR-0336 §2's invocation condition, mirroring ``MemoryIngestor``'s.
 
-    The floor is restated here rather than shared, since the predicate production
-    shares lives in ``ai_assistant.memory.policy``, out of reach (golden rule 1).
+    The admissibility floor, and no confirmation; no band enters it. The floor is
+    restated here rather than shared, since the predicate production shares lives in
+    ``ai_assistant.memory.policy``, out of reach (golden rule 1).
     """
     memory = proposal.proposed
-    if memory.band is BeliefBand.ASSERTED or any(_asserted(c) for c in conflicts):
-        return False
-    if proposal.sensitivity is DataTier.SECRET:
+    if proposal.confirmation is not None or proposal.sensitivity is DataTier.SECRET:
         return False
     if memory.band is BeliefBand.DERIVED and all(
         part_episode(support.points_at) is None for support in memory.supports
     ):
         return False
-    return not (
-        memory.band is BeliefBand.DERIVED
-        and memory.rests_on_outside_content
-        and proposal.confirmation is None
-    )
+    return not (memory.band is BeliefBand.DERIVED and memory.rests_on_outside_content)
 
 
 def _agreement_form(content: str) -> str:
@@ -355,20 +350,24 @@ def _retirement_set(
     resolved: tuple[str, ...],
     relations: Mapping[str, ConflictRelation],
 ) -> list[MemoryRecord]:
-    """The whole set a ``SUPERSEDE`` retires, as ``MemoryIngestor`` computes it."""
-    labelled = any(relations.get(c.id) is ConflictRelation.CONTRADICTS for c in conflicts)
+    """The whole set a ``SUPERSEDE`` retires, as ``MemoryIngestor`` computes it (ADR-0336 §5).
+
+    The target, and beyond it only the retirement-class members this writer holds a
+    ``CONTRADICTS`` relation for, plus an assertion a confirmation covers. Duplicated
+    rather than imported (§5:4).
+    """
     others = [
         conflict
         for conflict in conflicts
         if conflict.id != target.id
-        and relations.get(conflict.id) not in _UNRETIRABLE_RELATIONS
         and (
             (
                 record_band(conflict) in _RETIREMENT_CLASS
-                and (not labelled or relations.get(conflict.id) is ConflictRelation.CONTRADICTS)
+                and relations.get(conflict.id) is ConflictRelation.CONTRADICTS
             )
             or (
                 _asserted(conflict)
+                and relations.get(conflict.id) not in _UNRETIRABLE_RELATIONS
                 and _confirmation_covers(
                     conflict, proposal, MemoryDecisionKind.SUPERSEDE, resolved=resolved
                 )
@@ -376,6 +375,21 @@ def _retirement_set(
         )
     ]
     return [target, *others]
+
+
+def _contradicted(
+    decision: MemoryDecision,
+    conflicts: Sequence[MemoryRecord],
+    relations: Mapping[str, ConflictRelation],
+) -> tuple[str, ...]:
+    """ADR-0336 §7's field: on an ``ASK_USER``, the assertions held as contradicted."""
+    if decision.kind is not MemoryDecisionKind.ASK_USER:
+        return ()
+    return tuple(
+        c.id
+        for c in conflicts
+        if _asserted(c) and relations.get(c.id) is ConflictRelation.CONTRADICTS
+    )
 
 
 def _bounded_topics(admitted: Sequence[str]) -> tuple[str, ...]:
@@ -720,13 +734,18 @@ class FakeMemoryWriter:
             relations=relations or {},
             retiring=retiring,
         )
-        return MemoryIngestResult(decision=decision, record_id=record_id, conflicts=resolved)
+        return MemoryIngestResult(
+            decision=decision,
+            record_id=record_id,
+            conflicts=resolved,
+            contradicted=_contradicted(decision, conflicts, relations or {}),
+        )
 
     async def _relations_for(
         self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
     ) -> dict[str, ConflictRelation] | None:
         """The relations this writer holds for one ingest, or ``None`` (ADR-0159 §2, §3, §6)."""
-        if not _may_reconcile(proposal, conflicts):
+        if not _may_reconcile(proposal):
             return None
         memory = proposal.proposed
         own = {c.id: ConflictRelation.RESTATES for c in conflicts if _agrees(c, memory)}

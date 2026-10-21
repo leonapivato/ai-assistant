@@ -129,6 +129,16 @@ def _proposal(
     return MemoryUpdateProposal(proposed=record, rationale="because", sensitivity=sensitivity)
 
 
+def _contradicts(*record_ids: str) -> dict[str, ConflictRelation]:
+    """The writer's labels for a set in which each of ``record_ids`` is contradicted.
+
+    Since ADR-0336 a supersession or a deferral rests on a ``CONTRADICTS`` label and on
+    nothing else (§3, §4), so a case about either arm supplies the label the writer's
+    reconciler would have, and an unlabelled member rules nothing (§6).
+    """
+    return dict.fromkeys(record_ids, ConflictRelation.CONTRADICTS)
+
+
 class TestDefaultMemoryPolicyContract(MemoryPolicyContract):
     """Runs DefaultMemoryPolicy through the shared MemoryPolicy conformance suite."""
 
@@ -359,12 +369,39 @@ async def test_an_untainted_derived_proposal_is_untouched_by_the_rule() -> None:
 
 
 async def test_inference_conflicting_with_asserted_defers_to_user() -> None:
+    """ADR-0336 §4:1: an inference contradicting what the user said defers."""
     proposal = _proposal(_semantic("new", source=MemorySource.INFERRED))
     asserted = _semantic("old", source=MemorySource.USER_ASSERTED)
 
-    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[asserted])
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[asserted], relations=_contradicts("old")
+    )
 
     assert decision.kind is MemoryDecisionKind.ASK_USER
+
+
+@pytest.mark.parametrize("relation", [None, ConflictRelation.ADDS, ConflictRelation.RESTATES])
+async def test_an_inference_beside_an_assertion_it_does_not_contradict_is_accepted(
+    relation: ConflictRelation | None,
+) -> None:
+    """ADR-0336 §4: unlabelled, adding or model-restating, the inference lands beside.
+
+    "Zeno works nights" beside "Zeno is my roommate" is no question any more. A
+    model's ``RESTATES`` does not fold it either, since §4 runs neither of ADR-0159
+    §4's arms while an assertion sits in the set, and the ``reason`` names the case.
+    """
+    proposal = _proposal(_semantic("works-nights", source=MemorySource.INFERRED))
+    asserted = _semantic("roommate", source=MemorySource.USER_ASSERTED)
+
+    decision = await DefaultMemoryPolicy().decide(
+        proposal,
+        conflicts=[asserted],
+        relations=None if relation is None else {"roommate": relation},
+    )
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+    assert decision.target_id is None
+    assert "beside a user-asserted memory" in decision.reason
 
 
 async def test_user_asserted_is_accepted() -> None:
@@ -376,12 +413,14 @@ async def test_user_asserted_is_accepted() -> None:
 
 
 async def test_user_assertion_supersedes_a_conflicting_inference() -> None:
-    # ADR-0038: the correction must displace the stale belief, not land beside
-    # it. Before this rule the ACCEPT above fired first and both stayed live.
+    # ADR-0038 as ADR-0336 §3(b) narrows it: the correction displaces the stale
+    # belief it *contradicts*, not every belief it resembles.
     proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED))
     stale = _semantic("stale", source=MemorySource.INFERRED)
 
-    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[stale])
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[stale], relations=_contradicts("stale")
+    )
 
     assert decision.kind is MemoryDecisionKind.SUPERSEDE
     assert decision.target_id == "stale"
@@ -394,13 +433,16 @@ async def test_user_assertion_contradicting_an_assertion_defers_even_with_an_inf
     # new assertion beside "their-words", leaving two live contradictory profile
     # records. The assertion-conflict check wins over the inference, so the policy
     # defers the whole thing to the user rather than half-resolving it.
+    # ADR-0336 §3(a) keeps it, for the mixed case where both are labelled.
     proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED))
     conflicts = [
         _semantic("their-words", source=MemorySource.USER_ASSERTED),
         _semantic("our-guess", source=MemorySource.OBSERVED),
     ]
 
-    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=conflicts, relations=_contradicts("their-words", "our-guess")
+    )
 
     assert decision.kind is MemoryDecisionKind.ASK_USER
 
@@ -417,31 +459,108 @@ async def test_user_assertion_supersedes_an_external_record() -> None:
     proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED))
     imported = _semantic("imported", source=MemorySource.EXTERNAL)
 
-    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[imported])
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[imported], relations=_contradicts("imported")
+    )
 
     assert decision.kind is MemoryDecisionKind.SUPERSEDE
     assert decision.target_id == "imported"
 
 
 @pytest.mark.parametrize("source", list(MemorySource), ids=str)
-async def test_an_assertion_never_lands_beside_a_conflict_any_more(
+async def test_an_assertion_never_lands_beside_a_contradicted_conflict(
     source: MemorySource,
 ) -> None:
-    # Arm 3's reachability, stated over the whole enum. Before ADR-0092 §4 an
-    # assertion contradicting only an EXTERNAL record was ACCEPTed *beside* it and
-    # both stayed live — the "stale belief stays live" shape of #38, surviving for
-    # one source. With EXTERNAL in the retirement class there is no longer any
-    # non-empty conflict set an assertion is merely accepted alongside: every
-    # source either gets retired (the class) or gets deferred to the user
-    # (USER_ASSERTED, ADR-0050 §2). Parametrised so a `MemorySource` added later
-    # cannot restore the shape by being left out of the class.
+    # Arm 3's reachability, stated over the whole enum and, since ADR-0336 §3, over a
+    # *contradicted* member. Before ADR-0092 §4 an assertion contradicting only an
+    # EXTERNAL record was ACCEPTed *beside* it and both stayed live — the "stale
+    # belief stays live" shape of #38, surviving for one source. Every source a
+    # contradiction is labelled on is either retired (the class) or deferred to the
+    # user (ASSERTED, §3(a)). Parametrised so a `MemorySource` added later cannot
+    # restore the shape by being left out of the class.
     proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED))
     conflict = _semantic("prior", source=source)
 
-    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[conflict])
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[conflict], relations=_contradicts("prior")
+    )
 
-    assert decision.kind is not MemoryDecisionKind.ACCEPT
     assert decision.kind in {MemoryDecisionKind.SUPERSEDE, MemoryDecisionKind.ASK_USER}
+
+
+@pytest.mark.parametrize("source", list(MemorySource), ids=str)
+@pytest.mark.parametrize("relation", [None, ConflictRelation.ADDS, ConflictRelation.RESTATES])
+async def test_an_assertion_lands_beside_every_conflict_it_does_not_contradict(
+    source: MemorySource, relation: ConflictRelation | None
+) -> None:
+    """ADR-0336 §3(c), §3:3, §6:1: similarity alone supersedes nothing and asks nothing.
+
+    Unlabelled, labelled ``ADDS`` or labelled ``RESTATES`` by a model, a member of any
+    band is left as it is and the assertion is installed beside it — never reinforced
+    onto it on a model's judgement (§3:3), never superseding it, and never a question.
+    """
+    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED))
+    conflict = _semantic("prior", source=source)
+
+    decision = await DefaultMemoryPolicy().decide(
+        proposal,
+        conflicts=[conflict],
+        relations=None if relation is None else {"prior": relation},
+    )
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+    assert decision.target_id is None
+
+
+async def test_the_two_asserted_accepts_are_legible_apart() -> None:
+    """ADR-0336 §3:4: the ``reason`` tells an empty set from one none of it contradicts."""
+    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED))
+
+    alone = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
+    beside = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[_semantic("prior", source=MemorySource.INFERRED)]
+    )
+
+    assert alone.kind is beside.kind is MemoryDecisionKind.ACCEPT
+    assert alone.reason != beside.reason
+    assert "no conflict" in alone.reason
+    assert "none is contradicted" in beside.reason
+
+
+async def test_the_asserted_arm_names_a_contradiction_by_relation_not_by_position() -> None:
+    """ADR-0336 §3:2: ``conflicts[0]`` is never the target by position.
+
+    The best-ranked member is unlabelled and the contradicted one ranks second, so a
+    supersession keyed on rank would retire the wrong memory.
+    """
+    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED))
+    conflicts = [
+        _semantic("closest", source=MemorySource.INFERRED),
+        _semantic("contradicted", source=MemorySource.INFERRED),
+    ]
+
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=conflicts, relations=_contradicts("contradicted")
+    )
+
+    assert decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert decision.target_id == "contradicted"
+
+
+async def test_an_assertion_beside_an_adding_assertion_is_accepted_and_asks_nothing() -> None:
+    """ADR-0336 §3(a): an assertion that only shares a subject is no contradiction.
+
+    "Zeno's address is …" beside "Zeno is my roommate", both the user's: before
+    ADR-0336 the second fact about one person was always a question.
+    """
+    proposal = _proposal(_semantic("address", source=MemorySource.USER_ASSERTED))
+    earlier = _semantic("roommate", source=MemorySource.USER_ASSERTED)
+
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[earlier], relations={"roommate": ConflictRelation.ADDS}
+    )
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
 
 
 async def test_user_assertion_takes_the_best_ranked_retirable_conflict() -> None:
@@ -455,7 +574,9 @@ async def test_user_assertion_takes_the_best_ranked_retirable_conflict() -> None
         _semantic("our-guess", source=MemorySource.INFERRED),
     ]
 
-    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=conflicts, relations=_contradicts("imported", "our-guess")
+    )
 
     assert decision.kind is MemoryDecisionKind.SUPERSEDE
     assert decision.target_id == "imported"
@@ -467,7 +588,9 @@ async def test_external_proposal_conflicting_with_an_assertion_defers() -> None:
     proposal = _proposal(_semantic("sync", source=MemorySource.EXTERNAL))
     corrected = _semantic("corrected", source=MemorySource.USER_ASSERTED)
 
-    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[corrected])
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[corrected], relations=_contradicts("corrected")
+    )
 
     assert decision.kind is MemoryDecisionKind.ASK_USER
 
@@ -477,11 +600,14 @@ async def test_user_assertion_contradicting_only_an_assertion_defers_to_the_user
     # ranks them and topical similarity is not a contradiction signal, so neither may
     # be destroyed (ADR-0045 §5 / clause 1); but leaving both live is the honesty gap
     # #245 reports. The policy defers to the user — the acceptable gate ADR-0045 §7
-    # named — superseding ADR-0038 §5's "accept beside".
+    # named — superseding ADR-0038 §5's "accept beside". ADR-0336 §3(a) keeps the
+    # deferral where the writer labels the earlier assertion a contradiction.
     proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED))
     earlier = _semantic("earlier", source=MemorySource.USER_ASSERTED)
 
-    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[earlier], relations=_contradicts("earlier")
+    )
 
     assert decision.kind is MemoryDecisionKind.ASK_USER
 
@@ -739,23 +865,33 @@ async def test_a_proposal_beside_an_unrelated_conflict_is_accepted() -> None:
     assert "none restates or contradicts" in decision.reason
 
 
-async def test_an_asserted_conflict_still_defers_whatever_the_relations_say() -> None:
-    """ADR-0159 §4's fourth clause, in the scope it still holds whole.
+@pytest.mark.parametrize(
+    ("relation", "expected"),
+    [
+        (ConflictRelation.RESTATES, MemoryDecisionKind.ACCEPT),
+        (ConflictRelation.ADDS, MemoryDecisionKind.ACCEPT),
+        (ConflictRelation.CONTRADICTS, MemoryDecisionKind.ASK_USER),
+    ],
+    ids=str,
+)
+async def test_a_derived_proposal_beside_an_assertion_rules_on_its_label(
+    relation: ConflictRelation, expected: MemoryDecisionKind
+) -> None:
+    """ADR-0336 §4:1, replacing ADR-0159 §4:4 where no assertion is contradicted.
 
-    The deferral precedes ADR-0159 §4's arms and no relation reaches past it. ADR-0214
-    §1 partially supersedes that clause — but only where every asserted member of the
-    set *agrees* with the proposal, and this one does not (the contents differ), so
-    the clause rules here exactly as it was written.
+    Only ``CONTRADICTS`` defers; a model's ``RESTATES`` reaches neither ADR-0159 §4's
+    reinforce nor anything else, so the inference lands beside the assertion.
     """
     asserted = _semantic("asserted", source=MemorySource.USER_ASSERTED, evidence=())
 
     decision = await DefaultMemoryPolicy().decide(
         _proposal(_semantic("new")),
         conflicts=[asserted],
-        relations={"asserted": ConflictRelation.RESTATES},
+        relations={"asserted": relation},
     )
 
-    assert decision.kind is MemoryDecisionKind.ASK_USER
+    assert decision.kind is expected
+    assert decision.target_id is None
 
 
 async def test_no_proposal_is_stored_temporarily() -> None:
@@ -916,7 +1052,13 @@ async def test_a_confirmed_proposal_falls_through_and_still_retires_a_stale_infe
         retires=("gone",),
     )
 
-    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[inference])
+    # The ordinary rules supersede what is labelled contradicted (ADR-0336 §3(b)).
+    # The writer leaves a confirmed proposal unlabelled (§2:1), so there it falls
+    # through to an ACCEPT beside the inference; the policy is a total function of
+    # its arguments, and what is pinned here is that it falls through at all.
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[inference], relations=_contradicts("stale")
+    )
 
     assert decision.kind is MemoryDecisionKind.SUPERSEDE
     assert decision.target_id == "stale"
@@ -1077,9 +1219,15 @@ async def test_a_one_token_contradiction_still_defers_to_the_user() -> None:
     proposal = _proposal(_semantic("correction", content=_AISLE, source=MemorySource.USER_ASSERTED))
     earlier = _semantic("said-before", content=_SEAT, source=MemorySource.USER_ASSERTED)
 
-    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
+    # ADR-0336 §3(a): the deferral rests on the writer's label, which a reconciler
+    # supplies; without one the pair is unlabelled and the correction lands beside.
+    labelled = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[earlier], relations=_contradicts("said-before")
+    )
+    unlabelled = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
 
-    assert decision.kind is MemoryDecisionKind.ASK_USER
+    assert labelled.kind is MemoryDecisionKind.ASK_USER
+    assert unlabelled.kind is MemoryDecisionKind.ACCEPT
 
 
 async def test_a_restatement_beside_a_disagreeing_assertion_still_defers() -> None:
@@ -1098,7 +1246,11 @@ async def test_a_restatement_beside_a_disagreeing_assertion_still_defers() -> No
         _semantic("disagrees", content=_AISLE, source=MemorySource.USER_ASSERTED),
     ]
 
-    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
+    # ADR-0336 §3:1 evaluates ADR-0121 §2 as it stands, so the arm still does not
+    # fire; the deferral is then §3(a)'s, on the contradiction labelled.
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=conflicts, relations=_contradicts("disagrees")
+    )
 
     assert decision.kind is MemoryDecisionKind.ASK_USER
 
@@ -1136,17 +1288,19 @@ async def test_an_agreeing_external_record_is_never_named_by_the_arm() -> None:
     system's idempotency key, and the next routine sync overwrites the fold —
     whether or not the user's words matched the import's. So the arm does not fire,
     the proposal falls through to the supersession arm, and ADR-0120 §5's correction
-    rate counts a correction that did not happen. That is filed (ADR-0121 §7), and
-    the store outcome is defensible: the user's own words land at a fresh id and the
-    import is retired, which is what ADR-0092 §4 decided a user assertion does.
+    rate counts a correction that did not happen. That is filed (ADR-0121 §7).
+
+    Since ADR-0336 §3 the supersession arm names only a labelled contradiction, and
+    the certain rung labels this pair ``RESTATES``, so the user's own words are
+    installed beside the import and the import is left live.
     """
     proposal = _proposal(_semantic("told-you", content=_SEAT, source=MemorySource.USER_ASSERTED))
     imported = _semantic("calendar", content=_SEAT, source=MemorySource.EXTERNAL)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[imported])
 
-    assert decision.kind is MemoryDecisionKind.SUPERSEDE
-    assert decision.target_id == "calendar"
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+    assert decision.target_id is None
 
 
 async def test_the_arm_names_the_best_ranked_foldable_agreeing_member() -> None:
@@ -1184,7 +1338,9 @@ async def test_records_of_different_kinds_never_agree() -> None:
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[other_kind])
 
-    assert decision.kind is MemoryDecisionKind.ASK_USER
+    # Not a fold: the pair does not agree, so it is unlabelled and the assertion is
+    # installed beside it (ADR-0336 §3(c)).
+    assert decision.kind is MemoryDecisionKind.ACCEPT
 
 
 #: The one belief the ADR-0214 §1 cases below are about, in the two positions that
@@ -1245,7 +1401,10 @@ async def test_a_second_disagreeing_assertion_still_defers() -> None:
         source=MemorySource.USER_ASSERTED,
     )
 
-    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[theirs, also_theirs])
+    # The deferral it falls to is ADR-0336 §4's, on the contradiction labelled.
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[theirs, also_theirs], relations=_contradicts("the-other-one")
+    )
 
     assert decision.kind is MemoryDecisionKind.ASK_USER
 
@@ -1268,7 +1427,9 @@ async def test_an_agreeing_import_is_no_target_and_does_not_rescue_the_arm() -> 
         source=MemorySource.USER_ASSERTED,
     )
 
-    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[imported, theirs])
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[imported, theirs], relations=_contradicts("their-words")
+    )
 
     assert decision.kind is MemoryDecisionKind.ASK_USER
 
@@ -1291,22 +1452,24 @@ async def test_the_arm_steps_over_a_better_ranked_agreeing_import() -> None:
     assert decision.target_id == "their-words"
 
 
-async def test_an_external_proposal_agreeing_with_an_assertion_still_defers() -> None:
+async def test_an_external_proposal_agreeing_with_an_assertion_never_folds() -> None:
     """ADR-0214 §1's **incoming-source** boundary — the case likeliest to be got wrong.
 
     The branch this arm is added to is keyed on ``not is_asserted``, which admits
     ``EXTERNAL``. Widening *that* branch instead of naming ``OBSERVED`` and
     ``INFERRED`` would rule ``REINFORCE`` on a fold ADR-0214 §3 does not permit, and
-    ``_refuse_unsafe_fold`` would then turn a deferral into a ``MemoryStoreError`` —
+    ``_refuse_unsafe_fold`` would then turn the ruling into a ``MemoryStoreError`` —
     a failure the writer-side conformance cases cannot catch, because the ruling
-    never reaches them from a conforming policy.
+    never reaches them from a conforming policy. Since ADR-0336 §4 the agreeing pair
+    is no contradiction, so the import is installed beside the assertion.
     """
     proposal = _proposal(_semantic("sync", content=_ASSERTION, source=MemorySource.EXTERNAL))
     theirs = _semantic("their-words", content=_ASSERTION, source=MemorySource.USER_ASSERTED)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[theirs])
 
-    assert decision.kind is MemoryDecisionKind.ASK_USER
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+    assert decision.target_id is None
 
 
 async def test_with_no_asserted_member_the_arm_is_not_consulted() -> None:
@@ -1422,7 +1585,8 @@ async def test_agreement_absorbs_exactly_the_four_transformations(
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
 
-    expected = MemoryDecisionKind.REINFORCE if expected_agreement else MemoryDecisionKind.ASK_USER
+    # A form that does not agree is unlabelled, so it lands beside (ADR-0336 §3(c)).
+    expected = MemoryDecisionKind.REINFORCE if expected_agreement else MemoryDecisionKind.ACCEPT
     assert decision.kind is expected
 
 

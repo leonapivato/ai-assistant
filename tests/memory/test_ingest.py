@@ -193,9 +193,35 @@ def _proposal(record: Memory, *, sensitivity: DataTier = DataTier.PERSONAL) -> M
     return MemoryUpdateProposal(proposed=record, rationale="because", sensitivity=sensitivity)
 
 
-def _ingestor(store: MemoryStore) -> MemoryIngestor:
+class _ContradictsEverything:
+    """A stub reconciler labelling every member it is shown ``CONTRADICTS``.
+
+    Since ADR-0336 a supersession or a deferral rests on that label and on nothing
+    else (§3, §5), so a case about the write a correction causes — the close, the
+    clamp, the batch — supplies the label a model would, and keeps measuring that.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def reconcile(
+        self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
+    ) -> ReconcilerReport:
+        """Label every member a contradiction."""
+        self.calls += 1
+        return ReconcilerReport(
+            relations=dict.fromkeys((c.id for c in conflicts), ConflictRelation.CONTRADICTS),
+            outcomes=frozenset({ReconcilerOutcome.ANSWERED}),
+        )
+
+
+def _ingestor(store: MemoryStore, *, labelled: bool = False) -> MemoryIngestor:
     return MemoryIngestor(
-        traces_sink=FakeTraceSink(), store=store, policy=DefaultMemoryPolicy(), now=_fixed_now
+        traces_sink=FakeTraceSink(),
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        now=_fixed_now,
+        reconciler=_ContradictsEverything() if labelled else None,
     )
 
 
@@ -415,7 +441,7 @@ async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
     await _plant_episodes(store, "ev1", "ev2")
     await store.add(_preference("stale", "user prefers morning meetings", evidence=("ev1",)))
 
-    result = await _ingestor(store).ingest(
+    result = await _ingestor(store, labelled=True).ingest(
         _proposal(_asserted("correction", "user prefers afternoon meetings", evidence=("ev2",)))
     )
 
@@ -474,6 +500,7 @@ async def test_a_correction_retires_every_conflicting_inference_not_only_the_bes
         traces_sink=FakeTraceSink(),
         store=store,
         policy=DefaultMemoryPolicy(),
+        reconciler=_ContradictsEverything(),
         now=_fixed_now,
         conflict_threshold=0.5,
         id_factory=lambda: "corrected",
@@ -541,6 +568,7 @@ async def test_a_multi_target_supersede_that_cannot_mint_leaves_every_target_liv
             traces_sink=FakeTraceSink(),
             store=store,
             policy=DefaultMemoryPolicy(),
+            reconciler=_ContradictsEverything(),
             now=_fixed_now,
             conflict_threshold=0.5,
             id_factory=lambda: "wall",
@@ -615,7 +643,7 @@ async def test_a_correction_that_contradicts_an_assertion_defers_and_writes_noth
     await _plant_episodes(store)
     await store.add(_asserted("earlier", "user works from the Berlin office"))
 
-    result = await _ingestor(store).ingest(
+    result = await _ingestor(store, labelled=True).ingest(
         _proposal(_asserted("later", "user works from the Munich office"))
     )
 
@@ -671,7 +699,7 @@ async def test_a_superseded_targets_hiding_is_read_time_relative(
         await store.add(_preference("stale", "user prefers morning meetings"))
 
         # The ingestor's clock (`_fixed_now`, 2026-06-01) is the close instant.
-        result = await _ingestor(store).ingest(
+        result = await _ingestor(store, labelled=True).ingest(
             _proposal(_asserted("correction", "user prefers afternoon meetings"))
         )
         assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
@@ -723,7 +751,7 @@ async def test_superseding_a_target_never_extends_its_existing_window() -> None:
         )
     )
 
-    result = await _ingestor(store).ingest(
+    result = await _ingestor(store, labelled=True).ingest(
         _proposal(_asserted("correction", "user prefers afternoon meetings"))
     )
 
@@ -768,7 +796,7 @@ async def test_superseding_a_future_dated_target_refuses_without_corrupting(
         )
 
         with pytest.raises(MemoryStoreError, match="valid_from"):
-            await _ingestor(store).ingest(
+            await _ingestor(store, labelled=True).ingest(
                 _proposal(_asserted("correction", "user prefers afternoon meetings"))
             )
 
@@ -829,7 +857,7 @@ async def test_superseding_a_target_whose_window_opens_at_the_close_refuses(
         before = await store.export()
 
         with pytest.raises(MemoryStoreError, match="valid_from"):
-            await _ingestor(store).ingest(
+            await _ingestor(store, labelled=True).ingest(
                 _proposal(_asserted("correction", "user prefers afternoon meetings"))
             )
 
@@ -879,6 +907,7 @@ async def test_a_multi_target_supersede_reads_its_close_instant_exactly_once() -
         traces_sink=FakeTraceSink(),
         store=store,
         policy=DefaultMemoryPolicy(),
+        reconciler=_ContradictsEverything(),
         now=clock,
         conflict_threshold=0.5,
         id_factory=lambda: "corrected",
@@ -917,6 +946,7 @@ async def test_a_correction_retires_the_import_and_survives_the_next_re_sync() -
         traces_sink=FakeTraceSink(),
         store=store,
         policy=DefaultMemoryPolicy(),
+        reconciler=_ContradictsEverything(),
         now=_fixed_now,
         id_factory=lambda: "m2",
     )
@@ -983,9 +1013,11 @@ async def test_the_default_policy_actually_supersedes() -> None:
     # ADR-0038 §1 requires the default policy to supersede a conflicting
     # inference under an assertion; ADR-0040 §4 makes it say so with the
     # SUPERSEDE ruling rather than a MERGE the ingestor had to interpret.
+    # ADR-0336 §3(b): over the conflict the writer labels a contradiction.
     decision = await DefaultMemoryPolicy().decide(
         _proposal(_semantic_from(MemorySource.USER_ASSERTED, "new", "afternoon")),
         conflicts=[_semantic_from(MemorySource.INFERRED, "stale", "morning")],
+        relations={"stale": ConflictRelation.CONTRADICTS},
     )
 
     assert decision.kind is MemoryDecisionKind.SUPERSEDE
@@ -1854,6 +1886,7 @@ async def test_a_supersede_closes_every_window_conditionally_and_installs_uncond
         traces_sink=FakeTraceSink(),
         store=store,
         policy=DefaultMemoryPolicy(),
+        reconciler=_ContradictsEverything(),
         now=_fixed_now,
         conflict_threshold=0.5,
         id_factory=lambda: "corrected",
@@ -2107,6 +2140,7 @@ async def test_a_stale_supersede_re_runs_and_retires_the_target_it_re_read() -> 
         traces_sink=FakeTraceSink(),
         store=store,
         policy=DefaultMemoryPolicy(),
+        reconciler=_ContradictsEverything(),
         now=_fixed_now,
         conflict_threshold=0.5,
         id_factory=lambda: "corrected",
@@ -2307,7 +2341,7 @@ async def test_a_one_token_correction_still_defers_end_to_end() -> None:
     await _plant_episodes(store, "before", "now")
     await store.add(_asserted("their-words", "the user prefers window seats", evidence=("before",)))
 
-    result = await _ingestor(store).ingest(
+    result = await _ingestor(store, labelled=True).ingest(
         _proposal(_asserted("correction", "the user prefers aisle seats", evidence=("now",)))
     )
 
@@ -2413,39 +2447,53 @@ def _reconciling(
     )
 
 
-async def test_an_asserted_proposal_reaches_no_reconciler_and_no_provider() -> None:
-    """ADR-0159 §2: a `USER_ASSERTED` proposal is ADR-0121 §2's arm and reads no relation.
+async def test_an_asserted_proposal_is_labelled_and_lands_beside_what_is_not_contradicted() -> None:
+    """ADR-0336 §2:1: a `USER_ASSERTED` proposal reaches the reconciler like any other.
 
-    Computing one there would buy nothing and would spend a model request *inside
-    the ingest lock* on one of the two paths a user waits on.
+    The real reconciler is consulted once and spends one request; its reply labels
+    nothing, so the stale inference is unlabelled and the correction is installed
+    beside it rather than retiring it on similarity (§3(c), §6:1). Before ADR-0336
+    this ingest made no request and retired the inference.
     """
     store = InMemoryMemoryStore()
     await _plant_episodes(store, _EPISODE)
     await store.add(_preference("stale", "user prefers morning meetings"))
     reconciler = _CountingReconciler()
 
-    await _reconciling(store, reconciler).ingest(
+    result = await _reconciling(store, reconciler).ingest(
         _proposal(_asserted("correction", "user prefers afternoon meetings"))
     )
 
-    assert reconciler.calls == 0
-    assert reconciler.requests == 0
+    assert reconciler.calls == 1
+    assert reconciler.requests == 1
+    assert result.decision.kind is MemoryDecisionKind.ACCEPT
+    assert await store.get("stale") is not None
 
 
-async def test_an_asserted_conflict_reaches_no_reconciler_and_no_provider() -> None:
-    """ADR-0159 §2: a set holding an assertion is the `ASK_USER` arm §4 leaves untouched."""
+async def test_a_set_holding_an_assertion_is_labelled_and_asks_only_on_a_contradiction() -> None:
+    """ADR-0336 §2:1, §4:1: a set holding an assertion is labelled, and the label rules.
+
+    Unlabelled, the observation lands beside the assertion; labelled
+    ``CONTRADICTS``, it defers and names that assertion (§7:1).
+    """
     store = InMemoryMemoryStore()
     await _plant_episodes(store, _EPISODE)
     await store.add(_asserted("theirs", "user prefers morning meetings"))
     reconciler = _CountingReconciler()
 
-    result = await _reconciling(store, reconciler).ingest(
+    beside = await _reconciling(store, reconciler).ingest(
         _proposal(_observed("observed", "user prefers afternoon meetings"))
     )
+    asked = await _reconciling(
+        store, _StubReconciler({"theirs": ConflictRelation.CONTRADICTS})
+    ).ingest(_proposal(_observed("observed-again", "user prefers afternoon meetings")))
 
-    assert result.decision.kind is MemoryDecisionKind.ASK_USER
-    assert reconciler.calls == 0
-    assert reconciler.requests == 0
+    assert reconciler.calls == 1
+    assert reconciler.requests == 1
+    assert beside.decision.kind is MemoryDecisionKind.ACCEPT
+    assert beside.contradicted == ()
+    assert asked.decision.kind is MemoryDecisionKind.ASK_USER
+    assert asked.contradicted == ("theirs",)
 
 
 async def test_a_secret_proposal_puts_nothing_in_front_of_a_model() -> None:

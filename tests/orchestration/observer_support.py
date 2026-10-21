@@ -19,6 +19,7 @@ from ai_assistant.core.types import (
     ActivationEffect,
     ChannelContext,
     ChannelIdentity,
+    ConflictRelation,
     DigestOutcome,
     EpisodeProcessingRecord,
     EpisodicMemory,
@@ -66,10 +67,14 @@ from ai_assistant.testing import (
 from ai_assistant.testing.activation import ended_pass
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.protocols import DiagnosticSink
-    from ai_assistant.core.types import ActivationUnderstanding, MemoryRecord
+    from ai_assistant.core.types import (
+        ActivationUnderstanding,
+        MemoryRecord,
+        MemoryUpdateProposal,
+    )
 
 #: The instant every case starts at: after §7:5's instant.
 AT: Final = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
@@ -244,12 +249,35 @@ class Minter:
         return str(self.minted)
 
 
+class Labelling:
+    """A stub reconciler answering fixed ADR-0159 §1 relations, keyed by record id.
+
+    What the writer holds about a stored memory decides what a deferral names
+    (ADR-0336 §7), so an observer case about a question supplies the label a model
+    would have.
+    """
+
+    def __init__(self, labels: Mapping[str, ConflictRelation]) -> None:
+        self._labels = dict(labels)
+
+    async def reconcile(
+        self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
+    ) -> Mapping[str, ConflictRelation]:
+        """Answer with this stub's fixed labels."""
+        return dict(self._labels)
+
+
 @dataclass
 class Harness:
-    """The canonical fakes, wired as the composition root would wire them."""
+    """The canonical fakes, wired as the composition root would wire them.
+
+    ``labels`` are what the writer's reconciler answers, keyed by stored memory id;
+    none by default, which is ADR-0336 §6's floor.
+    """
 
     clock: Clock = field(default_factory=Clock)
     ruling: MemoryDecisionKind = MemoryDecisionKind.ACCEPT
+    labels: Mapping[str, ConflictRelation] | None = None
     memory: FakeMemoryStore = field(init=False)
     plans: FakePlanStore = field(init=False)
     stories: FakeStoryStore = field(init=False)
@@ -263,7 +291,12 @@ class Harness:
         self.plans = FakePlanStore(now=self.clock)
         self.stories = FakeStoryStore(now=self.clock)
         self.policy = FakeMemoryPolicy(self.ruling)
-        self.writer = FakeMemoryWriter(store=self.memory, policy=self.policy, now=self.clock)
+        self.writer = FakeMemoryWriter(
+            store=self.memory,
+            policy=self.policy,
+            now=self.clock,
+            reconciler=None if self.labels is None else Labelling(self.labels),
+        )
         self.writes = MemoryWriteStage(writer=self.writer)
 
     async def hold(self, *records: MemoryRecord) -> None:
