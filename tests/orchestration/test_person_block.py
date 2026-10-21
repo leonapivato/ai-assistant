@@ -4,9 +4,11 @@ Built against the canonical fakes, ``FakePersonModelStore`` and ``FakeMemoryStor
 person resolved from the recorded trigger alone (§2:2-§2:4); the kept-in-mind slot's
 order, its budget and its count of what it left out (§6:1-§6:2); what it leaves out for
 resting on outside content (§6:4) and for the record rule (§6:5); a pin or mark followed
-through its memory's successors (§4:8) and shown nowhere where its memory is gone
-(§4:10); the suggestions planning is shown (§7:3, §7:9); the drop before each planning
-round (§7:10); and a store that cannot be read, which gives no block.
+through its memory's successors to its chain's current end, live read first and the
+history read only where the live read misses (§4:8; ADR-0342 §5:2-§5:5), and shown
+nowhere where its memory is gone (§4:10); the suggestions planning is shown (§7:3,
+§7:9); the drop before each planning round, of what the history read no longer returns
+(§7:10; ADR-0342 §5:4); and a store that cannot be read, which gives no block.
 """
 
 from __future__ import annotations
@@ -56,7 +58,9 @@ from ai_assistant.testing.memories import (
 )
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import ChannelTarget, Memory, PersonModel
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
+
+    from ai_assistant.core.types import ChannelTarget, Memory, MemoryRecord, PersonModel
 
 pytestmark = pytest.mark.anyio
 
@@ -141,13 +145,45 @@ def test_the_inputs_text_selects_no_person() -> None:
 # --- building the block -------------------------------------------------------------
 
 
+class _Reads(FakeMemoryStore):
+    """The canonical fake, recording each read by id the walk makes, in order.
+
+    ``before_live`` runs as the first live read is made, before it answers: a write
+    landing as the walk reads.
+    """
+
+    def __init__(self, *, before_live: Callable[[_Reads], Awaitable[None]] | None = None) -> None:
+        super().__init__(now=lambda: NOW)
+        self.reads: list[tuple[str, tuple[str, ...]]] = []
+        self._before_live = before_live
+
+    async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+        ids = tuple(record_ids)
+        self.reads.append(("live", ids))
+        if self._before_live is not None:
+            landing, self._before_live = self._before_live, None
+            await landing(self)
+        return await super().get_many(ids)
+
+    async def get_history(self, record_ids: Sequence[str]) -> Mapping[str, Memory]:
+        ids = tuple(record_ids)
+        self.reads.append(("history", ids))
+        return await super().get_history(ids)
+
+
 class _World:
     """The two fakes, a clock that ticks, and the assembly over them."""
 
-    def __init__(self, *, budget: int = KEPT_IN_MIND_CHARS, suggestions: int = 5) -> None:
+    def __init__(
+        self,
+        *,
+        budget: int = KEPT_IN_MIND_CHARS,
+        suggestions: int = 5,
+        memory: _Reads | None = None,
+    ) -> None:
         seconds = count()
         self.people = FakePersonModelStore(now=lambda: NOW + timedelta(seconds=next(seconds)))
-        self.memory = FakeMemoryStore(now=lambda: NOW)
+        self.memory = memory or _Reads()
         self.blocks = PersonBlocks(
             store=self.people, memory=self.memory, budget_chars=budget, suggestions=suggestions
         )
@@ -169,8 +205,22 @@ def _fact(record_id: str, content: str, **envelope: object) -> Memory:
     return memory(record_id, content, said_support(when=AT, added_at=AT), **envelope)
 
 
-def _ended(record_id: str, content: str, *, successor: str | None, live: bool = True) -> Memory:
-    """A memory ended at ``AT``, naming ``successor``; still inside its window where ``live``."""
+def _ended(
+    record_id: str,
+    content: str,
+    *,
+    successor: str | None,
+    then_wrong: tuple[str | None] | None = None,
+    live: bool = False,
+    **envelope: object,
+) -> Memory:
+    """A memory ended at ``AT``, naming ``successor``, its window closed there, as the writer
+    leaves it (ADR-0328 §3:4, §5:9).
+
+    ``then_wrong`` marks it wrong an hour later too, naming the one successor it holds
+    or none (ADR-0328 §5:7). ``live`` keeps its window open instead: a retired memory a
+    live read still returns, a state the writer never builds.
+    """
     support = said_support(when=AT, added_at=AT)
     create = MemoryOperation(
         kind=MemoryOperationKind.CREATE, cites=support.points_at, at=AT, by=support.added_by
@@ -182,14 +232,27 @@ def _ended(record_id: str, content: str, *, successor: str | None, live: bool = 
         by=MemoryWriterName.OBSERVER,
         successor=successor,
     )
-    until = NOW + timedelta(days=30) if live else NOW - timedelta(days=1)
+    operations: tuple[MemoryOperation, ...] = (create, end)
+    status = MemoryStatus.ENDED
+    if then_wrong is not None:
+        wrong = MemoryOperation(
+            kind=MemoryOperationKind.MARK_WRONG,
+            cites=support.points_at,
+            at=AT + timedelta(hours=1),
+            by=MemoryWriterName.OBSERVER,
+            successor=then_wrong[0],
+        )
+        operations = (create, end, wrong)
+        status = MemoryStatus.WRONG
+    until = NOW + timedelta(days=30) if live else AT
     return memory(
         record_id,
         content,
         support,
-        operations=(create, end),
-        status=MemoryStatus.ENDED,
+        operations=operations,
+        status=status,
         validity=Validity(valid_until=until),
+        **envelope,
     )
 
 
@@ -320,7 +383,25 @@ async def test_the_record_rule_is_applied_to_the_slot() -> None:
     assert [one.memory.id for one in bounded.kept] == ["m:about-ada", "m:diet"]
 
 
-async def test_a_pin_follows_its_memorys_successors_to_a_current_one() -> None:
+async def test_a_pin_on_a_current_memory_is_read_live_alone() -> None:
+    """ADR-0342 §5:3: the live read returns it, so the walk ends there, with no history read."""
+    world = _World()
+    await world.held(_fact("m:diet", "Eats no meat."))
+    await world.pin("m:diet")
+
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+
+    assert block is not None
+    assert [one.memory.id for one in block.kept] == ["m:diet"]
+    assert world.memory.reads == [("live", ("m:diet",))]
+
+
+async def test_a_pin_follows_two_retirements_to_its_chains_current_end() -> None:
+    """#3308: retired memories, their windows closed, reached through the history read.
+
+    Each hop asks the live read first and the history read only for what it missed
+    (ADR-0342 §5:3), and the block shows the current end alone (§5:5).
+    """
     world = _World()
     await world.held(
         _ended("m:old", "Lives in Porto.", successor="m:mid"),
@@ -333,9 +414,81 @@ async def test_a_pin_follows_its_memorys_successors_to_a_current_one() -> None:
 
     assert block is not None
     assert [one.memory.id for one in block.kept] == ["m:new"]
+    assert block.memory_ids == {"m:new"}
+    assert block.kept[0].memory.status is MemoryStatus.CURRENT
+    assert world.memory.reads == [
+        ("live", ("m:old",)),
+        ("history", ("m:old",)),
+        ("live", ("m:mid",)),
+        ("history", ("m:mid",)),
+        ("live", ("m:new",)),
+    ]
     model = await world.people.read(OWNER_PERSON_ID)
     assert model is not None
     assert [pin.memory_id for pin in model.pins] == ["m:old"]
+
+
+async def test_a_retirement_landing_as_the_live_read_is_made_is_followed() -> None:
+    """ADR-0342 §5:3's order: the live read misses, and the history read made after it
+    names a successor that is current.
+
+    The pinned memory is current until the walk's first live read, which the retirement
+    beats. A history read made before the live read would have found it current naming
+    no successor, and the live read missing it would then have shown nothing.
+    """
+
+    async def retire(store: _Reads) -> None:
+        await store.add(_fact("m:new", "Lives in Coimbra."))
+        await store.add(_ended("m:old", "Lives in Porto.", successor="m:new"))
+
+    world = _World(memory=_Reads(before_live=retire))
+    await world.held(_fact("m:old", "Lives in Porto."))
+    await world.pin("m:old")
+
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+
+    assert block is not None
+    assert [one.memory.id for one in block.kept] == ["m:new"]
+    assert world.memory.reads[:2] == [("live", ("m:old",)), ("history", ("m:old",))]
+
+
+@pytest.mark.parametrize(
+    ("then_wrong", "shown"),
+    [(("m:wrong-fix",), "m:wrong-fix"), ((None,), "m:end-fix")],
+    ids=["the-later-names-one", "the-later-names-none"],
+)
+async def test_the_latest_operation_naming_a_successor_governs(
+    then_wrong: tuple[str | None], shown: str
+) -> None:
+    """ADR-0342 §5:2: ended naming one successor, then marked wrong naming another or none."""
+    world = _World()
+    await world.held(
+        _ended("m:old", "Lives in Porto.", successor="m:end-fix", then_wrong=then_wrong),
+        _fact("m:end-fix", "Lives in Lisbon."),
+        _fact("m:wrong-fix", "Lives in Coimbra."),
+    )
+    await world.pin("m:old")
+
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+
+    assert block is not None
+    assert [one.memory.id for one in block.kept] == [shown]
+
+
+async def test_a_retired_memory_a_live_read_returns_is_never_shown_as_current() -> None:
+    """ADR-0342 §5:1, against a state the writer never builds: retired, its window open."""
+    world = _World()
+    await world.held(
+        _ended("m:old", "Lives in Porto.", successor="m:new", live=True),
+        _ended("m:stuck", "Lives in Faro.", successor=None, live=True),
+        _fact("m:new", "Lives in Coimbra."),
+    )
+    await world.pin("m:old", "m:stuck")
+
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+
+    assert block is not None
+    assert [one.memory.id for one in block.kept] == ["m:new"]
 
 
 async def test_two_pins_reaching_one_memory_show_it_once() -> None:
@@ -360,11 +513,16 @@ async def test_two_pins_reaching_one_memory_show_it_once() -> None:
             _ended("m:old", "Lives in Porto.", successor="m:loop"),
             _ended("m:loop", "Lives in Lisbon.", successor="m:old"),
         ),
-        # Retired and out of its window: the memory store no longer returns it.
-        (_ended("m:old", "Lives in Porto.", successor="m:new", live=False),),
+        # Retired and past its expiry: the history read omits it (ADR-0342 §3).
+        (_ended("m:old", "Lives in Porto.", successor="m:new", expires_at=AT),),
+        # The successor itself retired, naming none: the chain ends retired.
+        (
+            _ended("m:old", "Lives in Porto.", successor="m:mid"),
+            _ended("m:mid", "Lives in Lisbon.", successor=None),
+        ),
         (),
     ],
-    ids=["no-successor", "successor-not-held", "loop", "out-of-window", "not-held"],
+    ids=["no-successor", "successor-not-held", "loop", "expired", "ends-retired", "not-held"],
 )
 async def test_a_pin_whose_chain_reaches_no_current_memory_is_shown_in_no_block(
     records: tuple[Memory, ...],
@@ -555,6 +713,29 @@ async def test_a_memory_forgotten_while_the_activation_runs_is_dropped_before_a_
     assert [one.memory.id for one in kept.kept] == ["m:brief"]
     assert kept.suggestions == ()
     assert kept.profile == block.profile
+
+
+async def test_a_memory_retired_while_the_activation_runs_is_still_held() -> None:
+    """ADR-0342 §5:4: the store holds a memory exactly where the history read returns it.
+
+    The block is assembled once (§7:1), so the check before a round walks no chain:
+    the retired memory stays, and its successor is not brought in.
+    """
+    world = _World()
+    await world.held(_fact("m:diet", "Eats no meat."))
+    await world.pin("m:diet")
+    block = await world.blocks.assemble(OWNER_PERSON_ID, supply=BOUNDED)
+    assert block is not None
+
+    await world.held(
+        _ended("m:diet", "Eats no meat.", successor="m:fish"),
+        _fact("m:fish", "Eats fish, not meat."),
+    )
+    world.memory.reads.clear()
+    kept = await still_held(block, world.memory)
+
+    assert kept is block
+    assert world.memory.reads == [("history", ("m:diet",))]
 
 
 async def test_a_block_whose_memories_are_all_held_is_kept_as_it_is() -> None:
