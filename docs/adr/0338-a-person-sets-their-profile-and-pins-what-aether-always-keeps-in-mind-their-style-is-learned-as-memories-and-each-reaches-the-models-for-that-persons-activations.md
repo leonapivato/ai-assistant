@@ -402,9 +402,9 @@ person whose pins fill the budget sees, on the panel, which style memories were 
 > does not rest on outside content (ADR-0328 §15:6) and passes the record rule (§6:5). Every
 > other pin suggestion is shown on the panel alone.
 
-> **Normative.** Before each planning round after the first, code drops from the block every
-> memory the memory store no longer holds, so a memory forgotten while the activation runs
-> reaches no later request.
+> **Normative.** Before each planning round, the first included, code drops from the block
+> every memory the memory store no longer holds, so a memory forgotten while the activation
+> runs reaches no later request.
 
 Within a stage's data, the person block comes before the parts that change from round to
 round, so that it caches across rounds
