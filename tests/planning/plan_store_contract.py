@@ -936,6 +936,34 @@ class PlanStoreContract:
         assert await store.part_effects([QuestionPart(round="q-none", part=1)]) == ()
         assert [one.id for one in await store.part_effects((first, first))] == ["e1"]
 
+    async def test_the_read_by_part_answers_however_many_parts_it_names(
+        self, store: PlanStore
+    ) -> None:
+        """§4:9: a read naming more parts than SQLite binds is answered whole (#3301).
+
+        In claim order across the whole read, whatever the parts' places in it: the
+        first record claimed spends the last part named, the second the first, and the
+        fourth one from the middle, while the third spends a part the read does not name.
+        """
+        named = [QuestionPart(round="q-round", part=one) for one in range(1, _PAST_SQLITES_BOUND)]
+        await store.claim_activation_effect(
+            _spending("e1", activation="act-1", part=named[-1]), match=None
+        )
+        await store.claim_activation_effect(
+            _spending("e2", activation="act-2", part=named[0]), match=None
+        )
+        await store.claim_activation_effect(
+            _spending("e3", activation="act-3", part=QuestionPart(round="q-other", part=1)),
+            match=None,
+        )
+        await store.claim_activation_effect(
+            _spending("e4", activation="act-4", part=named[len(named) // 2]), match=None
+        )
+
+        read = await store.part_effects(named)
+
+        assert [one.id for one in read] == ["e1", "e2", "e4"]
+
     @pytest.mark.parametrize(
         "given",
         [

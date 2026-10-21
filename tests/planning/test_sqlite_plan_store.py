@@ -396,54 +396,195 @@ async def test_every_transaction_path_opens_and_closes_exactly_one(tmp_path: Pat
 #: named last and ``act-2`` first, so a read of them is several statements.
 _SLICED_ACTIVATIONS = (*(f"act-{index}" for index in range(2, 1202)), "act-1")
 
+#: More question parts than one statement of ``part_effects`` names
+#: (``sqlite_store._PART_SLICE``), so a read of them is several statements too.
+_SLICED_PARTS = tuple(QuestionPart(round="q-round", part=one) for one in range(1, 1202))
 
-async def test_a_read_in_several_slices_is_one_read_transaction(tmp_path: Path) -> None:
-    """Issue #3296: the slices of one ``activation_effects`` read see one snapshot.
+#: Each sliced read by the store's own name: what it reads, and how many of the named
+#: ids one of its statements binds.
+_SLICED_READS: dict[str, tuple[Callable[[SqlitePlanStore], Awaitable[object]], int, int]] = {
+    "activation_effects (issue #3296)": (
+        lambda store: store.activation_effects(_SLICED_ACTIVATIONS),
+        len(_SLICED_ACTIVATIONS),
+        sqlite_store._IN_SLICE,
+    ),
+    "part_effects (issue #3301)": (
+        lambda store: store.part_effects(_SLICED_PARTS),
+        len(_SLICED_PARTS),
+        sqlite_store._PART_SLICE,
+    ),
+}
+
+
+def _spent(effect_id: str, part: QuestionPart, *, activation: str = "act-1") -> ActivationEffect:
+    """A call claimed under an approval, spending ``part`` (ADR-0321 §4:9)."""
+    return _acted(effect_id, activation=activation).model_copy(update={"part": part})
+
+
+@pytest.mark.parametrize("read", list(_SLICED_READS), ids=list(_SLICED_READS))
+async def test_a_read_in_several_slices_is_one_read_transaction(tmp_path: Path, read: str) -> None:
+    """Issues #3296, #3301: the slices of one read see one snapshot.
 
     Each slice is its own statement, so a racing write landing between two of them
     would otherwise be half seen. The read opens one deferred ``BEGIN``, runs every
     slice inside it, and closes it.
     """
+    reading, named, per_statement = _SLICED_READS[read]
     store = SqlitePlanStore(path=tmp_path / "plans.db", now=_fixed_now)
     try:
-        await store.claim_activation_effect(_acted("e1"), match=None)
+        await store.claim_activation_effect(_spent("e1", _SLICED_PARTS[-1]), match=None)
         with _traced(store) as statements:
-            read = await store.activation_effects(_SLICED_ACTIVATIONS)
+            answer = await reading(store)
     finally:
         store.close()
 
-    assert [one.id for one in read] == ["e1"]
+    assert isinstance(answer, tuple)
+    assert [one.id for one in answer] == ["e1"]
     selects = [one for one in statements if one.lstrip().upper().startswith("SELECT")]
-    assert len(selects) == -(-len(_SLICED_ACTIVATIONS) // sqlite_store._IN_SLICE) > 1
+    assert len(selects) == -(-named // per_statement) > 1
     assert statements[0].strip().upper() == "BEGIN"
     assert [one for one in statements if one.strip().upper().startswith("BEGIN")] == ["BEGIN"]
     assert statements[-1].strip().upper() == "COMMIT"
 
 
+@pytest.mark.parametrize("read", list(_SLICED_READS), ids=list(_SLICED_READS))
 async def test_the_claim_order_survives_a_claimed_seq_an_outside_writer_retyped(
-    tmp_path: Path,
+    tmp_path: Path, read: str
 ) -> None:
     """Rows read in several slices are merged as ``ORDER BY claimed_seq`` orders them.
 
     The column is ``INTEGER``, but an outside writer can store text or a blob in it,
     which a Python sort will not compare with an integer. SQLite orders numbers, then
     text, then blobs, and the merged read answers in that order rather than raising.
+    ``e3`` is found by the read's first slice, and ``e1`` and ``e2`` by its last.
     """
+    reading, _named, _per_statement = _SLICED_READS[read]
     path = tmp_path / "plans.db"
     store = SqlitePlanStore(path=path, now=_fixed_now)
     try:
-        await store.claim_activation_effect(_acted("e1"), match=None)
-        await store.claim_activation_effect(_acted("e2"), match=None)
-        await store.claim_activation_effect(_acted("e3", activation="act-2"), match=None)
+        await store.claim_activation_effect(_spent("e1", _SLICED_PARTS[-1]), match=None)
+        await store.claim_activation_effect(_spent("e2", _SLICED_PARTS[-2]), match=None)
+        await store.claim_activation_effect(
+            _spent("e3", _SLICED_PARTS[0], activation="act-2"), match=None
+        )
         with sqlite3.connect(path) as conn:
             conn.execute("UPDATE activation_effects SET claimed_seq = X'00' WHERE id = 'e1'")
             conn.execute("UPDATE activation_effects SET claimed_seq = 'later' WHERE id = 'e2'")
 
-        read = await store.activation_effects(_SLICED_ACTIVATIONS)
+        answer = await reading(store)
     finally:
         store.close()
 
-    assert [one.id for one in read] == ["e3", "e2", "e1"]
+    assert isinstance(answer, tuple)
+    assert [one.id for one in answer] == ["e3", "e2", "e1"]
+
+
+async def test_a_row_two_slices_of_a_read_by_part_find_is_answered_once(
+    tmp_path: Path,
+) -> None:
+    """Issue #3301: a row found again by a later slice is not answered twice.
+
+    A hand-built file may collate ``part_round`` ``NOCASE``, a shape the open accepts,
+    and then a row spending ``q-round`` is matched by ``Q-ROUND`` as well. The read
+    names the two parts in different slices, and the single statement the slices
+    replace would have answered the row once.
+    """
+    path = tmp_path / "plans.db"
+    SqlitePlanStore(path=path, now=_fixed_now).close()
+    with contextlib.closing(sqlite3.connect(path)) as raw, raw:
+        raw.execute("ALTER TABLE activation_effects RENAME TO held")
+        raw.execute(
+            "CREATE TABLE activation_effects("
+            "id TEXT PRIMARY KEY, activation_id TEXT NOT NULL, claimed_seq INTEGER NOT NULL, "
+            "data TEXT NOT NULL, part_round TEXT COLLATE NOCASE, part_number INTEGER)"
+        )
+        raw.execute("DROP TABLE held")
+    lower = QuestionPart(round="q-round", part=1)
+    upper = QuestionPart(round="Q-ROUND", part=1)
+    filler = [
+        QuestionPart(round="q-filler", part=one) for one in range(1, 1 + sqlite_store._PART_SLICE)
+    ]
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.claim_activation_effect(_spent("e1", lower), match=None)
+
+        read = await store.part_effects([lower, *filler, upper])
+    finally:
+        store.close()
+
+    assert [one.id for one in read] == ["e1"]
+
+
+#: The smallest ``SQLITE_MAX_VARIABLE_NUMBER`` SQLite has shipped, its default before
+#: 3.32, and the bound ``sqlite_store._IN_SLICE`` is chosen under.
+_SMALLEST_SHIPPED_LIMIT = 999
+
+
+#: One more than the limit, so a read naming this many cannot be one statement.
+_PAST_THE_LIMIT = _SMALLEST_SHIPPED_LIMIT + 1
+
+
+async def _observations_past_the_limit(store: SqlitePlanStore) -> None:
+    episodes = [f"activation:{index}" for index in range(_PAST_THE_LIMIT)]
+    held = await store.write_observation(_observed(episodes[-1]), expected_revision=0)
+
+    assert await store.observations(episodes) == (held,)
+
+
+async def _activation_effects_past_the_limit(store: SqlitePlanStore) -> None:
+    activations = [f"act-{index}" for index in range(_PAST_THE_LIMIT)]
+    await store.claim_activation_effect(_acted("e1", activation=activations[-1]), match=None)
+
+    assert [one.id for one in await store.activation_effects(activations)] == ["e1"]
+
+
+async def _match_past_the_limit(store: SqlitePlanStore) -> None:
+    activations = tuple(f"act-{index}" for index in range(_PAST_THE_LIMIT))
+    await store.claim_activation_effect(_acted("e1", activation=activations[-1]), match=None)
+
+    claimed = await store.claim_activation_effect(
+        _acted("e2", activation=activations[0]), match=activations
+    )
+
+    assert claimed is ActivationEffectClaim.ALREADY_DONE
+
+
+async def _part_effects_past_the_limit(store: SqlitePlanStore) -> None:
+    parts = [QuestionPart(round="q-round", part=one) for one in range(1, 1 + _PAST_THE_LIMIT)]
+    await store.claim_activation_effect(_spent("e1", parts[-1]), match=None)
+
+    assert [one.id for one in await store.part_effects(parts)] == ["e1"]
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        pytest.param(_observations_past_the_limit, id="observations"),
+        pytest.param(_activation_effects_past_the_limit, id="activation_effects"),
+        pytest.param(_match_past_the_limit, id="the-claims-match"),
+        pytest.param(_part_effects_past_the_limit, id="part_effects"),
+    ],
+)
+async def test_every_sliced_read_answers_under_the_smallest_shipped_limit(
+    tmp_path: Path, scenario: Callable[[SqlitePlanStore], Awaitable[None]]
+) -> None:
+    """Issue #3303: each read naming any number of ids answers under a limit of 999.
+
+    The shared suite's past-the-bound cases would pass a store that read in one
+    statement wherever SQLite was built with a limit above theirs. Lowered on the
+    store's own connection, the limit refuses one statement past it, and each read the
+    store slices still answers whole, its last named id included.
+    """
+    store = SqlitePlanStore(path=tmp_path / "plans.db", now=_fixed_now)
+    try:
+        store._conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, _SMALLEST_SHIPPED_LIMIT)
+        marks = ", ".join("?" for _ in range(_PAST_THE_LIMIT))
+        with pytest.raises(sqlite3.OperationalError, match="too many SQL variables"):
+            store._conn.execute(f"SELECT {marks}", (0,) * _PAST_THE_LIMIT)
+
+        await scenario(store)
+    finally:
+        store.close()
 
 
 async def test_a_refusal_inside_a_transaction_leaves_the_store_usable(tmp_path: Path) -> None:
