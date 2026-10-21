@@ -73,8 +73,10 @@ from ai_assistant.testing.memories import (
     inference_support,
     legacy_support,
     memory,
+    pinned_support,
     said_support,
     sourced_support,
+    support_with_origin,
 )
 
 _NOW = AT + timedelta(hours=1)
@@ -1498,3 +1500,75 @@ async def test_a_commit_reply_missing_a_required_key_still_fails_as_unparsed() -
         "class": "unparsed",
         "message": "the commit step's reply did not parse",
     }
+
+
+@pytest.mark.parametrize("origin", list(SupportOrigin))
+def test_a_similar_memory_renders_whatever_origin_its_support_has(origin: SupportOrigin) -> None:
+    """§8:5: every origin has the words a rendering attributes it by (#3335).
+
+    A support of an origin the table lacks would fail the commit call's request before
+    the call is made, for every finding whose search finds that memory.
+    """
+    held = memory("m-seat", "The user prefers window seats.", support_with_origin(origin))
+    view = _view(_input("P1", "leaving"), similar=(_similar("M1", held),))
+
+    payload = json.loads(json.dumps(view.payload()))
+
+    (shown,) = payload["memories"]
+    (support,) = shown["supports"]
+    assert support["from"]
+    assert shown["stands"]
+
+
+async def test_a_pinned_memory_is_shown_to_the_commit_step_with_its_pin() -> None:
+    """ADR-0338 §4:4, ADR-0329 §9:3: a memory a pin confirmed renders among the similar.
+
+    The commit payload is built from the store: the pinned support points into no
+    episode, so it names no exchange and no time, and it ranks the memory confirmed.
+    """
+    harness = Harness()
+    leaving = episode("leaving", text="Window seats please.")
+    held = memory(
+        "m-seat",
+        "The user prefers window seats.",
+        said_support(address("leaving")),
+        pinned_support("pin:1"),
+    )
+    await harness.hold(leaving, held)
+    part = ReadPart(
+        handle="P1",
+        part=InputPart(episode=address("leaving")),
+        episode=address("leaving"),
+        occurred_at=AT,
+        text="Window seats please.",
+        origin=SupportOrigin.USER_MESSAGE,
+        when=AT,
+    )
+    reading = Reading(leaving=ReadEpisode(handle="E1", record=leaving, parts=(part,)))
+    finding = ObservationFinding(
+        id="f1",
+        episode=address("leaving"),
+        claim="The user prefers window seats.",
+        rests_on=(part.part,),
+    )
+    reader = EpisodeReader(
+        memory=harness.memory,
+        plans=harness.plans,
+        stories=harness.stories,
+        story_episodes=0,
+        related=0,
+    )
+
+    view = await commit_view(
+        finding, reading, reader=reader, memory=harness.memory, plans=harness.plans, similar=5
+    )
+
+    assert view is not None
+    payload = json.loads(json.dumps(view.payload()))
+    (shown,) = payload["memories"]
+    pinned = shown["supports"][1]
+    assert (pinned["exchange"], pinned["occurred_at"]) == (None, None)
+    assert pinned["outside"] is False
+    assert pinned["backs_as_worded"] is True
+    assert pinned["from"]
+    assert view.similar[0].memory.standing is MemoryStanding.CONFIRMED
