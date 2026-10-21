@@ -209,10 +209,6 @@ FOLLOW_UP_ROUTES: Final = frozenset(
 #: source and reason alone, never anything an entry holds (§8:14).
 FOLLOW_UP_NOT_ASKED: Final = "follow_up_not_asked"
 
-#: How far apart the copies of one observer call may be paired: the observer writes them
-#: one after another, under each activation it read for (ADR-0333 §2:9).
-COPIES_WITHIN_SECONDS: Final = 60.0
-
 #: A day of the budget (§8:3).
 _DAY_SECONDS: Final = 86_400.0
 
@@ -222,6 +218,11 @@ _DAY_SECONDS: Final = 86_400.0
 #: be paired unambiguously (§8:5).
 _PENDING_CALLS: Final = 256
 _SPOILED_CALLS: Final = 1024
+
+#: The most observer calls whose copies may still be joined, before any copy's returned
+#: entry has come back; past it the oldest is forgotten, and a copy written after is a
+#: call of its own.
+_OPEN_COPIES: Final = 256
 
 #: Why a follow-up's second request is refused: it is sent once and never retried (§8:15).
 _ONCE: Final = "a follow-up sends one request and is never retried (ADR-0337 §8:15)"
@@ -271,9 +272,6 @@ class _Call:
         returned: Its returned entry.
         targets: Its given entry under each activation it was written under, the first's
             included; the follow-up's entry is written under each.
-        paired_at: When it was paired, from the asker's clock.
-        copies: What another activation's copy of the call holds the same, for an
-            observer call; ``None`` for any other.
         outcome: The answer or the failure, once the follow-up has been asked.
     """
 
@@ -282,9 +280,39 @@ class _Call:
     given: DiagnosticEntry
     returned: DiagnosticEntry
     targets: list[DiagnosticEntry]
-    paired_at: float
-    copies: str | None
     outcome: dict[str, object] | None = None
+
+
+@dataclass(slots=True)
+class _Copies:
+    """The given entries of one observer call, one under each activation it read for.
+
+    The observer writes a call's given entry under each activation in turn, sends the
+    call once, then writes its returned entry under each (ADR-0333 §2:9). So a given
+    entry holding what an open group's do, under an activation the group does not yet
+    hold, is a copy of the group's call; the group closes once any copy's returned entry
+    comes back, and a given entry after that is another call. No clock decides it.
+
+    Attributes:
+        key: What every copy's given entry holds the same.
+        activations: The activations it holds a copy under.
+        call: The call, once its first copy has been paired and admitted.
+        settled: Whether its first copy has been paired, so that a later copy is joined
+            to ``call``, or asked nothing where ``call`` is ``None``.
+    """
+
+    key: str
+    activations: set[str] = field(default_factory=set)
+    call: _Call | None = None
+    settled: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _Held:
+    """A given entry waiting for its returned one, and the copies it is one of, if any."""
+
+    entry: DiagnosticEntry
+    copies: _Copies | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,8 +422,7 @@ class FollowUpAsker:
             thinking: The thinking a planning round's follow-up asks for, the
                 completer's own.
             now: The clock each follow-up's entry is stamped from.
-            clock: The monotonic clock the budget's day and the copies' window are
-                measured on.
+            clock: The monotonic clock the budget's day is measured on.
             build: Builds the model a spec names: pydantic-ai's own resolution, and a
                 test's seam. Each spec's model is built once, at its first follow-up,
                 owned by the asker and closed with it.
@@ -440,10 +467,10 @@ class FollowUpAsker:
         self._budget = _Budget(daily_calls)
         # Given entries waiting for their returned ones, by call; and the calls that can
         # no longer be paired unambiguously, as an ordered set.
-        self._pending: dict[_CallKey, list[DiagnosticEntry]] = {}
+        self._pending: dict[_CallKey, list[_Held]] = {}
         self._spoiled: dict[_CallKey, None] = {}
-        # The observer calls asked about lately, by what their copies hold the same.
-        self._asked: dict[str, _Call] = {}
+        # The observer calls whose copies may still be joined, by what they hold the same.
+        self._open: dict[str, _Copies] = {}
         self._queue: deque[_Call | _Copy] = deque()
         self._worker: asyncio.Task[None] | None = None
         self._closed = False
@@ -507,13 +534,27 @@ class FollowUpAsker:
         if key is None or key in self._spoiled:
             return
         if entry.kind is DiagnosticKind.GIVEN:
-            self._pending.setdefault(key, []).append(entry)
+            copies = self._copies(entry) if entry.source is DiagnosticSource.OBSERVER else None
+            self._pending.setdefault(key, []).append(_Held(entry, copies))
             while len(self._pending) > _PENDING_CALLS:
                 forgotten = next(iter(self._pending))
                 del self._pending[forgotten]
                 self._spoil(forgotten)
         elif entry.kind is DiagnosticKind.RETURNED:
             self._paired(key, entry)
+
+    def _copies(self, given: DiagnosticEntry) -> _Copies:
+        """The open copies ``given`` is one more of, or a new group it is the first of."""
+        key = _copies_key(given)
+        group = self._open.get(key)
+        if group is None or given.activation_id in group.activations:
+            # None open, or this activation already holds one: another call (§8:11).
+            group = _Copies(key)
+            self._open[key] = group
+            while len(self._open) > _OPEN_COPIES:
+                del self._open[next(iter(self._open))]
+        group.activations.add(given.activation_id)
+        return group
 
     def _spoil(self, key: _CallKey) -> None:
         self._spoiled[key] = None
@@ -534,9 +575,28 @@ class FollowUpAsker:
             self._spoil(key)
             self._skipped(returned, "unpaired")
             return
-        call = self._call(held[0], returned)
-        if call is not None:
-            self._admit(call)
+        given, copies = held[0].entry, held[0].copies
+        if copies is None:
+            call = self._call(given, returned)
+            if call is not None:
+                self._admit(call)
+            return
+        # The first copy back closes the group: a given entry after it is another call.
+        if self._open.get(copies.key) is copies:
+            del self._open[copies.key]
+        if copies.settled:
+            # §8:11: one call written under several activations is asked once.
+            if copies.call is None:
+                return
+            if copies.call.outcome is None:
+                copies.call.targets.append(given)
+            else:
+                self._enqueue(_Copy(copies.call, given))
+            return
+        copies.settled = True
+        call = self._call(given, returned)
+        if call is not None and self._admit(call):
+            copies.call = call
 
     def _call(self, given: DiagnosticEntry, returned: DiagnosticEntry) -> _Call | None:
         """The call to ask about, or ``None`` where it is no recorded call (§8:4, §8:8)."""
@@ -558,42 +618,16 @@ class FollowUpAsker:
                 model = f"{model.partition(':')[0]}:{named}"
         elif not isinstance(returned.body.get("reply"), str):
             return None
-        copies = None
-        if source is DiagnosticSource.OBSERVER:
-            copies = _copies_key(given, returned)
-        return _Call(
-            route=route,
-            model=model,
-            given=given,
-            returned=returned,
-            targets=[given],
-            paired_at=self._clock(),
-            copies=copies,
-        )
+        return _Call(route=route, model=model, given=given, returned=returned, targets=[given])
 
-    def _admit(self, call: _Call) -> None:
-        """Queue the call's follow-up as the budget admits, or join it to the copy asked."""
-        now = self._clock()
-        if call.copies is not None:
-            for stale in [k for k, one in self._asked.items() if not _within(one, now)]:
-                del self._asked[stale]
-            asked = self._asked.get(call.copies)
-            if asked is not None and all(
-                one.activation_id != call.given.activation_id for one in asked.targets
-            ):
-                # §8:11: one call written under several activations is asked once.
-                if asked.outcome is None:
-                    asked.targets.append(call.given)
-                else:
-                    self._enqueue(_Copy(asked, call.given))
-                return
-        if not self._budget.admits(now):
+    def _admit(self, call: _Call) -> bool:
+        """Queue the call's follow-up where the budget admits it; say whether it did."""
+        if not self._budget.admits(self._clock()):
             self._skipped(call.returned, "budget")
-            return
-        if call.copies is not None:
-            self._asked[call.copies] = call
+            return False
         self._budget.queued += 1
         self._enqueue(call)
+        return True
 
     def _skipped(self, entry: DiagnosticEntry, reason: str) -> None:
         _log.info(
@@ -741,25 +775,18 @@ def _call_key(entry: DiagnosticEntry) -> _CallKey | None:
     return entry.activation_id, entry.source.value, identity
 
 
-def _copies_key(given: DiagnosticEntry, returned: DiagnosticEntry) -> str:
-    """What every activation's copy of one observer call holds the same (ADR-0333 §2:9)."""
+def _copies_key(given: DiagnosticEntry) -> str:
+    """What every activation's copy of one observer call's given entry holds the same.
+
+    Its body but the two fields naming the episode it was written for (ADR-0333 §2:3,
+    §2:9): the step, the request, the finding a commit decides and the prompt key.
+    """
     held = {
-        "given": {
-            name: value
-            for name, value in given.model_dump(mode="json")["body"].items()
-            if name not in {"episode", "attempt_started_at"}
-        },
-        "returned": {
-            name: value
-            for name, value in returned.model_dump(mode="json")["body"].items()
-            if name not in {"episode", "attempt_started_at"}
-        },
+        name: value
+        for name, value in given.model_dump(mode="json")["body"].items()
+        if name not in {"episode", "attempt_started_at"}
     }
     return json.dumps(held, sort_keys=True, ensure_ascii=True)
-
-
-def _within(call: _Call, now: float) -> bool:
-    return now - call.paired_at <= COPIES_WITHIN_SECONDS
 
 
 def _without_sdk_retries(model: models.Model) -> None:
