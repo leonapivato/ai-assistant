@@ -122,8 +122,8 @@ labels, marks and whom it is about, and stops carrying `topics`.
 | The input or one of its messages, where the input's `InputOrigin` is `USER` and the message carries no `forwarded_from` | The person who sent it: the owner, today |
 | A confirmation | The person who gave the yes: the owner, today |
 | A pin (ADR-0338 §4:4) | The person who made the pin |
-| A message carrying `forwarded_from`, or an input whose `InputOrigin` is `OUTSIDE` | The source the record names: the forward's claimed original sender where the trigger records one (`ClaimedAuthor`), and otherwise an unknown source |
-| An evidence item | The source the record names: its digest's `Attestation.reported_by` where the record states one, and otherwise an unknown source |
+| A message carrying `forwarded_from`, or an input whose `InputOrigin` is `OUTSIDE` | The source the record names: the forward's claimed original sender where the trigger records one (`ClaimedAuthor`), and otherwise unknown |
+| An evidence item | The source the record names: its digest's `Attestation.reported_by` where the record states one, and otherwise unknown |
 | A round's message, a remember call, or an observer's inference | The assistant |
 | A legacy record | Unknown |
 
@@ -139,11 +139,13 @@ labels, marks and whom it is about, and stops carrying `topics`.
 > holder names is the owner, and the identifier that names the owner is a
 > composition-root constant.
 
-> **Normative.** A source holder is named by the identifier the record states for it:
+> **Normative.** A holder is named by the stable identifier the record carries for whoever
+> said or reported the part, whether or not that identifier resolves to a known person:
 > `Attestation.reported_by` for an evidence item, and the claimed sender's identifier for
-> a forward. Two source holders are the same holder only where both name the same
-> identifier. A source the record names no identifier for is an unknown source, and is
-> never the same holder as any other holder.
+> a forward. Two holders are the same holder exactly where they name the same identifier,
+> and connecting two parts to one identifier is enough, with no identity behind it. A
+> part whose record carries no identifier has an unknown holder, which is never the same
+> holder as any other.
 
 > **Normative.** A memory's holders are the holders of its counted `for` supports. They
 > are a value ADR-0328 §7 computes from the stored record, never stored as a judgment.
