@@ -18,13 +18,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 from phases_support import (
     SETTLE,
     Gated,
     answered,
+    entries,
     frozen,
     input_of,
     open_conversation,
@@ -56,12 +57,15 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     ActivationStop,
     ChannelIdentity,
+    ControllerRule,
+    ControllerStage,
     InputOrigin,
     MessageAuthor,
     ProcessingReason,
     ProcessingStatus,
     RecordedInputMessage,
     RoundResponse,
+    StageOutcome,
     TelegramIntakeKind,
     TranscriptMessage,
 )
@@ -492,6 +496,9 @@ async def test_a_join_whose_marking_is_refused_joins_nothing_and_is_taken_in_aft
 # - ``shutdown``: the engine's close, whose drain cancels the activation and the reader;
 # - ``takeover``: another place's activation that continues it takes it over (§4:6),
 #   waiting for the marking rather than refusing, and takes the joined message with it.
+# - ``deadline``: acting's commitment step, whose wait the marking holds past the pass's
+#   deadline (§3:14) and which the store then refuses: acting dispatches nothing and
+#   fails as its expiry, and the message, joined to nothing, is taken in after.
 
 
 def _held_acting(entered: asyncio.Event, release: asyncio.Event) -> type[PhasePath]:
@@ -504,6 +511,28 @@ def _held_acting(entered: asyncio.Event, release: asyncio.Event) -> type[PhasePa
             await super()._act(given)
 
     return _Held
+
+
+#: How far ahead of acting's first line a case moves the pass's deadline.
+_MOMENT: Final = 0.02
+
+
+def _expiring_acting(entered: asyncio.Event, release: asyncio.Event) -> type[PhasePath]:
+    """:func:`_held_acting`, whose first pass, once released, has a moment left."""
+    moved: list[bool] = []
+
+    class _Expiring(PhasePath):
+        async def _act(self, given: PhasePass) -> None:
+            entered.set()
+            await release.wait()
+            if not moved:
+                moved.append(True)
+                # The engine's working set holds the deadline every stage reads; the
+                # case brings it a moment ahead, after acting's entry checked it.
+                cast("Any", given).deadline = asyncio.get_running_loop().time() + _MOMENT
+            await super()._act(given)
+
+    return _Expiring
 
 
 class _FailingPlanning(Gated):
@@ -523,6 +552,8 @@ class _Route:
 
     #: The episodes frozen once the route has ended.
     frozen = 1
+    #: Whether the held marking lands, so the message joins the activation.
+    joins = True
     #: The conversation the activation runs in, once it is opened.
     conversation = ""
 
@@ -673,6 +704,56 @@ class _Takeover(_Route):
         assert [one.text for one in taken.messages] == ["book Riverside", "make it Saturday"]
 
 
+class _Deadline(_Route):
+    frozen = 2
+    joins = False
+
+    def build(self) -> Harness:
+        self.store.refused = 2
+        completer = FakeToolCallingCompleter.scripted(
+            RoundResponse(text="Riverside, Friday."), RoundResponse(text="Riverside, Saturday.")
+        )
+        return phases_harness(
+            completer,
+            conversation_store=self.store,
+            phases={"path": _expiring_acting(self.reached, self.release)},
+        )
+
+    async def leave(self, running: str) -> None:
+        self.release.set()
+
+        async def expired() -> bool:
+            return any(
+                one.state is not None
+                and one.state.activation_id == running
+                and any(
+                    entry.stage is ControllerStage.ACTING
+                    and entry.outcome is StageOutcome.TIMED_OUT
+                    for entry in one.state.stages.entries
+                )
+                for one in self.harness.engine._running
+            )
+
+        await until(expired, what="acting's wait to cross the pass's deadline")
+
+    async def check(self, found: Sequence[EpisodicMemory], running: str) -> None:
+        record = _of(found, running)
+        assert (record.status, record.reason) == (ProcessingStatus.FAILED, ProcessingReason.TIMEOUT)
+        assert entries(record)[-2:] == [
+            (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED, StageOutcome.TIMED_OUT),
+            (ControllerStage.END, ControllerRule.STAGE_TIMED_OUT, StageOutcome.DONE),
+        ]
+        assert record.joined == (), "a refused marking joins nothing"
+        later = _started_by(found, "make it Saturday")
+        assert await self.store.taken_in(self.conversation, positions=[1, 2]) == {
+            1: running,
+            2: processing(later).activation_id,
+        }
+        assert "Riverside, Friday." not in [
+            one.text for one in await written_by_assistant(self.harness, self.conversation)
+        ], "the round planned before the deadline dispatched nothing"
+
+
 def _episode_of(found: Sequence[EpisodicMemory], activation_id: str) -> EpisodicMemory:
     (episode,) = [one for one in found if processing(one).activation_id == activation_id]
     return episode
@@ -684,8 +765,8 @@ def _of(found: Sequence[EpisodicMemory], activation_id: str) -> EpisodeProcessin
 
 @pytest.mark.parametrize(
     "route",
-    [_Commit, _End, _Stop, _Failure, _Shutdown, _Takeover],
-    ids=["commit", "end", "stop", "failure", "shutdown", "takeover"],
+    [_Commit, _End, _Stop, _Failure, _Shutdown, _Takeover, _Deadline],
+    ids=["commit", "end", "stop", "failure", "shutdown", "takeover", "deadline"],
 )
 async def test_every_route_out_of_running_settles_a_pending_join_first(
     route: type[_Route],
@@ -713,10 +794,41 @@ async def test_every_route_out_of_running_settles_a_pending_join_first(
     found = await _frozen(harness, case.frozen)
     await harness.engine.aclose()
 
-    (joined, *_) = _of(found, running).joined
-    assert [one.position for one in joined.messages] == [2], "its episode records the join"
-    assert await store.taken_in(conversation, positions=[1, 2]) == {1: running, 2: running}
+    if case.joins:
+        (joined, *_) = _of(found, running).joined
+        assert [one.position for one in joined.messages] == [2], "its episode records the join"
+        assert await store.taken_in(conversation, positions=[1, 2]) == {1: running, 2: running}
     await case.check(found, running)
+
+
+async def test_acting_reads_the_deadline_again_before_its_commitment_step() -> None:
+    """§3:14: a pass past its deadline once acting's wait returns dispatches nothing."""
+
+    class _Expired(PhasePath):
+        async def _act(self, given: PhasePass) -> None:
+            # After acting's entry checked the deadline; with no join pending, its wait
+            # returns without yielding, so only the check after it finds the deadline.
+            cast("Any", given).deadline = asyncio.get_running_loop().time()
+            await super()._act(given)
+
+    harness = phases_harness(
+        FakeToolCallingCompleter.scripted(RoundResponse(text="Riverside, Friday.")),
+        phases={"path": _Expired},
+    )
+    conversation = await open_conversation(harness)
+    await harness.engine.write_message(conversation, message=said("m-1", "book Riverside"))
+    (episode,) = await _frozen(harness, 1)
+    await harness.engine.aclose()
+
+    record = processing(episode)
+    assert (record.status, record.reason) == (ProcessingStatus.FAILED, ProcessingReason.TIMEOUT)
+    assert entries(record)[-2:] == [
+        (ControllerStage.ACTING, ControllerRule.ROUND_AUTHORIZED, StageOutcome.TIMED_OUT),
+        (ControllerStage.END, ControllerRule.STAGE_TIMED_OUT, StageOutcome.DONE),
+    ]
+    assert "Riverside, Friday." not in [
+        one.text for one in await written_by_assistant(harness, conversation)
+    ]
 
 
 async def test_a_shutdown_reaches_a_joiner_suspended_in_its_read() -> None:
