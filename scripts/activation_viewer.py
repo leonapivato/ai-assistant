@@ -51,7 +51,9 @@ activation's, ``<activation_id>.replay.jsonl``, written by ``prompt_replay.py`` 
 §6), and never listed as an activation of its own name. An activation with results is
 marked in the list, and a model call's readable view shows each result that replays it
 beside the original reply, headed by its prompt's name, version and origin, with the
-candidate's instruction one click away (§6:4-§6:5).
+candidate's instruction one click away (§6:4-§6:5). A run that sent a call several times
+under one candidate (ADR-0337 §5:4) writes one result for each sample, and the samples
+are shown together, under that candidate's one heading, each naming its sample.
 """
 
 from __future__ import annotations
@@ -2254,8 +2256,28 @@ def _replay_result(line: Entry, body: Mapping[str, object], source: str) -> dict
     recorded = _mapping(body.get("recorded_prompt"))
     instruction = _text(candidate.get("instruction"))
     flags = _mapping(body.get("flags"))
+    sample, samples = body.get("sample"), body.get("samples")
+    numbered = type(sample) is int and type(samples) is int
     return {
         "line": line.line,
+        # The samples of one call under one candidate in one run share a set, which the
+        # page shows together (ADR-0337 §5:4); a result naming no sample is a set alone.
+        "set": json.dumps(
+            [
+                body.get("run"),
+                body.get("prompt"),
+                candidate.get("version"),
+                candidate.get("origin"),
+                candidate.get("file"),
+                body.get("flags"),
+            ],
+            sort_keys=True,
+            default=str,
+        )
+        if numbered
+        else f"line:{line.line}",
+        "sample": sample if numbered else None,
+        "samples": samples if numbered else None,
         "at": _ms(line.at),
         "run": _text(body.get("run")),
         "prompt": _text(body.get("prompt")),
@@ -2908,6 +2930,8 @@ button { font: inherit; }
 .replay-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
 .replay-head h4 { margin: 0; font-size: 13px; font-family: var(--mono); overflow-wrap: anywhere; }
 .replay-head .m { color: var(--muted); font-size: 12px; }
+.replay-head h5 { margin: 0; font-size: 12px; font-family: var(--mono); color: var(--muted); }
+.replay-sample { border-top: 1px dashed var(--line); padding-top: 6px; margin-top: 8px; }
 .call-sec > .sec-head {
   display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
   border-bottom: 1px solid var(--line); padding-bottom: 4px; margin-bottom: 6px;
@@ -4204,7 +4228,17 @@ SCRIPT: Final = r"""
   function renderReplays(holder, v) {
     const box = callSec(holder, "replays", "Replayed",
       plural(v.replays.length, "result", "results") + " of a replay over a copy of the record");
+    // The samples of one call under one candidate in one run are shown together, under the
+    // candidate's one heading (ADR-0337 \u00a75:4).
+    const sets = [];
+    const bySet = new Map();
     for (const r of v.replays) {
+      let held = bySet.get(r.set);
+      if (!held) { held = []; bySet.set(r.set, held); sets.push(held); }
+      held.push(r);
+    }
+    for (const samples of sets) {
+      const r = samples[0];
       const one = el("div", "replay");
       const head = el("div", "replay-head");
       const named = [r.prompt || "prompt not named", r.version || "no version",
@@ -4230,7 +4264,19 @@ SCRIPT: Final = r"""
           what: "the candidate\u2019s instruction" });
         prose(told, r.instruction.text);
       }
-      if (r.did) didInto(one, r.did);
+      if (r.sample === null || r.sample === undefined) {
+        if (r.did) didInto(one, r.did);
+      } else {
+        for (const s of samples) {
+          const sampled = el("div", "replay-sample");
+          const named = el("div", "replay-head");
+          named.appendChild(el("h5", null, "sample " + s.sample + " of " + s.samples));
+          named.appendChild(el("span", "m", clock(s.at, true)));
+          sampled.appendChild(named);
+          if (s.did) didInto(sampled, s.did);
+          one.appendChild(sampled);
+        }
+      }
       box.appendChild(one);
     }
   }

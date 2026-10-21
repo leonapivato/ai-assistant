@@ -596,6 +596,44 @@ async def test_a_replayed_activation_is_marked_and_its_call_shows_the_result(
         await expect(one.locator(".part-head .name", has_text="Text")).to_be_visible()
 
 
+@pytest.fixture
+def sampled(tmp_path: Path) -> Iterator[Any]:
+    """The viewer over a copy whose planning round a replay sent twice (ADR-0337 §5:4)."""
+    copy = make_copy(tmp_path)
+    status = asyncio.run(
+        replay_tool.replay(
+            replay_tool.ReplayOptions(
+                copy=copy, model="fake:model", sources=frozenset({"planning"}), samples=2
+            ),
+            report=lambda _: None,
+            caller=Model().caller(),
+            now=replay_now,
+        )
+    )
+    assert status == 0
+    with serving(copy / "diagnostics") as bound:
+        yield bound
+
+
+@pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "phone"])
+async def test_a_calls_samples_are_shown_together_under_one_heading(
+    sampled: Any, gateway_browser: Browser, width: int
+) -> None:
+    async with _page(gateway_browser, width=width) as page:
+        await _open(page, sampled.port, ACT_A)
+        await page.locator(".round").first.click()
+        readable = page.locator("#drawer-read")
+        one = readable.locator("#call-replays .replay")
+        await expect(one).to_have_count(1, timeout=_SHOWN)
+        await expect(one.locator("h4")).to_have_text("planning · 0123456789ab · recorded")
+        samples = one.locator(".replay-sample")
+        await expect(samples).to_have_count(2)
+        await expect(samples.locator("h5")).to_have_text(["sample 1 of 2", "sample 2 of 2"])
+        await expect(samples.nth(1).locator(".part-head .name", has_text="Text")).to_be_visible()
+        wide = await readable.evaluate("node => node.scrollWidth - node.clientWidth")
+        assert wide <= 0
+
+
 async def test_a_replayed_call_reads_at_a_phones_width_with_no_sideways_scroll(
     replayed: Any, gateway_browser: Browser
 ) -> None:
