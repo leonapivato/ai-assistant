@@ -19,7 +19,8 @@ story links; the place window and the episode window; what both recall runs foun
 each memory record only where its source is not outside; this activation's earlier
 rounds and their notes, shown on every pass whatever the audience; acting's outcomes;
 the offered capabilities and the channel kind's description; the current time, in the
-configured zone with its offset and the zone's name beside it (#2964); and
+person's zone where their profile sets one and the configured zone otherwise (ADR-0338
+§3:6), with its offset and the zone's name beside it (#2964); and
 digested evidence, which the digesting stage and recall's digest supply, each digest
 under the label of the result it read and each item under its source's label (ADR-0308
 §5:1). The episode window's and the found episodes' notes follow the reader's audience
@@ -141,7 +142,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final, Protocol
 from uuid import uuid4
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
 
@@ -443,6 +444,10 @@ class CallOutcome:
         replaces: For a remember that needs the user, the assertions its question shows
             the new statement replacing (ADR-0321 §5:5), which the asked call records
             by id.
+        worded: For a call that needs the user and names a memory by its id, such as a
+            ``pin``, each such argument with the memory's wording as the store held it
+            when this round was planned, which its exact line shows in place of the id
+            (ADR-0338 §8:6). The asked call records the id.
 
     Raises:
         ValueError: If it carries a result, or says one was digested, without the
@@ -465,6 +470,7 @@ class CallOutcome:
     deliberate_repeat: bool = False
     already_asked: QuestionPart | None = None
     replaces: tuple[Memory, ...] = ()
+    worded: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         """A result is shown under its label, so it carries the id the label names."""
@@ -473,12 +479,16 @@ class CallOutcome:
             or self.deliberate_repeat
             or self.already_asked is not None
             or bool(self.replaces)
+            or bool(self.worded)
         )
         if asking and self.kind is not CallOutcomeKind.NEEDS_YOU:
             msg = "only a call that needs the user carries what a question about it shows"
             raise ValueError(msg)
         if self.replaces and self.request is None:
             msg = "the assertions a question shows replaced ride the request it shows"
+            raise ValueError(msg)
+        if self.worded and self.request is None:
+            msg = "the wording a question shows a memory by rides the request it shows"
             raise ValueError(msg)
         looked_up = self.records is not None or self.story is not None or self.candidate is not None
         if (self.result is not None or self.digested or looked_up) and self.result_id is None:
@@ -1312,8 +1322,9 @@ class _Request:
             # so it caches across them (#3084).
             document["person"] = self._person(inputs.person)
         document |= {
-            # The current instant in the user's configured zone, with its offset, and the
-            # zone's IANA name, so a time told is told in local time (#2964).
+            # The current instant in the person's zone, or the configured one where theirs
+            # is not set (ADR-0338 §3:6), with its offset, and the zone's IANA name, so a
+            # time told is told in local time (#2964).
             "now": self._now.astimezone(self._zone).isoformat(),
             "time_zone": self._zone.key,
             "place": self._place(),
@@ -2159,6 +2170,7 @@ def exact_line(
     filled: Collection[str] = (),
     numbered: bool = False,
     replacing: Sequence[str] = (),
+    worded: Mapping[str, str] | None = None,
 ) -> str:
     """The exact line a question shows for one call (ADR-0321 §2:5-§2:6, §5:5).
 
@@ -2177,13 +2189,17 @@ def exact_line(
         numbered: Whether the line carries its part's number.
         replacing: For a remember, the statements its question shows it replacing, each
             shown after the arguments as "replacing".
+        worded: For an argument naming a memory by its id, as a ``pin``'s does, the
+            memory's wording, which the line shows in that argument's place, as the
+            argument the call sends (ADR-0338 §8:6).
 
     Returns:
         The line, with no line break in it.
     """
     left_out = _NEVER_SHOWN | frozenset(filled)
+    shown = {} if worded is None else worded
     arguments = [
-        f"{_name_text(name)}: {_json_text(value)}"
+        f"{_name_text(name)}: {_json_text(shown.get(name, value))}"
         for name, value in call.values.items()
         if name not in left_out
     ]
@@ -2303,10 +2319,15 @@ def _approved_id(part: QuestionPart) -> str:
 
 @dataclass(frozen=True, slots=True)
 class _Asked:
-    """One call a round's message asks about, and the assertions its question replaces."""
+    """One call a round's message asks about, and what its question shows beside it.
+
+    ``replacing`` is the assertions it replaces; ``worded`` the wording an argument
+    naming a memory is shown by (ADR-0338 §8:6).
+    """
 
     call: AskedCall
     replacing: tuple[str, ...] = ()
+    worded: tuple[tuple[str, str], ...] = ()
 
 
 def _asked_calls(names: Sequence[str], askable: Mapping[str, CallOutcome]) -> tuple[_Asked, ...]:
@@ -2346,7 +2367,7 @@ def _asked_calls(names: Sequence[str], askable: Mapping[str, CallOutcome]) -> tu
         except ValueError:
             _log.info("planning_ask_dropped", stage="planning", reason="unrecordable")
             continue
-        asked.append(_Asked(call, tuple(replaced.values())))
+        asked.append(_Asked(call, tuple(replaced.values()), outcome.worded))
     return tuple(asked)
 
 
@@ -2388,6 +2409,7 @@ def _with_questions(
             filled=_filled(capabilities, one.call),
             numbered=len(asked) > 1,
             replacing=one.replacing,
+            worded=dict(one.worded),
         )
         for one in asked
     )
@@ -2612,7 +2634,8 @@ class PlanningStage:
             now: The clock the current time and ``recorded_at`` are read from.
             timezone: The IANA name of the zone the request shows the current time in,
                 with its offset and the name beside it (#2964): ``Settings.timezone``,
-                the one timezone source. ``recorded_at`` stays UTC.
+                the hub's default, where the activation's person block sets no zone of
+                theirs (ADR-0338 §3:6). ``recorded_at`` stays UTC.
             new_id: Mints a round's id.
             diagnostics: The diagnostic record's write seam (ADR-0314 §4:4): the
                 rendered request and the offered tools before each round, and the
@@ -2648,6 +2671,23 @@ class PlanningStage:
         self._diagnostics = diagnostics
         self._candidates = candidates
 
+    def _zone_for(self, person: PersonBlock | None) -> ZoneInfo:
+        """The zone the round tells the current time in (ADR-0338 §3:6, ADR-0307 §6:1).
+
+        The person's zone where their profile sets one, and ``Settings.timezone`` where
+        it is empty or the activation is no person's, which is given no block (§2:3). The
+        store validates a zone on every write (§3:2), so one that does not resolve is a
+        store's defect: it is logged, and the hub's zone is used.
+        """
+        held = None if person is None else person.profile.time_zone
+        if held is None:
+            return self._zone
+        try:
+            return ZoneInfo(held)
+        except ZoneInfoNotFoundError, ValueError:
+            _log.warning("planning_zone_unresolved", stage="planning", reason="person_zone")
+            return self._zone
+
     async def plan(self, inputs: PlanningInputs) -> PlannedRound:
         """Run one round over ``inputs``: ask, record, then judge its calls.
 
@@ -2672,7 +2712,11 @@ class PlanningStage:
         approved_tool = _approved_tool(approved, offered)
         offered_here = offered if approved_tool is None else (*offered, approved_tool)
         request = _Request(
-            inputs, book, excerpt_chars=self._excerpt_chars, now=self._now(), zone=self._zone
+            inputs,
+            book,
+            excerpt_chars=self._excerpt_chars,
+            now=self._now(),
+            zone=self._zone_for(inputs.person),
         )
         rendered = request.rendered(offered_here)
         instruction = self._prompt.rendered(

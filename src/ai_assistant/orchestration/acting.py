@@ -39,6 +39,11 @@ finishes its record not done, with a code-owned reason, and reports it as
 ``needs_you``, carrying the assertions its question will show it replacing
 (:attr:`ActedCall.replaces`).
 
+**A call refused on the assistant's own records, with its reason** (ADR-0338 §8:7). A
+runner may answer :class:`~ai_assistant.orchestration.person_calls.NotDone`: it wrote
+nothing, and planning is owed why. Acting finishes its record not done and reports it
+not done with that reason, which is the runner's code-owned words.
+
 **A call that runs under a yes reaches its runner with the asked call** (ADR-0321
 §4:2, §5:2). Where the call was rebuilt from a question's asked call
 (:attr:`AuthorizedCall.asked`) and the own-records seam takes one
@@ -124,6 +129,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.activation_cleanup import drain_registered
 from ai_assistant.orchestration.held_results import HeldResult
+from ai_assistant.orchestration.person_calls import NotDone
 from ai_assistant.orchestration.remembering import NeedsYou
 
 if TYPE_CHECKING:
@@ -283,9 +289,10 @@ class NamedResult:
 
 
 #: What a runner on the own-records seam answers: the store's answer as a result; for a
-#: read routed record by record or a follow-up, what acting holds or offers again; or,
-#: where nothing was written because it needs the user's yes first, :class:`NeedsYou`.
-type OwnRecordsAnswer = ToolResult | HeldByIds | NamedResult | NeedsYou
+#: read routed record by record or a follow-up, what acting holds or offers again;
+#: where nothing was written because it needs the user's yes first, :class:`NeedsYou`;
+#: or, where nothing was written and planning is owed why, :class:`NotDone`.
+type OwnRecordsAnswer = ToolResult | HeldByIds | NamedResult | NeedsYou | NotDone
 
 
 class OwnRecordsCalls(Protocol):
@@ -369,6 +376,31 @@ class OwnRecordsByCapability:
         if isinstance(runner, ApprovedOwnRecordsCalls):
             return await runner.run_approved(call, asked)
         return await self.run(call)
+
+
+class _Beside:
+    """Further own-records runners, by capability, beside the seam a stage was built with.
+
+    Structurally :class:`OwnRecordsCalls` and :class:`ApprovedOwnRecordsCalls`: a call
+    to one of its capabilities reaches that runner, and any other the seam beside it,
+    each with the asked call where it takes one.
+    """
+
+    def __init__(self, runners: Mapping[str, OwnRecordsCalls], beside: OwnRecordsCalls) -> None:
+        self._runners: dict[str, OwnRecordsCalls] = dict(runners)
+        self._beside = beside
+
+    def _runner(self, call: ToolCall) -> OwnRecordsCalls:
+        return self._runners.get(str(call.request.tool.capability), self._beside)
+
+    async def run(self, call: ToolCall) -> OwnRecordsAnswer:
+        return await self._runner(call).run(call)
+
+    async def run_approved(self, call: ToolCall, asked: AskedCall) -> OwnRecordsAnswer:
+        runner: object = self._runner(call)
+        if isinstance(runner, ApprovedOwnRecordsCalls):
+            return await runner.run_approved(call, asked)
+        return await self._runner(call).run(call)
 
 
 @runtime_checkable
@@ -590,6 +622,25 @@ class ActingStage:
         self._now = checked_clock(now, owner="ActingStage")
         self._new_result_id = new_result_id
 
+    def add_own_records(self, runners: Mapping[str, OwnRecordsCalls]) -> None:
+        """Hold a runner for each further capability on the assistant's own records.
+
+        For a capability the composition root's seam does not reach, wired once the store
+        it writes is known: the person model's calls, attached where the engine is handed
+        a person-model store (ADR-0338 §11:2). A call to one of ``runners``' capabilities
+        goes to its runner, and every other call to the seam the stage was built with.
+
+        Args:
+            runners: The runner for each further capability, by the capability's name.
+
+        Raises:
+            ValueError: If ``runners`` is empty.
+        """
+        if not runners:
+            msg = "acting is handed at least one further runner"
+            raise ValueError(msg)
+        self._own_records = _Beside(runners, self._own_records)
+
     async def act(self, authorized: AuthorizedRound, *, held: HeldResults) -> ActedRound:
         """Run every call of ``authorized`` in parallel and say what came of each.
 
@@ -713,6 +764,8 @@ class ActingStage:
             answer = await self._own_records.run(one.call)
         if isinstance(answer, NeedsYou):
             return await self._needs_you(one, answer, effect_id)
+        if isinstance(answer, NotDone):
+            return await self._refused(one, answer, effect_id)
         if isinstance(answer, NamedResult):
             return await self._followed_up(one, answer, effect_id, round_id, held)
         if isinstance(answer, HeldByIds):
@@ -792,6 +845,20 @@ class ActingStage:
             effect_id=effect_id,
             replaces=replaces,
         )
+
+    async def _refused(
+        self, one: AuthorizedCall, answer: NotDone, effect_id: str | None
+    ) -> ActedCall:
+        """A call its runner refused, writing nothing, with the reason (ADR-0338 §8:7).
+
+        Its record is finished not done with that reason, and so is the call.
+        """
+        _log.info("acting_call_not_done", stage="acting", reason="refused_by_its_runner")
+        if effect_id is not None:
+            await self._plans.finish_activation_effect(
+                effect_id, ToolOutcome.FAILED, reason=answer.reason
+            )
+        return ActedCall(one, ActedOutcome.NOT_DONE, reason=answer.reason, effect_id=effect_id)
 
     async def _followed_up(
         self,
