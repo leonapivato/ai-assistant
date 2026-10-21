@@ -220,6 +220,26 @@ def test_a_field_is_set_cleared_and_refused_in_words(
     assert said[1:] == ["Saved.", "Cleared.", "It was not set, so nothing changed."]
 
 
+def test_a_value_with_no_utf8_encoding_is_a_usage_error_and_others_are_kept_verbatim(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """A shell argument ``$'\\xff'`` arrives surrogate-escaped; it is refused before the
+    engine is asked, not raised past the error boundary (adversarial review, round 8)."""
+    engine, people, _ = _on()
+    _wire(monkeypatch, engine)
+
+    assert _invoke("set", "name", "\udcff") == 2
+    held = asyncio.run(people.read(OWNER_PERSON_ID))
+    assert held is not None
+    assert held.profile.name is None
+    assert cli._present_profile_value(" Robin\nSmith ") == " Robin\nSmith "
+    assert _invoke("set", "name", "Robin\nSmith") == 0
+    held = asyncio.run(people.read(OWNER_PERSON_ID))
+    assert held is not None
+    assert held.profile.name == "Robin\nSmith"
+    assert output.getvalue().splitlines() == ["Saved."]
+
+
 def test_a_pin_shows_the_wording_it_confirms_before_it_is_made(
     monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:
