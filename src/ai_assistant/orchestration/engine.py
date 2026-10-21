@@ -137,6 +137,7 @@ from ai_assistant.core.types import (
     episode_summary,
     episode_view,
     part_episode,
+    person_model_lists,
     profile_field,
     profile_value,
     secret_value,
@@ -302,6 +303,7 @@ if TYPE_CHECKING:
         NotificationPreferences,
         PermissionDecision,
         PersonModelEdit,
+        PersonModelList,
         PersonModelView,
         ProfileChange,
         ProfileField,
@@ -3482,6 +3484,7 @@ class Engine:
         self,
         person_id: NonBlankEncodableText,
         *,
+        lists: Sequence[PersonModelList] | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
     ) -> PersonModelView | None:
@@ -3498,18 +3501,26 @@ class Engine:
         """
         self._reject_if_closing()
         named = non_blank_text(person_id, name="person_id")
+        selected = person_model_lists(lists)
         page_argument(limit, name="limit")
         page_argument(offset, name="offset")
         check_arguments(
             "person_model",
             max_bytes=self._max_payload_bytes,
             person_id=named,
+            lists=selected,
             limit=limit,
             offset=offset,
         )
         blocks = person_panel.wired(self._person_blocks)
         return await self._tracked(
-            person_panel.person_model_view(blocks, named, limit=limit, offset=offset),
+            person_panel.person_model_view(
+                blocks,
+                named,
+                limit=limit,
+                offset=offset,
+                lists=None if selected is None else frozenset(selected),
+            ),
             "person_model",
             checked=True,
         )

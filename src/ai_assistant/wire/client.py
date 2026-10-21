@@ -74,6 +74,7 @@ from ai_assistant.core.types import (
     check_chat_position,
     check_story_page,
     checked_chat_devices,
+    person_model_lists,
     profile_field,
     profile_value,
     secret_value,
@@ -142,6 +143,7 @@ if TYPE_CHECKING:
         PendingCandidate,
         PermissionDecision,
         PersonModelEdit,
+        PersonModelList,
         PersonModelView,
         Placement,
         ProfileChange,
@@ -676,6 +678,7 @@ class HubClient:
         self,
         person_id: NonBlankEncodableText,
         *,
+        lists: Sequence[PersonModelList] | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
     ) -> PersonModelView | None:
@@ -683,6 +686,7 @@ class HubClient:
 
         Args:
             person_id: The person, by id.
+            lists: The lists the page fills, or ``None`` for every one.
             limit: How many entries each list's page holds at most.
             offset: How many of each list's entries to skip.
 
@@ -690,10 +694,11 @@ class HubClient:
             Their model, or ``None`` where the hub holds no such person.
         """
         named = non_blank_text(person_id, name="person_id")
+        selected = person_model_lists(lists)
         page_argument(limit, name="limit")
         page_argument(offset, name="offset")
         return await self._call(  # type: ignore[no-any-return]
-            "person_model", person_id=named, limit=limit, offset=offset
+            "person_model", person_id=named, lists=selected, limit=limit, offset=offset
         )
 
     async def profile_changes(
