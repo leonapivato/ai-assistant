@@ -19,9 +19,10 @@ the reader hands it to the engine's join (``join``), which takes it only where t
 activation has not committed and is not stopped, its author and standing are the
 running input's, and fewer than ``join_limit`` joins are taken; the reader holds the
 fourth condition itself, that no earlier input on the place is waiting, since once one
-message has not joined nothing after it joins. A joined message is marked taken in by
-the activation it joins before the join appends it, as at admission (§3:18), so the
-store's bookkeeping is what a restart reads. A message that does not join waits: it is never
+message has not joined nothing after it joins. The join is taken pending the reader's
+marking of the message, taken in by the activation it joins, and that activation commits
+nothing until the marking has landed (§3:18), so the store's bookkeeping is what a
+restart reads. A message that does not join waits: it is never
 refused, and when the activation ends the reader looks again and takes in everything
 waiting **together, as one input**.
 
@@ -94,6 +95,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import ConversationStore
     from ai_assistant.core.types import MessageReceipt
+    from ai_assistant.orchestration.joining import PendingJoin
 
 __all__ = [
     "CHAT_TURN_BUDGET",
@@ -306,13 +308,12 @@ class ChatReader:
         window_size: int = CHAT_WINDOW_SIZE,
         written: Callable[[str, Sequence[str], Sequence[int]], Awaitable[Mapping[int, WrittenBy]]]
         | None = None,
-        join: Callable[[JoiningInput, str], str | None] | None = None,
+        join: Callable[[JoiningInput], tuple[JoinCheck, PendingJoin | None]] | None = None,
         start_wait: timedelta | None = None,
         composing_lapse: timedelta = DEFAULT_CHAT_COMPOSING_LAPSE,
         composing_cap: timedelta = DEFAULT_CHAT_COMPOSING_CAP,
         clock: Callable[[], float] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-        join_check: Callable[[JoiningInput], tuple[JoinCheck, str | None]] | None = None,
     ) -> None:
         """Wire the reader.
 
@@ -336,11 +337,12 @@ class ChatReader:
                 message is where it is one, by position, a position no record names
                 simply missing. ``None``, the default, links no assistant message, as
                 before the phases.
-            join: The engine's join (ADR-0332 §3:3, §3:6): it joins an input to the
-                activation running on its place, the one named, where that activation
-                may take it, and answers its id, or ``None`` where it joined none.
-                ``None``, the default, joins nothing: every message written while an
-                activation runs waits. Wired with ``join_check``.
+            join: The engine's join (ADR-0332 §3:3, §3:6, §3:18): it takes an input
+                into the activation running on its place where that activation may
+                take it, pending the reader's marking of its messages taken in by that
+                activation, which the reader then confirms or withdraws. ``None``, the
+                default, joins nothing: every message written while an activation runs
+                waits.
             start_wait: ``Settings.chat_start_wait`` (ADR-0332 §5:1): how long after
                 the latest waiting message the reader waits, where nothing is running,
                 before it takes them in. ``None``, the default, waits for nothing, and
@@ -352,11 +354,6 @@ class ChatReader:
             clock: The monotonic clock the waits are read on, in seconds; the running
                 loop's by default.
             sleep: How the reader waits.
-            join_check: Whether the join would take an input now, appending nothing
-                (:func:`~ai_assistant.orchestration.joining.check_join`): read before the
-                reader marks the input taken in by the activation it would join, so the
-                marking lands before the activation can read it (§3:18), as at
-                admission.
 
         Raises:
             ValueError: If a wait is not strictly positive, or ``composing_cap`` is
@@ -395,7 +392,6 @@ class ChatReader:
         self._composing_cap = composing_cap.total_seconds()
         self._clock = clock if clock is not None else _loop_time
         self._sleep = sleep
-        self._join_check = join_check
         # ADR-0332 §5:1: the start wait running for each conversation where nothing is,
         # from the first message noticed until the read takes the messages in.
         self._waits: dict[str, _StartWait] = {}
@@ -403,11 +399,6 @@ class ChatReader:
         self._closed = asyncio.Event()
         # The activation each conversation's read has admitted, while it runs.
         self._running: dict[str, _Turn] = {}
-        # ADR-0332 §3:18: per conversation, the messages marked taken in by an activation
-        # that the join then did not take, as it committed, was stopped or ended while the
-        # marking was written. They are no input of that one: the next activation takes
-        # them in, though the store names the other.
-        self._retake: dict[str, list[TranscriptMessage]] = {}
 
     def notice(self, conversation_id: str) -> None:
         """Tell the reader a user's message was written into a conversation (§6:1).
@@ -516,13 +507,7 @@ class ChatReader:
         Raises:
             ConversationStoreError: If the store cannot be written.
         """
-        retaken = {one.position for one in self._retake.pop(taken.conversation_id, ())}
-        positions = [
-            message.position for message in taken.messages if message.position not in retaken
-        ]
-        # Marked taken in already, by the activation the join did not take them into:
-        # they are this one's input (§3:18).
-        into.extend(one.position for one in taken.messages if one.position in retaken)
+        positions = [message.position for message in taken.messages]
         for start in range(0, len(positions), _MARK_CHUNK):
             into.extend(
                 await self._conversations.take_in(
@@ -539,11 +524,9 @@ class ChatReader:
                 if not await self._waited(conversation_id):
                     return
                 self._reading[conversation_id] = False
-                untaken = await self._conversations.untaken_messages(
+                waiting = await self._conversations.untaken_messages(
                     conversation_id, limit=_WAITING_ALL
                 )
-                retake = self._retake.get(conversation_id, [])
-                waiting = sorted((*retake, *untaken), key=lambda one: one.position)
                 if self._wait_end(conversation_id) > self._clock():
                     # A message noticed during those reads moved the wait's end, its cap
                     # still the first message's (ADR-0332 §5:1-§5:2).
@@ -683,38 +666,35 @@ class ChatReader:
                 asyncio.get_running_loop().call_later(_JOIN_RETRY.total_seconds(), turn.due.set)
 
     async def _join_waiting(self, conversation_id: str, turn: _Turn) -> JoinCheck | None:
-        """Mark what waits taken in by the running activation, then hand it to the join.
+        """Hand what waits to the join, then mark it taken in by the activation it joins.
 
         ADR-0332 §3:3: the messages not yet taken in, and handed to nothing, are one
-        input, since nothing before them is waiting. **The marking comes first**, as at
-        admission (§3:18, ADR-0293 §6:8): only once the store holds the messages taken
-        in by the activation that would join them does the join append them, so the
-        reader's bookkeeping is what a restart reads, and a message the activation could
-        act on is never taken in again. A message deleted or taken in elsewhere
-        meanwhile is not marked, and is not joined. Where the check refuses, the input
-        waits, and so does everything after it (§3:4). Where the join then refuses what
-        was marked, because the activation committed, was stopped or ended while the
-        marking was written, the next activation takes it in (:attr:`_retake`).
+        input, since nothing before them is waiting. The engine's join checks and takes
+        it in one step, **pending this marking** (§3:6, §3:18): the reader marks the
+        messages taken in by that activation, as at admission (ADR-0293 §6:8), and only
+        what the store marked joins; a message deleted or taken in elsewhere meanwhile
+        does not. Acting's commitment step waits for it, so the activation acts on
+        nothing the store does not hold taken in by it, and a marking that fails leaves
+        the message waiting with nothing having read it. Where the join refuses, the
+        input waits, and so does everything after it (§3:4).
 
         Returns:
-            What the check found, or ``None`` where nothing was waiting.
+            What the join found, or ``None`` where nothing was waiting.
 
         Raises:
-            ConversationStoreError: If the store cannot be read or written; what it
-                marked before then is the next activation's.
+            ConversationStoreError: If the store cannot be read or written; what was
+                marked before then joins, and the rest waits.
         """
         join = self._join
-        check = self._join_check
         assert join is not None  # noqa: S101 — the joiner runs only beside it
-        assert check is not None  # noqa: S101 — wired with it
         if turn.over:
             return None
         untaken = await self._conversations.untaken_messages(conversation_id, limit=_WAITING_ALL)
         waiting = [one for one in untaken if one.position not in turn.handed]
         if not waiting or turn.waited:
             return None
-        found, into = check(self._joining_input(conversation_id, waiting))
-        if found is not JoinCheck.JOINABLE or into is None:
+        found, pending = join(self._joining_input(conversation_id, waiting))
+        if pending is None:
             turn.waited = found is JoinCheck.REFUSED
             return found
         marked: set[int] = set()
@@ -725,19 +705,14 @@ class ChatReader:
                     await self._conversations.take_in(
                         conversation_id,
                         positions=positions[start : start + _MARK_CHUNK],
-                        activation_id=into,
+                        activation_id=pending.activation_id,
                     )
                 )
         finally:
-            kept = [one for one in waiting if one.position in marked]
-            turn.handed.update(one.position for one in kept)
-            joined = bool(kept) and (
-                join(self._joining_input(conversation_id, kept), into) is not None
-            )
-            if kept and not joined:
-                # Marked by the activation, never its input: the next one takes it in.
-                self._retake.setdefault(conversation_id, []).extend(kept)
-                turn.waited = True
+            # Settled however the marking ended: what the store holds joins, and the
+            # activation's commitment step goes on.
+            pending.confirm(marked)
+            turn.handed.update(marked)
         return found
 
     def _joining_input(

@@ -3364,8 +3364,13 @@ class PhasePath:
             raise RuntimeError(msg)
         step = working.step(self._now(), self._wait(given))
         try:
+            # ADR-0332 §3:18: a join taken whose marking has not landed is waited for,
+            # so the reader's bookkeeping holds what joined before anything acts on it.
+            state = active_state()
+            if state is not None:
+                await state.settled()
             # ADR-0332 §3:5-§3:7: the commitment step, before anything of the round is
-            # dispatched and in the same synchronous step as the stage's first line.
+            # dispatched, in one synchronous step with no await before the dispatch.
             withheld = _commitment(latest, decided)
             if withheld is not None:
                 latest.acted = withheld

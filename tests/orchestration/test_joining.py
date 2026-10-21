@@ -7,6 +7,7 @@ another place is shown (§4:1-§4:3) and the takeover's one step (§4:6).
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
@@ -47,10 +48,12 @@ from ai_assistant.orchestration.joining import (
     DEFAULT_JOIN_LIMIT,
     THE_USER,
     InputStanding,
+    JoinCheck,
     JoiningInput,
     input_standing,
     is_pure_read,
     join_running,
+    reserve_join,
     take_over,
     visible_running,
 )
@@ -446,3 +449,87 @@ def test_a_takeover_is_refused_where_the_other_has_acted_stopped_ended_or_differ
     fresh = _running("a", _IDS[0])
     assert not take_over([fresh, acted], acted, _IDS[0], limit=3, at=_AT)
     assert not fresh.stopped
+
+
+# --- §3:6, §3:18: a join taken pending its reader's marking ----------------------------
+
+
+def test_a_pending_join_is_no_input_until_confirmed_and_counts_toward_the_limit() -> None:
+    """Taken in one step with its check; read by nothing until its marking lands."""
+    state = _running("a")
+    found, pending = reserve_join([state], _joining("a"), limit=1, at=_AT)
+
+    assert found is JoinCheck.JOINABLE
+    assert pending is not None
+    assert pending.activation_id == _IDS[0]
+    assert _joined_now(state) == ()
+    assert state.inputs_held == 1, "no stage reads it yet"
+    assert _joining_now(state)
+    assert reserve_join([state], _joining("a"), limit=1, at=_AT) == (JoinCheck.REFUSED, None)
+
+    pending.confirm([2])
+    assert not _joining_now(state)
+    (joined,) = _joined_now(state)
+    assert [one.text for one in joined.messages] == ["make it Saturday"]
+
+
+def test_a_pending_join_confirmed_with_nothing_marked_joins_nothing() -> None:
+    state = _running("a")
+    _, pending = reserve_join([state], _joining("a"), limit=3, at=_AT)
+    assert pending is not None
+    pending.confirm([])
+    assert state.joined == ()
+    assert not _joining_now(state)
+
+    _, again = reserve_join([state], _joining("a"), limit=3, at=_AT)
+    assert again is not None
+    again.withdraw()
+    assert state.joined == ()
+    assert not _joining_now(state)
+
+
+async def test_acting_waits_while_a_join_is_pending_and_not_once_it_settles() -> None:
+    """§3:18: the commitment step's wait; it returns at once where nothing is pending."""
+    state = _running("a")
+    await state.settled()
+    _, pending = reserve_join([state], _joining("a"), limit=3, at=_AT)
+    assert pending is not None
+    waiting = asyncio.ensure_future(state.settled())
+    await asyncio.sleep(0)
+    assert not waiting.done()
+
+    pending.confirm([2])
+    await asyncio.wait_for(waiting, 1)
+    assert state.commit(1) is Commitment.SET_ASIDE, "the join it waited for is found"
+
+
+def test_a_join_before_the_pass_begins_is_not_yet_and_one_stopped_is_refused() -> None:
+    """§3:3: a standing not yet set is asked again; a stop before the pass refuses."""
+    early = _running("a", standing=None)
+    assert reserve_join([early], _joining("a"), limit=3, at=_AT) == (JoinCheck.NOT_YET, None)
+    early.stop()
+    assert reserve_join([early], _joining("a"), limit=3, at=_AT) == (JoinCheck.REFUSED, None)
+    assert reserve_join([], _joining("a"), limit=3, at=_AT) == (JoinCheck.REFUSED, None)
+
+
+def test_an_activation_waiting_on_a_joins_marking_is_not_taken_over() -> None:
+    """§4:6: its pending join would land after its input was taken, so none is taken."""
+    other = _running("a", _IDS[0])
+    _, pending = reserve_join([other], _joining("a"), limit=3, at=_AT)
+    assert pending is not None
+    taker = _running("b", _IDS[1])
+
+    assert not take_over([other, taker], taker, _IDS[0], limit=3, at=_AT)
+    assert not other.stopped
+    pending.confirm([2])
+    assert take_over([other, taker], taker, _IDS[0], limit=3, at=_AT)
+
+
+def _joining_now(state: ActivationState) -> bool:
+    """Whether a join is pending its marking, read afresh."""
+    return state.joining
+
+
+def _joined_now(state: ActivationState) -> tuple[JoinedInput, ...]:
+    """The inputs that joined, read afresh."""
+    return state.joined
