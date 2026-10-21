@@ -13,6 +13,7 @@ the steps' data, are tested instead.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, cast
@@ -20,7 +21,11 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from observer_support import AT, Harness, address, episode, reply, said
 
-from ai_assistant.core.errors import MemoryStoreStaleError, PersonModelStoreError
+from ai_assistant.core.errors import (
+    MemoryStoreError,
+    MemoryStoreStaleError,
+    PersonModelStoreError,
+)
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     BeliefBand,
@@ -29,6 +34,7 @@ from ai_assistant.core.types import (
     InputPart,
     Memory,
     MemoryChange,
+    MemoryDecisionKind,
     MemoryOperation,
     MemoryOperationKind,
     MemoryRetirement,
@@ -39,8 +45,10 @@ from ai_assistant.core.types import (
     OpenQuestionKind,
     PersonActHow,
     PersonModelAct,
+    PersonModelWrite,
     PinPart,
     ProfileField,
+    ProposedSuggestion,
     ReadingCertainty,
     SuggestionKind,
     SupportDirection,
@@ -53,6 +61,7 @@ from ai_assistant.orchestration.observer.prompts import (
     OBSERVER_SCOUT_PROMPT,
 )
 from ai_assistant.orchestration.observer.writing import FindingWriter
+from ai_assistant.orchestration.writes import MemoryWriteStage
 from ai_assistant.testing import FakeModelProvider, default_prompt
 from ai_assistant.testing.memories import (
     confirmed_support,
@@ -670,3 +679,117 @@ async def test_a_confirmation_cited_over_a_memory_its_pins_made_an_assertion_is_
         await _writer(harness, store).write(Checked(primary=create))
 
     assert (await _held(harness, "m-veg")).status is MemoryStatus.CURRENT
+
+
+class _FailingPinWrites(MemoryWriteStage):
+    """The write stage, whose add support citing a pin fails as a store fault would."""
+
+    async def apply(self, change: MemoryChange) -> None:
+        if isinstance(change.operation.cites, PinPart):
+            msg = "the store failed the write"
+            raise MemoryStoreError(msg)
+        await super().apply(change)
+
+
+async def test_a_pin_support_the_guard_cannot_write_fails_the_retirement() -> None:
+    """§9:9: a retirement is never proposed past a pin whose support did not land."""
+    harness = Harness()
+    store = _store(harness)
+    await harness.hold(episode("later", text="I eat fish now."))
+    await _pinned(
+        harness, store, memory("m-veg", "The user is vegetarian.", said_support(address("held")))
+    )
+    shown = await _held(harness, "m-veg")
+    pins = PinConfirmations(
+        people=store,
+        memory=harness.memory,
+        writes=_FailingPinWrites(writer=harness.writer),
+        now=harness.clock,
+    )
+    writer = FindingWriter(
+        writes=harness.writes,
+        memory=harness.memory,
+        now=harness.clock,
+        mint=harness.mint,
+        pins=pins,
+    )
+
+    with pytest.raises(MemoryStoreError):
+        await writer.write(Checked(primary=_ending(shown, address("later"))))
+
+    assert (await _held(harness, "m-veg")).status is MemoryStatus.CURRENT
+    assert await harness.memory.get("observed:new") is None
+
+
+async def test_a_create_the_policy_may_supersede_with_confirms_every_pin_first() -> None:
+    """§9:9, ADR-0328 §11:7: a supersession is ruled against the standing the pins give."""
+    harness = Harness(ruling=MemoryDecisionKind.SUPERSEDE)
+    store = _store(harness)
+    await harness.hold(episode("later", text="I am vegetarian, mostly."))
+    pin = await _pinned(
+        harness, store, memory("m-veg", "The user is vegetarian.", said_support(address("held")))
+    )
+    newer = memory("observed:new", "The user is vegetarian.", said_support(address("later")))
+
+    # The writer refuses an end the pinned standing outranks (ADR-0328 §6:5).
+    with contextlib.suppress(MemoryStoreError):
+        await _writer(harness, store).write(Checked(primary=Create(memory=newer)))
+
+    (call,) = harness.policy.calls
+    assert [one.id for one in call.conflicts] == ["m-veg"], "a supersession was in reach"
+    held = await _held(harness, "m-veg")
+    assert held.support_at(PinPart(pin=pin)) is not None, "confirmed before the ingest"
+    assert held.status is MemoryStatus.CURRENT
+
+
+class _FailingWritesOnce:
+    """The fake person-model store, whose first mark and first suggestion fail."""
+
+    def __init__(self, store: FakePersonModelStore) -> None:
+        self._store = store
+        self._failed: set[str] = set()
+
+    def _once(self, name: str) -> None:
+        if name not in self._failed:
+            self._failed.add(name)
+            msg = "the person-model store cannot be written"
+            raise PersonModelStoreError(msg)
+
+    async def add_style_mark(self, person_id: str, memory_id: str) -> PersonModelWrite:
+        self._once("mark")
+        return await self._store.add_style_mark(person_id, memory_id)
+
+    async def record_suggestion(
+        self, person_id: str, suggestion: ProposedSuggestion
+    ) -> PersonModelWrite:
+        self._once("suggestion")
+        return await self._store.record_suggestion(person_id, suggestion)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._store, name)
+
+
+async def test_a_mark_and_a_suggestion_the_store_failed_are_made_by_the_next_run() -> None:
+    """§9:4-§9:5: what the commit asked for is kept, never decided again by a retry."""
+    harness = Harness()
+    store = _store(harness)
+    await _three(harness)
+    scout = FakeModelProvider.scripted(reply(findings=[{"claim": _CLAIM, "rests_on": ["P1"]}]))
+    commit = FakeModelProvider.scripted(_create(style=True, pin=True))
+    observer = harness.observer(
+        scout=scout, commit=commit, person_model=cast("PersonModelStore", _FailingWritesOnce(store))
+    )
+
+    first = await observer.run()
+
+    assert first.processed == 1
+    model = await _model(store)
+    assert (model.style_marks, model.suggestions) == ((), ())
+
+    await observer.run()
+
+    (created,) = [one for one in await harness.memory.export() if isinstance(one, Memory)]
+    model = await _model(store)
+    assert [one.memory_id for one in model.style_marks] == [created.id]
+    assert [one.proposed.memory_id for one in model.suggestions] == [created.id]
+    assert len(commit.calls) == 1, "no second decision"

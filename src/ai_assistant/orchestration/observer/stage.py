@@ -278,6 +278,15 @@ class _Attempt:
 
 
 @dataclass(frozen=True, slots=True)
+class _PersonWrite:
+    """One write to the person-model store: a suggestion, or a style mark on a memory."""
+
+    person_id: str
+    suggestion: ProposedSuggestion | None = None
+    mark: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class _Decided:
     """A commit's outcome, and the decision and note it came from where a call made one."""
 
@@ -380,6 +389,11 @@ class Observer:
             writes=writes, memory=memory, now=self._now, mint=self._mint, pins=self._pins
         )
         self._lock = asyncio.Lock()
+        # A write to the person-model store that the store failed, kept for the next run
+        # to make again (ADR-0338 §9:2-§9:5): what a step decided is never decided again
+        # for it, so it is not lost to a retry whose model decides otherwise. Only a
+        # process that stops while that store is failing loses one, as ``_unsaved`` below.
+        self._person_pending: list[_PersonWrite] = []
         # A finding as this process last built it, while the plan store has not taken
         # the write carrying it: an outcome decided, or a write landed on a memory and
         # put in ``written``. A write of the record that fails ends the run (§16:6's
@@ -419,7 +433,9 @@ class Observer:
         return outcome
 
     async def _run(self) -> RunOutcome:
-        # ADR-0338 §9:6: before the episodes, with no model call and against no budget.
+        # ADR-0338 §9:6: before the episodes, with no model call and against no budget;
+        # first, what an earlier run could not write to the person model.
+        await self._replayed()
         pinned = 0 if self._pins is None else await self._pins.run_pass()
         window = await self._episodes(frozenset())
         queue = await self.due(window)
@@ -639,9 +655,8 @@ class Observer:
 
         Given a person (ADR-0338 §9:1-§9:3), a finding that only restates a field is
         recorded already decided, nothing kept, and is never committed; its suggestion,
-        and each the scout proposed beside its findings, is recorded before the findings
-        are, so a store that fails leaves no finding behind, and the retry scouts again
-        rather than losing a suggestion (§16:1).
+        and each the scout proposed beside its findings, is recorded, or kept for the
+        next run where the store cannot be written.
         """
         rendered = None if person is None else person.rendered()
         reply = await self._call(
@@ -691,24 +706,44 @@ class Observer:
 
         The store refuses a value the profile holds, an equal suggestion pending or
         dismissed, and a memory already pinned (ADR-0338 §9:2, §9:5), and validates a
-        field's value as it validates a field's (§3:2): a refusal is logged under its
-        code-owned reason, never the value, and the next is recorded.
+        field's value as it validates a field's (§3:2). A store that cannot be written
+        keeps the suggestion for the next run (``_person_pending``).
+        """
+        for one in suggestions:
+            await self._person_write(_PersonWrite(person_id=person.person_id, suggestion=one))
 
-        Raises:
-            PersonModelStoreError: If the store cannot be written: the attempt fails.
+    async def _person_write(self, write: _PersonWrite) -> None:
+        """Make one write to the person-model store, or keep it for the next run.
+
+        A refusal is logged under its code-owned reason, never the value (ADR-0329 §15:7).
         """
         people = self._people
-        if people is None:  # pragma: no cover - called only with a person
+        if people is None:  # pragma: no cover - called only where a store is wired
             return
-        for one in suggestions:
-            written = await people.record_suggestion(person.person_id, one)
-            if written.kind is PersonModelWriteKind.REFUSED:
-                _log.info(
-                    "observer_person",
-                    stage="suggestion",
-                    result="refused",
-                    reason=None if written.refusal is None else written.refusal.value,
-                )
+        try:
+            if write.mark is not None:
+                written = await people.add_style_mark(write.person_id, write.mark)
+            elif write.suggestion is not None:
+                written = await people.record_suggestion(write.person_id, write.suggestion)
+            else:  # pragma: no cover - every write is one or the other
+                return
+        except PersonModelStoreError as exc:
+            self._person_pending.append(write)
+            _log.info("observer_person", stage="write", result="kept", reason=type(exc).__name__)
+            return
+        if written.kind is PersonModelWriteKind.REFUSED:
+            _log.info(
+                "observer_person",
+                stage="mark" if write.mark is not None else "suggestion",
+                result="refused",
+                reason=None if written.refusal is None else written.refusal.value,
+            )
+
+    async def _replayed(self) -> None:
+        """Make again each person-model write an earlier run kept (ADR-0338 §9:2-§9:5)."""
+        pending, self._person_pending = self._person_pending, []
+        for one in pending:
+            await self._person_write(one)
 
     async def _committed(
         self, finding_id: str, reading: Reading, attempt: _Attempt, person: PersonFields | None
@@ -774,9 +809,8 @@ class Observer:
 
         Every write that lands is put in the finding's ``written`` beside ``earlier``
         and saved before the next is made (§16:1). Given a person, the style mark and the
-        pin suggestion the step asked for are recorded once the memory writes landed and
-        before the outcome is, so a store that fails fails the attempt and the retry
-        decides the finding again (ADR-0338 §9:4-§9:5).
+        pin suggestion the step asked for are recorded once the memory writes landed, on
+        the memories they landed on (ADR-0338 §9:4-§9:5).
         """
         view = await commit_view(
             _finding(attempt, finding_id),
@@ -845,11 +879,10 @@ class Observer:
         records no pin suggestion for a memory pinned or one equal to a pending or
         dismissed one.
 
-        Raises:
-            PersonModelStoreError: If the store cannot be written: the attempt fails.
+        A store that cannot be written keeps each for the next run, so a retry that
+        decides otherwise never loses what this decision asked for.
         """
-        people = self._people
-        if people is None or not (decision.marks_style or decision.suggests_pin):
+        if self._people is None or not (decision.marks_style or decision.suggests_pin):
             return
         kept = (MemoryOperationKind.CREATE, MemoryOperationKind.ADD_SUPPORT)
         memories = [
@@ -860,16 +893,12 @@ class Observer:
         ]
         for memory_id in memories:
             if decision.marks_style:
-                await people.add_style_mark(person.person_id, memory_id)
+                await self._person_write(_PersonWrite(person_id=person.person_id, mark=memory_id))
             if decision.suggests_pin:
-                await self._suggested(
-                    person,
-                    [
-                        ProposedSuggestion(
-                            kind=SuggestionKind.PIN, memory_id=memory_id, episode_id=episode
-                        )
-                    ],
+                suggestion = ProposedSuggestion(
+                    kind=SuggestionKind.PIN, memory_id=memory_id, episode_id=episode
                 )
+                await self._suggested(person, [suggestion])
 
     async def _call(  # noqa: PLR0913 — the step, its route, its request, its finding and flag
         self,

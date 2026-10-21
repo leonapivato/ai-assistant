@@ -33,15 +33,18 @@ store's failure as well as a refusal, and only a retry tells a passing outage fr
 refusal, so neither is recorded as a terminal outcome.
 
 **A retirement is ruled against the standing its memory's pins give it** (ADR-0338
-§9:9). Before a proposal that ends, marks wrong or replaces a stored memory, the pin pass
-is run on that memory alone (``PinConfirmations``): each pin a person made on their own
-profile that no support of it points at yet earns its ``pinned`` support, and the memory
-is read again. Where that lifts the memory above the support the retirement cites, the
-retirement is not proposed, and the ``conflict`` question the commit decided beside it is
-raised instead (ADR-0328 §6:5, §13:1). Those supports are the pin pass's writes, never
-the finding's, so its outcome does not list them; a retirement that already landed while
-a pin was being made stands, and the next run's pass adds that pin's support to the
-retired memory (§9:10).
+§9:9). Before every proposal to ``ingest`` — which may end, mark wrong or replace the
+memory its retirement names, or end those a ``SUPERSEDE`` ruling retires — the pin pass
+is run strictly (``PinConfirmations``): each pin a person made on their own profile that
+no support of its memory points at yet earns its ``pinned`` support, a support that
+cannot be written fails the attempt, and every memory the finding holds as read that the
+pass moved is read again. The policy then rules a supersession against the stored
+standing, the pins' included. Where the pins lift the memory a retirement names above the
+support it cites, the retirement is not proposed, and the ``conflict`` question the
+commit decided beside it is raised instead (ADR-0328 §6:5, §13:1). Those supports are
+the pin pass's writes, never the finding's, so its outcome does not list them; a
+retirement that already landed while a pin was being made stands, and the next run's
+pass adds that pin's support to the retired memory (§9:10).
 
 **What one finding wrote is handed to the caller as each write lands** (§16:1), before
 the write is verified and before anything else is read or written, so the caller can put
@@ -312,9 +315,13 @@ class FindingWriter:
     async def _create(self, create: Create, ledger: _Ledger) -> FindingUnwritten | None:
         """§12:2, §12:4: one proposal to ``ingest``, and what its ruling wrote."""
         retiring = create.retiring
-        if retiring is not None:
-            shown = await self._fresh(retiring.memory)
-            fresh = await self._confirmed(shown)
+        shown = None if retiring is None else await self._fresh(retiring.memory)
+        # ADR-0338 §9:9: every ingest may retire a memory — the one its retirement names,
+        # or those a ``SUPERSEDE`` ruling ends (ADR-0328 §11:7) — so every pin lacking its
+        # support earns it first, and a write that fails fails the attempt.
+        confirmed = await self._confirmed([] if shown is None else [shown])
+        if retiring is not None and shown is not None:
+            fresh = confirmed.get(shown.id, shown)
             if fresh is not shown and self._outranks(fresh, create):
                 # ADR-0338 §9:9, ADR-0328 §6:5: the pins lifted the memory above what the
                 # retirement cites, so its question is raised instead (§13:1).
@@ -384,33 +391,47 @@ class FindingWriter:
             await self._kept()
         return None
 
-    async def _confirmed(self, memory: Memory) -> Memory:
-        """``memory`` with the ``pinned`` supports its own pins lack added (ADR-0338 §9:9).
+    async def _confirmed(self, read: Sequence[Memory]) -> dict[str, Memory]:
+        """Run the pin pass strictly before an ingest (ADR-0338 §9:9); what it moved, read.
 
-        Read again after they land, and adopted only where the pass's own add supports
-        are all that changed; the revision the retirement then expects is the one they
-        left (ADR-0219 §2).
+        Each memory the pass added supports to that this finding holds as read — ``read``,
+        and the memories the commit step was shown — is read again and adopted only where
+        the pass's own add supports are all that changed, so the revision this finding's
+        next write expects is the one they left (ADR-0219 §2).
+
+        Args:
+            read: The memories read for the write beyond those the step was shown.
+
+        Returns:
+            Each such memory as it now stands, by id.
 
         Raises:
-            _Refusal: ``check_failed`` where the store no longer holds it as current.
-            MemoryStoreStaleError: Where another writer moved it beside the pass.
-            MemoryStoreError: Where the history read fails.
-            PersonModelStoreError: Where the pins cannot be read: the attempt fails, and
-                the retry reads them again.
+            _Refusal: ``check_failed`` where the store no longer holds one as current.
+            MemoryStoreStaleError: Where another writer moved one beside the pass.
+            MemoryStoreError: Where the history read, or a support's write, fails: the
+                attempt fails, and the retry runs the pass again.
+            PersonModelStoreError: Where the pins cannot be read, likewise.
         """
         if self._pins is None:
-            return memory
-        added = (await self._pins.confirm({memory.id})).get(memory.id, 0)
-        if not added:
-            return memory
-        after = await self._memory.get(memory.id)
-        if not isinstance(after, Memory):
-            raise _Refusal(FindingUnwritten.CHECK_FAILED)
-        if not _pinned(memory, after, added):
-            msg = "a memory moved beside the observer's confirmation of its pins"
-            raise MemoryStoreStaleError(msg)
-        self._expected[memory.id] = after.revision
-        return after
+            return {}
+        added = await self._pins.confirm(strict=True)
+        held = {**self._shown, **{one.id: one for one in read}}
+        moved: dict[str, Memory] = {}
+        for memory_id, count in added.items():
+            before = held.get(memory_id)
+            if before is None:
+                continue
+            after = await self._memory.get(memory_id)
+            if not isinstance(after, Memory):
+                raise _Refusal(FindingUnwritten.CHECK_FAILED)
+            if not _pinned(before, after, count):
+                msg = "a memory moved beside the observer's confirmation of its pins"
+                raise MemoryStoreStaleError(msg)
+            self._expected[memory_id] = after.revision
+            if memory_id in self._shown:
+                self._shown[memory_id] = after
+            moved[memory_id] = after
+        return moved
 
     @staticmethod
     def _outranks(target: Memory, create: Create) -> bool:

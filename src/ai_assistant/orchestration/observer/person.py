@@ -53,7 +53,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.person_block import activation_person
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection
+    from collections.abc import Callable
     from datetime import datetime
 
     from ai_assistant.core.protocols import MemoryStore, PersonModelStore
@@ -170,8 +170,8 @@ class PinConfirmations:
         self._writes = writes
         self._now = now
 
-    async def confirm(self, memory_ids: Collection[str] | None = None) -> dict[str, int]:
-        """Add the ``pinned`` support every own pin lacks, on ``memory_ids`` or on all.
+    async def confirm(self, *, strict: bool = False) -> dict[str, int]:
+        """Add the ``pinned`` support every own pin lacks (§9:6, §9:9).
 
         Every pin is read from the store's export, which carries every person's pins,
         removed ones included (§10:5), so the store holds each pin the pass adds a
@@ -179,35 +179,33 @@ class PinConfirmations:
         each conditionally on the revision the history read last returned for it.
 
         Args:
-            memory_ids: The memories whose pins to confirm, for the retirement guard
-                (§9:9); every pinned memory where ``None``, for the run's pass (§9:6).
+            strict: Whether a support that cannot be written fails the call, as it must
+                before a write that may retire a memory (§9:9): that write is then not
+                made, and its attempt is retried. The run's own pass is not strict: a
+                write that fails there is left for the next run (§9:6).
 
         Returns:
-            How many supports were added, by memory. A write that failed is left out,
-            and a later run tries it again.
+            How many supports were added, by memory.
 
         Raises:
             PersonModelStoreError: If the pins cannot be read.
-            MemoryStoreError: If the history read fails.
+            MemoryStoreError: If the history read fails, or, where ``strict``, a support
+                cannot be written.
         """
         export = await self._people.export()
-        pins = [
-            pin
-            for pin in export.pins
-            if _own(pin) and (memory_ids is None or pin.memory_id in memory_ids)
-        ]
+        pins = [pin for pin in export.pins if _own(pin)]
         if not pins:
             return {}
         held = await self._memory.get_history(list(dict.fromkeys(pin.memory_id for pin in pins)))
         added: dict[str, int] = {}
         for memory_id, current in held.items():
             mine = [pin for pin in pins if pin.memory_id == memory_id]
-            count = await self._confirmed(current, mine)
+            count = await self._confirmed(current, mine, strict=strict)
             if count:
                 added[memory_id] = count
         return added
 
-    async def _confirmed(self, held: Memory, pins: list[Pin]) -> int:
+    async def _confirmed(self, held: Memory, pins: list[Pin], *, strict: bool) -> int:
         """Add each of ``pins``' missing supports to one memory; how many were added.
 
         ``held`` is the memory as the history read returned it, whatever its status; after
@@ -237,6 +235,8 @@ class PinConfirmations:
             try:
                 await self._writes.apply(change)
             except MemoryStoreError as exc:
+                if strict:
+                    raise
                 # §9:6: tried again on the next run. Logged with a code-owned reason only
                 # (ADR-0329 §15:7): never the memory, the pin or the wording.
                 _log.info("observer_pins", stage="pin", result="not_written", reason=_named(exc))
