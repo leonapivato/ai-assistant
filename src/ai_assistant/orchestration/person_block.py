@@ -16,8 +16,8 @@ kind that brings one adds it here.
 **What the block holds** (§6, §7:1, §7:9). The person's five fields; the kept-in-mind
 slot — their pinned memories, oldest pin first, then the memories marked as how they
 want to be spoken to, the most recently marked first, each memory once, a pin or mark
-following its memory's successors to a current one (§4:8), as far as the memory store
-returns them (#3308) — within a character budget
+showing its chain's current end alone (§4:8, §5:3; ADR-0342 §5:2-§5:5), never a retired
+memory as current (ADR-0342 §5:1) — within a character budget
 over the wordings it shows, stopping before the first that would exceed it and counting
 what it left out (§6:1-§6:2); and their pending suggestions that rest on no outside
 content, newest first, up to a count, a pin suggestion's memory only where it is
@@ -27,9 +27,17 @@ rule (ADR-0217 §2) is applied to the slot's memories and a pin suggestion's, he
 recall's records (§6:5). A pin or mark whose memory the store no longer holds is shown
 nowhere (§4:10).
 
+**A chain is walked live read first** (ADR-0342 §5:3). At each memory, a live read
+(``get_many``) that returns it current ends the walk there, at the chain's current end;
+only where it does not is the memory read through the history read (``get_history``),
+after that live read, and the walk goes on to the successor the latest operation naming
+one names (§5:2). The history read only says where to look next: whether a memory is
+current is the live read's answer alone (ADR-0342 §4:4, §5:1).
+
 **Once per activation, before understanding** (§7:1), and the same block reaches every
 planning round, less what :func:`still_held` drops before each one: a memory the memory
-store no longer holds (§7:10).
+store no longer holds (§7:10), which is one the history read no longer returns
+(ADR-0342 §5:4).
 
 **A store that cannot be read gives no block**, and the activation goes on without one:
 the fault is logged under a fixed event name with a code-owned reason, and never a
@@ -47,7 +55,6 @@ from ai_assistant.core.channel_validation import establishes_the_user
 from ai_assistant.core.errors import MemoryStoreError, PersonModelStoreError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
-    RETIRING_OPERATIONS,
     ChannelIdentity,
     Memory,
     MemoryStatus,
@@ -367,17 +374,25 @@ class PersonBlocks:
         return tuple(shown)
 
     async def _reached(self, starts: Iterable[str]) -> dict[str, Memory]:
-        """The current memory each start's chain reaches, where one does (ADR-0338 §4:8).
+        """Each start's chain's current end, where it has one (ADR-0342 §5:2-§5:3).
 
         A pin or mark on a memory that is ended or wrong and names a successor shows the
         successor, followed to a current memory; a chain that reaches no current memory,
-        or a memory the store no longer holds, shows nothing (§4:8, §4:10). The chains
-        are walked together, one batch read per step.
+        or a memory the store no longer holds, shows nothing (ADR-0338 §4:8, §4:10).
 
-        **Followed only as far as the memory store returns records** (#3308): its reads
-        by id omit a record no longer live, so a retired memory whose validity window
-        has closed is returned to no reader, and a pin on it is shown nowhere until a
-        read reaching a retired memory's successor exists.
+        At each memory a chain reaches, the live read is asked first, and where it
+        returns the memory current, the walk ends there. Only the memories it does not
+        return are read through the history read, made after it, so a memory retired
+        between the two is read retired and its successor is followed rather than lost
+        (ADR-0342 §5:3's order). The walk ends with no current memory where the history
+        read omits the memory, where its record names no successor, or where the
+        successor is one this chain has already reached. The chains are walked together:
+        one live read per step, and one history read where that live read missed.
+
+        A live read returning a memory whose status is not current, a state the writer
+        never builds (a retired memory's window is closed, ADR-0328 §3:4, §5:9), is
+        taken as a miss, so even then no retired memory is shown as current (ADR-0342
+        §5:1).
         """
         at = {start: start for start in dict.fromkeys(starts)}
         reached: dict[str, Memory] = {}
@@ -385,16 +400,23 @@ class PersonBlocks:
         for _ in range(_SUCCESSOR_HOPS):
             if not at:
                 break
-            found = await self._memory.get_many(list(dict.fromkeys(at.values())))
-            following: dict[str, str] = {}
+            live = await self._memory.get_many(list(dict.fromkeys(at.values())))
+            missed: dict[str, str] = {}
             for start, memory_id in at.items():
-                record = found.get(memory_id)
-                if not isinstance(record, Memory):
-                    continue
-                if record.status is MemoryStatus.CURRENT:
+                record = live.get(memory_id)
+                if isinstance(record, Memory) and record.status is MemoryStatus.CURRENT:
                     reached[start] = record
+                else:
+                    missed[start] = memory_id
+            if not missed:
+                break
+            history = await self._memory.get_history(list(dict.fromkeys(missed.values())))
+            following: dict[str, str] = {}
+            for start, memory_id in missed.items():
+                retired = history.get(memory_id)
+                if retired is None:
                     continue
-                successor = _successor(record)
+                successor = _successor(retired)
                 if successor is None or successor in visited[start]:
                     continue
                 visited[start].add(successor)
@@ -421,9 +443,14 @@ def _recorded(suggestion: PersonSuggestion) -> datetime:
 
 
 def _successor(record: Memory) -> str | None:
-    """The successor the memory's latest retiring operation names, where it names one."""
+    """The successor the latest operation in the memory's log naming one names (ADR-0342 §5:2).
+
+    A memory may be retired twice, ended and later marked wrong (ADR-0328 §5:7), and
+    each may name a successor or none: the latest that names one governs, so a later
+    retirement naming none leaves an earlier one's successor standing.
+    """
     for operation in reversed(record.operations):
-        if operation.kind in RETIRING_OPERATIONS:
+        if operation.successor is not None:
             return operation.successor
     return None
 
@@ -432,9 +459,12 @@ async def still_held(block: PersonBlock, memory: MemoryStore) -> PersonBlock:
     """The block less every memory the memory store no longer holds (ADR-0338 §7:10).
 
     Read before each planning round, the first included, so a memory forgotten while
-    the activation runs reaches no later request. A memory store that cannot be read
-    leaves the block's fields and no memory of it, so nothing forgotten can slip
-    through a failed check.
+    the activation runs reaches no later request. The store holds a memory exactly
+    where the history read returns it (ADR-0342 §5:4), so a memory forgotten or past
+    its ``expires_at`` is dropped, and one retired since the block was assembled is
+    not: the block is assembled once (§7:1), and this check walks no chain. A memory
+    store that cannot be read leaves the block's fields and no memory of it, so nothing
+    forgotten can slip through a failed check.
 
     Args:
         block: The activation's block, as it stood before this round.
@@ -447,11 +477,10 @@ async def still_held(block: PersonBlock, memory: MemoryStore) -> PersonBlock:
     if not ids:
         return block
     try:
-        found = await memory.get_many(ids)
+        held = set(await memory.get_history(ids))
     except MemoryStoreError:
         _log.warning("person_block_unread", stage="person_block", reason="memory_fault")
-        found = {}
-    held = {memory_id for memory_id, record in found.items() if isinstance(record, Memory)}
+        held = set()
     if held.issuperset(ids):
         return block
     return replace(

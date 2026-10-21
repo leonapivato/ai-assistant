@@ -3196,7 +3196,8 @@ class Engine:
 
         Everything about *what* comes back is the store's ratified contract, not
         this façade's: live beliefs only (a retired record is history, reachable
-        through ``export`` alone), newest revision first with ``id`` breaking ties,
+        through ``export``, and by id through the store's history read, ADR-0342
+        §4:3), newest revision first with ``id`` breaking ties,
         and a page that is full whenever enough matching records exist. Offset
         paging over a store that is being written to may skip or repeat a record,
         which ADR-0073 §2 names and accepts.
