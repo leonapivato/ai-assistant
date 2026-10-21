@@ -1,6 +1,6 @@
 # 341. A pure read is a call that writes nothing and does not leave the hub, so looking something up in the assistant's own records does not commit an activation
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-21
 - Scope: what ADR-0332 counts as a **pure read**, and so where an activation's join window closes. The problem is [#3284](https://github.com/leonapivato/ai-assistant/issues/3284). A per-version recall, a durable store of pending input, and whether the clock is a pure read are not decided here (§4).
 - Dependency: [ADR-0332](0332-activations-run-side-by-side-across-places-and-one-at-a-time-within-one-a-new-input-joins-the-running-activation-until-it-acts-and-a-place-waits-a-moment-before-it-starts.md), [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md) and [ADR-0312](0312-a-tool-that-only-discloses-may-declare-no-effect-the-authorizing-phases-module-takes-another-name-and-planning-always-sees-its-own-activation.md), as their status lines leave them.
