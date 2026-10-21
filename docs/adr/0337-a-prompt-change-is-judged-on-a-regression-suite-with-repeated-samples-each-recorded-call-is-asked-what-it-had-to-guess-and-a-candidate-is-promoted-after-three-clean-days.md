@@ -6,7 +6,7 @@
 - Dependency: [ADR-0314](0314-a-diagnostic-record-keeps-what-each-phase-was-given-and-returned-and-nothing-reads-it-back.md), [ADR-0316](0316-an-activation-viewer-outside-the-package-shows-the-diagnostic-record-to-the-owner-on-the-server.md), [ADR-0333](0333-the-observer-writes-diagnostic-entries-in-a-file-of-its-own-beside-the-activation-it-learned-from-and-the-viewer-shows-what-was-learned.md), [ADR-0334](0334-a-prompt-is-a-template-the-hub-loads-at-start-the-owners-hub-may-override-it-from-its-data-directory-and-each-model-call-records-the-version-it-sent.md) and [ADR-0335](0335-a-replay-re-sends-recorded-model-calls-from-a-copy-of-the-owners-hub-through-a-candidate-prompt-and-keeps-each-new-reply-beside-the-original.md), as their status lines leave them.
 - Authorization: on 2026-10-21 the owner asked to "fix what we've already found. Then lets think about a process so that it can continuously improve over time", and set the posture that "prompt injection and privacy shouldn't be a concern right now since nobody is using it seriously yet." The proposal was draft PR [#3236](https://github.com/leonapivato/ai-assistant/pull/3236). The scope of this version, what it decides and what it defers, is the dispatcher's decision under the owner's standing delegation; the dispatcher assigned 0337 and ratifies it under that delegation.
 - **Changes `core`, so it is a contract-surface decision.** `DiagnosticSource` gains one member, `follow_up` (§8:9), and `Settings` gains two fields (§8:1, §8:3). No Protocol changes, nothing the wire carries changes, and `PROTOCOL_VERSION` does not move.
-- **Partially supersedes**, in the clauses §11's first table names: ADR-0314, ADR-0316, ADR-0333, ADR-0334 and ADR-0335.
+- **Partially supersedes**, in the clauses §11's first table names: ADR-0123, ADR-0314, ADR-0316, ADR-0333, ADR-0334 and ADR-0335.
 
 ## Context
 
@@ -119,6 +119,8 @@ invented; a **real** case is a call the owner's hub made.
 > **Normative.** A case of the prompt `follow_up` instead holds the followed call's request
 > whole, its system message and its offered tools included, and the followed response, so that
 > its candidate is rendered as the request's last user message, as §6:3 has the hub send it.
+> It is rendered under no flag, since `follow_up` declares none, and the followed call's flags
+> are kept with it only as a record of where it came from.
 
 > **Normative.** A case's property is either a code check, named from the closed set the runner
 > declares, or `read`, which names what a person reading the reply looks for.
@@ -195,13 +197,17 @@ an instruction says.
 > **Normative.** A pull request carries a real case's results only as counts: its case name,
 > its version and how many samples passed.
 
+> **Normative.** A backup excludes the case store's directory and every file beneath it. Its
+> name is owned by the composition root, as the record's directory is (ADR-0314 §7:5), and the
+> tool and the backup take it from there (ADR-0123 §3:3).
+
 Only the owner, or the dispatcher at the owner's direction, runs a suite over real cases, on the
 server, as ADR-0335 §2:4 and §2:5 already have it; §4:7 widens only the synthetic run. A real
 case outlives the record's window by design: the failures most worth keeping are the ones the
 window would have deleted. The case store sits in the data directory so that deleting the
-owner's data destroys it with every other entry there (ADR-0126 §1:2), and a backup carries
-it as it carries the rest (ADR-0123), as ADR-0334 §5:3 has the prompts directory carried. The
-hub never writes it, so it is not a store under ADR-0326 §2:2 and owes no migration.
+owner's data destroys it with every other entry there (ADR-0126 §1:2), and it is left out of
+backups because a backup may leave the server, which §4:9 forbids (ADR-0123 §3:6). The hub
+never writes it, so it is not a store under ADR-0326 §2:2 and owes no migration.
 
 ### 5. Repeated samples
 
@@ -356,10 +362,10 @@ or only beside a detected failure, is the later decision §10 names.
 > (ADR-0334 §7:3), opened once the suite is green for it and it has run clean as an override on
 > the owner's hub for at least three days.
 
-> **Normative.** The suite is green for a candidate where no case of its prompt that passes on
-> the current default fails on the candidate, and every case the candidate was written to fix
-> passes on it. A case passes on a version where every one of its samples passes its code
-> check, or, for `read`, where the person who read every sample says it passes.
+> **Normative.** The suite is green for a candidate where, on every case of its prompt, the
+> candidate passes at least as many of the case's samples as the current default does, and on
+> every case the candidate was written to fix it passes every sample. A sample passes where it
+> passes its case's code check, or, for `read`, where the person who read it says it passes.
 
 > **Normative.** A candidate has run clean where, over those days, at least one recorded call
 > carries its version, or for a prompt that writes no entries the start's line names it
@@ -416,6 +422,7 @@ Superseded in part; every clause the middle column does not name stands:
 | ADR-0333 | §3:1, in the addition alone: an entry whose source is `follow_up` goes to the follow-up file; §4:1, in the addition alone: the observer's recorded calls are read by the follow-up asker and reach the follow-up call, and a kept observer call reaches a model in a suite run, as for ADR-0314 §3:2; the observer itself still reads no entry | §4:2, §4:10, §8:5, §8:11, §8:12 |
 | ADR-0334 | §1:3, in the addition alone: for `follow_up`, the template is the request's last user message, and the system message is the followed call's own; §2:1, in the addition alone: a ninth prompt, `follow_up` | §6:1, §6:3 |
 | ADR-0335 | §3:1, in the addition alone: the `keep` and `suite` commands, and the owner's deleting a case, read and write the live data directory's `prompt_cases` directory and nothing else in it; §2:4 and §2:5, in the addition alone: a suite run of synthetic cases alone runs on any machine, by the owner, the dispatcher or a lane the dispatcher briefs; §4:10, in the addition alone: a run sends each call as many times as it names, and may send the follow-up after each response; §6:1 and §6:2, in the addition alone: a result line for each sample, naming its sample, and carrying the follow-up's answer or failure where one was sent | §4:7, §4:8, §4:10, §5:4, §7:1–§7:3 |
+| ADR-0123 | §3:1's exclusions, in the addition alone: the case store's directory; §3:4's exact match, for that directory alone, every file beneath which is excluded | §4:13 |
 | ADR-0316 | §3:3 and §5:1, each in the addition alone: an activation's follow-up file, read by its name and never listed, with each answer shown beside the call it follows | §8:17 |
 
 Read through and not superseded:
@@ -427,7 +434,6 @@ Read through and not superseded:
 | ADR-0314 §3:4, ADR-0335 §3:5 | Nothing: copies and the case store stay on the server; only a synthetic suite run leaves it, and it reads no hub's data |
 | ADR-0335 §3:6 | Nothing: copies are deleted on its deadline; a real case is not a copy (§4:11) |
 | ADR-0004 §6, ADR-0126 §1:2 | Nothing: deleting the owner's data destroys the case store with every other entry of the data directory |
-| ADR-0123 | Nothing: a backup carries the case store as it carries the rest of the data directory |
 | ADR-0326 §2:2 | Nothing: the hub never writes the case store, so it is not a store |
 | ADR-0335 §2:6, ADR-0334 §6:2 | Nothing: no hosted hub's data is read, and hosted hubs run the shipped defaults |
 | ADR-0334 §6:1, §6:3, §7:1, §7:3, §7:5 | Nothing: overrides are placed by the owner or the dispatcher at the owner's direction, carry no entry text, are held to the ratified clauses, are promoted by a reviewed pull request and are cleared at deploy |
@@ -436,7 +442,7 @@ Read through and not superseded:
 | ADR-0004 §2 | Nothing: the follow-up is sent from `models/` to the provider the hub's own call went to |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
-> dated header note of ADR-0314, ADR-0316, ADR-0333, ADR-0334 and ADR-0335, atomically with
+> dated header note of ADR-0123, ADR-0314, ADR-0316, ADR-0333, ADR-0334 and ADR-0335, atomically with
 > this ADR under ADR-0070 and ADR-0082, preserving their ratified bodies. The replacements take
 > effect on this ADR's ratification.
 
@@ -459,7 +465,8 @@ Read through and not superseded:
 - A rendered-request case goes stale when the code changes how it renders data; a stale case
   is rewritten, not trusted.
 - A real case keeps raw outside text and other people's words past the record's window, in
-  the owner's hub's data directory and its backups, until the owner deletes it.
+  the owner's hub's data directory, until the owner deletes it; a backup restored elsewhere
+  brings back no case.
 - A promotion without the owner's review rests on the suite, the replays, the three days and
   the promotion review.
 
@@ -468,7 +475,7 @@ Read through and not superseded:
 | # | Question | Here |
 | --- | --- | --- |
 | 1 | Judge model | Deferred (§10) |
-| 2 | The private case store, and its lifetime | Decided: on the owner's hub's server, kept until the owner deletes it (§4:8–§4:11) |
+| 2 | The private case store, and its lifetime | Decided: in the owner's hub's data directory, in no backup, kept until the owner deletes it (§4:8–§4:11, §4:13) |
 | 3 | How a case gives its input | Decided: the rendered request (§3:4); the stage's inputs and scenarios deferred (§10) |
 | 4 | When an override is settled | Decided: three clean days and a green suite (§9:1–§9:3) |
 | 5 | The timer's rhythm | Deferred with the timer (§10) |
@@ -483,16 +490,18 @@ Read through and not superseded:
 | 14 | Seeding first | Decided: the seed lane is first (§1:3, §3:7) |
 
 **Lanes it implies**, each after this merges `Accepted`, the first before the rest (§1:3):
-1. The suite: `prompt_cases/` with its seed cases, the gate's form test, and the `suite` and
-   `keep` commands with repeated samples, under `scripts/` and `tests/scripts/`. Seeding the
-   real half is the owner's or the dispatcher's act on the server once `keep` exists.
-2. Repeated samples and the offline follow-up in `replay`, and the `follow_up` template, with
+1. The suite: `prompt_cases/` with its seed cases, the gate's form test, and the `suite`
+   command with repeated samples over synthetic cases, under `scripts/` and `tests/scripts/`.
+2. The case store: its name in `app/` and its backup exclusion in `service/` (ADR-0123 §3:6),
+   then `keep` and real-case suite runs in the tool. Seeding the real half is the owner's or
+   the dispatcher's act on the server once `keep` exists.
+3. Repeated samples and the offline follow-up in `replay`, and the `follow_up` template, with
    the viewer showing a call's samples together.
-3. The hub-side follow-up: the `follow_up` member of `DiagnosticSource`, the two settings and the startup
-   refusal, the asker in `models/` and its wiring in `app/`, the store's file. This changes
-   `core`.
-4. The viewer's follow-up display and the replay tool's skip of follow-up files, under
-   `scripts/`. The dispatcher may fold this into the third.
+4. The hub-side follow-up: the `follow_up` member of `DiagnosticSource`, the two settings
+   and the startup refusal, the asker in `models/` and its wiring in `app/`, the store's file.
+   This changes `core`.
+5. The viewer's follow-up display and the replay tool's skip of follow-up files, under
+   `scripts/`. The dispatcher may fold this into the fourth.
 
 **What would reopen it.** A suite that stays green while the hub's replies get worse; a
 follow-up stream whose answers do not recur and point nowhere; or a candidate that ran three
