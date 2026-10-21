@@ -578,25 +578,84 @@ async def test_a_copy_paired_after_its_answer_came_back_is_written_without_askin
     await asker.aclose()
 
 
-async def test_the_same_observer_call_long_after_is_asked_again() -> None:
-    sink, world, clock = FakeDiagnosticSink(), _World(), _Clock()
-    asker = _asker(sink, world, clock=clock)
+async def test_the_same_observer_request_after_its_call_came_back_is_another_call() -> None:
+    """§8:11: a given entry after a copy's returned one is a call of its own, however soon."""
+    sink, world = FakeDiagnosticSink(), _World()
+    asker = _asker(sink, world)
 
     await _hand(
         asker,
         _observed(DiagnosticKind.GIVEN, _ACTIVATION, _AT),
         _observed(DiagnosticKind.RETURNED, _ACTIVATION, _AT),
-    )
-    await _settled(sink, 1)
-    clock.at += 61
-    await _hand(
-        asker,
         _observed(DiagnosticKind.GIVEN, _OTHER, _AT),
         _observed(DiagnosticKind.RETURNED, _OTHER, _AT),
     )
     await _settled(sink, 2)
 
     assert len(world.sent) == 2
+    await asker.aclose()
+
+
+async def test_the_same_request_again_under_one_activation_is_another_call() -> None:
+    """A retried attempt writes its given entry again under the same activation."""
+    sink, world = FakeDiagnosticSink(), _World()
+    asker = _asker(sink, world)
+    later = _AT + timedelta(minutes=15)
+
+    await _hand(
+        asker,
+        _observed(DiagnosticKind.GIVEN, _ACTIVATION, _AT),
+        _observed(DiagnosticKind.RETURNED, _ACTIVATION, _AT),
+        _observed(DiagnosticKind.GIVEN, _ACTIVATION, later),
+        _observed(DiagnosticKind.RETURNED, _ACTIVATION, later),
+    )
+    await _settled(sink, 2)
+
+    assert len(world.sent) == 2
+    await asker.aclose()
+
+
+@pytest.mark.parametrize("daily_calls", [1, 100])
+async def test_a_copy_whose_returned_entry_comes_back_late_is_still_the_one_call(
+    daily_calls: int,
+) -> None:
+    """§8:11: no clock decides it, so a stalled write splits nothing, budget or none."""
+    sink, world, clock = FakeDiagnosticSink(), _World(), _Clock()
+    asker = _asker(sink, world, clock=clock, daily_calls=daily_calls)
+
+    await _hand(
+        asker,
+        _observed(DiagnosticKind.GIVEN, _ACTIVATION, _AT),
+        _observed(DiagnosticKind.GIVEN, _OTHER, _AT),
+        _observed(DiagnosticKind.RETURNED, _ACTIVATION, _AT),
+    )
+    await _settled(sink, 1)
+    clock.at += 3_600
+    await _hand(asker, _observed(DiagnosticKind.RETURNED, _OTHER, _AT))
+    written = await _settled(sink, 2)
+
+    assert len(world.sent) == 1
+    assert {one.activation_id for one in written} == {_ACTIVATION, _OTHER}
+    await asker.aclose()
+
+
+async def test_a_copy_of_a_call_the_budget_turned_away_is_not_asked_either() -> None:
+    """§8:11, §8:3: the one call was not asked, so no copy of it is."""
+    sink, world = FakeDiagnosticSink(), _World()
+    asker = _asker(sink, world, daily_calls=0)
+
+    with structlog.testing.capture_logs() as captured:
+        await _hand(
+            asker,
+            _observed(DiagnosticKind.GIVEN, _ACTIVATION, _AT),
+            _observed(DiagnosticKind.GIVEN, _OTHER, _AT),
+            _observed(DiagnosticKind.RETURNED, _ACTIVATION, _AT),
+            _observed(DiagnosticKind.RETURNED, _OTHER, _AT),
+        )
+        await _quiet()
+
+    assert world.sent == []
+    assert [one["reason"] for one in captured if one["event"] == FOLLOW_UP_NOT_ASKED] == ["budget"]
     await asker.aclose()
 
 
