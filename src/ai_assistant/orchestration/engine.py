@@ -2498,9 +2498,6 @@ class Engine:
                 claims nothing about what it did not (ADR-0132 §5).
             NotificationOutboxError: If a ruled interruption could not be handed to
                 the delivery seam (ADR-0131 §3b).
-            PersonModelStoreError: If the owner's zone could not be read before a
-                ruling (ADR-0338 §3:6). That candidate is not ruled, and the next
-                pass offers it again (ADR-0130 §8).
         """
         self._reject_if_closing()
         if self._upcoming is None:
@@ -3886,8 +3883,8 @@ class Engine:
             RuntimeError: If the engine is shutting down.
             ValueError: If ``page`` is not an integer in ``(0, 2**63)``.
             ConfigurationError: If no notification store is wired.
-            NotificationStoreError: If the store cannot be read or written.
-            PersonModelStoreError: If the owner's zone could not be read before a
+            NotificationStoreError: If the store cannot be read or written, or the
+                owner's zone could not be read from the person-model store before a
                 ruling (ADR-0338 §3:6). That record is not ruled, so its quiet
                 window is never read in a zone that is not theirs: it stays due, and
                 the next run rules it (ADR-0130 §5).
