@@ -1,6 +1,6 @@
 # 317. An activation that chose to say nothing has finished
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0340 (§3:1–§3:4, for an activation the clock starts: the fixed reminder line in their place)
 - Date: 2026-10-13
 - Scope: the phases, milestone M43 ([#2815](https://github.com/leonapivato/ai-assistant/issues/2815)): how an activation started from a conversation ends when planning chose to write nothing, and where the *couldn't finish* message is written ([#2943](https://github.com/leonapivato/ai-assistant/issues/2943)).
 - Authorization: the owner ruled this decision's content on 2026-10-13 in #2943, option A: silence is a normal ending. The dispatcher assigned 0317 and authorized ratifying it once its reviews are green.
@@ -12,6 +12,7 @@
   [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md)
   (§3:7, in the addition alone: a stage's failure that ends the activation also writes *couldn't finish*, whatever
   earlier rounds wrote).
+- Partially superseded: 2026-10-21 by ADR-0340 — §3:1–§3:4, for an activation the clock starts: the fixed reminder line is written in their place, where an occurrence it was saying is not said (ADR-0340 §7:2), and §3:5 classifies its episode (ADR-0340 §7:3). Every other clause stands. This replacement takes effect on ratification of ADR-0340. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
