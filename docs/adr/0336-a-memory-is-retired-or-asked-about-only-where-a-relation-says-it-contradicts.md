@@ -197,8 +197,9 @@ adds the proposal's supports to the target and keeps the target's wording (ADR-0
 §11:6). Its standing is the highest origin among the supports that back the claim as
 worded. A support from what the user said, added on a model's judgement that two
 different wordings say the same thing, would lift the target to "you said it" on that
-judgement alone. That is the laundering ADR-0098 §4 forbids. For a narrower claim (§8) it
-would also attach the user's word to content the user did not state. So the stored
+judgement alone. That is the laundering ADR-0098 §4 forbids. Where the model mislabels a
+narrower claim (§8), it would also attach the user's word to content the user did not
+state. So the stored
 memory stays as it was, and the assertion stands beside it at its own standing. A
 verbatim restatement still folds, by ADR-0121 §2, because there the wording is the
 user's. A writer exception for a model-labelled fold onto an assertion was the hard half
@@ -327,26 +328,46 @@ person, and §13:3 already says what such a finding records.
 
 ### 8. A narrower claim
 
-> **Normative.** A proposed memory that states part of what a stored memory states, and
-> nothing that memory does not, stands to it as `RESTATES` under ADR-0159 §1:1. A
-> proposed memory that states more than a stored memory, and denies nothing it states,
-> stands to it as `ADDS`. No fourth relation is added.
+> **Normative.** ADR-0159 §1:1's first two values are read as follows. `RESTATES`: the
+> proposed record and the named record make the same claim, so each says everything the
+> other says, whatever the wording. `ADDS`: the two records do not make the same claim
+> and neither denies what the other says. That covers a proposed record saying more than
+> the named one, one saying less, and one saying something different. `CONTRADICTS` is
+> unchanged, and no fourth relation is added.
 
-> **Normative.** The reconciler's instruction conveys the clause above. Its wording is the
-> owner's, in the review of the prompts ADR-0334 makes owner-editable, and no lane
-> rewords the default instruction for this decision without that wording.
+> **Normative.** So a proposed memory that states part of what a stored memory states,
+> and nothing that memory does not, stands to it as `ADDS`.
 
-ADR-0159 §1:1 defines `RESTATES` as "the proposed record says what the named record
-already says". Everything a narrower claim says, the broader memory says, so the
-definition already admits it. A fourth value would change a `core` enum, the prompt and
-every policy's reading for a case the three values settle.
+> **Normative.** The reconciler's instruction conveys the two clauses above. Its wording
+> is the owner's, in the review of the prompts ADR-0334 makes owner-editable. Until that
+> wording lands, the default instruction stands as it is.
 
-**Nothing waits on the words.** On the asserted arm, `RESTATES` from a model and `ADDS`
-both install beside (§3:3), so a narrower assertion is safe under either label. On the
-non-asserted arm, `RESTATES` folds onto a derived member (ADR-0159 §4(a)) and `ADDS`
-installs beside, and neither retires anything. Only a `CONTRADICTS` label on a narrower
-claim does harm, and today's instruction already reserves that label for claims that
-"cannot both be true".
+**Why `ADDS` and not `RESTATES`, though ADR-0159 §1:1's words admit either.** ADR-0159
+§1:1 defines `RESTATES` as "the proposed record says what the named record already says",
+which a narrower claim satisfies read literally. But a `RESTATES` label is what lets a
+non-asserted proposal fold (ADR-0159 §4(a), as ADR-0161 §1 left it). A fold adds the
+proposal's supports to the target as backing its wording as worded (ADR-0328 §11:6), and
+that wording is the broader claim. An `ATTESTED` proposal reporting only that Zeno works
+nights, folded onto a derived "Zeno works nights and lives at 12 Oak Road", would lift the
+whole memory, address included, to "from a source" (ADR-0328 §6) on evidence for half of
+it. A fold is honest only where the proposal says everything the target says. So
+`RESTATES` is read as the same claim, both ways, and a narrower claim is `ADDS`: installed
+beside on every arm, never folded, never retired.
+
+**What this reading changes, and what it does not.** The certain rung is untouched:
+ADR-0121 §1's `agrees` holds only between equal wordings, which make the same claim. A
+broader proposal was `ADDS` already. The reading narrows `RESTATES` by one case, so
+ADR-0159 §4(a) folds on fewer labels and nothing is folded that was not folded before.
+A fourth value would change a `core` enum, the prompt and every policy's reading for a
+case the three values settle once `RESTATES` means what a fold needs it to mean.
+
+**What waits on the words.** On the asserted arm nothing does: `RESTATES` from a model
+and `ADDS` both install beside (§3:3). On the non-asserted arm, today's instruction
+calls a more specific belief `adds` and says nothing of a less specific one, so until the
+owner's wording lands a model may still label a narrower claim `restates` and fold it, as
+it may on `main` now. This decision makes that a mislabel rather than a ruled outcome.
+The owner can close it before any lane runs, with an override in the hub's data
+directory (ADR-0334 §3:3).
 
 ### 9. What it costs
 
@@ -386,7 +407,8 @@ The lane owes:
   field, filled from the writer's own relations.
 - `memory/policy.py`: `_rule_on_assertion` under §3, `_rule_on_a_prior_assertion` under
   §4, and the class docstring's rules 6, 8, 9 and 10.
-- `core/types.py`: §7's field and its description.
+- `core/types.py`: §7's field and its description, and `ConflictRelation`'s docstring for
+  §8's reading of `RESTATES` and `ADDS`.
 - `core/protocols.py`: `MemoryWriter.ingest`'s paragraph on what a `SUPERSEDE` retires,
   and the field's meaning.
 - `testing/writer.py`: the same retirement rule and the same field on the canonical fake.
@@ -404,7 +426,10 @@ The lane owes:
     question; labelled `CONTRADICTS`: `ASK_USER`, with §7's field naming that member and
     no other member of the set;
   - a narrower `ASSERTED` proposal and a broader `DERIVED` member labelled `RESTATES` by
-    the stub: `ACCEPT`, the broader memory current and unchanged;
+    the stub: `ACCEPT`, the broader memory current and unchanged, since §3:3 holds
+    whatever the label;
+  - a narrower `ATTESTED` proposal and a broader `DERIVED` member labelled `ADDS` by the
+    stub: `ACCEPT`, the broader memory's supports and standing unchanged;
   - a `DERIVED` proposal and an `ASSERTED` member labelled `ADDS`: `ACCEPT`; labelled
     `CONTRADICTS`: `ASK_USER`;
   - a proposal carrying a `UserConfirmation`: no reconciler invoked, counted against a
@@ -421,7 +446,7 @@ Superseded in part; every clause the middle column does not name stands:
 | ADR-0038 | §1 and §2, as they reach a conflict no relation labels a contradiction: a user assertion supersedes a derived memory only where the writer labels it `CONTRADICTS`, and false-positive supersession on similarity is no longer the error chosen. §3's ratification of the deferral, as it reaches a conflict set none of whose asserted members is labelled `CONTRADICTS` | §3, §4, §6 |
 | ADR-0050 | §1's retirement set, as it reaches a member the writer holds no `CONTRADICTS` relation for on a crossing carrying none. §2's deferral, as it reaches a conflict set none of whose asserted members is labelled `CONTRADICTS` | §5:1, §3:1 |
 | ADR-0079 | §3's obligation, on a crossing for which the writer holds no `CONTRADICTS` relation: the target alone is retired | §5:1 |
-| ADR-0159 | §2:2's first two conditions; §4:4, as it reaches a conflict set none of whose asserted members is labelled `CONTRADICTS`; §5:2's last sentence | §2:1, §4:1, §5:1 |
+| ADR-0159 | §1:1's `RESTATES` and `ADDS`, as they reach a proposed record stating part of what the named record states: that is `ADDS`, and `RESTATES` is the same claim both ways; §2:2's first two conditions; §4:4, as it reaches a conflict set none of whose asserted members is labelled `CONTRADICTS`; §5:2's last sentence | §8:1–§8:2, §2:1, §4:1, §5:1 |
 | ADR-0171 | §2:3 | §5:1 |
 | ADR-0329 | §13:1, in the addition alone: a `policy_ask` is raised on each stored memory the ingest result names as contradicted | §7:4 |
 
@@ -432,7 +457,7 @@ Read through and not superseded:
 | ADR-0078 §4, §5, §5a, §5b | Nothing: `conflicts` keeps its meaning (§7:3), a confirmed proposal is not labelled (§2:1), and its retirement stands (§5:2) |
 | ADR-0092 §4 | Nothing: it fixes which bands an assertion *may* retire, and §5 changes no member of that class |
 | ADR-0121 §2, ADR-0214 §1 | Nothing: each arm is evaluated first, exactly as it stands (§3:1, §4:1). Their fall-through clauses say what those ADRs change, and the arms they fall to change at their sources |
-| ADR-0159 §1, §3, §4:1, §5:1, §6 | Nothing: the vocabulary, the reconciler's rules and the non-asserted arm are unchanged, and §8 reads §1:1 as written |
+| ADR-0159 §1:2–§1:3, §3, §4:1, §5:1, §6 | Nothing: unlabelled, the content-only rule, the reconciler's rules and the non-asserted arm are unchanged; §4:1 folds on fewer labels because §8 narrows `RESTATES` |
 | ADR-0164 §3 | Nothing: its keys track the invocation condition by reference (§9) |
 | ADR-0328 §11:5–§11:8, §13:4, §16:10 | Nothing: each write a ruling causes is as §11 says; §13:4 keeps the policy reading bands, which every arm here does; a legacy memory still stands at inference |
 | ADR-0329 §12:4, §13:2, §13:3 | Nothing: a retiring operation is ruled on as before, a question still rests on an `against` support, and an `ASK_USER` naming no memory still raises nothing |
@@ -458,8 +483,9 @@ Read through and not superseded:
 - One bounded model request on each asserted ingest the certain rung does not settle, and
   on each non-asserted ingest beside an assertion (§9).
 - The reconciler's `CONTRADICTS` label becomes the one way a write ends a memory or asks
-  the user. Its precision on that label is load-bearing, and the instruction's wording is
-  owed to the owner's prompt review (§8).
+  the user. Its precision on that label is load-bearing.
+- Until the owner's wording for §8 lands, a narrower non-asserted claim a model labels
+  `restates` still folds onto the broader memory, as it can today (§8).
 - Near-duplicates stand side by side. A model-judged restatement of an assertion and a
   narrower claim beside a broader one are both installed beside rather than folded (§3:3).
   Store maintenance (ADR-0329 §2:4) is where they would be tidied.
@@ -497,8 +523,11 @@ constrain designs now, and no clause here leans on either.
   nothing going forward.
 - **Fold a model-labelled `RESTATES` onto its target on the asserted arm.** Rejected
   (§3): the fold would lift the target's standing to "you said it" on a model's judgement.
-- **A fourth relation for a narrower claim.** Rejected (§8): ADR-0159 §1:1 already
-  admits it as `RESTATES`.
+- **A narrower claim as `RESTATES`.** The brief's preference, and what ADR-0159 §1:1's
+  words admit read literally. Rejected (§8): on the non-asserted arm it folds, and the
+  fold lifts the broader memory's standing on evidence for part of it.
+- **A fourth relation for a narrower claim.** Rejected (§8): once `RESTATES` means the
+  same claim both ways, `ADDS` already rules it correctly on every arm.
 - **Narrow `MemoryIngestResult.conflicts` on an `ASK_USER` instead of adding a field.**
   Rejected (§7): `conflicts` bounds what an answer authorises, and giving it two meanings
   would move that bound for the interim remember path.
