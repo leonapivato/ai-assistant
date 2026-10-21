@@ -3057,6 +3057,32 @@ def _present_person_record(value: str) -> str:
     return value
 
 
+def _present_profile_value(value: str) -> str:
+    """Reject a field's value with no UTF-8 encoding, **without changing** it.
+
+    ``set_profile_field`` refuses such a value with a ``ValueError`` before any I/O
+    (``profile_value``), which is not an :class:`AssistantError` and would escape
+    :func:`_about`'s error boundary as a traceback (ADR-0042 §7; adversarial review,
+    round 8). Every other rule on a value is the store's, said as its refusal, so a
+    blank value is not refused here.
+
+    Args:
+        value: The value as the user typed it.
+
+    Returns:
+        The value, byte for byte.
+
+    Raises:
+        BadParameter: If the value has no UTF-8 encoding.
+    """
+    try:
+        encodable_text(value)
+    except ValueError as exc:
+        msg = "must be text with a UTF-8 encoding"
+        raise typer.BadParameter(msg) from exc
+    return value
+
+
 _ABOUT_LIMIT_OPTION = typer.Option(
     25, "--limit", callback=_page_argument, help="How many of each list to show at most."
 )
@@ -3137,7 +3163,9 @@ def about_log(
 @about_app.command("set")
 def about_set(
     field: ProfileField = _ABOUT_FIELD_ARGUMENT,
-    value: str = typer.Argument(..., help="Its new value, as you want it kept."),
+    value: str = typer.Argument(
+        ..., callback=_present_profile_value, help="Its new value, as you want it kept."
+    ),
 ) -> None:
     """Set one of your profile's fields. A time zone is a name such as Europe/Lisbon.
 
