@@ -1511,6 +1511,18 @@ class PhaseWorking:
         self.labels.add(planned.labels)
         self._rounds.append(_Round(planned=planned, planned_from=self.version))
 
+    def overtaken(self) -> frozenset[str]:
+        """The rounds new input overtook before they acted (ADR-0332 §3:7, §3:12-§3:13).
+
+        Each planned from an earlier understanding version than the latest: a join came
+        before it committed, so its message was never written and nothing it asked about
+        was shown, whether its round was set aside or never reached acting. Only a pure
+        read of it can have run.
+        """
+        return frozenset(
+            one.planned.round.id for one in self._rounds if one.planned_from != self.version
+        )
+
     def understood(self, version: int) -> None:
         """Hold the latest recorded understanding version, which planning starts over for.
 
@@ -3001,6 +3013,7 @@ class PhasePath:
             stories=stories,
             approved=approved,
             pending=pending,
+            overtaken=working.overtaken(),
         )
         # The round is recorded inside planning's call, so the recorder reads what it
         # needs of this activation from here (ADR-0321 §4:4: a question cut to fit).
