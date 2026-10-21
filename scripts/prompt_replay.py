@@ -1318,6 +1318,11 @@ def load_follow_up(spec: str | None, declared: Mapping[str, PromptDeclaration]) 
     return FollowUp(candidate=candidate, question=template.render(flags={}, values={}))
 
 
+def cut_follow_up(follow_up: FollowUp, stopped: BaseException) -> dict[str, object]:
+    """A follow-up the run was stopped while awaiting, as its response's result records it."""
+    return {**follow_up.head(), "failure": failure_body(stopped)}
+
+
 async def ask_follow_up(
     follow_up: FollowUp,
     caller: Caller,
@@ -1387,9 +1392,35 @@ async def send_plan(  # noqa: PLR0913 — keyword-only past the plan, caller and
     result for each sample under each entry it replays (ADR-0337 §5:4); nothing is
     continued (§4:10). Where the run names the follow-up, it is asked after each response
     and its answer, or failure, written into that response's result (ADR-0337 §7). A call
-    that fails is recorded as failed (§4:7).
+    that fails is recorded as failed (§4:7). A run stopped while a follow-up is out still
+    writes the response it follows, the follow-up recorded as cut, before it stops.
     """
     sent = Sent()
+
+    def write(
+        planned: Planned,
+        sample: int,
+        outcome: Mapping[str, object],
+        asked: Mapping[str, object] | None,
+    ) -> None:
+        for given in planned.givens:
+            body = {
+                **result_body(given, planned, run, caller.model_name),
+                "sample": sample,
+                "samples": samples,
+                **outcome,
+            }
+            if asked is not None:
+                body["follow_up"] = dict(asked)
+            line = {
+                "activation_id": given.activation_id,
+                "source": REPLAY_SOURCE,
+                "kind": REPLAY_KIND,
+                "recorded_at": now().isoformat(),
+                "body": body,
+            }
+            sent.files.add(append_result(record, given.activation_id, line))
+
     for planned in plan.calls:
         for sample in range(1, samples + 1):
             outcome = await _outcome(planned, caller)
@@ -1399,32 +1430,18 @@ async def send_plan(  # noqa: PLR0913 — keyword-only past the plan, caller and
                 sent.failed[str(failure.get("class"))] += 1
             else:
                 sent.replied += 1
-            asked = (
-                None
-                if follow_up is None
-                else await ask_follow_up(
-                    follow_up, caller, planned.messages, planned.tools, outcome
-                )
-            )
+            asked: dict[str, object] | None = None
+            if follow_up is not None:
+                try:
+                    asked = await ask_follow_up(
+                        follow_up, caller, planned.messages, planned.tools, outcome
+                    )
+                except asyncio.CancelledError as exc:
+                    write(planned, sample, outcome, cut_follow_up(follow_up, exc))
+                    raise
             if asked is not None:
                 sent.follow_up_sent(asked)
-            for given in planned.givens:
-                body = {
-                    **result_body(given, planned, run, caller.model_name),
-                    "sample": sample,
-                    "samples": samples,
-                    **outcome,
-                }
-                if asked is not None:
-                    body["follow_up"] = asked
-                line = {
-                    "activation_id": given.activation_id,
-                    "source": REPLAY_SOURCE,
-                    "kind": REPLAY_KIND,
-                    "recorded_at": now().isoformat(),
-                    "body": body,
-                }
-                sent.files.add(append_result(record, given.activation_id, line))
+            write(planned, sample, outcome, asked)
     return sent
 
 
@@ -2752,7 +2769,14 @@ async def send_suite(  # noqa: PLR0913 — keyword-only past the calls, caller a
             **outcome,
         }
         if follow_up is not None and asks_follow_up(call.case):
-            asked = await ask_follow_up(follow_up, caller, call.messages, call.case.tools, outcome)
+            try:
+                asked = await ask_follow_up(
+                    follow_up, caller, call.messages, call.case.tools, outcome
+                )
+            except asyncio.CancelledError as exc:
+                # The sample's response came back, so it is written before the run stops.
+                _append_line(results, {**line, "follow_up": cut_follow_up(follow_up, exc)})
+                raise
             if asked is not None:
                 line["follow_up"] = asked
         _append_line(results, line)
