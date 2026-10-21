@@ -30,8 +30,9 @@ A reply with prose around its object is read for that object, not refused for th
 the whole reply first, then a fenced block, then the last object standing on its own in
 the text. Each is validated exactly as a bare reply is. An object found in the text is
 taken only where it names a field of the shape, so a stray ``{}`` or an unrelated object
-in the prose is never read as an empty answer; and an object is never looked inside, so a
-nested piece of a malformed answer is never read as the answer.
+in the prose is never read as an empty answer; and no container, an object or an array, is
+ever looked inside, nor a fence opened within one, so a nested piece of a malformed answer
+is never read as the answer.
 """
 
 from __future__ import annotations
@@ -83,7 +84,7 @@ def parsed[T: BaseModel](content: str, shape: type[T]) -> T | None:
     wrote prose around it, the object is looked for in the text: a fenced block, the last
     that validates; else an object standing on its own in the text, the last that
     validates. An object found in the text counts only where it names a field of
-    ``shape``, and a nested object is never a candidate, only one standing at the top.
+    ``shape``, and nothing inside a container, an object or an array, is a candidate.
 
     Args:
         content: The model's reply.
@@ -101,12 +102,8 @@ def parsed[T: BaseModel](content: str, shape: type[T]) -> T | None:
     whole = _validated(body, shape)
     if whole is not None:
         return whole
-    fenced = [
-        match.group(2)
-        for match in _FENCED.finditer(content)
-        if match.group(1).strip() in {"", "json", "JSON"}
-    ]
-    for candidate in (*reversed(fenced), *reversed(_top_level_objects(content))):
+    fenced, objects = _candidates(content)
+    for candidate in (*reversed(fenced), *reversed(objects)):
         if not _names_a_field(candidate, shape):
             continue
         found = _validated(candidate, shape)
@@ -136,58 +133,86 @@ def _names_a_field(text: str, shape: type[BaseModel]) -> bool:
     return not named.isdisjoint(value)
 
 
-def _top_level_objects(text: str) -> list[str]:
-    """The JSON objects standing on their own in ``text``, in order; none nested.
+def _candidates(text: str) -> tuple[list[str], list[str]]:
+    """The fenced blocks' bodies and the top-level JSON objects in ``text``, each in order.
 
-    Each ``{`` outside an object found so far starts a candidate. One that decodes is
-    taken whole and the scan resumes after it; one that does not is skipped as far as its
-    braces balance, so nothing inside a malformed object is ever a candidate. A ``{``
-    whose braces never balance ends the scan, since what follows may be inside it.
+    One walk finds both, so they share one rule: nothing inside a container, an object or
+    an array, is a candidate, and neither is a fence opened inside one. Each ``{`` or
+    ``[`` the walk meets starts a container. One that decodes is passed whole, an object
+    kept as a candidate and an array's members never; one that does not decode is skipped
+    as far as its brackets balance. A container whose brackets never balance ends the
+    walk, since everything after it may be inside it. A fenced block met outside any
+    container yields its body, untagged or tagged ``json``, and the walk goes on through
+    that body, so an object in it is met as any other.
     """
+    fences = {match.start(): match for match in _FENCED.finditer(text)}
     decoder = json.JSONDecoder()
-    found: list[str] = []
-    start = text.find("{")
-    while start != -1:
+    fenced: list[str] = []
+    objects: list[str] = []
+    index = 0
+    while index < len(text):
+        fence = fences.get(index)
+        if fence is not None:
+            if fence.group(1).strip() in {"", "json", "JSON"}:
+                fenced.append(fence.group(2))
+            index = fence.start(2)
+            continue
+        if text[index] not in "{[":
+            index += 1
+            continue
         try:
-            value, end = decoder.raw_decode(text, start)
+            value, end = decoder.raw_decode(text, index)
         except ValueError, RecursionError:
-            balanced = _balanced_end(text, start)
+            balanced = _balanced_end(text, index)
             if balanced is None:
                 break
             end = balanced
         else:
             if isinstance(value, dict):
-                found.append(text[start:end])
-        start = text.find("{", end)
-    return found
+                objects.append(text[index:end])
+        index = end
+    return fenced, objects
+
+
+#: Each closing bracket, and the opening one it closes.
+_OPENS: Final = {"}": "{", "]": "["}
 
 
 def _balanced_end(text: str, start: int) -> int | None:
-    """The index just past the ``}`` closing the ``{`` at ``start``, or ``None``.
+    """The index just past the bracket closing the one at ``start``, or ``None``.
 
-    Braces inside a JSON string, with its backslash escapes, are not counted.
+    Brackets inside a JSON string, with its backslash escapes, are not counted. A closing
+    bracket of the wrong kind is no balance: ``None``, as for one never closed.
     """
-    depth = 0
-    in_string = False
-    escaped = False
-    for index in range(start, len(text)):
+    stack: list[str] = []
+    index = start
+    while index < len(text):
         char = text[index]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-        elif char == '"':
-            in_string = True
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
+        if char == '"':
+            index = _past_string(text, index)
+            continue
+        if char in "{[":
+            stack.append(char)
+        elif char in _OPENS:
+            if not stack or stack.pop() != _OPENS[char]:
+                return None
+            if not stack:
                 return index + 1
+        index += 1
     return None
+
+
+def _past_string(text: str, start: int) -> int:
+    """The index just past the JSON string opening at ``start``; the end where none closes."""
+    index = start + 1
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+        elif text[index] == '"':
+            return index + 1
+        else:
+            index += 1
+    return len(text)
 
 
 def scout_messages(reading: Reading, instruction: RenderedPrompt) -> list[Message]:
