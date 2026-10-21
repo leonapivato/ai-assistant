@@ -290,8 +290,14 @@ sequenceDiagram
   (rules read decisions, not history), and it already holds for the other rules. The loop
   guard (ADR-0280 §4:6) lets understanding run once per joined input. Recall's
   at-most-twice (ADR-0308 §2:10) becomes once per understanding version, plus the first
-  run. Both are bounded by a join limit, a number #2589 sets, after which further input
-  waits.
+  run.
+  - Recall's digest follows the same scope. Its decision (ADR-0308 §4:5) and its
+    once-per-pass guard (ADR-0309 §3:5) become once per understanding version, so a
+    joined input's new recall finds are digested against the new meaning.
+  - Earlier digests stay on the episode as evidence already recorded, and planning sees
+    them beside the new one.
+  - All of these are bounded by a join limit, a number #2589 sets, after which further
+    input waits.
 - **Stores.** The open episode (ADR-0286) gains each joined input as an append. The
   readers' bookkeeping marks a joined message as taken in by the running activation's id,
   as at admission (ADR-0293 §6:8, ADR-0323 §5:8).
@@ -317,7 +323,8 @@ sequenceDiagram
   arriving over time);
 - ADR-0293 §6:2–§6:3 and ADR-0323 §5:5 and §5:7 (when input is taken in);
 - ADR-0280 §4:6 for understanding;
-- ADR-0308 §2:10 (how often recall runs);
+- ADR-0308 §2:10 (how often recall runs), and ADR-0308 §4:5 with ADR-0309 §3:5 (recall's
+  digest, per understanding version);
 - ADR-0280 §7:1's record, for the joined inputs.
 
 ## 3. The short wait, and typing
@@ -549,8 +556,14 @@ capability is added.
   - The task is the place on its internal channel, so pick 1's one-at-a-time-per-place
     gives one slice at a time per task for free.
 - **It authorizes nothing new.** A slice's input is the hub's own push, which informs and
-  never authorizes (ADR-0292 §5). A slice may do what the starting request was approved
-  for. Anything else becomes a question to the person, and asking first is speaking first.
+  never authorizes (ADR-0292 §5). An approval is used only by the activation the yes was
+  given in (ADR-0321 §4:1), so a slice cannot inherit the starting request's approval.
+  - A slice makes only the calls that policy allows without a per-call yes, such as
+    searches and reads.
+  - Anything that would need a yes becomes a question to the person, and asking first is
+    speaking first (the seam below).
+  - A task-scoped delegation, where the starting yes covers a stated set of later calls,
+    would amend ADR-0321. It is left open (question 10).
 - **The seam.** A slice never writes into a person's place.
   - It ends by writing to its story and setting the task's mark: *has something to say*,
     with how urgent it is and whether it is a question.
@@ -583,8 +596,8 @@ capability is added.
   It lost because research needs planning, acting and digesting, which run only inside an
   activation. Outside one, it would need a second pipeline.
 
-**Amends:** nothing ratified directly. It builds on ADR-0292 §5 and §7 and ADR-0306, and
-its sensor is the timers milestone's. That milestone's ADR, and proactivity's, carry the
+**Amends:** nothing ratified directly, as picked. It builds on ADR-0292 §5 and §7, ADR-0306
+and ADR-0321 §4:1, and its sensor is the timers milestone's. That milestone's ADR, and proactivity's, carry the
 rest.
 
 ## 6. What it costs
@@ -649,3 +662,6 @@ Each is a lane or several. (a) and (b) are independent.
 9. **Across people:** with a household hub, is a shared place (one conversation with two
    members) one-at-a-time across both authors, as the pick has it, with joining only for
    the same author?
+10. **Background authority:** may a background task carry a task-scoped delegation (the
+    starting yes covering a stated set of later calls, amending ADR-0321 §4:1), or do
+    slices ask for every call that needs a yes?
