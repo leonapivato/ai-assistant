@@ -28,7 +28,11 @@ from test_engine import (
     _grant_operations,
 )
 
-from ai_assistant.core.errors import ConfigurationError, PersonModelStoreError
+from ai_assistant.core.errors import (
+    ConfigurationError,
+    NotificationStoreError,
+    PersonModelStoreError,
+)
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ClassReach,
@@ -197,7 +201,7 @@ async def test_a_changed_zone_governs_the_next_pick() -> None:
 
 
 async def test_a_store_fault_picks_no_policy() -> None:
-    """The fault reaches the caller, which then rules nothing."""
+    """The fault reaches the caller as the ruling paths' declared store fault, chained."""
     factory = _Factory()
     people = await _people(_TOKYO)
     pick = RulingPolicy(
@@ -205,8 +209,9 @@ async def test_a_store_fault_picks_no_policy() -> None:
     )
     people.fail_next()
 
-    with pytest.raises(PersonModelStoreError):
+    with pytest.raises(NotificationStoreError, match="person-model store") as raised:
         await pick.pick()
+    assert isinstance(raised.value.__cause__, PersonModelStoreError)
     assert factory.zones == []
 
 
@@ -276,8 +281,9 @@ async def test_a_store_fault_on_the_live_path_rules_and_writes_nothing() -> None
     )
     people.fail_next()
 
-    with pytest.raises(PersonModelStoreError):
+    with pytest.raises(NotificationStoreError, match="person-model store") as raised:
         await stage.offer(_candidate())
+    assert isinstance(raised.value.__cause__, PersonModelStoreError)
 
     assert await store.export() == []
     assert await outbox.claim() is None
@@ -382,8 +388,9 @@ async def test_a_store_fault_on_reconsideration_leaves_the_record_due_and_unrule
     before = await store.get(record)
     people.fail_next()
 
-    with pytest.raises(PersonModelStoreError):
+    with pytest.raises(NotificationStoreError, match="person-model store") as raised:
         await engine.reconsider_notifications()
+    assert isinstance(raised.value.__cause__, PersonModelStoreError)
 
     assert await store.get(record) == before, "nothing was ruled, and no unit spent"
     assert [due.id for due in await store.due()] == [record]

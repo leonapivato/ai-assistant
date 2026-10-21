@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from ai_assistant.core.errors import PersonModelStoreError
+from ai_assistant.core.errors import NotificationStoreError, PersonModelStoreError
 from ai_assistant.core.types import OWNER_PERSON_ID, NotificationDispositionKind
 from ai_assistant.orchestration.person_block import person_zone
 
@@ -80,7 +80,10 @@ class RulingPolicy:
 
     **A store fault rules nothing.** Where the person-model store cannot be read,
     :meth:`pick` raises and the caller hands no policy to the notification store, so no
-    record is written or changed and no unit of budget is spent. That is the one reading
+    record is written or changed and no unit of budget is spent. It raises the
+    ``NotificationStoreError`` every ruling path already declares, chained to the
+    person-model store's fault, so ``NotificationWriter``'s failure surface is unchanged:
+    the ruling's standing state could not be read, and nothing was ruled. That is the one reading
     that cannot move the person's night: the hub's zone would put their quiet window at
     the wrong hours wherever the two differ, and a guess at their zone is no better. The
     held record stays due and the next reconsideration run tries it again, which ADR-0130
@@ -125,16 +128,21 @@ class RulingPolicy:
             resolves, and the hub's policy otherwise, or where nothing is wired.
 
         Raises:
-            PersonModelStoreError: If the person-model store cannot be read. Nothing has
-                been ruled, and the caller rules nothing.
+            NotificationStoreError: If the person-model store cannot be read, chained to
+                its ``PersonModelStoreError``. Nothing has been ruled, and the caller
+                rules nothing.
         """
         if self._people is None or self._policy_for is None:
             return self._default
         try:
             model = await self._people.read(OWNER_PERSON_ID)
-        except PersonModelStoreError:
+        except PersonModelStoreError as exc:
             _log.warning("notification_zone_unread", stage="notifications", reason="store_fault")
-            raise
+            msg = (
+                "the zone the quiet windows are read in could not be read from the "
+                "person-model store, so nothing was ruled (ADR-0338 §3:6)"
+            )
+            raise NotificationStoreError(msg) from exc
         zone = person_zone(None if model is None else model.profile, stage="notifications")
         return self._default if zone is None else self._policy_for(zone)
 
@@ -250,15 +258,14 @@ class NotificationWriteStage:
             produced where ADR-0130 §8 required one.
 
         Raises:
-            NotificationStoreError: If the store cannot be read or written.
-                Nothing was ruled and nothing was handed off.
+            NotificationStoreError: If the store cannot be read or written, or the
+                owner's zone could not be read from the person-model store
+                (:class:`RulingPolicy`). Nothing was ruled and nothing was handed
+                off, so the person's night is never read in a zone that is not
+                theirs, and the producer's next pass offers the candidate again.
             NotificationOutboxError: If the ruling was ``INTERRUPT`` and the
                 enqueue could not commit. The record stays actionable and the next
                 reconciliation offers it (ADR-0131 §3b).
-            PersonModelStoreError: If the owner's zone could not be read. Nothing
-                was ruled, so the person's night is not read in a zone that is not
-                theirs, and the producer's next pass offers the candidate again
-                (:class:`RulingPolicy`).
         """
         policy = await self._policies.pick()
         ruling = await self._store.admit(candidate, policy=policy)
