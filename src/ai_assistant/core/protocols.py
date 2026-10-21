@@ -3282,8 +3282,9 @@ class PlanStore(Protocol):
         Raises:
             PlanningError: If the store holds no record under ``effect_id``, the
                 record is already finished, the reason is blank or has no UTF-8
-                encoding, a reason rides on an outcome other than ``FAILED``, or a
-                position on anything but a message done. Nothing is written.
+                encoding, a reason rides on an outcome other than ``FAILED``, a
+                position on anything but a message done, or the backend fails.
+                Nothing is written.
         """
         ...
 
