@@ -612,6 +612,41 @@ def _named_day(element: object) -> tuple[int, int, int] | None:
     return _declared_day(element) if isinstance(element, str) else None
 
 
+def _transcription(date: str, tokens: Sequence[str], units: Mapping[str, str]) -> str:
+    """One day's content, in the form §5:5 fixes and this adapter pins.
+
+    The ``time`` value, then each requested variable in the ``daily`` order with the
+    provider's field name, its token as the response spelled it and its unit as
+    ``daily_units`` spells it, one per line.
+
+    Args:
+        date: The ``time`` element, as the response spelled it.
+        tokens: Each requested variable's token text, in ``_DAILY_VARIABLES``' order.
+        units: Each requested variable's unit.
+
+    Returns:
+        The transcription.
+    """
+    lines = [f"{_TIME_KEY}{_NAME_SEPARATOR}{date}"]
+    lines.extend(
+        f"{variable}{_NAME_SEPARATOR}{token}{_UNIT_SEPARATOR}{units[variable]}"
+        for variable, token in zip(_DAILY_VARIABLES, tokens, strict=True)
+    )
+    return _LINE_SEPARATOR.join(lines)
+
+
+def _rendered_length(span: str) -> int:
+    """How many characters ``span`` takes inside a ``json.dumps`` string rendering.
+
+    Args:
+        span: Text that will sit inside the transcription.
+
+    Returns:
+        Its rendered length, without the rendering's two delimiters.
+    """
+    return len(json.dumps(span)) - 2
+
+
 def _extent_of(day: tuple[int, int, int], offset: timedelta) -> ReportedExtent | None:
     """The half-open bounds of ``day`` in the zone ``offset`` names (ADR-0260 §5).
 
@@ -1222,23 +1257,35 @@ class ForecastEgress:
         units = _declared_units(decoded)
         columns = [daily.get(variable) for variable in _DAILY_VARIABLES]
         kept: list[_Day] = []
-        if offset is not None and units is not None:
-            present = [column for column in columns if isinstance(column, list)]
-            if len(present) == len(_DAILY_VARIABLES):
-                for position, (element, day) in enumerate(zip(times, named, strict=True)):
-                    if day is None or seen[day] != 1 or not isinstance(element, str):
-                        continue
-                    read = self._day_at(
-                        position, element, day, columns=present, units=units, offset=offset
-                    )
-                    if read is not None:
-                        kept.append(read)
-        minted = tuple(self._record(day, reported_at) for day in kept[: self._max_days])
+        present = [column for column in columns if isinstance(column, list)]
+        if offset is not None and units is not None and len(present) == len(_DAILY_VARIABLES):
+            # **The units are measured once, not once per day.** They are the same in
+            # every day's transcription, and a response inside its byte bound can carry
+            # a unit of a hundred thousand characters beside thousands of days: building
+            # and encoding each day's transcription before measuring it would copy that
+            # unit once per day — quadratic work on the event loop's own thread, where
+            # the deadline cannot be delivered (adversarial review, round 1). So row 13
+            # is first decided on the transcription's measure, and only a day that fits
+            # is ever built.
+            fixed = len(json.dumps(_transcription("", ("",) * len(_DAILY_VARIABLES), units)))
+            for position, (element, day) in enumerate(zip(times, named, strict=True)):
+                if len(kept) == self._max_days:
+                    # Row 14 takes the first survivors; row 11 was counted over the whole
+                    # response above, so nothing past here can change which they are.
+                    break
+                if day is None or seen[day] != 1 or not isinstance(element, str):
+                    continue
+                read = self._day_at(
+                    position, element, day, columns=present, units=units, offset=offset, fixed=fixed
+                )
+                if read is not None:
+                    kept.append(read)
+        minted = tuple(self._record(day, reported_at) for day in kept)
         if not minted:
             return _refused(ForecastRefusal.NO_RESULT)
         return ForecastOutcome(reported_at=reported_at, records=minted)
 
-    def _day_at(  # noqa: PLR0913 — the position, its date as spelled and as read, and the three response-wide facts §5's rows 7 and 8 already judged
+    def _day_at(  # noqa: PLR0913 — the position, its date as spelled and as read, the three response-wide facts §5's rows 7 and 8 already judged, and their measure
         self,
         position: int,
         date: str,
@@ -1247,6 +1294,7 @@ class ForecastEgress:
         columns: Sequence[Sequence[object]],
         units: Mapping[str, str],
         offset: timedelta,
+        fixed: int,
     ) -> _Day | None:
         """One position read into a day, or ``None`` where §5's rows 10, 12 or 13 drop it.
 
@@ -1261,6 +1309,9 @@ class ForecastEgress:
             columns: Each requested variable's column, in ``_DAILY_VARIABLES``' order.
             units: Each requested variable's unit.
             offset: The one offset the response declared.
+            fixed: The rendering's length for this response's transcription with the
+                date and every token empty — the field names, the separators, the units
+                and the two delimiters, measured once by :meth:`_minted`.
 
         Returns:
             The day, or ``None``.
@@ -1268,23 +1319,26 @@ class ForecastEgress:
         extent = _extent_of(day, offset)
         if extent is None:
             return None
-        lines = [f"{_TIME_KEY}{_NAME_SEPARATOR}{date}"]
-        for variable, column in zip(_DAILY_VARIABLES, columns, strict=True):
+        tokens: list[str] = []
+        for column in columns:
             token = column[position]
             if not isinstance(token, _Token):
                 # Row 12: `null`, a boolean, a string, an array or an object, each of
                 # which the format does not admit as a daily value.
                 return None
-            lines.append(
-                f"{variable}{_NAME_SEPARATOR}{token.text}{_UNIT_SEPARATOR}{units[variable]}"
-            )
-        content = _LINE_SEPARATOR.join(lines)
-        if len(json.dumps(content)) > self._max_day_chars:
-            # Row 13, measured as ADR-0230 §6 measures a fetched document — on the
-            # `json.dumps` rendering at its default `ensure_ascii=True`, its two
-            # delimiters included, which is the rendering the prompt will carry. A
-            # ceiling on source characters would admit a day six or twelve times this
-            # long while claiming to admit this much (ADR-0222 §4).
+            tokens.append(token.text)
+        # Row 13, measured as ADR-0230 §6 measures a fetched document — on the
+        # `json.dumps` rendering at its default `ensure_ascii=True`, its two delimiters
+        # included, which is the rendering the prompt will carry. A ceiling on source
+        # characters would admit a day six or twelve times this long while claiming to
+        # admit this much (ADR-0222 §4). **That rendering escapes character by
+        # character**, so its length is the skeleton's plus each inserted span's own;
+        # the day is built only once that sum fits, and the built transcription is then
+        # measured itself, so the rule stands on the rendering and not on the sum.
+        if fixed + sum(map(_rendered_length, (date, *tokens))) > self._max_day_chars:
+            return None
+        content = _transcription(date, tokens, units)
+        if len(json.dumps(content)) > self._max_day_chars:  # pragma: no cover — the sum is exact
             return None
         return _Day(extent=extent, content=content)
 
