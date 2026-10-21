@@ -429,6 +429,64 @@ async def test_a_corrupt_row_is_the_seams_error(tmp_path: Path, statement: str) 
         store.close()
 
 
+@pytest.mark.parametrize("zone", ["é" * 200, "a" * 200], ids=["non-ascii", "ascii"])
+async def test_a_zone_name_the_file_system_refuses_is_an_invalid_value(
+    tmp_path: Path, zone: str
+) -> None:
+    """§3:2: a name too long for a path is refused as a value, never raised as OSError."""
+    store = _open(tmp_path / "person_model.db")
+    try:
+        before = await store.export()
+
+        written = await store.set_field(OWNER_PERSON_ID, ProfileField.TIME_ZONE, zone, act=PANEL)
+        suggested = await store.record_suggestion(
+            OWNER_PERSON_ID, field_suggestion(ProfileField.TIME_ZONE, zone)
+        )
+
+        assert written.refusal is PersonModelRefusal.INVALID_VALUE
+        assert suggested.refusal is PersonModelRefusal.INVALID_VALUE
+        assert await store.export() == before
+    finally:
+        store.close()
+    with pytest.raises(ValueError, match="seed"):
+        _open(tmp_path / "seeded.db", seed_time_zone=zone)
+
+
+async def test_a_write_that_fails_after_its_first_statements_leaves_nothing(
+    tmp_path: Path,
+) -> None:
+    """§10:2's one step: the acceptance and the change-log entry roll back with the field."""
+    path = tmp_path / "person_model.db"
+    store = _open(path)
+    try:
+        await store.record_suggestion(
+            OWNER_PERSON_ID, field_suggestion(ProfileField.ADDRESS, "Robin")
+        )
+        before = await store.export()
+        with contextlib.closing(sqlite3.connect(path)) as conn:
+            conn.execute(
+                "CREATE TRIGGER refuse_fields BEFORE INSERT ON fields "
+                "BEGIN SELECT RAISE(ABORT, 'the disk refused the field'); END"
+            )
+            conn.commit()
+
+        with pytest.raises(PersonModelStoreError, match="refused the field"):
+            await store.set_field(OWNER_PERSON_ID, ProfileField.ADDRESS, "Robin", act=PANEL)
+
+        assert await store.export() == before
+        with contextlib.closing(sqlite3.connect(path)) as conn:
+            conn.execute("DROP TRIGGER refuse_fields")
+            conn.commit()
+        retried = await store.set_field(OWNER_PERSON_ID, ProfileField.ADDRESS, "Robin", act=PANEL)
+        assert retried.kind is PersonModelWriteKind.WRITTEN
+        model = await _owner(store)
+        assert model.profile.address == "Robin"
+        assert len(model.changes) == 1
+        assert model.suggestions == ()
+    finally:
+        store.close()
+
+
 async def test_the_change_log_is_append_only_on_disk(tmp_path: Path) -> None:
     """§3:5: an entry is neither rewritten nor removed while its person is held."""
     path = tmp_path / "person_model.db"

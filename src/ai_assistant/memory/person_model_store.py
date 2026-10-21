@@ -235,7 +235,9 @@ def _value_fault(field: ProfileField, value: str | None, *, chars: int) -> str |
     if field is ProfileField.TIME_ZONE:
         try:
             ZoneInfo(value)
-        except ZoneInfoNotFoundError, ValueError:
+        except ZoneInfoNotFoundError, ValueError, OSError:
+            # `OSError` too: a long name reaches the file system as a path, and a name
+            # it refuses there (ENAMETOOLONG) is no zone either.
             return "a time zone is a name zoneinfo resolves"
     return None
 
