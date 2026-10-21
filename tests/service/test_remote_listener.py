@@ -22,6 +22,7 @@ from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import DeviceRole
 from ai_assistant.service.enrolment import ENROLMENTS_FILENAME, DeviceRegistry, EnrolmentStore
+from ai_assistant.service.exits import ClearableRefusalError
 from ai_assistant.service.overlay import HubOverlayIdentity, OverlayIdentityUnavailableError
 from ai_assistant.service.remote import RemoteListener
 from ai_assistant.service.roster import HubRoster
@@ -309,7 +310,32 @@ async def test_the_hub_refuses_to_bind_an_address_the_agent_does_not_report(
             budget=ConnectionBudget(max_connections=8, max_pending_handshakes=4),
             delivery=DeliverySlots(max_delivery_connections=4),
         )
-        with pytest.raises(ConfigurationError, match="does not report"):
+        with pytest.raises(ConfigurationError, match="does not report") as refused:
+            await listener.start(build="test")
+        # A wrong setting stays down (ADR-0083 §5): not the mark that makes it a ``1``.
+        assert not isinstance(refused.value, ClearableRefusalError)
+    finally:
+        store.close()
+
+
+async def test_the_hub_refuses_to_bind_before_the_agent_holds_any_address(
+    tmp_path: Path,
+) -> None:
+    """An agent that answers but reports no overlay address for this machine is one
+    still coming up — not logged in, or waiting for its network map — so the bind is
+    refused as a fault that clears (#3171), not as a wrong setting."""
+    store = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
+    try:
+        listener = RemoteListener(
+            FakeAssistantEngine(),
+            _settings(tmp_path),
+            registry=(registry := DeviceRegistry(store, hub_identity=_HUB_ID)),
+            roster=HubRoster(registry),
+            agent=_FakeAgent(addresses=frozenset()),
+            budget=ConnectionBudget(max_connections=8, max_pending_handshakes=4),
+            delivery=DeliverySlots(max_delivery_connections=4),
+        )
+        with pytest.raises(ClearableRefusalError, match="no overlay address"):
             await listener.start(build="test")
     finally:
         store.close()
@@ -332,7 +358,9 @@ async def test_the_hub_refuses_to_bind_when_the_agent_cannot_be_asked(tmp_path: 
             budget=ConnectionBudget(max_connections=8, max_pending_handshakes=4),
             delivery=DeliverySlots(max_delivery_connections=4),
         )
-        with pytest.raises(ConfigurationError, match="could not be asked"):
+        # A ``1``, not a ``78`` (#3171): an agent that timed out or has not started
+        # yet at boot clears without anyone acting.
+        with pytest.raises(ClearableRefusalError, match="could not be asked"):
             await listener.start(build="test")
     finally:
         store.close()

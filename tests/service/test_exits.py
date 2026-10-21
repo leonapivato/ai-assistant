@@ -9,6 +9,7 @@ is why the default is tested as deliberately as the special cases.
 from __future__ import annotations
 
 import errno
+import ssl
 
 import pytest
 
@@ -18,7 +19,13 @@ from ai_assistant.core.errors import (
     MemoryStoreError,
     ModelError,
 )
-from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART, classify
+from ai_assistant.service.exits import (
+    EXIT_DEPLOYMENT,
+    EXIT_OK,
+    EXIT_RESTART,
+    ClearableRefusalError,
+    classify,
+)
 
 
 def _state_fault() -> IncompatibleStateError:
@@ -186,3 +193,106 @@ def test_a_state_fault_beneath_a_store_fault_is_still_found() -> None:
 
     assert code == EXIT_DEPLOYMENT
     assert "re-embed" in action
+
+
+# --- #3171: a refusal that clears, and a refusal that retypes one ------------------
+
+
+def _retyping(cause: OSError) -> ConfigurationError:
+    """A refusal raised ``from`` an operating-system fault, as a custody check does."""
+    try:
+        try:
+            raise cause
+        except OSError as exc:
+            msg = "the overlay agent socket cannot be read"
+            raise ConfigurationError(msg) from exc
+    except ConfigurationError as refusal:
+        return refusal
+
+
+def test_a_refusal_marked_clearable_comes_back() -> None:
+    """An overlay agent that would not answer at start is a ``1`` (#3171).
+
+    The one error carries an agent that is not running *and* one that timed out or
+    has not come up yet at boot, and the second clears without anyone acting:
+    ADR-0083 §5, "if yes — even eventually — it is ``1``". It is still a
+    ``ConfigurationError``, so every caller catching that family is unchanged.
+    """
+    refusal = ClearableRefusalError("the overlay agent on this machine did not answer")
+
+    assert isinstance(refusal, ConfigurationError)
+    assert classify(refusal) == (EXIT_RESTART, "")
+
+
+def test_a_clearable_refusal_beneath_a_store_fault_still_comes_back() -> None:
+    """The chain walk reaches the mark, as it reaches every other refusal."""
+    wrapped = MemoryStoreError("failed to open memory store")
+    wrapped.__cause__ = ClearableRefusalError("the overlay agent did not answer")
+
+    assert classify(wrapped) == (EXIT_RESTART, "")
+
+
+@pytest.mark.parametrize("code", [errno.ENFILE, errno.EMFILE, errno.EIO, errno.ENOSPC, None])
+def test_a_refusal_retyping_a_fault_that_clears_comes_back(code: int | None) -> None:
+    """A ``ConfigurationError`` raised from ``ENFILE`` takes the errno's verdict (#3171).
+
+    Without this, a custody check that met descriptor exhaustion would leave a
+    correctly configured hub down for good, while the same errno raw is a ``1``.
+    Whether the fault clears is the errno's to say, not the wrapper's.
+    """
+    cause = OSError("no errno at all") if code is None else OSError(code, "transient")
+
+    assert classify(_retyping(cause)) == (EXIT_RESTART, "")
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        errno.EACCES,
+        errno.EPERM,
+        errno.EROFS,
+        errno.ENOTDIR,
+        errno.EISDIR,
+        errno.ENOENT,
+        errno.ELOOP,
+        errno.ENAMETOOLONG,
+        errno.EADDRNOTAVAIL,
+    ],
+)
+def test_a_refusal_retyping_a_configured_fault_stays_down(code: int) -> None:
+    """The other half: a permission, or a configured path or address that names
+    nothing, is what the configuration got wrong, so the refusal's ``78`` stands.
+    """
+    verdict, action = classify(_retyping(OSError(code, "refused", "/run/qa/tailscaled.sock")))
+
+    assert verdict == EXIT_DEPLOYMENT
+    assert action
+
+
+def test_a_refusal_retyping_a_tls_fault_stays_down() -> None:
+    """``ssl.SSLError``'s errno is the TLS library's code, not the kernel's, so the
+    refusal's own verdict stands — as the gateway reads it (#3167).
+    """
+    verdict, _action = classify(_retyping(ssl.SSLError(errno.EIO, "key values mismatch")))
+
+    assert verdict == EXIT_DEPLOYMENT
+
+
+def test_a_refusal_with_only_a_context_still_stays_down() -> None:
+    """Only ``__cause__`` is read: an ``ENFILE`` merely in flight is not the refusal's."""
+    refusal = ConfigurationError("timezone 'Mars/Olympus' is unknown")
+    refusal.__context__ = OSError(errno.ENFILE, "too many open files in system")
+
+    assert classify(refusal)[0] == EXIT_DEPLOYMENT
+
+
+def test_a_raw_missing_path_still_comes_back() -> None:
+    """``ENOENT`` is a ``78`` only beneath a refusal about something configured.
+
+    Raw, it is a ``1``, because startup creates what is missing — the unchanged
+    half of the rule the configured set is read under.
+    """
+    assert classify(FileNotFoundError(errno.ENOENT, "missing", "/data/x.db")) == (
+        EXIT_RESTART,
+        "",
+    )

@@ -74,7 +74,13 @@ from ai_assistant.service import datadir
 from ai_assistant.service.admin import AdminListener
 from ai_assistant.service.configuration import ConfigurationStamp
 from ai_assistant.service.enrolment import ENROLMENTS_FILENAME, DeviceRegistry, EnrolmentStore
-from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART, classify
+from ai_assistant.service.exits import (
+    EXIT_DEPLOYMENT,
+    EXIT_OK,
+    EXIT_RESTART,
+    ClearableRefusalError,
+    classify,
+)
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.service.overlay import OverlayIdentityUnavailableError, local_agent
 from ai_assistant.service.remote import RemoteListener
@@ -775,13 +781,20 @@ async def _build_devices(
         The apparatus, with a remote listener only where one is configured.
 
     Raises:
-        ConfigurationError: If a remote listener is configured and the overlay agent
-            cannot say what this machine is, or if ``hub_overlay_agent_socket`` names
-            a path that fails the custody conditions ``local_agent`` holds a
-            configured socket to. Both are stay-down deployment faults: an operator
-            who configured a remote listener and has no agent running has a
-            deployment to fix, and a hub that came up serving loopback alone would be
-            silently ignoring the configuration they set (ADR-0083 §5, ruling 4).
+        ClearableRefusalError: If a remote listener is configured and the overlay
+            agent cannot say what this machine is. The hub refuses rather than come
+            up serving loopback alone, which would be silently ignoring the
+            configuration the operator set — but it is a ``1``, not a ``78``
+            (#3171): the one error carries an agent that is not running *and* one
+            that timed out or has not started yet at boot, the second clears
+            without anyone acting, and nothing here can tell the two apart (a
+            missing socket is what both look like at boot). ADR-0083 §5: "where a
+            new fault does not obviously answer the question, the answer is ``1``".
+        ConfigurationError: If ``hub_overlay_agent_socket`` names a path that fails
+            the custody conditions ``local_agent`` holds a configured socket to. A
+            stay-down deployment fault (ADR-0083 §5), unless the custody check met
+            an operating-system fault that clears, which
+            :func:`~ai_assistant.service.exits.classify` reads off the errno.
     """
     if settings.hub_remote_address is None:
         store = EnrolmentStore(data_dir / ENROLMENTS_FILENAME)
@@ -804,7 +817,7 @@ async def _build_devices(
             f"reads a device's, so neither can happen without it; start the overlay agent, "
             f"or unset ASSISTANT_HUB_REMOTE_ADDRESS to serve the loopback socket alone"
         )
-        raise ConfigurationError(msg) from exc
+        raise ClearableRefusalError(msg) from exc
     store = EnrolmentStore(data_dir / ENROLMENTS_FILENAME)
     registry = DeviceRegistry(store, hub_identity=identity)
     roster = HubRoster(registry)

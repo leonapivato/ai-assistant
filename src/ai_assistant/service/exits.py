@@ -5,11 +5,27 @@ process that never explains itself, and a fatal refusal a supervisor keeps
 restarting is a crash loop wearing a diagnosis.** So the codes separate "come
 back" from "stay down", and this module is the one place a failure is turned into
 one of them.
+
+**Two things decide what a** ``ConfigurationError`` **earns, and both are a test
+rather than a list of refusals** (#3171, the hub's half of what #3167 settled for
+the gateway in ``ai_assistant.interfaces.gateway.exits``):
+
+1. **What the refusal is.** A ``ConfigurationError`` is a ``78``. A refusal whose
+   author knows a restart can get past it is raised as :class:`ClearableRefusalError`
+   — a ``ConfigurationError`` still, so every caller catching the family is
+   unchanged — and is a ``1``: an overlay agent that would not answer at start, which
+   is also an agent that timed out or has not come up yet at boot.
+2. **What it retypes.** A ``ConfigurationError`` raised *from* an ``OSError`` says
+   "the operating system refused while this was being read", and whether that clears
+   is the errno's to say, not the refusal's. A path that names nothing, a
+   permission, an address this machine does not hold: ``78``. Descriptors
+   exhausted, an I/O error, anything else: ``1``.
 """
 
 from __future__ import annotations
 
 import errno
+import ssl
 from typing import Final
 
 from ai_assistant.core.errors import ConfigurationError, IncompatibleStateError
@@ -66,9 +82,57 @@ _STAY_DOWN_ERRNOS: Final = frozenset(
     }
 )
 
+#: The ``errno`` values that, under a refusal about something **configured**, mean
+#: the configuration is what is wrong: :data:`_STAY_DOWN_ERRNOS`, and a configured
+#: path that names nothing (``ENOENT``, ``ELOOP``, ``ENAMETOOLONG``) or a configured
+#: address no interface here holds (``EADDRNOTAVAIL``). A file that appears later is
+#: one a person or their tooling put there, which is the human act §5's ``78`` waits
+#: for. The gateway's set, for the gateway's reason (#3167), so the two read one
+#: refusal the same way.
+#:
+#: Read **only** for a ``ConfigurationError`` whose direct cause is the ``OSError``.
+#: A raw ``ENOENT`` stays a ``1``, because startup creates what is missing; what
+#: makes it a ``78`` here is that something configured named it.
+_CONFIGURED_ERRNOS: Final = _STAY_DOWN_ERRNOS | frozenset(
+    {errno.ENOENT, errno.ELOOP, errno.ENAMETOOLONG, errno.EADDRNOTAVAIL}
+)
+
 #: How far the cause chain is walked before giving up. A guard against a cycle a
 #: hand-built ``__cause__`` could create, not a limit anyone should reach.
 _MAX_CAUSE_DEPTH: Final = 32
+
+
+class ClearableRefusalError(ConfigurationError):
+    """A refusal to start that restarting, unchanged, may get past: exit ``1``.
+
+    Still a :class:`~ai_assistant.core.errors.ConfigurationError`, so it renders and
+    is caught exactly as every other refusal at start is. What it adds is the answer
+    to ADR-0083 §5's question, given by the one place that knows it: "if yes — even
+    eventually — it is ``1``", and "where a new fault does not obviously answer the
+    question, the answer is ``1``: a spurious restart is recoverable and a spurious
+    ``78`` is an outage".
+    """
+
+
+def _retypes_a_fault_that_clears(refusal: ConfigurationError) -> bool:
+    """Whether ``refusal`` retypes an operating-system fault a restart may clear.
+
+    ``ssl.SSLError`` is an ``OSError`` whose ``errno`` is the TLS library's own code
+    rather than the kernel's, and it says the material is unusable, so it is the
+    refusal's verdict that stands, not an errno. The hub reads no TLS material at
+    start today; the exception is kept so this reads a refusal exactly as the
+    gateway's ``exit_code`` does.
+
+    Args:
+        refusal: A refusal at start.
+
+    Returns:
+        ``True`` where its direct cause is such a fault.
+    """
+    cause = refusal.__cause__
+    if not isinstance(cause, OSError) or isinstance(cause, ssl.SSLError):
+        return False
+    return cause.errno not in _CONFIGURED_ERRNOS
 
 
 def _causes(exc: BaseException) -> list[BaseException]:
@@ -106,16 +170,24 @@ def classify(exc: BaseException) -> tuple[int, str]:
     it is :data:`EXIT_DEPLOYMENT` and a human must act. If yes — even eventually —
     it is :data:`EXIT_RESTART`.
 
-    The three branches below are that test applied, not a taxonomy:
+    The branches below are that test applied, not a taxonomy. The chain is read
+    outermost first, and the first exception a branch names decides:
 
     * :class:`~ai_assistant.core.errors.IncompatibleStateError` — state this build
       cannot serve correctly (ADR-0083 §6). It carries its own operator action,
       which is why it is checked first and why nothing here has to invent one.
+    * :class:`ClearableRefusalError` — a refusal its author knows a restart can get
+      past, such as an overlay agent that would not answer at start (#3171). It is
+      :data:`EXIT_RESTART`.
     * :class:`~ai_assistant.core.errors.ConfigurationError` — every startup
       misconfiguration already arrives as this class: settings that will not load,
       a model spec naming an uninstalled vendor, a vendor with no credential
       (#530), an unbuildable embedder, a data directory that cannot be prepared.
-      None of them clears itself.
+      None of them clears itself — **unless it retypes an operating-system fault
+      that does**: one raised directly from an ``OSError`` whose errno is outside
+      :data:`_CONFIGURED_ERRNOS` (descriptors exhausted, an I/O error) is
+      :data:`EXIT_RESTART`, because the errno, not the wrapper, says whether the
+      fault clears (#3171).
     * A filesystem access fault anywhere in the cause chain
       (:data:`_STAY_DOWN_ERRNOS`).
 
@@ -136,7 +208,11 @@ def classify(exc: BaseException) -> tuple[int, str]:
     for cause in _causes(exc):
         if isinstance(cause, IncompatibleStateError):
             return EXIT_DEPLOYMENT, cause.operator_action
+        if isinstance(cause, ClearableRefusalError):
+            return EXIT_RESTART, ""
         if isinstance(cause, ConfigurationError):
+            if _retypes_a_fault_that_clears(cause):
+                return EXIT_RESTART, ""
             return EXIT_DEPLOYMENT, "correct the configuration, then start the hub again"
         if isinstance(cause, OSError) and cause.errno in _STAY_DOWN_ERRNOS:
             target = cause.filename if cause.filename is not None else "the data directory"
