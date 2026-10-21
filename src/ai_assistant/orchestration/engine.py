@@ -219,6 +219,7 @@ from ai_assistant.orchestration.payloads import (
     page_argument,
     positive_page_argument,
 )
+from ai_assistant.orchestration.person_block import activation_person
 from ai_assistant.orchestration.phase_path import PlaceTarget, failing_stage
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.speech import (
@@ -321,6 +322,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.joining import JoiningInput, RunningActivation
     from ai_assistant.orchestration.matters_pass import MattersPass, MattersPassReport
     from ai_assistant.orchestration.observer import Observer, RunOutcome
+    from ai_assistant.orchestration.person_block import PersonBlock, PersonBlocks
     from ai_assistant.orchestration.phase_path import PhasePath, PhaseWorking
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.story_links import (
@@ -1431,6 +1433,7 @@ class Engine:
         telegram: TelegramLineSeams | None = None,
         candidates: bool = False,
         observer: Observer | None = None,
+        person_blocks: PersonBlocks | None = None,
     ) -> None:
         """Wire the façade from injected collaborators.
 
@@ -1797,6 +1800,11 @@ class Engine:
                 activation waiting on it, and :meth:`observe_episodes` runs it for the
                 scheduler's row (§7:6); ``None`` starts nothing, and
                 :meth:`observe_episodes` refuses.
+            person_blocks: The person block's assembly over the person-model store
+                (ADR-0338 §7:1), or ``None``, the default, where no store is wired: then
+                no activation is given a block, and nothing of the person model reaches
+                understanding or planning. Wired, an activation that is a person's is
+                given one, assembled once before understanding (§2:2-§2:4).
 
         Raises:
             TypeError: If ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is
@@ -1837,6 +1845,7 @@ class Engine:
         # the background — never a second while it runs, and once more after it where an
         # episode froze in the meantime.
         self._observer = observer
+        self._person_blocks = person_blocks
         self._observing: asyncio.Task[None] | None = None
         self._observe_again = False
         self._trail = trail
@@ -6676,6 +6685,7 @@ class Engine:
         running = self._visible_running(state, working)
         try:
             async with asyncio.timeout_at(deadline):
+                person = await self._person_block(state, working)
                 fetched = await self._fetch_held(working, windows)
                 stories = await self._assembled_candidates(working, fetched)
                 recalled = working.recalled
@@ -6696,6 +6706,7 @@ class Engine:
                     origin=None if state is None else state.trigger.origin,
                     joined=joined,
                     running=running,
+                    person=person,
                 )
         except BaseException as exc:
             # A timer fires only when the loop gets control, so a stage can cross the
@@ -6720,6 +6731,26 @@ class Engine:
             # Outside the handler: the timer's own exception rides along as nothing.
             raise ModelTimeoutError(_UNDERSTANDING_EXPIRED) from None
         self._recorded_understanding(state, working, understood, covers=held)
+
+    async def _person_block(
+        self, state: ActivationState | None, working: _ActivationPass
+    ) -> PersonBlock | None:
+        """The activation's person block, assembled once, before understanding (§7:1).
+
+        ADR-0338 §2:2-§2:4: the person is read from the recorded trigger, and an
+        activation that is no person's — or a pass no channel admitted — is given none.
+        The block is carried on the state, which every planning round reads, so an
+        understanding run again for joined input reads the same block. ``None`` where no
+        person-model store is wired.
+        """
+        if self._person_blocks is None or state is None:
+            return None
+        if not state.person_block_assembled:
+            state.person_block_assembled = True
+            state.person_block = await self._person_blocks.assemble(
+                activation_person(state.trigger), supply=working.supply
+            )
+        return state.person_block
 
     def _recorded_understanding(
         self,

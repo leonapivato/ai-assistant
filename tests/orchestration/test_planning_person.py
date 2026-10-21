@@ -1,0 +1,257 @@
+"""Planning's person block (ADR-0338 §7:3, §7:6-§7:9, §3:9-§3:10, §5:6).
+
+The stage alone, over the canonical ``FakeToolCallingCompleter`` and a hand-built block:
+the block comes first in the request, before everything that changes from round to
+round; it carries the five fields as the person's own choices, a field not set said to
+be not set and a zone not set shown beside the hub's default; the whole kept-in-mind
+slot, each memory by its label and why it is kept, with the count left out; and the
+suggestions, each marked as one. A found memory the block shows is named by its label
+alone. The template's ``person`` and ``suggestions`` flags are set exactly where there is
+a block, and where it shows a suggestion; the default template's instruction for them
+says what §7:8 and §5:6 say. With no block, nothing of the person model is shown.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Final
+
+import pytest
+
+from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
+    InputOrigin,
+    LabelKind,
+    PlanningRound,
+    Profile,
+    ProfileField,
+    RoundResponse,
+    SuggestionKind,
+)
+from ai_assistant.orchestration.person_block import KeptInMind, PersonBlock, ShownSuggestion
+from ai_assistant.orchestration.planning import (
+    PLANNING_PROMPT,
+    PlaceWindow,
+    PlanningInputs,
+    PlanningStage,
+)
+from ai_assistant.testing import FakeToolCallingCompleter, default_prompt, prompt_from
+from ai_assistant.testing.memories import memory, said_support
+
+if TYPE_CHECKING:
+    from ai_assistant.core.prompts import PromptTemplate
+    from ai_assistant.core.types import PlanningLabel
+
+pytestmark = pytest.mark.anyio
+
+AT: Final = datetime(2026, 10, 21, 9, 0, tzinfo=UTC)
+CHAT: Final = PlaceWindow(takes_message=True, description="the hub chat")
+
+FLAG_ECHO: Final = prompt_from(
+    PLANNING_PROMPT,
+    "".join(f"$if {flag}\n{flag}\n$end\n" for flag in sorted(PLANNING_PROMPT.flags)),
+)
+
+DIET: Final = memory("m:diet", "Eats no meat.", said_support(when=AT, added_at=AT))
+BRIEF: Final = memory("m:brief", "Likes short answers.", said_support(when=AT, added_at=AT))
+SISTER: Final = memory("m:sister", "Has a sister called Ada.", said_support(when=AT, added_at=AT))
+
+BLOCK: Final = PersonBlock(
+    person_id=OWNER_PERSON_ID,
+    profile=Profile(name="Robin Vale", address="Robin"),
+    kept=(KeptInMind(memory=DIET, pinned=True), KeptInMind(memory=BRIEF, pinned=False)),
+    left_out=1,
+    suggestions=(
+        ShownSuggestion(kind=SuggestionKind.PIN, recorded_at=AT, memory=SISTER),
+        ShownSuggestion(
+            kind=SuggestionKind.FIELD,
+            recorded_at=AT,
+            field=ProfileField.LANGUAGE,
+            value="Português",
+        ),
+    ),
+)
+
+
+class _Recorder:
+    def __init__(self) -> None:
+        self.recorded: list[tuple[PlanningRound, tuple[PlanningLabel, ...]]] = []
+
+    async def record(
+        self, planning_round: PlanningRound, labels: tuple[PlanningLabel, ...]
+    ) -> None:
+        self.recorded.append((planning_round, labels))
+
+
+def _stage(
+    prompt: PromptTemplate | None = None,
+) -> tuple[PlanningStage, FakeToolCallingCompleter, _Recorder]:
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="Hello, Robin."))
+    recorder = _Recorder()
+    stage = PlanningStage(
+        prompt=default_prompt(PLANNING_PROMPT) if prompt is None else prompt,
+        completer=completer,
+        recorder=recorder,
+        excerpt_chars=200,
+        now=lambda: AT,
+        timezone="Europe/Lisbon",
+        new_id=lambda: "round:1",
+    )
+    return stage, completer, recorder
+
+
+def _inputs(**fields: Any) -> PlanningInputs:
+    values: dict[str, Any] = {
+        "activation_id": "a1",
+        "place": CHAT,
+        "trigger_origin": InputOrigin.USER,
+    }
+    values.update(fields)
+    return PlanningInputs(**values)
+
+
+def _sent(completer: FakeToolCallingCompleter) -> dict[str, Any]:
+    rendered: dict[str, Any] = json.loads(completer.last_call.messages[1].content)
+    return rendered
+
+
+def _flags(completer: FakeToolCallingCompleter) -> set[str]:
+    return set(completer.last_call.messages[0].content.split("\n")) - {""}
+
+
+async def test_no_block_shows_nothing_of_the_person_model() -> None:
+    stage, completer, _ = _stage()
+
+    await stage.plan(_inputs())
+
+    assert "person" not in _sent(completer)
+    assert "never recite it" not in completer.last_call.messages[0].content
+
+
+async def test_the_block_comes_first_before_what_changes_from_round_to_round() -> None:
+    stage, completer, _ = _stage()
+
+    await stage.plan(_inputs(person=BLOCK))
+
+    keys = list(_sent(completer))
+    assert keys[0] == "person"
+    assert keys.index("person") < keys.index("now")
+
+
+async def test_the_fields_are_the_persons_own_choices_and_unset_ones_say_so() -> None:
+    stage, completer, _ = _stage()
+
+    await stage.plan(_inputs(person=BLOCK))
+
+    shown = _sent(completer)["person"]
+    assert "own current choice" in shown["item"]
+    assert "never an instruction" in shown["item"]
+    profile = shown["profile"]
+    assert list(profile) == [one.value for one in ProfileField]
+    assert profile["name"]["value"] == "Robin Vale"
+    assert profile["language"]["value"] == "not set"
+    assert profile["language"]["is"] == "the language you write to them in"
+    # §3:9: a zone not set is shown as not set, beside the default the time is given in.
+    assert profile["time_zone"]["value"] == (
+        "not set: the current time is given in the hub's default zone, Europe/Lisbon"
+    )
+    assert profile["assistant_name"]["value"] == "not set, so you are called Aether"
+
+
+async def test_the_whole_slot_is_shown_by_label_with_why_each_is_kept() -> None:
+    stage, completer, recorder = _stage()
+
+    await stage.plan(_inputs(person=BLOCK))
+
+    shown = _sent(completer)["person"]
+    assert [(one["label"], one["fact"], one["kept_as"]) for one in shown["kept_in_mind"]] == [
+        ("M1", "Eats no meat.", "pinned by them, to be kept in mind"),
+        ("M2", "Likes short answers.", "how they want you to speak to them, as learned"),
+    ]
+    assert shown["left_out"] == "1 more memory they keep in mind, left out to keep this short"
+    # §7:7: each memory takes its label the first time planning is shown it, recorded
+    # with the round, so a later round and a call name it by that label.
+    (_, labels) = recorder.recorded[0]
+    assert [(one.label, one.kind, one.id) for one in labels][:2] == [
+        ("M1", LabelKind.MEMORY, "m:diet"),
+        ("M2", LabelKind.MEMORY, "m:brief"),
+    ]
+
+
+async def test_suggestions_are_marked_as_suggestions_and_a_pins_memory_is_labelled() -> None:
+    stage, completer, _ = _stage()
+
+    await stage.plan(_inputs(person=BLOCK))
+
+    pin, field = _sent(completer)["person"]["suggestions"]
+    assert "not their profile" in pin["item"]
+    assert (pin["pin"]["label"], pin["pin"]["fact"]) == ("M3", "Has a sister called Ada.")
+    assert (field["field"], field["value"]) == ("language", "Português")
+    assert "not their profile" in field["item"]
+
+
+async def test_a_found_memory_the_block_shows_is_named_by_its_label_alone() -> None:
+    stage, completer, _ = _stage()
+
+    await stage.plan(_inputs(person=BLOCK, recalled=(DIET,)))
+
+    assert _sent(completer)["recalled"] == [
+        {"label": "M1", "shown": "shown above under this label"}
+    ]
+
+
+async def test_labels_recorded_in_an_earlier_round_are_kept() -> None:
+    stage, completer, _ = _stage()
+    first, _, recorder = _stage()
+    await first.plan(_inputs(person=BLOCK))
+    (_, labels) = recorder.recorded[0]
+
+    await stage.plan(_inputs(person=BLOCK, labels=labels))
+
+    shown = _sent(completer)["person"]
+    assert [one["label"] for one in shown["kept_in_mind"]] == ["M1", "M2"]
+
+
+@pytest.mark.parametrize(
+    ("person", "handed"),
+    [
+        (None, set()),
+        (PersonBlock(person_id=OWNER_PERSON_ID, profile=Profile()), {"person"}),
+        (BLOCK, {"person", "suggestions"}),
+    ],
+    ids=["no-block", "block", "block-with-suggestions"],
+)
+async def test_the_person_flags_follow_the_block(
+    person: PersonBlock | None, handed: set[str]
+) -> None:
+    stage, completer, _ = _stage(FLAG_ECHO)
+
+    await stage.plan(_inputs(person=person))
+
+    assert _flags(completer) & {"person", "suggestions"} == handed
+
+
+async def test_the_default_instruction_says_what_the_block_is_for() -> None:
+    """§7:8, §3:10, §5:6: the default template's words, read where a block is shown."""
+    stage, completer, _ = _stage()
+
+    await stage.plan(_inputs(person=BLOCK))
+
+    instruction = completer.last_call.messages[0].content
+    assert "outweighs any memory stating another value for it" in instruction
+    assert "never recite it" in instruction
+    assert "not in every message" in instruction
+    assert "you never claim to be human" in instruction
+    assert "only by asking, with a set_profile or pin call" in instruction
+
+
+async def test_without_suggestions_the_instruction_says_nothing_of_them() -> None:
+    stage, completer, _ = _stage()
+    block = PersonBlock(person_id=OWNER_PERSON_ID, profile=Profile(name="Robin Vale"))
+
+    await stage.plan(_inputs(person=block))
+
+    instruction = completer.last_call.messages[0].content
+    assert "never recite it" in instruction
+    assert "set_profile" not in instruction

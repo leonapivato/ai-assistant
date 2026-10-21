@@ -3,7 +3,8 @@
     "prompt": "understanding",
     "flags": {
       "recalled": false,
-      "stories": false
+      "stories": false,
+      "person": false
     }
   },
   "messages": [

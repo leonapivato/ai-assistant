@@ -115,10 +115,19 @@ def test_the_nine_prompts_carry_their_flags_and_values() -> None:
         MEMORY_RECONCILER_PROMPT,
         FOLLOW_UP_PROMPT,
     )
-    assert UNDERSTANDING_PROMPT.flags == frozenset({"recalled", "stories"})
+    assert UNDERSTANDING_PROMPT.flags == frozenset({"recalled", "stories", "person"})
     assert UNDERSTANDING_PROMPT.values == frozenset()
     assert PLANNING_PROMPT.flags == frozenset(
-        {"takes_message", "story_calls", "story_reads", "approved", "candidates", "reliance"}
+        {
+            "takes_message",
+            "story_calls",
+            "story_reads",
+            "approved",
+            "candidates",
+            "reliance",
+            "person",
+            "suggestions",
+        }
     )
     assert PLANNING_PROMPT.values == frozenset(
         {"approved_action_tool", "note_reliance_capability", "needs_your_yes"}
@@ -178,7 +187,9 @@ def test_an_override_replaces_its_prompts_default_whole(tmp_path: Path) -> None:
 
     assert template.origin is PromptOrigin.OVERRIDE
     assert template.version == hashlib.sha256(written.read_bytes()).hexdigest()[:12]
-    assert template.render(flags={"recalled": True, "stories": False}) == (f"{_PRIVATE}\nrecalled")
+    assert template.render(flags={"recalled": True, "stories": False, "person": False}) == (
+        f"{_PRIVATE}\nrecalled"
+    )
 
 
 def test_the_start_logs_each_prompts_name_version_and_origin_and_none_of_its_text(

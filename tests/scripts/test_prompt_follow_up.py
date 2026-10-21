@@ -56,7 +56,7 @@ pytestmark = pytest.mark.integration
 #: An understanding reply, as the followed call's response in a case.
 MEANING: Final = json.dumps({"meaning": "find a flight " + PRIVATE, "meaning_ground": "stated"})
 
-UNDERSTANDING_FLAGS: Final = {"recalled": False, "stories": False}
+UNDERSTANDING_FLAGS: Final = {"recalled": False, "stories": False, "person": False}
 
 WEB_SEARCH: Final = {
     "name": "web_search",
@@ -213,7 +213,11 @@ def test_each_follow_up_carries_its_own_samples_system_message(tmp_path: Path) -
         candidates=(str(template), "recorded"),
         activations=frozenset({ACT_A}),
         sources=frozenset({"understanding"}),
-        flags=("understanding.recalled=false", "understanding.stories=false"),
+        flags=(
+            "understanding.recalled=false",
+            "understanding.stories=false",
+            "understanding.person=false",
+        ),
         samples=2,
         follow_up="",
     )
@@ -477,7 +481,7 @@ def _understanding_case(directory: Path, samples: int = 2) -> None:
     (folder / "plain.toml").write_text(
         'prompt = "understanding"\nguards = "label_in_text"\ncame_from = "2026-10-21"\n'
         f'set = "development"\nsamples = {samples}\n\n'
-        "[flags]\nrecalled = false\nstories = false\n\n"
+        "[flags]\nrecalled = false\nstories = false\nperson = false\n\n"
         '[property]\ncheck = "no_label"\nfields = ["meaning"]\nlabels = ["H"]\n\n'
         "[input]\n"
         f'messages = [{{ role = "user", content = {json.dumps(json.dumps({"in": PRIVATE}))} }}]\n'

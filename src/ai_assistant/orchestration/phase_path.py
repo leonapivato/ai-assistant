@@ -297,6 +297,7 @@ from ai_assistant.orchestration.lookups import (
     searched_ids,
 )
 from ai_assistant.orchestration.outside_content import rests_on_outside_content
+from ai_assistant.orchestration.person_block import still_held
 from ai_assistant.orchestration.planning import (
     ApprovedAction,
     CallOutcome,
@@ -366,6 +367,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.controller import ControllerStageRun
     from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.lookups import LookUps
+    from ai_assistant.orchestration.person_block import PersonBlock
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.story_calls import StoryCalls
     from ai_assistant.orchestration.story_links import Candidates, ShortView, StoryCandidates
@@ -2981,6 +2983,7 @@ class PhasePath:
                 # every read before the round is (ADR-0280 §5).
                 approved = await self._approved(given, working)
                 pending = await self._pending(given, working)
+                person = await self._person()
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
         outside = (
@@ -3018,6 +3021,7 @@ class PhasePath:
             approved=approved,
             pending=pending,
             overtaken=working.overtaken(),
+            person=person,
         )
         # The round is recorded inside planning's call, so the recorder reads what it
         # needs of this activation from here (ADR-0321 §4:4: a question cut to fit).
@@ -3034,6 +3038,21 @@ class PhasePath:
         if whole is not planned.round:
             planned = replace(planned, round=whole)
         working.planned(planned)
+
+    async def _person(self) -> PersonBlock | None:
+        """The activation's person block for this round, less what memory no longer holds.
+
+        ADR-0338 §7:3, §7:10: the block assembled before understanding, from which every
+        memory the memory store no longer holds is dropped before each round, the first
+        included, and the state keeps what is left, so a memory forgotten while the
+        activation runs reaches no later request. ``None`` where the activation has no
+        block.
+        """
+        state = active_state()
+        if state is None or state.person_block is None:
+            return None
+        state.person_block = await still_held(state.person_block, self._memory)
+        return state.person_block
 
     async def _pending(
         self, given: PhasePass, working: PhaseWorking

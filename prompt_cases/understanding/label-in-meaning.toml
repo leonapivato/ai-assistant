@@ -11,6 +11,7 @@ samples = 2
 [flags]
 recalled = false
 stories = false
+person = false
 
 [property]
 check = "no_label"
