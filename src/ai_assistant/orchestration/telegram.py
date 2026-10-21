@@ -52,10 +52,11 @@ it back.
 **Restarts** (§5:10, §6:10). The activation takes its updates in as its first step once
 its episode is written, as the chat's does (ADR-0293 §6:8): so after a restart, updates
 an interrupted activation took in are not taken in again, and updates never taken in
-are taken in as usual. Before its first poll the reader looks at the activation that
-last took updates in, and where the restart cut it off — its episode closed
-*interrupted*, and not by the user's stop — the writer sends
-:data:`INTERRUPTED_LINE` once, by rule.
+are taken in as usual; an update an episode records as joined is marked taken in by
+that activation, where its marking never landed, and not taken in again (ADR-0332
+§3:18). Before its first poll the reader looks at the chat's last activation, by its
+newest episode, and where the restart cut it off — its episode closed *interrupted*,
+and not by the user's stop — the writer sends :data:`INTERRUPTED_LINE` once, by rule.
 
 **The window** (§10). A bot cannot read its chat's history, so the kind declares an
 episode window: the recent episodes on the line's channel and place, each linked to
@@ -109,7 +110,6 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     RecordedInputMessage,
     TelegramFailure,
-    TelegramIntakeKind,
     TelegramOutcome,
     TelegramPollOutcome,
     ToolOutcome,
@@ -125,9 +125,8 @@ from ai_assistant.orchestration.channel_kinds import (
 )
 from ai_assistant.orchestration.chat import CHAT_WINDOW_SIZE, COULDNT_FINISH
 from ai_assistant.orchestration.defects import is_defect, log_defect
-from ai_assistant.orchestration.joining import JoiningInput, input_standing
+from ai_assistant.orchestration.joining import JoiningInput, input_standing, joined_positions
 from ai_assistant.orchestration.phase_path import Delivery, Fitted
-from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.understanding import (
     AskedIn,
     LineMessage,
@@ -140,6 +139,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import MemoryStore, TelegramBotClient, TelegramIntakeRecord
     from ai_assistant.core.types import (
+        ChannelEpisodePage,
         TelegramMessage,
         TelegramSendOutcome,
         TelegramUpdate,
@@ -1091,12 +1091,16 @@ class TelegramReader:
         while it runs, and its updates are dealt with once a later poll finds them taken
         in.
         """
+        page = await self._memory.channel_episodes(self._channel, limit=_WINDOW_EPISODES)
+        updates = await self._joined_before(updates, page)
+        if not updates:
+            return
         messages = [one.message for one in updates if one.message is not None]
         taken = TelegramInput(
             channel=self._channel,
             activation_id=self._mint(),
             updates=tuple(updates),
-            window=await self._window(messages),
+            window=await self._window(messages, page),
         )
         self._marked[taken.activation_id] = []
         self._current = taken.activation_id
@@ -1105,6 +1109,33 @@ class TelegramReader:
             activation_id=taken.activation_id, task=task, handed=set(taken.update_ids)
         )
         task.add_done_callback(self._ended)
+
+    async def _joined_before(
+        self, updates: Sequence[TelegramUpdate], page: ChannelEpisodePage
+    ) -> list[TelegramUpdate]:
+        """``updates`` but those a recent episode records as joined, marked by its activation.
+
+        ADR-0332 §3:18: a joined update is marked taken in by the activation it joined,
+        as at admission. Where that marking never landed before a restart, the episode,
+        which records each joined input before any stage acts on it (§3:16), is what
+        says it was taken in: it is marked so now, and is not taken in again (§5:10).
+
+        Raises:
+            TelegramIntakeRecordError: If the record cannot be written.
+        """
+        joined = joined_positions(page)
+        again: dict[str, list[int]] = {}
+        kept: list[TelegramUpdate] = []
+        for update in updates:
+            by = None if update.message is None else joined.get(update.message.message_id)
+            if by is None:
+                kept.append(update)
+            else:
+                again.setdefault(by, []).append(update.update_id)
+        for activation_id, update_ids in again.items():
+            _log.info("telegram_join_marked_late", stage="reader", updates=len(update_ids))
+            await self._intake.take_in(update_ids, activation_id=activation_id)
+        return kept
 
     async def _running(self, taken: TelegramInput) -> None:
         """Run the input's activation, showing typing while it runs (§6:7)."""
@@ -1254,20 +1285,22 @@ class TelegramReader:
     async def _after_restart(self) -> None:
         """Send the restart's one fixed message, where it cut the chat's last activation off.
 
-        The activation that last took updates in is the one the record names for the
-        highest update it still holds taken in (§5:8). Where its episode closed
-        *interrupted*, and not by the user's stop, which writes nothing (ADR-0295
-        §3:3), the writer sends :data:`INTERRUPTED_LINE`, claimed once per activation
-        (§6:10). Anything that cannot be read sends nothing.
+        The chat's last activation is the one its newest episode records (ADR-0283 §3:1):
+        the engine closes a dead process's open episodes before the reader starts, so
+        the activation a restart cut off is among them. It is read from the episodes and
+        not from the intake record, since the reader confirms an activation's updates
+        while it runs (ADR-0332 §8:7), and a confirmed update leaves the record. Where
+        that episode closed *interrupted*, and not by the user's stop, which writes
+        nothing (ADR-0295 §3:3), the writer sends :data:`INTERRUPTED_LINE`, claimed once
+        per activation (§6:10). Anything that cannot be read sends nothing.
         """
         try:
-            held = await self._intake.export()
-            taken = [one for one in held.intake if one.kind is TelegramIntakeKind.TAKEN_IN]
-            if not taken:
+            page = await self._memory.channel_episodes(self._channel, limit=1)
+            newest = page.entries[-1].record if page.entries else None
+            if not isinstance(newest, EpisodicMemory) or not _cut_off(newest):
                 return
-            last = max(taken, key=lambda one: one.update_id).activation_id
-            if last is None or not await self._cut_off(last):
-                return
+            assert newest.processing_record is not None  # noqa: S101 — read by _cut_off
+            last = newest.processing_record.activation_id
             await self._writer.fixed(lambda: self._intake.claim_interrupted(last), INTERRUPTED_LINE)
         except TelegramIntakeRecordError, MemoryStoreError:
             _log.warning("telegram_restart_unread", stage="reader", reason="store_failed")
@@ -1277,26 +1310,20 @@ class TelegramReader:
             else:
                 _log.warning("telegram_restart_unread", stage="reader", reason="failed")
 
-    async def _cut_off(self, activation_id: str) -> bool:
-        """Whether a restart cut ``activation_id`` off: closed *interrupted*, not stopped."""
-        record = await self._memory.get(episode_address(activation_id))
-        if not isinstance(record, EpisodicMemory) or record.processing_record is None:
-            return False
-        processing = record.processing_record
-        return (
-            processing.status is ProcessingStatus.INTERRUPTED
-            and processing.reason is not ProcessingReason.STOPPED
-        )
-
     # --- the window (§10) ---
 
-    async def _window(self, messages: Sequence[TelegramMessage]) -> TranscriptWindow:
+    async def _window(
+        self, messages: Sequence[TelegramMessage], page: ChannelEpisodePage
+    ) -> TranscriptWindow:
         """The line's episode window, with what the input replies to (§10, §4:12).
+
+        Args:
+            messages: The input's messages.
+            page: The line's recent episodes, the newest :data:`_WINDOW_EPISODES`.
 
         Raises:
             MemoryStoreError: If the episodes cannot be read.
         """
-        page = await self._memory.channel_episodes(self._channel, limit=_WINDOW_EPISODES)
         episodes = [
             one.record
             for one in page.entries
@@ -1473,6 +1500,16 @@ def _runs(updates: Sequence[TelegramUpdate]) -> list[list[TelegramUpdate]]:
 
 def _forwarded(update: TelegramUpdate) -> bool:
     return update.message is not None and update.message.forward_origin is not None
+
+
+def _cut_off(record: EpisodicMemory) -> bool:
+    """Whether a restart cut the episode's activation off: closed *interrupted*, not stopped."""
+    processing = record.processing_record
+    return (
+        processing is not None
+        and processing.status is ProcessingStatus.INTERRUPTED
+        and processing.reason is not ProcessingReason.STOPPED
+    )
 
 
 def _failure(outcome: TelegramOutcome) -> str:
