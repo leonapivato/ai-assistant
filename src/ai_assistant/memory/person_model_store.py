@@ -468,8 +468,13 @@ class SqlitePersonModelStore:
         """
         tables = conn.execute("SELECT count(*) FROM sqlite_master WHERE type = 'table'").fetchone()
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if tables[0]:
-            if version != PERSON_MODEL_SCHEMA_VERSION:
+        # A file is created only where it holds no table and no label. Every other label
+        # is refused before anything is written, a table-free file's included: a newer
+        # one is a label this code does not understand (ADR-0326 §5:3), and a file that
+        # holds tables under any other version, or a label with no tables, is not one
+        # any release wrote.
+        if tables[0] or version != 0:
+            if not tables[0] or version != PERSON_MODEL_SCHEMA_VERSION:
                 msg = (
                     f"the person-model store at {self._path!r} has schema version "
                     f"{version}; this build opens only version {PERSON_MODEL_SCHEMA_VERSION}"
@@ -1035,6 +1040,14 @@ class SqlitePersonModelStore:
             proposed = found.proposed
             if proposed.kind is SuggestionKind.FIELD:
                 assert proposed.field is not None  # noqa: S101 — the type requires it
+                # §3:2: every write is validated, an accepted suggestion's included, against
+                # the bound this store holds now, which may be tighter than the one it was
+                # recorded under. A refusal leaves the suggestion pending.
+                fault = _value_fault(proposed.field, proposed.value, chars=self._chars)
+                if fault is not None:
+                    return _refused(
+                        PersonModelRefusal.INVALID_VALUE, reason=fault, record_id=found.id
+                    )
                 act = PersonModelAct(
                     how=PersonActHow.SUGGESTION, by=by, episode_id=proposed.episode_id
                 )

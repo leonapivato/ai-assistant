@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     PersonActHow,
     PersonModelAct,
+    PersonModelRefusal,
     PersonModelWriteKind,
     PersonRole,
     ProfileField,
@@ -316,6 +317,53 @@ async def test_a_file_of_another_schema_is_refused_untouched(tmp_path: Path, ver
         assert tables == {"persons"}
         assert conn.execute("SELECT count(*) FROM persons").fetchone()[0] == 0
         assert conn.execute("PRAGMA user_version").fetchone()[0] == version
+
+
+@pytest.mark.parametrize("version", [1, PERSON_MODEL_SCHEMA_VERSION + 1, 7])
+def test_a_labelled_file_with_no_tables_is_refused_untouched(tmp_path: Path, version: int) -> None:
+    """ADR-0326 §5:3: a newer label is refused whether or not the file holds a table."""
+    path = tmp_path / "person_model.db"
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        conn.execute(f"PRAGMA user_version = {version}")
+        conn.commit()
+
+    with pytest.raises(PersonModelStoreError, match=f"schema version {version}"):
+        _open(path)
+
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        assert conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == version
+
+
+async def test_accepting_a_suggestion_validates_it_against_the_bound_held_now(
+    tmp_path: Path,
+) -> None:
+    """§3:2: a value recorded under a wider bound is refused at acceptance, nothing written."""
+    path = tmp_path / "person_model.db"
+    first = _open(path)
+    try:
+        recorded = await first.record_suggestion(
+            OWNER_PERSON_ID, field_suggestion(ProfileField.NAME, "Robin Vale")
+        )
+        assert recorded.record_id is not None
+    finally:
+        first.close()
+
+    tighter = SqlitePersonModelStore(path=path, field_chars=5, now=ticking(_CREATED))
+    try:
+        before = await tighter.export()
+
+        refused = await tighter.accept_suggestion(
+            OWNER_PERSON_ID, recorded.record_id, by=OWNER_PERSON_ID
+        )
+
+        assert refused.kind is PersonModelWriteKind.REFUSED
+        assert refused.refusal is PersonModelRefusal.INVALID_VALUE
+        assert refused.reason
+        assert await tighter.export() == before
+        assert [one.id for one in (await _owner(tighter)).suggestions] == [recorded.record_id]
+    finally:
+        tighter.close()
 
 
 def test_a_new_store_writes_its_schema_version(tmp_path: Path) -> None:
