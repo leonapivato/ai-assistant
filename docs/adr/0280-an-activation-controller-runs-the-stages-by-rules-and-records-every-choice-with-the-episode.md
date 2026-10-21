@@ -98,7 +98,7 @@
   §1:3). This scoped replacement takes effect on ratification of ADR-0309. This reciprocal
   header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior
   supersessions and the ratified body below are preserved.
-- Partially superseded: 2026-10-21 by ADR-0332 — §4:3's row `not_understood`, as ADR-0309 §3:1 keeps it: it answers where no understanding decision covers every input the activation holds, and §4:6's loop guard lets understanding run once per input held (ADR-0332 §3:9). §7:1's record, in the addition alone: `EpisodeProcessingRecord` gains `joined` (ADR-0332 §3:19, §7:2). Every other clause stands. This replacement takes effect on ratification of ADR-0332. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-21 by ADR-0332 — §4:3's row `not_understood`, as ADR-0309 §3:1 keeps it: it answers where no understanding decision covers every input the activation holds, and §4:6's loop guard lets understanding run once per input held (ADR-0332 §3:9). §7:1's record, in the addition alone: `EpisodeProcessingRecord` gains `joined` (ADR-0332 §3:16, §7:2). Every other clause stands. This replacement takes effect on ratification of ADR-0332. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
