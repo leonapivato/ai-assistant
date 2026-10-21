@@ -3,7 +3,8 @@
 # coming up is the person's taste, and the prompts hold no rule for it: what governs is a
 # preference they stated, kept as a style memory (ADR-0338 §5). This person said they don't
 # want earlier things brought up when they only say hello, so the round greets them back and
-# brings up none of them.
+# brings up none of them. The mirror case, `greeting-rundown-as-asked`, holds the same
+# window under the opposite preference.
 prompt = "planning"
 guards = "greeting_recap"
 came_from = "2026-10-21"
