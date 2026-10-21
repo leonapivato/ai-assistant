@@ -19,6 +19,7 @@ the module's own justification for the default would have been false (#1410).
 
 from __future__ import annotations
 
+import fcntl
 import os
 import shutil
 import sys
@@ -869,6 +870,85 @@ def test_a_pair_whose_parts_cannot_be_archived_is_put_back_together(
     assert "tree=t1" in (archive / "a-2.md").read_text()
     assert (archive / "parts" / "a-2" / "part-0001-of-0002.md").exists()
     assert not (archive / "parts" / "a").exists()
+
+
+def test_a_pair_whose_parts_cannot_be_claimed_is_put_back_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The claim is part of the pair's step too: a `parts/` the sweep cannot
+    # rename in fails before any move, and the artifact must not stay archived
+    # under a number its messages never learned.
+    repo = _repo(tmp_path)
+    archive = repo / ".review" / "archive"
+    archive.mkdir(parents=True)
+    (archive / "a.md").write_text("an earlier recording\n")
+    artifact = _dead(repo, "a.md")
+    parts = _parts(repo, "a")
+
+    def refuse(part: object) -> Path:
+        raise PermissionError(13, "Permission denied", str(parts))
+
+    monkeypatch.setattr(_MODULE, "_claim", refuse)
+    assert _MODULE.main(["--repo", str(repo)]) == 1
+    monkeypatch.undo()
+
+    assert "tree=t1" in artifact.read_text()
+    assert (parts / "part-0001-of-0002.md").exists()
+    assert not (archive / "a-2.md").exists()
+
+
+def test_a_later_failure_strands_no_earlier_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each pair is finished before the next file is touched, so a failure on `b`
+    # leaves `a` archived beside its own messages and `b` where it was.
+    repo = _repo(tmp_path)
+    archive = repo / ".review" / "archive"
+    archive.mkdir(parents=True)
+    for stem in ("a", "b"):
+        (archive / f"{stem}.md").write_text("an earlier recording\n")
+        _dead(repo, f"{stem}.md")
+        _parts(repo, stem)
+    move = _MODULE._archive_file
+
+    def refuse(path: Path, destination: Path) -> None:
+        if path.name == "b.md":
+            raise PermissionError(13, "Permission denied", str(path))
+        move(path, destination)
+
+    monkeypatch.setattr(_MODULE, "_archive_file", refuse)
+    assert _MODULE.main(["--repo", str(repo)]) == 1
+    monkeypatch.undo()
+
+    review = repo / ".review"
+    assert (archive / "a-2.md").exists()
+    assert (archive / "parts" / "a-2" / "part-0001-of-0002.md").exists()
+    assert not (review / "parts" / "a").exists()
+    assert (review / "b.md").exists()
+    assert (review / "parts" / "b" / "part-0001-of-0002.md").exists()
+    assert not (archive / "b-2.md").exists()
+
+
+def test_a_second_sweep_is_refused_while_one_runs(tmp_path: Path) -> None:
+    # A directory one sweep holds under its claim name looks to another like an
+    # old orphan, so two sweeps of one clone must never interleave.
+    repo = _repo(tmp_path)
+    artifact = _dead(repo, "a.md")
+    parts = _parts(repo, "a")
+    with (repo / ".review" / _MODULE.SWEEP_LOCK).open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+
+        status, _, err = _sweep(repo, "--delete")
+        dry_status, dry_out, _ = _sweep(repo, "--dry-run")
+
+    assert status == 1
+    assert "another review sweep is running" in err
+    assert artifact.exists()
+    assert parts.exists()
+    assert dry_status == 0, dry_out
+    status, out, _ = _sweep(repo, "--delete")
+    assert status == 0, out
+    assert not parts.exists()
 
 
 def test_a_directory_move_never_replaces_its_destination(tmp_path: Path) -> None:

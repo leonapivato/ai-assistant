@@ -94,12 +94,15 @@ installs at, then compares it with what it classified, and puts back — and
 stops — on a mismatch. And a pair is archived as a pair or not at all: when the
 parts cannot follow their artifact, the artifact is put back too, so no later
 sweep has to guess which archived recording a stranded directory belonged to.
+Two sweeps never interleave: one that would change anything holds an ``flock``
+on ``.review/.sweep.lock`` from classifying to acting, and a second is refused.
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import fcntl
 import os
 import re
 import shutil
@@ -111,7 +114,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
 
 #: The review directory, relative to the repository root.
 REVIEW_DIR = ".review"
@@ -126,6 +129,8 @@ PARTS_DIR = "parts"
 #: swept: far longer than the instant between `codex-review.sh` installing a
 #: round's parts and renaming its artifact into place.
 ORPHAN_GRACE_SECONDS = 3600
+#: The lock a sweep that changes anything holds for its whole run.
+SWEEP_LOCK = ".sweep.lock"
 #: Candidate default branches, most authoritative first: an artifact's commit is
 #: "merged" when it is an ancestor of the first of these the clone actually has.
 DEFAULT_BRANCHES = ("origin/main", "main")
@@ -568,8 +573,9 @@ def archive_plan(
         companions: Each swept artifact's parts directory, keyed on the artifact.
 
     Returns:
-        One ``(source, destination)`` pair per path, in the order given, and then
-        one per companion.
+        One ``(source, destination)`` pair per path, in the order given, each
+        artifact's companion directly after it — so the two are acted on as one
+        step, and nothing else can fail between them.
     """
     archive = review / ARCHIVE_DIR
     companions = companions or {}
@@ -582,7 +588,6 @@ def archive_plan(
         return not (destination in taken or destination.is_symlink() or destination.exists())
 
     plan: list[tuple[Path, Path]] = []
-    following: list[tuple[Path, Path]] = []
     for path in paths:
         destination = archive / path.relative_to(review)
         stem, suffix = destination.stem, destination.suffix
@@ -598,8 +603,8 @@ def archive_plan(
         if companion is not None:
             beside = archive / PARTS_DIR / destination.stem
             taken.add(beside)
-            following.append((companion, beside))
-    return plan + following
+            plan.append((companion, beside))
+    return plan
 
 
 #: The prefix of the name a parts directory is held under while it is swept: a
@@ -731,13 +736,14 @@ def _act(
 ) -> None:
     """Archive or delete the swept files and parts directories.
 
-    Every file is acted on before any directory, and a swept artifact precedes
-    its parts directory in both ``paths`` and ``plan``. A parts directory that
-    cannot be archived *beside its artifact* puts the artifact back, so a
-    failure never leaves the pair split across the archive with a name only
-    this sweep knew: the next sweep finds both where they were and plans them
-    together again. When deleting, a split pair is an artifact gone and an
-    orphan the next sweep deletes, which loses nothing that pairing protects.
+    A swept artifact and its parts directory are one step: the directory comes
+    directly after its artifact in both ``paths`` and ``plan``. When archiving,
+    a directory that cannot follow its artifact — the claim, the destination or
+    the move failing — puts the artifact back, so a failure never leaves the
+    pair split across the archive under a number only this sweep knew: the next
+    sweep finds both where they were and plans them together again. When
+    deleting, a split pair is an artifact gone and an orphan the next sweep
+    deletes, which loses nothing that pairing protects.
 
     Args:
         paths: The files and directories to act on. Deletion needs nothing else;
@@ -791,47 +797,59 @@ def _archive(plan: Sequence[tuple[Path, Path]], classified: Mapping[Path, PartsV
     """Archive the swept files and, once claimed, the swept parts directories.
 
     Args:
-        plan: Each path with where it lands.
+        plan: Each path with where it lands, each artifact's companion directly
+            after it.
         classified: The parts directories among them, by path.
+
+    Raises:
+        SweepError: If a directory changed after it was classified.
     """
     archived: dict[Path, Path] = {}
     for path, destination in plan:
-        destination.parent.mkdir(parents=True, exist_ok=True)
         part = classified.get(path)
         if part is None:
+            destination.parent.mkdir(parents=True, exist_ok=True)
             _archive_file(path, destination)
             archived[path] = destination
             continue
-        held = _claim(part)
-        if held is None:
-            continue
+        held: Path | None = None
         try:
+            held = _claim(part)
+            if held is None:
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
             _move_directory(held, destination)
         except OSError:
+            # A mismatch on the claim is a `SweepError` and does not come here:
+            # then a round has replaced the messages, its own artifact follows,
+            # and the archived one has nothing left to be paired with.
             _put_back(part, held, archived)
             raise
 
 
-def _put_back(part: PartsVerdict, held: Path, archived: Mapping[Path, Path]) -> None:
+def _put_back(part: PartsVerdict, held: Path | None, archived: Mapping[Path, Path]) -> None:
     """Undo a pair's half-done archive: its parts to their name, its artifact back.
 
     Args:
-        part: The parts directory whose move failed.
-        held: Where :func:`_claim` holds it.
+        part: The parts directory that could not be archived.
+        held: Where :func:`_claim` holds it, or ``None`` when it was never
+            claimed and so is still at its own name.
         archived: Each file this sweep archived, with where it went.
 
     Raises:
         SweepError: If either cannot be put back, naming where each now is.
     """
     try:
-        _move_directory(held, part.path)
+        if held is not None:
+            _move_directory(held, part.path)
         if part.artifact is not None and part.artifact in archived:
             _archive_file(archived[part.artifact], part.artifact)
     except (OSError, NotImplementedError) as exc:
+        messages = held if held is not None and held.exists() else part.path
         artifact = archived.get(part.artifact) if part.artifact is not None else None
         raise SweepError(
             f"could not archive {PARTS_DIR}/{part.path.name}/ beside its artifact, nor put "
-            f"the pair back: the messages are at {held if held.exists() else part.path}"
+            f"the pair back: the messages are at {messages}"
             + (f" and the artifact at {artifact}" if artifact is not None else "")
             + f". ({exc})"
         ) from exc
@@ -910,6 +928,60 @@ def _sweep(args: argparse.Namespace) -> int:
     review = repo / REVIEW_DIR
     if not review.is_dir():
         raise SweepError(f"no {REVIEW_DIR}/ in {repo}; nothing to sweep")
+    with contextlib.nullcontext() if args.dry_run else _one_sweep_at_a_time(review):
+        _sweep_review(repo, review, delete=args.delete, dry_run=args.dry_run)
+    return 0
+
+
+@contextlib.contextmanager
+def _one_sweep_at_a_time(review: Path) -> Iterator[None]:
+    """Hold the review directory's sweep lock for as long as the context lasts.
+
+    Two sweeps interleaving is the one race the per-directory claim cannot
+    settle: a directory one sweep holds under its claim name looks to another
+    like an old orphan, and the second would take it out from under the first.
+    So a sweep that would change anything holds this for its whole run, from
+    classifying to acting, and a second is refused rather than queued. An
+    ``flock`` lives on the open descriptor, so a sweep that dies releases it.
+
+    Args:
+        review: The review directory.
+
+    Yields:
+        Nothing; the lock is held until the context exits.
+
+    Raises:
+        SweepError: If another sweep holds the lock, or it cannot be taken.
+    """
+    path = review / SWEEP_LOCK
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    except OSError as exc:
+        raise SweepError(f"could not open the sweep lock {path}: {exc}") from exc
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise SweepError(
+                f"another review sweep is running in this clone (it holds {path}); "
+                f"run this one after it finishes."
+            ) from exc
+        except OSError as exc:
+            raise SweepError(f"could not take the sweep lock {path}: {exc}") from exc
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _sweep_review(repo: Path, review: Path, *, delete: bool, dry_run: bool) -> None:
+    """Classify the review directory and act on what is sweepable.
+
+    Args:
+        repo: The repository root.
+        review: Its review directory.
+        delete: Delete rather than archive.
+        dry_run: Decide everything and change nothing.
+    """
     refs = Refs(repo)
     verdicts = [classify(a, refs) for a in sorted(review.glob("*.md"))]
     swept = [v for v in verdicts if v.state in SWEEPABLE]
@@ -918,26 +990,19 @@ def _sweep(args: argparse.Namespace) -> int:
     parts = classify_parts(review, verdicts, time.time())
     companions = {p.artifact: p.path for p in parts if p.swept and p.artifact is not None}
     orphans = [p.path for p in parts if p.swept and p.artifact is None]
-    # Files first, then directories, and each artifact before its own parts:
-    # `_act` relies on that order, and `archive_plan` on artifacts preceding the
-    # orphans whose names must avoid their companions'.
+    # The orphans last: `archive_plan` reserves each artifact's companion name
+    # before it plans the orphans that must avoid it, and puts each companion
+    # directly after its artifact, which is what `_act` treats as one step.
     files = [v.path for v in swept] + snapshots
-    if args.delete:
+    if delete:
         plan: list[tuple[Path, Path]] = []
         sweeping = [*files, *companions.values(), *orphans]
     else:
         plan = archive_plan([*files, *orphans], review, companions)
         sweeping = [source for source, _ in plan]
-    _act(
-        sweeping,
-        plan,
-        delete=args.delete,
-        dry_run=args.dry_run,
-        parts=[p for p in parts if p.swept],
-    )
+    _act(sweeping, plan, delete=delete, dry_run=dry_run, parts=[p for p in parts if p.swept])
     renamed = [pair for pair in plan if pair[1].name != pair[0].name]
-    _report(verdicts, snapshots, parts, renamed, delete=args.delete, dry_run=args.dry_run)
-    return 0
+    _report(verdicts, snapshots, parts, renamed, delete=delete, dry_run=dry_run)
 
 
 def _parser() -> argparse.ArgumentParser:
