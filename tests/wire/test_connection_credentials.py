@@ -280,20 +280,31 @@ async def test_no_credential_reaches_the_socket_when_the_identity_is_refused(
     ids=["line-break", "control-character", "over-bound"],
 )
 async def test_an_unusable_keyless_identity_is_refused_before_the_socket_is_opened(
-    tmp_path: Path, identity: str
+    tmp_path: Path, identity: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """ADR-0325 §4:3: the keyless act's refusals are the **client's**, before any I/O.
 
     The shared suite's case cannot show this: a running hub refuses the same
     identity itself, so a client that deferred the check would still pass there.
-    Here nothing answers as a hub. The listener records every connection it
-    accepts and every frame it reads, then hangs up, so a client that let the
-    identity through would raise a transport error rather than
-    ``UnusableIdentityError`` — and the empty records say no connection was even
-    attempted, which is stronger than "no request frame carried it".
+    Here nothing answers as a hub, so a client that let the identity through
+    would raise a transport error rather than ``UnusableIdentityError``.
+
+    **The dial itself is recorded**, at ``asyncio.open_unix_connection``, which is
+    where :meth:`HubEngineClient._open` opens the socket. The listener's records
+    alone would not do: a client that dialled, then validated, then closed could
+    finish before the server ran its handler, leaving them empty. They are kept
+    beside it, for a dial by any other route.
     """
+    dialled: list[str] = []
     accepted: list[None] = []
     seen: list[bytes] = []
+    dial = asyncio.open_unix_connection
+
+    async def _recorded(
+        path: str, **kwargs: Any
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        dialled.append(path)
+        return await dial(path, **kwargs)
 
     async def _hub(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         accepted.append(None)
@@ -305,10 +316,12 @@ async def test_an_unusable_keyless_identity_is_refused_before_the_socket_is_open
             )
         writer.close()
 
+    monkeypatch.setattr(asyncio, "open_unix_connection", _recorded)
     async with _listening(tmp_path / "hub.sock", _hub) as client:
         with pytest.raises(UnusableIdentityError):
             await client.connect_keyless_account(identity=identity)
 
+    assert dialled == []
     assert accepted == []
     assert seen == []
 
