@@ -180,3 +180,42 @@ def test_a_result_naming_another_file_or_line_is_not_shown(copy: Path) -> None:
 
     assert view["replays"] == []
     assert len(observed["replays"]) == 1
+
+
+# --- ADR-0337 §5:4: a call's samples shown together -----------------------------------------
+
+
+def test_a_calls_samples_share_one_set_each_naming_its_sample(tmp_path: Path) -> None:
+    made = make_copy(tmp_path)
+    _run(made, sources=frozenset({"planning"}), samples=3)
+    _run(made, sources=frozenset({"planning"}), samples=2)
+
+    with serving(made / "diagnostics") as bound:
+        view = _json(bound.port, f"/api/call?id={ACT_A}&line={PLANNING_GIVEN}")
+
+    shown = view["replays"]
+    assert [(one["sample"], one["samples"]) for one in shown] == [
+        (1, 3),
+        (2, 3),
+        (3, 3),
+        (1, 2),
+        (2, 2),
+    ]
+    sets = [one["set"] for one in shown]
+    assert len(set(sets[:3])) == 1
+    assert len(set(sets[3:])) == 1
+    assert sets[0] != sets[3]
+    assert all(one["did"]["parts"] for one in shown)
+
+
+def test_a_result_naming_no_sample_is_a_set_of_its_own(copy: Path) -> None:
+    results = copy / "diagnostics" / f"{ACT_A}.replay.jsonl"
+    rewritten = results.read_text().replace('"sample":1,"samples":1,', "")
+    results.write_text(rewritten)
+
+    with serving(copy / "diagnostics") as bound:
+        view = _json(bound.port, f"/api/call?id={ACT_A}&line={UNDERSTANDING_GIVEN}")
+
+    shown = view["replays"]
+    assert [one["sample"] for one in shown] == [None, None]
+    assert len({one["set"] for one in shown}) == 2
