@@ -172,6 +172,7 @@ from ai_assistant.tools.web_search import WEB_SEARCH_ID
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
+    from zoneinfo import ZoneInfo
 
     from ai_assistant.core.config import Settings
     from ai_assistant.core.prompts import PromptDeclaration
@@ -185,6 +186,7 @@ if TYPE_CHECKING:
         MemoryStore,
         MemoryWriter,
         ModelProvider,
+        NotificationPolicy,
         OutboundTransport,
         PlanStore,
         Reader,
@@ -607,6 +609,22 @@ def seeded_time_zone(settings: Settings) -> str | None:
         The zone to seed, or ``None``.
     """
     return settings.timezone if "timezone" in settings.model_fields_set else None
+
+
+def _policy_for_zone(zone: ZoneInfo) -> NotificationPolicy:
+    """The policy whose quiet windows are read in a person's zone (ADR-0338 §3:6).
+
+    The factory both notification ruling paths hold, so each ruling is handed a policy
+    built over the zone it is for, which stays that instance's construction-time input
+    (ADR-0130 §6).
+
+    Args:
+        zone: The person's zone, as their profile sets it.
+
+    Returns:
+        The concrete policy over that zone.
+    """
+    return DefaultNotificationPolicy(timezone=zone)
 
 
 def _configured_telegram_relay(settings: Settings) -> TelegramRelay | None:
@@ -1324,11 +1342,13 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
 
         # ADR-0130 §4 and §5's deterministic ruling, built once and held twice: the
         # engine hands it to the store on the reconsideration path, and the write
-        # stage below hands it to the same store on the live path. One object,
-        # because two would be two policies over one store — and `Settings.timezone`
-        # is its one construction-time input (§6), so two could not even disagree
-        # about the user's night without a second timezone source, which there is
-        # not.
+        # stage below hands it to the same store on the live path. One object over
+        # `Settings.timezone`, the hub's default, and beside it one factory for a
+        # person's zone (ADR-0338 §3:6): both paths read the owner's zone from the
+        # one person-model store just before each ruling and hand the store the
+        # policy for it, so the two cannot disagree about the person's night. Each
+        # policy's zone stays its construction-time input (§6). Where the person
+        # model is off, both hand every ruling this one policy, as before.
         notification_policy = DefaultNotificationPolicy(timezone=settings.timezone)
         # **ADR-0130 §3's producer seam, concrete at last** (#964). Until leg 10's
         # first producer existed there was nothing to hold it and this root said so;
@@ -1347,7 +1367,11 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # defaulted, so a root that meant "there is nowhere to deliver" would have
         # to say so.
         notification_writer = NotificationWriteStage(
-            store=notifications, policy=notification_policy, outbox=outbox
+            store=notifications,
+            policy=notification_policy,
+            outbox=outbox,
+            policy_for=_policy_for_zone,
+            people=person_model,
         )
 
         # **The one registered egress integration, where a deployment configured
@@ -2071,13 +2095,14 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # be describing a different contract.
             #
             # **`settings.timezone` is the policy's one construction-time input**
-            # (§6): quiet windows are read in the same value ADR-0008 §5 gives the
-            # temporal context and ADR-0093 §7b binds the calendar reader to, and
-            # no second timezone source is introduced. It is passed here rather
-            # than per call because a caller free to vary it could move the user's
-            # night — and `Settings` has already refused an unknown IANA zone at
-            # load, which is what stands behind a figure that now decides when the
-            # assistant is allowed to interrupt.
+            # (§6), as the hub's default: quiet windows are read in the zone of the
+            # person a notification is for, and in this value where theirs is empty
+            # (ADR-0338 §3:6, superseding §6:4's single source). A zone is never an
+            # argument to a ruling, because a caller free to vary it could move the
+            # user's night: the engine picks, per ruling, which policy to hand over,
+            # this one or one `_policy_for_zone` built for the person's zone. And
+            # `Settings` has already refused an unknown IANA zone at load, as the
+            # person-model store refuses one on every write (§3:2).
             #
             # **The `NotificationWriter` is composed above rather than here**, and
             # that placement is §1's: the seam belongs to the *producer*, not to
@@ -2090,6 +2115,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # ADR-0130 §7 requires and as the trace store's sweep already does.
             notifications=notifications,
             notification_policy=notification_policy,
+            # ADR-0338 §3:6: the same factory the write stage holds; the engine reads
+            # the owner's zone from the store its person block reads, where it is on.
+            notification_policy_for=_policy_for_zone,
             # ADR-0131's delivery seam. The outbox reaches the engine as
             # ``orchestration``'s own ``DeliveryOutbox`` rather than as ``core``'s
             # ``NotificationOutbox``, because §3b gives the latter "exactly one
