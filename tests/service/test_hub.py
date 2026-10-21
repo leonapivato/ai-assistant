@@ -1597,20 +1597,22 @@ async def test_a_stale_control_socket_from_a_crashed_run_is_replaced(
     assert not stale.exists()
 
 
-async def test_a_configured_hub_that_cannot_ask_its_agent_stays_down(
+async def test_a_configured_hub_that_cannot_ask_its_agent_refuses_and_comes_back(
     settings: Settings,
     wired: dict[str, list[Any]],
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A configured remote listener whose overlay agent is absent is a deployment
-    fault, not a hub that quietly serves loopback alone.
+    """A configured remote listener whose overlay agent will not answer is refused,
+    not a hub that quietly serves loopback alone — and it is a ``1``, not a ``78``.
 
     ADR-0124 §6 discloses the hub's own overlay identity at enrolment and §4 reads a
-    device's at admission; neither can happen without the agent. Coming up anyway
-    would be the hub silently ignoring the configuration the operator set, which is
-    ADR-0083's ruling 4 failure — so it is a ``ConfigurationError`` and exit 78,
-    "this will not be fixed by restarting".
+    device's at admission; neither can happen without the agent, and coming up
+    anyway would be the hub silently ignoring the configuration the operator set.
+    But the one error carries an agent that timed out or has not started yet at
+    boot, which clears without anyone acting, so ADR-0083 §5's "if yes — even
+    eventually — it is ``1``" decides (#3171). A ``78`` here is a box that rebooted
+    before its overlay agent and stayed down until someone noticed.
     """
     from ai_assistant.service.overlay import (  # noqa: PLC0415 - one call site
         OverlayIdentityUnavailableError,
@@ -1627,7 +1629,107 @@ async def test_a_configured_hub_that_cannot_ask_its_agent_stays_down(
 
     code = await hub.serve(configured)
 
+    assert code == EXIT_RESTART
+
+
+async def test_a_configured_hub_whose_agent_holds_another_address_stays_down(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stay-down half of #3171: an agent that answers, and names this machine's
+    overlay addresses, has said the configured one is not among them.
+
+    Nothing about that clears by restarting — the setting is wrong — so it keeps
+    ADR-0083 §5's ``78``.
+    """
+    from ai_assistant.service import overlay as overlay_module  # noqa: PLC0415 - one call site
+
+    async def _elsewhere(self: overlay_module.TailscaleAgent) -> Any:
+        del self
+        return overlay_module.HubOverlayIdentity(
+            identity="nHUB", addresses=frozenset({"100.64.0.10"})
+        )
+
+    monkeypatch.setattr(overlay_module.TailscaleAgent, "hub_identity", _elsewhere)
+    configured = settings.model_copy(update={"hub_remote_address": "100.64.0.9"})
+
+    code = await hub.serve(configured)
+
     assert code == EXIT_DEPLOYMENT
+
+
+async def test_a_configured_hub_whose_agent_holds_no_address_yet_comes_back(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent that answers but has no overlay address for this machine yet is one
+    still coming up at boot, so the refusal is a ``1`` (#3171)."""
+    from ai_assistant.service import overlay as overlay_module  # noqa: PLC0415 - one call site
+
+    async def _not_yet(self: overlay_module.TailscaleAgent) -> Any:
+        del self
+        return overlay_module.HubOverlayIdentity(identity="nHUB", addresses=frozenset())
+
+    monkeypatch.setattr(overlay_module.TailscaleAgent, "hub_identity", _not_yet)
+    configured = settings.model_copy(update={"hub_remote_address": "100.64.0.9"})
+
+    code = await hub.serve(configured)
+
+    assert code == EXIT_RESTART
+
+
+async def test_a_configured_agent_socket_that_is_not_a_socket_stays_down(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    tmp_path: Path,
+) -> None:
+    """The custody refusal ``local_agent`` raises for a configured path keeps its
+    ``78``: a regular file at the path will not become the agent's socket by the hub
+    starting again (#3171's stay-down case)."""
+    impostor = tmp_path / "tailscaled.sock"
+    impostor.write_text("not a socket")
+    configured = settings.model_copy(
+        update={"hub_remote_address": "100.64.0.9", "hub_overlay_agent_socket": str(impostor)}
+    )
+
+    code = await hub.serve(configured)
+
+    assert code == EXIT_DEPLOYMENT
+
+
+async def test_a_custody_check_that_met_descriptor_exhaustion_comes_back(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``ConfigurationError`` raised from ``ENFILE`` is a ``1`` through the hub's
+    own start, not only in :func:`~ai_assistant.service.exits.classify` (#3171)."""
+
+    def _exhausted(socket_path: str | None = None) -> Any:
+        del socket_path
+        try:
+            raise OSError(errno.ENFILE, "too many open files in system")
+        except OSError as exc:
+            msg = "the path to the overlay agent socket cannot be read"
+            raise ConfigurationError(msg) from exc
+
+    monkeypatch.setattr(hub, "local_agent", _exhausted)
+    configured = settings.model_copy(
+        update={
+            "hub_remote_address": "100.64.0.9",
+            "hub_overlay_agent_socket": "/run/qa/tailscaled.sock",
+        }
+    )
+
+    code = await hub.serve(configured)
+
+    assert code == EXIT_RESTART
 
 
 async def test_a_hub_whose_control_socket_will_not_bind_serves_no_remote_request(
@@ -1719,7 +1821,7 @@ async def test_the_configured_agent_socket_reaches_the_agent_the_hub_builds(
 
     code = await hub.serve(configured)
 
-    assert code == EXIT_DEPLOYMENT
+    assert code == EXIT_RESTART
     assert asked == ["/run/qa/tailscaled.sock"]
 
 
@@ -1755,7 +1857,7 @@ async def test_a_hub_with_no_configured_agent_socket_still_asks_for_the_defaults
 
     code = await hub.serve(configured)
 
-    assert code == EXIT_DEPLOYMENT
+    assert code == EXIT_RESTART
     assert asked == [None]
 
 

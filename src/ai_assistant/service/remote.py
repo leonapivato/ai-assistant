@@ -36,6 +36,7 @@ import structlog
 
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.service.enrolment import Refusal
+from ai_assistant.service.exits import ClearableRefusalError
 from ai_assistant.service.overlay import OverlayIdentityUnavailableError
 from ai_assistant.service.transport import hold, refuse
 from ai_assistant.wire import envelope as env
@@ -165,10 +166,15 @@ class RemoteListener:
         never came up.
 
         Raises:
-            ConfigurationError: If the agent does not report the configured address
-                as this machine's own, or cannot be asked. A stay-down deployment
-                fault (ADR-0083 §5): restarting unchanged never succeeds, and what
-                has to change is the configuration or the overlay.
+            ClearableRefusalError: If the agent cannot be asked, or reports no
+                overlay address for this machine at all. A ``1``, not a ``78``
+                (#3171): an agent that timed out, has not started yet, or has not
+                yet been given its addresses at boot clears without anyone acting,
+                and ADR-0083 §5 says "if yes — even eventually — it is ``1``".
+            ConfigurationError: If the agent reports addresses for this machine and
+                the configured one is not among them. A stay-down deployment fault
+                (ADR-0083 §5): restarting unchanged never succeeds, and what has to
+                change is the configuration or the overlay.
             OSError: If the socket cannot be bound. Left to propagate for the same
                 reason the loopback listener leaves it: the raw errno distinguishes
                 a stay-down fault from a transient one.
@@ -183,7 +189,21 @@ class RemoteListener:
                 f"will not bind one it cannot confirm; start the overlay agent, or unset "
                 f"ASSISTANT_HUB_REMOTE_ADDRESS to serve the loopback socket alone"
             )
-            raise ConfigurationError(msg) from exc
+            raise ClearableRefusalError(msg) from exc
+        if not reported.addresses:
+            # An agent that answers but holds no address for this machine yet is one
+            # still coming up — not logged in, or waiting for its network map — and
+            # nothing about the configured address is wrong. Refused all the same,
+            # since §2 binds only a confirmed overlay address, but as a fault that
+            # clears (#3171).
+            msg = (
+                f"the remote listener is configured to bind {self.address}, and the overlay "
+                f"agent on this machine reports no overlay address for it yet. ADR-0124 §2 "
+                f"binds only an overlay address, so the hub will not bind one it cannot "
+                f"confirm; bring the overlay up on this machine, or unset "
+                f"ASSISTANT_HUB_REMOTE_ADDRESS to serve the loopback socket alone"
+            )
+            raise ClearableRefusalError(msg)
         if self.address not in reported.addresses:
             msg = (
                 f"the remote listener is configured to bind {self.address}, which the "
