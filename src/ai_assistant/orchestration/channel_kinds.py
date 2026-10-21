@@ -23,6 +23,14 @@ went into as ``<channel type>:<instance id>`` — ``conversation:<id>`` for the 
 as it always was. :func:`place_of` spells it, and :func:`users_place` reads from a
 recorded place whether its kind establishes the user there, which is what authorizing
 reads of a question's place (ADR-0323 §4:8) without naming a channel (§4:5).
+
+**One activation at a time** (ADR-0332 §2:3). A kind declares whether each of its places
+runs one activation at a time: the hub chat's conversations and the line do. The
+declaration is :func:`one_at_a_time`'s register, keyed by channel type as ``core``'s is,
+so a kind not yet declared in code (the hub chat's) declares it too, and
+:attr:`ChannelKind.one_at_a_time` reads it rather than restating it. On such a place an
+activation is admitted only where none started from it is running, and an input that
+arrives meanwhile joins the running one or waits (§2:4).
 """
 
 from __future__ import annotations
@@ -42,12 +50,17 @@ __all__ = [
     "Direction",
     "Reach",
     "WindowSource",
+    "one_at_a_time",
     "place_of",
     "users_place",
 ]
 
 #: What separates a place's channel type from its instance id.
 _PLACE_SEPARATOR: Final = ":"
+
+#: ADR-0332 §2:3: the channel types whose kind declares that each of its places runs one
+#: activation at a time. The hub chat's conversations and the Telegram line.
+_ONE_AT_A_TIME: Final = frozenset({"conversation", "telegram"})
 
 
 class Reach(StrEnum):
@@ -161,6 +174,11 @@ class ChannelKind:
         """Whether the kind establishes the user as an author in its places (§5:4)."""
         return establishes_the_user(self.channel_type)
 
+    @property
+    def one_at_a_time(self) -> bool:
+        """Whether each of the kind's places runs one activation at a time (ADR-0332 §2:3)."""
+        return self.channel_type in _ONE_AT_A_TIME
+
     def input_origin(self, channel: ChannelIdentity, *, takes_in_forward: bool) -> InputOrigin:
         """The origin the kind declares for one input on ``channel`` (ADR-0284 §2:2).
 
@@ -172,6 +190,17 @@ class ChannelKind:
             msg = "a kind declares the origin of its own channels' input alone"
             raise ValueError(msg)
         return input_origin(channel, takes_in_forward=takes_in_forward)
+
+
+def one_at_a_time(channel_type: str) -> bool:
+    """Whether the kind of ``channel_type`` runs one activation at a time per place.
+
+    ADR-0332 §2:3: the conversation kind and the line declare that they do, so on one of
+    their places an activation is admitted only where none started from it is running,
+    and an input arriving meanwhile joins it or waits (§2:4). Every other kind's
+    activations run side by side (§2:2).
+    """
+    return channel_type in _ONE_AT_A_TIME
 
 
 def place_of(channel: ChannelIdentity) -> str:

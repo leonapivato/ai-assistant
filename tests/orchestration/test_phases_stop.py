@@ -92,16 +92,20 @@ async def test_already_ended_and_no_such_activation_each_write_nothing() -> None
 
 
 async def test_what_waited_behind_a_stopped_activation_is_then_taken_in() -> None:
-    """ADR-0295 §3:6: a stop holds nothing back; the correction is answered after it."""
+    """ADR-0295 §3:6: a stop holds nothing back; the correction is answered after it.
+
+    The correction is written after the stop, so it joins nothing (ADR-0332 §3:3): it
+    waits, and is taken in when the stopped activation ends.
+    """
     completer = Gated(RoundResponse(text="Saturday it is."), RoundResponse(text="Sunday it is."))
     harness = phases_harness(completer)
     conversation = await open_conversation(harness)
     await harness.engine.write_message(conversation, message=said("m-1", "book it Saturday"))
     await asyncio.wait_for(completer.entered.wait(), SETTLE)
     running = await working(harness, conversation)
-    await harness.engine.write_message(conversation, message=said("m-2", "actually Sunday"))
 
     assert await harness.engine.stop_activation(running) is ActivationStop.STOPPED
+    await harness.engine.write_message(conversation, message=said("m-2", "actually Sunday"))
     completer.release.set()
 
     async def both_frozen() -> bool:

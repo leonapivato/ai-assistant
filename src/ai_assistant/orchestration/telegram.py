@@ -21,11 +21,26 @@ recorded nowhere and is not answered (§5:2). An update the intake record alread
 was dealt with and is passed over, so a duplicate fetch starts no second activation and
 sends no second fixed line (§5:9).
 
-**One activation at a time, and nothing asked of Telegram while it runs** (§5:5,
-§5:7). The reader is one loop: it polls, deals with what came back, and polls again
-only once the activation it started has ended. A message sent meanwhile waits in
-Telegram, and the next poll takes in everything waiting **together, as one input**,
-each message keeping the time Telegram gave it (§5:4).
+**One activation at a time, and polling while it runs** (ADR-0332 §2:3-§2:4, §8:7-§8:8,
+amending ADR-0323 §5:5 and §5:7). The reader is one loop: it polls and deals with what
+came back. Where nothing is running, the first message starts the start wait
+(``telegram_start_wait``, ADR-0332 §5:3), and once it has passed the reader takes in
+everything that has arrived **together, as one input**, each message keeping the time
+Telegram gave it (§5:4), and runs its activation beside the loop. While it runs, the
+loop keeps polling: a message from the same author **joins it** where ADR-0332 §3:3
+allows, through the engine's join, and is marked taken in by it (§3:18); one that does
+not join waits in Telegram, unconfirmed, and so does everything after it, until the
+activation ends and the next poll takes them in. Those polls are paced
+(:data:`RUNNING_POLL_PACE`), so updates left waiting never make the reader poll in a
+loop.
+
+**The line's** ``/stop`` (ADR-0332 §8). A message from the configured account in its
+chat, not forwarded, whose whole text is ``/stop`` and which Telegram marked as that
+``bot_command`` (:func:`is_stop_command`), is no input: the reader records it answered
+on the intake record (``claim_reply``), then stops the activation running from the
+chat, as ``stop_activation`` does, and answers by rule, :data:`STOPPED_LINE` or
+:data:`NOTHING_RUNNING_LINE`. It acts on one as soon as a poll returns it, which is only
+while it is within the page Telegram returns past the confirmed offset (§8:4).
 
 **The confirm rule** (§5:6). The reader tells the intake record which updates are dealt
 with — input once its activation is admitted and has marked it taken in, a non-text
@@ -106,6 +121,7 @@ from ai_assistant.orchestration.channel_kinds import (
 )
 from ai_assistant.orchestration.chat import CHAT_WINDOW_SIZE, COULDNT_FINISH
 from ai_assistant.orchestration.defects import is_defect, log_defect
+from ai_assistant.orchestration.joining import JoiningInput, input_standing
 from ai_assistant.orchestration.phase_path import Delivery, Fitted
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.understanding import (
@@ -127,9 +143,14 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.phase_path import PlaceWriter
 
 __all__ = [
+    "DEFAULT_TELEGRAM_START_WAIT",
     "INTERRUPTED_LINE",
     "LINE_GIVER",
     "NON_TEXT_LINE",
+    "NOTHING_RUNNING_LINE",
+    "RUNNING_POLL_PACE",
+    "STOPPED_LINE",
+    "STOP_COMMAND",
     "TELEGRAM",
     "TELEGRAM_CHANNEL_TYPE",
     "TELEGRAM_DESCRIPTION",
@@ -137,6 +158,7 @@ __all__ = [
     "TelegramLineSeams",
     "TelegramReader",
     "TelegramWriter",
+    "is_stop_command",
     "line_channel",
     "split_message",
 ]
@@ -148,6 +170,25 @@ TELEGRAM_CHANNEL_TYPE: Final = "telegram"
 
 #: The fixed line a non-text message from the owner is answered with (§5:3).
 NON_TEXT_LINE: Final = "I can only read text here for now."
+
+#: The line's one stop command, as its whole text and its ``bot_command`` (ADR-0332 §8:1).
+STOP_COMMAND: Final = "/stop"
+
+#: The fixed line a stop command is answered with where it stopped an activation (§8:5).
+STOPPED_LINE: Final = "Stopped."
+
+#: The fixed line a stop command is answered with where nothing was running (§8:5).
+NOTHING_RUNNING_LINE: Final = "Nothing was running."
+
+#: ``Settings.telegram_start_wait``'s default (ADR-0332 §6:4), which the line's seams
+#: take where the composition root passes none.
+DEFAULT_TELEGRAM_START_WAIT: Final = timedelta(seconds=2)
+
+#: The rest between two polls while an activation runs and an update is left waiting, or
+#: handed to the activation and not yet marked: those come back in every poll at once, so
+#: the rest is what keeps the reader from polling in a loop (ADR-0332 §8:8). It ends early
+#: when the activation does.
+RUNNING_POLL_PACE: Final = timedelta(seconds=1)
 
 #: The fixed message sent after a restart cut the chat's last activation off (§6:10).
 INTERRUPTED_LINE: Final = (
@@ -333,6 +374,12 @@ class TelegramLineSeams:
         poll_wait: ``Settings.telegram_poll_wait``.
         poll_bound: ``Settings.telegram_poll_bound``, strictly above the wait.
         send_bound: ``Settings.telegram_send_bound``, one send's or indicator's bound.
+        start_wait: ``Settings.telegram_start_wait`` (ADR-0332 §5:3), strictly
+            positive: how long after the first message, where nothing is running, the
+            reader waits before it takes in what has arrived.
+
+    Raises:
+        ValueError: If ``start_wait`` is not strictly positive.
     """
 
     client: TelegramBotClient
@@ -341,6 +388,13 @@ class TelegramLineSeams:
     poll_wait: timedelta
     poll_bound: timedelta
     send_bound: timedelta
+    start_wait: timedelta = DEFAULT_TELEGRAM_START_WAIT
+
+    def __post_init__(self) -> None:
+        """The start wait is strictly positive (ADR-0332 §6:4)."""
+        if self.start_wait <= timedelta(0):
+            msg = "telegram_start_wait is strictly positive (ADR-0332 §6:4)"
+            raise ValueError(msg)
 
     @property
     def channel(self) -> ChannelIdentity:
@@ -384,19 +438,7 @@ class TelegramInput:
     @property
     def recorded(self) -> tuple[RecordedInputMessage, ...]:
         """Each message as the trigger records it: dated, a forward with its sender (§5:4)."""
-        return tuple(
-            RecordedInputMessage(
-                text=one.text or "",
-                sent_at=one.sent_at,
-                position=one.message_id,
-                forwarded_from=None
-                if one.forward_origin is None
-                else ClaimedAuthor(
-                    name=one.forward_origin.name, account_id=one.forward_origin.account_id
-                ),
-            )
-            for one in self.messages
-        )
+        return _recorded(self.messages)
 
     def narrowed(self, update_ids: Sequence[int]) -> TelegramInput:
         """The input as its activation took it in: only the updates ``update_ids`` name."""
@@ -410,6 +452,39 @@ class TelegramInput:
             ),
         )
         return replace(self, updates=updates, window=window)
+
+
+def _recorded(messages: Sequence[TelegramMessage]) -> tuple[RecordedInputMessage, ...]:
+    """Each message as an episode records it: dated, a forward with its sender (§5:4)."""
+    return tuple(
+        RecordedInputMessage(
+            text=one.text or "",
+            sent_at=one.sent_at,
+            position=one.message_id,
+            forwarded_from=None
+            if one.forward_origin is None
+            else ClaimedAuthor(
+                name=one.forward_origin.name, account_id=one.forward_origin.account_id
+            ),
+        )
+        for one in messages
+    )
+
+
+def is_stop_command(message: TelegramMessage) -> bool:
+    """Whether a message from the configured account in its chat is a stop (ADR-0332 §8:1).
+
+    Not forwarded, its whole text :data:`STOP_COMMAND`, and its ``command`` that too:
+    Telegram marked the text as a ``bot_command`` entity at its first character. Nothing
+    else is one (§8:2): a forward, ``/stop@`` followed by a name, ``/stop`` without the
+    entity, and text that only mentions it. That the message is the configured
+    account's, in its private chat, is the reader's to have checked first (§5:1).
+    """
+    return (
+        message.forward_origin is None
+        and message.text == STOP_COMMAND
+        and message.command == STOP_COMMAND
+    )
 
 
 async def _finished[O: TelegramOutcome](
@@ -676,21 +751,42 @@ class _Batch:
         return through
 
 
+@dataclass(slots=True)
+class _Turn:
+    """The activation the reader runs beside its loop, while it runs (ADR-0332 §8:7).
+
+    Attributes:
+        activation_id: The activation.
+        task: What runs it: the activation, then the reader's account of what it marked.
+        handed: The updates handed to it, its trigger's and each joined one's, which no
+            later poll hands anything again while it runs.
+        waited: Whether an input did not join it, after which nothing joins it, since no
+            input joins past one that is waiting (§3:3).
+    """
+
+    activation_id: str
+    task: asyncio.Future[None]
+    handed: set[int]
+    waited: bool = False
+
+
 class TelegramReader:
     """The line's reader, its sensor: one loop that polls, deals and polls again (§5).
 
     :meth:`run` is the line's long-running task, which the engine starts with the hub
     and stops with it: :meth:`close` ends a poll or a rest at once, and an activation
-    running then is drained as any other.
+    running then is drained as any other, the loop ending once it has.
     """
 
-    def __init__(  # noqa: PLR0913 — the bot and its records, the episodes, how an activation runs, the engine's two seams, the writers' links, and two bounds
+    def __init__(  # noqa: PLR0913 — the bot and its records, the episodes, how an activation runs, joins and stops, the engine's two seams, the writers' links, and two bounds
         self,
         *,
         seams: TelegramLineSeams,
         writer: TelegramWriter,
         memory: MemoryStore,
         activate: Callable[[TelegramInput], Awaitable[bool]],
+        join: Callable[[JoiningInput], str | None],
+        stop: Callable[[str], Awaitable[bool]],
         closing: Callable[[], bool],
         mint: Callable[[], str],
         written: Callable[
@@ -709,6 +805,11 @@ class TelegramReader:
                 in (:meth:`take_in`) and writes its reply. It returns whether anything
                 was marked, once the activation has ended, or raises
                 ``CancelledError`` where a shutdown cancelled it.
+            join: The engine's join (ADR-0332 §3:3, §3:6): it joins an input to the
+                activation running on the line's chat where that activation may take
+                it, and answers the activation's id, or ``None`` where it joined none.
+            stop: Stops a running activation as ``stop_activation`` does (ADR-0332
+                §8:4), and answers whether it stopped one.
             closing: Whether the engine has begun shutting down, after which nothing
                 new is taken in.
             mint: The activation id the next input is admitted with.
@@ -730,6 +831,9 @@ class TelegramReader:
         self._mint = mint
         self._written = written
         self._sleep = sleep
+        self._join = join
+        self._stop = stop
+        self._start_wait = seams.start_wait
         self._task: asyncio.Task[object] | None = None
         # Whether the loop is polling or resting, which a close ends at once; an
         # activation it runs is the drain's.
@@ -739,6 +843,17 @@ class TelegramReader:
         self._marked: dict[str, list[int]] = {}
         # The activation the reader has admitted for an input, until it ends.
         self._current: str | None = None
+        # ADR-0332 §8:7: the activation running beside the loop, until it ends.
+        self._turn: _Turn | None = None
+        # ADR-0332 §5:3: the start wait has passed for the input waiting, so the next
+        # poll that returns it takes it in. Also set when an activation ends with input
+        # left waiting, which arrived while it ran, so it is taken in at once (§5:5).
+        self._started = False
+        # ADR-0332 §3:18: the updates a join took whose marking has not yet landed, by
+        # the activation they joined. Each later poll marks them first and hands none of
+        # them to anything else, so a marking refused never lets a joined update be
+        # taken in again while this process runs.
+        self._owed: dict[int, str] = {}
 
     @property
     def channel(self) -> ChannelIdentity:
@@ -753,9 +868,9 @@ class TelegramReader:
     def close(self) -> None:
         """Stop the loop: a poll or a rest in progress ends at once (§11:11).
 
-        A poll cut off so is finished *unknown* and takes nothing in; an activation the
-        loop is running is left to finish or be cancelled by the engine's drain, after
-        which the loop ends without polling again.
+        A poll cut off so is finished *unknown* and takes nothing in; an activation
+        running beside the loop is left to finish or be cancelled by the engine's drain,
+        and the loop ends once it has, without polling again.
         """
         self._stopped = True
         if self._idle and self._task is not None:
@@ -768,28 +883,51 @@ class TelegramReader:
             CancelledError: Where :meth:`close` or a shutdown cancelled it.
         """
         self._task = asyncio.current_task()
-        await self._after_restart()
-        while not self._done():
-            try:
-                outcome = await self._poll()
-                if outcome.done:
-                    settled = await self._deal_with(outcome.updates)
-                    wait = None if settled else POLL_BACKOFF
-                else:
-                    wait = _poll_backoff(outcome)
-            except asyncio.CancelledError:
-                raise
-            except TelegramIntakeRecordError, MemoryStoreError:
-                _log.warning("telegram_read_failed", stage="reader", reason="store_failed")
-                wait = POLL_BACKOFF
-            except Exception as exc:  # the line runs as long as the hub: a defect is logged
-                if is_defect(exc):
-                    log_defect("telegram_read_failed", exc, stage="reader", activation_id=None)
-                else:
-                    _log.warning("telegram_read_failed", stage="reader", reason="failed")
-                wait = POLL_BACKOFF
-            if wait is not None and not self._done():
-                await self._idly(self._sleep(wait.total_seconds()))
+        try:
+            await self._after_restart()
+            while not self._done():
+                await self._once()
+        finally:
+            # An activation running beside the loop is the drain's: the loop ends once it
+            # has, and a further cancellation reaches it.
+            turn = self._turn
+            if turn is not None:
+                await asyncio.gather(turn.task, return_exceptions=True)
+
+    async def _once(self) -> None:
+        """One poll, what it returned dealt with, and the rest before the next."""
+        try:
+            outcome = await self._poll()
+            if outcome.done:
+                wait = await self._deal_with(outcome.updates)
+            else:
+                wait = _poll_backoff(outcome)
+        except asyncio.CancelledError:
+            raise
+        except TelegramIntakeRecordError, MemoryStoreError:
+            _log.warning("telegram_read_failed", stage="reader", reason="store_failed")
+            wait = POLL_BACKOFF
+        except Exception as exc:  # the line runs as long as the hub: a defect is logged
+            if is_defect(exc):
+                log_defect("telegram_read_failed", exc, stage="reader", activation_id=None)
+            else:
+                _log.warning("telegram_read_failed", stage="reader", reason="failed")
+            wait = POLL_BACKOFF
+        if wait is not None and not self._done():
+            await self._idly(self._rest(wait))
+
+    async def _rest(self, wait: timedelta) -> None:
+        """Rest before the next poll; a pace while an activation runs ends with it (§8:8)."""
+        turn = self._turn
+        resting = asyncio.ensure_future(self._sleep(wait.total_seconds()))
+        try:
+            if turn is None or wait != RUNNING_POLL_PACE:
+                await resting
+            else:
+                await asyncio.wait((resting, turn.task), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            resting.cancel()
+            await asyncio.gather(resting, return_exceptions=True)
 
     def _done(self) -> bool:
         return self._stopped or self._closing()
@@ -829,26 +967,80 @@ class TelegramReader:
             _log.info("telegram_poll_not_done", stage="reader", reason=_failure(outcome))
         return outcome
 
-    async def _deal_with(self, updates: Sequence[TelegramUpdate]) -> bool:
+    async def _deal_with(self, updates: Sequence[TelegramUpdate]) -> timedelta | None:
         """Deal with what one poll handed back, then say what is dealt with (§5:6).
 
+        In the order Telegram gave them (:meth:`_scan`), and then the input left: where
+        an activation runs, it joins it or waits (:meth:`_joined`), and where none runs it
+        is taken in once the start wait has passed (:meth:`_begin`). An update handed to
+        the running activation and not yet marked is neither dealt with nor input, and
+        is dealt with once a later poll finds it taken in.
+
         Returns:
-            Whether every update was dealt with.
+            The rest before the next poll: none where every update was dealt with, or
+            where the activation ended meanwhile and what waited is to be taken in; the
+            start wait where it has just begun; the pace while an activation runs; and
+            the backoff otherwise.
 
         Raises:
             TelegramIntakeRecordError: If the record cannot be read or written.
         """
+        await self._settle()
         batch = _Batch(ids=[one.update_id for one in updates])
         if not batch.ids:
-            return True
+            return None
+        turn = self._turn
+        pending = await self._scan(updates, turn, batch)
+        begun: bool | None = None
+        if pending and turn is not None:
+            batch.dealt.update(await self._joined(turn, pending))
+        elif pending and not self._closing():
+            begun = await self._begin(pending)
+        through = batch.through
+        if through is not None:
+            await self._intake.confirm_through(through)
+        if through == batch.ids[-1] or begun is False:
+            # All dealt with; or just taken in, its updates dealt with once a poll
+            # finds them marked, so the next poll is at once.
+            return None
+        if begun:
+            return self._start_wait
+        if self._turn is not None:
+            return RUNNING_POLL_PACE
+        return None if turn is not None else POLL_BACKOFF
+
+    async def _scan(
+        self, updates: Sequence[TelegramUpdate], turn: _Turn | None, batch: _Batch
+    ) -> list[TelegramUpdate]:
+        """Deal with each update in order, but the input; answer the input left after.
+
+        An update held already, or not input, is dealt with; a stop command is acted on
+        (:meth:`_stopping`), once the input before it has joined or not (ADR-0332 §8:4),
+        so an input that joined before the stop is the stopped activation's; and a
+        non-text message is answered by rule (§5:3).
+
+        Returns:
+            The input after the last stop command, in order.
+        """
         recorded = await self._intake.recorded(batch.ids)
+        pending: list[TelegramUpdate] = []
         for update in updates:
             if update.update_id in recorded:
                 batch.dealt.add(update.update_id)  # §5:9: taken in or answered once
                 continue
+            if update.update_id in self._owed or (
+                turn is not None and update.update_id in turn.handed
+            ):
+                continue  # the running activation's, its marking not yet landed
             message = self._own(update)
             if message is None:
                 batch.dealt.add(update.update_id)  # §5:2: not input, recorded nowhere
+            elif is_stop_command(message):
+                if turn is not None:
+                    batch.dealt.update(await self._joined(turn, pending))
+                    pending = []
+                if await self._stopping(update.update_id):
+                    batch.dealt.add(update.update_id)
             elif message.text is None or not message.text.strip():
                 # §5:3: answered by rule. Whether this claimed the reply or the record
                 # already held it answered or taken in, the record now holds it.
@@ -857,13 +1049,8 @@ class TelegramReader:
                 )
                 batch.dealt.add(update.update_id)
             else:
-                batch.inputs.append(update)
-        if batch.inputs and not self._closing():
-            batch.dealt.update(await self._admit(batch.inputs))
-        through = batch.through
-        if through is not None:
-            await self._intake.confirm_through(through)
-        return through == batch.ids[-1]
+                pending.append(update)
+        return pending
 
     def _own(self, update: TelegramUpdate) -> TelegramMessage | None:
         """The update's message, where it is the configured account's in its chat (§5:1)."""
@@ -879,11 +1066,26 @@ class TelegramReader:
             return None
         return message
 
-    async def _admit(self, updates: Sequence[TelegramUpdate]) -> tuple[int, ...]:
-        """Bring the updates in, with the window, as one activation's input (§5:5).
+    async def _begin(self, updates: Sequence[TelegramUpdate]) -> bool:
+        """Start the start wait, or once it has passed take ``updates`` in (ADR-0332 §5:3).
 
         Returns:
-            The updates the activation marked taken in.
+            Whether this began the start wait: nothing is taken in yet, and the next poll
+            after it takes in what has arrived.
+        """
+        if not self._started:
+            self._started = True
+            return True
+        await self._admit(updates)
+        self._started = False
+        return False
+
+    async def _admit(self, updates: Sequence[TelegramUpdate]) -> None:
+        """Bring the updates in, with the window, as one activation's input (§5:5).
+
+        The activation runs beside the loop (ADR-0332 §8:7): the loop goes on polling
+        while it runs, and its updates are dealt with once a later poll finds them taken
+        in.
         """
         messages = [one.message for one in updates if one.message is not None]
         taken = TelegramInput(
@@ -894,15 +1096,138 @@ class TelegramReader:
         )
         self._marked[taken.activation_id] = []
         self._current = taken.activation_id
+        task = asyncio.ensure_future(self._running(taken))
+        self._turn = _Turn(
+            activation_id=taken.activation_id, task=task, handed=set(taken.update_ids)
+        )
+        task.add_done_callback(self._ended)
+
+    async def _running(self, taken: TelegramInput) -> None:
+        """Run the input's activation, showing typing while it runs (§6:7)."""
         typing = asyncio.ensure_future(self._writer.typing(taken.activation_id))
         try:
             await self._activate(taken)
+        except asyncio.CancelledError:
+            raise
+        except TelegramIntakeRecordError, MemoryStoreError:
+            _log.warning("telegram_read_failed", stage="reader", reason="store_failed")
+        except Exception as exc:  # the line runs as long as the hub: a defect is logged
+            if is_defect(exc):
+                log_defect(
+                    "telegram_read_failed", exc, stage="reader", activation_id=taken.activation_id
+                )
+            else:
+                _log.warning("telegram_read_failed", stage="reader", reason="failed")
         finally:
             self._current = None
-            marked = tuple(self._marked.pop(taken.activation_id, ()))
+            self._marked.pop(taken.activation_id, None)
             typing.cancel()
             await asyncio.gather(typing, return_exceptions=True)
-        return marked
+
+    def _ended(self, task: asyncio.Future[None]) -> None:
+        """The activation has ended: what waited meanwhile is taken in at once (§5:5)."""
+        turn = self._turn
+        if turn is not None and turn.task is task:
+            self._turn = None
+            self._started = turn.waited
+        if not task.cancelled():
+            task.exception()  # retrieved, so a failure is never reported unretrieved
+
+    async def _joined(self, turn: _Turn | None, updates: Sequence[TelegramUpdate]) -> set[int]:
+        """Join ``updates`` to the running activation, in order, as far as they may.
+
+        ADR-0332 §3:3: each run of consecutive updates of one standing is one input,
+        handed to the engine's join, which takes it in one step or not at all; the first
+        that does not join waits, and so does everything after it (§3:4). An update that
+        joined is marked taken in by the activation it joined (§3:18), the marking owed
+        until it lands (:meth:`_settle`).
+
+        Returns:
+            The updates that joined and are marked.
+
+        Raises:
+            TelegramIntakeRecordError: If the record cannot be written; the marking
+                stays owed.
+        """
+        if turn is None or not updates:
+            return set()
+        joined: list[tuple[int, str]] = []
+        for run in _runs(updates):
+            if turn.task.done():
+                # It ended meanwhile: what is left arrived while it ran, so it is taken
+                # in at once by the next poll (§5:5).
+                turn.waited = True
+                self._started = True
+            if turn.waited:
+                break
+            messages = [one.message for one in run if one.message is not None]
+            forward = any(one.forward_origin is not None for one in messages)
+            into = self._join(
+                JoiningInput(
+                    channel=self._channel,
+                    messages=_recorded(messages),
+                    standing=input_standing(
+                        origin=TELEGRAM.input_origin(self._channel, takes_in_forward=forward),
+                        established=not forward,
+                    ),
+                )
+            )
+            if into is None:
+                turn.waited = True
+                break
+            for one in run:
+                turn.handed.add(one.update_id)
+                self._owed[one.update_id] = into
+                joined.append((one.update_id, into))
+        if not joined:
+            return set()
+        await self._settle()
+        return {update_id for update_id, _ in joined if update_id not in self._owed}
+
+    async def _settle(self) -> None:
+        """Mark the updates a join took, where their marking has not landed (§3:18).
+
+        Raises:
+            TelegramIntakeRecordError: If the record cannot be written; the marking
+                stays owed.
+        """
+        while self._owed:
+            activation_id = next(iter(self._owed.values()))
+            update_ids = sorted(one for one, by in self._owed.items() if by == activation_id)
+            await self._intake.take_in(update_ids, activation_id=activation_id)
+            for one in update_ids:
+                self._owed.pop(one, None)
+
+    async def _stopping(self, update_id: int) -> bool:
+        """Act on a stop command: record it answered, stop what runs, answer (§8:4-§8:6).
+
+        The record holds it answered before anything is stopped, so a poll that returns
+        it again stops nothing and answers nothing (§8:6). Then the activation running
+        from the line's chat is stopped, where one is, and the line answers by rule from
+        the writer, never from the activation (§8:5).
+
+        Returns:
+            Whether the record holds it answered, so it is dealt with.
+
+        Raises:
+            TelegramIntakeRecordError: If the record cannot be written for the claim; it
+                is then not dealt with, and nothing is stopped.
+        """
+        first = await self._intake.claim_reply(update_id)
+        if first is None:
+            return True  # held already: a repeat stops nothing (§5:9)
+        running = self._current
+        stopped = running is not None and await self._stop(running)
+        _log.info("telegram_stop_command", stage="reader", stopped=stopped)
+        claims: list[str] = [first]
+
+        async def claim() -> str | None:
+            if claims:
+                return claims.pop()
+            return await self._intake.claim_reply(update_id)
+
+        await self._writer.fixed(claim, STOPPED_LINE if stopped else NOTHING_RUNNING_LINE)
+        return True
 
     async def take_in(self, taken: TelegramInput, *, into: list[int]) -> None:
         """Mark the input's updates taken in by its activation (§5:8, ADR-0293 §6:8).
@@ -1121,6 +1446,26 @@ class TelegramReader:
                 if writer.asked is not None:
                     asked[quoted.message_id] = writer.asked
         return tuple(one for _, one in sorted(replied.items())), claimed
+
+
+def _runs(updates: Sequence[TelegramUpdate]) -> list[list[TelegramUpdate]]:
+    """``updates`` in runs of consecutive ones of one standing: forwards, or the user's own.
+
+    A forward's author is claimed (ADR-0323 §4:10), so a run that takes one in has a
+    standing of its own, and never joins one whose author is established (ADR-0332 §3:3).
+    """
+    runs: list[list[TelegramUpdate]] = []
+    for one in updates:
+        forward = one.message is not None and one.message.forward_origin is not None
+        if runs and _forwarded(runs[-1][-1]) == forward:
+            runs[-1].append(one)
+        else:
+            runs.append([one])
+    return runs
+
+
+def _forwarded(update: TelegramUpdate) -> bool:
+    return update.message is not None and update.message.forward_origin is not None
 
 
 def _failure(outcome: TelegramOutcome) -> str:

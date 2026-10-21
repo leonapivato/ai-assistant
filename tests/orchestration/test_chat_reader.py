@@ -228,13 +228,17 @@ async def test_a_repeated_send_is_taken_in_once() -> None:
     assert len(await _episodes(harness.memory)) == 1
 
 
-# --- the interim: one activation at a time per conversation (§6:2, §6:3) -------------
+# --- one activation at a time per conversation (§6:2, §6:3, ADR-0332 §2:4) -----------
 
 
 async def test_messages_written_while_one_runs_wait_and_are_taken_in_as_one_input() -> None:
-    """§6:2, §6:3: nothing is refused; what waited is one input when the first ends."""
+    """§6:2, §6:3: nothing is refused; what waited is one input when the first ends.
+
+    With joining off (ADR-0332 §6:5), so each message written meanwhile waits; joining
+    is ``test_chat_reader_joining``'s.
+    """
     composer = _GatedModel()
-    harness = _harness(composer=composer)
+    harness = _harness(composer=composer, join_limit=0)
     conversation = await _conversation(harness)
     await harness.engine.write_message(conversation, message=_said("m-1", "first"))
     await asyncio.wait_for(composer.entered.wait(), _SETTLE)
@@ -306,10 +310,15 @@ async def test_the_window_is_the_recent_transcript_each_message_keeping_its_auth
 
 
 async def test_a_reply_written_after_a_waiting_message_is_marked_as_after_it() -> None:
-    """§6: the window shows that a message was written before the reply it follows."""
+    """§6: the window shows that a message was written before the reply it follows.
+
+    With joining off (ADR-0332 §6:5), so the message written meanwhile waits.
+    """
     model = FakeModelProvider(STATED_PROPOSAL)
     composer = _GatedModel()
-    harness = _harness(composer=composer, understanding=understanding_stage(model=model))
+    harness = _harness(
+        composer=composer, understanding=understanding_stage(model=model), join_limit=0
+    )
     conversation = await _conversation(harness)
     await harness.engine.write_message(conversation, message=_said("m-1", "first"))
     await asyncio.wait_for(composer.entered.wait(), _SETTLE)
@@ -511,9 +520,12 @@ async def test_a_shutdown_while_marking_leaves_an_interrupted_activation() -> No
 
 
 async def test_a_backlog_past_one_marking_call_is_still_one_input() -> None:
-    """§6:3: every waiting message is taken in together, whatever the store's bound."""
+    """§6:3: every waiting message is taken in together, whatever the store's bound.
+
+    With joining off (ADR-0332 §6:5), so every message written meanwhile waits.
+    """
     composer = _GatedModel()
-    harness = _harness(composer=composer)
+    harness = _harness(composer=composer, join_limit=0)
     conversation = await _conversation(harness)
     await harness.engine.write_message(conversation, message=_said("m-0", "first"))
     await asyncio.wait_for(composer.entered.wait(), _SETTLE)
