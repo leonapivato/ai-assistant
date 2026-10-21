@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     ProposedCall,
     SearchOutcome,
     SearchRefusal,
+    ToolFailureKind,
     ToolOutcome,
     TranscriptMessage,
 )
@@ -314,21 +315,46 @@ async def test_a_forecast_read_goes_to_its_forecaster_and_is_attributed_by_the_h
 
 
 @pytest.mark.parametrize(
-    ("refusal", "outcome"),
+    ("refusal", "outcome", "kind"),
     [
-        (ForecastRefusal.NO_RESULT, ToolOutcome.SUCCEEDED),
-        (ForecastRefusal.DEADLINE_EXPIRED, ToolOutcome.INDETERMINATE),
-        (ForecastRefusal.TRANSPORT_FAILED, ToolOutcome.INDETERMINATE),
-        (ForecastRefusal.PROVIDER_REFUSED, ToolOutcome.FAILED),
-        (ForecastRefusal.RESPONSE_TOO_LARGE, ToolOutcome.FAILED),
-        (ForecastRefusal.UNATTESTED, ToolOutcome.FAILED),
+        (ForecastRefusal.NO_RESULT, ToolOutcome.SUCCEEDED, None),
+        (ForecastRefusal.UNATTESTED, ToolOutcome.SUCCEEDED, None),
+        (ForecastRefusal.DEADLINE_EXPIRED, ToolOutcome.INDETERMINATE, ToolFailureKind.TIMED_OUT),
+        (ForecastRefusal.TRANSPORT_FAILED, ToolOutcome.FAILED, ToolFailureKind.UNAVAILABLE),
+        (ForecastRefusal.PROVIDER_REFUSED, ToolOutcome.FAILED, ToolFailureKind.REFUSED),
+        (ForecastRefusal.RESPONSE_TOO_LARGE, ToolOutcome.FAILED, ToolFailureKind.REFUSED),
     ],
 )
-def test_a_forecast_refusal_is_a_result_unknown_or_not_done(
-    refusal: ForecastRefusal, outcome: ToolOutcome
+def test_a_forecast_refusal_is_the_outcome_its_ledger_completion_records(
+    refusal: ForecastRefusal, outcome: ToolOutcome, kind: ToolFailureKind | None
 ) -> None:
-    """ADR-0324 §8:1: a read cut short may have reached the provider, so it is unknown."""
-    assert _forecasted(ForecastOutcome(refusal=refusal)).outcome is outcome
+    """ADR-0306 §5:8, ADR-0321 §4:10, ADR-0324 §8:1: one outcome for both records.
+
+    Acting writes an approved call's effect record from this result, so it is the
+    outcome the forecaster's ledger completion records for the same refusal; the
+    forecaster's tests pin the same table for the ledger. An answer the provider gave is
+    done, a read cut short is unknown, and a call that did not complete is not done. A
+    refusal brings no text back, whichever outcome it is.
+    """
+    result = _forecasted(ForecastOutcome(refusal=refusal))
+
+    assert result.outcome is outcome
+    assert (None if result.failure is None else result.failure.kind) is kind
+    assert not result.output
+
+
+async def test_a_forecast_that_described_days_is_done_with_their_texts() -> None:
+    """The success arm of the same table: done, with one text per minted record."""
+    forecaster = FakeForecaster()
+    proposal = await forecaster.request()
+    assert proposal is not None
+    outcome = await forecaster.read(_allowed(proposal), timeout=timedelta(seconds=5))
+
+    result = _forecasted(outcome)
+
+    assert result.outcome is ToolOutcome.SUCCEEDED
+    assert result.failure is None
+    assert result.output == tuple(record.content for record in outcome.records)
 
 
 def test_a_pulls_attribution_follows_its_result_when_a_follow_up_offers_it_again() -> None:

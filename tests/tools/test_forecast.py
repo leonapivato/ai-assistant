@@ -80,6 +80,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.protocols import Forecaster
 from ai_assistant.core.types import (
     CostBasis,
+    ForecastOutcome,
     ForecastRefusal,
     MemorySource,
     PermissionDecision,
@@ -89,6 +90,7 @@ from ai_assistant.core.types import (
     ProvisioningState,
     SemanticMemory,
     ToolCall,
+    ToolFailureKind,
     ToolInvocation,
     ToolOutcome,
 )
@@ -101,12 +103,12 @@ from ai_assistant.tools.forecast import (
     FORECAST_READ_ID,
     FORECAST_SOURCE_NAME,
     ForecastEgress,
+    _result_of,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import ForecastOutcome
 
 #: The bound every case passes unless it is about the bound.
 _BOUND: Final = timedelta(seconds=30)
@@ -2135,3 +2137,29 @@ async def test_a_call_whose_decision_was_never_recorded_is_refused_before_the_se
         await subject.forecaster.read(call, timeout=_BOUND)
 
     assert subject.transport.attempts == ()
+
+
+@pytest.mark.parametrize(
+    ("refusal", "outcome", "kind"),
+    [
+        (ForecastRefusal.NO_RESULT, ToolOutcome.SUCCEEDED, None),
+        (ForecastRefusal.UNATTESTED, ToolOutcome.SUCCEEDED, None),
+        (ForecastRefusal.DEADLINE_EXPIRED, ToolOutcome.INDETERMINATE, ToolFailureKind.TIMED_OUT),
+        (ForecastRefusal.TRANSPORT_FAILED, ToolOutcome.FAILED, ToolFailureKind.UNAVAILABLE),
+        (ForecastRefusal.PROVIDER_REFUSED, ToolOutcome.FAILED, ToolFailureKind.REFUSED),
+        (ForecastRefusal.RESPONSE_TOO_LARGE, ToolOutcome.FAILED, ToolFailureKind.REFUSED),
+    ],
+)
+def test_every_refusal_completes_with_the_outcome_the_pull_reports(
+    refusal: ForecastRefusal, outcome: ToolOutcome, kind: ToolFailureKind | None
+) -> None:
+    """ADR-0306 §5:8: the completion's outcome, over every ``ForecastRefusal`` member.
+
+    The same table ``orchestration``'s tests pin for the result acting writes an
+    approved call's effect record from, so the ledger row and the effect record give
+    one answer (ADR-0321 §4:10).
+    """
+    result = _result_of(ForecastOutcome(refusal=refusal), FORECAST_READ, _BOUND)
+
+    assert result.outcome is outcome
+    assert (None if result.failure is None else result.failure.kind) is kind

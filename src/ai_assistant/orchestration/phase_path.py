@@ -483,9 +483,8 @@ _ACTED_OUTCOMES: Final = {
 }
 _GONE: Final = "the place took no message: the conversation is gone or refused it"
 
-#: The search and forecast refusals that leave a call's outcome unknown: it may have
-#: reached the provider, and an unknown outcome is reported as unknown (ADR-0312 §2,
-#: ADR-0306 §5:13, ADR-0324 §8:1). Both vocabularies spell them alike.
+#: The search refusals that leave a search's outcome unknown: it may have reached the
+#: provider, and an unknown outcome is reported as unknown (ADR-0312 §2, ADR-0306 §5:13).
 _UNKNOWN_SEARCHES: Final = frozenset({"deadline_expired", "transport_failed"})
 
 #: The capabilities planning is never offered, though a registry holds them: the clock,
@@ -1028,21 +1027,39 @@ def _forecast_attribution(channel: str, reported_at: datetime | None) -> str:
 def _forecasted(outcome: ForecastOutcome) -> ToolResult:
     """A forecast read's outcome as a call's result: its records' texts, or why none.
 
-    A read whose answer described no day completed, with nothing in it; one cut short,
-    at the deadline or mid-exchange, may have reached the provider, so its outcome is
-    unknown (ADR-0324 §8:1); any other refusal is not done. The search's mapping, one
-    seam over.
+    **The outcome is the one the forecaster's ledger completion records**, so an effect
+    record a call under an approval gets carries the outcome its invocation completed
+    with (ADR-0306 §5:8, ADR-0321 §4:10), and the two records never disagree. An answer
+    the provider gave completed the call, whether or not it is one this system carries
+    — a day described, none described, or no instant declared — so it is done, its
+    texts the records it minted, none for a refusal. A read cut short by its deadline
+    may have reached the provider, so its outcome is unknown (ADR-0324 §8:1). A call
+    that did not complete as a call is not done. The forecaster states the same mapping
+    for its ledger completion, and each subsystem's tests pin the same table.
     """
-    if outcome.refusal is None or outcome.refusal is ForecastRefusal.NO_RESULT:
+    refusal = outcome.refusal
+    if refusal is None or refusal in _COMPLETED_FORECASTS:
         texts: list[FrozenJson] = [record.content for record in outcome.records]
         return ToolResult(outcome=ToolOutcome.SUCCEEDED, output=texts)
-    failure = ToolFailure(
-        kind=ToolFailureKind.UNAVAILABLE,
-        message=f"the forecast read was refused: {outcome.refusal.value}",
+    if refusal is ForecastRefusal.DEADLINE_EXPIRED:
+        return ToolResult(
+            outcome=ToolOutcome.INDETERMINATE,
+            failure=ToolFailure(
+                kind=ToolFailureKind.TIMED_OUT, message="the forecast read ran out of time"
+            ),
+        )
+    kind = (
+        ToolFailureKind.UNAVAILABLE
+        if refusal is ForecastRefusal.TRANSPORT_FAILED
+        else ToolFailureKind.REFUSED
     )
-    if outcome.refusal.value in _UNKNOWN_SEARCHES:
-        return ToolResult(outcome=ToolOutcome.INDETERMINATE, failure=failure)
+    failure = ToolFailure(kind=kind, message=f"the forecast read was refused: {refusal.value}")
     return ToolResult(outcome=ToolOutcome.FAILED, failure=failure)
+
+
+#: The forecast refusals of a call that completed: the provider answered, and what it
+#: answered is not something this system carries.
+_COMPLETED_FORECASTS: Final = frozenset({ForecastRefusal.NO_RESULT, ForecastRefusal.UNATTESTED})
 
 
 def _properties(tool: ToolDefinition) -> set[str]:
