@@ -2493,6 +2493,8 @@ _FAULT_PANELS: Final = frozenset(
         "conversations",
         "notifications",
         "acts",
+        # ADR-0338 §8:2's About you panel.
+        "about",
         "sources",
         "standing",
         "history",
@@ -3818,6 +3820,7 @@ def test_the_page_offers_none_of_the_panels_adr_0309_retires() -> None:
     assert re.findall(r'<button type="button" id="([a-z-]+)"', console) == [
         "chat-button",
         "conversations-button",
+        "about-button",
         "beliefs-button",
         "sources-button",
         "standing-button",

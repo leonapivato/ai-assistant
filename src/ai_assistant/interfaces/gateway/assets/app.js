@@ -4522,6 +4522,10 @@ const candidateRuns = { current: 0 };
 async function openBeliefs() {
   const half = headerHalf();
   const era = sessionEra;
+  await readPinning();
+  if (half !== null && !sameSession(half, era)) {
+    return;
+  }
   await listBeliefs();
   if (half === null || !sameSession(half, era)) {
     return;
@@ -4639,11 +4643,35 @@ function outsideWarrant(belief) {
   );
 }
 
+// How the person confirmed a memory's wording (ADR-0328 §6:1, ADR-0338 §4:3-§4:4): by a
+// yes to a question, by a pin, or both (#3333). Read off the counted supports backing it
+// where the view carries them; the listing's summary carries none, and there the
+// sentence names neither, rather than one that may not be how it was confirmed. The CLI
+// says the same (`_confirmed_why`).
+function confirmedHow(belief) {
+  if (!Array.isArray(belief.supports)) {
+    return "You confirmed this wording.";
+  }
+  const backing = belief.supports.filter((one) => one.counts && one.direction === "for");
+  const asked = backing.some((one) => one.origin === "confirmation");
+  const pinned = backing.some((one) => one.origin === "pinned");
+  if (asked && pinned) {
+    return "You confirmed this wording when I asked you, and by pinning it.";
+  }
+  if (pinned) {
+    return "You confirmed this wording by pinning it.";
+  }
+  if (asked) {
+    return "You confirmed this wording when I asked you.";
+  }
+  return "You confirmed this wording.";
+}
+
 // Why a memory is held: its standing, said in plain words (ADR-0328 §15:4). An
 // inference says its evidence summary, and whether any of it came from outside.
 function whyHeld(belief) {
   if (belief.standing === "confirmed") {
-    return "You confirmed this wording when I asked you.";
+    return confirmedHow(belief);
   }
   if (belief.standing === "said") {
     return "You told me, and your own word is the whole of it.";
@@ -4760,6 +4788,7 @@ function renderBelief(list, belief) {
   const item = document.createElement("div");
   item.className = "belief-row";
   renderBeliefFields(item, belief);
+  offerPinning(item, belief);
   const forget = document.createElement("button");
   forget.type = "button";
   forget.textContent = "Forget";
@@ -4852,6 +4881,650 @@ async function forgetBelief(id) {
     }
     fault(GATEWAY_GONE, "beliefs");
   }
+}
+
+// --- the person model: the About you panel and pinning (ADR-0338 §8:2-§8:3) -------
+//
+// One read of the person's model fills the panel, every list of it a page beside its
+// total (§8:1), and each list's "Show more" reads that list alone, from where it
+// stopped. Every value is the hub's: the slot's order and fill, what it left out and
+// why, which pins are no longer current, and every wording shown (§4:8, §6). The page
+// computes none of them, so it and the command line cannot show two models of one
+// person.
+//
+// **Shown only to the person and the owner** (§8:3), which is the hub's route table's
+// rule and not this page's: a device without the commands role is refused the read
+// before dispatch, and that refusal reaches the panel as every other does.
+//
+// **A hub that keeps no person model answers `off`**, and the panel says it is not
+// switched on yet. It is a state the hub is in, not a fault, so it is never written in
+// the panel's fault slot (`PersonModelOffError`, ADR-0338 §11:2).
+
+// The one person this hub holds (ADR-0338 §2:1), by the id the hub gives them. The page
+// names the person whose model it shows, as every caller of the surface does, and the
+// gateway supplies no person of its own. `test_bundle.py` pins it to `core`'s constant.
+const OWNER_PERSON_ID = "person:owner";
+
+// What the panel says on a hub whose person model is off, and what the belief panel
+// says about pinning there. The CLI says the same (`person_inspection.OFF`).
+const PERSON_MODEL_OFF =
+  "The person model is not switched on on this hub yet, so there is nothing here to " +
+  "show or change.";
+const PINNING_OFF = "Pinning is not switched on on this hub yet.";
+const PINNING_SAYS =
+  "Pinning a memory keeps it in mind in every conversation, and confirms its wording " +
+  "as yours.";
+
+// The five fields, in ADR-0338 §3's order: what the panel calls each, and what an empty
+// one means. An empty field is shown as not set and never as a default presented as the
+// person's own (§3:9); where emptiness has a meaning the table gives it, that is said.
+// The CLI says the same (`person_inspection.FIELD_WORDS`, `UNSET_WORDS`).
+const PROFILE_FIELDS = [
+  { field: "name", label: "Your name", unset: "Not set." },
+  { field: "address", label: "What I call you", unset: "Not set." },
+  // The name an empty one means is the page's own, which is written once, in the
+  // document's title (#3113), and is `core`'s `DEFAULT_ASSISTANT_NAME`.
+  {
+    field: "assistant_name",
+    label: "What you call me",
+    unset: `Not set: I go by ${document.title}.`,
+  },
+  {
+    field: "time_zone",
+    label: "Your time zone",
+    unset: "Not set: I use the hub's own time zone.",
+  },
+  { field: "language", label: "The language I write to you in", unset: "Not set." },
+];
+
+// How a change to a field was made (ADR-0338 §3:5), as the CLI says it.
+const CHANGE_HOW_WORDS = {
+  panel: "by you, on the panel or the command line",
+  approval: "by your yes to my question",
+  suggestion: "by accepting my suggestion",
+  seed: "by the hub, when it was first set up",
+};
+
+// Why the slot left a memory out (ADR-0338 §6:2, §6:4), as the CLI says it.
+const LEFT_OUT_WORDS = {
+  budget: "Left out: there is no room left for it in what I keep in mind.",
+  outside_content:
+    "Left out: it rests on outside content, which I keep in mind only once you have " +
+    "confirmed its wording.",
+};
+
+// Why a write was refused, by the refusal's own name: the store's (`PersonModelRefusal`)
+// and the two the engine gives before any write (`PersonModelEditRefusal`, §4:2, §6:3).
+// Each is the whole sentence, so a refusal is shown in words and never as a code. The
+// CLI says the same (`person_inspection.REFUSAL_WORDS`).
+const EDIT_REFUSALS = {
+  unknown_person: "I hold no profile for you, so nothing was changed.",
+  invalid_value: "That value was not saved.",
+  invalid_act: "That change cannot be made this way, so nothing was changed.",
+  unknown_record: "That is no longer there, so nothing was changed.",
+  already_decided: "That suggestion was already accepted or dismissed.",
+  not_current: "That memory is no longer current, so it was not pinned.",
+  over_budget:
+    "Pinning it would take what I keep in mind over its budget, so it was not pinned. " +
+    "Unpin something first.",
+};
+
+// What each act did, when it wrote and when it changed nothing. The CLI says the same
+// (`person_inspection.DONE_WORDS`).
+const EDIT_DONE = {
+  set: { written: "Saved.", unchanged: "That is what it already was, so nothing changed." },
+  clear: { written: "Cleared.", unchanged: "It was not set, so nothing changed." },
+  pin: {
+    written:
+      "Pinned. I keep it in mind in every conversation, and your pin confirms this " +
+      "wording as yours.",
+    unchanged: "It was already pinned.",
+  },
+  unpin: {
+    written: "Unpinned. The memory itself is kept.",
+    unchanged: "No pin showed that memory, so nothing changed.",
+  },
+  unmark: {
+    written: "Removed. I will not mark it again; the memory itself is kept.",
+    unchanged: "That was already removed.",
+  },
+  accept: { written: "Accepted.", unchanged: "It was already pinned." },
+  dismiss: { written: "Dismissed. I will not suggest it again.", unchanged: "Dismissed." },
+};
+
+// What a panel's write did, in words (ADR-0338 §8:7's spirit on the panel): the refusal
+// before any write, the store's refusal with its reason, or what the act did.
+function editWords(act, edit) {
+  if (edit.refused !== null) {
+    return EDIT_REFUSALS[edit.refused] || edit.refused;
+  }
+  const write = edit.write;
+  if (write.kind === "refused") {
+    const said = EDIT_REFUSALS[write.refusal] || write.refusal;
+    return write.reason === null ? said : `${said} The rule is: ${write.reason}.`;
+  }
+  const done = EDIT_DONE[act];
+  return write.kind === "unchanged" ? done.unchanged : done.written;
+}
+
+// A field's label, by its name.
+function fieldLabel(field) {
+  const known = PROFILE_FIELDS.find((one) => one.field === field);
+  return known === undefined ? field : known.label;
+}
+
+// A value as a sentence shows it: quoted, or "not set".
+function quotedValue(value) {
+  return value === null ? "not set" : `“${value}”`;
+}
+
+// One control, built rather than written into the document.
+function control(text, act) {
+  const made = document.createElement("button");
+  made.type = "button";
+  made.textContent = text;
+  made.addEventListener("click", act);
+  return made;
+}
+
+// A row's controls, on one line that wraps.
+function controls(parent, made) {
+  const row = document.createElement("p");
+  row.className = "choice";
+  made.forEach((one) => row.appendChild(one));
+  parent.appendChild(row);
+}
+
+function aboutRow(list) {
+  const item = document.createElement("div");
+  item.className = "about-row";
+  list.appendChild(item);
+  return item;
+}
+
+// Which read of the panel is current. A list's "Show more" reads against the model the
+// panel last rendered, and an answer to a read the panel has since started again —
+// opened from the menu, or re-read after an edit — renders nothing and advances nothing.
+const aboutRuns = { current: 0 };
+
+// How far each list has been read in the current run, and the change log.
+const aboutRead = {
+  kept: 0,
+  left_out: 0,
+  no_longer_current: 0,
+  style_marks: 0,
+  suggestions: 0,
+  changes: 0,
+};
+
+// The five lists: where each renders, its total's member, how one entry renders, what
+// an empty one says, and the part of the panel hidden while it is empty.
+const ABOUT_LISTS = {
+  kept: {
+    node: "kept-list",
+    total: "kept_total",
+    render: renderKept,
+    empty: "Nothing yet.",
+  },
+  left_out: {
+    node: "left-out-list",
+    total: "left_out_total",
+    render: renderLeftOut,
+    part: "left-out",
+  },
+  no_longer_current: {
+    node: "no-longer-current-list",
+    total: "no_longer_current_total",
+    render: renderStalePin,
+    part: "no-longer-current",
+  },
+  style_marks: {
+    node: "style-list",
+    total: "style_marks_total",
+    render: renderStyleMark,
+    empty: "Nothing yet.",
+  },
+  suggestions: {
+    node: "suggestion-list",
+    total: "suggestions_total",
+    render: renderSuggestion,
+    empty: "None.",
+  },
+};
+
+// The panel's own entry, and the read every edit ends with. `kept` is whether the line
+// saying what the last edit did stays: it does after an edit, and is cleared when the
+// panel is opened from the menu.
+async function openAbout(kept) {
+  if (kept !== true) {
+    el("about-outcome").textContent = "";
+  }
+  aboutRuns.current += 1;
+  const run = aboutRuns.current;
+  fault(null, "about");
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  try {
+    const asked = { person_id: OWNER_PERSON_ID, limit: PAGE, offset: 0 };
+    const body = await relay(half, "/person", asked, "about");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null || run !== aboutRuns.current) {
+      return;
+    }
+    const model = renderAbout(body);
+    show("about", true);
+    if (model !== null) {
+      await readChanges(false, run);
+    }
+  } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    fault(GATEWAY_GONE, "about");
+  }
+}
+
+// The whole panel from one answer, or the state that stands in for it. Returns the
+// model, or `null` where there is none to show.
+function renderAbout(body) {
+  const state = el("about-state");
+  if (body.off === true) {
+    state.textContent = PERSON_MODEL_OFF;
+    el("about-body").hidden = true;
+    return null;
+  }
+  const model = body.person_model;
+  if (model === null) {
+    state.textContent = "I hold no profile for you.";
+    el("about-body").hidden = true;
+    return null;
+  }
+  state.textContent = "";
+  el("about-body").hidden = false;
+  renderProfile(model.profile);
+  el("kept-fill").textContent =
+    `Using ${model.kept_chars} of the ${model.budget_chars} characters I keep in mind.`;
+  Object.keys(ABOUT_LISTS).forEach((name) => renderAboutList(name, model, false));
+  return model;
+}
+
+// One list's page, from its first entry or appended to what is on screen.
+function renderAboutList(name, model, more) {
+  const spec = ABOUT_LISTS[name];
+  const list = el(spec.node);
+  if (!more) {
+    clearNode(list);
+    aboutRead[name] = 0;
+  }
+  const entries = model[name];
+  const total = model[spec.total];
+  entries.forEach((one) => spec.render(list, one));
+  aboutRead[name] += entries.length;
+  if (!more && total === 0 && spec.empty !== undefined) {
+    line(list, spec.empty, "hint");
+  }
+  if (spec.part !== undefined) {
+    el(spec.part).hidden = total === 0;
+  }
+  // A total says how many there are, so a list stopped short offers the rest: an entry
+  // past a page is one whose control is otherwise unreachable.
+  if (aboutRead[name] < total) {
+    const run = aboutRuns.current;
+    const next = control("Show more", () => {
+      list.removeChild(next);
+      void readAboutList(name, run);
+    });
+    list.appendChild(next);
+  }
+}
+
+// The next page of one list, read alone (ADR-0338 §8:1's `lists`).
+async function readAboutList(name, run) {
+  if (run !== aboutRuns.current) {
+    return;
+  }
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  try {
+    const asked = {
+      person_id: OWNER_PERSON_ID,
+      lists: [name],
+      limit: PAGE,
+      offset: aboutRead[name],
+    };
+    const body = await relay(half, "/person", asked, "about");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null || run !== aboutRuns.current) {
+      return;
+    }
+    if (body.off === true || body.person_model === null) {
+      renderAbout(body);
+      return;
+    }
+    renderAboutList(name, body.person_model, true);
+  } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    fault(GATEWAY_GONE, "about");
+  }
+}
+
+// The five fields, each its own form: a Save writes that field and no other.
+function renderProfile(profile) {
+  const fields = el("profile-fields");
+  clearNode(fields);
+  PROFILE_FIELDS.forEach((spec) => renderField(fields, spec, profile[spec.field]));
+}
+
+function renderField(fields, spec, value) {
+  const form = document.createElement("form");
+  form.className = "profile-field";
+  const id = `field-${spec.field}`;
+  const label = document.createElement("label");
+  label.htmlFor = id;
+  label.textContent = spec.label;
+  form.appendChild(label);
+  line(form, value === null ? spec.unset : `Now: ${value}`, "hint");
+  const input = document.createElement("input");
+  input.id = id;
+  input.name = id;
+  input.type = "text";
+  input.autocomplete = "off";
+  input.value = value === null ? "" : value;
+  form.appendChild(input);
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.textContent = "Save";
+  const made = [save];
+  // Clearing is its own act, offered where there is something to clear: an empty box
+  // saved is a value the store refuses, never a clear by another name.
+  if (value !== null) {
+    made.push(control("Clear", () => setField(spec.field, null)));
+  }
+  controls(form, made);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void setField(spec.field, input.value);
+  });
+  fields.appendChild(form);
+}
+
+// One memory the slot shows (§6:2): what keeps it there, its wording, and, for a pin,
+// its unpin.
+function renderKept(list, kept) {
+  const item = aboutRow(list);
+  line(item, kept.pinned ? "Pinned" : "How you like me to speak", "hint");
+  line(item, kept.content, "reply");
+  if (kept.pinned) {
+    controls(item, [control("Unpin", () => unpinFromAbout(kept.memory_id))]);
+  }
+}
+
+// One memory the slot left out, and why (§6:4).
+function renderLeftOut(list, left) {
+  const item = aboutRow(list);
+  line(item, left.pinned ? "Pinned" : "How you like me to speak", "hint");
+  line(item, left.content, "reply");
+  line(item, LEFT_OUT_WORDS[left.reason] || left.reason, "hint");
+  if (left.pinned) {
+    controls(item, [control("Unpin", () => unpinFromAbout(left.memory_id))]);
+  }
+}
+
+// A pin no longer current (§4:8), and what the person can do about it: unpin it, named
+// by the memory it was made on.
+function renderStalePin(list, stale) {
+  const item = aboutRow(list);
+  line(item, `Pinned ${localTime(stale.pinned_at)}, and no longer current`, "hint");
+  line(item, stale.content, "reply");
+  if (stale.rests_on_outside_content) {
+    line(item, "It rested on outside content rather than on what you told me.", "hint");
+  }
+  controls(item, [control("Unpin", () => unpinFromAbout(stale.memory_id))]);
+}
+
+// A style memory (§5:3), with its remove control.
+function renderStyleMark(list, mark) {
+  const item = aboutRow(list);
+  line(item, mark.content, "reply");
+  if (mark.shows === null) {
+    line(item, "No longer current, so I keep it in mind no more.", "hint");
+  }
+  controls(item, [control("Remove", () => removeStyleMark(mark.mark_id))]);
+}
+
+// A pending suggestion (§9:2, §9:5), to accept or dismiss, marked where it rests on
+// outside content (§7:9). Accepting a pin suggestion pins its memory, which confirms its
+// wording (§4:3), so the wording is shown with what accepting it does.
+function renderSuggestion(list, suggestion) {
+  const item = aboutRow(list);
+  if (suggestion.kind === "pin") {
+    line(item, "Keep this in mind:", "hint");
+    line(item, suggestion.content, "reply");
+    line(item, "Accepting it pins it, which confirms this wording as yours.", "hint");
+  } else {
+    line(item, `${fieldLabel(suggestion.field)}:`, "hint");
+    line(item, `${quotedValue(suggestion.value)}`, "reply");
+  }
+  if (suggestion.rests_on_outside_content) {
+    line(item, "This rests on outside content rather than on what you told me.", "hint");
+  }
+  controls(item, [
+    control("Accept", () => decideSuggestion(suggestion.suggestion_id, "accept")),
+    control("Dismiss", () => decideSuggestion(suggestion.suggestion_id, "dismiss")),
+  ]);
+}
+
+// One page of the change log, the most recent first (§3:5). The log has no total, so a
+// full page offers the next, as the belief listing's does (`offerMore`).
+async function readChanges(more, run) {
+  if (run !== aboutRuns.current) {
+    return;
+  }
+  const half = headerHalf();
+  if (half === null) {
+    return;
+  }
+  const era = sessionEra;
+  try {
+    const asked = {
+      person_id: OWNER_PERSON_ID,
+      limit: PAGE,
+      offset: more ? aboutRead.changes : 0,
+    };
+    const body = await relay(half, "/person/changes", asked, "about");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null || run !== aboutRuns.current || body.off === true) {
+      return;
+    }
+    const list = el("change-list");
+    if (!more) {
+      clearNode(list);
+      aboutRead.changes = 0;
+    }
+    if (body.changes.length === 0 && !more) {
+      line(list, "No change yet.", "hint");
+    }
+    body.changes.forEach((one) => renderChange(list, one));
+    aboutRead.changes += body.changes.length;
+    offerMore(list, body.changes.length, () => readChanges(true, run));
+  } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    fault(GATEWAY_GONE, "about");
+  }
+}
+
+function renderChange(list, change) {
+  const item = aboutRow(list);
+  line(
+    item,
+    `${fieldLabel(change.field)}: ${quotedValue(change.old)} → ${quotedValue(change.new)}`,
+    "reply"
+  );
+  line(
+    item,
+    `${localTime(change.at)} · ${CHANGE_HOW_WORDS[change.how] || change.how}`,
+    "hint"
+  );
+}
+
+// One write to the person's model from the About you panel, said on its outcome line,
+// and then the panel read again. Nothing is retried: a write that did not land is said,
+// and the person decides again.
+async function aboutEdit(path, payload, act) {
+  fault(null, "about");
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  // The panel is built again after the write, so the control the person acted from is
+  // replaced; the focus goes back to its successor, by id, so a keyboard is not sent
+  // back to the top of the page.
+  const focused = document.activeElement === null ? "" : document.activeElement.id;
+  try {
+    const asked = Object.assign({ person_id: OWNER_PERSON_ID }, payload);
+    const body = await relay(half, path, asked, "about");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null) {
+      return;
+    }
+    el("about-outcome").textContent =
+      body.off === true ? PERSON_MODEL_OFF : editWords(act, body.edit);
+    await openAbout(true);
+    const again = focused === "" ? null : el(focused);
+    if (again !== null) {
+      again.focus();
+    }
+  } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    fault(GATEWAY_GONE, "about");
+  }
+}
+
+// One pin or unpin from the belief panel, said on its outcome line. The listing is not
+// read again: a pin changes no row's standing until the observer has recorded it
+// (ADR-0338 §9:6), and a listing re-read would lose the page the person had reached.
+async function beliefEdit(path, payload, act) {
+  fault(null, "beliefs");
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const era = sessionEra;
+  try {
+    const asked = Object.assign({ person_id: OWNER_PERSON_ID }, payload);
+    const body = await relay(half, path, asked, "beliefs");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null) {
+      return;
+    }
+    el("belief-outcome").textContent =
+      body.off === true ? PINNING_OFF : editWords(act, body.edit);
+  } catch (_) {
+    // Not this session's condition to report (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    fault(GATEWAY_GONE, "beliefs");
+  }
+}
+
+function setField(field, value) {
+  // An absent value is the clear: the gateway reads absent and `null` alike, and sends
+  // the hub no value (ADR-0085 §10).
+  const payload = value === null ? { field: field } : { field: field, value: value };
+  return aboutEdit("/person/field/set", payload, value === null ? "clear" : "set");
+}
+
+function unpinFromAbout(memoryId) {
+  return aboutEdit("/person/unpin", { memory_id: memoryId }, "unpin");
+}
+
+function removeStyleMark(markId) {
+  return aboutEdit("/person/style-mark/remove", { mark_id: markId }, "unmark");
+}
+
+function decideSuggestion(suggestionId, act) {
+  return aboutEdit(`/person/suggestion/${act}`, { suggestion_id: suggestionId }, act);
+}
+
+// Whether this hub keeps a person model, read when the belief panel opens: its rows
+// offer pin and unpin only where it does. The smallest read, filling no list.
+const pinning = { on: false };
+
+async function readPinning() {
+  pinning.on = false;
+  const half = headerHalf();
+  if (half === null) {
+    return;
+  }
+  const era = sessionEra;
+  try {
+    const asked = { person_id: OWNER_PERSON_ID, lists: [], limit: 1, offset: 0 };
+    const body = await relay(half, "/person", asked, "beliefs");
+    // Not this session's answer (#2404).
+    if (!sameSession(half, era)) {
+      return;
+    }
+    if (body === null) {
+      return;
+    }
+    pinning.on = body.off !== true && body.person_model !== null;
+    el("belief-pin-state").textContent = body.off === true ? PINNING_OFF : PINNING_SAYS;
+  } catch (_) {
+    // Nothing of its own to say: the listing read next says the gateway is gone, and
+    // without an answer the rows offer no pin.
+    pinning.on = false;
+  }
+}
+
+// A current memory's pin and unpin (ADR-0338 §8:2), the pin control saying that pinning
+// confirms the wording shown (§4:3).
+function offerPinning(item, belief) {
+  if (!pinning.on || belief.kind !== "memory" || belief.status !== "current") {
+    return;
+  }
+  controls(item, [
+    control("Pin: confirms this wording", () =>
+      beliefEdit("/person/pin", { memory_id: belief.id }, "pin")
+    ),
+    control("Unpin", () => beliefEdit("/person/unpin", { memory_id: belief.id }, "unpin")),
+  ]);
 }
 
 // --- the notification review surface (ADR-0177 §10; ADR-0130 §6, §7, §9) -----
@@ -6155,6 +6828,7 @@ function renderConnectionAct(list, one) {
 }
 
 const CONTROL_PANELS = [
+  "about",
   "sources",
   "standing",
   "history",
@@ -6314,6 +6988,7 @@ window.addEventListener("online", chatOnline);
 el("sources-button").addEventListener("click", fromMenu("sources", listSources));
 el("standing-button").addEventListener("click", fromMenu("standing", listStanding));
 el("history-button").addEventListener("click", fromMenu("history", listGrantHistory));
+el("about-button").addEventListener("click", fromMenu("about", openAbout));
 el("beliefs-button").addEventListener("click", fromMenu("beliefs", openBeliefs));
 // A band changed is a different question, so it starts the listing again rather than
 // filtering what is already on screen: this page holds no beliefs of its own and the

@@ -339,7 +339,8 @@ h3 {
  */
 .chat-devices-said h3,
 .chat-about-body h4,
-#tuning-body h4 {
+#tuning-body h4,
+#about h4 {
   font-family: var(--text);
   font-size: 0.7rem;
   font-weight: 600;
@@ -1324,7 +1325,8 @@ code {
 .grant-row,
 .belief-row,
 .notification-row,
-.connection-row {
+.connection-row,
+.about-row {
   border-top: 1px solid var(--line);
   padding: 0.7rem 0;
 }
@@ -1365,8 +1367,19 @@ code {
  * labels (the rule with the other section labels, near the top) and not a second
  * level of panel.
  */
-#tuning-body h4 {
+#tuning-body h4,
+#about h4 {
   margin: 1.2rem 0 0.35rem;
+}
+
+/*
+ * The About you panel (ADR-0338 §8:2). A field is its own small form, its label over
+ * the text box and its controls on one wrapped line below, so each field is saved or
+ * cleared by itself and a Save never writes a field the person did not touch.
+ */
+.profile-field {
+  border-top: 1px solid var(--line);
+  padding: 0.7rem 0;
 }
 
 #tuning-body .choice select,
