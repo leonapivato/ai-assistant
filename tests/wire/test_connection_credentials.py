@@ -274,6 +274,45 @@ async def test_no_credential_reaches_the_socket_when_the_identity_is_refused(
     assert seen == []
 
 
+@pytest.mark.parametrize(
+    "identity",
+    ["two\nlines", "bell\x07", "i" * (ACCOUNT_IDENTITY_MAX_BYTES + 1)],
+    ids=["line-break", "control-character", "over-bound"],
+)
+async def test_an_unusable_keyless_identity_is_refused_before_the_socket_is_opened(
+    tmp_path: Path, identity: str
+) -> None:
+    """ADR-0325 §4:3: the keyless act's refusals are the **client's**, before any I/O.
+
+    The shared suite's case cannot show this: a running hub refuses the same
+    identity itself, so a client that deferred the check would still pass there.
+    Here nothing answers as a hub. The listener records every connection it
+    accepts and every frame it reads, then hangs up, so a client that let the
+    identity through would raise a transport error rather than
+    ``UnusableIdentityError`` — and the empty records say no connection was even
+    attempted, which is stronger than "no request frame carried it".
+    """
+    accepted: list[None] = []
+    seen: list[bytes] = []
+
+    async def _hub(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        accepted.append(None)
+        with contextlib.suppress(Exception):
+            seen.append(
+                await read_frame(
+                    reader, max_frame_bytes=_FRAME, timeout=_PATIENT, idle_timeout=_PATIENT
+                )
+            )
+        writer.close()
+
+    async with _listening(tmp_path / "hub.sock", _hub) as client:
+        with pytest.raises(UnusableIdentityError):
+            await client.connect_keyless_account(identity=identity)
+
+    assert accepted == []
+    assert seen == []
+
+
 # --- ADR-0151 §16 item 7: no argument reaches a log --------------------------
 
 
