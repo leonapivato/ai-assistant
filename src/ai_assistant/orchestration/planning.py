@@ -1538,7 +1538,8 @@ class _Request:
         """One memory of the slot, as a found memory is shown, with why it is kept."""
         return {
             "kept_as": _PINNED_TEXT if one.pinned else _STYLE_TEXT,
-            **self._memory(one.memory),
+            # §6:1: the slot's budget bounds its wordings, so each is shown whole.
+            **self._memory(one.memory, whole=True),
         }
 
     def _suggestion(self, one: ShownSuggestion) -> dict[str, object]:
@@ -1723,17 +1724,19 @@ class _Request:
             self.shown.marked = True
         return shown
 
-    def _memory(self, record: Memory) -> dict[str, object]:
+    def _memory(self, record: Memory, *, whole: bool = False) -> dict[str, object]:
         """A found memory not resting on outside content: its wording, by its standing.
 
         ADR-0328 §15:5's label: its standing in plain words, its age (as of and learned,
         each unknown where nothing dates it), its evidence summary where its standing is
         inference, its reading certainty where that is not ``sure``, and its track record
         where it has one; and, beside it, each unresolved open question on it in words
-        (ADR-0329 §6:6), which nothing raises before the observer runs.
+        (ADR-0329 §6:6), which nothing raises before the observer runs. ``whole`` shows the
+        wording uncut, as the kept-in-mind slot does, whose budget already bounds it
+        (ADR-0338 §6:1).
         """
         fact = record.content
-        bound = self._excerpt_chars
+        bound = len(fact) if whole else self._excerpt_chars
         shown: dict[str, object] = {
             "label": self._book.label(LabelKind.MEMORY, record.id),
             "item": _BAND_TEXT[record.band],

@@ -32,6 +32,7 @@ from itertools import count
 from typing import TYPE_CHECKING, Final, final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import PersonModelStoreError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -158,18 +159,35 @@ class FakePersonModelStore:
                 ``suggestion``); sequential per kind where ``None``.
 
         Raises:
-            ValueError: If ``field_chars`` is below 1.
+            ValueError: If ``field_chars`` is below 1, or the clock's first reading is not
+                an aware instant.
         """
         if field_chars < 1:
             msg = "a field's bound is at least one character"
             raise ValueError(msg)
         self._chars = field_chars
-        self._now = now
+        # ADR-0026 §2: every reading aware and converted to UTC, checked where it is read.
+        self._clock = checked_clock(now, owner="FakePersonModelStore")
         numbers = count(1)
         self._new_id = new_id or (lambda kind: f"{kind}:{next(numbers)}")
-        owner = Person(id=OWNER_PERSON_ID, role=PersonRole.OWNER, created_at=now())
+        owner = Person(id=OWNER_PERSON_ID, role=PersonRole.OWNER, created_at=self._clock())
         self._people: dict[str, _Held] = {owner.id: _Held(person=owner)}
         self._fail = False
+
+    def _now(self) -> datetime:
+        """One reading of the clock, taken before the write it dates changes anything.
+
+        A reading the clock check refuses is a store fault, raised before any record is
+        touched, as the store's own refusal would be (ADR-0026 §4).
+
+        Raises:
+            PersonModelStoreError: If the reading is not an aware instant.
+        """
+        try:
+            return self._clock()
+        except ClockReadingError as exc:
+            msg = "the fake person-model store's clock gave a reading it cannot record"
+            raise PersonModelStoreError(msg) from exc
 
     def fail_next(self) -> None:
         """Make the next member called raise ``PersonModelStoreError``, touching nothing."""
