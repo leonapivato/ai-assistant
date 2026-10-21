@@ -1,0 +1,73 @@
+# Prompt cases
+
+The synthetic half of the prompt regression suite ([ADR-0337](../docs/adr/0337-a-prompt-change-is-judged-on-a-regression-suite-with-repeated-samples-each-recorded-call-is-asked-what-it-had-to-guess-and-a-candidate-is-promoted-after-three-clean-days.md) §3).
+A case is one model call and a property its reply must have. `scripts/prompt_replay.py suite`
+sends the cases; a test in the gate reads every one and checks its form, and sends nothing
+(§3:6).
+
+**Every case here is invented** (§3:2, §2:2): its people, places, messages and data are
+modelled on no real person, and no text in it comes from a diagnostic entry, a copy, a case
+store or any store of a hub. The review of the pull request that adds a case reads for this.
+
+## Where a case lives
+
+One TOML file per case, in the directory named for its prompt (§3:1):
+`prompt_cases/<prompt>/<case>.toml`. The case is named `<prompt>/<case>` in a run and in its
+results. Its input may instead be a JSON file beside it, which the case names (§3:4).
+
+## What a case holds (§3:3)
+
+```toml
+prompt = "planning"            # the directory's prompt
+guards = "yes_without_question" # the failure class it guards
+came_from = "#3104"            # the issue, or the date, 2026-10-21, it came from
+set = "development"            # or "held_out": never shown to whoever drafts a candidate
+samples = 3                    # how often it is sent under each version (§5:2)
+
+[flags]                        # exactly the flags the prompt declares, each true or false
+takes_message = true
+
+[property]                     # a code check and its parameters, or "read"
+check = "asks_about"
+calls = ["1.1"]
+
+[input]                        # the call's request after the system message (§3:4)
+messages = [{ role = "user", content = '''...''' }]
+tools = [ ... ]                # a planning case's offered tools, and only a planning case's
+# or: file = "<case>.json", holding {"messages": [...], "tools": [...]}
+```
+
+A `read` property names, in `read`, what a person reading the reply looks for:
+
+```toml
+[property]
+check = "read"
+read = "Greets the user back and brings up no earlier matter they did not ask about."
+```
+
+The closed sets are the runner's, in `scripts/prompt_replay.py`, and a case names nothing
+outside them:
+
+- **failure classes**, `FAILURE_CLASSES`, each saying whether its property is safety-relevant
+  (§5:1). A case guarding a safety-relevant one declares at least three samples (§5:2). A
+  class found later is added there.
+- **code checks**, `CODE_CHECKS`, each with what it decides, the prompts it reads a reply of
+  and the parameters it takes. Prefer a code check wherever code can decide; everything else
+  is `read` (§3:5).
+
+A case asserts what a reply does, never what an instruction says. A rendered request goes
+stale when the code changes how it renders data; a stale case is rewritten, not trusted.
+
+## Running them
+
+```bash
+uv run python scripts/prompt_replay.py suite --model <provider:model> --count
+uv run python scripts/prompt_replay.py suite --model <provider:model> \
+    --candidate <draft>/planning.txt --results <results-dir>
+```
+
+The run prints, for each case and version, how many samples passed the case's code check of
+how many were sent, or that the case is to be read, and writes each reply to
+`<results-dir>/suite-<run>.jsonl`. A candidate is green for its prompt where, on every case,
+it passes at least as many samples as the default, and every sample of each case it was
+written to fix (§9:2); a `read` case's samples pass where the person who reads them says so.

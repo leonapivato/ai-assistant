@@ -1,0 +1,33 @@
+# The part says where the user's sister is moving and roughly when, and nothing more. A
+# wording that adds a city, a reason, a job or an exact day states what no part does.
+prompt = "observer_commit"
+guards = "unstated_detail"
+came_from = "2026-10-21"
+set = "held_out"
+samples = 1
+
+[property]
+check = "read"
+read = """The wording, and every support's note, state nothing P1 does not: no city, no \
+reason for the move, no exact day. Saying the month that "next month" meant, from when P1 \
+was said, is not an added detail."""
+
+[[input.messages]]
+role = "user"
+content = '''
+{
+  "claim": "The user's sister is moving to Portugal next month.",
+  "under_review": "E1",
+  "parts": [
+    {
+      "part": "P1",
+      "exchange": "E1",
+      "occurred_at": "2026-09-14T20:12:00+00:00",
+      "from": "the user",
+      "outside": false,
+      "at": null,
+      "text": "my sister's moving to Portugal next month, I'm going to miss her so much"
+    }
+  ],
+  "memories": []
+}'''

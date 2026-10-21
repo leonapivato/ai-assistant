@@ -1,0 +1,42 @@
+# A finding joins two habits, each stated in a different part. Neither part states the
+# claim as a whole, so where the wording keeps both clauses no support backs it as worded.
+prompt = "observer_commit"
+guards = "compound_backed_as_worded"
+came_from = "2026-10-21"
+set = "development"
+samples = 1
+
+[property]
+check = "read"
+read = """Where the wording keeps both clauses, no support has backs_as_worded true: P1 states \
+only the run and P2 only the swim. A wording narrowed to one clause may be backed as worded \
+by the part that states that clause."""
+
+[[input.messages]]
+role = "user"
+content = '''
+{
+  "claim": "The user runs on Tuesday mornings and swims on Friday evenings.",
+  "under_review": "E1",
+  "parts": [
+    {
+      "part": "P1",
+      "exchange": "E1",
+      "occurred_at": "2026-08-04T06:10:00+00:00",
+      "from": "the user",
+      "outside": false,
+      "at": null,
+      "text": "out for my Tuesday morning run, back by 8 if anything comes up"
+    },
+    {
+      "part": "P2",
+      "exchange": "E2",
+      "occurred_at": "2026-08-07T13:30:00+00:00",
+      "from": "the user",
+      "outside": false,
+      "at": null,
+      "text": "can't do Friday evening, that's my swim"
+    }
+  ],
+  "memories": []
+}'''

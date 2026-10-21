@@ -1672,8 +1672,10 @@ SETS: Final = ("development", "held_out")
 SAFETY_SAMPLES: Final = 3
 
 #: What a case file holds: these keys and no other (§3:3).
-_CASE_KEYS: Final = frozenset({"prompt", "guards", "came_from", "set", "samples", "property"})
-_CASE_OPTIONAL: Final = frozenset({"flags", "input"})
+_CASE_KEYS: Final = frozenset(
+    {"prompt", "guards", "came_from", "set", "samples", "property", "input"}
+)
+_CASE_OPTIONAL: Final = frozenset({"flags"})
 
 #: Where a case came from: an issue, ``#1234``, or a date, ``2026-10-21`` (§3:3).
 _CAME_FROM: Final = re.compile(r"#[1-9][0-9]*|[0-9]{4}-[0-9]{2}-[0-9]{2}")
@@ -1953,23 +1955,34 @@ def _read_prompt_directory(
         elif entry.suffix != CASE_SUFFIX:
             reading.defects.append(f"{where}: is neither a case nor a case's input")
         else:
+            named |= _named_input(entry)
             try:
-                case, input_file = _read_case(entry, declaration)
+                reading.cases.append(_read_case(entry, declaration))
             except _CaseDefectError as exc:
                 reading.defects.append(f"{where}: {exc}")
-                continue
-            reading.cases.append(case)
-            if input_file is not None:
-                named.add(input_file)
     for orphan in sorted(inputs - named):
         reading.defects.append(f"{directory.name}/{orphan}: no case names this input")
 
 
-def _read_case(path: Path, declaration: PromptDeclaration) -> tuple[Case, str | None]:
+def _named_input(path: Path) -> set[str]:
+    """The input file a case file names, read as far as it reads.
+
+    So that a defective case's input is not reported as named by no case as well.
+    """
+    try:
+        held = tomllib.loads(_read_regular(path).decode("utf-8"))
+    except ReplayError, UnicodeDecodeError, tomllib.TOMLDecodeError:
+        return set()
+    given = held.get("input")
+    named = given.get("file") if isinstance(given, dict) else None
+    return {named} if isinstance(named, str) else set()
+
+
+def _read_case(path: Path, declaration: PromptDeclaration) -> Case:
     """One case file, checked whole (§3:3-§3:5, §5:2).
 
     Returns:
-        The case, and the name of the input file it names, if it names one.
+        The case.
 
     Raises:
         _CaseDefectError: At its first defect.
@@ -2004,8 +2017,8 @@ def _read_case(path: Path, declaration: PromptDeclaration) -> tuple[Case, str | 
         raise _CaseDefectError(f"samples is not a whole number of at least {least} (ADR-0337 §5:2)")
     flags = _case_flags(held.get("flags", {}), declaration)
     check, params = _case_property(held["property"], declaration.name)
-    messages, tools, input_file = _case_input(held.get("input"), path, declaration.name)
-    case = Case(
+    messages, tools = _case_input(held["input"], path, declaration.name)
+    return Case(
         name=f"{declaration.name}/{path.stem}",
         prompt=declaration.name,
         guards=guards,
@@ -2018,7 +2031,6 @@ def _read_case(path: Path, declaration: PromptDeclaration) -> tuple[Case, str | 
         messages=messages,
         tools=tools,
     )
-    return case, input_file
 
 
 def _came_from(value: str) -> bool:
@@ -2097,11 +2109,10 @@ def _check_no_label(given: Mapping[str, object], prompt: str) -> None:
 
 def _case_input(
     held: object, path: Path, prompt: str
-) -> tuple[tuple[Message, ...], tuple[OfferedTool, ...] | None, str | None]:
+) -> tuple[tuple[Message, ...], tuple[OfferedTool, ...] | None]:
     """A case's input, held in the case or in a JSON file beside it (§3:4)."""
     if not isinstance(held, dict):
         raise _CaseDefectError("input is not a table")
-    input_file: str | None = None
     if "file" in held:
         named = held["file"]
         if set(held) != {"file"} or not isinstance(named, str):
@@ -2114,13 +2125,12 @@ def _case_input(
             raise _CaseDefectError(f"its input file {named} is not a JSON file beside it") from None
         if not isinstance(held, dict):
             raise _CaseDefectError(f"its input file {named} holds no JSON object")
-        input_file = named
     allowed = {"messages", "tools"} if prompt == PLANNING else {"messages"}
     if set(held) != allowed:
         raise _CaseDefectError(f"the input of a {prompt} case holds exactly {sorted(allowed)}")
     messages = _case_messages(held["messages"])
     tools = None if prompt != PLANNING else _case_tools(held["tools"])
-    return messages, tools, input_file
+    return messages, tools
 
 
 def _case_messages(held: object) -> tuple[Message, ...]:
