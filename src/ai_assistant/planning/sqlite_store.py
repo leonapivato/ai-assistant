@@ -965,9 +965,10 @@ class SqlitePlanStore:
         transaction, so two finishes of one record cannot both land.
 
         Raises:
-            PlanningError: If the record is not held or already finished, the reason
-                is blank or has no UTF-8 encoding, the reason or position does not
-                belong to the outcome, or the backend fails.
+            PlanningError: If ``effect_id`` is not an identifier, the record is not
+                held or already finished, the reason is blank or has no UTF-8
+                encoding, the reason or position does not belong to the outcome, or
+                the backend fails.
         """
         named = checked_effect_id(effect_id)
         async with self._lock:
