@@ -5465,7 +5465,9 @@ class Settings(BaseSettings):
         """Reject a timezone that is not a known IANA zone."""
         try:
             ZoneInfo(value)
-        except (ZoneInfoNotFoundError, ValueError) as exc:
+        except (ZoneInfoNotFoundError, ValueError, OSError) as exc:
+            # `OSError` too (#3328): a long name reaches the file system as a path, and
+            # a name it refuses there (ENAMETOOLONG) is no zone either.
             msg = f"unknown timezone {value!r}"
             raise ValueError(msg) from exc
         return value

@@ -106,7 +106,9 @@ def profile_value_fault(field: ProfileField, value: str | None, *, chars: int) -
     if field is ProfileField.TIME_ZONE:
         try:
             ZoneInfo(value)
-        except ZoneInfoNotFoundError, ValueError:
+        except ZoneInfoNotFoundError, ValueError, OSError:
+            # `OSError` too, as the SQLite store (#3328): a long name reaches the file
+            # system as a path, and a name it refuses there (ENAMETOOLONG) is no zone.
             return "a time zone is a name zoneinfo resolves"
     return None
 

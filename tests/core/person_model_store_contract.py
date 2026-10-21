@@ -307,6 +307,28 @@ class PersonModelStoreContract:
 
         assert written.kind is WRITTEN
 
+    @pytest.mark.parametrize("zone", ["é" * 200, "a" * 256], ids=["non-ascii", "ascii"])
+    async def test_a_zone_name_the_file_system_refuses_is_an_invalid_value(
+        self, factory: PersonModelStoreFactory, zone: str
+    ) -> None:
+        """§3:2: a name too long for a path is refused as a value, never raised as OSError.
+
+        Built with a bound the name is within, so the zone lookup is what refuses it (#3328).
+        """
+        with pytest.raises(OSError, match="too long"):
+            ZoneInfo(zone)  # the premise: the lookup itself raises OSError (ENAMETOOLONG)
+        store = factory(field_chars=len(zone))
+        before = await store.export()
+
+        written = await store.set_field(OWNER_PERSON_ID, ProfileField.TIME_ZONE, zone, act=PANEL)
+        suggested = await store.record_suggestion(
+            OWNER_PERSON_ID, field_suggestion(ProfileField.TIME_ZONE, zone)
+        )
+
+        assert written.refusal is PersonModelRefusal.INVALID_VALUE
+        assert suggested.refusal is PersonModelRefusal.INVALID_VALUE
+        assert await store.export() == before
+
     async def test_only_accepting_a_suggestion_writes_a_field_as_a_suggestion(
         self, store: PersonModelStore
     ) -> None:
