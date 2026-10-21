@@ -5248,13 +5248,21 @@ function renderProfile(profile) {
   });
   const fields = el("profile-fields");
   clearNode(fields);
-  PROFILE_FIELDS.forEach((spec) => renderField(fields, spec, profile[spec.field]));
-  Object.keys(drafts).forEach((field) => {
-    el(`field-${field}`).value = drafts[field];
-  });
+  PROFILE_FIELDS.forEach((spec) =>
+    renderField(fields, spec, profile[spec.field], drafts[spec.field])
+  );
 }
 
-function renderField(fields, spec, value) {
+// One field's form: its box holds the draft where there is one, and otherwise the value
+// the hub holds.
+//
+// **A value with a line break round-trips unchanged** (adversarial review, round 7):
+// ADR-0338 §3 bounds a field only by its length, so a line break set from the command
+// line is a valid value, and an `<input type=text>` strips line breaks from its value. A
+// box whose text holds one is therefore a `<textarea>`, which shows it, and a Save from a
+// box not typed in since it was built sends the value held, verbatim — the box's value
+// is the browser's rendering of it, and a `<textarea>` reads a CR back as a LF.
+function renderField(fields, spec, value, draft) {
   const form = document.createElement("form");
   form.className = "profile-field";
   const id = `field-${spec.field}`;
@@ -5263,13 +5271,22 @@ function renderField(fields, spec, value) {
   label.textContent = spec.label;
   form.appendChild(label);
   line(form, value === null ? spec.unset : `Now: ${value}`, "hint");
-  const input = document.createElement("input");
+  const shown = draft !== undefined ? draft : value === null ? "" : value;
+  const lines = shown.split(/\r\n|\r|\n/).length;
+  const input = document.createElement(lines > 1 ? "textarea" : "input");
   input.id = id;
   input.name = id;
-  input.type = "text";
+  if (lines > 1) {
+    input.rows = lines;
+  } else {
+    input.type = "text";
+  }
   input.autocomplete = "off";
-  input.value = value === null ? "" : value;
+  input.value = shown;
+  // Typed in since it was built: a restored draft is typed text too.
+  let typed = draft !== undefined;
   input.addEventListener("input", () => {
+    typed = true;
     fieldTyping.revision[spec.field] = (fieldTyping.revision[spec.field] || 0) + 1;
     fieldTyping.draft.add(spec.field);
   });
@@ -5286,7 +5303,7 @@ function renderField(fields, spec, value) {
   controls(form, made);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    void setField(spec.field, input.value);
+    void setField(spec.field, typed || value === null ? input.value : value);
   });
   fields.appendChild(form);
 }

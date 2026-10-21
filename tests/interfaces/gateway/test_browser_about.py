@@ -787,3 +787,60 @@ async def test_a_box_typed_in_while_a_clear_is_out_keeps_what_was_typed(
         assert held is not None
         assert held.profile.name is None
         assert heard == []
+
+
+@_WIDTHS
+async def test_a_value_with_a_line_break_is_saved_back_unchanged(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """§3 bounds a field by its length alone, so a line break set from the command line
+    is a valid value; a Save from its box, untouched, writes nothing over it, and an edit
+    keeps the breaks it shows (adversarial review, round 7)."""
+    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
+        heard = _complaints(drive.page)
+        people, _ = switch_on(drive.engine)
+        await drive.engine.set_profile_field(
+            OWNER_PERSON_ID, field=ProfileField.NAME, value="Robin\nSmith"
+        )
+        await drive.engine.set_profile_field(
+            OWNER_PERSON_ID, field=ProfileField.ADDRESS, value="Rob\r\nby"
+        )
+        await _open(drive)
+        page = drive.page
+        outcome = page.locator("#about-outcome")
+        name = page.locator("#field-name")
+        await expect(name).to_have_value("Robin\nSmith")
+        assert await name.evaluate("(box) => box.tagName") == "TEXTAREA"
+
+        for field in (0, 1):
+            async with page.expect_response("**/person/changes"):
+                await (
+                    page.locator("#profile-fields > form")
+                    .nth(field)
+                    .get_by_role("button", name="Save")
+                    .click()
+                )
+            await expect(outcome).to_have_text("That is what it already was, so nothing changed.")
+        await expect(name).to_have_value("Robin\nSmith")
+        held = await people.read(OWNER_PERSON_ID)
+        assert held is not None
+        assert (held.profile.name, held.profile.address) == ("Robin\nSmith", "Rob\r\nby")
+
+        # Enter in the box is a line, not a Save; the Save sends the lines shown.
+        await name.press("ControlOrMeta+End")
+        await name.press("Enter")
+        await name.press_sequentially("Jr")
+        async with page.expect_response("**/person/changes"):
+            await (
+                page.locator("#profile-fields > form")
+                .nth(0)
+                .get_by_role("button", name="Save")
+                .click()
+            )
+        await expect(outcome).to_have_text("Saved.")
+        await expect(name).to_have_value("Robin\nSmith\nJr")
+        held = await people.read(OWNER_PERSON_ID)
+        assert held is not None
+        assert held.profile.name == "Robin\nSmith\nJr"
+        assert await _overflow(page) <= 0
+        assert heard == []
