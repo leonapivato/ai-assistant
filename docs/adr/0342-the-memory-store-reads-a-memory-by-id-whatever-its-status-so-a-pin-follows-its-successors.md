@@ -181,11 +181,13 @@ reached by id, from a pointer the caller already holds, and never by browsing.
 > §5:3) takes, at each memory along the chain, the successor named by the latest operation
 > in that memory's log that names one.
 
-> **Normative.** That walk starts at the pin's or the mark's own memory, and ends at the
-> first memory along the chain that a live read returns, which is the chain's **current
-> end**. Otherwise it ends at a memory that names no
-> successor, at an id the history read omits, or at an id the walk has already read, and in
-> each of these three cases the chain reaches no current memory.
+> **Normative.** That walk starts at the pin's or the mark's own memory. At each memory it
+> reaches, it asks a live read first. Where the live read returns the memory, the walk ends
+> there, at the chain's **current end**. Where it does not, the walk reads the memory through
+> the history read, made after that live read, and goes on to the successor that record
+> names. The walk ends with no current memory where that history read omits the memory,
+> where the record names no successor, or where the successor is a memory the walk has
+> already reached.
 
 > **Normative.** Where ADR-0338 says that the memory store holds a memory (§4:9, §7:10,
 > §9:6), the store holds it exactly where the history read returns it.
@@ -208,16 +210,20 @@ reached by id, from a pointer the caller already holds, and never by browsing.
 marked wrong (ADR-0328 §5:7), and each operation may name a successor. The later operation
 is the later finding about what replaced the memory, so it governs.
 
-**Why the walk is sound across calls.** A successor is created in the same write that names
-it (ADR-0328 §5:6). Any successor a read reveals was therefore held in that read's state,
-and is missing from a later read only where it has been forgotten since. Each hop reads a
-state no older than the hop before it. A cycle cannot arise from §5:6, because each
-successor is created after the memory that names it, so the stop at an id already read
-guards only against a corrupt store.
+**Why the walk is sound across calls.** The live read comes first at each memory, and the
+history read after it, so a memory is judged "names no successor" only on a record read
+after a live read found it retired. Nothing makes a retired memory current again (ADR-0328
+§5:7), so that record already carries the operation that retired it, and any successor that
+operation names. A successor is created in the same write that names it (§5:6), so it is
+held in that state, and is missing from a later read only where it has been forgotten since.
+A memory retired between the live read and the history read is retired in the record the
+history read returns, so the walk goes on to its successor rather than stopping. A cycle
+cannot arise from §5:6, because each successor is created after the memory that names it,
+so the stop at a memory already reached guards only against a corrupt store.
 
 **Why a live read decides "current".** Liveness stays judged by one predicate, the store's
 (ADR-0045 §6, ADR-0072 §7). A caller never computes currency from a status field and a
-clock of its own. The history read finds the candidates, and a live read confirms the end.
+clock of its own. A live read finds the end, and the history read only says where to look next.
 
 ### 6. Delivery and order
 
