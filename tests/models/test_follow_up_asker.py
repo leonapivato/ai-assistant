@@ -12,8 +12,11 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
+import httpx
 import pytest
 import structlog
+from anthropic import AsyncAnthropic
+from network_guard import network_denied
 from pydantic_ai.messages import (
     ModelMessagesTypeAdapter,
     ModelRequest,
@@ -24,7 +27,10 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
+from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.providers.anthropic import AnthropicProvider
+from vendor_stacks import RequestRecorder, failing_status
 
 from ai_assistant.core.correlation import correlated_operation, current_correlation
 from ai_assistant.core.diagnostics import (
@@ -56,6 +62,8 @@ _AT: Final = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
 _PROMPT: Final = {"name": "understanding", "version": "v1", "origin": "default", "flags": {}}
 _TEMPLATE: Final = default_prompt(FOLLOW_UP_PROMPT)
 _QUESTION: Final = _TEMPLATE.render()
+#: Every route's spec, unless a case names others: the world's model, by the name it answers.
+_ROUTE: Final = "fake:world"
 _ANOTHER: Final = PromptDeclaration(name="another", package="ai_assistant.models")
 
 
@@ -68,7 +76,27 @@ class _World:
         self.bound: list[tuple[str | None, str | None]] = []
         self.gate: asyncio.Event | None = None
         self.failure: Exception | None = None
-        self.model = FunctionModel(self._respond, model_name="world")
+        self.built: list[str] = []
+        self.opened = 0
+        self.closed = 0
+        world = self
+
+        class _Owned(FunctionModel):
+            """The world's model, counting how often its client is opened and closed."""
+
+            async def __aenter__(self) -> _Owned:
+                world.opened += 1
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                world.closed += 1
+
+        self.model: FunctionModel = _Owned(self._respond, model_name="world")
+
+    def build(self, spec: str) -> Model:
+        """The model any spec names, here: the world's, counting each build."""
+        self.built.append(spec)
+        return self.model
 
     async def _respond(self, messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         del info
@@ -96,16 +124,17 @@ def _asker(  # noqa: PLR0913 — the sink, the world, then the keyword-only knob
     daily_calls: int = 100,
     clock: Callable[[], float] | None = None,
     timeout: float = 30.0,
-    routes: Mapping[str, Model | str] | None = None,
+    routes: Mapping[str, str] | None = None,
 ) -> FollowUpAsker:
     return FollowUpAsker(
         sink,
         prompt=_TEMPLATE,
-        routes=dict.fromkeys(FOLLOW_UP_ROUTES, world.model) if routes is None else routes,
+        routes=dict.fromkeys(FOLLOW_UP_ROUTES, _ROUTE) if routes is None else routes,
         daily_calls=daily_calls,
         timeout=timeout,
         now=lambda: _AT + timedelta(minutes=5),
         clock=clock or _Clock(),
+        build=world.build,
     )
 
 
@@ -247,7 +276,7 @@ async def test_a_recorded_completion_is_asked_and_its_answer_written_as_a_follow
         "follows": {"source": "understanding", "recorded_at": "2026-10-21T12:00:00Z"},
         "prompt": _PROMPT,
         "follow_up_prompt": _TEMPLATE.rendered().provenance(),
-        "model": "world",
+        "model": _ROUTE,
         "answer": "I had to guess the date.",
     }
     assert not sink.of(DiagnosticSource.FOLLOW_UP, DiagnosticKind.GIVEN)
@@ -277,52 +306,86 @@ async def test_a_round_is_asked_through_the_seam_with_each_call_closed() -> None
     await asker.aclose()
 
 
-async def test_a_round_answered_by_another_model_than_the_routes_is_not_asked() -> None:
-    sink, world = FakeDiagnosticSink(), _World()
-    asker = _asker(sink, world)
-    returned = _returned(
-        DiagnosticSource.PLANNING, reply=None, response=_round_response("someone-else")
-    )
-
-    with structlog.testing.capture_logs() as captured:
-        await _hand(asker, _given(DiagnosticSource.PLANNING, tools=_TOOLS), returned)
-        await _quiet()
-
-    assert world.sent == []
-    assert not sink.of(DiagnosticSource.FOLLOW_UP)
-    assert [(one["event"], one["reason"]) for one in captured] == [(FOLLOW_UP_NOT_ASKED, "model")]
-    await asker.aclose()
-
-
 @pytest.mark.parametrize(
-    ("spec", "named", "asked"),
+    ("named", "sent_to"),
     [
-        ("anthropic:claude-x", "claude-x", True),
-        ("anthropic:claude-x", "claude-x-20250929", True),
-        ("anthropic:claude-x", "claude-xy", False),
-        ("anthropic:claude-x", "claude", False),
+        ("claude-x", "anthropic:claude-x"),
+        ("claude-x-20250929", "anthropic:claude-x-20250929"),
+        ("another-model", "anthropic:another-model"),
+        ("", "anthropic:claude-x"),
     ],
 )
-async def test_a_route_named_by_spec_answers_for_itself_and_its_dated_snapshot(
-    spec: str, named: str, asked: bool
+async def test_a_round_is_asked_of_the_model_its_response_names_through_the_routes_provider(
+    named: str, sent_to: str
 ) -> None:
-    """§8:8: a provider names the snapshot an alias resolved to; nothing else is the route's.
-
-    The budget is zero, so a call the route answered for is turned away by the budget,
-    which is decided after the model, and nothing is sent to the spec's provider.
-    """
+    """§8:8: the model that answered where the returned entry names one, else the route's."""
     sink, world = FakeDiagnosticSink(), _World()
-    routes: dict[str, Model | str] = dict.fromkeys(FOLLOW_UP_ROUTES, world.model)
-    routes["planning"] = spec
-    asker = _asker(sink, world, routes=routes, daily_calls=0)
+    routes = dict.fromkeys(FOLLOW_UP_ROUTES, _ROUTE)
+    routes["planning"] = "anthropic:claude-x"
+    asker = _asker(sink, world, routes=routes)
     returned = _returned(DiagnosticSource.PLANNING, reply=None, response=_round_response(named))
 
-    with structlog.testing.capture_logs() as captured:
-        await _hand(asker, _given(DiagnosticSource.PLANNING, tools=_TOOLS), returned)
+    await _hand(asker, _given(DiagnosticSource.PLANNING, tools=_TOOLS), returned)
+    (entry,) = await _settled(sink, 1)
 
-    reasons = [one["reason"] for one in captured if one["event"] == FOLLOW_UP_NOT_ASKED]
-    assert reasons == (["budget"] if asked else ["model"])
+    assert world.built == [sent_to]
+    assert _body(entry)["model"] == sent_to
     await asker.aclose()
+
+
+async def test_each_models_client_is_built_once_and_closed_with_the_asker() -> None:
+    """Each spec's model is the asker's own: built at its first follow-up, closed at the end."""
+    sink, world = FakeDiagnosticSink(), _World()
+    asker = _asker(sink, world)
+
+    await _hand(asker, _given(), _returned(), _given(), _returned())
+    await _settled(sink, 2)
+    await _hand(asker, _given(DiagnosticSource.PLANNING, tools=_TOOLS))
+    await _hand(
+        asker, _returned(DiagnosticSource.PLANNING, reply=None, response=_round_response("other"))
+    )
+    await _settled(sink, 3)
+
+    assert world.built == [_ROUTE, "fake:other"]
+    assert world.opened == 2
+    assert world.closed == 0
+    await asker.aclose()
+    assert world.closed == 2
+    await asker.aclose()
+    assert world.closed == 2
+
+
+async def test_a_follow_up_on_a_vendors_client_is_one_request_on_the_wire() -> None:
+    """§8:15: the client's own retries are off, so a 429 is one request, recorded failed."""
+    recorder = RequestRecorder(failing_status(429))
+    sink = FakeDiagnosticSink()
+
+    with network_denied():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(recorder)) as http_client:
+
+            def build(spec: str) -> Model:
+                client = AsyncAnthropic(
+                    api_key="test-key-not-a-credential", http_client=http_client
+                )
+                assert client.max_retries == 2  # the vendor's default, which is turned off
+                return AnthropicModel(
+                    spec.partition(":")[2], provider=AnthropicProvider(anthropic_client=client)
+                )
+
+            asker = FollowUpAsker(
+                sink,
+                prompt=_TEMPLATE,
+                routes=dict.fromkeys(FOLLOW_UP_ROUTES, "anthropic:claude-x"),
+                daily_calls=10,
+                timeout=30.0,
+                build=build,
+            )
+            await _hand(asker, _given(), _returned())
+            (entry,) = await _settled(sink, 1)
+            await asker.aclose()
+
+    assert len(recorder.bodies) == 1
+    assert _body(entry)["failure"]["class"] == "ModelRateLimitError"
 
 
 @pytest.mark.parametrize(
@@ -759,19 +822,19 @@ async def test_closing_drops_the_queue_and_abandons_the_follow_up_in_flight() ->
     [
         ({"prompt": prompt_from(_ANOTHER, "Another prompt.")}, ValueError),
         ({"routes": {"understanding": "anthropic:claude-x"}}, ValueError),
+        ({"routes": dict.fromkeys(FOLLOW_UP_ROUTES, "no-provider")}, ValueError),
         ({"daily_calls": -1}, ValueError),
         ({"daily_calls": True}, TypeError),
         ({"timeout": 0.0}, ValueError),
     ],
-    ids=["prompt", "routes", "budget", "budget-bool", "timeout"],
+    ids=["prompt", "routes", "spec", "budget", "budget-bool", "timeout"],
 )
 def test_what_it_is_built_with_is_checked(
     change: dict[str, object], error: type[Exception]
 ) -> None:
-    world = _World()
     built: dict[str, Any] = {
         "prompt": _TEMPLATE,
-        "routes": dict.fromkeys(FOLLOW_UP_ROUTES, world.model),
+        "routes": dict.fromkeys(FOLLOW_UP_ROUTES, _ROUTE),
         "daily_calls": 1,
         "timeout": 1.0,
         **change,

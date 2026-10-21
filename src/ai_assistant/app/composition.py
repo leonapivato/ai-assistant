@@ -2638,9 +2638,10 @@ def _follow_up_asker(
 ) -> FollowUpAsker | None:
     """The follow-up asker around the record's sink, where it asks (ADR-0337 §8:5, §8:8).
 
-    Each route's follow-up goes to the first model of the stage's own route: planning,
-    understanding and a digest's parts to ``default_model``, which leads the routed
-    order and is the one planning's completer asks (:func:`_model_specs`); the
+    Each route's follow-up goes to the first model of the stage's own route, or, where a
+    planning response names the model that answered, to that model of the same provider:
+    planning, understanding and a digest's parts to ``default_model``, which leads the
+    routed order and is the one planning's completer asks (:func:`_model_specs`); the
     observer's two steps each to its own step's model. Its deadline is the one every
     route's attempt is held to, ``model_timeout_seconds``, and it asks with the
     planning completer's own thinking, the default.
