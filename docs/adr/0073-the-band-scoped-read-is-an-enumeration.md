@@ -1,6 +1,6 @@
 # 73. The band-scoped read is an enumeration; inspection shows live beliefs
 
-- Status: Partially superseded by ADR-0084 (the placement of the `Belief`, `TurnOutcome` and `IngestSummary` DTOs as `orchestration` dataclasses outside contract surface) and ADR-0328 (§4's per-belief list but its floor that a citation is never rendered as evidence it cannot show, and §7's `Belief` carrying exactly §4's fields)
+- Status: Partially superseded by ADR-0084 (the placement of the `Belief`, `TurnOutcome` and `IngestSummary` DTOs as `orchestration` dataclasses outside contract surface) and ADR-0328 (§4's per-belief list but its floor that a citation is never rendered as evidence it cannot show, and §7's `Belief` carrying exactly §4's fields) and ADR-0342 (§3's and §10's deferral of a history surface, for the store's read alone: a retired memory is reachable by id through a history read as well as through `export`)
 - Date: 2026-07-27
 - Note (2026-08-02): **§4's `ATTESTED` gate now has an answer to its `core`
   question. The gate itself is not discharged.** §4 rules that an attested belief's
@@ -104,6 +104,7 @@
   loop `learn` already runs), ADR-0021 §4 (the bounded-read precedent
   `AuditTrail.recent` sets), ADR-0004 §6 (the data rights this surface delivers).
 - Partially superseded: 2026-10-18 by ADR-0328 — §4's per-belief list but its floor that a citation is never rendered as evidence it cannot show, and §7's `Belief` carrying exactly §4's fields: ADR-0328 §15 states what a projection of a memory carries; the floor stands. This replacement takes effect on ratification of ADR-0328. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
+- Partially superseded: 2026-10-21 by ADR-0342 — §3's and §10's deferral of a history surface, for the store's read alone: `MemoryStore` gains a history read that returns memories by id whatever their status, so a retired memory is reachable by id through it as well as through `export` (ADR-0342 §2:1, §3:1). §3's ruling that inspection reads live beliefs only, and that `list_beliefs` grows no axis for retired records, stands (ADR-0342 §4:3), and so does the deferral of a rendered history view (ADR-0342 §7). Every other part stands. This replacement takes effect on ratification of ADR-0342. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
