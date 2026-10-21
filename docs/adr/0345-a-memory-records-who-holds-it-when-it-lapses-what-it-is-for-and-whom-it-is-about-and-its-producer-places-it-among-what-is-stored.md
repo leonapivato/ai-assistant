@@ -122,7 +122,7 @@ labels, marks and whom it is about, and stops carrying `topics`.
 | The input or one of its messages, where the input's `InputOrigin` is `USER` and the message carries no `forwarded_from` | The person who sent it: the owner, today |
 | A confirmation | The person who gave the yes: the owner, today |
 | A pin (ADR-0338 §4:4) | The person who made the pin |
-| A message carrying `forwarded_from`, or an input whose `InputOrigin` is `OUTSIDE` | The source the record names: the forward's claimed original sender where the trigger records one (`ClaimedAuthor`), and otherwise unknown |
+| A message carrying `forwarded_from`, or an input whose `InputOrigin` is `OUTSIDE` | A claimed source: the forward's claimed original sender where the trigger records one (`ClaimedAuthor`), held as claimed, and otherwise unknown |
 | An evidence item | The source the record names: its digest's `Attestation.reported_by` where the record states one, and otherwise unknown |
 | A round's message, a remember call, or an observer's inference | The assistant |
 | A legacy record | Unknown |
@@ -132,8 +132,8 @@ labels, marks and whom it is about, and stops carrying `topics`.
 > holder.
 
 > **Normative.** A holder is one of four kinds, a closed set added to and never renamed:
-> a person, named by an identifier; a source, named by an identifier; the assistant; and
-> unknown.
+> a person, named by an identifier; a source, named by an identifier and marked
+> established or claimed; the assistant; and unknown.
 
 > **Normative.** Until a decision on identified people adds others, the one person a
 > holder names is the owner, and the identifier that names the owner is a
@@ -146,6 +146,15 @@ labels, marks and whom it is about, and stops carrying `topics`.
 > and connecting two parts to one identifier is enough, with no identity behind it. A
 > part whose record carries no identifier has an unknown holder, which is never the same
 > holder as any other.
+
+> **Normative.** A person holder is named only by an identity the channel itself establishes
+> for whoever sent the part (ADR-0323 §4:2). An author the part only claims, in a forward,
+> a quotation or a report, names a claimed source holder, which is never the same holder
+> as an established one, whatever identifier either carries, and becomes the same only by
+> the owner's act linking the two.
+
+> **Normative.** A holder is set from who sent or reported a part, never from what the
+> part says. A part claiming what another person believes is held by whoever sent it.
 
 > **Normative.** A support keeps the identifier its holder was recorded under, and no write
 > rewrites it. Which person an identifier belongs to is a link held outside the support,
@@ -160,6 +169,11 @@ labels, marks and whom it is about, and stops carrying `topics`.
 > **Normative.** A memory's standing stays as ADR-0328 §6 computes it. It says how the
 > memory's backing reached the assistant, and in a placed proposal's write (§5) it ranks
 > no holder above another.
+
+**Why only an established identity holds.** Sam forwarding a text "from the user", or
+showing a screenshot of one, or saying "the user agrees with me", must never make a belief
+the user's. Each is held by Sam, with the claimed author recorded as a claimed source. What
+the user believes comes only from the user's own words on a channel that establishes them.
 
 **Why a holder beside the origin.** The origin says how a part reached the assistant;
 the holder says whose belief it is. Today they coincide, because only the owner speaks,
