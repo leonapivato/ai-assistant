@@ -6982,8 +6982,9 @@ class Engine:
         reader's one marking write.
 
         Raises:
-            ModelTimeoutError: If the deadline passed first; nothing is taken over, as
-                past the deadline the stage is not entered (:func:`_takeover_expired`).
+            ModelTimeoutError: If the deadline passed first, or had passed once the
+                wait ended; nothing is taken over, as past the deadline the stage is not
+                entered (:func:`_takeover_expired`).
         """
         other = next(
             (
@@ -7000,6 +7001,10 @@ class Engine:
                 await other.settled()
         except TimeoutError:
             raise ModelTimeoutError(_TAKEOVER_EXPIRED) from None
+        # Read again with no await before the takeover's step: a wait resumed after
+        # the deadline, its timeout not yet raised, takes nothing over (ADR-0343 §4:3).
+        if working.deadline_passed:
+            raise ModelTimeoutError(_TAKEOVER_EXPIRED)
 
     def _reserve_join(self, joining: JoiningInput) -> tuple[JoinCheck, PendingJoin | None]:
         """The readers' join (ADR-0332 §3:3, §3:6, §3:18): taken, pending its marking.
