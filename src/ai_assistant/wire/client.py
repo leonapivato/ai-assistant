@@ -886,6 +886,11 @@ class HubClient:
             "write_message", conversation_id=named, message=sent
         )
 
+    async def composing(self, conversation_id: Identifier) -> None:
+        """Say the person is typing into a conversation's composer (ADR-0332 §5:9)."""
+        named = identifier(conversation_id, name="conversation_id")
+        await self._call("composing", conversation_id=named)
+
     async def delete_message(self, conversation_id: Identifier, *, position: int) -> bool:
         """Delete one message, leaving its marker (ADR-0293 §5:8)."""
         named = identifier(conversation_id, name="conversation_id")

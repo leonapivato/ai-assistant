@@ -42,7 +42,7 @@ from ai_assistant.core.types import (
     SupportOrigin,
 )
 from ai_assistant.memory import SqliteMemoryStore
-from ai_assistant.memory._episode_format import MEMORY_RECORD_FORMAT
+from ai_assistant.memory._episode_format import EPISODE_RECORD_FORMAT, MEMORY_RECORD_FORMAT
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.testing import FakeTraceSink
 
@@ -87,6 +87,14 @@ def _raw_rows(path: Path) -> dict[str, tuple[str, dict[str, Any], int]]:
         }
 
 
+def _with_later_defaults(stored: dict[str, Any]) -> dict[str, Any]:
+    """An episode's stored blob, with the defaults of fields added since it was written."""
+    record = stored.get("processing_record")
+    if record is None:
+        return stored
+    return {**stored, "processing_record": {**record, "joined": record.get("joined", [])}}
+
+
 def _label(path: Path) -> int:
     with sqlite3.connect(path) as conn:
         (version,) = conn.execute("SELECT version FROM episode_record_format").fetchone()
@@ -120,7 +128,7 @@ async def _upgraded(path: Path) -> dict[str, Any]:
 
 def test_the_fixture_is_what_the_previous_release_wrote() -> None:
     """The file is at the previous label and holds each kind it could store."""
-    assert _label(_FIXTURE) == MEMORY_RECORD_FORMAT - 1
+    assert _label(_FIXTURE) == EPISODE_RECORD_FORMAT
     kinds = {kind for kind, _, _ in _raw_rows(_FIXTURE).values()}
     assert kinds == {"episodic", "semantic", "preference", "procedural"}
 
@@ -131,6 +139,8 @@ async def test_the_file_is_upgraded_in_place_and_its_label_advances(legacy: Path
 
     exported = await _upgraded(legacy)
 
+    # ADR-0326 §4:5: the upgrades chain, so the file reaches this build's own label,
+    # through ADR-0328's and then ADR-0332's.
     assert _label(legacy) == MEMORY_RECORD_FORMAT
     # Nothing dropped: every row is still there, at its id (ADR-0326 §4:4).
     assert set(_raw_rows(legacy)) == set(before)
@@ -149,7 +159,11 @@ async def test_no_episode_is_rewritten(legacy: Path) -> None:
         assert after[record_id][:2] == before[record_id][:2]
         episode = exported[record_id]
         assert isinstance(episode, EpisodicMemory)
-        assert episode.model_dump(mode="json", exclude={"revision"}) == before[record_id][1]
+        # A field a later decision adds at its default is the one difference: ADR-0332
+        # §7:2's ``joined`` on the processing record.
+        assert episode.model_dump(mode="json", exclude={"revision"}) == _with_later_defaults(
+            before[record_id][1]
+        )
 
 
 async def test_each_legacy_record_becomes_a_memory_at_its_id(legacy: Path) -> None:
@@ -347,4 +361,4 @@ def test_an_upgrade_that_cannot_finish_leaves_the_file_as_it_found_it(legacy: Pa
         _open(legacy)
 
     assert legacy.read_bytes() == before
-    assert _label(legacy) == MEMORY_RECORD_FORMAT - 1
+    assert _label(legacy) == EPISODE_RECORD_FORMAT

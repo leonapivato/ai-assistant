@@ -4901,7 +4901,10 @@ def _message_of(raw: object) -> TelegramMessage | None:
         replies to — is not in the shape the Bot API documents. **A forward whose
         origin cannot be read is not read at all**, rather than read as the user's
         own words: a forward is claimed, and a message that lost the mark would be
-        established (§4:1, §4:10).
+        established (§4:1, §4:10). Its ``entities`` are the one exception: where they
+        are not in the documented shape, the message is read whole with no command
+        (ADR-0332 §7:9), since a message read as no command is the safe side of the
+        stop's predicate (§8:1).
     """
     if not isinstance(raw, Mapping):
         return None
@@ -4932,10 +4935,77 @@ def _message_of(raw: object) -> TelegramMessage | None:
                 "text": text,
                 "forward_origin": forward,
                 "reply_to": quoted,
+                "command": _command_of(text, raw.get("entities")),
             }
         )
     except ValidationError:
         return None
+
+
+def _command_of(text: str | None, entities: object) -> str | None:
+    """The command Telegram marked at the start of a message's text (ADR-0332 §7:9).
+
+    The part of ``text`` that a ``bot_command`` entity starting at its first character
+    covers, by the entity's offset and length. Telegram counts both in UTF-16 code
+    units, so the text is measured in them rather than in code points.
+
+    **Anything not in the shape the Bot API documents is no command**, and never drops
+    the message: ``entities`` that are not a list of objects each carrying a text
+    ``type`` and an in-range ``int`` ``offset`` and ``length``, two ``bot_command``
+    entities at the first character, or one whose span ends inside a character.
+
+    Args:
+        text: The message's text, already read; ``None`` for one with none.
+        entities: The message's ``entities`` member, as Telegram sent it.
+
+    Returns:
+        The command's text, or ``None`` where the message has no such entity or its
+        entities cannot be read.
+    """
+    if text is None or not isinstance(entities, list):
+        return None
+    try:
+        encoded = text.encode("utf-16-le")
+    except UnicodeEncodeError:
+        # A lone surrogate: the text is not one ``TelegramMessage`` admits, and the
+        # message is refused as a whole where it is validated.
+        return None
+    spans = [_entity_span(entity, units=len(encoded) // 2) for entity in entities]
+    if any(span is None for span in spans):
+        return None
+    starting = [
+        length
+        for kind, offset, length in (span for span in spans if span is not None)
+        if kind == "bot_command" and offset == 0
+    ]
+    if len(starting) != 1:
+        return None
+    try:
+        return encoded[: 2 * starting[0]].decode("utf-16-le")
+    except UnicodeDecodeError:
+        # The span ends between the two halves of a surrogate pair.
+        return None
+
+
+def _entity_span(entity: object, *, units: int) -> tuple[str, int, int] | None:
+    """One ``MessageEntity``'s type, offset and length, where it is in the documented shape.
+
+    Args:
+        entity: One member of a message's ``entities``.
+        units: The text's length in UTF-16 code units.
+
+    Returns:
+        The three, or ``None`` where it is not an object carrying a text ``type`` and
+        ``int`` ``offset`` and ``length`` that name a non-empty span inside the text.
+    """
+    if not isinstance(entity, Mapping):
+        return None
+    kind, offset, length = entity.get("type"), entity.get("offset"), entity.get("length")
+    if type(kind) is not str or type(offset) is not int or type(length) is not int:
+        return None
+    if offset < 0 or length < 1 or offset + length > units:
+        return None
+    return kind, offset, length
 
 
 def _instant_of(date: object) -> datetime | None:

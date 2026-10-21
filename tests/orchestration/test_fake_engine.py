@@ -771,6 +771,18 @@ async def test_two_first_reads_of_a_held_conversation_join_the_chat_space_once()
     assert [type(one).__name__ for one in started] == ["ConversationStartedChange"]
 
 
+async def test_a_composing_signal_is_recorded_as_a_call_and_nowhere_else() -> None:
+    """ADR-0332 §5:8: the fake keeps the signal in ``calls`` alone, for a test to read."""
+    engine = FakeAssistantEngine()
+    conversation = (await engine.start_conversation()).id
+    before = await engine.chat_changes(after=0)
+
+    await engine.composing(f" {conversation} ")
+
+    assert engine.calls[-1] == ("composing", {"conversation_id": conversation})
+    assert await engine.chat_changes(after=0) == before
+
+
 async def test_a_deletion_racing_a_first_read_leaves_no_chat_conversation() -> None:
     """Deleting a held conversation while a first read is joining it to the chat space.
 

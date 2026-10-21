@@ -1639,6 +1639,16 @@ class FakeAssistantEngine:
             self._reader.notice(named)
         return self._checked(receipt, "write_message")
 
+    async def composing(self, conversation_id: Identifier) -> None:
+        """Take a composing signal, which writes nothing and answers nothing (ADR-0332 §5).
+
+        Recorded in :attr:`calls` and nowhere else. It goes to no reader yet, as the
+        engine's goes to none: no start wait runs for it to extend (§5:7).
+        """
+        named = identifier(conversation_id, name="conversation_id")
+        check_arguments("composing", max_bytes=self._max_payload_bytes, conversation_id=named)
+        self.calls.append(("composing", {"conversation_id": named}))
+
     def _spawn_read(self, read: Coroutine[None, None, None]) -> None:
         """Start one of the reader's reads as a task this fake holds (ADR-0293 §6)."""
         task = asyncio.get_running_loop().create_task(read)

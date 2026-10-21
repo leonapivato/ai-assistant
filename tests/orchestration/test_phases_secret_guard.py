@@ -400,7 +400,10 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     a time, an author, the text and what it replies to; and its trigger records each
     message it took in as ``RecordedInputMessage``, with a forward's original sender as
     ``ClaimedAuthor`` — a name and an id Telegram reported (§4:10, §5:4). The bot's
-    token never reaches any of them: the client binds it in ``tools/`` (§11:8).
+    token never reaches any of them: the client binds it in ``tools/`` (§11:8). A joined
+    input (ADR-0332 §3:16) is a time, the ``ChannelIdentity`` it came from, its
+    ``RecordedInputMessage``s and the identifier of an activation a takeover stopped:
+    the user's words and identifiers, with no carrier.
 
     **The audience** (ADR-0203, ADR-0204). ``UnboundedAudienceSupply`` and
     ``BoundedAudienceSupply`` filter what is rendered and are never rendered: a set of
@@ -469,6 +472,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "EvidenceItemPart",
         "HeldResult",
         "InputPart",
+        "JoinedInput",
         "LegacyPart",
         "LineMessage",
         "Memory",

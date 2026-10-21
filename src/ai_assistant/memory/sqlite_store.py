@@ -83,6 +83,7 @@ from ai_assistant.memory._channel_reads import (
 )
 from ai_assistant.memory._episode_format import (
     EPISODE_RECORD_FORMAT,
+    MEMORIES_RECORD_FORMAT,
     MEMORY_RECORD_FORMAT,
     MEMORY_RECORD_FORMATS,
     inspect_existing,
@@ -538,6 +539,7 @@ class SqliteMemoryStore:
             self._migrate_records(conn)
             self._migrate_walk_key(conn)
             self._upgrade_to_memories(conn, existing_format)
+            self._upgrade_to_joined(conn, existing_format)
             self._index_channels(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
@@ -984,7 +986,8 @@ class SqliteMemoryStore:
           procedural record's steps were appended.
         - **No episode is rewritten** (§16:7), a recall item naming ``semantic``
           included; only its band column is filled.
-        - **The label advances** to :data:`MEMORY_RECORD_FORMAT` (§16:8).
+        - **The label advances** to :data:`MEMORIES_RECORD_FORMAT` (§16:8), from which
+          :meth:`_upgrade_to_joined` takes it on (ADR-0326 §4:5).
 
         A fresh store, written at the new label from its first open, has nothing to
         upgrade, and neither has a file already at it.
@@ -1014,6 +1017,30 @@ class SqliteMemoryStore:
                 "SELECT rowid, kind, data FROM records WHERE rowid > ? ORDER BY rowid LIMIT ?",
                 (chunk[-1][0], _BACKFILL_CHUNK),
             ).fetchall()
+        conn.execute("UPDATE episode_record_format SET version = ?", (MEMORIES_RECORD_FORMAT,))
+
+    @staticmethod
+    def _upgrade_to_joined(conn: sqlite3.Connection, found: int | None) -> None:
+        """Upgrade a file at an earlier label to ADR-0332 §7:8's, in place.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, after
+        :meth:`_upgrade_to_memories` has carried a file at 12 to 13, so the upgrades
+        chain (ADR-0326 §4:5), and it completes or rolls back with the transaction
+        (§4:3).
+
+        **The label alone advances.** A record written at 13 validates unchanged under
+        this build: ``joined`` and ``continues`` default to empty, and no record names a
+        stage or a rule that did not exist. Nothing is rewritten, so nothing can be
+        dropped (§4:4). What the label buys is §5:3's refusal: an older build, which
+        reads 12 and 13, refuses a file whose records may carry what it would misread.
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+        """
+        if found is None or found == MEMORY_RECORD_FORMAT:
+            return
         conn.execute("UPDATE episode_record_format SET version = ?", (MEMORY_RECORD_FORMAT,))
 
     def _upgrade_row(

@@ -490,6 +490,25 @@ class TelegramIntakeRecordContract:
         assert held.outcome is None
         assert (await record.recorded([10]))[10].kind is TelegramIntakeKind.ANSWERED
 
+    async def test_a_stop_command_answered_is_told_from_a_new_one_and_never_taken_in(
+        self, record: TelegramIntakeRecord
+    ) -> None:
+        """ADR-0332 §8:6: a stop is recorded as an update answered, before it is acted on.
+
+        The reader reads :meth:`recorded` before its claim: nothing there is a new stop,
+        and an update held as answered is a repeat, which stops nothing and is never
+        taken in as input (§8:3).
+        """
+        assert await record.recorded([10]) == {}
+
+        assert await record.claim_reply(10) is not None
+
+        assert await record.recorded([10]) == {
+            10: TelegramIntake(update_id=10, kind=TelegramIntakeKind.ANSWERED)
+        }
+        assert await record.claim_reply(10) is None
+        assert await record.take_in([10], activation_id=ACTIVATION) == ()
+
     @pytest.mark.parametrize(
         "earlier",
         [None, DONE, SENT, *(failed(one) for one in FINAL)],

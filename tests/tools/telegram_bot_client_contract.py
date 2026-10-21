@@ -109,13 +109,17 @@ class Prepared:
     opened: Callable[[], tuple[str, ...]]
 
 
-def an_update(update_id: int, *, text: str = "hello", sender: int | None = None) -> TelegramUpdate:
+def an_update(
+    update_id: int, *, text: str = "hello", sender: int | None = None, command: str | None = None
+) -> TelegramUpdate:
     """An update carrying one text message from ``sender`` in their private chat.
 
     Args:
         update_id: Telegram's id for the update.
         text: The message's text.
         sender: The sending account; the line's chat by default.
+        command: The text a ``bot_command`` entity at its first character covers, or
+            ``None`` for a message with none (ADR-0332 §7:9).
 
     Returns:
         The update.
@@ -130,6 +134,7 @@ def an_update(update_id: int, *, text: str = "hello", sender: int | None = None)
             sender_id=account,
             sent_at=datetime(2026, 10, 17, 12, 0, update_id % 60, tzinfo=UTC),
             text=text,
+            command=command,
         ),
     )
 
@@ -435,6 +440,29 @@ class TelegramBotClientContract:
 
         assert outcome.done
         assert outcome.updates == updates
+
+    async def test_a_stop_is_told_from_its_text_by_telegrams_entity_alone(self) -> None:
+        """ADR-0332 §1:4, §7:9: two ``/stop`` texts, one marked a command by Telegram.
+
+        They differ only in the ``bot_command`` entity, so one comes back carrying the
+        command and the other as a message with none, and both are read whole. The
+        command never comes from the text.
+        """
+        updates = (
+            an_update(20, text="/stop", command="/stop"),
+            an_update(21, text="/stop"),
+            an_update(22, text="/stop@another_bot please", command="/stop@another_bot"),
+        )
+        prepared = await self.holding(*updates)
+
+        outcome = await prepared.client.poll(
+            attempt=ATTEMPT, offset=None, wait=A_WAIT, timeout=A_BOUND
+        )
+
+        assert outcome.done
+        assert outcome.updates == updates
+        commands = [one.message.command for one in outcome.updates if one.message is not None]
+        assert commands == ["/stop", None, "/stop@another_bot"]
 
     async def test_a_poll_asks_for_new_messages_and_sends_its_offset(self) -> None:
         """The offset confirms; the wait is whole seconds, never more than asked."""

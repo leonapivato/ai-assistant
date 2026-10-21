@@ -4331,6 +4331,61 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Several inputs at once: the start wait and joining (ADR-0332 §5, §6) ---
+    # **Each has a working default**, which #2589 tunes by measurement without a new
+    # decision (§6:6): the starting values are guesses. The three hub-chat durations
+    # bound one another, which the model validator below refuses at load where they do
+    # not: the composing cap is the longest a start wait may last, so it is no shorter
+    # than the wait it caps or than one composing signal's life (§6:3).
+    chat_start_wait: _DurationSetting = Field(
+        default=timedelta(seconds=1.5),
+        gt=timedelta(0),
+        description=(
+            "How long the hub chat's reader waits after the latest message of a "
+            "conversation where nothing is running, with no composing signal live, "
+            "before it takes the waiting messages in together (ADR-0332 §5:1). "
+            "Strictly positive."
+        ),
+    )
+    chat_composing_lapse: _DurationSetting = Field(
+        default=timedelta(seconds=3),
+        gt=timedelta(0),
+        description=(
+            "How long one composing signal from the hub chat page stays live after it "
+            "arrives, extending a start wait already running (ADR-0332 §5:6, §5:7). "
+            "Strictly positive."
+        ),
+    )
+    chat_composing_cap: _DurationSetting = Field(
+        default=timedelta(seconds=10),
+        gt=timedelta(0),
+        description=(
+            "The longest a hub chat start wait lasts after the first waiting message, "
+            "whatever the composing signal says (ADR-0332 §5:2). No shorter than "
+            "chat_start_wait or chat_composing_lapse."
+        ),
+    )
+    telegram_start_wait: _DurationSetting = Field(
+        default=timedelta(seconds=2),
+        gt=timedelta(0),
+        description=(
+            "How long the Telegram line's reader waits after the first message in its "
+            "chat where nothing is running before it takes in what has arrived "
+            "(ADR-0332 §5:3). Fixed, since Telegram tells a bot nothing about typing. "
+            "Strictly positive."
+        ),
+    )
+    join_limit: _IntegerSetting = Field(
+        default=3,
+        ge=0,
+        lt=2**31,
+        description=(
+            "The most inputs one activation takes in after its trigger, by joining on "
+            "its place or by a takeover from another (ADR-0332 §3:3, §4:6). 0 turns "
+            "joining off, and takeover with it."
+        ),
+    )
+
     # --- The simulated booking provider (ADR-0273 §1, §5) -----------------
     # **Absent by default, and absence is the whole-or-absent shape these settings
     # already use rather than a boolean flag.** ADR-0273 §1: a deployment supplying
@@ -5024,6 +5079,28 @@ class Settings(BaseSettings):
             f"telegram_poll_bound={self.telegram_poll_bound} must be strictly greater "
             f"than telegram_poll_wait={self.telegram_poll_wait}: a poll is bounded by "
             f"more than the time Telegram is asked to hold it (ADR-0323 §11:10)"
+        )
+        raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def _the_composing_cap_bounds_the_chats_waits(self) -> Settings:
+        """Refuse a composing cap shorter than the start wait or a signal's life (§6:3).
+
+        The cap is the longest a hub chat start wait lasts. One shorter than the wait
+        itself would cut every wait off before it ends, and one shorter than a signal's
+        life would end a wait that a live signal is still extending.
+
+        Raises:
+            ValueError: If ``chat_composing_cap`` is shorter than ``chat_start_wait`` or
+                ``chat_composing_lapse``.
+        """
+        if self.chat_composing_cap >= max(self.chat_start_wait, self.chat_composing_lapse):
+            return self
+        msg = (
+            f"chat_composing_cap={self.chat_composing_cap} must be no shorter than "
+            f"chat_start_wait={self.chat_start_wait} or chat_composing_lapse="
+            f"{self.chat_composing_lapse}: it caps the start wait the composing signal "
+            f"extends (ADR-0332 §6:3)"
         )
         raise ValueError(msg)
 

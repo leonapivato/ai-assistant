@@ -2670,7 +2670,15 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ground: the promoted method set gains ``connect_keyless_account``. No type in
 #:     ``core`` changes (§5:3). A hub at 112 does not route the method a peer at 113
 #:     calls (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 113
+#: 114: ADR-0332 §7:7 advances the version once for step 1 of joining and the start
+#:     wait (§1:3), on these grounds: the promoted method set gains ``composing``
+#:     (§5:9, §5:10), which a hub at 113 does not route; and the wire-carried
+#:     ``EpisodicMemory.processing_record`` gains ``joined`` (``JoinedInput``), its
+#:     understanding versions ``continues``, ``ControllerStage`` ``takeover`` and
+#:     ``ControllerRule`` ``takeover_undecided``, which a peer at 113 refuses as
+#:     unknown (ADR-0124 §9:2). ``TelegramMessage.command`` is carried by no engine
+#:     method.
+PROTOCOL_VERSION: Final[int] = 114
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

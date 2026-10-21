@@ -753,7 +753,8 @@ _INTEGER_FIELDS: Final = tuple(
 #: the calendar trio already has.
 #: ``telegram_poll_bound`` joins them for ADR-0323 §11:10's refusal: the bound must
 #: exceed ``telegram_poll_wait``, and the hour these cases set the wait to is above
-#: the bound's default.
+#: the bound's default. ``chat_composing_cap`` joins them for ADR-0332 §6:3's, on the
+#: same ground: it is no shorter than ``chat_start_wait`` or ``chat_composing_lapse``.
 _COMPANIONS: Final[dict[str, Any]] = {
     "calendar_reader_path": Path("/srv/calendars/personal.ics"),
     "calendar_upcoming_lead": timedelta(hours=2),
@@ -762,6 +763,7 @@ _COMPANIONS: Final[dict[str, Any]] = {
     "forecast_latitude": 41.1579,
     "forecast_longitude": -8.6291,
     "telegram_poll_bound": timedelta(hours=3),
+    "chat_composing_cap": timedelta(hours=3),
 }
 
 
@@ -949,6 +951,10 @@ def test_every_integer_setting_is_discovered() -> None:
         # call a day, so the observer scouts one episode and then holds every other
         # while it looks configured. Zero is admitted and means no call at all.
         "observer_daily_calls",
+        # ADR-0332 §6:5's bound on an activation's joins, and the ``bool`` argument
+        # again: ``join_limit=True`` is one join while it reads as joining on. Zero is
+        # admitted and turns joining and takeover off.
+        "join_limit",
     }
 
 
@@ -1316,6 +1322,13 @@ def test_every_duration_setting_is_discovered() -> None:
         # minutes, so it is in :data:`_HOUR_SCALE_DURATIONS`' exceptions and its forms
         # are pinned at a minute in ``tests/core/test_gateway_settings.py``.
         "gateway_edge_assertion_max_age",
+        # ADR-0332 §6:1 to §6:4's waits, none nullable: each is strictly positive. The
+        # composing cap joins :data:`_COMPANIONS`, because it must be no shorter than
+        # the start wait and the composing lapse, and these cases set those to an hour.
+        "chat_start_wait",
+        "chat_composing_lapse",
+        "chat_composing_cap",
+        "telegram_start_wait",
     }
 
 

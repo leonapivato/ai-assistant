@@ -96,6 +96,15 @@ def update_json(update: TelegramUpdate) -> dict[str, Any]:
             "from": {"id": message.sender_id, "is_bot": False, "first_name": "O"},
             "text": message.text,
         }
+        if message.command is not None:
+            # The relay hands a message's entities unaltered (ADR-0332 §7:10).
+            raw["message"]["entities"] = [
+                {
+                    "type": "bot_command",
+                    "offset": 0,
+                    "length": len(message.command.encode("utf-16-le")) // 2,
+                }
+            ]
     return raw
 
 
