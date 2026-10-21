@@ -219,7 +219,7 @@ from ai_assistant.orchestration.payloads import (
     page_argument,
     positive_page_argument,
 )
-from ai_assistant.orchestration.person_block import activation_person
+from ai_assistant.orchestration.person_block import activation_person, still_held
 from ai_assistant.orchestration.phase_path import PlaceTarget, failing_stage
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.speech import (
@@ -6740,8 +6740,9 @@ class Engine:
         ADR-0338 §2:2-§2:4: the person is read from the recorded trigger, and an
         activation that is no person's — or a pass no channel admitted — is given none.
         The block is carried on the state, which every planning round reads, so an
-        understanding run again for joined input reads the same block. ``None`` where no
-        person-model store is wired.
+        understanding run again for joined input reads the same block, less what the
+        memory store no longer holds (§7:10). ``None`` where no person-model store is
+        wired.
         """
         if self._person_blocks is None or state is None:
             return None
@@ -6750,6 +6751,10 @@ class Engine:
             state.person_block = await self._person_blocks.assemble(
                 activation_person(state.trigger), supply=working.supply
             )
+        elif state.person_block is not None:
+            # §7:10, for an understanding run again on joined input as for a planning
+            # round: a memory forgotten since the block was assembled reaches no request.
+            state.person_block = await still_held(state.person_block, self._memory)
         return state.person_block
 
     def _recorded_understanding(

@@ -31,7 +31,6 @@ from threading import Lock
 from typing import Annotated, Any, Final, Literal, Self, assert_never
 from urllib.parse import unquote
 from uuid import uuid4
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jsonschema.exceptions import SchemaError, ValidationError
 from jsonschema.validators import Draft202012Validator
@@ -20480,40 +20479,6 @@ class Profile(BaseModel):
             The new profile.
         """
         return self.model_copy(update={field.value: value})
-
-
-def profile_value_fault(field: ProfileField, value: str | None, *, chars: int) -> str | None:
-    """Why ``value`` is no valid value of ``field``, or ``None`` where it is (ADR-0338 §3:2).
-
-    One rule for every writer of a field, the store's own check included: ``None``
-    clears the field; a time zone is a name ``zoneinfo`` resolves; every other field is
-    text, not blank, within ``chars`` characters, the bound a composition-root constant
-    holds.
-
-    Args:
-        field: The field written.
-        value: The value written, or ``None`` to clear it.
-        chars: The bound on a text field's length.
-
-    Returns:
-        A code-owned reason, or ``None``.
-    """
-    if value is None:
-        return None
-    if not value.strip():
-        return "a field is cleared, never set to blank text"
-    if len(value) > chars:
-        return f"a field's value is at most {chars} characters"
-    try:
-        encodable_text(value)
-    except ValueError:
-        return "a field's value is text with a UTF-8 encoding"
-    if field is ProfileField.TIME_ZONE:
-        try:
-            ZoneInfo(value)
-        except ZoneInfoNotFoundError, ValueError:
-            return "a time zone is a name zoneinfo resolves"
-    return None
 
 
 class PersonActHow(StrEnum):

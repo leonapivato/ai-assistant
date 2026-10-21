@@ -189,6 +189,14 @@ class PersonBlock:
         return tuple(one.memory for one in self.kept if one.pinned)
 
     @property
+    def memories(self) -> tuple[Memory, ...]:
+        """Every memory the block shows, in the slot or with a pin suggestion."""
+        return (
+            *(one.memory for one in self.kept),
+            *(one.memory for one in self.suggestions if one.memory is not None),
+        )
+
+    @property
     def memory_ids(self) -> frozenset[str]:
         """Every memory the block shows, in the slot or with a pin suggestion."""
         return frozenset(

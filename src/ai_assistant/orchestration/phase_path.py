@@ -2983,7 +2983,7 @@ class PhasePath:
                 # every read before the round is (ADR-0280 §5).
                 approved = await self._approved(given, working)
                 pending = await self._pending(given, working)
-                person = await self._person()
+                person = await self._person(working)
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
         outside = (
@@ -3039,7 +3039,7 @@ class PhasePath:
             planned = replace(planned, round=whole)
         working.planned(planned)
 
-    async def _person(self) -> PersonBlock | None:
+    async def _person(self, working: PhaseWorking) -> PersonBlock | None:
         """The activation's person block for this round, less what memory no longer holds.
 
         ADR-0338 §7:3, §7:10: the block assembled before understanding, from which every
@@ -3047,10 +3047,16 @@ class PhasePath:
         included, and the state keeps what is left, so a memory forgotten while the
         activation runs reaches no later request. ``None`` where the activation has no
         block.
+
+        Every memory the block held before the drop was given to the activation —
+        understanding was shown its pins, and an earlier round the rest — so each is
+        held among what the activation was given, and the episode inherits its
+        placement (ADR-0309 §5:10, ADR-0217 §3) whether or not it is dropped later.
         """
         state = active_state()
         if state is None or state.person_block is None:
             return None
+        working.supplied.obtained(state.person_block.memories)
         state.person_block = await still_held(state.person_block, self._memory)
         return state.person_block
 
