@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _activation_record import serving
@@ -34,6 +37,8 @@ from _replay_record import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from pydantic_ai.messages import ModelMessage
+
 pytestmark = pytest.mark.integration
 
 #: An understanding candidate with no flag in it.
@@ -44,12 +49,12 @@ CANDIDATE = "A candidate understanding instruction."
 UNDERSTANDING_GIVEN, PLANNING_GIVEN, PLANNING_RETURNED, DIGEST_GIVEN = 0, 2, 3, 4
 
 
-def _run(copy: Path, **options: Any) -> None:
+def _run(copy: Path, caller: Any = None, **options: Any) -> None:
     status = asyncio.run(
         replay_tool.replay(
             replay_tool.ReplayOptions(copy=copy, model="fake:model", **options),
             report=lambda _: None,
-            caller=Model().caller(),
+            caller=Model().caller() if caller is None else caller,
             now=now,
         )
     )
@@ -219,3 +224,51 @@ def test_a_result_naming_no_sample_is_a_set_of_its_own(copy: Path) -> None:
     shown = view["replays"]
     assert [one["sample"] for one in shown] == [None, None]
     assert len({one["set"] for one in shown}) == 2
+
+
+# --- ADR-0337 §6:5: a replayed response's follow-up shown as text ----------------------------
+
+
+def test_a_samples_follow_up_is_shown_beside_it_as_text(tmp_path: Path) -> None:
+    made = make_copy(tmp_path)
+    model = Model()
+    _run(made, model.caller(), sources=frozenset({"planning"}), samples=2, follow_up="")
+    default = replay_tool.load_follow_up("", replay_tool.declared_prompts())
+    assert default is not None
+
+    with serving(made / "diagnostics") as bound:
+        view = _json(bound.port, f"/api/call?id={ACT_A}&line={PLANNING_GIVEN}")
+
+    for shown in view["replays"]:
+        asked = shown["follow_up"]
+        assert asked["answer"]["text"] == model.reply
+        assert asked["failure"] is None
+        assert asked["question"]["text"] == default.question
+        assert asked["version"] == default.candidate.template.version
+        assert asked["origin"] == "default"
+
+
+def test_a_follow_up_that_failed_is_shown_as_its_failure(tmp_path: Path) -> None:
+    made = make_copy(tmp_path)
+
+    def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del info
+        if any(isinstance(one, ModelResponse) for one in messages):
+            raise ModelHTTPError(status_code=429, model_name="named")
+        return ModelResponse(parts=[TextPart("a reply")])
+
+    caller = replay_tool.ModelCaller(FunctionModel(answer), timeout=10)
+    _run(made, caller, sources=frozenset({"digesting"}), follow_up="")
+
+    with serving(made / "diagnostics") as bound:
+        view = _json(bound.port, f"/api/call?id={ACT_A}&line={DIGEST_GIVEN}")
+
+    (shown,) = view["replays"]
+    assert shown["follow_up"]["answer"] is None
+    assert shown["follow_up"]["failure"].startswith("ModelRateLimitError")
+
+
+def test_a_result_with_no_follow_up_shows_none(server: Any) -> None:
+    view = _json(server.port, f"/api/call?id={ACT_A}&line={PLANNING_GIVEN}")
+
+    assert [one["follow_up"] for one in view["replays"]] == [None]
