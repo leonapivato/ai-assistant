@@ -2,7 +2,7 @@
 
 ## A Personal AI That Becomes More Useful the Longer You Use It
 
-The goal of this project is to build a deeply personalized, model-agnostic AI assistant that helps people manage everyday life across conversations, tools, projects, routines, and decisions.
+The goal of this project is to build **Aether**: a deeply personalized, model-agnostic AI assistant that helps people manage everyday life across conversations, tools, projects, routines, and decisions, first for one person and then for the household they share.
 
 It should not feel like a chatbot that starts over with every request. It should feel like a persistent personal intelligence layer: one that understands the user, remembers what matters, coordinates the right models and tools, and gradually learns how to be more helpful.
 
@@ -60,6 +60,18 @@ to:
 
 The system should eventually help with communication, scheduling, planning, research, reminders, task execution, decision support, personal organization, and device or service coordination through one consistent interface.
 
+The assistant is separate from the interfaces it is reached through. It lives behind all of them and reasons across them. A person can start a thought by text on one platform and finish it on another, someone else in the household can talk to it at the same time, and meanwhile it can be working on something long, such as a job search or research, and come back when there is something worth saying. An interface is how the assistant is reached. The assistant itself is one continuous intelligence behind every interface.
+
+---
+
+## Who It Serves
+
+**A person first.** The first assistant serves one person. It learns them, works for them and answers to them.
+
+**Then a household.** One assistant can serve a household. It recognizes who is speaking and how they are interacting, and what it shares, what it may do and how it speaks change with the person. One person, the owner, has the final say. Members and permission groups come later; until they are designed, the owner holds complete control. Whatever the arrangement, the assistant is honest with each person about who can see what.
+
+**Each household is its own.** One household's data never mixes with another's. People can run their own hub, or have one run for them.
+
 ---
 
 ## The User Promise
@@ -84,7 +96,7 @@ Each useful interaction should improve future assistance. Corrections, choices, 
 
 ### Free to Choose Models
 
-The user's personal context should not be trapped inside one model provider. The orchestration layer should be able to route work across multiple models without losing the assistant's identity or understanding of the user.
+The user's personal context should not be trapped inside one model provider. The orchestration layer should be able to route work across multiple models without losing the assistant's identity or understanding of the user. As open models become competitive, it should be able to run entirely on hardware the user owns.
 
 ---
 
@@ -137,6 +149,8 @@ Stable profile information is not a separate store but a matter of provenance: f
 
 The assistant should remember selectively, detect conflicts, update stale information, and avoid preserving sensitive or incidental details without justification.
 
+Selective here means selective about what becomes lasting knowledge and what is brought up, not about what is heard. Everything the user tells the assistant stays in the record of what happened. What becomes lasting knowledge about them passes a worth-keeping test and carries its evidence. Beyond that, selectivity lives in what is surfaced and in what is forgotten. Input the assistant only overhears or senses meets a higher bar than what a person says to it.
+
 Observing broadly and retaining broadly are different things, and the distance
 between them is where this principle does its work. What the assistant observes
 is *proposed*; a deterministic policy decides what is kept; and what is kept
@@ -171,6 +185,12 @@ carries consequences that may be irreversible, and answers to the approval,
 limit, and audit machinery above. Collapsing the two into one notion of
 "integration" would either over-restrict reading or under-restrict acting.
 
+The privacy that matters most is privacy toward people. An assistant that lives in
+a home must not repeat one person's things to someone who should not hear them: a
+roommate, a guest, whoever is in the room. Disclosure to a service the user chose
+is a different question, governed by grants and destinations rather than by
+audience. Secrets never leave on any channel.
+
 ### 4. Context Determines Usefulness
 
 The most intelligent answer is not always the most useful answer.
@@ -204,6 +224,10 @@ Proactive suggestions should be evaluated according to:
 - whether the opportunity will expire.
 
 The assistant should learn when the user welcomes intervention and when silence is better.
+
+How much it does unasked, and when it speaks first, are boundaries set per person, the way a human assistant works them out with the person they work for. Some the person states, such as "book restaurants under $50 without asking" or "don't message me before nine". Others the assistant proposes after seeing a pattern, and the person accepts or declines. Each boundary is visible and changeable, and deterministic code enforces it, so the model can never widen its own limits. Someone new starts careful: the assistant asks before anything leaves their hub, and stays quiet unless asked.
+
+Proactivity also means working while the user is away. A search or a task that takes days continues in the background, survives restarts, and reports back when there is something worth saying.
 
 ### 6. Models Are Components, Not the Product
 
@@ -255,6 +279,36 @@ awake to notice. Continuity needs identity and context to belong to the user
 rather than to a device. And keeping critical state deterministic (Principle 7)
 is far easier when exactly one process owns it.
 
+Living behind every interface also means doing more than one thing at once. Two
+people may be talking to it, or one person on two devices, while long-running work
+continues. Each has its own context, and none blocks the others.
+
+### 9. It Feels Human, and Never Pretends to Be
+
+Interaction should feel natural and human, with a personality each person can
+adjust. The assistant reads which moments call for which tone, depending on the
+person and the context: calm and brief under stress, warm for good news, short
+while someone is driving.
+
+Underneath, its character is stable: honest, warm and competent. A style or a
+personality changes how it speaks, never what is true or what it judges best. It
+never claims to be human or to feel what it does not.
+
+### 10. Built for the Models That Are Coming
+
+Models will become cheaper and open models more capable. Compatibility with other
+products will become easier as AI makes reverse engineering cheap. The system
+should be ready for all three:
+
+- it should be able to run entirely on hardware the user owns, including the hub,
+  the models and speech, and each stage should be checked on a model before it
+  moves to it;
+- it should be designed for far more model calls than today's prices encourage,
+  while keeping cost discipline in the present;
+- integrations should use standards and broad bridges first, and keep narrow or
+  reverse-engineered integrations behind adapters, so that a change upstream breaks
+  one adapter rather than the assistant.
+
 ---
 
 ## Core System Capabilities
@@ -266,6 +320,10 @@ target, not what is implemented; what has actually landed is recorded in
 ### Persistent User Model
 
 A structured representation of what is known or inferred about the user, including confidence, evidence, context, and recency.
+
+### People and Households
+
+Knowing who is speaking and how sure it is, and keeping a model of each person: their profile, the style they prefer, and their boundaries. A household is a set of members under an owner who has the final say.
 
 ### Memory System
 
@@ -283,9 +341,17 @@ Persistent representations of long-term objectives, milestones, unresolved quest
 
 The ability to decompose requests into steps, choose tools, request approval when needed, recover from errors, and resume interrupted work.
 
+### Background Work
+
+Long-running tasks that continue while the user is away, survive restarts, and report back when there is something worth saying.
+
 ### Tool and Integration Layer
 
 A consistent interface to services such as email, calendar, notes, messaging, files, task systems, smart devices, health platforms, vehicles, and future integrations. Read-only sources, which feed context and observation, are governed separately from tools that act on the world (Principle 3), even where both reach the same service.
+
+### Everyday Presence
+
+The assistant reaches into everyday life through spokes: the computer, phone, watch, household devices, TVs, speakers, the car, and household sensing such as Wi-Fi presence. Each is attached with consent, one signal at a time. A shared surface depends on knowing who is present.
 
 ### Permission and Autonomy System
 
@@ -303,48 +369,33 @@ Triggers and policies that identify useful moments to remind, recommend, prepare
 
 Traces that make it possible to understand what context was used, why a decision was made, what tools were called, and whether the result helped.
 
+### A Living Presence
+
+A visible form in the user's interfaces that is a view of what the assistant knows and of what the hub is actually doing. It should be beautiful enough to want to look at, and never show anything that isn't happening.
+
 ---
 
 ## High-Level Architecture
 
 ```text
-User or External Trigger
+Spokes: phone, web, Telegram, computer, speakers, sensors, timers
           |
           v
-Intent, Risk, and Task Classification
+Channels: what came in, where, from whom, and who can hear
           |
           v
-Context Assembly
-  - Current situation
-  - Relevant memories
-  - Active goals and projects
-  - Commitments
+The hub: one per household, always on
+  - Recall: what it already knows that bears on this
+  - Understanding: what the input means and who it involves
+  - Planning: what to say and do, in rounds
+  - Authorizing: rules, boundaries and approvals, decided by code
+  - Acting: tools and messages, each recorded
           |
           v
-Planner and Model Router
-  - Select model
-  - Construct plan
-  - Select tools
-  - Identify approval points
+The episode: what came in, what was understood, what was done
           |
           v
-Permission and Policy Check
-          |
-          v
-Execution Engine
-  - Tool calls
-  - State tracking
-  - Retries
-  - Validation
-          |
-          v
-Response, Action, or Notification
-          |
-          v
-Feedback Capture
-          |
-          v
-Memory and User-Model Update Proposal
+Learning: what is worth remembering, kept with its evidence
 ```
 
 ---
@@ -383,18 +434,16 @@ It should prove one complete personalization loop:
 6. The system proposes a scoped learning update.
 7. The updated preference improves a later interaction.
 
-A focused initial product could include:
+The first version is reached through messaging and includes:
 
-- conversational interface;
-- user profile and preference management;
-- typed long-term memory;
-- goals and active projects;
-- calendar and email integrations;
-- draft-first actions;
-- approval workflows;
-- feedback capture;
+- a chat on the web and on Telegram;
+- typed long-term memory, learned from conversation and kept with its evidence;
+- a profile of each person;
+- research on the web, and email with approval;
+- draft-first actions and approval workflows;
+- inspection and correction of what it knows;
 - model routing;
-- audit and memory inspection.
+- a small invite-only pilot with friends and family, hosted for them.
 
 This is more valuable than launching with dozens of shallow integrations.
 
@@ -471,6 +520,12 @@ The system may act when it should ask.
 Proactivity may become interruption.
 
 **Response:** interruption-cost modeling, quiet periods, relevance thresholds, and feedback-based adaptation.
+
+### Household Trust
+
+In a shared home, one person's things may reach another.
+
+**Response:** knowing who is speaking and who is present, saying plainly what the owner can see, and designing members and permission groups before the assistant is shared.
 
 ### Model Unreliability
 
