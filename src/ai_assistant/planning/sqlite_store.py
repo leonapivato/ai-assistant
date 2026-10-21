@@ -188,9 +188,11 @@ _EFFECT_COLUMNS = "id, activation_id, data, part_round, part_number"
 #: promoted columns **or** by the record itself, so a row whose columns an outside
 #: writer changed or cleared is still found, and then refused by
 #: :func:`_checked_activation_effect` rather than read as a part nobody spent
-#: (ADR-0321 §4:9). The parameters are the keys twice, once for each side.
+#: (ADR-0321 §4:9). The parameters are the keys twice, once for each side. ``{seq}`` is
+#: ``"claimed_seq, "`` where the rows of several statements are merged in claim order,
+#: and empty where one statement is the whole read.
 _PART_ROWS = (
-    "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only constants and placeholders are interpolated
+    "SELECT {seq}" + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only constants and placeholders are interpolated
     "WHERE (part_round, part_number) IN (VALUES {keys}) "
     "OR (json_extract(data, '$.part.round'), json_extract(data, '$.part.part')) "
     "IN (VALUES {keys}) ORDER BY claimed_seq ASC"
@@ -227,6 +229,12 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 #: :meth:`SqlitePlanStore.activation_effects` and a claim's ``match`` name (issue #3296)
 #: — well under the smallest limit SQLite has shipped (999).
 _IN_SLICE = 500
+
+#: How many question parts one statement of :meth:`SqlitePlanStore.part_effects` names.
+#: :data:`_PART_ROWS` binds four parameters per part, a part's two values once for each
+#: side of its match, so a statement binds :data:`_IN_SLICE` parameters as the other
+#: sliced reads do (issue #3301).
+_PART_SLICE = _IN_SLICE // 4
 
 #: The column each record table's ``PRIMARY KEY`` is, checked against the key's own
 #: index. A pre-existing table keyed on something else opens a store whose
@@ -905,7 +913,7 @@ class SqlitePlanStore:
                 [
                     _checked_activation_effect(str(self._path), row)
                     for row in conn.execute(
-                        _PART_ROWS.format(keys="(?, ?)"),
+                        _PART_ROWS.format(keys="(?, ?)", seq=""),
                         (record.part.round, record.part.part) * 2,
                     ).fetchall()
                 ]
@@ -1021,15 +1029,15 @@ class SqlitePlanStore:
         return tuple(_checked_activation_effect(str(self._path), row) for row in rows)
 
     def _part_effects_sync(self, named: tuple[QuestionPart, ...]) -> list[tuple[Any, ...]]:
-        keys = ", ".join("(?, ?)" for _ in named)
-        values = [value for one in named for value in (one.round, one.part)]
-        try:
-            return [
-                tuple(row)
-                for row in self._conn.execute(_PART_ROWS.format(keys=keys), values * 2).fetchall()
-            ]
-        except sqlite3.Error as exc:
-            raise _wrap("read activation effects by question part", "", exc) from exc
+        # Several statements under one read transaction, so the slices see one snapshot
+        # (issue #3301).
+        with transaction(
+            self._conn,
+            "read activation effects by question part",
+            error=PlanningError,
+            immediate=False,
+        ) as conn:
+            return _part_rows(conn, named)
 
     # --- observation records (ADR-0329 §16) ------------------------------
 
@@ -1339,6 +1347,51 @@ def _effect_rows(conn: sqlite3.Connection, activations: Sequence[str]) -> list[t
                 part,
             ).fetchall()
         )
+    keyed.sort(key=lambda row: _claim_order(row[0]))
+    return [row[1:] for row in keyed]
+
+
+def _part_rows(conn: sqlite3.Connection, parts: Sequence[QuestionPart]) -> list[tuple[Any, ...]]:
+    """The rows carrying any of ``parts``, in claim order, read in slices of the parts.
+
+    In slices, because SQLite bounds the parameters one statement binds, and a read
+    names any number of parts (issue #3301). The caller holds the transaction the
+    slices run in, so they see one state of the table, and the rows are put in claim
+    order across the slices by :func:`_claim_order`, as :func:`_effect_rows` puts them.
+
+    A row is answered as often as the single statement these slices replace answered
+    it, which is once. A later slice can find a row an earlier one found: its columns
+    and its record may name two parts the read names apart, or a hand-built file may
+    collate ``part_round`` other than ``BINARY``, so that two parts the read tells apart
+    both match it. A row a later slice finds again is dropped. Rows equal in every
+    column match the same parts, so they first appear in one slice together, and each
+    is kept there, as the single statement keeps each.
+
+    Args:
+        conn: The connection, inside the caller's transaction.
+        parts: The question parts whose rows to read, each once.
+
+    Returns:
+        ``(id, activation_id, data, part_round, part_number)`` per row, in claim order.
+    """
+    seen: set[tuple[Any, ...]] = set()
+    keyed: list[tuple[Any, ...]] = []
+    for start in range(0, len(parts), _PART_SLICE):
+        part = parts[start : start + _PART_SLICE]
+        keys = ", ".join("(?, ?)" for _ in part)
+        values = [value for one in part for value in (one.round, one.part)]
+        fresh = [
+            row
+            for row in (
+                tuple(found)
+                for found in conn.execute(
+                    _PART_ROWS.format(keys=keys, seq="claimed_seq, "), values * 2
+                ).fetchall()
+            )
+            if row not in seen
+        ]
+        seen.update(fresh)
+        keyed.extend(fresh)
     keyed.sort(key=lambda row: _claim_order(row[0]))
     return [row[1:] for row in keyed]
 
