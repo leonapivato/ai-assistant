@@ -264,7 +264,13 @@ def test_an_input_may_be_a_json_file_beside_the_case(tmp_path: Path) -> None:
         ),
         (
             _understanding(property={"check": "no_label", "fields": ["meanign"], "labels": ["H"]}),
-            "names fields no understanding reply holds: ['meanign']",
+            "names fields no understanding reply holds as text: ['meanign']",
+        ),
+        (
+            _understanding(
+                property={"check": "no_label", "fields": ["references"], "labels": ["H"]}
+            ),
+            "names fields no understanding reply holds as text: ['references']",
         ),
         (_understanding(property={"check": "read"}), "a read property"),
         (_understanding(property={"check": "read", "read": " "}), "a read property"),
@@ -474,6 +480,9 @@ def test_no_label_may_name_a_nested_field_of_the_reply_shape() -> None:
     )
     assert "claim" in declared("observer_scout")
     assert {"wording", "note", "asks"} <= declared("observer_commit")
+    assert "findings" not in declared("observer_scout")
+    assert {"references", "unresolved", "meaning_labels"}.isdisjoint(declared("understanding"))
+    assert {"supports", "resolves"}.isdisjoint(declared("observer_commit"))
 
 
 def test_no_label_takes_a_label_as_a_whole_word_alone() -> None:
