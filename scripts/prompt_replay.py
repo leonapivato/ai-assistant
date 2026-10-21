@@ -1800,7 +1800,10 @@ def _action_in(reply: Reply, params: Mapping[str, object]) -> Judgement:
     reading = _reply_object(reply)
     if reading is None:
         return "the reply is not one JSON object"
-    if reading.get("action") not in cast("list[str]", params["actions"]):
+    action = reading.get("action")
+    if not isinstance(action, str):
+        return "the reply's action is not a string"
+    if action not in cast("list[str]", params["actions"]):
         return "the reply takes another action"
     return None
 
@@ -1810,7 +1813,10 @@ def _memory_kept(reply: Reply, params: Mapping[str, object]) -> Judgement:
     reading = _reply_object(reply)
     if reading is None:
         return "the reply is not one JSON object"
-    if reading.get("action") in _RETIRING and reading.get("memory") == params["memory"]:
+    action = reading.get("action")
+    if not isinstance(action, str):
+        return "the reply's action is not a string"
+    if action in _RETIRING and reading.get("memory") == params["memory"]:
         return "the reply retires the memory"
     return None
 
@@ -2255,6 +2261,11 @@ def suite_versions(
     return (SuiteVersion(CANDIDATE, candidate), SuiteVersion(CONTROL, default))
 
 
+def suite_count(cases: Sequence[Case], versions: Mapping[str, tuple[SuiteVersion, ...]]) -> int:
+    """How many calls a run would make, samples included, counted before any is built (§4:4)."""
+    return sum(case.samples * len(versions[case.prompt]) for case in cases)
+
+
 def plan_suite(
     cases: Sequence[Case], versions: Mapping[str, tuple[SuiteVersion, ...]]
 ) -> list[SuiteCall]:
@@ -2318,11 +2329,7 @@ async def send_suite(
         passed: bool | None = None
         reason: str | None = None
         if call.case.check != READ:
-            reason = (
-                "the call failed"
-                if reply is None
-                else CODE_CHECKS[call.case.check].judge(reply, call.case.params)
-            )
+            reason = _judged(call.case, reply)
             passed = reason is None
             tally.passed += passed
         line = {
@@ -2335,6 +2342,20 @@ async def send_suite(
         }
         _append_line(results, line)
     return tallies
+
+
+def _judged(case: Case, reply: Reply | None) -> Judgement:
+    """The case's code check over one reply; a reply the check cannot read does not pass.
+
+    A reply is the model's, of any shape: a check that cannot read it fails the sample
+    rather than the run, so every later sample is still sent and recorded (§4:6).
+    """
+    if reply is None:
+        return "the call failed"
+    try:
+        return CODE_CHECKS[case.check].judge(reply, case.params)
+    except Exception as exc:  # a reply of any shape is the model's, never the run's fault
+        return f"the check could not read the reply ({type(exc).__name__})"
 
 
 async def _suite_outcome(call: SuiteCall, caller: Caller) -> tuple[dict[str, object], Reply | None]:
@@ -2486,13 +2507,14 @@ async def suite(
     versions = {
         prompt: suite_versions(prompt, candidates, declared) for prompt in {c.prompt for c in cases}
     }
-    calls = plan_suite(cases, versions)
-    _report_suite_plan(cases, versions, calls, options.bound, report)
     for prompt in sorted(set(candidates) - set(versions)):
         report(f"{prompt}: no case of this prompt is selected")
-    if len(calls) > options.bound:
-        report(f"refused: {len(calls)} calls exceed the bound of {options.bound}")
+    count = suite_count(cases, versions)
+    _report_suite_plan(cases, versions, count, options.bound, report)
+    if count > options.bound:
+        report(f"refused: {count} calls exceed the bound of {options.bound}")
         return 1
+    calls = plan_suite(cases, versions)
     if options.count_only or not calls:
         return 0
     if options.results is None:
@@ -2531,7 +2553,7 @@ def _new_results_file(directory: Path, run: str) -> Path:
 def _report_suite_plan(
     cases: Sequence[Case],
     versions: Mapping[str, tuple[SuiteVersion, ...]],
-    calls: Sequence[SuiteCall],
+    count: int,
     bound: int,
     report: Callable[[str], None],
 ) -> None:
@@ -2547,7 +2569,7 @@ def _report_suite_plan(
         )
         alone = [one.role for one in versions[prompt]] == [CANDIDATE]
         report(f"{prompt}: {shown}" + (": the default itself, so no control" if alone else ""))
-    report(f"{len(calls)} calls to send, samples included (bound {bound})")
+    report(f"{count} calls to send, samples included (bound {bound})")
 
 
 def _report_suite(
