@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Final
 import pytest
 from phases_support import chat_turn, frozen, processing, until, written
 from story_support import CONVERSATION, episode
-from telegram_support import CHAT, REFERENCE, YieldingTelegram, text
+from telegram_support import CASE_START_WAIT, CHAT, REFERENCE, YieldingTelegram, text
 from test_engine import AT, Harness
 from understanding_support import recall_stage
 
@@ -1702,6 +1702,7 @@ def _line() -> tuple[FakeTelegramBotClient, TelegramLineSeams]:
         poll_wait=timedelta(seconds=1),
         poll_bound=timedelta(seconds=2),
         send_bound=timedelta(seconds=1),
+        start_wait=CASE_START_WAIT,
     )
 
 

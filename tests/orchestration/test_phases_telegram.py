@@ -16,7 +16,16 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 from phases_support import NeverFinishing, frozen, input_of, phases_harness, processing
-from telegram_support import AT, CHAT, REFERENCE, SETTLE, YieldingTelegram, photo, text
+from telegram_support import (
+    AT,
+    CASE_START_WAIT,
+    CHAT,
+    REFERENCE,
+    SETTLE,
+    YieldingTelegram,
+    photo,
+    text,
+)
 from test_engine import AT as ENGINE_AT
 
 from ai_assistant.core.errors import ModelError
@@ -79,6 +88,7 @@ class _Line:
             poll_wait=timedelta(seconds=1),
             poll_bound=timedelta(seconds=2),
             send_bound=timedelta(seconds=1),
+            start_wait=CASE_START_WAIT,
         )
 
     def sent(self) -> list[str]:
