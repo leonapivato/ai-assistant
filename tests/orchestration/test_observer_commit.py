@@ -15,6 +15,7 @@ from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
+import pytest
 from observer_support import AT, Harness, address, episode, reply
 
 from ai_assistant.core.types import (
@@ -1294,14 +1295,25 @@ def test_backticks_inside_a_fenced_objects_string_do_not_close_its_fence() -> No
     assert parsed(content, CommitReply) == CommitReply.model_validate(nothing)
 
 
-def test_a_block_fenced_as_another_language_is_not_the_reply() -> None:
-    """Closed, unclosed, or with CRLF line endings, a quoted block is never the decision."""
+def test_an_object_fenced_as_another_language_is_read_as_any_other() -> None:
+    """Only an untagged or ``json`` block is offered whole; any object is still met."""
     content = f"{_REASONING}\n```python\n{reply(**_ADD)}\n```\nThat is the code."
 
-    assert parsed(content, CommitReply) is None
-    assert parsed(content.replace("\n", "\r\n"), CommitReply) is None
-    assert parsed(content[: content.index("\n```\nThat")], CommitReply) is None
-    assert parsed(content.replace("\n```python", " Code: ```python"), CommitReply) is None
+    assert parsed(content, CommitReply) == CommitReply.model_validate(_ADD)
+
+
+def test_a_container_left_open_in_a_fenced_block_holds_what_follows_it() -> None:
+    """A fence never cuts the search: a support after the block is still inside the answer."""
+    fragment = json.dumps({"part": "P1", "how_sure": "sure", "note": "evidence"})
+    for tag in ("json", "python", ""):
+        content = (
+            f'```{tag}\n{{"action": "add", "memory": "M1", "supports": [\n```\n{fragment}\n]}}'
+        )
+
+        assert parsed(content, CommitReply) is None
+        assert parsed(content.removesuffix("\n]}"), CommitReply) is None
+    opened_on_the_fence = f'```json {{"action": "add", "supports": [\n{fragment}\n```\n]}}'
+    assert parsed(opened_on_the_fence, CommitReply) is None
 
 
 def test_a_fenced_reply_is_read_with_crlf_line_endings_or_no_closing_fence() -> None:
@@ -1431,14 +1443,23 @@ async def test_a_commit_reply_with_prose_around_its_object_is_written() -> None:
     assert stored.content == "The user prefers window seats."
 
 
-async def test_a_fragment_of_a_malformed_commit_reply_fails_as_unparsed() -> None:
-    """§16:4: a support inside an array is no decision; the attempt fails and waits."""
+_FRAGMENT = json.dumps({"part": "P1", "how_sure": "sure", "note": "evidence"})
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        f"{_REASONING}\n[{_FRAGMENT}]",
+        f'```json\n{{"action": "add", "memory": "M1", "supports": [\n```\n{_FRAGMENT}\n]}}',
+    ],
+    ids=["inside-an-array", "inside-an-object-spanning-a-fence"],
+)
+async def test_a_fragment_of_a_malformed_commit_reply_fails_as_unparsed(content: str) -> None:
+    """§16:4: a support inside a container is no decision; the attempt fails and waits."""
     harness = Harness()
     await _three(harness)
-    fragment = json.dumps({"part": "P1", "how_sure": "sure", "note": "evidence"})
     observer = harness.observer(
-        scout=FakeModelProvider.scripted(_SCOUTED),
-        commit=FakeModelProvider.scripted(f"{_REASONING}\n[{fragment}]"),
+        scout=FakeModelProvider.scripted(_SCOUTED), commit=FakeModelProvider.scripted(content)
     )
 
     outcome = await observer.run()
