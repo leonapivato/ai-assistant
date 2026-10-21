@@ -765,6 +765,29 @@ async def test_a_connection_that_is_no_longer_connectable_refuses_the_call() -> 
     assert await booking.store.commit_count() == 0
 
 
+async def test_a_keyless_record_refuses_the_credentialed_call() -> None:
+    """ADR-0325 §2:3, §5:6: the booking callable holds a key, so a slotless record fails.
+
+    The seam bound the call against an ``ACTIVE`` record naming a slot; by the time the
+    callable runs the reference holds a keyless record — ``ACTIVE``, no slot — and a
+    callable built with a ``Secrets`` face refuses a record that names none rather
+    than reading nothing and asking anyway (ADR-0273 §3:1 asks of it what ADR-0148
+    §6:5 asked).
+    """
+    moving = Records(entry(), entry(slot=None, revision=2))
+    booking = await configured(records=moving)
+    registry = registry_for(booking)
+    seam = seam_for(booking, registry)
+    parameters = arguments()
+    binding = await bound(seam, BOOKING_ACT, parameters)
+
+    result = await recorded(registry, authorised(BOOKING_ACT, parameters, binding))
+
+    assert result.failure is not None
+    assert result.failure.kind is ToolFailureKind.NOT_AUTHORISED
+    assert await booking.store.commit_count() == 0
+
+
 async def test_a_record_recorded_for_another_identity_refuses_the_call() -> None:
     """Arm 17, condition 4 — the recorded identity (ADR-0148 §6).
 
