@@ -13,13 +13,16 @@ browser lane drive, with no horizontal scroll and an empty console.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 from typing import TYPE_CHECKING, Final
 
 import pytest
 from browser_drive import DESKTOP, PHONE, driving, press
 from person_seed import ended, fact, field_suggestion, hold, outside, pin_suggestion, switch_on
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import expect
+from test_browser_session_loss import _ends_the_session
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -540,6 +543,66 @@ async def test_a_belief_act_while_one_is_out_is_said_and_not_sent(
         assert held is not None
         assert [pin.memory_id for pin in held.standing_pins] == ["m:diet"]
         assert heard == []
+
+
+@_WIDTHS
+async def test_a_belief_read_stalled_under_an_ended_session_holds_up_no_later_write(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """A Pin's read, stalled while its session ends, refuses no write of the session
+    re-entered after it, and sends no pin once it is let go (adversarial review,
+    round 8)."""
+    loop = asyncio.get_running_loop()
+    release: asyncio.Future[None] = loop.create_future()
+    pins: list[str] = []
+
+    async def hang(route: Route) -> None:
+        await release
+        # The page may have moved on from under a held route in a failing run; the
+        # case's own assertions are what report it.
+        with contextlib.suppress(PlaywrightError):
+            await route.fallback()
+
+    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
+        people, store = switch_on(drive.engine)
+        await hold(drive.engine, store, fact("m:diet", "Eats no meat."))
+        page = drive.page
+        page.on("request", lambda one: pins.append(one.url) if "/person/pin" in one.url else None)
+        async with page.expect_response("**/candidates/pending"):
+            await press(page, "#beliefs-button")
+        diet = page.locator("#belief-list > .belief-row", has_text="Eats no meat.")
+        await page.route("**/belief", hang)
+        async with page.expect_request("**/belief"):
+            await diet.get_by_role("button", name="Pin: confirms this wording").click()
+
+        await page.route("**/sources", _ends_the_session)
+        await press(page, "#sources-button")
+        await page.wait_for_selector("#bootstrap:not([hidden])")
+        await page.unroute("**/sources")
+        await drive.admit()
+        await _open(drive)
+
+        await page.fill("#field-name", "Robin")
+        async with page.expect_response("**/person/changes"):
+            await page.press("#field-name", "Enter")
+        await expect(page.locator("#about-outcome")).to_have_text("Saved.")
+        held = await people.read(OWNER_PERSON_ID)
+        assert held is not None
+        assert held.profile.name == "Robin"
+
+        # The old session's read, let go: its answer is not this session's, so no pin
+        # follows it. The ordering is a whole round trip after its last byte.
+        async with page.expect_response("**/belief") as stale:
+            release.set_result(None)
+        await (await stale.value).finished()
+        async with page.expect_response("**/person/changes"):
+            await press(page, "#about-button")
+        assert pins == []
+        held = await people.read(OWNER_PERSON_ID)
+        assert held is not None
+        # No console check: the browser logs the ended session's own refusals (the 401
+        # that ends it, the 409 its stalled read is answered), which are not defects.
+        assert held.standing_pins == ()
 
 
 async def test_a_save_keeps_what_was_typed_in_other_fields_and_while_it_was_sent(

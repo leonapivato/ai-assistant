@@ -5440,7 +5440,7 @@ async function aboutEdit(path, payload, act, landed) {
   // **One write at a time** (adversarial review, round 3): two saves of one field in
   // flight could land in either order, and the older could overwrite the newer choice
   // with nothing on screen saying so. A second act while one is out is said and not sent.
-  if (aboutWriting.busy) {
+  if (writeLocked()) {
     el("about-outcome").textContent = ABOUT_BUSY;
     return;
   }
@@ -5455,7 +5455,7 @@ async function aboutEdit(path, payload, act, landed) {
   // replaced; the focus goes back to its successor, by id, so a keyboard is not sent
   // back to the top of the page.
   const focused = document.activeElement === null ? "" : document.activeElement.id;
-  aboutWriting.busy = true;
+  const lock = takeWriteLock(half, era, true);
   try {
     const asked = Object.assign({ person_id: OWNER_PERSON_ID }, payload);
     let body;
@@ -5465,7 +5465,7 @@ async function aboutEdit(path, payload, act, landed) {
       // Held for the write and nothing after it: the read that follows is ordered by
       // `aboutRuns`, and a lock held across it would let one stalled read refuse every
       // later write (adversarial review, round 4).
-      aboutWriting.busy = false;
+      releaseWriteLock(lock);
     }
     // Not this session's answer (#2404).
     if (!sameSession(half, era)) {
@@ -5496,7 +5496,33 @@ async function aboutEdit(path, payload, act, landed) {
 // Whether a write to the person's model is in flight, from either panel, and what a
 // second act meanwhile is told. One lock for both panels: a pin from the belief panel and
 // an unpin from About you act on the same pins, and could land in either order too.
-const aboutWriting = { busy: false };
+//
+// **A lock still at its read binds only its own session, and only its taker releases
+// it** (adversarial review, round 8). A belief act takes the lock before the read that
+// checks its row, and an act whose session has ended sends no write after that read
+// (`sameSession`); a read stalled under an old session would otherwise refuse every write
+// of the session after it until it settled. A write that has been sent binds whatever
+// session follows, since it can still land. The old act's release is of its own lock,
+// never of one a newer act took.
+const aboutWriting = { held: null };
+
+function writeLocked() {
+  const held = aboutWriting.held;
+  return held !== null && (held.sent || sameSession(held.half, held.era));
+}
+
+// `sent`: whether the write itself goes out under the lock now, rather than after a read.
+function takeWriteLock(half, era, sent) {
+  const lock = { half: half, era: era, sent: sent };
+  aboutWriting.held = lock;
+  return lock;
+}
+
+function releaseWriteLock(lock) {
+  if (aboutWriting.held === lock) {
+    aboutWriting.held = null;
+  }
+}
 const ABOUT_BUSY = "Your last change is still being made, so this one was not sent. Try again.";
 
 // Whether a write did what was asked, or changed nothing as the contract says such a
@@ -5587,7 +5613,7 @@ const NOT_THE_ROWS =
 // after an Unpin pressed later, and leave pinned what the person last unpinned. The lock
 // is the About you panel's own, so neither panel's write overtakes the other's.
 async function checkedBeliefEdit(belief, path, act) {
-  if (aboutWriting.busy) {
+  if (writeLocked()) {
     el("belief-outcome").textContent = ABOUT_BUSY;
     return;
   }
@@ -5598,7 +5624,7 @@ async function checkedBeliefEdit(belief, path, act) {
     return;
   }
   const era = sessionEra;
-  aboutWriting.busy = true;
+  const lock = takeWriteLock(half, era, false);
   try {
     const held = await relay(half, "/belief", { record_id: belief.id }, "beliefs");
     // Not this session's answer (#2404).
@@ -5612,6 +5638,7 @@ async function checkedBeliefEdit(belief, path, act) {
       el("belief-outcome").textContent = NOT_THE_ROWS;
       return;
     }
+    lock.sent = true;
     await beliefEdit(path, { memory_id: belief.id }, act);
   } catch (_) {
     // Not this session's condition to report (#2404).
@@ -5621,7 +5648,7 @@ async function checkedBeliefEdit(belief, path, act) {
     fault(GATEWAY_GONE, "beliefs");
   } finally {
     // Held for the read and the write, and nothing after: no listing is read again.
-    aboutWriting.busy = false;
+    releaseWriteLock(lock);
   }
 }
 
