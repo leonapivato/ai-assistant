@@ -69,7 +69,7 @@ from ai_assistant.testing.activation import ended_pass
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from ai_assistant.core.protocols import DiagnosticSink
+    from ai_assistant.core.protocols import DiagnosticSink, PersonModelStore
     from ai_assistant.core.types import (
         ActivationUnderstanding,
         MemoryRecord,
@@ -312,9 +312,14 @@ class Harness:
         commit: FakeModelProvider | None = None,
         window: int = WINDOW,
         diagnostics: DiagnosticSink | None = None,
+        person_model: PersonModelStore | None = None,
         **bounds: Any,
     ) -> Observer:
-        """The observer over these fakes, its routes scripted, writing to ``diagnostics``."""
+        """The observer over these fakes, its routes scripted, writing to ``diagnostics``.
+
+        ``person_model`` is the person-model store the root wires where the switch is on
+        (ADR-0338 §9:8); none by default, as on every hub where it is off.
+        """
         return Observer(
             scout=scout or FakeModelProvider.scripted(),
             commit=commit or FakeModelProvider.scripted(),
@@ -329,4 +334,5 @@ class Harness:
             now=self.clock,
             mint=self.mint,
             diagnostics=diagnostics,
+            person_model=person_model,
         )

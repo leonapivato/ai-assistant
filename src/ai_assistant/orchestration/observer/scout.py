@@ -40,18 +40,40 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from ai_assistant.core.types import Message, ObservationFinding, Role
+from ai_assistant.core.types import (
+    Message,
+    ObservationFinding,
+    ProfileField,
+    ProposedSuggestion,
+    Role,
+    SuggestionKind,
+    SupportOrigin,
+)
 
 if TYPE_CHECKING:
     from ai_assistant.core.prompts import RenderedPrompt
-    from ai_assistant.core.types import SupportPart
-    from ai_assistant.orchestration.observer.reading import Reading
+    from ai_assistant.core.types import FrozenJson, SupportPart
+    from ai_assistant.orchestration.observer.reading import Reading, ReadPart
 
-__all__ = ["ScoutReply", "parsed", "proposed_findings", "scout_messages"]
+__all__ = [
+    "PersonProposals",
+    "PersonScoutReply",
+    "ScoutReply",
+    "parsed",
+    "person_proposals",
+    "proposed_findings",
+    "scout_messages",
+]
+
+#: The origins of the assistant's own words, on which no suggestion rests (ADR-0329 §10:1).
+_ASSISTANT_ORIGINS: Final = frozenset(
+    {SupportOrigin.ASSISTANT_MESSAGE, SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE}
+)
 
 
 class _ProposedFinding(BaseModel):
@@ -69,6 +91,55 @@ class ScoutReply(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="ignore")
     findings: tuple[_ProposedFinding, ...] = ()
+
+
+class _PersonProposedFinding(_ProposedFinding):
+    """A finding as the scout writes it under the person flag (ADR-0338 §9:3).
+
+    ``restates`` is any JSON value: one that is not a setting and a value says nothing,
+    so a malformed one costs the reply nothing and the finding is committed as any other.
+    """
+
+    restates: JsonValue = None
+
+
+class PersonScoutReply(BaseModel):
+    """The scout's whole reply where it is given a person's fields (ADR-0338 §9:1-§9:3).
+
+    Its two additions are optional, and read as JSON values whatever they hold: a reply
+    that leaves them out, as one written under an override that does not carry the
+    person sections does, is read exactly as :class:`ScoutReply` reads it, and an entry
+    that is not a suggestion is dropped alone, never the reply.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+    findings: tuple[_PersonProposedFinding, ...] = ()
+    suggestions: JsonValue = None
+
+
+@dataclass(frozen=True, slots=True)
+class PersonProposals:
+    """What the scout proposed of the person model, after code's checks (ADR-0338 §9:2-§9:3).
+
+    Attributes:
+        restating: The findings that only restate a field, by id, each with the field
+            suggestion it becomes, or ``None`` where no part it rests on can carry one.
+            None of them is committed.
+        suggestions: The field suggestions the scout proposed beside its findings.
+        dropped: How many proposed suggestions code dropped as malformed.
+    """
+
+    restating: dict[str, ProposedSuggestion | None]
+    suggestions: tuple[ProposedSuggestion, ...]
+    dropped: int
+
+    @property
+    def to_record(self) -> tuple[ProposedSuggestion, ...]:
+        """Every suggestion to record, the scout's and the restating findings', in order."""
+        return (
+            *self.suggestions,
+            *(one for one in self.restating.values() if one is not None),
+        )
 
 
 #: A fence opening a block, its tag group 1. It is matched only where the walk stands in
@@ -248,7 +319,12 @@ def _past_string(text: str, start: int) -> int:
     return len(text)
 
 
-def scout_messages(reading: Reading, instruction: RenderedPrompt) -> list[Message]:
+def scout_messages(
+    reading: Reading,
+    instruction: RenderedPrompt,
+    *,
+    person: dict[str, FrozenJson] | None = None,
+) -> list[Message]:
     """The scout's one call: its instruction, and the reading as quoted source data.
 
     Args:
@@ -256,18 +332,24 @@ def scout_messages(reading: Reading, instruction: RenderedPrompt) -> list[Messag
         instruction: ``OBSERVER_SCOUT_PROMPT`` rendered from its template, default or
             override, as the composition root read it at start (ADR-0334 §3:5); the
             call's given entry records its ``prompt`` key (ADR-0335 §9:1).
+        person: The leaving episode's person's five fields (ADR-0338 §7:4, §9:1), shown
+            first under ``person``, ahead of what changes from call to call; ``None``
+            where the step is given none, and the payload is then as it was.
 
     Returns:
         The conversation the scout's route completes.
     """
+    payload = reading.payload()
+    if person is not None:
+        payload = {"person": person, **payload}
     return [
         Message(role=Role.SYSTEM, content=instruction.text),
-        Message(role=Role.USER, content=json.dumps(reading.payload(), ensure_ascii=True)),
+        Message(role=Role.USER, content=json.dumps(payload, ensure_ascii=True)),
     ]
 
 
 def proposed_findings(
-    reply: ScoutReply, reading: Reading, *, numbered_from: int = 1
+    reply: ScoutReply | PersonScoutReply, reading: Reading, *, numbered_from: int = 1
 ) -> tuple[tuple[ObservationFinding, ...], int]:
     """The findings code keeps of the scout's reply, and how many it dropped.
 
@@ -279,11 +361,131 @@ def proposed_findings(
     Returns:
         The kept findings, each with no outcome yet, and the count of those dropped.
     """
+    kept, dropped = _kept(reply, reading, numbered_from=numbered_from)
+    return tuple(one for one, _ in kept), dropped
+
+
+def person_proposals(
+    reply: PersonScoutReply, reading: Reading, *, numbered_from: int = 1
+) -> PersonProposals:
+    """What the scout proposed of the person model, checked (ADR-0338 §9:2-§9:3).
+
+    A finding marked as only restating a field, with a field and a non-blank value,
+    becomes a field suggestion resting on the first part it rests on that the leaving
+    episode carries and that is not the assistant's own words (ADR-0329 §8:2, §10:1), or
+    on none where it rests on no such part; either way it is not committed (§9:3). A
+    reliance finding restates nothing. A proposed suggestion is kept only where it names
+    a field, a non-blank value and one part, by its label, that the leaving episode
+    carries and that is not the assistant's own words. Whether the value is valid, held
+    already, pending or dismissed is the store's to answer when it is recorded (§9:2).
+
+    Args:
+        reply: The scout's parsed reply, under the person flag.
+        reading: The reading its labels name things in.
+        numbered_from: The number the first finding's id takes, as
+            :func:`proposed_findings` was given it for the same reply, so the two name
+            the findings alike.
+
+    Returns:
+        The restating findings, the suggestions, and how many suggestions were dropped.
+    """
+    kept, _ = _kept(reply, reading, numbered_from=numbered_from)
+    episode = reading.leaving.record.id
+    restating: dict[str, ProposedSuggestion | None] = {}
+    for finding, proposed in kept:
+        if not isinstance(proposed, _PersonProposedFinding) or finding.relied_on is not None:
+            continue
+        restated = _setting(proposed.restates)
+        if restated is None:
+            continue
+        part = next(
+            (
+                read
+                for one in finding.rests_on
+                if (read := reading.at(one)) is not None and _may_carry(read, reading)
+            ),
+            None,
+        )
+        restating[finding.id] = None if part is None else _suggested(restated, part, episode)
+    suggestions: list[ProposedSuggestion] = []
+    dropped = 0
+    entries = reply.suggestions if isinstance(reply.suggestions, list) else []
+    for entry in entries:
+        suggestion = _scouted_suggestion(entry, reading, episode)
+        if suggestion is None:
+            dropped += 1
+        else:
+            suggestions.append(suggestion)
+    if reply.suggestions is not None and not isinstance(reply.suggestions, list):
+        dropped += 1
+    return PersonProposals(restating=restating, suggestions=tuple(suggestions), dropped=dropped)
+
+
+def _setting(value: JsonValue) -> tuple[ProfileField, str] | None:
+    """A field and its value, from a JSON object naming both; ``None`` from anything else."""
+    if not isinstance(value, dict):
+        return None
+    field, held = value.get("field"), value.get("value")
+    if not isinstance(field, str) or not isinstance(held, str) or not held.strip():
+        return None
+    try:
+        return ProfileField(field), held.strip()
+    except ValueError:
+        return None
+
+
+def _may_carry(read: ReadPart, reading: Reading) -> bool:
+    """Whether a suggestion may rest on ``read``: the leaving episode's, not the assistant's."""
+    return read.part in reading.leaving_parts and read.origin not in _ASSISTANT_ORIGINS
+
+
+def _suggested(
+    setting: tuple[ProfileField, str], read: ReadPart, episode: str
+) -> ProposedSuggestion | None:
+    """A field suggestion resting on ``read``, its origin code's, from the record (§7:9).
+
+    ``None`` where the value is no text a suggestion may carry.
+    """
+    field, value = setting
+    try:
+        return ProposedSuggestion(
+            kind=SuggestionKind.FIELD,
+            field=field,
+            value=value,
+            episode_id=episode,
+            part=read.part,
+            origin=read.origin,
+        )
+    except ValidationError:
+        return None
+
+
+def _scouted_suggestion(
+    entry: JsonValue, reading: Reading, episode: str
+) -> ProposedSuggestion | None:
+    """One suggestion the scout proposed, or ``None`` where it is malformed (§9:2)."""
+    setting = _setting(entry)
+    if setting is None or not isinstance(entry, dict):
+        return None
+    label = entry.get("part")
+    read = reading.part(label) if isinstance(label, str) else None
+    if read is None or not _may_carry(read, reading):
+        return None
+    return _suggested(setting, read, episode)
+
+
+def _kept(
+    reply: ScoutReply | PersonScoutReply, reading: Reading, *, numbered_from: int
+) -> tuple[list[tuple[ObservationFinding, _ProposedFinding | None]], int]:
+    """The findings kept, each beside the proposal it came from, and the count dropped.
+
+    A finding code adds for a candidate recorded under an approval came from no proposal.
+    """
     episode = reading.leaving.record.id
     leaving = reading.leaving_parts
     hints = {hint.handle: hint.effect for hint in reading.hints}
     reliances = {one.handle: one.memory.id for one in reading.reliances}
-    kept: list[ObservationFinding] = []
+    kept: list[tuple[ObservationFinding, _ProposedFinding | None]] = []
     dropped = 0
     after = reading.leaving.record.occurred_at
     for proposed in reply.findings:
@@ -309,18 +511,18 @@ def proposed_findings(
             dropped += 1
             continue
         try:
-            kept.append(
-                ObservationFinding(
-                    id=f"f{numbered_from + len(kept)}",
-                    episode=episode,
-                    claim=proposed.claim,
-                    rests_on=parts,
-                    candidate=candidate,
-                    relied_on=relied_on,
-                )
+            finding = ObservationFinding(
+                id=f"f{numbered_from + len(kept)}",
+                episode=episode,
+                claim=proposed.claim,
+                rests_on=parts,
+                candidate=candidate,
+                relied_on=relied_on,
             )
         except ValidationError:
             dropped += 1
+            continue
+        kept.append((finding, proposed))
     for hint in reading.hints:
         confirmation = hint.confirmation
         if confirmation is None:
@@ -328,23 +530,22 @@ def proposed_findings(
         # A finding about a candidate the user confirmed rests on that yes, whatever
         # else the scout named: the commit step sees the words the user approved.
         kept = [
-            _resting_on_too(one, confirmation.part)
+            (_resting_on_too(one, confirmation.part), source)
             if one.candidate == hint.effect and one.relied_on is None
-            else one
-            for one in kept
+            else (one, source)
+            for one, source in kept
         ]
-        if any(confirmation.part in one.rests_on and one.relied_on is None for one in kept):
+        if any(confirmation.part in one.rests_on and one.relied_on is None for one, _ in kept):
             continue
-        kept.append(
-            ObservationFinding(
-                id=f"f{numbered_from + len(kept)}",
-                episode=episode,
-                claim=confirmation.text,
-                rests_on=(confirmation.part,),
-                candidate=hint.effect,
-            )
+        added = ObservationFinding(
+            id=f"f{numbered_from + len(kept)}",
+            episode=episode,
+            claim=confirmation.text,
+            rests_on=(confirmation.part,),
+            candidate=hint.effect,
         )
-    return tuple(kept), dropped
+        kept.append((added, None))
+    return kept, dropped
 
 
 def _parts(handles: tuple[str, ...], reading: Reading) -> tuple[SupportPart, ...]:

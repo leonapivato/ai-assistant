@@ -133,8 +133,12 @@ def test_the_nine_prompts_carry_their_flags_and_values() -> None:
         {"approved_action_tool", "note_reliance_capability", "needs_your_yes"}
     )
     assert STORY_TIDY_UP_PROMPT.values == frozenset({"story_summary_cap_chars"})
+    # ADR-0338 §9:1-§9:5: the observer's two steps, given a person's fields or not.
+    assert OBSERVER_SCOUT_PROMPT.flags == frozenset({"person"})
+    assert OBSERVER_COMMIT_PROMPT.flags == frozenset({"person"})
     for declaration in PROMPTS[2:]:
-        assert declaration.flags == frozenset()
+        if declaration not in {OBSERVER_SCOUT_PROMPT, OBSERVER_COMMIT_PROMPT}:
+            assert declaration.flags == frozenset()
     for declaration in (
         DIGESTING_PROMPT,
         MATTERS_PASS_PROMPT,

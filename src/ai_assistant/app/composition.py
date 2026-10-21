@@ -1759,6 +1759,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             now=_utcnow,
             # ADR-0333 §2:7: the record's write seam where it is on, ``None`` where off.
             diagnostics=diagnostics,
+            # ADR-0338 §9:8: the same person-model store the person block reads, where
+            # the switch is on; ``None`` where it is off, and then the observer reads and
+            # writes nothing of the person model and runs no pin pass (§11:2).
+            person_model=person_model,
         )
         # ADR-0309 §2:6: the phases, which plan every activation, over the objects this
         # root already built (:class:`_PhaseSeams`).
