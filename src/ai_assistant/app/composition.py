@@ -1795,6 +1795,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 poll_wait=settings.telegram_poll_wait,
                 poll_bound=settings.telegram_poll_bound,
                 send_bound=settings.telegram_send_bound,
+                start_wait=settings.telegram_start_wait,
             )
         engine = Engine(
             plans=plans,
@@ -1838,6 +1839,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 diagnostics=diagnostics,
             ),
             stage_record_limit=STAGE_RECORD_LIMIT,
+            # ADR-0332 §6:5: the most inputs one activation takes in after its trigger.
+            join_limit=settings.join_limit,
             # ADR-0289 §4's nine story methods read and write this store, and the
             # story summary view lists this many notes (ADR-0303 §10:2).
             stories=stories,
@@ -2179,6 +2182,11 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # the longer budget their rounds need.
             phases=phases,
             chat_turn_budget=PHASES_TURN_BUDGET,
+            # ADR-0332 §5:1-§5:2, §5:6: the hub chat's start wait, and the composing
+            # signal that extends it.
+            chat_start_wait=settings.chat_start_wait,
+            chat_composing_lapse=settings.chat_composing_lapse,
+            chat_composing_cap=settings.chat_composing_cap,
         )
         # The **same** trace store again, narrowed a third way (ADR-0119 §7): a
         # ``TraceSink`` for `service`'s startup stamp, which appends one
