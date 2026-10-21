@@ -92,7 +92,9 @@ class Route(StrEnum):
 #: the assistant or traffic of a conversation's or a spoke's. ADR-0329 §18:2's
 #: ``pending_candidates`` is placed there by the same class, beside ``beliefs``: a
 #: query on the assistant's own records, which the command role scopes to the owner
-#: (§18:1).
+#: (§18:1). ADR-0325 §5:1's ``connect_keyless_account`` is placed there beside
+#: ``connect_account``, by the same class: a command on the hub's own connection
+#: records, which ADR-0151's connection surface already puts in this row.
 ROWS: Final[Mapping[Route, frozenset[str]]] = {
     Route.COMMAND: frozenset(
         {
@@ -101,6 +103,7 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
             "belief",
             "beliefs",
             "connect_account",
+            "connect_keyless_account",
             "connected_accounts",
             "create_story",
             "disconnect_account",

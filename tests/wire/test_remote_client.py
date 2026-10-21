@@ -522,6 +522,10 @@ async def test_a_destination_that_never_answers_is_reported_rather_than_waited_o
             ),
             id="reprovision_account",
         ),
+        pytest.param(
+            lambda client: client.connect_keyless_account(identity="Open-Meteo"),
+            id="connect_keyless_account",
+        ),
         pytest.param(lambda client: client.disconnect_account("ref-1"), id="disconnect_account"),
         pytest.param(lambda client: client.connected_accounts(), id="connected_accounts"),
         pytest.param(lambda client: client.recent_connection_acts(), id="recent_connection_acts"),
@@ -532,8 +536,9 @@ async def test_no_connection_operation_is_carried_on_this_transport(
 ) -> None:
     """ADR-0151 §13: not over ADR-0124's remote listener, until the hop is ruled.
 
-    **All five, not only the two that carry a credential.** §13's prohibition is
-    stated over the operations rather than over the argument, and the two listings
+    **All six, not only the two that carry a credential.** §13's prohibition is
+    stated over the operations rather than over the argument — ADR-0325 §5:5 puts
+    the keyless act under it although no credential crosses — and the two listings
     disclose an account identity — Tier 1 data (ADR-0149 §3) — which ADR-0124 §3's
     enumerated-disclosure list does not cover either.
 

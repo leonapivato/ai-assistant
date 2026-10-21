@@ -731,7 +731,7 @@ def grant_scope(value: Sequence[GrantScope], *, name: str) -> tuple[GrantScope, 
 _UNPRINTABLE_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
-def _refuse_unusable_identity(identity: str, *, plaintext: str) -> None:
+def _refuse_unusable_identity(identity: str, *, plaintext: str | None) -> None:
     """ADR-0151 §5's three refusals, over a plaintext the caller already holds.
 
     **Private, and takes the plaintext rather than the holder**, so that the one
@@ -761,7 +761,10 @@ def _refuse_unusable_identity(identity: str, *, plaintext: str) -> None:
         identity: The account identity as the caller passed it.
         plaintext: The credential supplied in the same call, already unwrapped by
             whoever is entitled to. It is compared and discarded; no branch below
-            names it, any part of it, or its length.
+            names it, any part of it, or its length. ``None`` for the keyless act,
+            which supplies no credential and so has no equality to refuse: the
+            other two refusals bind it unchanged and nothing replaces the third
+            (ADR-0325 §4:3).
 
     Raises:
         UnusableIdentityError: On :func:`usable_identity`'s terms.
@@ -777,7 +780,7 @@ def _refuse_unusable_identity(identity: str, *, plaintext: str) -> None:
     # and never after a write. Reading the plaintext here is the comparison ADR-0149
     # §4 requires; it is compared and discarded, and the branch below names neither
     # side of it.
-    if identity == plaintext:
+    if plaintext is not None and identity == plaintext:
         msg = (
             "the account identity is the same value as the credential, so the "
             "credential was very likely pasted into the identity field. Nothing was "
@@ -852,3 +855,30 @@ def check_provisioning_call(
     check_arguments(
         method, max_bytes=max_bytes, credential=plaintext, identity=identity, **arguments
     )
+
+
+def check_keyless_call(method: str, *, max_bytes: int, identity: str) -> None:
+    """Every local refusal the keyless provisioning act owes (ADR-0325 §4:3, §5:1).
+
+    :func:`check_provisioning_call`'s two halves with no credential in either:
+    ADR-0151 §5's refusals of an identity that is oversized or carries a control
+    character or a line break, then §11's frame measurement of the one argument.
+    The equality refusal has nothing to compare on this act, and nothing replaces
+    it — the risk it addresses, a token pasted into the identity field, needs a
+    token, and the keyless act asks for none (ADR-0325 §4).
+
+    Args:
+        method: The method being called, for the message.
+        max_bytes: The contract limit in bytes.
+        identity: The name the user gives the connection, already refused blank or
+            unwritable by :func:`non_blank_text`.
+
+    Raises:
+        UnusableIdentityError: If the identity is one ADR-0149 §4 does not admit.
+            Raised **before** the measurement, so an unusable identity is refused on
+            its own terms rather than reported as an oversized payload.
+        OversizedValueError: If the argument object's canonical encoding exceeds
+            ``max_bytes``. Nothing is written (ADR-0151 §11).
+    """
+    _refuse_unusable_identity(identity, plaintext=None)
+    check_arguments(method, max_bytes=max_bytes, identity=identity)

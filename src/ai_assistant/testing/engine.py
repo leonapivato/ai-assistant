@@ -168,6 +168,7 @@ from ai_assistant.orchestration.episode_reads import fit_chunk, fit_page
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     check_arguments,
+    check_keyless_call,
     check_payload,
     check_provisioning_call,
     grant_scope,
@@ -2069,6 +2070,21 @@ class FakeAssistantEngine:
         return self._checked(
             await self.connections.reprovision(handle, identity=named, credential=secret),
             "reprovision_account",
+        )
+
+    async def connect_keyless_account(self, *, identity: NonBlankEncodableText) -> ConnectedAccount:
+        """Connect a source that needs no credential, through :attr:`connections`.
+
+        The local refusals are implemented here rather than delegated, on
+        :meth:`connect_account`'s reason (ADR-0085 §9, ADR-0325 §4:3).
+        """
+        named = non_blank_text(identity, name="identity")
+        check_keyless_call(
+            "connect_keyless_account", max_bytes=self._max_payload_bytes, identity=named
+        )
+        self.calls.append(("connect_keyless_account", {"identity": named}))
+        return self._checked(
+            await self.connections.provision_keyless(identity=named), "connect_keyless_account"
         )
 
     async def disconnect_account(self, reference: Identifier) -> ConnectedAccount | None:

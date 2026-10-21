@@ -189,6 +189,7 @@ from ai_assistant.orchestration.notifications import hand_off
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     check_arguments,
+    check_keyless_call,
     check_payload,
     check_provisioning_call,
     grant_scope,
@@ -1479,16 +1480,17 @@ class Engine:
                 in this package, and ADR-0102 §2 records that reusing a word for a
                 different type one constructor over is how two things come to be
                 confused at a glance.
-            connection_operations: The five connection operations (ADR-0151 §1,
-                §10) — the **only** object in this package holding a
+            connection_operations: The six connection operations (ADR-0151 §1,
+                §10, ADR-0325 §5:1) — the **only** object in this package holding a
                 :class:`~ai_assistant.core.protocols.ConnectionProvisioner`. The
                 façade delegates ``connect_account``, ``reprovision_account``,
-                ``disconnect_account``, ``connected_accounts`` and
-                ``recent_connection_acts`` to it, keeping this class's own job the
-                argument validation, the size measurement and the drain tracking.
+                ``connect_keyless_account``, ``disconnect_account``,
+                ``connected_accounts`` and ``recent_connection_acts`` to it, keeping
+                this class's own job the argument validation, the size measurement
+                and the drain tracking.
 
                 **Required, on ``grant_operations``' argument exactly** — these
-                five are ``AssistantEngine`` methods and the shared conformance
+                six are ``AssistantEngine`` methods and the shared conformance
                 suite runs against this class, so an engine that could be built
                 without them is one whose surface is conditionally present. It is
                 also the shape #684 taught: ``build_engine`` once took a ``grants``
@@ -5076,6 +5078,40 @@ class Engine:
         return await self._tracked(
             self._connections.reprovision(handle, identity=named, credential=secret),
             "reprovision_account",
+            checked=True,
+            traced=False,
+        )
+
+    async def connect_keyless_account(self, *, identity: NonBlankEncodableText) -> ConnectedAccount:
+        """Connect a source that needs no credential, under a reference the provisioner mints.
+
+        **Two local refusals before any I/O, in this order** (ADR-0325 §4:3,
+        ADR-0085 §9): the identity is refused blank or unwritable and **normalised by
+        nothing**, and it is then refused unusable — oversized, or carrying a control
+        character or a line break — before the argument is measured against the
+        frame. A wire client refuses exactly what this refuses, so no such call
+        reaches the hub.
+
+        Untraced, for :meth:`connect_account`'s reason: a trace would put an instant
+        on the owner's act through a door ADR-0151 §18 keeps shut.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``identity`` is blank or unwritable.
+            UnusableIdentityError: If ``identity`` is one ADR-0149 §4 does not
+                admit. Nothing is written.
+            ConnectionStoreError: If the act's one write did not return. Carries no
+                reference, and the outcome is not known (ADR-0325 §3:6).
+            OversizedValueError: If the argument or the record exceeds the limit.
+        """
+        self._reject_if_closing()
+        named = non_blank_text(identity, name="identity")
+        check_keyless_call(
+            "connect_keyless_account", max_bytes=self._max_payload_bytes, identity=named
+        )
+        return await self._tracked(
+            self._connections.connect_keyless(identity=named),
+            "connect_keyless_account",
             checked=True,
             traced=False,
         )

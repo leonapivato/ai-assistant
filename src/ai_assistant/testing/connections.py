@@ -77,7 +77,8 @@ class FakeConnectionEntry:
     """One append to the fake's connection log (ADR-0148 §6, ADR-0149 §5).
 
     A provisioning entry carries the identity, the state and this act's own slot;
-    a **removal entry** carries none of the three, which is what says the
+    a **keyless** entry carries the identity and the ``ACTIVE`` state with no slot
+    (ADR-0325 §3:1); a **removal entry** carries none of the three, which is what says the
     reference has no live record — and not a third
     :class:`~ai_assistant.core.types.ProvisioningState`, which ADR-0149 §5 forbids.
 
@@ -86,7 +87,8 @@ class FakeConnectionEntry:
         revision: ADR-0148 §6's monotonic revision.
         identity: The account identity, verbatim, or ``None`` on a removal.
         state: How far the act had got, or ``None`` on a removal.
-        slot: The credential slot the act wrote to, or ``None`` on a removal.
+        slot: The credential slot the act wrote to, or ``None`` on a removal and
+            on a keyless entry.
     """
 
     reference: str
@@ -337,6 +339,33 @@ class FakeConnectionProvisioner:
             reference=reference,
             identity=identity,
             revision=revision,
+            state=ProvisioningState.ACTIVE,
+        )
+
+    async def provision_keyless(self, *, identity: NonBlankEncodableText) -> ConnectedAccount:
+        """Connect a source that needs no credential: one entry, no keyring call.
+
+        ADR-0325 §3:2's act over the in-memory log — the reference's first entry,
+        appended ``ACTIVE`` at revision 1 with no slot — with the log's refusal of a
+        reference it already holds standing for the store's compare-and-swap. Nothing
+        is set, deleted or read on :attr:`secrets` (§3:3), which is what the shared
+        suite counts.
+        """
+        reference = _receivable(self._next_reference())
+        _printable(identity)
+        if any(entry.reference == reference for entry in self.entries):
+            msg = (
+                "the connection log already holds the reference this act minted, so "
+                "nothing was written; the factory repeated a value it must not repeat"
+            )
+            raise ConnectionStoreError(msg)
+        self.entries.append(
+            FakeConnectionEntry(reference, 1, identity, ProvisioningState.ACTIVE, None)
+        )
+        return ConnectedAccount(
+            reference=reference,
+            identity=identity,
+            revision=1,
             state=ProvisioningState.ACTIVE,
         )
 

@@ -1094,6 +1094,7 @@ async def test_a_bound_listener_answers_nothing_until_it_is_told_to_serve(
             "reprovision_account",
             {"identity": "ada", "credential": "hunter2-correct-horse", "reference": "ref-1"},
         ),
+        ("connect_keyless_account", {"identity": "Open-Meteo"}),
         ("disconnect_account", {"reference": "ref-1"}),
         ("connected_accounts", {}),
         ("recent_connection_acts", {}),
@@ -1119,8 +1120,9 @@ async def test_no_connection_operation_is_served_on_the_remote_listener(
     there is no ratified code meaning "not on this transport" and this lane may not
     invent one.
 
-    **All five, not only the two carrying a credential.** The listings disclose an
-    account identity, which ADR-0149 §3 makes Tier 1.
+    **All six, not only the two carrying a credential.** The listings disclose an
+    account identity, which ADR-0149 §3 makes Tier 1, and ADR-0325 §5:5 puts the
+    keyless act on the same transport rule as the other five.
     """
     engine = FakeAssistantEngine()
     async with _remote(tmp_path, engine=engine) as hub:

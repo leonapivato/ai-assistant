@@ -26,7 +26,9 @@ ADR-0148 §6's act writes the record *pending* and then, after the credential,
 *active*; both are appends here, at one revision, and
 :meth:`SqliteConnectionStore.recent` collapses them into the one
 :class:`~ai_assistant.core.types.ConnectionAct` per ``(reference, revision)``
-ADR-0151 §9 requires, carrying the furthest state that act reached. A
+ADR-0151 §9 requires, carrying the furthest state that act reached. A **keyless**
+provisioning act appends one entry, ``ACTIVE`` with no slot, because it has no
+credential write for a pending state to stand ahead of (ADR-0325 §3). A
 disconnection appends a third kind of entry — a **removal** — which carries no
 identity, no state and no slot, and is not a third
 :class:`~ai_assistant.core.types.ProvisioningState` (ADR-0149 §5).
@@ -323,7 +325,10 @@ class ConnectionEntry(BaseModel):
     Two shapes in one model, told apart by whether :attr:`state` is present:
 
     - a **provisioning entry**, carrying the identity, the revision, the
-      provisioning state and this act's own credential slot; and
+      provisioning state and this act's own credential slot — or, for a
+      **keyless** connection, the identity, the revision and the ``ACTIVE`` state
+      with **no** slot, which is the one entry a keyless provisioning act writes
+      (ADR-0325 §3); and
     - a **removal entry**, carrying "the reference, the incremented revision and
       the fact that the connection was removed" and nothing else (ADR-0149 §5).
 
@@ -351,7 +356,8 @@ class ConnectionEntry(BaseModel):
         state: How far the act that wrote this entry had got, or ``None`` on a
             removal.
         slot: The credential slot the act which wrote this entry wrote its
-            credential to, or ``None`` on a removal. Never a slot an earlier act
+            credential to, or ``None`` on a removal and on a keyless entry, which
+            names no credential at all (ADR-0325 §2). Never a slot an earlier act
             wrote, and never written by two acts (ADR-0148 §6).
     """
 
@@ -365,24 +371,36 @@ class ConnectionEntry(BaseModel):
 
     @model_validator(mode="after")
     def _is_one_shape_or_the_other(self) -> ConnectionEntry:
-        """Refuse an entry that is neither a provisioning entry nor a removal.
+        """Refuse an entry that is neither a provisioning entry, a keyless one, nor a removal.
 
-        The three optional members travel together: an entry with a state but no
-        slot would name a record no credential read could satisfy, and one with a
-        slot but no state would be a record ADR-0148 §6 has no state for. Making
-        the mixture unconstructible is cheaper than checking for it at each of
-        the six places that read an entry.
+        **Three shapes and no fourth** (ADR-0325 §3:1). The identity and the state
+        travel together, because one without the other is a record ADR-0148 §6 has
+        no reading for. The slot travels with them **except** on a keyless entry,
+        which carries an identity and the ``ACTIVE`` state and names no slot: it is
+        what a keyless provisioning act writes in its one write, and a keyless
+        callable reads no credential under it (§2:3).
+
+        **A slotless pending entry stays unconstructible**, and that is the clause
+        rather than an omission. The pending state exists for one window, the
+        record ahead of the keyring while the credential write is in flight; a
+        keyless act has no credential write, so a pending entry naming no slot
+        would describe a window that does not exist (§3). A removal entry stays
+        the one carrying none of the three. Making the mixtures unconstructible is
+        cheaper than checking for them at each of the places that read an entry.
 
         Raises:
-            ValueError: If some but not all of the identity, the state and the
-                slot are present.
+            ValueError: If the entry is none of the three shapes.
         """
         present = (self.identity is not None, self.state is not None, self.slot is not None)
-        if any(present) and not all(present):
+        removal = not any(present)
+        keyless = present == (True, True, False) and self.state is ProvisioningState.ACTIVE
+        if not (all(present) or removal or keyless):
             msg = (
                 "a connection entry carries an identity, a state and a slot together "
-                "(a provisioning entry) or none of them (a removal entry, ADR-0149 §5); "
-                f"got identity={present[0]}, state={present[1]}, slot={present[2]}"
+                "(a provisioning entry), an identity and the active state with no slot "
+                "(a keyless entry, ADR-0325 §3) or none of them (a removal entry, "
+                f"ADR-0149 §5); got identity={present[0]}, "
+                f"state={None if self.state is None else self.state.value}, slot={present[2]}"
             )
             raise ValueError(msg)
         return self

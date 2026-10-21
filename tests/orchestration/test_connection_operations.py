@@ -70,6 +70,10 @@ class _Recording:
         self.calls.append(("reprovision", (reference,), kwargs))
         return await self.record.reprovision(reference, **kwargs)
 
+    async def provision_keyless(self, **kwargs: Any) -> ConnectedAccount:
+        self.calls.append(("provision_keyless", (), kwargs))
+        return await self.record.provision_keyless(**kwargs)
+
     async def disconnect(self, reference: str) -> ConnectedAccount | None:
         self.calls.append(("disconnect", (reference,), {}))
         return await self.record.disconnect(reference)
@@ -128,14 +132,21 @@ async def test_the_relay_names_no_keyring_face() -> None:
 
     The distinction ADR-0102 §7 drew about a composition root and
     ``SourceGrantStore``, checked here rather than asserted: this object can name
-    five members over `core` types and cannot name ``set``, ``delete`` or ``get``.
+    six members over `core` types and cannot name ``set``, ``delete`` or ``get``.
     A future member that widened the seam would fail here before it reached review.
     """
     operations = ConnectionOperations(provisioner=FakeConnectionProvisioner())
 
     surface = {name for name in dir(operations) if not name.startswith("_")}
 
-    assert surface == {"connect", "reprovision", "disconnect", "connected", "recent_acts"}
+    assert surface == {
+        "connect",
+        "reprovision",
+        "connect_keyless",
+        "disconnect",
+        "connected",
+        "recent_acts",
+    }
     assert not surface & {"set", "delete", "get", "purge"}
 
 
@@ -163,6 +174,25 @@ async def test_every_seam_member_is_reached_with_the_arguments_it_was_given() ->
     assert recording.calls[1][1] == (record.reference,)
     assert recording.calls[2][1] == (record.reference,)
     assert recording.calls[4][2] == {"limit": 3}
+
+
+async def test_the_keyless_act_is_one_seam_call_with_the_identity_verbatim() -> None:
+    """ADR-0325 §3:3, §4:2: a forward and a return, and nothing for a keyring.
+
+    The identity arrives un-stripped and un-case-folded, the seam is reached once —
+    nothing is read back — and the fake's keyring is never asked anything, because
+    the act has no credential to relay.
+    """
+    recording = _Recording()
+    # Every keyring member raises from here on, so a completed act called none.
+    recording.record.secrets.become_unavailable()
+    operations = ConnectionOperations(provisioner=recording)
+
+    record = await operations.connect_keyless(identity=_IDENTITY)
+
+    assert recording.calls == [("provision_keyless", (), {"identity": _IDENTITY})]
+    assert record.identity == _IDENTITY
+    assert record.state is ProvisioningState.ACTIVE
 
 
 async def test_a_failed_act_is_neither_retried_nor_converted() -> None:
