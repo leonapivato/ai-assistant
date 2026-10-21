@@ -280,8 +280,8 @@ BOOKING_AVAILABILITY: Final = ToolDefinition(
   field"*: **a deployment that finds the read prompting has a policy threshold to
   examine and not a declaration to edit**.
 - ``reads=(SECRET, OPERATIONAL)`` — the credential the bound connection names, which
-  ADR-0148 §6's conditions 2 and 3 make it read on every call **including for a
-  provider that accepts it and does not use it** (ADR-0260 §12), and the configured
+  ADR-0148 §6's conditions 2 and 3 make it read on every call **although the
+  simulated provider accepts it and does not use it** (§1), and the configured
   availability and prices (§5). ``reads=()`` would be the silent no-reach claim
   ADR-0016 §1 makes this field required to prevent.
 - ``writes=()``. A read changes nothing this system stores.

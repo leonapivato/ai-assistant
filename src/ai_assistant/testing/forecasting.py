@@ -336,7 +336,9 @@ def _coordinate_schema(*, maximum: float) -> dict[str, FrozenJson]:
 #: The declaration this fake's :meth:`FakeForecaster.request` carries by value. Its
 #: safety fields are the production declaration's, argued in ADR-0260 §6 and ADR-0016
 #: §1, because a fake ruled on more leniently than the real thing would let a consumer's
-#: policy test pass for a reason no deployment enjoys.
+#: policy test pass for a reason no deployment enjoys. ``reads=()`` is production's
+#: keyless declaration (ADR-0344 §3), and it is true of this fake as well: it reads no
+#: credential.
 FAKE_FORECAST_READ: Final = ToolDefinition(
     id=FAKE_FORECAST_ID,
     capability="forecast_read",
@@ -344,7 +346,7 @@ FAKE_FORECAST_READ: Final = ToolDefinition(
     risk_level=RiskLevel.LOW,
     reversibility=Reversibility.REVERSIBLE,
     side_effecting=True,
-    reads=(DataTier.SECRET,),
+    reads=(),
     writes=(),
     discloses=(DataTier.PERSONAL,),
     cost=ToolCost(basis=CostBasis.UNKNOWN),

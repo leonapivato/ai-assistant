@@ -372,11 +372,12 @@ def test_the_fake_declares_the_production_safety_fields() -> None:
 
     "A fake ruled on more leniently than the real thing would let a consumer's policy
     test pass for a reason no deployment enjoys." The four fields a ruling depends on are
-    the production declaration's, argued in ADR-0016 §1 and ADR-0260 §6.
+    the production declaration's, argued in ADR-0016 §1 and ADR-0260 §6 — ``reads``
+    keyless, as ADR-0344 §3 declares production's.
     """
     assert FAKE_FORECAST_READ.side_effecting is True
     assert [tier.value for tier in FAKE_FORECAST_READ.discloses] == ["personal"]
-    assert [tier.value for tier in FAKE_FORECAST_READ.reads] == ["secret"]
+    assert [tier.value for tier in FAKE_FORECAST_READ.reads] == []
     assert FAKE_FORECAST_READ.cost.basis.value == "unknown"
 
 
