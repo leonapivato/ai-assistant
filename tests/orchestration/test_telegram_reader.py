@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from story_support import episode
 from telegram_support import (
@@ -81,9 +81,23 @@ from ai_assistant.testing import (
 from ai_assistant.testing.telegram import GET_UPDATES, SEND_MESSAGE
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 
-    from ai_assistant.orchestration.joining import JoiningInput
+    from ai_assistant.orchestration.joining import JoiningInput, PendingJoin
+
+
+class _Pending:
+    """A stand-in for a join taken pending its marking, recording what confirms it."""
+
+    def __init__(self, activation_id: str, confirmed: list[tuple[int, ...]]) -> None:
+        self.activation_id = activation_id
+        self._confirmed = confirmed
+
+    def confirm(self, positions: Iterable[int | None]) -> None:
+        self._confirmed.append(tuple(sorted(one for one in positions if one is not None)))
+
+    def withdraw(self) -> None:
+        self._confirmed.append(())
 
 
 class _Line:
@@ -122,14 +136,12 @@ class _Line:
         self.closing = False
         # ADR-0332 §3, §8: what the reader handed the join and the stop, and what each
         # answers: no join is taken, and a stop stops what runs, unless a case says.
-        # What the reader asked the check (`joins`) and handed the join once it had
-        # marked it (`joined_inputs`); the check finds the activation `answer` names
-        # joinable, and the join takes it unless `refuse_join` (the race, §3:18).
+        # What the reader handed the join (`joins`), which takes it pending its marking
+        # into the activation `answer` names, and the message ids each was confirmed with.
         self.joins: list[JoiningInput] = []
-        self.joined_inputs: list[JoiningInput] = []
+        self.confirmed: list[tuple[int, ...]] = []
         self.joined: str | None = None
         self.answer: Callable[[JoiningInput], str | None] = lambda joining: self.joined
-        self.refuse_join = False
         self.stops: list[str] = []
         self._ids = iter(f"act-{n}" for n in range(1, 100))
         self.reader = TelegramReader(
@@ -144,7 +156,6 @@ class _Line:
             memory=self.memory,
             activate=self._activate,
             join=self._join,
-            join_check=self._check,
             stop=self._stop,
             closing=lambda: self.closing,
             mint=lambda: next(self._ids),
@@ -157,14 +168,12 @@ class _Line:
         self.rests.append(seconds)
         await asyncio.sleep(0.001)
 
-    def _check(self, joining: JoiningInput) -> tuple[JoinCheck, str | None]:
+    def _join(self, joining: JoiningInput) -> tuple[JoinCheck, PendingJoin | None]:
         self.joins.append(joining)
         into = self.answer(joining)
-        return (JoinCheck.REFUSED, None) if into is None else (JoinCheck.JOINABLE, into)
-
-    def _join(self, joining: JoiningInput, into: str) -> str | None:
-        self.joined_inputs.append(joining)
-        return None if self.refuse_join else into
+        if into is None:
+            return JoinCheck.REFUSED, None
+        return JoinCheck.JOINABLE, cast("PendingJoin", _Pending(into, self.confirmed))
 
     async def _stop(self, activation_id: str) -> bool:
         self.stops.append(activation_id)
@@ -705,6 +714,7 @@ async def test_a_message_sent_while_one_runs_joins_it_and_is_marked_taken_in_by_
     await line.until(lambda: line.fake.held == (), what="it was confirmed")
 
     assert (held.kind, held.activation_id) == (TelegramIntakeKind.TAKEN_IN, running)
+    assert line.confirmed == [(60,)], "confirmed with what the record marked"
     (joining,) = line.joins
     assert joining.channel == line.seams.channel
     assert joining.messages == (
@@ -797,10 +807,8 @@ async def test_a_join_whose_marking_failed_joins_nothing_and_is_taken_in_after()
     running = await _running(line)
     line.answer = _failing_marking(line, running)
     line.fake.hold(text(2, "actually Saturday"))
-    await line.until(lambda: bool(line.joins), what="the join was asked")
-    for _ in range(20):
-        await asyncio.sleep(0.001)
-    assert line.joined_inputs == [], "nothing the record does not hold taken in is joined"
+    await line.until(lambda: bool(line.confirmed), what="the join was settled")
+    assert line.confirmed == [()], "nothing the record does not hold taken in is joined"
 
     assert line.gate is not None
     line.gate.set()
@@ -818,33 +826,13 @@ async def test_a_stop_after_a_join_whose_marking_failed_still_stops() -> None:
 
     await line.until(lambda: STOPPED_LINE in line.sent(), what="the stop was answered")
     assert line.stops == [running]
-    assert line.joined_inputs == []
+    assert line.confirmed == [()], "nothing joined"
 
     assert line.gate is not None
     line.gate.set()
     await line.until(lambda: len(line.inputs) == 2, what="the correction was taken in after")
     await line.stop()
     assert line.inputs[1].update_ids == (2,)
-
-
-async def test_a_join_the_activation_refused_once_marked_is_the_next_ones_input() -> None:
-    """§3:18: committed, stopped or ended while the marking was written: retaken."""
-    line = _Line()
-    running = await _running(line)
-    line.joined = running
-    line.refuse_join = True
-    line.fake.hold(text(2, "actually Saturday"))
-    held = await _until_held(line, 2)
-    assert (held.kind, held.activation_id) == (TelegramIntakeKind.TAKEN_IN, running)
-    await line.until(lambda: line.fake.held == (), what="it was confirmed")
-
-    assert line.gate is not None
-    line.gate.set()
-    await line.until(lambda: len(line.inputs) == 2, what="the next activation took it in")
-    await line.stop()
-    (taken,) = line.inputs[1:]
-    assert taken.update_ids == (2,), "its input, though the record names the other"
-    assert line.marked[1] == (2,), "and counted as taken in by it"
 
 
 # --- the line's /stop (ADR-0332 §8) -----------------------------------------------------

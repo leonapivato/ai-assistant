@@ -212,6 +212,13 @@ class ActivationState:
     #: ADR-0332 §3:16-§3:17: the inputs that joined, in the order they joined, a
     #: takeover's among them; recorded on the episode's ``joined``.
     joined: tuple[JoinedInput, ...] = field(default=(), init=False)
+    #: ADR-0332 §3:6, §3:18: joins taken, in one step with their check, whose reader's
+    #: marking of their messages has not yet landed (:meth:`reserve`). Counted toward
+    #: ``join_limit``, they hold acting's commitment step (:meth:`settled`), and are no
+    #: part of the input, so no stage reads and no episode records them, until the
+    #: marking lands and confirms them, or fails and withdraws them.
+    _pending: list[JoinedInput] = field(default_factory=list, init=False, repr=False)
+    _settled: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     #: ADR-0332 §3:3: who wrote the trigger's input, as its place establishes it, and what
     #: it carries; set when the pass begins, on a place that runs one activation at a
     #: time. ``None`` until then, and on every other activation: nothing joins it, and it
@@ -288,8 +295,61 @@ class ActivationState:
         activation not ended, and fewer joins taken than ``join_limit``.
         """
         return (
-            not self.ended and not self.stopped and not self.committed and len(self.joined) < limit
+            not self.ended
+            and not self.stopped
+            and not self.committed
+            and len(self.joined) + len(self._pending) < limit
         )
+
+    @property
+    def joining(self) -> bool:
+        """Whether a join taken is waiting for its marking to land (:meth:`reserve`)."""
+        return bool(self._pending)
+
+    def reserve(self, joined: JoinedInput, *, limit: int) -> bool:
+        """Take ``joined`` pending its reader's marking (ADR-0332 §3:6, §3:18).
+
+        The check is :meth:`join`'s, in **one synchronous step** with taking it, so a
+        join either lands before the commitment step or finds the activation committed.
+        It is no part of the input until :meth:`confirm`, and acting's commitment step
+        waits for it (:meth:`settled`): so the reader's marking lands before the
+        activation can act on what joined, as at admission, and a marking that fails
+        leaves nothing it could have acted on.
+
+        Returns:
+            Whether it was taken; ``False`` where nothing changed.
+        """
+        if not self.can_join(limit=limit):
+            return False
+        self._pending.append(joined)
+        self._settled.clear()
+        return True
+
+    def confirm(self, joined: JoinedInput, messages: tuple[RecordedInputMessage, ...]) -> None:
+        """The marking of a pending join landed: ``messages`` of it join (§3:16).
+
+        ``messages`` are those the reader's store marked, so one deleted or taken in
+        elsewhere meanwhile is not among them. Where none are, it is withdrawn.
+        """
+        self._pending.remove(joined)
+        if messages:
+            self.joined = (*self.joined, joined.model_copy(update={"messages": messages}))
+        if not self._pending:
+            self._settled.set()
+
+    def withdraw(self, joined: JoinedInput) -> None:
+        """The marking of a pending join failed: nothing of it joined, and it waits (§3:4)."""
+        self._pending.remove(joined)
+        if not self._pending:
+            self._settled.set()
+
+    async def settled(self) -> None:
+        """Wait until no join is pending its marking, as acting's commitment step does.
+
+        Returns at once, without yielding, where none is.
+        """
+        while self._pending:
+            await self._settled.wait()
 
     def join(self, joined: JoinedInput, *, limit: int) -> bool:
         """Take ``joined`` into the activation, where it may still join (ADR-0332 §3:6).

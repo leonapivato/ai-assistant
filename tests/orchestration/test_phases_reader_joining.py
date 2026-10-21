@@ -55,8 +55,11 @@ from ai_assistant.core.types import (
     ActivationStop,
     ChannelIdentity,
     InputOrigin,
+    MessageAuthor,
     RecordedInputMessage,
+    RoundResponse,
     TelegramIntakeKind,
+    TranscriptMessage,
 )
 from ai_assistant.orchestration.channel_kinds import one_at_a_time
 from ai_assistant.orchestration.chat import (
@@ -70,6 +73,7 @@ from ai_assistant.orchestration.joining import (
     join_running,
     place_busy,
 )
+from ai_assistant.orchestration.phase_path import PhasePath
 from ai_assistant.orchestration.telegram import (
     DEFAULT_TELEGRAM_START_WAIT,
     NOTHING_RUNNING_LINE,
@@ -83,6 +87,7 @@ from ai_assistant.testing import (
     FakeModelProvider,
     FakeTelegramBotClient,
     FakeTelegramIntakeRecord,
+    FakeToolCallingCompleter,
 )
 
 if TYPE_CHECKING:
@@ -91,6 +96,7 @@ if TYPE_CHECKING:
     from test_engine import Harness
 
     from ai_assistant.core.types import EpisodicMemory, Message, TelegramIntake
+    from ai_assistant.orchestration.phase_path import PhasePass
 
 #: The line's channel, keyed by its connection and its chat.
 _LINE: Final = line_channel(REFERENCE, CHAT)
@@ -377,20 +383,21 @@ async def test_a_join_on_a_place_that_runs_side_by_side_joins_nothing() -> None:
 
 
 class _HeldMarking(FakeConversationStore):
-    """A store whose first marking waits for :attr:`release`, and whose ``refused`` fails."""
+    """A store whose ``held``-th marking waits for :attr:`release`; ``refused`` fails once."""
 
-    def __init__(self, *, refused: int | None = None) -> None:
+    def __init__(self, *, held: int = 1, refused: int | None = None) -> None:
         super().__init__(now=lambda: AT)
         self.release = asyncio.Event()
         self.holding = asyncio.Event()
         self.refused = refused
-        self._held = False
+        self._held = held
+        self._marks = 0
 
     async def take_in(
         self, conversation_id: str, *, positions: Sequence[int], activation_id: str
     ) -> tuple[int, ...]:
-        if not self._held:
-            self._held = True
+        self._marks += 1
+        if self._marks == self._held:
             self.holding.set()
             await self.release.wait()
         if self.refused in positions:
@@ -458,3 +465,63 @@ async def test_a_join_whose_marking_is_refused_joins_nothing_and_is_taken_in_aft
         1: running,
         2: processing(later).activation_id,
     }
+
+
+def _held_acting(entered: asyncio.Event, release: asyncio.Event) -> type[PhasePath]:
+    """A path whose acting stage waits for ``release`` before its first line."""
+
+    class _Held(PhasePath):
+        async def _act(self, given: PhasePass) -> None:
+            entered.set()
+            await release.wait()
+            await super()._act(given)
+
+    return _Held
+
+
+async def test_acting_waits_for_a_joins_marking_and_then_sets_its_round_aside() -> None:
+    """§3:5, §3:18: nothing commits while a join's marking is written; then it is found.
+
+    The join is taken before acting's first line, and its marking held: acting waits
+    for it rather than committing past it, so the round planned before it runs nothing
+    and the one planned after it is the one whose message is written.
+    """
+    store = _HeldMarking(held=2)
+    entered, release = asyncio.Event(), asyncio.Event()
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(text="Riverside, Friday."), RoundResponse(text="Riverside, Saturday.")
+    )
+    harness = phases_harness(
+        completer, conversation_store=store, phases={"path": _held_acting(entered, release)}
+    )
+    conversation = await open_conversation(harness)
+    await harness.engine.write_message(conversation, message=said("m-1", "book Riverside"))
+    await asyncio.wait_for(entered.wait(), SETTLE)
+    running = await working(harness, conversation)
+
+    await harness.engine.write_message(conversation, message=said("m-2", "make it Saturday"))
+    await asyncio.wait_for(store.holding.wait(), SETTLE)
+    release.set()
+    for _ in range(20):
+        await asyncio.sleep(0.001)
+    assert await harness.plans.activation_effects([running]) == (), "nothing committed yet"
+    store.release.set()
+    (episode,) = await _frozen(harness, 1)
+    await harness.engine.aclose()
+
+    assert [one.text for one in await written_by_assistant(harness, conversation)] == [
+        "Riverside, Saturday."
+    ]
+    record = processing(episode)
+    assert [one.position for one in record.joined[0].messages] == [2]
+    assert [one.text for one in record.rounds] == ["Riverside, Friday.", "Riverside, Saturday."]
+
+
+async def written_by_assistant(harness: Harness, conversation: str) -> list[TranscriptMessage]:
+    page = await harness.conversation_store.transcript(conversation, limit=100)
+    assert page is not None
+    return [
+        one
+        for one in page.entries
+        if isinstance(one, TranscriptMessage) and one.author is MessageAuthor.ASSISTANT
+    ]

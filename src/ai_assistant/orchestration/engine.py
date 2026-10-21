@@ -198,10 +198,11 @@ from ai_assistant.orchestration.episode_reads import fit_chunk, fit_page
 from ai_assistant.orchestration.joining import (
     DEFAULT_JOIN_LIMIT,
     JoinCheck,
-    check_join,
+    PendingJoin,
     input_standing,
     join_running,
     place_busy,
+    reserve_join,
     take_over,
     visible_running,
 )
@@ -1994,11 +1995,10 @@ class Engine:
                 written=None if phases is None else phases.written,
                 # ADR-0332 §3, §5: a message written while an activation runs joins it
                 # where it may, and one where nothing runs waits a moment first.
-                join=self._join_running,
+                join=self._reserve_join,
                 start_wait=chat_start_wait,
                 composing_lapse=chat_composing_lapse,
                 composing_cap=chat_composing_cap,
-                join_check=self._join_check,
             )
             if chat_reader
             else None
@@ -2040,8 +2040,7 @@ class Engine:
                 activate=self._line_read_in,
                 # ADR-0332 §3, §8: a message sent while an activation runs joins it where
                 # it may, and the line's `/stop` stops it.
-                join=self._join_running,
-                join_check=self._join_check,
+                join=self._reserve_join,
                 stop=self._stop_line,
                 closing=lambda: self._closing,
                 mint=self._chat_activation_id,
@@ -6938,22 +6937,30 @@ class Engine:
             else:
                 _log.warning("takeover_stop_unrecorded", stage="takeover", reason="store_failed")
 
-    def _join_check(self, joining: JoiningInput) -> tuple[JoinCheck, str | None]:
-        """Whether :meth:`_join_running` would take ``joining`` now (ADR-0332 §3:3).
+    def _reserve_join(self, joining: JoiningInput) -> tuple[JoinCheck, PendingJoin | None]:
+        """The readers' join (ADR-0332 §3:3, §3:6, §3:18): taken, pending its marking.
 
-        Appends nothing: what a reader reads before it marks the input taken in by the
-        activation it would join (§3:18), so the marking lands before the activation
-        can read the input, as at admission. A closing engine joins nothing.
+        :func:`~ai_assistant.orchestration.joining.reserve_join` checks and takes the
+        input in one synchronous step, as :meth:`_join_running` does; the reader then
+        marks its messages taken in by the activation named, and confirms what its store
+        marked, or withdraws it. Acting's commitment step waits for that, so the
+        activation acts on nothing the reader's bookkeeping does not hold. A closing
+        engine joins nothing.
+
+        Raises:
+            TraceStoreError: If the clock's reading of when it joins is not usable;
+                nothing is taken.
         """
         if self._closing:
             return JoinCheck.REFUSED, None
-        return check_join(
+        return reserve_join(
             (one.state for one in self._running if one.state is not None),
             joining,
             limit=self._join_limit,
+            at=self._now(),
         )
 
-    def _join_running(self, joining: JoiningInput, into: str | None = None) -> str | None:
+    def _join_running(self, joining: JoiningInput) -> str | None:
         """The join's entry point (ADR-0332 §3:3, §3:6): join a place's running activation.
 
         For a place's reader, which holds §3:3's fourth condition itself: it hands an
@@ -6963,8 +6970,8 @@ class Engine:
         two inputs' standing, and appends the input where the activation has neither
         committed nor been stopped and has taken fewer joins than ``join_limit``. The
         open episode records it with the next append the activation makes (ADR-0286
-        §3), its freeze at the latest. ``into`` is the activation the reader already
-        marked the input taken in by (§3:18, :meth:`_join_check`): only that one joins.
+        §3), its freeze at the latest. The readers take a join through
+        :meth:`_reserve_join`, so their marking lands first (§3:18).
 
         Returns:
             The id of the activation joined; ``None`` where it joined none, and the input
@@ -6981,7 +6988,6 @@ class Engine:
             joining,
             limit=self._join_limit,
             at=self._now(),
-            into=into,
         )
 
     async def _beliefs(

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import pytest
 
@@ -37,9 +37,9 @@ from ai_assistant.orchestration.joining import THE_USER, JoinCheck
 from ai_assistant.testing import FakeConversationStore
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Sequence
+    from collections.abc import Callable, Coroutine, Iterable, Sequence
 
-    from ai_assistant.orchestration.joining import JoiningInput
+    from ai_assistant.orchestration.joining import JoiningInput, PendingJoin
 
 #: How long a case waits for the reader before it fails rather than hangs.
 _SETTLE: Final = 5.0
@@ -85,6 +85,20 @@ class _Clock:
             await asyncio.sleep(0)
 
 
+class _Pending:
+    """A stand-in for a join taken pending its marking, recording what confirms it."""
+
+    def __init__(self, activation_id: str, confirmed: list[tuple[int, ...]]) -> None:
+        self.activation_id = activation_id
+        self._confirmed = confirmed
+
+    def confirm(self, positions: Iterable[int | None]) -> None:
+        self._confirmed.append(tuple(sorted(one for one in positions if one is not None)))
+
+    def withdraw(self) -> None:
+        self._confirmed.append(())
+
+
 class _Reader:
     """A chat reader over a fake store, its activation and its join stand-ins."""
 
@@ -100,12 +114,13 @@ class _Reader:
         self.taken_at: list[float] = []
         self.gate: asyncio.Event | None = None
         self.entered = asyncio.Event()
+        # What the join was handed and took pending its marking (`joins`), and the
+        # positions each was then confirmed with (`confirmed`): it takes what `answer`
+        # names, and answers *not yet* the first `not_yet` times.
         self.joins: list[JoiningInput] = []
-        # What the check finds, and what the join answers: the activation the check
-        # names joins, unless a case says the join then refuses (the race, §3:18).
+        self.confirmed: list[tuple[int, ...]] = []
         self.answer: str | None = None
         self.not_yet = 0
-        self.refuse_join = False
         self.tasks: list[asyncio.Task[None]] = []
         self.closing = False
         self._ids = iter(f"act-{n}" for n in range(1, 100))
@@ -117,7 +132,6 @@ class _Reader:
             closing=lambda: self.closing,
             mint=lambda: next(self._ids),
             join=self._join,
-            join_check=self._check,
             start_wait=start_wait,
             composing_lapse=_LAPSE,
             composing_cap=_CAP,
@@ -128,19 +142,14 @@ class _Reader:
     def _spawn(self, read: Coroutine[None, None, None]) -> None:
         self.tasks.append(asyncio.ensure_future(read))
 
-    def _check(self, joining: JoiningInput) -> tuple[JoinCheck, str | None]:
-        del joining
+    def _join(self, joining: JoiningInput) -> tuple[JoinCheck, PendingJoin | None]:
         if self.not_yet:
             self.not_yet -= 1
             return JoinCheck.NOT_YET, None
         if self.answer is None:
             return JoinCheck.REFUSED, None
-        return JoinCheck.JOINABLE, self.answer
-
-    def _join(self, joining: JoiningInput, into: str) -> str | None:
-        assert into == self.answer, "joined into the activation it was marked by"
         self.joins.append(joining)
-        return None if self.refuse_join else into
+        return JoinCheck.JOINABLE, cast("PendingJoin", _Pending(self.answer, self.confirmed))
 
     async def _activate(self, taken: ChatInput) -> bool:
         self.inputs.append(taken)
@@ -355,6 +364,7 @@ async def test_a_message_written_while_one_runs_joins_it_and_is_marked_taken_in_
     assert await chat.store.taken_in(conversation, positions=[position]) == {position: "act-1"}, (
         "marked taken in by the activation it joined"
     )
+    await chat.until(lambda: chat.confirmed == [(position,)], what="the join was confirmed")
     assert chat.clock.slept == slept, "a message while one runs waits for nothing (§5:5)"
 
     (joining,) = chat.joins
@@ -423,9 +433,8 @@ async def test_a_join_whose_marking_failed_joins_nothing_and_is_taken_in_after()
     chat.answer = "act-1"
     position = await chat.say(conversation, "actually Saturday")
     await chat.until(lambda: store.marks >= 2, what="the join's marking was tried")
-    for _ in range(10):
-        await asyncio.sleep(0.001)
-    assert chat.joins == [], "nothing the store does not hold taken in is joined"
+    await chat.until(lambda: bool(chat.confirmed), what="the join was settled")
+    assert chat.confirmed == [()], "nothing the store does not hold taken in is joined"
 
     assert chat.gate is not None
     chat.gate.set()
@@ -434,31 +443,6 @@ async def test_a_join_whose_marking_failed_joins_nothing_and_is_taken_in_after()
 
     assert _texts(chat.inputs[1]) == ["actually Saturday"]
     assert await store.taken_in(conversation, positions=[position]) == {position: "act-2"}
-
-
-async def test_a_join_the_activation_refused_once_marked_is_the_next_ones_input() -> None:
-    """§3:18: committed, stopped or ended while the marking was written: retaken."""
-    chat = _Reader()
-    conversation = await _running(chat)
-    chat.answer = "act-1"
-    chat.refuse_join = True
-    position = await chat.say(conversation, "actually Saturday")
-    await chat.marked(conversation, position)
-    await chat.until(lambda: bool(chat.joins), what="the join was asked")
-
-    assert chat.gate is not None
-    chat.gate.set()
-    await chat.until(lambda: len(chat.inputs) == 2, what="the next activation took it in")
-    await chat.idle()
-
-    assert _texts(chat.inputs[1]) == ["actually Saturday"], "its input, though marked earlier"
-    assert await store_taken(chat, conversation, position) == "act-1", (
-        "the store names the activation it was marked by first"
-    )
-
-
-async def store_taken(chat: _Reader, conversation: str, position: int) -> str | None:
-    return (await chat.store.taken_in(conversation, positions=[position])).get(position)
 
 
 class _DeletedMidRead(FakeConversationStore):
@@ -486,9 +470,8 @@ async def test_a_message_deleted_while_the_join_read_it_joins_nothing() -> None:
     chat.answer = "act-1"
     store.delete = 2
     await chat.say(conversation, "cancel the order")
-    for _ in range(20):
-        await asyncio.sleep(0.001)
-    assert chat.joins == [], "nothing marked, nothing joined"
+    await chat.until(lambda: bool(chat.confirmed), what="the join was settled")
+    assert chat.confirmed == [()], "nothing marked, so nothing joined"
 
     assert chat.gate is not None
     chat.gate.set()

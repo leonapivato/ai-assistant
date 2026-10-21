@@ -20,7 +20,11 @@ place is waiting — is the reader's to hold before it hands an input to the joi
 **The join** (§3:6) is :meth:`~ai_assistant.orchestration.activation_state.
 ActivationState.join`: taken only where the activation has not ended, neither its
 committed mark nor its stop mark is set, and it has taken fewer joins than
-``join_limit`` (§6:5), in one step with no await between the check and the append.
+``join_limit`` (§6:5), in one step with no await between the check and the append. A
+reader takes it through :func:`reserve_join`, which decides it the same way but holds
+it pending the reader's marking of its messages, taken in by that activation (§3:18):
+acting's commitment step waits for that, so the activation acts on nothing the reader's
+bookkeeping does not hold, as at admission.
 
 **What another place is shown** (§4:1-§4:3). :func:`visible_running` reads the running
 activations of the same person on that person's other places, each with its input and
@@ -70,12 +74,13 @@ __all__ = [
     "InputStanding",
     "JoinCheck",
     "JoiningInput",
+    "PendingJoin",
     "RunningActivation",
-    "check_join",
     "input_standing",
     "is_pure_read",
     "join_running",
     "place_busy",
+    "reserve_join",
     "take_over",
     "visible_running",
 ]
@@ -91,11 +96,11 @@ THE_USER: Final = "user"
 
 
 class JoinCheck(StrEnum):
-    """What :func:`check_join` found of an input a reader would hand the join (§3:3)."""
+    """What :func:`reserve_join` found of an input a reader hands the join (§3:3)."""
 
     JOINABLE = "joinable"
-    """The activation running on its place would take it now: the reader marks it taken
-    in by that activation, and then hands it to the join, as at admission (§3:18)."""
+    """The activation running on its place took it, pending the reader's marking of its
+    messages taken in by that activation, as at admission (§3:18)."""
 
     NOT_YET = "not_yet"
     """An activation runs on its place whose pass has not begun, so its input's standing
@@ -241,28 +246,70 @@ def _on_place(
     return on_place[0] if len(on_place) == 1 else None
 
 
-def check_join(
-    running: Iterable[ActivationState], joining: JoiningInput, *, limit: int
-) -> tuple[JoinCheck, str | None]:
-    """Whether :func:`join_running` would take ``joining`` now, appending nothing (§3:3).
+@dataclass(frozen=True, slots=True)
+class PendingJoin:
+    """A join taken pending its reader's marking (ADR-0332 §3:6, §3:18).
 
-    What a reader reads before it marks an input taken in by the activation it would
-    join (§3:18): the marking is the reader's durable bookkeeping, so it lands before
-    the activation can read the input, as at admission (ADR-0293 §6:8).
+    The reader marks the input's messages taken in by :attr:`activation_id`, then
+    confirms what its store marked, or withdraws it where the marking failed. Until
+    then the activation does not commit (:meth:`ActivationState.settled`).
+
+    Attributes:
+        activation_id: The activation it joins, which the reader marks it taken in by.
+    """
+
+    activation_id: str
+    _state: ActivationState
+    _joined: JoinedInput
+
+    def confirm(self, positions: Iterable[int | None]) -> None:
+        """The marking landed: the messages at ``positions`` the store marked join."""
+        marked = set(positions)
+        self._state.confirm(
+            self._joined, tuple(one for one in self._joined.messages if one.position in marked)
+        )
+
+    def withdraw(self) -> None:
+        """The marking failed: nothing joined, and the input waits (§3:4)."""
+        self._state.withdraw(self._joined)
+
+
+def reserve_join(
+    running: Iterable[ActivationState],
+    joining: JoiningInput,
+    *,
+    limit: int,
+    at: datetime,
+) -> tuple[JoinCheck, PendingJoin | None]:
+    """Take ``joining`` into the activation running on its place, pending its marking.
+
+    As :func:`join_running` decides it, **in one step with no await between** the
+    check and taking it (§3:6); but it joins only once the reader's marking of its
+    messages, taken in by that activation, has landed (§3:18), as at admission
+    (ADR-0293 §6:8). Acting's commitment step waits for it, so the activation acts on
+    nothing the reader's bookkeeping does not hold.
 
     Returns:
-        The finding, and the activation's id where it is :attr:`JoinCheck.JOINABLE`.
+        :attr:`JoinCheck.JOINABLE` with the pending join; :attr:`JoinCheck.NOT_YET`
+        where the activation's pass has not begun, so its standing is not yet set, and
+        the reader asks again; :attr:`JoinCheck.REFUSED` where it would not join, and
+        the input waits (§3:4).
     """
     state = _on_place(running, joining.channel)
     if state is None or state.activation_id is None:
         return JoinCheck.REFUSED, None
     if state.standing is None:
-        if state.stopped or state.committed:
+        if state.stopped or state.committed or state.ended:
             return JoinCheck.REFUSED, None
         return JoinCheck.NOT_YET, None
-    if not joining.standing.joins(state.standing) or not state.can_join(limit=limit):
+    if not joining.standing.joins(state.standing):
         return JoinCheck.REFUSED, None
-    return JoinCheck.JOINABLE, state.activation_id
+    joined = JoinedInput(joined_at=at, channel=joining.channel, messages=joining.messages)
+    if not state.reserve(joined, limit=limit):
+        return JoinCheck.REFUSED, None
+    return JoinCheck.JOINABLE, PendingJoin(
+        activation_id=state.activation_id, _state=state, _joined=joined
+    )
 
 
 def join_running(
@@ -271,7 +318,6 @@ def join_running(
     *,
     limit: int,
     at: datetime,
-    into: str | None = None,
 ) -> str | None:
     """Join ``joining`` to the activation running on its place, where §3:3 allows.
 
@@ -290,8 +336,6 @@ def join_running(
         joining: The input a reader brings, with its standing.
         limit: ``join_limit`` (§6:5): the most joins one activation takes.
         at: When it joins.
-        into: The activation the reader marked the input taken in by (§3:18), where it
-            did; then only that one is joined.
 
     Returns:
         The id of the activation it joined; ``None`` where it joined none, and then it
@@ -299,8 +343,6 @@ def join_running(
     """
     state = _on_place(running, joining.channel)
     if state is None or state.activation_id is None or state.standing is None:
-        return None
-    if into is not None and state.activation_id != into:
         return None
     if not joining.standing.joins(state.standing):
         return None
@@ -418,6 +460,7 @@ def take_over(
         or not standing.joins(other.standing)
         or not _running(other)
         or other.committed
+        or other.joining
         or not taker.can_join(limit=limit)
     ):
         return False
