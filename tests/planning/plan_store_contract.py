@@ -618,6 +618,26 @@ class PlanStoreContract:
 
         assert await store.activation_effects(["act-1"]) == ()
 
+    @pytest.mark.parametrize(
+        "match",
+        [("\ud800",), ("act-1", "act-\udfff")],
+        ids=["lone-surrogate", "after-a-valid-id"],
+    )
+    async def test_a_match_naming_an_id_with_no_utf8_encoding_is_refused(
+        self, store: PlanStore, match: tuple[str, ...]
+    ) -> None:
+        """An id no store could hold is refused as a ``PlanningError``, writing nothing.
+
+        A record's activation is an identifier, so the id names nothing; but a SQLite
+        store cannot bind it, and its driver's ``UnicodeEncodeError`` would otherwise
+        escape as something other than the error the Protocol raises (issue #3288).
+        Every store refuses it alike, before the claim's write.
+        """
+        with pytest.raises(PlanningError, match="index"):
+            await store.claim_activation_effect(_effect("e1"), match=match)
+
+        assert await store.activation_effects(["act-1"]) == ()
+
     async def test_a_stop_of_another_activation_refuses_nothing(self, store: PlanStore) -> None:
         """The stop is decided for the record's own activation alone."""
         await store.record_stop("act-2")

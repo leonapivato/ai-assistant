@@ -874,7 +874,8 @@ class SqlitePlanStore:
         Raises:
             ClaimStopped: If the store holds a stop record for the activation.
             PlanningError: If the id is already held, the record carries an outcome,
-                a reason or a position, or the backend fails.
+                a reason or a position, ``match`` names an id with no UTF-8 encoding
+                (which SQLite could not bind), or the backend fails.
         """
         # Snapshotted before the first await, so a caller mutating its record while
         # this call is queued cannot change what is written (ADR-0018 §3).

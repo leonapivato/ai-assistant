@@ -104,12 +104,27 @@ def _claimable_effect(effect: object) -> ActivationEffect:
 
 
 def _named_activations(match: object) -> tuple[str, ...] | None:
-    """Return ``match`` as a tuple of activation ids, or refuse it (ADR-0306 §6:2)."""
+    """Return ``match`` as a tuple of activation ids, or refuse it (ADR-0306 §6:2).
+
+    Re-implemented here rather than imported from ``ai_assistant.planning``, for the
+    reason this module's docstring gives. An id with no UTF-8 encoding is refused, as
+    the SQLite store must refuse it (issue #3288).
+
+    Raises:
+        PlanningError: If ``match`` is neither ``None`` nor a tuple of strings, or names
+            an id with no UTF-8 encoding.
+    """
     if match is None:
         return None
     if not isinstance(match, tuple) or not all(isinstance(one, str) for one in match):
         msg = "match is None or a tuple of activation ids (ADR-0306 §6:2)"
         raise PlanningError(msg)
+    for index, one in enumerate(match):
+        try:
+            encodable_text(one)
+        except ValueError as exc:
+            msg = f"match names activation ids, and the one at index {index} is not: {exc}"
+            raise PlanningError(msg) from exc
     return match
 
 
@@ -331,8 +346,9 @@ class FakePlanStore:
 
         Raises:
             ClaimStopped: If the store holds a stop record for the activation.
-            PlanningError: If the id is already held, or the record carries an
-                outcome, a reason or a position.
+            PlanningError: If the id is already held, the record carries an outcome,
+                a reason or a position, or ``match`` names an id with no UTF-8
+                encoding.
         """
         record = _claimable_effect(effect)
         named = _named_activations(match)

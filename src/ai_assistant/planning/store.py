@@ -114,8 +114,9 @@ class InMemoryPlanStore:
 
         Raises:
             ClaimStopped: If the store holds a stop record for the activation.
-            PlanningError: If the id is already held, or the record carries an
-                outcome, a reason or a position.
+            PlanningError: If the id is already held, the record carries an outcome,
+                a reason or a position, or ``match`` names an id with no UTF-8
+                encoding.
         """
         record = revalidated_claim(effect)
         named = matched_activations(match)
