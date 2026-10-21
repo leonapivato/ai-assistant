@@ -801,7 +801,7 @@ def test_a_reply_a_check_cannot_read_fails_its_sample_and_the_run_goes_on(
         prompt="observer_commit",
         guards="narrower_write_loses_fact",
         samples=3,
-        flags={},
+        flags={"person": False},
         property={"check": "memory_kept", "memory": "M1"},
     )
     directory = _cases(tmp_path, ("observer_commit/one.toml", case))
