@@ -137,6 +137,29 @@ class OverlayIdentityUnavailableError(Exception):
     """
 
 
+class OverlayAgentRefusedError(OverlayIdentityUnavailableError):
+    """The agent's socket answered, and the answer is a refusal no restart changes.
+
+    Two shapes: the local API declined this process by policy (``401``/``403``, on
+    a tailnet where the hub's user is not the operator), or ADR-0131 §7's peer check
+    refused whoever answers on the socket (a uid neither root nor this process's, or
+    a platform with no peer-credential call to establish it).
+
+    **Still an** :class:`OverlayIdentityUnavailableError`, **and refused exactly
+    alike** wherever a device is being admitted: every admission site catches the
+    base class, so this adds no branch that could become "admit anyway". The one
+    reader of the difference is a hub's *start*, which turns it into a stay-down
+    ``78`` where every other way of not knowing — an agent not up yet at boot, one
+    that timed out — is a ``1`` (ADR-0083 §5, #3171).
+    """
+
+
+#: The local API's answers that mean *this process may not ask*, not *the daemon
+#: could not answer*: a hub whose user is not the tailnet's operator is refused this
+#: way, and only a person granting it access changes that.
+_REFUSED_BY_POLICY: Final = frozenset({b"401", b"403"})
+
+
 @dataclass(frozen=True, slots=True)
 class HubOverlayIdentity:
     """What the agent reports about *this* machine.
@@ -313,9 +336,11 @@ class TailscaleAgent:
 
         Raises:
             OSError: If the socket cannot be opened or the daemon goes away.
-            OverlayIdentityUnavailableError: If the peer answering on the socket is
-                neither root nor this process (ADR-0131 §7), if the status line is
-                not a success, or if the answer is framed in an encoding this
+            OverlayAgentRefusedError: If the peer answering on the socket is
+                neither root nor this process, or cannot be established (ADR-0131
+                §7), or if the local API declines this process (``401``/``403``).
+            OverlayIdentityUnavailableError: If the status line is any other
+                non-success, or if the answer is framed in an encoding this
                 transport does not read.
         """
         reader, writer = await asyncio.open_unix_connection(self.socket_path)
@@ -323,9 +348,10 @@ class TailscaleAgent:
             # Before anything is written: ADR-0131 §7 binds this to every agent
             # request path, and this is the hub's — the one that supplies the overlay
             # identity behind every remote admission. The class named here is *this*
-            # module's, which is the one `service/remote.py` catches; the wire half's
-            # class of the same name would escape that handler entirely.
-            check_agent_peer(writer, self.socket_path, refusal=OverlayIdentityUnavailableError)
+            # module's — its stay-down subclass, which `service/remote.py`'s handlers
+            # catch as the base; the wire half's class of the same name would escape
+            # that handler entirely.
+            check_agent_peer(writer, self.socket_path, refusal=OverlayAgentRefusedError)
             request = (
                 f"GET {path} {_HTTP_VERSION}\r\n"
                 f"Host: {_LOCAL_API_HOST}\r\n"
@@ -339,6 +365,8 @@ class TailscaleAgent:
             if len(status) < _STATUS_LINE_PARTS or status[1] != b"200":
                 rendered = head.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
                 msg = f"the overlay agent refused a local query: {rendered}"
+                if len(status) >= _STATUS_LINE_PARTS and status[1] in _REFUSED_BY_POLICY:
+                    raise OverlayAgentRefusedError(msg)
                 raise OverlayIdentityUnavailableError(msg)
             _check_framing(head)
             return await _read_body(reader)

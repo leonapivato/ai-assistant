@@ -23,7 +23,11 @@ from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import DeviceRole
 from ai_assistant.service.enrolment import ENROLMENTS_FILENAME, DeviceRegistry, EnrolmentStore
 from ai_assistant.service.exits import ClearableRefusalError
-from ai_assistant.service.overlay import HubOverlayIdentity, OverlayIdentityUnavailableError
+from ai_assistant.service.overlay import (
+    HubOverlayIdentity,
+    OverlayAgentRefusedError,
+    OverlayIdentityUnavailableError,
+)
 from ai_assistant.service.remote import RemoteListener
 from ai_assistant.service.roster import HubRoster
 from ai_assistant.service.transport import ConnectionBudget, DeliverySlots, Listener
@@ -362,6 +366,38 @@ async def test_the_hub_refuses_to_bind_when_the_agent_cannot_be_asked(tmp_path: 
         # yet at boot clears without anyone acting.
         with pytest.raises(ClearableRefusalError, match="could not be asked"):
             await listener.start(build="test")
+    finally:
+        store.close()
+
+
+class _RefusingAgent(_FakeAgent):
+    """An agent whose socket answers with a refusal no restart changes."""
+
+    async def hub_identity(self) -> HubOverlayIdentity:
+        """Refuse by policy, as a ``403`` or ADR-0131 §7's peer check does."""
+        msg = "the overlay agent refused a local query: HTTP/1.0 403 Forbidden"
+        raise OverlayAgentRefusedError(msg)
+
+
+async def test_the_hub_refuses_to_bind_when_the_agent_refuses_it_by_policy(
+    tmp_path: Path,
+) -> None:
+    """A refusal by policy is a plain ``ConfigurationError`` at the bind too, so it
+    stays down (#3171): not the mark that makes an agent not up yet a ``1``."""
+    store = EnrolmentStore(tmp_path / ENROLMENTS_FILENAME)
+    try:
+        listener = RemoteListener(
+            FakeAssistantEngine(),
+            _settings(tmp_path),
+            registry=(registry := DeviceRegistry(store, hub_identity=_HUB_ID)),
+            roster=HubRoster(registry),
+            agent=_RefusingAgent(),
+            budget=ConnectionBudget(max_connections=8, max_pending_handshakes=4),
+            delivery=DeliverySlots(max_delivery_connections=4),
+        )
+        with pytest.raises(ConfigurationError, match="could not be asked") as refused:
+            await listener.start(build="test")
+        assert not isinstance(refused.value, ClearableRefusalError)
     finally:
         store.close()
 

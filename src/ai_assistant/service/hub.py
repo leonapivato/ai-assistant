@@ -82,7 +82,11 @@ from ai_assistant.service.exits import (
     classify,
 )
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
-from ai_assistant.service.overlay import OverlayIdentityUnavailableError, local_agent
+from ai_assistant.service.overlay import (
+    OverlayAgentRefusedError,
+    OverlayIdentityUnavailableError,
+    local_agent,
+)
 from ai_assistant.service.remote import RemoteListener
 from ai_assistant.service.roster import HubRoster
 from ai_assistant.service.scheduler import Scheduler, jobs_for
@@ -793,8 +797,11 @@ async def _build_devices(
             A permission fault beneath it — a socket the hub may not open — is
             still read by :func:`~ai_assistant.service.exits.classify` and stays
             down.
-        ConfigurationError: If ``hub_overlay_agent_socket`` names a path that fails
-            the custody conditions ``local_agent`` holds a configured socket to. A
+        ConfigurationError: If the agent's socket answered with a refusal no
+            restart changes (:class:`~ai_assistant.service.overlay.OverlayAgentRefusedError`:
+            the local API declined this process, or whoever answers there cannot be
+            trusted), or if ``hub_overlay_agent_socket`` names a path that fails the
+            custody conditions ``local_agent`` holds a configured socket to. A
             stay-down deployment fault (ADR-0083 §5), unless the custody check met
             an operating-system fault that clears, which
             :func:`~ai_assistant.service.exits.classify` reads off the errno.
@@ -820,6 +827,10 @@ async def _build_devices(
             f"reads a device's, so neither can happen without it; start the overlay agent, "
             f"or unset ASSISTANT_HUB_REMOTE_ADDRESS to serve the loopback socket alone"
         )
+        # An agent that refused this process by policy, or a socket whose answerer
+        # cannot be trusted, stays refused at every start (#3171): a ``78``.
+        if isinstance(exc, OverlayAgentRefusedError):
+            raise ConfigurationError(msg) from exc
         raise ClearableRefusalError(msg) from exc
     store = EnrolmentStore(data_dir / ENROLMENTS_FILENAME)
     registry = DeviceRegistry(store, hub_identity=identity)

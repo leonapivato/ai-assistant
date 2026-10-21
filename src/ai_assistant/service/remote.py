@@ -37,7 +37,7 @@ import structlog
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.service.enrolment import Refusal
 from ai_assistant.service.exits import ClearableRefusalError
-from ai_assistant.service.overlay import OverlayIdentityUnavailableError
+from ai_assistant.service.overlay import OverlayAgentRefusedError, OverlayIdentityUnavailableError
 from ai_assistant.service.transport import hold, refuse
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire import serve_connection
@@ -172,7 +172,10 @@ class RemoteListener:
                 yet been given its addresses at boot clears without anyone acting,
                 and ADR-0083 §5 says "if yes — even eventually — it is ``1``".
             ConfigurationError: If the agent reports addresses for this machine and
-                the configured one is not among them. A stay-down deployment fault
+                the configured one is not among them, or if its socket answered with a
+                refusal no restart changes
+                (:class:`~ai_assistant.service.overlay.OverlayAgentRefusedError`). A
+                stay-down deployment fault
                 (ADR-0083 §5): restarting unchanged never succeeds, and what has to
                 change is the configuration or the overlay.
             OSError: If the socket cannot be bound. Left to propagate for the same
@@ -189,6 +192,10 @@ class RemoteListener:
                 f"will not bind one it cannot confirm; start the overlay agent, or unset "
                 f"ASSISTANT_HUB_REMOTE_ADDRESS to serve the loopback socket alone"
             )
+            # An agent that refused this process by policy, or a socket whose answerer
+            # cannot be trusted, stays refused at every start (#3171): a ``78``.
+            if isinstance(exc, OverlayAgentRefusedError):
+                raise ConfigurationError(msg) from exc
             raise ClearableRefusalError(msg) from exc
         if not reported.addresses:
             # An agent that answers but holds no address for this machine yet is one

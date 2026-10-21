@@ -31,6 +31,7 @@ from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.service.overlay import (
     MAX_OVERLAY_IDENTITY_BYTES,
     TAILSCALE_SOCKETS,
+    OverlayAgentRefusedError,
     OverlayIdentityUnavailableError,
     TailscaleAgent,
     local_agent,
@@ -240,6 +241,42 @@ async def test_a_daemon_that_is_not_there_is_a_refusal_rather_than_a_crash(
     agent = TailscaleAgent(tmp_path / "nothing-here.sock")
     with pytest.raises(OverlayIdentityUnavailableError, match="did not answer"):
         await agent.hub_identity()
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_a_local_api_that_declines_this_process_is_a_refusal_no_restart_changes(
+    status: int, tmp_path: Path
+) -> None:
+    """``401``/``403`` is the daemon declining *this process* — on a tailnet where the
+    hub's user is not the operator — so it is the stay-down subclass (#3171), and
+    still the one refusal every admission site catches."""
+    async with _daemon(tmp_path, {"/localapi/v0/status": (status, b"")}) as (agent, _):
+        with pytest.raises(OverlayAgentRefusedError, match="refused a local query"):
+            await agent.hub_identity()
+
+
+@pytest.mark.parametrize("status", [404, 500, 503])
+async def test_any_other_non_success_is_a_refusal_that_may_clear(
+    status: int, tmp_path: Path
+) -> None:
+    """The discriminating half: only a refusal by policy is the stay-down subclass.
+
+    A daemon still starting, or erring, is the base refusal a hub's start reads as a
+    ``1``.
+    """
+    async with _daemon(tmp_path, {"/localapi/v0/status": (status, b"")}) as (agent, _):
+        with pytest.raises(OverlayIdentityUnavailableError) as raised:
+            await agent.hub_identity()
+    assert not isinstance(raised.value, OverlayAgentRefusedError)
+
+
+async def test_a_missing_daemon_is_not_a_refusal_by_policy(tmp_path: Path) -> None:
+    """An agent not running yet at boot must stay the base refusal, or a hub that
+    started before its agent would stay down (#3171)."""
+    agent = TailscaleAgent(tmp_path / "nothing-here.sock")
+    with pytest.raises(OverlayIdentityUnavailableError) as raised:
+        await agent.hub_identity()
+    assert not isinstance(raised.value, OverlayAgentRefusedError)
 
 
 async def test_a_status_naming_no_node_for_this_machine_is_refused(tmp_path: Path) -> None:
@@ -734,7 +771,7 @@ async def test_the_hubs_own_startup_query_authenticates_its_peer_too(
     """
     monkeypatch.setattr("ai_assistant.wire.overlay.peer_uid", lambda _sock: os.geteuid() + 1)
     async with _daemon(tmp_path, {"/localapi/v0/status": _ok(_STATUS)}) as (agent, asked):
-        with pytest.raises(OverlayIdentityUnavailableError, match="runs as uid"):
+        with pytest.raises(OverlayAgentRefusedError, match="runs as uid"):
             await agent.hub_identity()
         assert asked == []
 
@@ -771,7 +808,7 @@ async def test_a_platform_with_no_peer_credential_call_refuses_as_the_hub_catche
 
     monkeypatch.setattr("ai_assistant.wire.overlay.peer_uid", _unavailable)
     async with _daemon(tmp_path, {"/localapi/v0/whois": _ok(_WHOIS)}) as (agent, asked):
-        with pytest.raises(OverlayIdentityUnavailableError, match="peer-credential"):
+        with pytest.raises(OverlayAgentRefusedError, match="peer-credential"):
             await agent.identify("100.64.0.11", 41234)
         assert asked == []
 
