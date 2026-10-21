@@ -501,6 +501,22 @@ class _Recording:
         return await self._policy.decide(proposal, conflicts=conflicts, relations=relations)
 
 
+class _Negations:
+    """A stub reconciler labelling a stored ``never <statement>`` a contradiction.
+
+    Since ADR-0336 §4 a non-asserted proposal defers only where the writer labels an
+    assertion ``CONTRADICTS``, so the writer here holds the label a model would give
+    the fixture's negation, and nothing else.
+    """
+
+    async def reconcile(
+        self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
+    ) -> Mapping[str, ConflictRelation]:
+        """Label each member that negates the proposal ``CONTRADICTS``."""
+        negation = f"never {proposal.proposed.content}"
+        return {c.id: ConflictRelation.CONTRADICTS for c in conflicts if c.content == negation}
+
+
 async def _over(
     *stored: Memory, wired: bool = True
 ) -> tuple[RememberCalls, FakeMemoryStore, _Recording]:
@@ -509,7 +525,7 @@ async def _over(
     for record in stored:
         await store.add(record)
     policy = _Recording()
-    writer = FakeMemoryWriter(store=store, policy=policy, now=_now)
+    writer = FakeMemoryWriter(store=store, policy=policy, now=_now, reconciler=_Negations())
     return RememberCalls(writer=writer, memory=store if wired else None, now=_now), store, policy
 
 

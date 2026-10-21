@@ -39,6 +39,7 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
     ClaimedAuthor,
+    ConflictRelation,
     ControllerStage,
     CostBasis,
     DataTier,
@@ -132,6 +133,8 @@ if TYPE_CHECKING:
         ActionRequest,
         EpisodicMemory,
         FrozenJson,
+        MemoryRecord,
+        MemoryUpdateProposal,
         Message,
         MessageReceipt,
         OfferedTool,
@@ -486,7 +489,10 @@ class _Hub:
             search_query="query",
         )
         memory_writer = FakeMemoryWriter(
-            store=harness.memory, policy=DefaultMemoryPolicy(), now=lambda: AT
+            store=harness.memory,
+            policy=DefaultMemoryPolicy(),
+            now=lambda: AT,
+            reconciler=_Negations(),
         )
         return PhasePath(
             planning_prompt=default_prompt(PLANNING_PROMPT),
@@ -1041,6 +1047,22 @@ async def test_after_a_search_a_remember_asks_and_a_yes_saves_it_confirmed() -> 
         and one.ruling.outcome is PermissionOutcome.ALLOW
     ]
     assert decided.approved_part is not None
+
+
+class _Negations:
+    """A stub reconciler labelling a stored ``never <statement>`` a contradiction.
+
+    Since ADR-0336 §4 a non-asserted proposal defers only where the writer labels an
+    assertion ``CONTRADICTS``, so the writer here holds the label a model would give
+    the fixture's negation, and nothing else.
+    """
+
+    async def reconcile(
+        self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
+    ) -> Mapping[str, ConflictRelation]:
+        """Label each member that negates the proposal ``CONTRADICTS``."""
+        negation = f"never {proposal.proposed.content}"
+        return {c.id: ConflictRelation.CONTRADICTS for c in conflicts if c.content == negation}
 
 
 async def _beliefs(memory: FakeMemoryStore, fact: str) -> list[Memory]:
