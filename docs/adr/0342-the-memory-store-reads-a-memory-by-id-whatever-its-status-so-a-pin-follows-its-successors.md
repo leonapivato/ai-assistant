@@ -89,9 +89,6 @@ it, and follows a successor itself, hop by hop.
 > sequence returns an empty mapping with no round trip, duplicate ids collapse, and the
 > argument has no size cap.
 
-> **Normative.** Every memory the history read returns carries no score. A stored score is
-> cleared, as `list_beliefs` clears one, because the read ranks nothing.
-
 > **Normative.** The history read raises `MemoryStoreError` where the store cannot be read
 > or a stored record is corrupt, as `get_many` does.
 
@@ -176,16 +173,17 @@ reached by id, from a pointer the caller already holds, and never by browsing.
 
 ### 5. The callers, and what binds them
 
-> **Normative.** A caller presents a memory as current only where a live read (`get`,
-> `get_many`, `search` or `list_beliefs`) returned it. A memory that only the history read
-> returned is shown, where it is shown at all, as no longer current.
+> **Normative.** A caller of the history read presents a memory as current only where a live
+> read (`get`, `get_many`, `search` or `list_beliefs`) returned it. A memory that only the
+> history read returned is shown, where it is shown at all, as no longer current.
 
 > **Normative.** A caller following a pin or a style mark to a successor (ADR-0338 §4:8,
 > §5:3) takes, at each memory along the chain, the successor named by the latest operation
 > in that memory's log that names one.
 
-> **Normative.** That walk ends at the first memory along the chain that a live read
-> returns, which is the chain's **current end**. Otherwise it ends at a memory that names no
+> **Normative.** That walk starts at the pin's or the mark's own memory, and ends at the
+> first memory along the chain that a live read returns, which is the chain's **current
+> end**. Otherwise it ends at a memory that names no
 > successor, at an id the history read omits, or at an id the walk has already read, and in
 > each of these three cases the chain reaches no current memory.
 
@@ -229,7 +227,8 @@ clock of its own. The history read finds the candidates, and a live read confirm
 
 > **Normative.** Moving ADR-0338's person block onto the history read (§5:1 to §5:5) is a
 > lane of its own, in `orchestration/`, briefed after both the triad lane and ADR-0338's lane
-> 1 have merged.
+> 1 have merged. Where the triad lane merges before lane 1's first review, the dispatcher may
+> instead fold the move into lane 1.
 
 > **Normative.** The person model does not go live on a person's hub (ADR-0338 §11:2) before
 > the triad lane and the lane of §6:2 have merged.
@@ -237,9 +236,10 @@ clock of its own. The history read finds the candidates, and a live read confirm
 **Why the block's move is a lane of its own.** Lane 1 ships the block against `get_many`
 alone, and ships the conservative reading of #3308: a pin on a retired memory is shown
 nowhere. That is a safe interim, since it never shows a retired memory as current. Moving
-the block onto the history read touches `orchestration/` alone, and follows both the
-contract it reads and the block it changes, so it cannot ride in either lane (ADR-0137 §4).
-It is small: one walk and one check.
+the block onto the history read touches `orchestration/` alone. It consumes the contract, so
+it cannot ride in the triad lane (ADR-0137 §4), and it changes the block, so it follows lane
+1. It is small: one walk and one check. Lane 1 can carry it only where the contract merges
+before lane 1 is reviewed, which is the fold §6:2 leaves to the dispatcher.
 
 ### 7. What this decision does not decide
 
@@ -293,8 +293,8 @@ Read through and not superseded:
 
 - **One member on `MemoryStore`.** Every implementation carries it: `SqliteMemoryStore`,
   `InMemoryMemoryStore` and the canonical fake. The conformance suite gains its cases. That is
-  the triad lane (§1:3). On the SQLite store it is `get_many`'s query, filtered to the
-  memory kind, without the validity predicate.
+  the triad lane (§1:3). On the SQLite store it is `get_many`'s read with the expiry filter
+  kept, the validity filter dropped and episodes left out.
 - **Docstrings that go stale.** `list_beliefs` says that a retired record is reachable
   "through `export` alone", and the class docstring says that reads "come in three shapes".
   The triad lane restates both.
