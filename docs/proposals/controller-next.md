@@ -203,13 +203,24 @@ places).
   same place that arrives before the running activation has acted joins that activation.
   The input then holds both messages, each kept with its own time (as ADR-0323 §5:4
   already keeps Telegram's).
-  - *Has acted* is the one boundary used throughout this pick. It means acting has run a
-    call with an effect, or a call that discloses (ADR-0312), because something left the
-    hub, or it has written the round's message, since writing a reply or a question into
-    the place is an act (ADR-0307 §3).
-  - A round whose only calls are reads with no effect, such as the current time or a
-    memory search, has not acted. A correction arriving after such a round still joins,
-    and the results already read stay on the episode for the new planning to use.
+  - *Has acted* is the one boundary used throughout this pick. It means acting has made
+    its first claim: an effect record claimed for a call in the world or for the round's
+    message (ADR-0306 §5:2, §5:4), or an invocation claimed for a call that leaves the hub
+    (ADR-0306 §5:7). A message counts, since writing a reply or a question into the place
+    is an act (ADR-0307 §3).
+  - **The join is decided where the stop is decided.** A claim is written in one
+    indivisible plan-store step that also decides the stop (ADR-0306 §5:4). A join is
+    decided in that same step.
+    - A join that lands before the first claim refuses that claim, as a stop refuses what
+      is not yet claimed. The round's unclaimed calls never run, and its authorizing and
+      acting decisions are set aside for the new understanding.
+    - A claim that lands first closes the window, and the input waits.
+
+    So nothing claimed is ever overtaken by a join, and a booking claimed a moment before
+    "wait, not that" finishes as ADR-0306 §5:2 requires.
+  - A round whose only calls claim nothing, such as reading the hub's own records, has not
+    acted. A correction arriving after such a round still joins, and the results already
+    read stay on the episode for the new planning to use.
   - The simpler boundary, "acting has begun at all", is the alternative (question 2).
 - **What a join makes due again.** The joined input is input that no understanding covers
   yet, so `not_understood` answers again. Understanding runs over all of the input and
@@ -270,7 +281,8 @@ sequenceDiagram
   at-most-twice (ADR-0308 §2:10) becomes once per understanding version, plus the first
   run. Both are bounded by a join limit, a number #2589 sets, after which further input
   waits.
-- **Stores.** The open episode (ADR-0286) gains each joined input as an append. The
+- **Stores.** The plan store's claim step (ADR-0306 §5:4) decides a pending join as it
+  decides a stop. The open episode (ADR-0286) gains each joined input as an append. The
   readers' bookkeeping marks a joined message as taken in by the running activation's id,
   as at admission (ADR-0293 §6:8, ADR-0323 §5:8).
 - **Channels.** The hub chat's reader must take in a message written while an activation
@@ -377,7 +389,12 @@ The controller is unchanged, since the wait happens before admission.
     shows it.
   - The rules read it: `round_limit_reached` reads the mode's limit,
     `understood_not_recalled` answers only where the mode's recall depth includes a second
-    run, and a new phase's row answers only where the mode turns it on. The phases read
+    run, and a new phase's row answers only where the mode turns it on.
+  - A mode that skips recall's second run still records the second-run decision, as *not
+    run*: a decision that nothing came of (ADR-0280 §3:6). So `recall_undigested` still
+    answers for the first run's outside memories (ADR-0308 §4:4–§4:6), and their digest
+    still reaches planning. Skipping the second search never drops what the first one
+    found. The phases read
     their model and effort from it.
   - The controller still calls no model and reads no text (ADR-0280 §3:4).
 - **Who picks, in precedence order:**
@@ -439,11 +456,15 @@ The controller is unchanged, since the wait happens before admission.
   - The activation that hears it records a *pending mode*. Planning calls a capability, and
     acting records it as an effect (ADR-0306), so it is durable, visible and attributable.
   - It is held per person and per place.
-  - It is read at the next activation's admission by context assembly, not by the
-    controller, which reads no store (ADR-0280 §3:4).
-  - It is used once, and the using activation's mode decision names it as the source. It
-    expires unused after a lifetime #2589 sets (an hour, say), and it is cleared when the
-    person says otherwise.
+  - It is read at each later activation's admission by context assembly, not by the
+    controller, which reads no store (ADR-0280 §3:4), and applied there *provisionally*,
+    as the starting mode.
+  - It is *consumed* only by an activation whose understanding finds a question it applies
+    to. That activation's mode decision names it as the source, and the consumption is
+    recorded as that activation's effect. An activation in between, such as "one moment",
+    runs in it provisionally, finds no question, and leaves it armed.
+  - It expires unconsumed after a lifetime #2589 sets (an hour, say), and it is cleared
+    when the person says otherwise.
   - The place's current state shows it ("next answer: quick") so you can see it is armed.
   - **Where the question arrives in the same input**, because it came during the short
     wait or joined before the activation acted, the instruction is fulfilled there.
@@ -561,7 +582,7 @@ rest.
 | Pick | The controller | The stores | What you see |
 | --- | --- | --- | --- |
 | 1. Side by side | Nothing for the concurrency itself; running activations readable per person across places | The lock and recheck on what is acted on (#2586); nothing new for memory, stories or spend | Talk on Telegram and the web at once; a thought finished on another platform is joined to the first |
-| 2. Joining | Joined inputs on the working set; rules read *understanding covers the input*; the loop guard per joined input; a join limit | The open episode appends each joined input; the readers mark joined messages taken in | A correction a second later changes the first answer instead of chasing it |
+| 2. Joining | Joined inputs on the working set; rules read *understanding covers the input*; the loop guard per joined input; a join limit | The plan store's claim step decides a join as it decides a stop; the open episode appends each joined input; the readers mark joined messages taken in | A correction a second later changes the first answer instead of chasing it |
 | 3. The short wait | Nothing (before admission) | A per-kind wait in each reader; a composing operation (wire, gateway, ADR-0298 row, page) | One reply to a burst; on the web, the assistant waits while you type |
 | 4. Modes | A mode decision read by the rules; a modes table; recorded with the episode; each new phase an ADR | Understanding's reply gains two fields (`core/types.py`, wire); per-mode routes in `Settings`; a pending-mode effect | Quick things are quick, hard things get thought; "just blurt" works; the viewer says which mode ran and why |
 | 5. Background | A background mode; slices are ordinary activations | A task effect and its story; the slice sensor (timers milestone); the *has something to say* mark | Research continues while you talk, survives restarts, and is there when you ask |
