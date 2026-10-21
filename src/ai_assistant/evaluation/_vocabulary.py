@@ -126,8 +126,7 @@ COUNT_KEYS: Final = (*DECISION_KEYS, *RETRIEVAL_COUNT_KEYS)
 USER_SEAMS: Final = frozenset({"converse", "resume", "learn", "answer"})
 
 #: ADR-0120 §3's **machine** set: the operations that write on their own
-#: initiative. Keeping these out of §4's and §5's numerators is what lets #829's
-#: arming of consolidation move a diagnostic instead of a measure.
+#: initiative.
 #:
 #: **ADR-0294 §5 took the two ingestion seams off this set**, with the operations
 #: they labelled, on ADR-0285 §7's precedent for the observation seams. A trace a
