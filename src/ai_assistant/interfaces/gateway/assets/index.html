@@ -86,6 +86,7 @@
               -->
               <nav id="panel-index" class="panel-index" aria-label="Panels on this page" hidden></nav>
               <button type="button" id="conversations-button">Conversations</button>
+              <button type="button" id="about-button">About you</button>
               <button type="button" id="beliefs-button">Beliefs</button>
               <button type="button" id="sources-button">Sources</button>
               <button type="button" id="standing-button">What I may read now</button>
@@ -363,8 +364,76 @@
         <div id="act-log"></div>
       </section>
 
+      <!--
+        ADR-0338 §8:2's About you panel: the five fields, which the person edits here,
+        what I keep in mind with its fill and what it left out, the pins no longer
+        current (§4:8), the style memories, the suggestions, and the change log. Every
+        list is built by `app.js` from one read of the person's model, and each part is
+        a list with its own "Show more", because each is paged with its own total.
+
+        Shown only to the person and the owner (§8:3): the hub refuses the read to a
+        device without the commands role, and the page adds no rule of its own. On a hub
+        that keeps no person model, the panel says it is not switched on yet, and
+        nothing below the state line is shown.
+      -->
+      <section id="about" class="panel" hidden>
+        <h3>About you</h3>
+        <p class="hint" id="about-state" aria-live="polite"></p>
+        <p class="hint" id="about-outcome" aria-live="polite"></p>
+        <div id="about-body" hidden>
+          <h4>Your profile</h4>
+          <p class="hint">
+            What you set here is your current choice, and it outweighs anything I
+            remember that says otherwise. Each change is kept in the log at the foot of
+            this panel.
+          </p>
+          <div id="profile-fields"></div>
+          <h4>What I keep in mind</h4>
+          <p class="hint">
+            The memories you pinned, then what you have told me about how to speak to
+            you, kept in mind in every conversation. Pin a memory from What I believe.
+          </p>
+          <p class="hint" id="kept-fill"></p>
+          <div id="kept-list"></div>
+          <div id="left-out" hidden>
+            <h4>Left out of what I keep in mind</h4>
+            <div id="left-out-list"></div>
+          </div>
+          <div id="no-longer-current" hidden>
+            <h4>Pins no longer current</h4>
+            <p class="hint">
+              Each was pinned on a memory that no longer holds, and nothing replaced it,
+              so I keep none of them in mind. Unpin one to take it off this list.
+            </p>
+            <div id="no-longer-current-list"></div>
+          </div>
+          <h4>How you like me to speak</h4>
+          <p class="hint">
+            What I have learned about how you want me to speak to you. Removing one
+            stops me keeping it in mind for that, and I will not mark it again; the
+            memory itself stays in What I believe.
+          </p>
+          <div id="style-list"></div>
+          <h4>My suggestions</h4>
+          <p class="hint">
+            Changes I think you might want, from our conversations. Nothing changes
+            until you accept one.
+          </p>
+          <div id="suggestion-list"></div>
+          <h4>Changes to your profile</h4>
+          <div id="change-list"></div>
+        </div>
+      </section>
+
       <section id="beliefs" class="panel" hidden>
         <h3>What I believe</h3>
+        <!--
+          ADR-0338 §8:2: pin and unpin on each current memory, offered only where the
+          hub keeps a person model, and this line says which. Pinning confirms the
+          wording shown (§4:3), and the pin control says so on every row.
+        -->
+        <p class="hint" id="belief-pin-state"></p>
+        <p class="hint" id="belief-outcome" aria-live="polite"></p>
         <!--
           ADR-0329 §18:1: what I have noted to remember and not yet kept, each by its fact
           and marked pending. Above the listing, so a page of beliefs does not push it out

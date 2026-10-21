@@ -238,6 +238,7 @@ from ai_assistant.core.errors import (
     IncompleteProvisioningError,
     InvalidResolutionError,
     OversizedValueError,
+    PersonModelOffError,
     ProvisioningOutcomeUnknownError,
     ResidualCredentialError,
     UnknownConnectionError,
@@ -249,6 +250,7 @@ from ai_assistant.core.types import (
     CHAT_DEVICES_MAX,
     DEFAULT_NOTIFICATION_REACH,
     DEFAULT_PAGE_SIZE,
+    OWNER_PERSON_ID,
     SECRET_VALUE_MAX_BYTES,
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     ActivationEnding,
@@ -285,6 +287,7 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     ProcessingStatus,
+    ProfileField,
     ProvisioningState,
     QuietWindow,
     ReadingCertainty,
@@ -310,7 +313,7 @@ from ai_assistant.core.types import (
     story_note_ids,
     story_note_text,
 )
-from ai_assistant.interfaces import episode_inspection, story_inspection
+from ai_assistant.interfaces import episode_inspection, person_inspection, story_inspection
 from ai_assistant.interfaces.devices import this_device as _this_device
 from ai_assistant.interfaces.gateway import Disclosure, Note, run_gateway
 from ai_assistant.interfaces.gateway import exits as gateway_exits
@@ -355,6 +358,7 @@ if TYPE_CHECKING:
         GrantableSource,
         HeldNotification,
         NotificationCandidate,
+        PersonModelEdit,
         QuestionPart,
         StoryHeader,
         StoryOutcome,
@@ -3004,6 +3008,253 @@ def forget(
     """
     code = asyncio.run(_forget_belief(belief_id, assume_yes=yes))
     raise typer.Exit(code)
+
+
+# --- the person model: what the About you panel shows (ADR-0338 §8:1-§8:3) -----------
+#
+# The command line's half of the About you panel, for a person without a browser: the
+# same eight members, read and written as the page reads and writes them, in the page's
+# words (`person_inspection`). The person is the hub's one person, the owner (§2:1), so
+# no command takes one. Shown only to the person and the owner (§8:3): the hub refuses
+# a device without the commands role, and that refusal is rendered as every other.
+
+about_app = typer.Typer(
+    name="about",
+    help=(
+        "What I know about you and keep in mind: your profile's five fields, the log of "
+        "changes to them, the memories you pinned, how you like me to speak, and my "
+        "suggestions. The same as the page's About you panel."
+    ),
+    no_args_is_help=True,
+)
+app.add_typer(about_app, name="about")
+
+
+def _present_person_record(value: str) -> str:
+    """Reject a blank or unwritable id of the person model, **without stripping** it.
+
+    The person model holds every id verbatim and a pointer that normalised what it was
+    handed could name another record (ADR-0338 §10:4), so this is
+    :func:`_present_id`'s check minus its strip.
+
+    Args:
+        value: The id as the user typed it.
+
+    Returns:
+        The value, byte for byte.
+
+    Raises:
+        BadParameter: If the value is blank, or has no UTF-8 encoding.
+    """
+    if not value.strip():
+        msg = "must not be blank"
+        raise typer.BadParameter(msg)
+    try:
+        encodable_text(value)
+    except ValueError as exc:
+        msg = "must be text with a UTF-8 encoding"
+        raise typer.BadParameter(msg) from exc
+    return value
+
+
+_ABOUT_LIMIT_OPTION = typer.Option(
+    25, "--limit", callback=_page_argument, help="How many of each list to show at most."
+)
+_ABOUT_OFFSET_OPTION = typer.Option(
+    0, "--offset", callback=_page_argument, help="How many of each list to skip first."
+)
+_ABOUT_FIELD_ARGUMENT = typer.Argument(..., help="Which of the five fields.")
+_ABOUT_MEMORY_ARGUMENT = typer.Argument(
+    ...,
+    callback=_present_person_record,
+    help="The memory, by the id 'assistant beliefs' or 'assistant about show' shows.",
+)
+
+
+async def _about(read: Callable[[AssistantEngine], Awaitable[int]], *, off_is_ok: bool) -> int:
+    """Open the engine, run one person-model act, and render a hub with the switch off.
+
+    One error boundary (ADR-0042 §7). ``PersonModelOffError`` is a state rather than a
+    fault, so it is said in the panel's words and never as an error: a read exits 0, a
+    write, which did nothing, does not.
+    """
+    try:
+        engine = await _open_engine()
+        return await read(engine)
+    except PersonModelOffError:
+        person_inspection.render_off(console)
+        return _EXIT_OK if off_is_ok else _EXIT_ERROR
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+
+def _about_written(act: str, edit: PersonModelEdit) -> int:
+    """Say what a write did, and exit non-zero where it was refused."""
+    done, said = person_inspection.edit_text(act, edit)
+    person_inspection.render_said(console, said)
+    return _EXIT_OK if done else _EXIT_ERROR
+
+
+@about_app.command("show")
+def about_show(
+    limit: int = _ABOUT_LIMIT_OPTION,
+    offset: int = _ABOUT_OFFSET_OPTION,
+) -> None:
+    """Show your profile, what I keep in mind, how you like me to speak, and my suggestions.
+
+    Each list is paged by --limit and --offset together, and says how many it holds,
+    so a list longer than a page is read with a larger --offset. The ids shown are the
+    ones the commands below take.
+    """
+
+    async def read(engine: AssistantEngine) -> int:
+        view = await engine.person_model(OWNER_PERSON_ID, limit=limit, offset=offset)
+        if view is None:
+            person_inspection.render_said(console, person_inspection.NO_PROFILE)
+            return _EXIT_ERROR
+        person_inspection.render_model(console, view, offset=offset)
+        return _EXIT_OK
+
+    raise typer.Exit(asyncio.run(_about(read, off_is_ok=True)))
+
+
+@about_app.command("log")
+def about_log(
+    limit: int = _ABOUT_LIMIT_OPTION,
+    offset: int = _ABOUT_OFFSET_OPTION,
+) -> None:
+    """Show the log of changes to your profile, the most recent first."""
+
+    async def read(engine: AssistantEngine) -> int:
+        page = await engine.profile_changes(OWNER_PERSON_ID, limit=limit, offset=offset)
+        person_inspection.render_changes(console, page, full=bool(page) and len(page) == limit)
+        return _EXIT_OK
+
+    raise typer.Exit(asyncio.run(_about(read, off_is_ok=True)))
+
+
+@about_app.command("set")
+def about_set(
+    field: ProfileField = _ABOUT_FIELD_ARGUMENT,
+    value: str = typer.Argument(..., help="Its new value, as you want it kept."),
+) -> None:
+    """Set one of your profile's fields. A time zone is a name such as Europe/Lisbon.
+
+    The value is kept exactly as typed, and checked by the hub: a time zone it cannot
+    resolve, or a value past its length, is refused and nothing is changed.
+    """
+
+    async def write(engine: AssistantEngine) -> int:
+        edit = await engine.set_profile_field(OWNER_PERSON_ID, field=field, value=value)
+        return _about_written("set", edit)
+
+    raise typer.Exit(asyncio.run(_about(write, off_is_ok=False)))
+
+
+@about_app.command("clear")
+def about_clear(field: ProfileField = _ABOUT_FIELD_ARGUMENT) -> None:
+    """Clear one of your profile's fields, so it is not set."""
+
+    async def write(engine: AssistantEngine) -> int:
+        edit = await engine.set_profile_field(OWNER_PERSON_ID, field=field)
+        return _about_written("clear", edit)
+
+    raise typer.Exit(asyncio.run(_about(write, off_is_ok=False)))
+
+
+@about_app.command("pin")
+def about_pin(
+    memory_id: str = _ABOUT_MEMORY_ARGUMENT,
+    *,
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the prompt. The wording is still shown first."
+    ),
+) -> None:
+    """Pin a memory, so I keep it in mind in every conversation.
+
+    Pinning confirms the wording shown as yours (ADR-0338 §4:3), so the memory is
+    shown first and pinned once you agree; --yes skips the question, not the showing.
+    """
+    confirm: Callable[[], bool] = (lambda: True) if yes else _confirm_pin
+
+    async def write(engine: AssistantEngine) -> int:
+        held = await engine.belief(memory_id)
+        if held is None:
+            person_inspection.render_no_memory(console, memory_id)
+            return _EXIT_ERROR
+        person_inspection.render_pin_prompt(console, held.content)
+        if not confirm():
+            _print("[dim]Left alone. Nothing was pinned.[/]")
+            return _EXIT_OK
+        # The id as typed, verbatim, and not the read's: the person model holds ids
+        # verbatim (ADR-0338 §10:4), and the pin is the check that the memory is current.
+        edit = await engine.pin_memory(OWNER_PERSON_ID, memory_id=memory_id)
+        return _about_written("pin", edit)
+
+    raise typer.Exit(asyncio.run(_about(write, off_is_ok=False)))
+
+
+def _confirm_pin() -> bool:
+    """Read the yes/no for a pin whose wording was already shown. Defaults no."""
+    return typer.confirm("Pin it?", default=False)
+
+
+@about_app.command("unpin")
+def about_unpin(memory_id: str = _ABOUT_MEMORY_ARGUMENT) -> None:
+    """Unpin a memory. The memory itself is kept; forgetting it is 'assistant forget'."""
+
+    async def write(engine: AssistantEngine) -> int:
+        edit = await engine.unpin_memory(OWNER_PERSON_ID, memory_id=memory_id)
+        return _about_written("unpin", edit)
+
+    raise typer.Exit(asyncio.run(_about(write, off_is_ok=False)))
+
+
+@about_app.command("remove-style")
+def about_remove_style(
+    mark_id: str = typer.Argument(
+        ...,
+        callback=_present_person_record,
+        help="The style memory's mark, by the id 'assistant about show' shows.",
+    ),
+) -> None:
+    """Stop keeping a memory in mind as how you like me to speak; I will not mark it again."""
+
+    async def write(engine: AssistantEngine) -> int:
+        edit = await engine.remove_style_mark(OWNER_PERSON_ID, mark_id=mark_id)
+        return _about_written("unmark", edit)
+
+    raise typer.Exit(asyncio.run(_about(write, off_is_ok=False)))
+
+
+_ABOUT_SUGGESTION_ARGUMENT = typer.Argument(
+    ...,
+    callback=_present_person_record,
+    help="The suggestion, by the id 'assistant about show' shows.",
+)
+
+
+@about_app.command("accept")
+def about_accept(suggestion_id: str = _ABOUT_SUGGESTION_ARGUMENT) -> None:
+    """Accept one of my suggestions: set its field, or pin its memory, which confirms it."""
+
+    async def write(engine: AssistantEngine) -> int:
+        edit = await engine.accept_person_suggestion(OWNER_PERSON_ID, suggestion_id=suggestion_id)
+        return _about_written("accept", edit)
+
+    raise typer.Exit(asyncio.run(_about(write, off_is_ok=False)))
+
+
+@about_app.command("dismiss")
+def about_dismiss(suggestion_id: str = _ABOUT_SUGGESTION_ARGUMENT) -> None:
+    """Dismiss one of my suggestions, so I do not suggest it again."""
+
+    async def write(engine: AssistantEngine) -> int:
+        edit = await engine.dismiss_person_suggestion(OWNER_PERSON_ID, suggestion_id=suggestion_id)
+        return _about_written("dismiss", edit)
+
+    raise typer.Exit(asyncio.run(_about(write, off_is_ok=False)))
 
 
 @app.command()
@@ -6692,7 +6943,7 @@ def _why(belief: Belief | BeliefSummary) -> str:
         case None:
             return _why_episodic(belief)
         case MemoryStanding.CONFIRMED:
-            return "you confirmed this wording when I asked you."
+            return _confirmed_why(belief)
         case MemoryStanding.SAID:
             return "you told me, and your own word is the whole of it."
         case MemoryStanding.SOURCE:
@@ -6707,6 +6958,32 @@ def _why(belief: Belief | BeliefSummary) -> str:
             return _evidence_words(belief) + _outside_warrant(belief)
         case _:  # pragma: no cover - exhaustive
             assert_never(belief.standing)
+
+
+def _confirmed_why(belief: Belief | BeliefSummary) -> str:
+    """How the person confirmed a memory's wording: by a yes, by a pin, or both (#3333).
+
+    A ``confirmation`` support is a yes to a question (ADR-0328 §6:1), and a ``pinned``
+    one is a pin the person made (ADR-0338 §4:3-§4:4); both rank at "you confirmed this
+    wording". Read off the counted supports backing it, where the single view carries
+    them. A listing's summary carries none, and there the sentence names neither, rather
+    than one that may not be how it was confirmed. The page says the same
+    (``confirmedHow``).
+    """
+    if not isinstance(belief, Belief):
+        return "you confirmed this wording."
+    backing = [
+        one for one in belief.supports if one.counts and one.direction is SupportDirection.FOR
+    ]
+    asked = any(one.origin is SupportOrigin.CONFIRMATION for one in backing)
+    pinned = any(one.origin is SupportOrigin.PINNED for one in backing)
+    if asked and pinned:
+        return "you confirmed this wording when I asked you, and by pinning it."
+    if pinned:
+        return "you confirmed this wording by pinning it."
+    if asked:
+        return "you confirmed this wording when I asked you."
+    return "you confirmed this wording."
 
 
 def _why_episodic(belief: Belief | BeliefSummary) -> str:
