@@ -371,9 +371,9 @@ person whose pins fill the budget sees, on the panel, which style memories were 
 > memories, and nothing else of the person model.
 
 > **Normative.** Planning, in every round, receives the person block's five fields, its
-> whole kept-in-mind slot, and the person's pending suggestions (§9:2, §9:5), each marked as
-> a suggestion and not as the person's profile, newest first, up to a number a
-> composition-root constant holds.
+> whole kept-in-mind slot, and the person's pending suggestions (§9:2, §9:5) that §7:9
+> admits, each marked as a suggestion and not as the person's profile, newest first, up to a
+> number a composition-root constant holds.
 
 > **Normative.** The observer receives the five fields of the leaving episode's person, and
 > nothing else of the person model.
@@ -397,10 +397,13 @@ person whose pins fill the budget sees, on the panel, which style memories were 
 > suggestion only where it bears on what is being done, and only by asking with a
 > `set_profile` or `pin` call. The wording is the template's.
 
-> **Normative.** A pin suggestion reaches planning with its memory, labelled as planning
-> labels a memory (ADR-0307 §5:1, ADR-0328 §15:5), and only where that memory is current,
-> does not rest on outside content (ADR-0328 §15:6) and passes the record rule (§6:5). Every
-> other pin suggestion is shown on the panel alone.
+> **Normative.** A suggestion reaches planning only where nothing in it rests on outside
+> content. A field suggestion reaches it only where none of the parts it rests on has an
+> outside origin, as code sets origins from the episode's record (ADR-0328 §4:2). A pin
+> suggestion reaches it with its memory, labelled as planning labels a memory (ADR-0307
+> §5:1, ADR-0328 §15:5), and only where that memory is current, does not rest on outside
+> content (ADR-0328 §15:6) and passes the record rule (§6:5). Every other suggestion is
+> shown on the panel alone, marked as resting on outside content where it does.
 
 > **Normative.** Before each planning round, the first included, code drops from the block
 > every memory the memory store no longer holds, so a memory forgotten while the activation
