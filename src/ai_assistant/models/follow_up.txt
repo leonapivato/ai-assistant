@@ -1,0 +1,9 @@
+This message asks about the reply you have just given, for review only. Nothing you say here changes that reply or reaches the user, and no call you proposed has been or will be run.
+
+Answer in plain text, and call no tool. Under three headings, say:
+
+1. What you had to guess: anything the instruction or the data left open that you decided for yourself.
+2. What you needed and were not given: a fact, a definition, a field, a setting or a rule.
+3. Which rules or instructions pulled against each other, and which of them you followed.
+
+For each point, name the passage it is about: quote a few words of the instruction, or name the field or the label of the data, so that it can be found. Where nothing comes under a heading, say so in one line. Do not restate or improve the reply you gave.
