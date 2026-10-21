@@ -109,6 +109,7 @@ from ai_assistant.memory import (
 from ai_assistant.memory import traces as memory_traces
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.memory.health import StoreHealthReader
+from ai_assistant.memory.person_model_store import SqlitePersonModelStore
 from ai_assistant.orchestration import (
     ConnectionOperations,
     ConversationLifecycle,
@@ -823,6 +824,19 @@ async def _fake_person_model_store(now: Clock) -> None:
     )
 
 
+async def _sqlite_person_model_store(now: Clock) -> None:
+    """Creating the store stamps the owner, and a field's write its change (ADR-0338 §3:5)."""
+    with tempfile.TemporaryDirectory() as directory:
+        store = SqlitePersonModelStore(
+            path=Path(directory) / "person_model.db", field_chars=200, now=now
+        )
+        try:
+            act = PersonModelAct(how=PersonActHow.PANEL, by=OWNER_PERSON_ID)
+            await store.set_field(OWNER_PERSON_ID, ProfileField.NAME, "Robin", act=act)
+        finally:
+            store.close()
+
+
 async def _sqlite_story_store(now: Clock) -> None:
     """A create stamps the story and its log lines from the store's own clock."""
     with tempfile.TemporaryDirectory() as directory:
@@ -949,6 +963,7 @@ SEAMS = [
     Seam("SqliteConversationStore", _sqlite_conversation_store, ConversationStoreError),
     Seam("FakeStoryStore", _fake_story_store, StoryStoreError),
     Seam("FakePersonModelStore", _fake_person_model_store, PersonModelStoreError),
+    Seam("SqlitePersonModelStore", _sqlite_person_model_store, PersonModelStoreError),
     Seam("SqliteStoryStore", _sqlite_story_store, StoryStoreError),
     Seam("SqliteNotificationOutbox", _sqlite_notification_outbox, NotificationOutboxError),
     Seam("SqliteNotificationStore", _sqlite_notification_store, NotificationStoreError),
