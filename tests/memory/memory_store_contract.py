@@ -70,8 +70,11 @@ from ai_assistant.core.types import (
     LabelKind,
     Memory,
     MemoryKind,
+    MemoryOperation,
+    MemoryOperationKind,
     MemoryRecord,
     MemorySource,
+    MemoryStatus,
     MemorySupport,
     MemoryWrite,
     MemoryWriteMode,
@@ -186,13 +189,16 @@ async def _read_one(store: MemoryStore, read: str, record_id: str) -> MemoryReco
     """``record_id`` as one *named* record-returning read hands it back, or ``None``.
 
     Dispatched by name rather than by a lambda per case so the parameter ids in the
-    report are the six read names ADR-0219 §1 enumerates, and so a read added to that
-    clause later fails here by name instead of being silently unasserted.
+    report are the six read names ADR-0219 §1 enumerates, and the history read ADR-0342
+    §2:2 adds beside them, and so a read added later fails here by name instead of
+    being silently unasserted.
     """
     if read == "get":
         return await store.get(record_id)
     if read == "get_many":
         return (await store.get_many([record_id])).get(record_id)
+    if read == "get_history":
+        return (await store.get_history([record_id])).get(record_id)
     if read == "search":
         found: Sequence[MemoryRecord] = (await store.search("distinctive", limit=10)).records
     elif read == "list_beliefs":
@@ -305,6 +311,53 @@ def _preference(
 ) -> MemoryRecord:
     """A second memory, standing for what was a preference record (ADR-0328 §2:3)."""
     return memory(record_id, content, _support(source, last_updated))
+
+
+#: The status each retiring operation a fixture uses leaves (ADR-0328 §5:7).
+_RETIRED_AS: dict[MemoryOperationKind, MemoryStatus] = {
+    MemoryOperationKind.END: MemoryStatus.ENDED,
+    MemoryOperationKind.MARK_WRONG: MemoryStatus.WRONG,
+}
+
+
+def _retired(
+    record_id: str,
+    content: str,
+    retired_by: MemoryOperationKind,
+    *,
+    successor: str | None = None,
+    expires_at: datetime | None = None,
+) -> Memory:
+    """A memory an end or a mark wrong retired long ago, naming ``successor`` if given.
+
+    Built whole rather than through a writer, because a store keeps what it is given
+    (ADR-0328 §11:1): created and retired in 2000, so its window closed before any
+    clock a binding injects and it is never live at the store's now (§3:4, §5:10).
+    """
+    support = _support(MemorySource.OBSERVED, _LONG_AGO)
+    closed = _LONG_AGO + _ONE_HOUR
+    create = MemoryOperation(
+        kind=MemoryOperationKind.CREATE,
+        cites=support.points_at,
+        at=support.added_at,
+        by=support.added_by,
+    )
+    retire = MemoryOperation(
+        kind=retired_by,
+        cites=support.points_at,
+        at=closed,
+        by=support.added_by,
+        successor=successor,
+    )
+    return memory(
+        record_id,
+        content,
+        support,
+        operations=(create, retire),
+        status=_RETIRED_AS[retired_by],
+        validity=Validity(valid_until=closed),
+        expires_at=expires_at,
+    )
 
 
 def _episodic(record_id: str, content: str) -> EpisodicMemory:
@@ -683,6 +736,20 @@ class _GetOp(_ReadOp):
         return store.get("read-b")
 
 
+class _GetHistoryOp(_ReadOp):
+    """``get_history`` — a batch by id under the connection lock (ADR-0342 §2:3)."""
+
+    name = "get_history"
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Read record A whatever its status — the call that is cancelled."""
+        return store.get_history(["read-a"])
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Read record B concurrently."""
+        return store.get_history(["read-b"])
+
+
 class _EpisodesOp(_ReadOp):
     """Episode listing holds the same resource until its cancelled read settles."""
 
@@ -875,6 +942,7 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _ClearOp,
     _PurgeExpiredOp,
     _GetOp,
+    _GetHistoryOp,
     _EpisodesOp,
     _EpisodeChunkOp,
     _SearchOp,
@@ -2178,6 +2246,315 @@ class MemoryStoreContract:
             "in one result disagree about when 'now' was"
         )
 
+    # --- the history read: get_history (ADR-0342 §2-§4) ----------------------
+    # One case per clause, as the batch read's are above. The **equality against
+    # ``export``** is the case §3:1 turns on, written the way ``get_many``'s
+    # equality against ``get`` is: over every row of §3's table in one call, so a
+    # store applying only some of ``export``'s predicate to the batch fails it. The
+    # snapshot is asserted on the clock axis alone, for the reason the batch read's
+    # comment gives; ``SqliteMemoryStore``'s own suite carries the chunk boundary.
+
+    async def test_get_history_returns_every_held_memory_whatever_its_status(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0342 §2:1 and §2:2: current, ended and wrong alike, each whole as stored.
+
+        The window is varied as well as the status, because §3's first row returns a
+        memory "its window open or closed": a current memory whose window has closed
+        and one not yet open are both held, and both come back. Compared whole, so a
+        store returning a projection, or dropping the operations log that carries
+        the successor, fails rather than passing on the ids.
+        """
+        held_records = (
+            _semantic("current", "held now"),
+            _retired(
+                "ended", "held until it was replaced", MemoryOperationKind.END, successor="current"
+            ),
+            _retired("wrong", "never true", MemoryOperationKind.MARK_WRONG),
+            _semantic("closed", "its window closed", validity=Validity(valid_until=_LONG_AGO)),
+            _semantic("early", "not yet open", validity=Validity(valid_from=_FAR_FUTURE)),
+        )
+        for record in held_records:
+            await store.add(record)
+
+        held = await store.get_history([record.id for record in held_records])
+
+        assert {record_id: _unstamped(record) for record_id, record in held.items()} == {
+            record.id: record for record in held_records
+        }
+        assert held["ended"].status is MemoryStatus.ENDED
+        assert held["ended"].operations[-1].successor == "current"
+        assert held["wrong"].status is MemoryStatus.WRONG
+        assert all(record.revision > 0 for record in held.values())
+
+    async def test_get_history_answers_what_export_carries_at_every_id(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0342 §3:1 and §3:2, over every row of §3's table in one call.
+
+        Asserted as an **equality against ``export``**, so the case cannot drift
+        from the predicate it is about: whatever ``export`` carries as a memory at an
+        id, the history read returns, revision and all, and an id at which it
+        carries none is *omitted* — never an error, never a ``None`` value. Expired
+        (a retired memory among them, since retention wins over history), forgotten,
+        an episode and an id never stored are all in the call beside the five held
+        memories, because a store that left out only some of them would pass a case
+        that used one.
+        """
+        await store.add(_semantic("current", "held now"))
+        await store.add(_retired("ended", "held once", MemoryOperationKind.END))
+        await store.add(_retired("wrong", "never true", MemoryOperationKind.MARK_WRONG))
+        await store.add(_semantic("closed", "closed", validity=Validity(valid_until=_LONG_AGO)))
+        await store.add(_semantic("early", "not yet", validity=Validity(valid_from=_FAR_FUTURE)))
+        await store.add(_semantic("expired", "promised away", expires_at=_LONG_AGO))
+        await store.add(
+            _retired("ended-expired", "both", MemoryOperationKind.END, expires_at=_LONG_AGO)
+        )
+        await store.add(_semantic("forgotten", "erased"))
+        assert await store.delete("forgotten") is True
+        await store.add(_episode("episode"))
+        asked = [
+            "current",
+            "ended",
+            "wrong",
+            "closed",
+            "early",
+            "expired",
+            "ended-expired",
+            "forgotten",
+            "episode",
+            "never-stored",
+        ]
+
+        held = await store.get_history(asked)
+
+        exported = {
+            record.id: record
+            for record in await store.export()
+            if record.id in asked and isinstance(record, Memory)
+        }
+        assert held == exported, (
+            "the history read and export disagree about what the store holds at an id"
+        )
+        assert set(held) == {"current", "ended", "wrong", "closed", "early"}, (
+            "the fixtures did not exercise every row of ADR-0342 §3's table"
+        )
+        assert all(value is not None for value in held.values())
+
+    async def test_get_history_returns_the_record_get_returns(self, store: MemoryStore) -> None:
+        """ADR-0342 §3:3: where ``get`` returns a memory, the history read returns it too.
+
+        The same record, compared whole and stamp included, so a store answering the
+        history read from a second copy of a row — or overlaying a different
+        revision on one path — fails. The retired memory beside it is the case ``get``
+        answers ``None`` for, so the clause is not satisfied by a read that agreed
+        with ``get`` because it *was* ``get``.
+        """
+        await store.add(_semantic("current", "held now"))
+        await store.add(_retired("ended", "held once", MemoryOperationKind.END))
+
+        held = await store.get_history(["current", "ended"])
+
+        assert held["current"] == await store.get("current")
+        assert await store.get("ended") is None
+        assert "ended" in held
+
+    async def test_get_history_omits_an_episode_that_get_many_returns(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0342 §3's table: an episode is omitted, though the store holds it.
+
+        ``get_many`` resolving the same id is what makes the omission the history
+        read's own: the episode is live and held, and the batch read answers for it,
+        so a history read that returned it was reading episodes rather than failing
+        to find one.
+        """
+        await store.add(_episode("episode"))
+        await store.add(_semantic("current", "held now"))
+
+        assert set(await store.get_many(["episode", "current"])) == {"episode", "current"}
+        assert set(await store.get_history(["episode", "current"])) == {"current"}
+
+    async def test_get_history_of_nothing_is_an_empty_mapping(self, store: MemoryStore) -> None:
+        """ADR-0342 §2:4: an empty sequence returns an empty mapping, as ``get_many``'s does.
+
+        Seeded first, so an implementation that ignored its argument and returned
+        every memory it holds would fail rather than return ``{}`` either way.
+        """
+        await store.add(_retired("ended", "held once", MemoryOperationKind.END))
+
+        assert await store.get_history([]) == {}
+
+    async def test_get_history_collapses_duplicate_ids(self, store: MemoryStore) -> None:
+        """ADR-0342 §2:4: a mapping, so duplicates collapse and never multiply the result."""
+        await store.add(_retired("dup", "held once", MemoryOperationKind.END))
+        await store.add(_semantic("other", "held now"))
+
+        held = await store.get_history(["dup", "dup", "other", "dup"])
+
+        assert set(held) == {"dup", "other"}
+        assert len(held) < len(["dup", "dup", "other", "dup"])
+
+    async def test_get_history_returns_detached_snapshots(self, store: MemoryStore) -> None:
+        """Records are detached snapshots, like every other ``MemoryStore`` read.
+
+        Frozen under ADR-0068, so asserted as the batch read's case asserts it: the
+        returned object refuses mutation, and the stored record is unaffected.
+        """
+        await store.add(_retired("snap", "held once", MemoryOperationKind.END))
+
+        held = await store.get_history(["snap"])
+
+        with pytest.raises(ValidationError):
+            held["snap"].validity.valid_until = _FAR_FUTURE
+        assert await store.get("snap") is None
+
+    async def test_get_history_judges_every_id_against_one_clock_reading(
+        self, store_factory: StoreFactory
+    ) -> None:
+        """ADR-0342 §2:3: one call is one snapshot, on the axis a portable test reaches.
+
+        The history read's clock decides retention alone, so the deadline is an
+        ``expires_at``: every record falls due after the first reading and before
+        the second, and a store re-reading an advancing clock per id would omit
+        every one after the first. Retired memories, so the window cannot be what
+        keeps them in or out.
+        """
+        step = timedelta(hours=1)
+        state = {"now": _STORE_NOW}
+
+        def advancing() -> datetime:
+            reading = state["now"]
+            state["now"] = reading + step
+            return reading
+
+        store = store_factory(advancing)
+        deadline = _STORE_NOW + step // 2
+        wanted = [f"h{i}" for i in range(3)]
+        for record_id in wanted:
+            await store.add(
+                _retired(record_id, "held once", MemoryOperationKind.END, expires_at=deadline)
+            )
+
+        held = await store.get_history(wanted)
+
+        assert set(held) == set(wanted), (
+            "the history read judged its ids against more than one instant, so two "
+            "entries in one result disagree about when 'now' was"
+        )
+
+    async def test_get_history_follows_no_chain(self, store: MemoryStore) -> None:
+        """ADR-0342 §4:2: the memory at each id given, and a successor only where asked.
+
+        The retired memory names its successor, which is current and held, so a
+        store that followed the link — to the chain's end or one hop — would add it
+        to the answer.
+        """
+        await store.add(
+            _retired("old", "held until replaced", MemoryOperationKind.END, successor="new")
+        )
+        await store.add(_semantic("new", "held now"))
+
+        assert set(await store.get_history(["old"])) == {"old"}
+        assert set(await store.get_history(["old", "new"])) == {"old", "new"}
+
+    async def test_the_live_reads_stay_live_only_for_a_retired_memory(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0342 §4:3: ``get``, ``get_many``, ``search`` and ``list_beliefs`` stay live.
+
+        An ended and a wrong memory, worded so ``search`` would reach them, are
+        returned by the history read and by none of the four live reads. A store
+        that answered the history read by widening a live read's predicate, rather
+        than by a read of its own, would leak them here.
+        """
+        await store.add(_retired("ended", "distinctive coffee, ended", MemoryOperationKind.END))
+        await store.add(
+            _retired("wrong", "distinctive coffee, wrong", MemoryOperationKind.MARK_WRONG)
+        )
+        await store.add(_semantic("current", "distinctive coffee, current"))
+        retired = {"ended", "wrong"}
+
+        assert set(await store.get_history(["ended", "wrong"])) == retired
+        assert await store.get("ended") is None
+        assert await store.get("wrong") is None
+        assert set(await store.get_many(["ended", "wrong", "current"])) == {"current"}
+        found = {record.id for record in (await store.search("distinctive coffee")).records}
+        assert found == {"current"}
+        assert {record.id for record in await store.list_beliefs()} == {"current"}
+
+    async def test_a_retired_memory_is_written_at_the_revision_the_history_read_returned(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0342 §2:2 and ADR-0328 §5:4: the read's revision is the stored one.
+
+        The observer's pin pass adds a support to a retired memory conditionally on
+        the revision the history read returned (ADR-0342 §5:6). So a conditional
+        write carrying that revision lands, and the record the history read returns
+        afterwards is the one written, under a new stamp.
+        """
+        await store.add(_retired("ended", "held once", MemoryOperationKind.END))
+        read = (await store.get_history(["ended"]))["ended"]
+        pinned = said_support("activation:pinned", when=_REVISED, added_at=_REVISED)
+        confirm = MemoryOperation(
+            kind=MemoryOperationKind.ADD_SUPPORT,
+            cites=pinned.points_at,
+            at=_REVISED,
+            by=pinned.added_by,
+        )
+        dumped = read.model_dump()
+        dumped["supports"] = [*dumped["supports"], pinned.model_dump()]
+        dumped["operations"] = [*dumped["operations"], confirm.model_dump()]
+        written = Memory.model_validate(dumped)
+
+        await store.write_atomic(
+            [
+                MemoryWrite(
+                    record=written,
+                    mode=MemoryWriteMode.IF_UNCHANGED,
+                    expected_revision=read.revision,
+                )
+            ]
+        )
+
+        after = (await store.get_history(["ended"]))["ended"]
+        assert after.revision != read.revision
+        assert after.status is MemoryStatus.ENDED
+        assert _unstamped(after) == _unstamped(written)
+
+    async def corrupt_stored_record(self, store: MemoryStore, record_id: str) -> bool:
+        """Make the record stored at ``record_id`` undecodable, where this store can.
+
+        Overridden by a store that keeps records in an encoding a row can be corrupt
+        in, which is the case ADR-0342 §2:5's second limb names. A store holding
+        validated objects has no such state to reach, so the default declines and
+        the case that takes this hook skips: it is an obligation the suite declares
+        optional, never one a binding opts itself out of.
+
+        Returns:
+            Whether the record was corrupted.
+        """
+        del store, record_id
+        return False
+
+    @pytest.mark.optional_obligation
+    async def test_get_history_reports_a_corrupt_record_as_a_store_error(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0342 §2:5: a corrupt stored record raises ``MemoryStoreError``.
+
+        The corrupt record is a retired one, which no live read decodes — so this is
+        the read that first meets it, and it must say so rather than omit it or leak
+        the decoder's own exception.
+        """
+        await store.add(_retired("ended", "held once", MemoryOperationKind.END))
+        await store.add(_semantic("sound", "held now"))
+        if not await self.corrupt_stored_record(store, "ended"):
+            pytest.skip("this store holds validated records, so none can be corrupt")
+
+        with pytest.raises(MemoryStoreError):
+            await store.get_history(["ended", "sound"])
+
     async def test_a_record_over_the_topic_bound_stays_readable(self, store: MemoryStore) -> None:
         """ADR-0213 §1's residue, pinned where a ``max_length`` would break it.
 
@@ -2204,6 +2581,7 @@ class MemoryStoreContract:
         assert got is not None
         assert got.topics == over_bound
         assert set(await store.get_many(["imported"])) == {"imported"}
+        assert set(await store.get_history(["imported"])) == {"imported"}
         assert "imported" in {record.id for record in await store.list_beliefs()}
         assert "imported" in {record.id for record in await store.export()}
         assert "imported" in {record.id for record in (await store.search("labels")).records}
@@ -3695,12 +4073,15 @@ class MemoryStoreContract:
 
     @pytest.mark.parametrize(
         "read",
-        ["get", "get_many", "search", "list_beliefs", "export", "walk_records"],
+        ["get", "get_many", "get_history", "search", "list_beliefs", "export", "walk_records"],
     )
     async def test_every_record_returning_read_carries_the_stored_revision(
         self, store: MemoryStore, read: str
     ) -> None:
-        """ADR-0219 §1's read clause, over each of the six reads by name (§7).
+        """ADR-0219 §1's read clause, over each of its six reads and the history read.
+
+        By name (§7). The history read is held to the clause because a caller writes
+        a retired memory conditionally on the revision it returned (ADR-0342 §2:2).
 
         Parameterised because the failure it exists to catch is **per-path**: a store
         holding the revision outside the payload it decodes can overlay it correctly
@@ -3965,10 +4346,11 @@ class MemoryStoreContract:
         originally suspended "the next write", which no read-side case could
         position a mutation inside — so ADR-0073 §8 had to state the
         materialise-before-the-first-await discharge as an obligation while
-        recording that the suite would not prove it. The four operations the cases
-        below arm are ``add``, ``write_atomic``, ``search`` and ``list_beliefs``;
-        which collaborator stops each one is the implementation's business, and for
-        one store they are not all the same collaborator.
+        recording that the suite would not prove it. The operations the cases below
+        arm are ``add``, ``write_atomic``, ``search``, ``list_beliefs``, ``get_many``
+        and ``get_history``; which collaborator stops each one is the
+        implementation's business, and for one store they are not all the same
+        collaborator.
 
         **The position is part of the hook's contract, not the implementer's
         choice** (ADR-0065 §3). A hook fired at method *entry* would let the
@@ -4239,6 +4621,32 @@ class MemoryStoreContract:
             resolved = set(await call)
 
             assert resolved == {"obs-batch-asked"}, _LATE_FILTER
+
+    async def test_get_history_observes_its_record_ids_before_its_first_await(
+        self, store: MemoryStore
+    ) -> None:
+        """``core.protocols``' input clause, on ``get_history``'s ``record_ids`` (ADR-0065).
+
+        The batch read's case, on the history read's own argument: none of its other
+        obligations mutates the sequence mid-call, so an implementation that took its
+        lock first and read the argument afterwards would satisfy all of them while
+        answering a later version of the caller's input. The added id is a retired
+        memory the history read would return, so a late read is the only way it can
+        appear.
+        """
+        async with self._observation_subject(store, vacuous=self.reads_without_suspending) as (
+            subject,
+            arm,
+        ):
+            await subject.add(_retired("obs-history-asked", "eta", MemoryOperationKind.END))
+            await subject.add(_retired("obs-history-added", "eta", MemoryOperationKind.END))
+            record_ids = ["obs-history-asked"]
+            gate = None if arm is None else arm("get_history")
+            async with held_at_its_first_await(gate, subject.get_history(record_ids)) as call:
+                record_ids.append("obs-history-added")  # grow the caller's own list mid-flight
+            resolved = set(await call)
+
+            assert resolved == {"obs-history-asked"}, _LATE_FILTER
 
     # --- the resumable walk (ADR-0114 §8) ------------------------------------
     # Each clause below names the case that can fail, because each has a wrong

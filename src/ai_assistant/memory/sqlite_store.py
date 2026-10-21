@@ -64,6 +64,7 @@ from ai_assistant.core.types import (
     EpisodeCursor,
     EpisodePage,
     EpisodicMemory,
+    Memory,
     MemoryKind,
     MemoryRecord,
     MemorySearchResult,
@@ -147,10 +148,6 @@ _VEC_KNN_MAX_K = 4096
 #: Large enough that a migration is a handful of statements per thousand records,
 #: small enough that a store of any size is never materialised at once.
 _BACKFILL_CHUNK = 500
-#: Bound parameters ``get_many``'s statement spends on something other than an id
-#: — the two read-time comparisons against ``now`` — and therefore the headroom
-#: its chunk size must leave under ``SQLITE_MAX_VARIABLE_NUMBER``.
-_GET_MANY_FIXED_PARAMS = 2
 _OWNER_ONLY = 0o600
 #: The sidecars SQLite may keep beside a database file. Each holds the same pages
 #: the database does, so ADR-0004 §4 reaches them too. SQLite copies the database
@@ -1765,22 +1762,86 @@ class SqliteMemoryStore:
         Only the *placeholders* are interpolated; every value is bound, so the
         assembled text carries no caller data.
         """
-        room = self._conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - _GET_MANY_FIXED_PARAMS
-        chunk = max(room, 1)
-        base = (
-            "SELECT data, revision FROM records "
-            "WHERE (expires_at IS NULL OR expires_at > ?) "
-            "AND (valid_until IS NULL OR valid_until > ?)"
+        return self._rows_at_ids_sync(
+            record_ids,
+            "(expires_at IS NULL OR expires_at > ?) AND (valid_until IS NULL OR valid_until > ?)",
+            (now, now),
+            what="read memories in a batch",
         )
+
+    def _rows_at_ids_sync(
+        self,
+        record_ids: Sequence[str],
+        where: str,
+        params: Sequence[int],
+        *,
+        what: str,
+    ) -> list[tuple[str, int]]:
+        """The rows at ``record_ids`` passing ``where``, chunked, in one read transaction.
+
+        The batch reads' one mechanism: :meth:`_get_many_sync` and
+        :meth:`_get_history_sync` differ only in the predicate. Each chunk's
+        statement spends ``len(params)`` bound parameters on the predicate and the
+        rest of the connection's limit on ids, so the chunk size is computed from
+        the predicate rather than assumed. ``where`` is this module's own text,
+        never a caller's.
+        """
+        room = self._conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - len(params)
+        chunk = max(room, 1)
+        base = f"SELECT data, revision FROM records WHERE {where}"  # noqa: S608 — only this module's own predicate is interpolated
         rows: list[tuple[str, int]] = []
-        with self._transaction("read memories in a batch", immediate=False) as conn:
+        with self._transaction(what, immediate=False) as conn:
             for start in range(0, len(record_ids), chunk):
                 ids = record_ids[start : start + chunk]
                 sql = base + f" AND id IN ({', '.join('?' * len(ids))})"
                 rows.extend(
-                    (str(row[0]), int(row[1])) for row in conn.execute(sql, [now, now, *ids])
+                    (str(row[0]), int(row[1])) for row in conn.execute(sql, [*params, *ids])
                 )
         return rows
+
+    async def get_history(self, record_ids: Sequence[str]) -> Mapping[str, Memory]:
+        """Return the memories held at ``record_ids``, whatever their status (ADR-0342 §2).
+
+        :meth:`get_many`'s read with the expiry filter kept, the validity filter
+        dropped and episodes left out — the same lock acquisition, clock reading and
+        deferred read transaction, so one call is one snapshot of the clock and of
+        the file (ADR-0342 §2:3). Exactly the rows :meth:`export` reads at those
+        ids, decoded by the same path with the stored revision overlaid (ADR-0219
+        §1), so this answers what ``export`` would carry at each id (ADR-0342 §3:1).
+
+        An episode is left out on the **decoded** record rather than on the
+        ``kind`` column, so the answer is what ``export`` would carry even for a
+        row whose column and payload disagree. A row that cannot be decoded raises
+        ``MemoryStoreError``, as every other read does (ADR-0342 §2:5).
+
+        ``record_ids`` is deduplicated on the first executed line, before the lock
+        (ADR-0065), and an empty argument is answered without a round trip.
+        """
+        wanted = tuple(dict.fromkeys(record_ids))
+        if not wanted:
+            return {}
+        async with self._lock:
+            now = self._now_micros()
+            rows = await _run_to_completion(self._get_history_sync, wanted, now)
+        return {
+            record.id: record
+            for record in (self._decoded_at(data, revision) for data, revision in rows)
+            if isinstance(record, Memory)
+        }
+
+    def _get_history_sync(self, record_ids: Sequence[str], now: int) -> list[tuple[str, int]]:
+        """Read every named row not past its ``expires_at``, in one transaction.
+
+        ``export``'s predicate over the named ids, through the chunked reader
+        :meth:`_get_many_sync` uses, so a call larger than one statement holds is
+        still one snapshot (ADR-0342 §2:3, ADR-0086 §8).
+        """
+        return self._rows_at_ids_sync(
+            record_ids,
+            "(expires_at IS NULL OR expires_at > ?)",
+            (now,),
+            what="read memories by id whatever their status",
+        )
 
     async def search(
         self,

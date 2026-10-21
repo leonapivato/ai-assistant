@@ -260,6 +260,7 @@ def _broken_store() -> FakeMemoryStore:
     [
         pytest.param(lambda store: store.get("1"), id="get"),
         pytest.param(lambda store: store.get_many(["1"]), id="get_many"),
+        pytest.param(lambda store: store.get_history(["1"]), id="get_history"),
         pytest.param(lambda store: store.search("coffee"), id="search"),
         pytest.param(lambda store: store.list_beliefs(), id="list_beliefs"),
         pytest.param(lambda store: store.walk_records("nightly", limit=1), id="walk_records"),
@@ -331,6 +332,7 @@ async def test_a_read_that_reaches_no_record_is_answered_rather_than_failed() ->
     assert (await store.search("   ")).records == ()
     assert (await store.search("coffee", limit=0)).records == ()
     assert await store.get_many([]) == {}
+    assert await store.get_history([]) == {}
     assert await store.list_beliefs(limit=0) == []
     assert await store.list_beliefs(kinds=()) == []
 

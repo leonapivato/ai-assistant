@@ -761,7 +761,7 @@ class _ARealMemoryStore:
     add = clear = delete = export = get = list_beliefs = purge_expired = search = staticmethod(
         lambda *a: None
     )
-    get_many = write_atomic = staticmethod(lambda *a: None)
+    get_many = get_history = write_atomic = staticmethod(lambda *a: None)
     walk_records = advance_walk = select = episodes = episode_chunk = staticmethod(
         lambda *a, **k: None
     )
