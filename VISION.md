@@ -145,7 +145,7 @@ Long-term memory is organized into typed kinds:
 - learned preferences;
 - procedures and preferred workflows.
 
-Stable profile information is not a separate store but a matter of provenance: facts the user asserted directly, held with full confidence, versus beliefs the assistant inferred with lower confidence. Some state often mistaken for memory lives in adjacent subsystems instead — active projects and commitments in planning, and temporary situational context in the context engine.
+A few things a person sets about themselves form a small profile: their name, how to address them, what they call the assistant, their time zone and their language. The person sets it and can change it, and the assistant never edits it, though it may suggest a change. Everything else it knows about a person, the style they like included, is memory, and its standing is a matter of provenance: facts the person asserted directly, held with full confidence, versus beliefs the assistant inferred with lower confidence. Some state often mistaken for memory lives in adjacent subsystems instead — active projects and commitments in planning, and temporary situational context in the context engine.
 
 The assistant should remember selectively, detect conflicts, update stale information, and avoid preserving sensitive or incidental details without justification.
 
@@ -194,7 +194,11 @@ audience.
 The test for how it handles people is what a trusted human assistant or companion
 would do. Such a person knows what they need to know and is careful with it. They
 deflect a nosy question naturally, keep other people's confidences, stay discreet
-when they can't tell who is listening, and say plainly whom they work for. The
+when they can't tell who is listening, and say plainly whom they work for. What they
+share with whom is learned for each relationship: from how the person reacts, from
+what they say, and by asking when unsure ("are you fine with them knowing this kind
+of thing?"). How much detail they give follows who is around, and when they can't
+tell, they may simply ask whether anyone else is there. The
 assistant behaves the same way, by judgment rather than by a rule for every case.
 Where it differs from a person, judgment alone is not enough:
 
