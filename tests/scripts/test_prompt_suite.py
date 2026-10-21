@@ -275,6 +275,17 @@ def test_an_input_may_be_a_json_file_beside_the_case(tmp_path: Path) -> None:
             _understanding(input={"messages": [{"role": "user", "content": "x"}], "tools": []}),
             "holds exactly ['messages']",
         ),
+        (
+            _understanding(
+                input={
+                    "messages": [
+                        {"role": "user", "content": "x"},
+                        {"role": "assistant", "content": "y"},
+                    ]
+                }
+            ),
+            "ends on a message other than the user's",
+        ),
         (_understanding(input={"file": "../elsewhere.json"}), "beside the case"),
         (_understanding(input={"file": "absent.json"}), "is not a JSON file beside it"),
         (_understanding(input={"file": "x.json", "messages": []}), "names that file alone"),
@@ -336,12 +347,14 @@ def test_a_case_is_one_file_under_a_declared_prompts_directory(tmp_path: Path) -
     (directory / "understanding" / "orphan.json").write_text("{}")
     (directory / "understanding" / "deeper").mkdir()
     (directory / "understanding" / "broken.toml").write_text("prompt = ")
+    (directory / "planning").symlink_to(directory / "understanding")
 
     defects = _defects(directory)
 
     assert defects == [
         "loose.toml: a case lies under its prompt's directory",
         "not_a_prompt/: names no prompt the package declares",
+        "planning: is a link, which the suite does not follow",
         "understanding/broken.toml: is not TOML (1:10)",
         "understanding/deeper: is not a regular file",
         "understanding/notes.txt: is neither a case nor a case's input",

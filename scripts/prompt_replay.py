@@ -1930,7 +1930,10 @@ def read_cases(directory: Path, declared: Mapping[str, PromptDeclaration]) -> Ca
         raise ReplayError(msg)
     reading = CaseReading()
     for entry in sorted(directory.iterdir()):
-        if entry.is_symlink() or not entry.is_dir():
+        if entry.is_symlink():
+            reading.defects.append(f"{entry.name}: is a link, which the suite does not follow")
+            continue
+        if not entry.is_dir():
             if entry.suffix in {CASE_SUFFIX, INPUT_SUFFIX}:
                 reading.defects.append(f"{entry.name}: a case lies under its prompt's directory")
             continue
@@ -2152,6 +2155,8 @@ def _case_messages(held: object) -> tuple[Message, ...]:
                 "the request after the system message (ADR-0337 §3:4)"
             )
         messages.append(message)
+    if messages[-1].role is not Role.USER:
+        raise _CaseDefectError("the input ends on a message other than the user's")
     return tuple(messages)
 
 
