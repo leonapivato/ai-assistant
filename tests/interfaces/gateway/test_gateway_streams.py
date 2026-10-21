@@ -1116,8 +1116,10 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
     last"**, which places ``stop_activation`` here by the governing decision's own text;
     the header record it owes ADR-0177 is issue #2714. **ADR-0329 §18:2's read "which the
     panel calls"** places ``pending_candidates`` here the same way, and its header record
-    is issue #3201. Every other clause of §1 binds each of them exactly as it binds §1's
-    own.
+    is issue #3201. **ADR-0332 §5:10 rules that "the gateway serves it at ``POST
+    /chat/composing``"**, and §5:9 makes ``composing`` "an act in the medium", so it
+    arrives under ADR-0296's record as well as by its own text. Every other clause of §1
+    binds each of them exactly as it binds §1's own.
 
     **What has left is named by the decision that took it.** ADR-0309 §5:4 retires the
     Ask panel's ``converse`` and ADR-0313 §3:4 push-to-talk's ``converse_spoken``; and
@@ -1180,6 +1182,9 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
         "delete_conversation",
         "transcript",
         "chat_changes",
+        # ADR-0332 §5:9-§5:10: "an act in the medium that writes nothing into it",
+        # served at `POST /chat/composing`.
+        "composing",
         # ...and the change stream itself, now that the hub serves one (ADR-0298 §7).
         "follow_chat",
         # ADR-0297 §6:4: the gateway's stop control beside "working…" (#2714).

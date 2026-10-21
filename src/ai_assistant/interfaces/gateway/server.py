@@ -78,6 +78,8 @@ panel calls — the notification *review* surface — ``notifications``,
 ``set_conversation_devices``, ``write_message``, ``delete_message``,
 ``delete_conversation``, ``transcript`` and ``chat_changes`` — and its record on §1:5
 the one value the gateway supplies of its own for them: the browser's device.
+ADR-0332 §5:9 adds ``composing`` to those acts in the medium, "an act in the medium
+that writes nothing into it", and §5:10 has this gateway serve it.
 ``next_notification`` remains the gateway's **own** poll and is none of them,
 because no browser request resolves to it — :class:`.delivery.DeliveryFanOut`
 originates it, no browser request names it, and no browser argument reaches it
@@ -359,6 +361,11 @@ _CHAT_DEVICES_PATH: Final = "/chat/devices"
 _CHAT_SET_DEVICES_PATH: Final = "/chat/devices/set"
 _CHAT_CONVERSATION_DEVICES_PATH: Final = "/chat/conversation/devices/set"
 _CHAT_WRITE_PATH: Final = "/chat/message/write"
+#: ADR-0332 §5:10's composing signal: "The gateway serves it at ``POST /chat/composing``,
+#: naming the conversation in its body, as it serves ``write_message`` at
+#: ``/chat/message/write``." The path is the ADR's own, so it does not take the
+#: thing-then-verb form above.
+_CHAT_COMPOSING_PATH: Final = "/chat/composing"
 _CHAT_DELETE_MESSAGE_PATH: Final = "/chat/message/delete"
 _CHAT_DELETE_CONVERSATION_PATH: Final = "/chat/conversation/delete"
 _CHAT_TRANSCRIPT_PATH: Final = "/chat/transcript"
@@ -475,6 +482,7 @@ _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _CHAT_SET_DEVICES_PATH): "set_my_devices",
     ("POST", _CHAT_CONVERSATION_DEVICES_PATH): "set_conversation_devices",
     ("POST", _CHAT_WRITE_PATH): "write_message",
+    ("POST", _CHAT_COMPOSING_PATH): "composing",
     ("POST", _CHAT_DELETE_MESSAGE_PATH): "delete_message",
     ("POST", _CHAT_DELETE_CONVERSATION_PATH): "delete_conversation",
     ("POST", _CHAT_TRANSCRIPT_PATH): "transcript",
@@ -1444,6 +1452,7 @@ class Gateway:
             _CHAT_START_PATH: self._start_conversation,
             _CHAT_SET_DEVICES_PATH: self._set_my_devices,
             _CHAT_CONVERSATION_DEVICES_PATH: self._set_conversation_devices,
+            _CHAT_COMPOSING_PATH: self._composing,
             _CHAT_DELETE_MESSAGE_PATH: self._delete_message,
             _CHAT_DELETE_CONVERSATION_PATH: self._delete_conversation,
             _CHAT_TRANSCRIPT_PATH: self._transcript,
@@ -3387,6 +3396,33 @@ class Gateway:
             partial(self._engine.write_message, named, message=message), fault=_chat_fault
         )
         return _rendered({"receipt": _receipt_view(receipt)})
+
+    async def _composing(self, request: Request) -> Response:
+        """Say the person is typing in a conversation, and answer nothing (ADR-0332 §5).
+
+        **One relay and nothing else.** The conversation is the browser's own argument,
+        relayed whole, and the signal is handed to ``AssistantEngine.composing`` (§5:9),
+        which writes nothing into the medium, any store or any episode (§5:8). Nothing
+        is held here either: the gateway keeps no note of who is typing, starts no wait,
+        and answers no state.
+
+        **Admission is the hub's** (ADR-0298 §5:6). ``composing`` is in the table's
+        Writing row (ADR-0332 §5:11): the requesting device must be the named
+        conversation's end for writing. That device is the one this gateway names for the
+        request (:meth:`_relaying_for`), as it is for ``write_message``, so a browser
+        device that only reads the conversation is refused by the hub, and the refusal
+        reaches the page as its reason's own fault (:meth:`_relayed`). No device is
+        checked here, and no body member is read for one.
+
+        Args:
+            request: The admitted request, carrying ``conversation_id``.
+
+        Returns:
+            An empty answer, because the signal answers nothing.
+        """
+        named = _required_string(_payload(request), "conversation_id")
+        await self._relayed(partial(self._engine.composing, named), fault=_chat_fault)
+        return _rendered({})
 
     async def _delete_message(self, request: Request) -> Response:
         """Delete one message of either author, leaving its marker (ADR-0293 §5:8, §5:9)."""

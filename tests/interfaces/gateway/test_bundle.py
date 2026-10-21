@@ -2456,6 +2456,12 @@ _FETCH_SITES: Final = {
 #: clauses refusing to let a surface assert.
 _ACT_SITE: Final = "act"
 
+#: The one ``fetch`` site whose answer, failure included, the page says nothing about:
+#: ADR-0332 §5:5's composing signal. It is not something the person asked for and not
+#: input (§5:8), so a rejected ``fetch`` there is a signal not sent and is not reported
+#: as the gateway having gone — the person's next act, which is, says that in full.
+_SIGNAL_SITE: Final = "sendComposing"
+
 #: Every entry point reaching ``relay``, each of which catches a rejected `fetch`
 #: itself. Enumerated rather than counted, for the reason issue #1332 records: a
 #: threshold satisfied by five of six guards leaves the sixth deletable in silence.
@@ -2652,7 +2658,8 @@ def test_every_fetch_the_page_makes_is_guarded() -> None:
 
     assert script.count("await fetch(") == script.count("fetch(")
     assert {name for name, body in functions.items() if "fetch(" in body} == set(_FETCH_SITES) | {
-        _ACT_SITE
+        _ACT_SITE,
+        _SIGNAL_SITE,
     }
     for called, entry in _FETCH_SITES.items():
         guard = functions[entry]
@@ -2665,6 +2672,9 @@ def test_every_fetch_the_page_makes_is_guarded() -> None:
     # lost a guard: it still catches, and answers with an outcome that is not known.
     assert "} catch (" in functions[_ACT_SITE]
     assert not _GATEWAY_GONE.search(functions[_ACT_SITE])
+    # The composing signal catches too, and reports nothing: no fault of any kind.
+    assert "} catch (" in functions[_SIGNAL_SITE]
+    assert "fault(" not in functions[_SIGNAL_SITE]
 
 
 def test_a_lost_request_on_a_grant_act_is_reported_as_an_unknown_outcome() -> None:
