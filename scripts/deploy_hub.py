@@ -1325,14 +1325,18 @@ class Plan:
         Run as the **login** user, who seeds, receives and keeps the wheel. Three
         labelled answers: where ``rsync`` is (empty when it is not there), what the
         base is (``usable`` only for a readable, non-empty regular file), and
-        whether the directory the next base is kept in exists and can be written.
-        That directory is created here when it is missing, which is the only change
-        the check makes, and it is the deploy's own.
+        whether the next base can be kept: ``not-a-file`` when something other than
+        a regular file is already at that path, a directory or a link to one,
+        which a rename would put the wheel inside of; otherwise whether its
+        directory exists and can be written. That directory is created here when
+        it is missing, which is the only change the check makes, and it is the
+        deploy's own.
 
         Returns:
             The remote command line.
         """
         base = remote_path(self.delta_base)
+        keep = remote_path(self.delta_keep)
         keep_dir = remote_path(str(PurePosixPath(self.delta_keep).parent))
         return (
             "printf 'DELTA_RSYNC=%s\\n' \"$(command -v rsync)\"; "
@@ -1340,7 +1344,8 @@ class Plan:
             f"elif [ ! -r {base} ]; then s=unreadable; elif [ ! -s {base} ]; then s=empty; "
             "else s=usable; fi; echo DELTA_BASE=$s; "
             f"mkdir -p -m 0700 {keep_dir} 2>/dev/null; "
-            f"if [ -d {keep_dir} ] && [ -w {keep_dir} ]; then echo DELTA_KEEP=writable; "
+            f"if [ -e {keep} ] && [ ! -f {keep} ]; then echo DELTA_KEEP=not-a-file; "
+            f"elif [ -d {keep_dir} ] && [ -w {keep_dir} ]; then echo DELTA_KEEP=writable; "
             "else echo DELTA_KEEP=unwritable; fi"
         )
 
@@ -1362,14 +1367,15 @@ class Plan:
 
         Copied to a neighbouring file and *renamed* over the kept one, as the
         marker is, so the next deploy finds a whole earlier wheel or none, never
-        half of one.
+        half of one. ``mv -T`` because a directory that appeared at that path
+        after the preflight must fail the rename, not receive the wheel inside it.
 
         Returns:
             The remote command line, run as the login user.
         """
         keep = remote_path(self.delta_keep)
         scratch = remote_path(f"{self.delta_keep}.{self.token}.tmp")
-        write = f"cp -- {remote_path(self.staged)} {scratch} && mv -f -- {scratch} {keep}"
+        write = f"cp -- {remote_path(self.staged)} {scratch} && mv -fT -- {scratch} {keep}"
         return f"{{ {write}; }} || {{ rm -f -- {scratch}; exit 1; }}"
 
     def stage_requirements(self) -> list[str]:
@@ -2523,6 +2529,12 @@ def _rule_on_delta(plan: Plan, ssh: Callable[[str], list[str]]) -> None:
             f"earlier build will do, since the result is digested either way.\n"
             f"Or: {_DELTA_INSTEAD}\n{_UNTOUCHED}"
         )
+    if keep == "not-a-file":
+        raise DeployError(
+            f"--delta-keep {plan.delta_keep} is not a file on the box: something else, a\n"
+            "directory or a link to one, is already there, and the kept wheel would go\n"
+            f"inside it. Pass --delta-keep with a file's path. Or: {_DELTA_INSTEAD}\n{_UNTOUCHED}"
+        )
     if keep != "writable":
         raise DeployError(
             f"{login} cannot write the directory of {plan.delta_keep} on the box, so this\n"
@@ -2826,7 +2838,9 @@ def _check_delta_options(args: argparse.Namespace) -> None:
     Raises:
         DeployError: If ``--delta-base``, ``--delta-keep`` or ``--bwlimit`` is given
             without ``--delta``, which would otherwise send the whole wheel while
-            looking like a delta was asked for; or if ``--delta`` has a relative
+            looking like a delta was asked for; if ``--delta-keep`` names a
+            directory rather than a file, or ``--delta-base`` is empty; or if
+            ``--delta`` has a relative
             ``--stage-dir``, which rsync would not expand (:data:`_RSYNC_OPTIONS`).
     """
     if not args.delta:
@@ -2845,6 +2859,13 @@ def _check_delta_options(args: argparse.Namespace) -> None:
                 "goes whole by scp. Pass --delta, or leave it out."
             )
         return
+    if args.delta_keep is not None and (not args.delta_keep or args.delta_keep.endswith("/")):
+        raise DeployError(
+            f"--delta-keep {args.delta_keep!r} names a directory; it must name the file\n"
+            "the installed wheel is kept as."
+        )
+    if args.delta_base == "":
+        raise DeployError("--delta-base is empty; name the wheel on the box, or leave it out.")
     if not PurePosixPath(args.stage_dir).is_absolute():
         raise DeployError(
             f"--delta needs an absolute --stage-dir, not {args.stage_dir}: rsync takes the\n"
