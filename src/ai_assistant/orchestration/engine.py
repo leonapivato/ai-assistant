@@ -137,6 +137,8 @@ from ai_assistant.core.types import (
     episode_summary,
     episode_view,
     part_episode,
+    profile_field,
+    profile_value,
     secret_value,
     story_members,
     story_move_members,
@@ -144,6 +146,7 @@ from ai_assistant.core.types import (
     story_note_text,
     user_message,
 )
+from ai_assistant.orchestration import person_panel
 from ai_assistant.orchestration.activation_coordinator import ActivationCoordinator
 from ai_assistant.orchestration.activation_state import (
     CURRENT_ACTIVATION,
@@ -298,6 +301,9 @@ if TYPE_CHECKING:
         NotificationDisposition,
         NotificationPreferences,
         PermissionDecision,
+        PersonModelEdit,
+        PersonModelView,
+        ProfileField,
         RecordedInvocation,
         RequestingDevice,
         SecretValue,
@@ -3462,6 +3468,176 @@ class Engine:
         if not self._candidates:
             return ()
         return await held_candidates(self._memory, self._plans)
+
+    # --- the person model, for the panels (ADR-0338 §8:1-§8:3) -------------
+    #
+    # Each member validates its arguments locally, then refuses on a hub that keeps no
+    # person model (``person_blocks`` not wired: ``Settings.person_model`` off, §11:2),
+    # then runs :mod:`~ai_assistant.orchestration.person_panel` over the person block's
+    # assembly, tracked and measured as every member is. The canonical fake answers them
+    # from the same module, so the two cannot read the slot two ways.
+
+    async def person_model(self, person_id: NonBlankEncodableText) -> PersonModelView | None:
+        """Read one person's model, as the About you panel shows it (ADR-0338 §8:1).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``person_id`` is blank or unwritable.
+            PersonModelOffError: If no person-model store is wired.
+            PersonModelStoreError: If the person-model store cannot be read.
+            MemoryStoreError: If the memory store cannot be read.
+        """
+        self._reject_if_closing()
+        named = non_blank_text(person_id, name="person_id")
+        check_arguments("person_model", max_bytes=self._max_payload_bytes, person_id=named)
+        blocks = person_panel.wired(self._person_blocks)
+        return await self._tracked(
+            person_panel.person_model_view(blocks, named), "person_model", checked=True
+        )
+
+    async def set_profile_field(
+        self,
+        person_id: NonBlankEncodableText,
+        *,
+        field: ProfileField,
+        value: EncodableText | None = None,
+    ) -> PersonModelEdit:
+        """Set or clear one of a person's fields, on the panel (ADR-0338 §3, §8:2).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If an argument is malformed.
+            PersonModelOffError: If no person-model store is wired.
+            PersonModelStoreError: If the store cannot be read or written.
+        """
+        self._reject_if_closing()
+        named = non_blank_text(person_id, name="person_id")
+        which = profile_field(field)
+        held = profile_value(value)
+        check_arguments(
+            "set_profile_field",
+            max_bytes=self._max_payload_bytes,
+            person_id=named,
+            field=which,
+            value=held,
+        )
+        blocks = person_panel.wired(self._person_blocks)
+        return await self._tracked(
+            person_panel.set_profile_field(blocks, named, which, held),
+            "set_profile_field",
+            checked=True,
+        )
+
+    async def pin_memory(
+        self, person_id: NonBlankEncodableText, *, memory_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Pin a memory, on the beliefs panel, through the one checked pin (ADR-0338 §4:2).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If an id is blank or unwritable.
+            PersonModelOffError: If no person-model store is wired.
+            PersonModelStoreError: If the person-model store cannot be read or written.
+            MemoryStoreError: If the memory store cannot be read.
+        """
+        named, memory = self._person_ids("pin_memory", person_id, memory_id=memory_id)
+        blocks = person_panel.wired(self._person_blocks)
+        return await self._tracked(
+            person_panel.pin_memory(blocks, named, memory), "pin_memory", checked=True
+        )
+
+    async def unpin_memory(
+        self, person_id: NonBlankEncodableText, *, memory_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Unpin a memory, erasing nothing, through the one unpin (ADR-0338 §4:7).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If an id is blank or unwritable.
+            PersonModelOffError: If no person-model store is wired.
+            PersonModelStoreError: If the person-model store cannot be read or written.
+            MemoryStoreError: If the memory store cannot be read.
+        """
+        named, memory = self._person_ids("unpin_memory", person_id, memory_id=memory_id)
+        blocks = person_panel.wired(self._person_blocks)
+        return await self._tracked(
+            person_panel.unpin_memory(blocks, named, memory), "unpin_memory", checked=True
+        )
+
+    async def remove_style_mark(
+        self, person_id: NonBlankEncodableText, *, mark_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Remove a style mark, on the panel (ADR-0338 §5:3).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If an id is blank or unwritable.
+            PersonModelOffError: If no person-model store is wired.
+            PersonModelStoreError: If the store cannot be read or written.
+        """
+        named, mark = self._person_ids("remove_style_mark", person_id, mark_id=mark_id)
+        blocks = person_panel.wired(self._person_blocks)
+        return await self._tracked(
+            person_panel.remove_style_mark(blocks, named, mark), "remove_style_mark", checked=True
+        )
+
+    async def accept_person_suggestion(
+        self, person_id: NonBlankEncodableText, *, suggestion_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Accept a pending suggestion, on the panel (ADR-0338 §8:8, §9:2, §9:5).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If an id is blank or unwritable.
+            PersonModelOffError: If no person-model store is wired.
+            PersonModelStoreError: If the person-model store cannot be read or written.
+            MemoryStoreError: If the memory store cannot be read.
+        """
+        named, suggestion = self._person_ids(
+            "accept_person_suggestion", person_id, suggestion_id=suggestion_id
+        )
+        blocks = person_panel.wired(self._person_blocks)
+        return await self._tracked(
+            person_panel.accept_suggestion(blocks, named, suggestion),
+            "accept_person_suggestion",
+            checked=True,
+        )
+
+    async def dismiss_person_suggestion(
+        self, person_id: NonBlankEncodableText, *, suggestion_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Dismiss a pending suggestion, on the panel (ADR-0338 §9:2, §12).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If an id is blank or unwritable.
+            PersonModelOffError: If no person-model store is wired.
+            PersonModelStoreError: If the store cannot be read or written.
+        """
+        named, suggestion = self._person_ids(
+            "dismiss_person_suggestion", person_id, suggestion_id=suggestion_id
+        )
+        blocks = person_panel.wired(self._person_blocks)
+        return await self._tracked(
+            person_panel.dismiss_suggestion(blocks, named, suggestion),
+            "dismiss_person_suggestion",
+            checked=True,
+        )
+
+    def _person_ids(self, method: str, person_id: str, **record: str) -> tuple[str, str]:
+        """A person-model write's two ids, validated verbatim and measured (ADR-0338 §10:4).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If an id is blank or unwritable.
+            OversizedValueError: If the arguments exceed the limit.
+        """
+        self._reject_if_closing()
+        named = non_blank_text(person_id, name="person_id")
+        ((name, value),) = record.items()
+        other = non_blank_text(value, name=name)
+        check_arguments(method, max_bytes=self._max_payload_bytes, person_id=named, **{name: other})
+        return named, other
 
     async def guard(self, record_id: Identifier) -> Placement | None:
         """Keep the record ``record_id`` names for the owner alone (ADR-0217 §7).

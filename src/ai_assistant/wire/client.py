@@ -74,6 +74,8 @@ from ai_assistant.core.types import (
     check_chat_position,
     check_story_page,
     checked_chat_devices,
+    profile_field,
+    profile_value,
     secret_value,
     story_members,
     story_move_members,
@@ -139,7 +141,10 @@ if TYPE_CHECKING:
         NotificationPreferences,
         PendingCandidate,
         PermissionDecision,
+        PersonModelEdit,
+        PersonModelView,
         Placement,
+        ProfileField,
         RecordedInvocation,
         SecretValue,
         SourceGrant,
@@ -656,6 +661,130 @@ class HubClient:
             The pending candidates, the most recent episode's first.
         """
         return await self._call("pending_candidates")  # type: ignore[no-any-return]
+
+    # --- the person model, for the panels (ADR-0338 §8:1-§8:3) -------------
+    #
+    # Each id is refused blank or unwritable here and sent **verbatim** (ADR-0338
+    # §10:4), and ``set_profile_field``'s field and value are refused here as the hub
+    # refuses them, before the socket is opened (ADR-0085 §9). Whether the hub keeps a
+    # person model is the hub's switch: where it is off, the hub answers each with
+    # ``PersonModelOffError``. Each sits in the route table's command row, so a device
+    # without the command role is refused by the hub before dispatch (§8:3).
+
+    async def person_model(self, person_id: NonBlankEncodableText) -> PersonModelView | None:
+        """One person's model, as the About you panel shows it (ADR-0338 §8:1).
+
+        Args:
+            person_id: The person, by id.
+
+        Returns:
+            Their model, or ``None`` where the hub holds no such person.
+        """
+        named = non_blank_text(person_id, name="person_id")
+        return await self._call("person_model", person_id=named)  # type: ignore[no-any-return]
+
+    async def set_profile_field(
+        self,
+        person_id: NonBlankEncodableText,
+        *,
+        field: ProfileField,
+        value: EncodableText | None = None,
+    ) -> PersonModelEdit:
+        """Set or clear one of a person's fields, on the panel (ADR-0338 §3).
+
+        Args:
+            person_id: Whose field.
+            field: Which field.
+            value: Its new value, or ``None`` to clear it.
+
+        Returns:
+            The hub's store's write.
+        """
+        named = non_blank_text(person_id, name="person_id")
+        which = profile_field(field)
+        held = profile_value(value)
+        return await self._call(  # type: ignore[no-any-return]
+            "set_profile_field", person_id=named, field=which, value=held
+        )
+
+    async def pin_memory(
+        self, person_id: NonBlankEncodableText, *, memory_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Pin a memory, through the hub's one checked pin (ADR-0338 §4:2, §6:3).
+
+        Args:
+            person_id: Whose pin.
+            memory_id: The memory, by id.
+
+        Returns:
+            The refusal before any write, or the store's write.
+        """
+        named, other = _person_ids(person_id, memory_id, name="memory_id")
+        return await self._call("pin_memory", person_id=named, memory_id=other)  # type: ignore[no-any-return]
+
+    async def unpin_memory(
+        self, person_id: NonBlankEncodableText, *, memory_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Unpin a memory, erasing nothing (ADR-0338 §4:7).
+
+        Args:
+            person_id: Whose pins.
+            memory_id: The memory, by id.
+
+        Returns:
+            The store's write.
+        """
+        named, other = _person_ids(person_id, memory_id, name="memory_id")
+        return await self._call("unpin_memory", person_id=named, memory_id=other)  # type: ignore[no-any-return]
+
+    async def remove_style_mark(
+        self, person_id: NonBlankEncodableText, *, mark_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Remove a style mark (ADR-0338 §5:3).
+
+        Args:
+            person_id: Whose mark.
+            mark_id: The mark, by id.
+
+        Returns:
+            The store's write.
+        """
+        named, other = _person_ids(person_id, mark_id, name="mark_id")
+        return await self._call("remove_style_mark", person_id=named, mark_id=other)  # type: ignore[no-any-return]
+
+    async def accept_person_suggestion(
+        self, person_id: NonBlankEncodableText, *, suggestion_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Accept a pending suggestion (ADR-0338 §8:8, §9:2, §9:5).
+
+        Args:
+            person_id: Whose.
+            suggestion_id: The suggestion, by id.
+
+        Returns:
+            The store's write, or a pin suggestion's refusal before any write.
+        """
+        named, other = _person_ids(person_id, suggestion_id, name="suggestion_id")
+        return await self._call(  # type: ignore[no-any-return]
+            "accept_person_suggestion", person_id=named, suggestion_id=other
+        )
+
+    async def dismiss_person_suggestion(
+        self, person_id: NonBlankEncodableText, *, suggestion_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Dismiss a pending suggestion (ADR-0338 §9:2, §12).
+
+        Args:
+            person_id: Whose.
+            suggestion_id: The suggestion, by id.
+
+        Returns:
+            The store's write.
+        """
+        named, other = _person_ids(person_id, suggestion_id, name="suggestion_id")
+        return await self._call(  # type: ignore[no-any-return]
+            "dismiss_person_suggestion", person_id=named, suggestion_id=other
+        )
 
     async def guard(self, record_id: Identifier) -> Placement | None:
         """Keep one belief for the owner alone (ADR-0217 §7).
@@ -1988,3 +2117,8 @@ async def hang_up(writer: asyncio.StreamWriter) -> None:
     writer.close()
     with contextlib.suppress(Exception, asyncio.CancelledError):
         await writer.wait_closed()
+
+
+def _person_ids(person_id: str, record_id: str, *, name: str) -> tuple[str, str]:
+    """A person-model write's two ids, refused blank or unwritable and kept verbatim."""
+    return non_blank_text(person_id, name="person_id"), non_blank_text(record_id, name=name)
