@@ -21,9 +21,11 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from itertools import count
 from typing import TYPE_CHECKING, Final, Protocol
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from ai_assistant.core.errors import PersonModelStoreError
 from ai_assistant.core.protocols import PersonModelStore
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -314,6 +316,37 @@ class PersonModelStoreContract:
 
         assert refused.refusal is PersonModelRefusal.INVALID_ACT
         assert (await owner(store)).changes == ()
+
+    async def test_a_clock_reading_it_cannot_record_fails_the_write_and_changes_nothing(
+        self, factory: PersonModelStoreFactory
+    ) -> None:
+        """§10:2's one step: a refused reading is a store fault raised before any write."""
+        readings = iter([datetime(2026, 10, 21, 9, 0, tzinfo=UTC)] * 2)
+        store = factory(
+            field_chars=FIELD_CHARS,
+            now=lambda: next(readings, datetime(2026, 10, 21, 9, 5)),  # noqa: DTZ001 — the naive reading under test
+        )
+        await store.record_suggestion(
+            OWNER_PERSON_ID, field_suggestion(ProfileField.NAME, "Robin Vale")
+        )
+        before = await store.export()
+
+        with pytest.raises(PersonModelStoreError):
+            await store.set_field(OWNER_PERSON_ID, ProfileField.NAME, "Robin Vale", act=PANEL)
+
+        assert await store.export() == before
+
+    async def test_an_aware_reading_in_another_zone_is_recorded_in_utc(
+        self, factory: PersonModelStoreFactory
+    ) -> None:
+        lisbon = datetime(2026, 10, 21, 10, 0, tzinfo=ZoneInfo("Europe/Lisbon"))
+        store = factory(field_chars=FIELD_CHARS, now=lambda: lisbon)
+
+        await store.set_field(OWNER_PERSON_ID, ProfileField.NAME, "Robin Vale", act=PANEL)
+
+        [change] = (await owner(store)).changes
+        assert change.at == lisbon
+        assert change.at.utcoffset() == timedelta(0)
 
     # --- pins (§4:1-§4:2, §4:7) ------------------------------------------------------
 

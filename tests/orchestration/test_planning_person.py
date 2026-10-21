@@ -255,3 +255,19 @@ async def test_without_suggestions_the_instruction_says_nothing_of_them() -> Non
     instruction = completer.last_call.messages[0].content
     assert "never recite it" in instruction
     assert "set_profile" not in instruction
+
+
+async def test_a_kept_memory_is_shown_whole_however_long_beside_the_excerpt_bound() -> None:
+    """§6:1: the slot's budget bounds its wordings, so none is cut to the excerpt bound."""
+    stage, completer, _ = _stage()
+    long = memory("m:long", "x" * 250 + " Must avoid all nuts.", said_support(when=AT, added_at=AT))
+    block = PersonBlock(
+        person_id=OWNER_PERSON_ID,
+        profile=Profile(),
+        kept=(KeptInMind(memory=long, pinned=True),),
+    )
+
+    await stage.plan(_inputs(person=block))
+
+    [kept] = _sent(completer)["person"]["kept_in_mind"]
+    assert kept["fact"] == long.content
