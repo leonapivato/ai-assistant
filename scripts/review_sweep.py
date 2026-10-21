@@ -84,8 +84,11 @@ renames the artifact into place a few filesystem operations later, so for that
 instant a live round's parts are an orphan here; the hour is what keeps a sweep
 that lands in the instant from archiving them out from under the verdict about
 to appear beside them. The same rule covers a ``<stem>.partial.<pid>`` staging
-directory an interrupted install stranded. Nothing that is not a plain
-directory is touched: what this cannot classify, it keeps.
+directory an interrupted install stranded. Archived, an orphan lands under
+``archive/orphaned-parts/``, never ``archive/parts/``: nothing records which
+archived recording of its stem it belonged to, so it is not filed beside one.
+Nothing that is not a plain directory is touched: what this cannot classify, it
+keeps.
 
 **A parts directory is acted on only once it is proved to be the one
 classified.** A round can install parts at a stem between the classification
@@ -125,6 +128,10 @@ ARCHIVE_DIR = "archive"
 DISPOSITIONS_DIR = "dispositions"
 #: A parted round's part messages, one directory per artifact stem (ADR-0331 §5:11).
 PARTS_DIR = "parts"
+#: Where a parts directory with no artifact is archived: apart from
+#: `archive/parts/`, whose names pair a directory with an archived artifact, since
+#: nothing records which archived recording an orphan belonged to.
+ORPHANS_DIR = "orphaned-parts"
 #: How long a parts directory with no artifact must sit unchanged before it is
 #: swept: far longer than the instant between `codex-review.sh` installing a
 #: round's parts and renaming its artifact into place.
@@ -566,9 +573,8 @@ def archive_plan(
 
     Args:
         paths: The files being swept, each under ``review``, and then any parts
-            directory being swept on its own. Every artifact precedes those
-            directories, so the names its companion takes are reserved before
-            they are planned.
+            directory being swept on its own — an orphan, which lands under
+            ``archive/orphaned-parts/`` rather than beside any archived artifact.
         review: The review directory.
         companions: Each swept artifact's parts directory, keyed on the artifact.
 
@@ -590,6 +596,9 @@ def archive_plan(
     plan: list[tuple[Path, Path]] = []
     for path in paths:
         destination = archive / path.relative_to(review)
+        if path.parent == review / PARTS_DIR:
+            # A parts directory swept on its own is an orphan; see ORPHANS_DIR.
+            destination = archive / ORPHANS_DIR / path.name
         stem, suffix = destination.stem, destination.suffix
         companion = companions.get(path)
         ordinal = 1
@@ -710,20 +719,39 @@ def _claim(part: PartsVerdict) -> Path | None:
         _move_directory(part.path, held)
     except FileNotFoundError:
         return None
-    status = held.lstat()
+    try:
+        status = held.lstat()
+    except OSError:
+        # Unproved is not proved: put it back at its own name, so the caller can
+        # put its artifact back beside it, and fail as any other OSError here.
+        _give_back(part, held)
+        raise
     if (status.st_dev, status.st_ino) == part.identity:
         return held
-    try:
-        _move_directory(held, part.path)
-    except OSError as exc:
-        raise SweepError(
-            f"{PARTS_DIR}/{part.path.name}/ changed after it was classified, and it could "
-            f"not be put back: it is at {held}. Move it back by hand. ({exc})"
-        ) from exc
+    _give_back(part, held)
     raise SweepError(
         f"{PARTS_DIR}/{part.path.name}/ changed after it was classified — a review round "
         f"installed it meanwhile — so it was left where it is. Run the sweep again."
     )
+
+
+def _give_back(part: PartsVerdict, held: Path) -> None:
+    """Return a claimed parts directory to the name it was claimed from.
+
+    Args:
+        part: The parts directory, as classified.
+        held: Where :func:`_claim` holds it.
+
+    Raises:
+        SweepError: If it cannot be returned, naming where it is.
+    """
+    try:
+        _move_directory(held, part.path)
+    except OSError as exc:
+        raise SweepError(
+            f"{PARTS_DIR}/{part.path.name}/ could not be put back after it was claimed: it "
+            f"is at {held}. Move it back to {part.path} by hand. ({exc})"
+        ) from exc
 
 
 def _act(
@@ -990,9 +1018,8 @@ def _sweep_review(repo: Path, review: Path, *, delete: bool, dry_run: bool) -> N
     parts = classify_parts(review, verdicts, time.time())
     companions = {p.artifact: p.path for p in parts if p.swept and p.artifact is not None}
     orphans = [p.path for p in parts if p.swept and p.artifact is None]
-    # The orphans last: `archive_plan` reserves each artifact's companion name
-    # before it plans the orphans that must avoid it, and puts each companion
-    # directly after its artifact, which is what `_act` treats as one step.
+    # `archive_plan` puts each companion directly after its artifact, which is
+    # what `_act` treats as one step; the orphans, unpaired, go last.
     files = [v.path for v in swept] + snapshots
     if delete:
         plan: list[tuple[Path, Path]] = []
