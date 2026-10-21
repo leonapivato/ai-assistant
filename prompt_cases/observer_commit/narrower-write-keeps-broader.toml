@@ -1,0 +1,53 @@
+# The user restates one half of an allergy a current memory already holds whole. Replacing
+# or ending that memory with the narrower claim would lose the other allergy from current
+# memory, so the memory stays: the part adds to it, or nothing changes.
+prompt = "observer_commit"
+guards = "narrower_write_loses_fact"
+came_from = "2026-10-21"
+set = "development"
+samples = 3
+
+[property]
+check = "memory_kept"
+memory = "M1"
+
+[[input.messages]]
+role = "user"
+content = '''
+{
+  "claim": "The user is allergic to peanuts.",
+  "under_review": "E1",
+  "parts": [
+    {
+      "part": "P1",
+      "exchange": "E1",
+      "occurred_at": "2026-07-19T11:02:00+00:00",
+      "from": "the user",
+      "outside": false,
+      "at": null,
+      "text": "remember I'm allergic to peanuts, so skip anywhere that does satay"
+    }
+  ],
+  "memories": [
+    {
+      "memory": "M1",
+      "claim": "The user is allergic to peanuts and to shellfish.",
+      "stands": "you said it",
+      "status": "current",
+      "supports": [
+        {
+          "exchange": "E2",
+          "occurred_at": "2026-04-02T19:44:00+00:00",
+          "from": "the user",
+          "outside": false,
+          "direction": "for",
+          "backs_as_worded": true,
+          "counted": true,
+          "at": null,
+          "text": "I can't have peanuts or shellfish, I'm allergic to both"
+        }
+      ],
+      "open_questions": []
+    }
+  ]
+}'''
