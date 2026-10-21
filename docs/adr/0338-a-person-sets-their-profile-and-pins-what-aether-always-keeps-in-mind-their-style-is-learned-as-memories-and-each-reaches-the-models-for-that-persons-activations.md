@@ -249,11 +249,11 @@ standing commitment, the people someone lives with. The person chooses them by p
 > is `sure`. Its `when` is the instant the pin was made, and it carries no about-when and no
 > source details.
 
-> **Normative.** A `pinned` support is added only to the memory its pin was made on, only
-> while that memory is current, and only where the person-model store holds the pin when the
-> support is added, whether or not it has been removed since: the confirmation is earned when
-> the pin is made. The observer's code checks all three before the write, in place of
-> ADR-0328 §4:7's check that a support's episode is held.
+> **Normative.** A `pinned` support is added only to the memory its pin was made on, and
+> only where the person-model store holds the pin when the support is added, whether or not
+> the pin has been removed since and whatever the memory's status has become since: the
+> confirmation is earned when the pin is made. The observer's code checks both before the
+> write, in place of ADR-0328 §4:7's check that a support's episode is held.
 
 > **Normative.** Only the observer adds a `pinned` support (§9:6).
 
@@ -344,9 +344,9 @@ The **kept-in-mind slot** is the part of the person block that holds memories: t
 > §15:6). A pinned memory that does enters the slot once its `pinned` support has put it in
 > band `ASSERTED`. The panel shows the memories the slot leaves out, and why.
 
-> **Normative.** The record rule (ADR-0217 §2) is applied to the slot's memories where the
-> block is assembled, ahead of understanding and planning, as it is applied to recall's
-> records.
+> **Normative.** The record rule (ADR-0217 §2) is applied to the slot's memories, and to the
+> memories of pin suggestions (§7:9), where the block is assembled, ahead of understanding
+> and planning, as it is applied to recall's records.
 
 **Why one budget, not a count (walk answer 3).** A count of 20 bounds nothing that matters:
 20 long memories cost as much as a hundred short ones. A budget bounds what every call pays.
@@ -395,6 +395,11 @@ person whose pins fill the budget sees, on the panel, which style memories were 
 > the person by name as a person would, not in every message. And it says to raise a
 > suggestion only where it bears on what is being done, and only by asking with a
 > `set_profile` or `pin` call. The wording is the template's.
+
+> **Normative.** A pin suggestion reaches planning with its memory, labelled as planning
+> labels a memory (ADR-0307 §5:1, ADR-0328 §15:5), and only where that memory is current,
+> does not rest on outside content (ADR-0328 §15:6) and passes the record rule (§6:5). Every
+> other pin suggestion is shown on the panel alone.
 
 Within a stage's data, the person block comes before the parts that change from round to
 round, so that it caches across rounds
@@ -496,17 +501,26 @@ Aether to remember something: only input that carries the user's authority appro
 > nowhere.
 
 > **Normative.** Each observer run, before its episodes, adds a `pinned` support (§4:4) for
-> every pin that a person made on their own profile, removed since or not, whose memory is
-> current, and which no support of that memory points at yet. It writes through the write
-> stage by ADR-0328 §11:3's operation member, one add support each, conditional on the
-> revision read, with no model call. A write that fails is tried again on the next run, and the pass counts toward
-> no model-call budget (ADR-0329 §16:9).
+> every pin that a person made on their own profile, removed since or not, whose memory the
+> store holds, and which no support of that memory points at yet. It writes through the
+> write stage by ADR-0328 §11:3's operation member, one add support each, conditional on the
+> revision read, with no model call. A write that fails is tried again on the next run, and
+> the pass counts toward no model-call budget (ADR-0329 §16:9).
 
 > **Normative.** The observer writes to the person-model store only suggestions and style
 > marks. It writes no field, no pin and no change-log entry.
 
 > **Normative.** The observer holds the person-model store by injection, beside what
 > ADR-0329 §15:1 names.
+
+> **Normative.** Before a write that ends, marks wrong or replaces a memory (ADR-0329 §12:4),
+> the observer adds the `pinned` support of every pin on that memory that lacks one, as the
+> pass of §9:6 does, and reads the memory again, so the retirement is ruled against the
+> standing the pins give it (ADR-0328 §6:5).
+
+> **Normative.** A retirement written while a pin on its memory was being made, before that
+> pin's support, stands. The pin's support is still added to the retired memory, and the pin
+> follows the successor (§4:8).
 
 A suggestion is a background finding, so it messages no one (ADR-0329 §13:6). It shows on
 the About you panel, and planning sees it in the person block (§7:3), where it is mentioned
@@ -606,13 +620,13 @@ Superseded in part. Every clause the middle column does not name stands:
 | ADR-0005 | §2's *not through separate stores or Protocols*, for the five fields alone: they are held in a store of their own, behind a Protocol of their own | §3:1, §10:1 |
 | ADR-0072 | §1's *no `UserProfile` type, no `UserProfileStore` Protocol, and no second collection of user facts*, and §8's first two declines (a `UserProfile` type or artifact; a second store or store Protocol), for the five fields alone. Pins and style marks point at memories and copy no fact, so they are no second collection | §3:1, §4:1, §5:3, §10:1–§10:3 |
 | ADR-0130 | §6:4's *read in `Settings.timezone`* and *no second timezone source is introduced*: quiet windows are read in the zone of the person they are for, and in `Settings.timezone` where that is empty | §3:6 |
-| ADR-0217 | §2:5's *no new site* half, for one further site alone: the kept-in-mind slot's memories, ahead of understanding and planning | §6:5 |
+| ADR-0217 | §2:5's *no new site* half, for one further site alone: the person block's memories, those of its kept-in-mind slot and of its pin suggestions, ahead of understanding and planning | §6:5 |
 | ADR-0276 | §1:5's *no retrieved memory* and *nothing else*, in the addition alone: the person block's five fields and pinned memories | §7:2 |
 | ADR-0281 | §7:2, in the addition alone: the person block's memories are labelled `M` first, the `recalled` section's numbering continues after them, and a recalled record the block shows is rendered there only | §7:7 |
 | ADR-0307 | §6:1, in the addition alone: the person block's five fields, its slot and the pending suggestions, with the current time given in the person's zone | §3:6, §7:3 |
 | ADR-0321 | §2:5 and §2:7, in the additions alone: a `pin` or `unpin` call's exact line shows the memory's wording in place of its label, and the test reads it as that argument; §4:4 and §4:17, in the additions alone: `set_profile`, `pin` and `unpin` as a source of *needs you* by rule | §8:5, §8:6 |
 | ADR-0328 | §4:1's points-at field and §4:2's origin table, in the additions alone: a pin as a part, and the origin `pinned`; §4:7, for that part alone: the pin is checked as held by the person-model store; §4:11 and §4:12, in the additions alone: code sets `sure` on a `pinned` support, and its `when` is the pin's instant | §4:4, §4:5 |
-| ADR-0329 | §8:1 and §9:3, in the additions alone: the five fields, read by the observer and given to both its steps; §9:1 and §9:4, in the additions alone: field suggestions, pin suggestions and style marks; §9:6, in the addition alone: a support pointing at a pin; §11:1, for a finding that only restates a field; §15:1, in the addition alone: the person-model store | §9:1–§9:6, §9:8 |
+| ADR-0329 | §8:1 and §9:3, in the additions alone: the five fields, read by the observer and given to both its steps; §9:1 and §9:4, in the additions alone: field suggestions, pin suggestions and style marks; §9:6, in the addition alone: a support pointing at a pin; §12:4, in the addition alone: a retiring write first adds its target's pending `pinned` supports; §11:1, for a finding that only restates a field; §15:1, in the addition alone: the person-model store | §9:1–§9:6, §9:8–§9:10 |
 
 Read through and not superseded:
 
