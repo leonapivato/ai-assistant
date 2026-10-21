@@ -1,6 +1,6 @@
 # 260. A forecast read is its own seam, at a provider the deployment configured, and what it mints carries the extent that makes it evidence
 
-- Status: Partially superseded by ADR-0272 (one scope. **The header's *Everything else of ADR-0247 binds entire* sentence, in the words *"and its trail check"* alone.** ADR-0247 §2's trail check admits a digest-free standing row only on a binding whose `closed_loop` is `True`, and §11 below keeps `closed_loop` the search kind's alone — so that sentence makes §6's own forecast `ALLOW` unrecordable, and `AuditTrail.record` refuses it. ADR-0272 §1 widens that one conjunct to *the binding carries its kind's own configured-provider fact*, exactly one of `closed_loop` and `forecast_reach` carried. **Everything else of that sentence binds entire** — §1's remaining clauses, §2's route (c) itself, §3's retirements as §6 restates their reach, §4's `closed_loop`, §5, §7, §8's (a′) to (d′), §9's unchanged list and §10's surface — and so does every other clause of this ADR: §6's widened route (c) and its three conjuncts, §7's bind-then-rule-then-record-then-send order, §11's `forecast_reach` with its restrictive default and its `closed_loop` is untouched clause, §12's three lanes and their order, and §13's arms) and ADR-0309 (§7–§10, the forecast read's place in the turn loop) and ADR-0319 (§3:4, §11:4, §12:3 and §13:5) and ADR-0320 (§2:1, §2:2 and §3:1) and ADR-0321 (§11:7's *`rebind` transcribes nothing new* and its untouched-count limb: an approved forecast read is rebound; §6:5's *destination trust is untouched* limb and §6:6's reliance on ADR-0193 §3 and §5: recipient grants and destination trust retire) and ADR-0324 (§1:4's closing of the route to planning, for the phases: the forecast read is offered as the weather channel's pull)
+- Status: Partially superseded by ADR-0272 (one scope. **The header's *Everything else of ADR-0247 binds entire* sentence, in the words *"and its trail check"* alone.** ADR-0247 §2's trail check admits a digest-free standing row only on a binding whose `closed_loop` is `True`, and §11 below keeps `closed_loop` the search kind's alone — so that sentence makes §6's own forecast `ALLOW` unrecordable, and `AuditTrail.record` refuses it. ADR-0272 §1 widens that one conjunct to *the binding carries its kind's own configured-provider fact*, exactly one of `closed_loop` and `forecast_reach` carried. **Everything else of that sentence binds entire** — §1's remaining clauses, §2's route (c) itself, §3's retirements as §6 restates their reach, §4's `closed_loop`, §5, §7, §8's (a′) to (d′), §9's unchanged list and §10's surface — and so does every other clause of this ADR: §6's widened route (c) and its three conjuncts, §7's bind-then-rule-then-record-then-send order, §11's `forecast_reach` with its restrictive default and its `closed_loop` is untouched clause, §12's three lanes and their order, and §13's arms) and ADR-0309 (§7–§10, the forecast read's place in the turn loop) and ADR-0319 (§3:4, §11:4, §12:3 and §13:5) and ADR-0320 (§2:1, §2:2 and §3:1) and ADR-0321 (§11:7's *`rebind` transcribes nothing new* and its untouched-count limb: an approved forecast read is rebound; §6:5's *destination trust is untouched* limb and §6:6's reliance on ADR-0193 §3 and §5: recipient grants and destination trust retire) and ADR-0324 (§1:4's closing of the route to planning, for the phases: the forecast read is offered as the weather channel's pull) and ADR-0344 (§4:3's *holds the credential*, *supplying an identity and a credential* and *a source needing no credential at all is a shape this corpus does not have*, §6:2's *before the credential is read* and its re-read limb, §12:5's and §12:6's reference-provider limbs, and §13:3's arm (c) in its credential limbs, each as it reaches the production forecaster, which is Open-Meteo's and keyless)
 - Date: 2026-09-15
 - **Partially supersedes**
   [ADR-0247](0247-the-configured-web-search-provider-is-the-destination-the-owner-chose-and-the-recipient-they-granted-and-the-call-budget-is-removed.md)
@@ -132,6 +132,18 @@
   takes effect on ratification of ADR-0324. This reciprocal header record accompanies the
   numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body
   below are preserved.
+- Partially superseded: 2026-10-21 by ADR-0344 — the production forecaster becomes
+  Open-Meteo's, reached through a keyless connection (ADR-0325), and the reference provider
+  leaves the tree. As they reach that forecaster: §4:3's *holds the credential*, its
+  *supplying an identity and a credential* and its *a source needing no credential at all
+  is a shape this corpus does not have*; §6:2's *before the credential is read*, which reads
+  as before the connection record's one read, and its re-read limb, which has no subject;
+  §12:5's and §12:6's reference-provider limbs; and §13:3's arm (c) in its credential
+  limbs (ADR-0344 §3, §8:4, §9). §4:3's *this contract never carries one*, §6:2's three
+  checks and their order, and every other clause stand. This replacement takes effect on
+  ratification of ADR-0344. This reciprocal header record accompanies the numbered draft
+  under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are
+  preserved.
 
 ## Context
 
