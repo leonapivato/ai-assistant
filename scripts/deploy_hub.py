@@ -83,6 +83,23 @@ the service user, which proves readability and integrity in one step — and
 refuses unless it matches the digest of the local file, which is the same digest
 the marker records.
 
+**``--delta`` sends only what changed.** The wheel carries vendored models and is
+hundreds of megabytes, and over a slow uplink a whole-file ``scp`` takes long
+enough, and fills the link fully enough, that the box looks down while it runs.
+Between two builds nearly every byte repeats. So ``--delta`` seeds the staged path
+with a wheel already on the box, the **base**, and ``rsync`` sends the difference
+onto it, at ``--bwlimit`` KB/s. Everything after the copy is unchanged. The staged
+file is digested against the local wheel as before, so a base that has nothing in
+common with the new build costs bandwidth and never correctness. After a
+successful install the deploy **keeps** the wheel it installed at ``--delta-keep``,
+one file in the login user's home, replaced each time, which is where the next
+``--delta`` deploy finds its base. The very first ``--delta`` deploy has no kept
+base, so ``--delta-base`` names a wheel already on the box. Asked for and not
+possible, the delta is **refused, never replaced by a whole-file copy**: no
+``rsync`` here or on the box, a base that is absent, empty or unreadable, or nowhere
+to keep the next one. All of it is checked before anything is built or stopped.
+Without ``--delta`` nothing about the deploy changes.
+
 **The data directory is backed up before anything installs** (ADR-0326 §6). A
 person's memory carries across every upgrade, and an upgrade cannot be undone by
 starting the earlier build on a directory the later one has served (ADR-0326
@@ -180,6 +197,21 @@ DEFAULT_MARKER = "~/DEPLOYED_COMMIT"
 DEFAULT_STAGE_DIR = "/tmp"  # noqa: S108  # world-readable by design: root writes, the service user reads
 #: The staging directory's name, before the per-run token is appended.
 _STAGE_PREFIX = "deploy-hub-"
+#: Where a ``--delta`` deploy keeps the wheel it installed, as the next one's base.
+#: In the **login** user's home, because that user stages and keeps it: the
+#: path survives a reboot, as ``/tmp`` need not, and needs no setup to write.
+DEFAULT_DELTA_KEEP = "~/deploy-hub/base.whl"
+#: ``rsync --bwlimit`` for ``--delta``, in KB/s: a rate that has left a 0.5 Mbps
+#: uplink usable while a wheel crossed it. ``0`` is rsync's "no limit".
+DEFAULT_BWLIMIT = 40
+#: How ``rsync`` sends the wheel under ``--delta``. ``-s`` sends the paths over
+#: rsync's own protocol instead of through the remote shell, so a path reaches the
+#: box as it was written: never split or expanded. That is why ``--delta``
+#: requires an absolute ``--stage-dir``: a ``~`` would arrive literally.
+#: ``--ignore-times`` because the seeded base can match the new wheel's size and
+#: modification time, and rsync's quick check would then skip the copy and leave
+#: the base in place. ``--no-whole-file`` because the delta is the point.
+_RSYNC_OPTIONS = ("-s", "--ignore-times", "--no-whole-file")
 #: Seconds to wait for ``hub_ready`` after the restart before calling it a failure.
 DEFAULT_READY_TIMEOUT = 60
 #: Seconds between journal polls while waiting for it.
@@ -949,6 +981,34 @@ def scp_command(host: str, ssh_user: str, local: Path, destination: str) -> list
     return ["scp", str(local), f"{ssh_user}@{host}:{remote_path(destination)}"]
 
 
+def rsync_command(
+    host: str, ssh_user: str, local: str, destination: str, bwlimit: int
+) -> list[str]:
+    """Return the local argv that sends the wheel as a delta onto the seeded base.
+
+    Args:
+        host: The box's hostname or address.
+        ssh_user: The login user ssh authenticates as.
+        local: The local wheel, an absolute path. rsync reads an argument with a
+            colon before its first slash as a remote one, so the path has to start
+            with a slash.
+        destination: The destination path on the box, absolute, and already
+            holding the base.
+        bwlimit: The bandwidth limit in KB/s, ``0`` for none.
+
+    Returns:
+        The argv. The destination is **not** shell-quoted: under ``-s`` no
+        remote shell reads it (:data:`_RSYNC_OPTIONS`).
+    """
+    return [
+        "rsync",
+        *_RSYNC_OPTIONS,
+        f"--bwlimit={bwlimit}",
+        local,
+        f"{ssh_user}@{host}:{destination}",
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # The plan                                                                     #
 # --------------------------------------------------------------------------- #
@@ -991,6 +1051,36 @@ class Plan:
         #: is what an operator looks for, and the token keeps two runs in one
         #: second apart, since the tool refuses a destination that exists.
         self.stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        #: Whether the wheel goes as an rsync delta onto a base already on the box,
+        #: rather than whole by `scp`. Only ever what `--delta` said.
+        self.delta: bool = bool(args.delta)
+
+    @property
+    def delta_keep(self) -> str:
+        """Where a ``--delta`` deploy keeps the wheel it installed, for the next one.
+
+        Returns:
+            The path on the box, in the login user's terms.
+        """
+        return str(self.args.delta_keep or DEFAULT_DELTA_KEEP)
+
+    @property
+    def delta_base(self) -> str:
+        """The wheel on the box this deploy sends its difference against.
+
+        Returns:
+            ``--delta-base`` when given, and otherwise the kept one.
+        """
+        return str(self.args.delta_base or self.delta_keep)
+
+    @property
+    def bwlimit(self) -> int:
+        """The rsync bandwidth limit, in KB/s.
+
+        Returns:
+            ``--bwlimit`` when given, and otherwise :data:`DEFAULT_BWLIMIT`.
+        """
+        return DEFAULT_BWLIMIT if self.args.bwlimit is None else int(self.args.bwlimit)
 
     @property
     def local(self) -> Path:
@@ -1220,9 +1310,67 @@ class Plan:
         """Return the argv that copies the wheel to the box.
 
         Returns:
-            The local argv.
+            The local argv: ``scp`` of the whole file, or under ``--delta`` the
+            rsync that sends its difference onto the base :meth:`seed` put there.
         """
+        if self.delta:
+            return rsync_command(
+                self.args.host, self.args.ssh_user, str(self.local), self.staged, self.bwlimit
+            )
         return scp_command(self.args.host, self.args.ssh_user, self.local, self.staged)
+
+    def probe_delta(self) -> str:
+        """Return the command that asks the box everything ``--delta`` depends on.
+
+        Run as the **login** user, who seeds, receives and keeps the wheel. Three
+        labelled answers: where ``rsync`` is (empty when it is not there), what the
+        base is (``usable`` only for a readable, non-empty regular file), and
+        whether the directory the next base is kept in exists and can be written.
+        That directory is created here when it is missing, which is the only change
+        the check makes, and it is the deploy's own.
+
+        Returns:
+            The remote command line.
+        """
+        base = remote_path(self.delta_base)
+        keep_dir = remote_path(str(PurePosixPath(self.delta_keep).parent))
+        return (
+            "printf 'DELTA_RSYNC=%s\\n' \"$(command -v rsync)\"; "
+            f"if [ ! -e {base} ]; then s=absent; elif [ ! -f {base} ]; then s=not-a-file; "
+            f"elif [ ! -r {base} ]; then s=unreadable; elif [ ! -s {base} ]; then s=empty; "
+            "else s=usable; fi; echo DELTA_BASE=$s; "
+            f"mkdir -p -m 0700 {keep_dir} 2>/dev/null; "
+            f"if [ -d {keep_dir} ] && [ -w {keep_dir} ]; then echo DELTA_KEEP=writable; "
+            "else echo DELTA_KEEP=unwritable; fi"
+        )
+
+    def seed(self) -> str:
+        """Return the command that puts the base where the wheel is about to land.
+
+        rsync sends a file's difference against the file already at its
+        destination, under that name. The base's name need not be the new wheel's,
+        so the base is copied to the staged path rather than named in place, and
+        the base itself is never written by the transfer.
+
+        Returns:
+            The remote command line, run as the login user.
+        """
+        return f"cp -- {remote_path(self.delta_base)} {remote_path(self.staged)}"
+
+    def keep_base(self) -> str:
+        """Return the command that keeps the installed wheel as the next base.
+
+        Copied to a neighbouring file and *renamed* over the kept one, as the
+        marker is, so the next deploy finds a whole earlier wheel or none, never
+        half of one.
+
+        Returns:
+            The remote command line, run as the login user.
+        """
+        keep = remote_path(self.delta_keep)
+        scratch = remote_path(f"{self.delta_keep}.{self.token}.tmp")
+        write = f"cp -- {remote_path(self.staged)} {scratch} && mv -f -- {scratch} {keep}"
+        return f"{{ {write}; }} || {{ rm -f -- {scratch}; exit 1; }}"
 
     def stage_requirements(self) -> list[str]:
         """Return the argv that copies the exported locked set beside the wheel.
@@ -1372,9 +1520,17 @@ class Plan:
             directory goes with ``rmdir`` rather than a recursive delete: it is
             an interpolated path, and the only things that should ever be in it
             are the files just removed — the wheel, and the locked set beside it
-            when this run shipped one.
+            when this run shipped one. Under ``--delta`` it also removes the
+            temporary file an rsync cut short can leave beside the wheel
+            (``.<wheel>.XXXXXX``): matched by ``find`` at depth one rather than by
+            a shell glob, which some shells refuse when it matches nothing.
         """
-        return f"rm -f {self._staged_files()} && rmdir {remote_path(self.stage_dir)}"
+        directory = remote_path(self.stage_dir)
+        remove = f"rm -f {self._staged_files()}"
+        if self.delta:
+            pattern = shlex.quote(f".{self.wheel}.*")
+            remove += f" && find {directory} -maxdepth 1 -type f -name {pattern} -exec rm -f {{}} +"
+        return f"{remove} && rmdir {directory}"
 
     def restart(self) -> str:
         """Return the restart command, which also prints the new invocation id.
@@ -1505,9 +1661,18 @@ def _mode_lines(plan: Plan, commit: str) -> list[str]:
     ]
     lines.extend(_step_lines(ssh_prefix, steps))
     lines.append("          (skipped, with no backup, on a first deploy: no build and no marker)")
+    if plan.delta:
+        lines.extend(_step_lines(ssh_prefix, [("delta?  ", plan.probe_delta())]))
+        lines.append(f"          (rsync here and on the box, the base {plan.delta_base}, and")
+        lines.append(f"          the directory of {plan.delta_keep}; refused, never sent whole)")
     lines.extend(_step_lines(ssh_prefix, [("stagedir", plan.make_stage_dir())]))
     staged = f"{args.ssh_user}@{args.host}:{plan.staged}"
-    lines.append(f"stage   : scp <the wheel above> {staged}")
+    if plan.delta:
+        lines.extend(_step_lines(ssh_prefix, [("seed    ", plan.seed())]))
+        rsync = " ".join([*_RSYNC_OPTIONS, f"--bwlimit={plan.bwlimit}"])
+        lines.append(f"stage   : rsync {rsync} <the wheel above> {staged}")
+    else:
+        lines.append(f"stage   : scp <the wheel above> {staged}")
     if plan.locked:
         requirements = f"{args.ssh_user}@{args.host}:{plan.staged_requirements}"
         lines.append(f"stage   : scp <the exported locked set> {requirements}")
@@ -1530,6 +1695,7 @@ def _mode_lines(plan: Plan, commit: str) -> list[str]:
             [
                 *([("unmark  ", plan.unmark(commit))] if plan.locked else []),
                 ("install ", plan.install()),
+                *([("keep    ", plan.keep_base())] if plan.delta else []),
                 ("unstage ", plan.unstage()),
                 ("marker! ", plan.write_marker(commit, "<sha256 of the built wheel>")),
                 ("restart ", plan.restart()),
@@ -2300,6 +2466,101 @@ def _restart_earlier_build(plan: Plan, ssh: Callable[[str], list[str]]) -> str:
     return "The hub was started again on its earlier build, and logged hub_ready."
 
 
+# --------------------------------------------------------------------------- #
+# The delta (--delta): only what changed crosses the link                      #
+# --------------------------------------------------------------------------- #
+
+
+#: What every refusal of ``--delta`` offers instead, since it never takes it itself.
+_DELTA_INSTEAD = "Deploy without --delta to send the whole wheel with scp."
+
+
+def _require_local_rsync() -> None:
+    """Refuse ``--delta`` on a machine with no ``rsync``, before the box is asked anything.
+
+    Raises:
+        DeployError: If ``rsync`` is not on this machine's PATH.
+    """
+    if shutil.which("rsync") is None:
+        raise DeployError(
+            "--delta sends the wheel with rsync, and there is no rsync on this machine's\n"
+            f"PATH. Install it, or: {_DELTA_INSTEAD}\n{_UNTOUCHED}"
+        )
+
+
+def _rule_on_delta(plan: Plan, ssh: Callable[[str], list[str]]) -> None:
+    """Refuse ``--delta`` where the box cannot take it, while nothing has been sent.
+
+    Args:
+        plan: The plan.
+        ssh: Wraps a remote command line as the local argv that runs it.
+
+    Raises:
+        DeployError: If the check could not run, the box has no ``rsync``, the
+            base is not a readable, non-empty file, or the next base could not be
+            kept.
+    """
+    status, out, error = _probe(ssh(plan.probe_delta()))
+    found = _labelled(out, "DELTA_RSYNC=")
+    base = _labelled(out, "DELTA_BASE=")
+    keep = _labelled(out, "DELTA_KEEP=")
+    if found is None or base is None or keep is None:
+        raise DeployError(
+            f"could not ask the box what --delta needs (exit {status}):\n"
+            f"{error.strip() or out.strip() or '(no output)'}\n{_UNTOUCHED}"
+        )
+    login = plan.args.ssh_user
+    if not found:
+        raise DeployError(
+            f"--delta sends the wheel with rsync, and {login} on {plan.args.host} has no\n"
+            f"rsync on its PATH. Install it there, or: {_DELTA_INSTEAD}\n{_UNTOUCHED}"
+        )
+    if base != "usable":
+        raise DeployError(
+            f"the base --delta sends the difference against, {plan.delta_base}, is {base}\n"
+            f"for {login} on the box. A deploy that kept none, the first one with --delta\n"
+            "among them, has to name a wheel already on the box with --delta-base; any\n"
+            f"earlier build will do, since the result is digested either way.\n"
+            f"Or: {_DELTA_INSTEAD}\n{_UNTOUCHED}"
+        )
+    if keep != "writable":
+        raise DeployError(
+            f"{login} cannot write the directory of {plan.delta_keep} on the box, so this\n"
+            "deploy could not keep the wheel it installs as the next deploy's base. Pass\n"
+            f"--delta-keep with a path it can write. Or: {_DELTA_INSTEAD}\n{_UNTOUCHED}"
+        )
+    print(
+        f"delta: sending the difference against {plan.delta_base} at {plan.bwlimit} KB/s\n"
+        f"       (0 is no limit); the installed wheel is kept at {plan.delta_keep}",
+        file=sys.stderr,
+    )
+
+
+def _keep_base(plan: Plan, ssh: Callable[[str], list[str]]) -> None:
+    """Keep the wheel just installed as the next deploy's base, best effort.
+
+    After the install a failure here must not fail a deploy that worked, so it
+    warns, as :func:`_discard_stage` does: the next ``--delta`` deploy then finds
+    the previous base, or none, and the cost is bandwidth.
+
+    Args:
+        plan: The plan.
+        ssh: Wraps a remote command line as the local argv that runs it.
+    """
+    try:
+        status, out, error = _probe(ssh(plan.keep_base()))
+    except DeployError as exc:  # ssh itself is unavailable
+        status, out, error = 1, "", str(exc)
+    if status != 0:
+        print(
+            f"warning: could not keep the installed wheel at {plan.delta_keep} on\n"
+            f"         {plan.args.host}: {(error or out).strip() or f'exit {status}'}\n"
+            "         The next --delta deploy sends its difference against an older\n"
+            "         base, or needs --delta-base.",
+            file=sys.stderr,
+        )
+
+
 def _deploy(plan: Plan, repo: Path, commit: str) -> None:
     """Run the deploy and verify it.
 
@@ -2316,6 +2577,8 @@ def _deploy(plan: Plan, repo: Path, commit: str) -> None:
     def ssh(remote: str) -> list[str]:
         return ssh_command(args.host, args.ssh_user, remote)
 
+    if plan.delta:
+        _require_local_rsync()
     before_marker = marker_body(_run_local(ssh(plan.read_marker())), plan.token)
     version_output = _run_local(ssh(plan.read_version()))
     before_version = version_output.strip()
@@ -2329,6 +2592,9 @@ def _deploy(plan: Plan, repo: Path, commit: str) -> None:
     # Ruled before anything is built, staged or stopped: a box that cannot take
     # the backup refuses the deploy while the hub is still serving.
     backup = _rule_on_backup(plan, before_marker, version_output, ssh)
+    if plan.delta:
+        # Likewise, and never answered by falling back to a whole-file scp.
+        _rule_on_delta(plan, ssh)
 
     with tempfile.TemporaryDirectory(prefix="deploy-hub-") as scratch:
         if plan.locked:
@@ -2376,6 +2642,32 @@ def build_wheel(repo: Path, out: Path) -> Path:
         names = ", ".join(w.name for w in wheels) or "nothing"
         raise DeployError(f"uv build --wheel produced {names}, not exactly one wheel")
     return wheels[0]
+
+
+def _stage(
+    plan: Plan, ssh: Callable[[str], list[str]], digest: str, requirements_digest: str | None
+) -> None:
+    """Put the wheel, and the locked set on a locked run, on the box and prove them.
+
+    Args:
+        plan: The plan.
+        ssh: Wraps a remote command line as the local argv that runs it.
+        digest: The sha256 of the local wheel.
+        requirements_digest: The sha256 of the exported locked set, on a locked run.
+
+    Raises:
+        DeployError: If a copy fails, or :func:`_assert_staged` refuses what landed.
+    """
+    if plan.delta:
+        _run_local(ssh(plan.seed()))
+    _run_local(plan.stage())
+    if plan.locked:
+        _run_local(plan.stage_requirements())
+    _run_local(ssh(plan.make_readable()))
+    # Unchanged under --delta, and the reason a base can never make a wrong install:
+    # whatever rsync left at the staged path is held to the local wheel's digest
+    # before anything stops.
+    _assert_staged(plan, digest, requirements_digest)
 
 
 def _install_and_verify(
@@ -2427,11 +2719,7 @@ def _install_and_verify(
     stopped = False
     try:
         try:
-            _run_local(plan.stage())
-            if plan.locked:
-                _run_local(plan.stage_requirements())
-            _run_local(ssh(plan.make_readable()))
-            _assert_staged(plan, digest, requirements_digest)
+            _stage(plan, ssh, digest, requirements_digest)
             if backup is not None:
                 # ADR-0326 §6:1. On a failure this has already started the hub
                 # again, and nothing below it has run.
@@ -2440,6 +2728,8 @@ def _install_and_verify(
             if plan.locked:
                 _run_local(ssh(plan.unmark(commit)))
             _run_local(ssh(plan.install()))
+            if plan.delta:
+                _keep_base(plan, ssh)
         finally:
             _discard_stage(plan)
         _run_local(ssh(plan.write_marker(commit, digest)))
@@ -2504,6 +2794,62 @@ def _deployed_commit(args: argparse.Namespace, repo: Path) -> str:
             "Recording HEAD for a wheel built elsewhere makes that answer wrong."
         )
     return resolve_commit(repo, args.wheel_commit)
+
+
+def _kbps(value: str) -> int:
+    """Parse ``--bwlimit``: a whole number of KB/s, ``0`` meaning no limit.
+
+    Args:
+        value: The argument as given.
+
+    Returns:
+        The limit.
+
+    Raises:
+        argparse.ArgumentTypeError: If it is not a non-negative integer.
+    """
+    try:
+        limit = int(value)
+    except ValueError:
+        limit = -1
+    if limit < 0:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a whole number of KB/s, 0 or more")
+    return limit
+
+
+def _check_delta_options(args: argparse.Namespace) -> None:
+    """Refuse a ``--delta`` setting that would be silently ignored or misread.
+
+    Args:
+        args: The parsed arguments.
+
+    Raises:
+        DeployError: If ``--delta-base``, ``--delta-keep`` or ``--bwlimit`` is given
+            without ``--delta``, which would otherwise send the whole wheel while
+            looking like a delta was asked for; or if ``--delta`` has a relative
+            ``--stage-dir``, which rsync would not expand (:data:`_RSYNC_OPTIONS`).
+    """
+    if not args.delta:
+        given = [
+            flag
+            for flag, value in (
+                ("--delta-base", args.delta_base),
+                ("--delta-keep", args.delta_keep),
+                ("--bwlimit", args.bwlimit),
+            )
+            if value is not None
+        ]
+        if given:
+            raise DeployError(
+                f"{', '.join(given)} only applies with --delta, and without it the wheel\n"
+                "goes whole by scp. Pass --delta, or leave it out."
+            )
+        return
+    if not PurePosixPath(args.stage_dir).is_absolute():
+        raise DeployError(
+            f"--delta needs an absolute --stage-dir, not {args.stage_dir}: rsync takes the\n"
+            "destination path as written, with no shell on the box to expand it."
+        )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -2580,6 +2926,34 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--delta",
+        action="store_true",
+        help=(
+            "send the wheel as an rsync delta against a wheel already on the box rather"
+            " than whole with scp; refused, never sent whole, when rsync or the base is"
+            " missing. Needs an absolute --stage-dir"
+        ),
+    )
+    parser.add_argument(
+        "--delta-base",
+        help=(
+            "with --delta: the wheel on the box to send the difference against, for a"
+            " box with none kept yet (default: the one --delta-keep names)"
+        ),
+    )
+    parser.add_argument(
+        "--delta-keep",
+        help=(
+            "with --delta: where the installed wheel is kept, replacing the last one, as"
+            f" the next deploy's base; the login user's path (default: {DEFAULT_DELTA_KEEP})"
+        ),
+    )
+    parser.add_argument(
+        "--bwlimit",
+        type=_kbps,
+        help=f"with --delta: rsync's limit in KB/s, 0 for none (default: {DEFAULT_BWLIMIT})",
+    )
+    parser.add_argument(
         "--allow-dirty", action="store_true", help="deploy an uncommitted tree, marked dirty"
     )
     parser.add_argument("--allow-earlier", action="store_true", help=ALLOW_EARLIER_HELP)
@@ -2600,6 +2974,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     args = _parser().parse_args(argv)
     try:
+        _check_delta_options(args)
         repo = Path(args.repo).resolve()
         # Only ever a *prediction*, used to render the plan and to name the file
         # on the box. A real run replaces it with the build's actual output.

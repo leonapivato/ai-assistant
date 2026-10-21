@@ -1182,6 +1182,13 @@ class _FakeBox:
         self.exports: list[Path | None] = []
         #: Remote path -> the bytes scp put there.
         self.staged: dict[str, bytes] = {}
+        #: Under --delta: what the box answers the delta check, the base it holds,
+        #: whether rsync really sends, and what the keep step left as the next base.
+        self.delta_probe = "DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=usable\nDELTA_KEEP=writable\n"
+        self.base = b"an earlier wheel"
+        self.rsync_sends = True
+        self.keep_status = 0
+        self.kept: bytes | None = None
 
     def run_local(self, argv: list[str], *, check: bool = True, cwd: Path | None = None) -> str:
         del check
@@ -1194,6 +1201,11 @@ class _FakeBox:
             Path(argv[argv.index("--output-file") + 1]).write_text(_LOCKED_SET)
         elif argv[0] == "scp":
             self.staged[argv[2].split(":", 1)[1]] = Path(argv[1]).read_bytes()
+        elif argv[0] == "rsync":
+            if self.rsync_sends:
+                self.staged[argv[-1].split(":", 1)[1]] = Path(argv[-2]).read_bytes()
+        elif self.plan.delta and self.plan.seed() in self.issued[-1]:
+            self.staged[self.plan.staged] = self.base
         else:
             return self._remote(self.issued[-1])
         return ""
@@ -1233,7 +1245,17 @@ class _FakeBox:
             return 0, "UNIT_STATE=active\n", ""
         if "journalctl" in text:
             return 0, "hub_ready jobs=[]\n", ""
-        return 0, "", ""
+        return self._delta(text) or (0, "", "")
+
+    def _delta(self, text: str) -> tuple[int, str, str] | None:
+        """Answer the delta check and the keep step, or ``None`` for anything else."""
+        if "DELTA_BASE=" in text:
+            return 0, f"Welcome\n{self.delta_probe}", ""
+        if not (self.plan.delta and self.plan.keep_base() in text):
+            return None
+        if self.keep_status == 0:
+            self.kept = self.staged[self.plan.staged]
+        return self.keep_status, "", "cp: No space left on device" * bool(self.keep_status)
 
     def installs(self) -> list[str]:
         return [command for command in self.issued if "pip install" in command]
@@ -2687,3 +2709,382 @@ def test_the_box_side_python_carries_no_single_quote(name: str) -> None:
     # Each crosses two shells inside single quotes; a quote in it would print in
     # the dry run as the '"'"' escaping nobody can check by eye.
     assert "'" not in getattr(_MODULE, name)
+
+
+# --------------------------------------------------------------------------- #
+# --delta: only what changed crosses the link, and nothing else changes        #
+# --------------------------------------------------------------------------- #
+
+
+_DELTA_LABELS = ("delta?  :", "seed    :", "keep    :")
+
+
+def _line_index(plan: str, needle: str) -> int:
+    return next(i for i, line in enumerate(plan.splitlines()) if needle in line)
+
+
+def test_without_delta_the_wheel_goes_whole_by_scp_as_before(tmp_path: Path) -> None:
+    plan = _dry_run(_repo(tmp_path))
+
+    assert "rsync" not in plan
+    assert not any(line.startswith(_DELTA_LABELS) for line in plan.splitlines())
+    assert "stage   : scp <the wheel above> root@hub.example:/tmp/deploy-hub-" in plan
+    assert "find " not in plan
+
+
+def test_the_delta_plan_checks_seeds_sends_the_difference_and_keeps_the_base(
+    tmp_path: Path,
+) -> None:
+    plan = _dry_run(_repo(tmp_path), "--delta")
+
+    for mode in plan.split("# otherwise"):
+        order = [
+            _line_index(mode, "delta?  :"),
+            _line_index(mode, "stagedir:"),
+            _line_index(mode, "seed    :"),
+            _line_index(mode, "stage   : rsync"),
+            _line_index(mode, "verify  :"),
+            _line_index(mode, "stop    :"),
+            _line_index(mode, "install :"),
+            _line_index(mode, "keep    :"),
+            _line_index(mode, "unstage :"),
+            _line_index(mode, "marker! :"),
+        ]
+        assert order == sorted(order), order
+        assert "scp <the wheel above>" not in mode
+    rsync = next(line for line in plan.splitlines() if line.startswith("stage   : rsync"))
+    assert "rsync -s --ignore-times --no-whole-file --bwlimit=40 <the wheel above> " in rsync
+    # The base is the kept one, seeded into this run's own staging directory, and the
+    # installed wheel replaces it through a scratch file renamed into place.
+    assert re.search(r"cp -- ~/deploy-hub/base\.whl /tmp/deploy-hub-[0-9a-f]+/w?", plan)
+    assert re.search(
+        r"mv -f -- ~/deploy-hub/base\.whl\.[0-9a-f]+\.tmp ~/deploy-hub/base\.whl;", plan
+    )
+    assert "mkdir -p -m 0700 ~/deploy-hub " in plan
+    # The digest check is the same check, as the service user, before the stop.
+    assert "su - assistant -c 'echo STAGED_SHA256=$(sha256sum " in plan
+    assert "rm -rf" not in plan
+
+
+def test_the_delta_settings_are_parameters(tmp_path: Path) -> None:
+    plan = _dry_run(
+        _repo(tmp_path),
+        "--delta",
+        "--delta-base",
+        "/srv/old builds/w.whl",
+        "--delta-keep",
+        "/srv/keep/base.whl",
+        "--bwlimit",
+        "0",
+    )
+
+    assert "--bwlimit=0 <the wheel above>" in plan
+    assert re.search(r"cp -- '/srv/old builds/w\.whl' /tmp/deploy-hub-", plan)
+    assert "[ ! -s '/srv/old builds/w.whl' ]" in plan
+    assert "mv -f -- /srv/keep/base.whl." in plan
+    assert "mkdir -p -m 0700 /srv/keep " in plan
+    assert "~/deploy-hub" not in plan
+
+
+@pytest.mark.parametrize(
+    "flag", [("--bwlimit", "10"), ("--delta-base", "/x"), ("--delta-keep", "/y")]
+)
+def test_a_delta_setting_without_delta_is_refused_not_ignored(
+    tmp_path: Path, flag: tuple[str, str]
+) -> None:
+    result = run("deploy_hub", ["hub.example", *flag, "--repo", str(_repo(tmp_path)), "--dry-run"])
+
+    assert result.returncode == 1
+    assert f"{flag[0]} only applies with --delta" in result.stderr
+
+
+@pytest.mark.parametrize("value", ["-1", "fast", "4.5"])
+def test_a_bandwidth_limit_is_a_whole_number_of_kb_per_second(tmp_path: Path, value: str) -> None:
+    result = run(
+        "deploy_hub",
+        ["hub.example", "--delta", "--bwlimit", value, "--repo", str(_repo(tmp_path)), "--dry-run"],
+    )
+
+    assert result.returncode == 2
+    assert "KB/s" in result.stderr
+
+
+def test_delta_refuses_a_stage_dir_rsync_would_not_expand(tmp_path: Path) -> None:
+    result = run(
+        "deploy_hub",
+        [
+            "hub.example",
+            "--delta",
+            "--stage-dir",
+            "~/stage",
+            "--repo",
+            str(_repo(tmp_path)),
+            "--dry-run",
+        ],
+    )
+
+    assert result.returncode == 1
+    assert "--delta needs an absolute --stage-dir" in result.stderr
+
+
+def test_the_rsync_destination_is_the_path_itself_not_shell_text(tmp_path: Path) -> None:
+    # Under -s no shell on the box reads it, so quoting it would put the quotes in
+    # the file name; the seed, which a shell does read, quotes the same path.
+    plan = _staged_plan(_repo(tmp_path))
+    plan.args.stage_dir, plan.delta = "/srv/stage dir", True
+
+    argv = plan.stage()
+
+    assert argv[:5] == ["rsync", "-s", "--ignore-times", "--no-whole-file", "--bwlimit=40"]
+    assert argv[-2] == str(plan.local)
+    assert argv[-1] == f"root@hub.example:/srv/stage dir/deploy-hub-{plan.token}/{plan.wheel}"
+    assert f"'/srv/stage dir/deploy-hub-{plan.token}/{plan.wheel}'" in plan.seed()
+
+
+def test_a_delta_dry_run_contacts_nothing(tmp_path: Path) -> None:
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    log = tmp_path / "called.log"
+    for name in ("ssh", "scp", "uv", "rsync"):
+        stub = shim / name
+        stub.write_text(f'#!/bin/sh\necho {name} >> "{log}"\n')
+        stub.chmod(0o755)
+    env = dict(os.environ, PATH=f"{shim}{os.pathsep}{os.environ['PATH']}")
+
+    result = run(
+        "deploy_hub",
+        ["hub.example", "--delta", "--repo", str(_repo(tmp_path)), "--dry-run"],
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not log.exists(), log.read_text()
+
+
+def _with_rsync(monkeypatch: pytest.MonkeyPatch, *, present: bool) -> None:
+    """Answer ``shutil.which("rsync")`` as asked, and every other name truthfully."""
+    which = shutil.which
+
+    def _which(name: str, *args: Any, **kwargs: Any) -> str | None:
+        if name == "rsync":
+            return "/usr/bin/rsync" if present else None
+        return which(name, *args, **kwargs)
+
+    monkeypatch.setattr(_MODULE.shutil, "which", _which)
+
+
+def _delta_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *args: str, **answers: Any
+) -> _FakeBox:
+    """Deploy a code-only change with --delta to a fake box answering ``answers``."""
+    repo = _repo(tmp_path)
+    deployed = _code_only(repo)
+    _with_rsync(monkeypatch, present=True)
+    box_init = _FakeBox.__init__
+
+    def _init(self: _FakeBox, *a: Any, **k: Any) -> None:
+        box_init(self, *a, **k)
+        for name, value in answers.items():
+            setattr(self, name, value)
+
+    monkeypatch.setattr(_FakeBox, "__init__", _init)
+    return _deploy_against(repo, monkeypatch, "--delta", *args, marker=f"commit={deployed}\n")
+
+
+def test_a_delta_deploy_sends_the_difference_and_keeps_what_it_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    box = _delta_box(tmp_path, monkeypatch)
+
+    wheel = b"the built wheel"
+    assert not any(c.startswith("scp ") for c in box.issued), box.issued
+    rsync = _index(box, "rsync -s ")
+    assert _index(box, "DELTA_BASE=") < _index(box, "uv build") < _index(box, "mkdir -m 0755")
+    assert _index(box, "mkdir -m 0755") < _index(box, box.plan.seed()) < rsync
+    assert rsync < _index(box, "sha256sum") < _index(box, "systemctl --user stop")
+    keep = _index(box, box.plan.keep_base())
+    assert _index(box, "pip install") < keep < _index(box, "rmdir") < _index(box, "commit=")
+    # What the box holds is the wheel, digested so; and it is what the next one starts from.
+    assert box.staged[box.plan.staged] == wheel
+    assert box.kept == wheel
+    assert "unit ai-assistant-hub is active and logged hub_ready" in capsys.readouterr().out
+
+
+def test_a_transfer_that_left_the_base_in_place_is_caught_by_the_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A base is only ever bandwidth: whatever the transfer leaves at the staged
+    # path is held to the local wheel's digest before anything stops.
+    with pytest.raises(_MODULE.DeployError, match="not the one that was sent"):
+        _delta_box(tmp_path, monkeypatch, rsync_sends=False)
+    box = _FakeBox.last
+
+    assert box.installs() == []
+    assert not any("systemctl --user stop" in c for c in box.issued)
+    assert box.kept is None
+    assert any("rmdir" in c for c in box.issued)
+
+
+@pytest.mark.parametrize(
+    ("answers", "message"),
+    [
+        ("DELTA_RSYNC=\nDELTA_BASE=usable\nDELTA_KEEP=writable\n", "has no\nrsync on its PATH"),
+        ("DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=absent\nDELTA_KEEP=writable\n", "is absent"),
+        ("DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=empty\nDELTA_KEEP=writable\n", "is empty"),
+        ("DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=not-a-file\nDELTA_KEEP=writable\n", "not-a-file"),
+        ("DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=unreadable\nDELTA_KEEP=writable\n", "unreadable"),
+        ("DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=usable\nDELTA_KEEP=unwritable\n", "cannot write"),
+        ("", "could not ask the box what --delta needs"),
+    ],
+)
+def test_a_delta_the_box_cannot_take_is_refused_before_anything_is_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answers: str, message: str
+) -> None:
+    with pytest.raises(_MODULE.DeployError, match=message) as refused:
+        _delta_box(tmp_path, monkeypatch, delta_probe=answers)
+    box = _FakeBox.last
+
+    # Never answered by sending the whole wheel instead: that is the operator's
+    # call, which a refusal the box answered names.
+    if answers:
+        assert "Deploy without --delta to send the whole wheel with scp." in str(refused.value)
+    assert _MODULE._UNTOUCHED in str(refused.value)
+    for step in ("uv build", "mkdir -m 0755", "scp ", "rsync -s", "systemctl --user stop"):
+        assert not any(step in c for c in box.issued), step
+
+
+def test_an_absent_base_names_the_way_to_give_a_first_delta_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answers = "DELTA_RSYNC=/usr/bin/rsync\nDELTA_BASE=absent\nDELTA_KEEP=writable\n"
+
+    with pytest.raises(_MODULE.DeployError, match="--delta-base") as refused:
+        _delta_box(tmp_path, monkeypatch, "--delta-base", "/srv/old.whl", delta_probe=answers)
+
+    assert "/srv/old.whl, is absent" in str(refused.value)
+    assert "/srv/old.whl" in _index_text(_FakeBox.last, "DELTA_BASE=")
+
+
+def _index_text(box: _FakeBox, needle: str) -> str:
+    return box.issued[_index(box, needle)]
+
+
+def test_no_local_rsync_is_refused_before_the_box_is_asked_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path)
+    deployed = _code_only(repo)
+    _with_rsync(monkeypatch, present=False)
+
+    with pytest.raises(_MODULE.DeployError, match="no rsync on this machine's\nPATH"):
+        _deploy_against(repo, monkeypatch, "--delta", marker=f"commit={deployed}\n")
+
+    assert _FakeBox.last.issued == []
+
+
+def test_a_base_that_could_not_be_kept_warns_and_the_deploy_stands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    box = _delta_box(tmp_path, monkeypatch, keep_status=1)
+
+    captured = capsys.readouterr()
+    assert "could not keep the installed wheel at ~/deploy-hub/base.whl" in captured.err
+    assert "No space left on device" in captured.err
+    assert "logged hub_ready" in captured.out
+    assert any("commit=" in c for c in box.issued)
+
+
+# --- The delta's commands, through a real shell and a real rsync ------------ #
+
+
+def _sh_login(command: str, env: dict[str, str]) -> tuple[int, str, str]:
+    """Run a command as the login user's shell would: no ``su``, in its home."""
+    shell = shutil.which("sh") or "/bin/sh"
+    completed = subprocess.run(  # noqa: S603  # fixed shell, test-built command
+        [shell, "-c", command],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=env["HOME"],
+        check=False,
+    )
+    return completed.returncode, completed.stdout, completed.stderr
+
+
+def _login_home(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    home = tmp_path / "root"
+    home.mkdir()
+    return home, {"HOME": str(home), "PATH": os.environ["PATH"]}
+
+
+def _delta_plan(tmp_path: Path, *args: str) -> Any:
+    stage = tmp_path / "stage dir"
+    stage.mkdir()
+    return _plan(_repo(tmp_path), "--delta", "--stage-dir", str(stage), *args)
+
+
+@_NEEDS_SHELL
+def test_the_real_delta_check_reads_the_base_and_makes_the_keep_directory(tmp_path: Path) -> None:
+    home, env = _login_home(tmp_path)
+    plan = _delta_plan(tmp_path)
+
+    first = _sh_login(plan.probe_delta(), env)
+    (home / "deploy-hub" / "base.whl").write_bytes(b"")
+    empty = _sh_login(plan.probe_delta(), env)
+    (home / "deploy-hub" / "base.whl").write_bytes(b"an earlier wheel")
+    usable = _sh_login(plan.probe_delta(), env)
+
+    assert _MODULE._labelled(first[1], "DELTA_BASE=") == "absent"
+    assert _MODULE._labelled(empty[1], "DELTA_BASE=") == "empty"
+    assert _MODULE._labelled(usable[1], "DELTA_BASE=") == "usable"
+    assert _MODULE._labelled(usable[1], "DELTA_KEEP=") == "writable"
+    assert (home / "deploy-hub").stat().st_mode & 0o777 == 0o700
+    assert _MODULE._labelled(usable[1], "DELTA_RSYNC=") == (shutil.which("rsync") or "")
+
+
+@_NEEDS_SHELL
+def test_the_real_seed_keep_and_unstage_leave_one_base_and_no_stage(tmp_path: Path) -> None:
+    home, env = _login_home(tmp_path)
+    plan = _delta_plan(tmp_path)
+    (home / "deploy-hub").mkdir()
+    (home / "deploy-hub" / "base.whl").write_bytes(b"an earlier wheel")
+    stage = Path(plan.stage_dir)
+
+    assert _sh_login(plan.make_stage_dir(), env)[0] == 0
+    assert _sh_login(plan.seed(), env)[0] == 0
+    assert (stage / plan.wheel).read_bytes() == b"an earlier wheel"
+    (stage / plan.wheel).write_bytes(b"the new wheel")
+    # What an rsync cut short leaves beside the wheel.
+    (stage / f".{plan.wheel}.Ab12Cd").write_bytes(b"half")
+    assert _sh_login(plan.keep_base(), env)[0] == 0
+    assert _sh_login(plan.unstage(), env)[0] == 0
+
+    assert (home / "deploy-hub" / "base.whl").read_bytes() == b"the new wheel"
+    assert sorted(p.name for p in (home / "deploy-hub").iterdir()) == ["base.whl"]
+    assert not stage.exists()
+
+
+@_NEEDS_SHELL
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync is not on PATH")
+def test_the_real_rsync_replaces_a_base_that_matches_in_size_and_time(tmp_path: Path) -> None:
+    # The quick check would leave such a base in place and call it sent. A remote
+    # shell that runs the far side here stands in for ssh.
+    rsh = tmp_path / "rsh"
+    rsh.write_text('#!/bin/sh\nif [ "$1" = "-l" ]; then shift 2; fi\nshift\nexec "$@"\n')
+    rsh.chmod(0o755)
+    plan = _delta_plan(tmp_path)
+    Path(plan.stage_dir).mkdir()
+    local = tmp_path / plan.wheel
+    local.write_bytes(b"the new wheel, one byte different: 1")
+    seeded = Path(plan.staged)
+    seeded.write_bytes(b"the new wheel, one byte different: 0")
+    stamp = local.stat().st_mtime_ns
+    os.utime(seeded, ns=(stamp, stamp))
+    plan.use(local)
+
+    completed = subprocess.run(  # noqa: S603  # the argv under test, a local stand-in for ssh
+        plan.stage(), env=dict(os.environ, RSYNC_RSH=str(rsh)), capture_output=True, check=False
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert seeded.read_bytes() == local.read_bytes()
