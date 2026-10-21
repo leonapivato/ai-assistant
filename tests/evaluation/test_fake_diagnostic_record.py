@@ -26,6 +26,10 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import DiagnosticEntry
 
 
+#: The sources whose entries go to a file of their own, beside the activation's.
+_SECOND = frozenset({DiagnosticSource.OBSERVER, DiagnosticSource.FOLLOW_UP})
+
+
 def _suspended[T: FakeDiagnosticSink | FakeDiagnosticRetention](
     subject: T,
 ) -> SuspendedMidWrite[T]:
@@ -45,10 +49,18 @@ class TestFakeDiagnosticSinkContract(DiagnosticSinkContract):
         return FakeDiagnosticSink()
 
     async def recorded(
-        self, sink: DiagnosticSink, activation_id: str
+        self,
+        sink: DiagnosticSink,
+        activation_id: str,
+        source: DiagnosticSource | None = None,
     ) -> tuple[DiagnosticEntry, ...]:
         assert isinstance(sink, FakeDiagnosticSink)
-        return tuple(one for one in sink.recorded if one.activation_id == activation_id)
+        return tuple(
+            one
+            for one in sink.recorded
+            if one.activation_id == activation_id
+            and (one.source is source if source is not None else one.source not in _SECOND)
+        )
 
     def failing_sink(self) -> DiagnosticSink:
         sink = FakeDiagnosticSink()

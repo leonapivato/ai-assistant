@@ -63,10 +63,21 @@ def _lines(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def _entries(directory: Path, activation_id: str) -> tuple[DiagnosticEntry, ...]:
-    if not plain_file_name(activation_id):
+#: The suffix of each file of its own a source writes to, beside the activation's.
+_SECOND_SUFFIXES = {
+    DiagnosticSource.OBSERVER: OBSERVER_SUFFIX,
+    DiagnosticSource.FOLLOW_UP: FOLLOW_UP_SUFFIX,
+}
+
+
+def _entries(
+    directory: Path, activation_id: str, source: DiagnosticSource | None = None
+) -> tuple[DiagnosticEntry, ...]:
+    """The entries of ``activation_id``'s own file, or of ``source``'s file beside it."""
+    if not plain_file_name(activation_id, source):
         return ()
-    path = directory / f"{activation_id}{SUFFIX}"
+    suffix = SUFFIX if source is None else _SECOND_SUFFIXES[source]
+    path = directory / f"{activation_id}{suffix}"
     if not path.exists():
         return ()
     return tuple(
@@ -111,10 +122,13 @@ class TestFileDiagnosticSinkContract(DiagnosticSinkContract):
         return FileDiagnosticRecord(directory=tmp_path / "diagnostics", file_bytes=_BOUND)
 
     async def recorded(
-        self, sink: DiagnosticSink, activation_id: str
+        self,
+        sink: DiagnosticSink,
+        activation_id: str,
+        source: DiagnosticSource | None = None,
     ) -> tuple[DiagnosticEntry, ...]:
         assert isinstance(sink, FileDiagnosticRecord)
-        return _entries(sink.directory, activation_id)
+        return _entries(sink.directory, activation_id, source)
 
     def failing_sink(self) -> DiagnosticSink:
         # A file where the directory should be: every write meets it.
