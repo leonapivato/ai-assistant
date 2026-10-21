@@ -453,7 +453,8 @@ The controller is unchanged, since the wait happens before admission.
     original, ADR-0335 §6).
   - Two limits of today's replay shape this plan:
     - Replay sends the settings the stage used (ADR-0335 §4:6). Varying effort needs that
-      clause amended, which the continuous-prompt-improvement proposal (#3236, titled for ADR-0337) also asks for.
+      clause amended, which the continuous-prompt-improvement proposal (#3236, titled
+      for ADR-0337) also asks for.
     - Replay continues nothing (ADR-0335 §4:10). It can measure a mode's per-call model and
       effort, but not its path: more rounds, a second recall, a new phase.
   - Path changes need either a whole-pass rerun over a copy, with reads answered from the
