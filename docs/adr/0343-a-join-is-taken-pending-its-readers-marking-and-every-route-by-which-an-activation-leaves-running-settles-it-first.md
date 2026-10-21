@@ -1,6 +1,6 @@
 # 343. A join is taken pending its reader's marking, and every route by which an activation leaves running settles it first
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-21
 - Scope: how ADR-0332's join (its §3:6) is ordered against the reader's marking of the joined messages (its §3:18). A join is taken pending that marking, and the activation commits, is taken over, ends and has its episode frozen only once each pending join is settled. A joined reply's quoted message and recall run again per understanding version are not decided here (§5).
 - Dependency: [ADR-0332](0332-activations-run-side-by-side-across-places-and-one-at-a-time-within-one-a-new-input-joins-the-running-activation-until-it-acts-and-a-place-waits-a-moment-before-it-starts.md), [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md), [ADR-0293](0293-the-hubs-chat-is-a-hosted-medium-and-a-conversation-keeps-its-own-transcript.md) and [ADR-0323](0323-a-telegram-chat-with-the-owners-bot-is-a-line-to-the-assistant-and-connecting-it-approves-what-the-line-carries.md), as their status lines leave them.
