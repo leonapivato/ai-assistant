@@ -116,6 +116,10 @@ invented; a **real** case is a call the owner's hub made.
 > and, for a planning call, its offered tools, in the form a given entry records them. It is
 > held in the case file, or in a JSON file beside it that the case names.
 
+> **Normative.** A case of the prompt `follow_up` instead holds the followed call's request
+> whole, its system message and its offered tools included, and the followed response, so that
+> its candidate is rendered as the request's last user message, as §6:3 has the hub send it.
+
 > **Normative.** A case's property is either a code check, named from the closed set the runner
 > declares, or `read`, which names what a person reading the reply looks for.
 
@@ -145,9 +149,10 @@ an instruction says.
 > **Normative.** The runner is a command of `scripts/prompt_replay.py`, `suite`, and is bound by
 > every clause of ADR-0335 that binds the tool except where this section says otherwise.
 
-> **Normative.** A suite run renders each case's system message from a candidate template, as
-> ADR-0335 §4:2–§4:5 have a replay render one, under the case's flags, and sends it with the
-> case's input as ADR-0335 §4:6–§4:8 have a replay send a recorded call.
+> **Normative.** A suite run renders from a candidate template each case's system message, or a
+> `follow_up` case's last user message (§3:5), as ADR-0335 §4:2–§4:5 have a replay render one,
+> under the case's flags, and sends it with the case's input as ADR-0335 §4:6–§4:8 have a
+> replay send a recorded call.
 
 > **Normative.** A suite run sends each case under the candidate and under the prompt's
 > current default from the checkout the tool runs from, which is the control, unless the
@@ -169,17 +174,19 @@ an instruction says.
 > record or case store, and may run on any machine, by the owner, the dispatcher or a lane the
 > dispatcher briefs.
 
-> **Normative.** The real cases live in one case store: a directory on the owner's hub's
-> server, outside every data directory and every copy, created readable by the hub's user
-> alone.
+> **Normative.** The real cases live in one case store: the directory `prompt_cases` in the
+> owner's hub's `Settings.data_dir`, created readable by the hub's user alone. The hub reads,
+> writes and deletes nothing in it; only the tool's `keep` and `suite` commands, and the
+> owner's deleting a case, write there.
 
 > **Normative.** The case store is Tier 1 under ADR-0004 §1 and stays on the owner's hub's
 > server: nothing copies it, or anything in it, to another machine, and it is read there, as
 > ADR-0314 §3:4 has the record read.
 
 > **Normative.** A command of the tool, `keep`, makes a real case from a given entry in a copy:
-> it takes the entry's messages after the system message and its offered tools unchanged, and
-> its flags as the entry records them or as the owner states them, and writes them with the
+> it takes the entry's messages after the system message and its offered tools unchanged, or
+> for a `follow_up` case the request whole and the response its returned entry records, and
+> the flags as the entry records them or as the owner states them, and writes them with the
 > property, samples, class and source the owner gives.
 
 > **Normative.** A real case is kept until the owner deletes it, by a command of the tool or
@@ -191,8 +198,10 @@ an instruction says.
 Only the owner, or the dispatcher at the owner's direction, runs a suite over real cases, on the
 server, as ADR-0335 §2:4 and §2:5 already have it; §4:7 widens only the synthetic run. A real
 case outlives the record's window by design: the failures most worth keeping are the ones the
-window would have deleted. The case store is in no backup, because it is in no data directory,
-and deleting the owner's data does not reach it; deleting it is the owner's own act.
+window would have deleted. The case store sits in the data directory so that deleting the
+owner's data destroys it with every other entry there (ADR-0126 §1:2), and a backup carries
+it as it carries the rest (ADR-0123), as ADR-0334 §5:3 has the prompts directory carried. The
+hub never writes it, so it is not a store under ADR-0326 §2:2 and owes no migration.
 
 ### 5. Repeated samples
 
@@ -243,6 +252,10 @@ asks after the answer, so it cannot change the answer, and it changes no reply's
 > **Normative.** A follow-up's answer is recorded and shown as text. Nothing acts on it, and no
 > tool it might propose is run.
 
+> **Normative.** A followed planning response is sent in the follow-up request whole, its
+> thinking included, so that the request stays one the provider accepts. That thinking reaches
+> the follow-up request, and a real `follow_up` case that keeps it, and nothing else.
+
 One answer on its own is a lead, not a finding: a model explaining itself after the fact
 rationalises, and a model asked to complain finds something. What counts is the same complaint
 across calls, or a complaint beside a failure found another way.
@@ -250,9 +263,11 @@ across calls, or a complaint beside a failure found another way.
 ### 7. The follow-up in the replay tool
 
 > **Normative.** A replay or a suite run may name the follow-up, and then sends it after every
-> response the run records, with the run's own candidate as the followed call's system
-> message, using the `follow_up` default from the package the tool runs from or a template file
-> the run names, checked as ADR-0335 §4:3 has every template checked.
+> response the run records, using the `follow_up` default from the package the tool runs from
+> or a template file the run names, checked as ADR-0335 §4:3 has every template checked.
+
+> **Normative.** Each follow-up the tool sends carries the request exactly as the response it
+> follows was sent, with that sample's own system message, the candidate's or the control's.
 
 > **Normative.** A follow-up the tool sends goes to the run's model through the same path as
 > the call it follows (ADR-0335 §4:6–§4:8), and its answer, or its failure, is written into
@@ -267,8 +282,9 @@ across calls, or a complaint beside a failure found another way.
 > refuses to start, before the API accepts a request, naming both settings.
 
 > **Normative.** `Settings` gains `follow_up_daily_calls`, an integer of at least zero whose
-> default is 100: the most follow-up calls the hub makes in any 24 hours. A follow-up the
-> budget does not admit is not asked, and nothing waits for it.
+> default is 100: the most follow-up calls the hub makes in any 24 hours of one run, counted
+> from zero when the hub starts. A follow-up the budget does not admit is not asked, and
+> nothing waits for it.
 
 > **Normative.** Where `follow_up_question` is true, the hub asks the follow-up of every
 > recorded call, as the budget admits: every model call whose given entry carries `prompt`
@@ -396,10 +412,10 @@ Superseded in part; every clause the middle column does not name stands:
 
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
-| ADR-0314 | §3:1, in the addition alone: the follow-up asker reads the entries a sink is handed and decides from them which calls to ask about, and its model calls carry them; §3:2, in the addition alone: a recorded call's request and response reach the follow-up call's prompt and its answer is kept in the record, and a recorded call's request, kept from a copy as a real case, reaches a model in a suite run and its replies are kept in the case store; §4's table, which §4:1 binds, in the addition alone: a row for `follow_up`, which writes a returned entry alone; §6:1, in the addition alone: an activation's follow-up entries are a further file, `<activation_id>.followup.jsonl`; §8:1's `DiagnosticSource` row, in the addition alone: the member `follow_up` | §4:2, §4:10, §6:3, §8:4–§8:6, §8:9, §8:12 |
+| ADR-0314 | §3:1, in the addition alone: the follow-up asker reads the entries a sink is handed and decides from them which calls to ask about, and its model calls carry them; §3:2, in the addition alone: a recorded call's request and response reach the follow-up call's prompt and its answer is kept in the record, and a recorded call's request, kept from a copy as a real case, reaches a model in a suite run and its replies are kept in the case store; §4's table, which §4:1 binds, in the addition alone: a row for `follow_up`, which writes a returned entry alone; §5:3, in the addition alone: a planning response's thinking reaches the follow-up request about it, and a real `follow_up` case that keeps it; §6:1, in the addition alone: an activation's follow-up entries are a further file, `<activation_id>.followup.jsonl`; §8:1's `DiagnosticSource` row, in the addition alone: the member `follow_up` | §4:2, §4:10, §6:3, §6:6, §8:4–§8:6, §8:9, §8:12 |
 | ADR-0333 | §3:1, in the addition alone: an entry whose source is `follow_up` goes to the follow-up file; §4:1, in the addition alone: the observer's recorded calls are read by the follow-up asker and reach the follow-up call, and a kept observer call reaches a model in a suite run, as for ADR-0314 §3:2; the observer itself still reads no entry | §4:2, §4:10, §8:5, §8:11, §8:12 |
 | ADR-0334 | §1:3, in the addition alone: for `follow_up`, the template is the request's last user message, and the system message is the followed call's own; §2:1, in the addition alone: a ninth prompt, `follow_up` | §6:1, §6:3 |
-| ADR-0335 | §2:4 and §2:5, in the addition alone: a suite run of synthetic cases alone runs on any machine, by the owner, the dispatcher or a lane the dispatcher briefs; §4:10, in the addition alone: a run sends each call as many times as it names, and may send the follow-up after each response; §6:1 and §6:2, in the addition alone: a result line for each sample, naming its sample, and carrying the follow-up's answer or failure where one was sent | §4:7, §5:4, §7:1, §7:2 |
+| ADR-0335 | §3:1, in the addition alone: the `keep` and `suite` commands, and the owner's deleting a case, read and write the live data directory's `prompt_cases` directory and nothing else in it; §2:4 and §2:5, in the addition alone: a suite run of synthetic cases alone runs on any machine, by the owner, the dispatcher or a lane the dispatcher briefs; §4:10, in the addition alone: a run sends each call as many times as it names, and may send the follow-up after each response; §6:1 and §6:2, in the addition alone: a result line for each sample, naming its sample, and carrying the follow-up's answer or failure where one was sent | §4:7, §4:8, §4:10, §5:4, §7:1–§7:3 |
 | ADR-0316 | §3:3 and §5:1, each in the addition alone: an activation's follow-up file, read by its name and never listed, with each answer shown beside the call it follows | §8:17 |
 
 Read through and not superseded:
@@ -410,6 +426,9 @@ Read through and not superseded:
 | ADR-0314 §3:3 | Nothing: the asker is handed a `DiagnosticSink` as every emitter is, and the store is handed to nothing |
 | ADR-0314 §3:4, ADR-0335 §3:5 | Nothing: copies and the case store stay on the server; only a synthetic suite run leaves it, and it reads no hub's data |
 | ADR-0335 §3:6 | Nothing: copies are deleted on its deadline; a real case is not a copy (§4:11) |
+| ADR-0004 §6, ADR-0126 §1:2 | Nothing: deleting the owner's data destroys the case store with every other entry of the data directory |
+| ADR-0123 | Nothing: a backup carries the case store as it carries the rest of the data directory |
+| ADR-0326 §2:2 | Nothing: the hub never writes the case store, so it is not a store |
 | ADR-0335 §2:6, ADR-0334 §6:2 | Nothing: no hosted hub's data is read, and hosted hubs run the shipped defaults |
 | ADR-0334 §6:1, §6:3, §7:1, §7:3, §7:5 | Nothing: overrides are placed by the owner or the dispatcher at the owner's direction, carry no entry text, are held to the ratified clauses, are promoted by a reviewed pull request and are cleared at deploy |
 | ADR-0334 §9:1 | Nothing: the suite is outside `tests/`, and a case asserts what a reply does, not what an instruction says |
@@ -439,8 +458,8 @@ Read through and not superseded:
 - `read` properties and follow-up answers are read by a person until a judge exists.
 - A rendered-request case goes stale when the code changes how it renders data; a stale case
   is rewritten, not trusted.
-- A real case keeps raw outside text and other people's words past the record's window, on
-  the owner's hub's server, until the owner deletes it.
+- A real case keeps raw outside text and other people's words past the record's window, in
+  the owner's hub's data directory and its backups, until the owner deletes it.
 - A promotion without the owner's review rests on the suite, the replays, the three days and
   the promotion review.
 
@@ -461,7 +480,7 @@ Read through and not superseded:
 | 11 | A confirm or reject control | Deferred (§10) |
 | 12 | A reason on a forget | Deferred (§10) |
 | 13 | A structured refusal signal | Deferred (§10) |
-| 14 | Seeding first | Decided: the seed lane is first (§1:3, §3:6) |
+| 14 | Seeding first | Decided: the seed lane is first (§1:3, §3:7) |
 
 **Lanes it implies**, each after this merges `Accepted`, the first before the rest (§1:3):
 1. The suite: `prompt_cases/` with its seed cases, the gate's form test, and the `suite` and
@@ -499,6 +518,9 @@ clean days and then showed a failure the suite had a case for.
 - **The case store on the dispatcher's machine, or in the repository.** Not chosen: the
   repository is public, and ADR-0314 §3:4 and ADR-0335 §3:5 keep the record and its copies on
   the server; superseding both is not needed for a first version.
+- **The case store outside the data directory.** Not chosen: deleting the owner's data
+  destroys the data directory and nothing outside it (ADR-0126 §1:4), so a Tier 1 store there
+  would escape the delete ADR-0004 §6 grants.
 - **Real cases deleted with the copy they came from.** Not chosen: the failures most worth
   keeping as cases are those the window deletes, and the case store holds the owner's hub's
   data on the owner's hub's server.
