@@ -1,6 +1,6 @@
 # 344. The forecast's first real provider is Open-Meteo, reached through a keyless connection, and it replaces the reference provider
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-21
 - Scope: `tools/`, the forecast integration: the Open-Meteo adapter ADR-0325 §6:1 defers as its first item, the records that item owes against ADR-0260, and the lanes that build it. Tracker: [#2396](https://github.com/leonapivato/ai-assistant/issues/2396), [#2513](https://github.com/leonapivato/ai-assistant/issues/2513), batch [#3113](https://github.com/leonapivato/ai-assistant/issues/3113).
 - Dependency: ADR-0260 as its status line leaves it, and ADR-0324 and ADR-0325, all on `main` at `c973d57a`.
