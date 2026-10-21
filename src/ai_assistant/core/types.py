@@ -4855,6 +4855,8 @@ class SupportOrigin(StrEnum):
     """A record stored before ADR-0328 that did (§16:4)."""
     OBSERVER_INFERENCE = "observer_inference"
     """An observer's inference, drawn in processing an episode (ADR-0329 §9:7)."""
+    PINNED = "pinned"
+    """A pin the person made on their own profile, which confirms the wording (ADR-0338 §4:4)."""
 
 
 class MemoryStanding(StrEnum):
@@ -4896,6 +4898,7 @@ _ORIGIN_STANDING: Final[dict[SupportOrigin, MemoryStanding]] = {
     SupportOrigin.LEGACY: MemoryStanding.INFERENCE,
     SupportOrigin.LEGACY_OUTSIDE: MemoryStanding.INFERENCE,
     SupportOrigin.OBSERVER_INFERENCE: MemoryStanding.INFERENCE,
+    SupportOrigin.PINNED: MemoryStanding.CONFIRMED,
 }
 
 #: §4's origin table: the origins that are outside content.
@@ -4912,6 +4915,11 @@ _OUTSIDE_ORIGINS: Final[frozenset[SupportOrigin]] = frozenset(
 #: §4:13: the origins that may carry source details.
 _SOURCE_DETAIL_ORIGINS: Final[frozenset[SupportOrigin]] = frozenset(
     {SupportOrigin.OUTSIDE_INPUT, SupportOrigin.EVIDENCE, SupportOrigin.LEGACY_OUTSIDE}
+)
+
+#: §4:11, with ADR-0338 §4:4: the origins code sets ``sure`` on.
+_SURE_ORIGINS: Final[frozenset[SupportOrigin]] = frozenset(
+    {SupportOrigin.CONFIRMATION, SupportOrigin.PINNED}
 )
 
 #: §4:11: the origins code leaves not judged.
@@ -5121,6 +5129,23 @@ class ObserverInferencePart(BaseModel):
     episode: EncodableText
 
 
+class PinPart(BaseModel):
+    """A pin the person made on their own profile, by the pin's id (ADR-0338 §4:4).
+
+    The part ADR-0338 adds to ADR-0328 §4's part table. It points into no episode: the
+    pin is held by the person-model store, which keeps it once it is removed, so a
+    support pointing at it still resolves (ADR-0338 §4:7). It copies nothing of the pin
+    or of its memory. Its support takes the origin ``pinned``, which ranks at "you
+    confirmed this wording" and is not outside. Whether the store holds the pin is the
+    observer's code's check before the write, in place of ADR-0328 §4:7's episode check
+    (ADR-0338 §4:5).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    part: Literal["pin"] = "pin"
+    pin: NonBlankEncodableText
+
+
 SupportPart = Annotated[
     InputPart
     | RoundMessagePart
@@ -5128,10 +5153,13 @@ SupportPart = Annotated[
     | ConfirmationPart
     | RememberCallPart
     | LegacyPart
-    | ObserverInferencePart,
+    | ObserverInferencePart
+    | PinPart,
     Field(discriminator="part"),
 ]
-"""The part one support points at (ADR-0328 §4's part table, with ADR-0329 §9:7's), by ``part``.
+"""The part one support points at, by ``part``.
+
+ADR-0328 §4's part table, with the parts ADR-0329 §9:7 and ADR-0338 §4:4 add to it.
 
 A frozen value, compared and hashed by its fields: a support is unique by its memory
 and the part it points at (§4:8), and an operation names the support it cites by
@@ -5149,11 +5177,17 @@ _PART_ORIGINS: Final[dict[str, frozenset[SupportOrigin]]] = {
     "remember_call": frozenset({SupportOrigin.REMEMBERED, SupportOrigin.REMEMBERED_OVER_OUTSIDE}),
     "legacy": frozenset({SupportOrigin.LEGACY, SupportOrigin.LEGACY_OUTSIDE}),
     "observer_inference": frozenset({SupportOrigin.OBSERVER_INFERENCE}),
+    "pin": frozenset({SupportOrigin.PINNED}),
 }
 
 
 def part_episode(part: SupportPart) -> str | None:
-    """The episode ``part`` points into, or ``None`` for a legacy record (ADR-0328 §4).
+    """The episode ``part`` points into, or ``None`` for a legacy record or a pin.
+
+    A legacy record points into no episode (ADR-0328 §4, §16:4), and neither does a pin,
+    which the person-model store holds (ADR-0338 §4:4): ADR-0328 §4:7's check that a
+    support's episode is held binds neither, and the observer's code checks the pin in
+    its place (ADR-0338 §4:5).
 
     Args:
         part: A support's part.
@@ -5161,7 +5195,7 @@ def part_episode(part: SupportPart) -> str | None:
     Returns:
         The episode's id exactly as held, or ``None``.
     """
-    return None if isinstance(part, LegacyPart) else part.episode
+    return None if isinstance(part, LegacyPart | PinPart) else part.episode
 
 
 def _support_origin_fault(support: MemorySupport) -> str | None:
@@ -5169,12 +5203,33 @@ def _support_origin_fault(support: MemorySupport) -> str | None:
     origin = support.origin
     if origin not in _PART_ORIGINS[support.points_at.part]:
         return f"a support pointing at a {support.points_at.part} part cannot take {origin}"
-    if origin is SupportOrigin.CONFIRMATION and support.how_sure is not ReadingCertainty.SURE:
-        return "a confirmation support is sure (ADR-0328 §4:11)"
+    if origin in _SURE_ORIGINS and support.how_sure is not ReadingCertainty.SURE:
+        return f"a {origin} support is sure (ADR-0328 §4:11, ADR-0338 §4:4)"
     if origin in _UNJUDGED_ORIGINS and support.how_sure is not None:
         return f"a {origin} support is not judged (ADR-0328 §4:11)"
     if support.source_details is not None and origin not in _SOURCE_DETAIL_ORIGINS:
         return f"a {origin} support carries no source details (ADR-0328 §4:13)"
+    if origin is SupportOrigin.PINNED:
+        return _pinned_support_fault(support)
+    return None
+
+
+def _pinned_support_fault(support: MemorySupport) -> str | None:
+    """Which of ADR-0338 §4:4's and §4:6's rules on a ``pinned`` support it breaks, if any.
+
+    It is ``for`` and backs the memory as worded, its ``when`` is the pin's instant and
+    it carries no about-when (§4:4), and the observer added it (§4:6). That ``when`` is
+    the instant of the pin the part names is the observer's code's to check, against
+    the person-model store, as it checks the pin is held (§4:5).
+    """
+    if support.direction is not SupportDirection.FOR or not support.backs_as_worded:
+        return "a pinned support is for its memory and backs it as worded (ADR-0338 §4:4)"
+    if support.when is None:
+        return "a pinned support's when is the instant the pin was made (ADR-0338 §4:4)"
+    if support.about_when is not None:
+        return "a pinned support carries no about-when (ADR-0338 §4:4)"
+    if support.added_by is not MemoryWriterName.OBSERVER:
+        return "only the observer adds a pinned support (ADR-0338 §4:6)"
     return None
 
 
@@ -15598,6 +15653,7 @@ class SupportView(BaseModel):
         "remember_call",
         "legacy",
         "observer_inference",
+        "pin",
     ]
     content: EncodableText | None = None
     origin: SupportOrigin

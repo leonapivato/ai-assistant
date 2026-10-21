@@ -6532,6 +6532,7 @@ _ORIGIN_WORDS: Final[dict[SupportOrigin, str]] = {
         "a record kept before memories had supports, resting on outside content"
     ),
     SupportOrigin.OBSERVER_INFERENCE: "my inference from the other supports",
+    SupportOrigin.PINNED: "your pin",
 }
 
 

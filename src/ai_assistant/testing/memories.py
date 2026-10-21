@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     MemorySupport,
     MemoryWriterName,
     ObserverInferencePart,
+    PinPart,
     QuestionPart,
     ReadingCertainty,
     RememberCallPart,
@@ -49,6 +50,7 @@ __all__ = [
     "memory",
     "memory_in_band",
     "message_support",
+    "pinned_support",
     "remembered_support",
     "said_support",
     "sourced_support",
@@ -302,6 +304,38 @@ def inference_support(
     )
 
 
+def pinned_support(
+    pin: str = "pin-1",
+    *,
+    when: datetime = AT,
+    added_at: datetime = AT,
+) -> MemorySupport:
+    """A support a pin earns: "you confirmed this wording", not outside (ADR-0338 §4:4).
+
+    ``for``, backing the memory as worded and ``sure``, added by the observer (§4:6),
+    with no about-when and no source details. ``when`` stands for the instant the pin
+    was made.
+
+    Args:
+        pin: The pin's id.
+        when: The instant the pin was made.
+        added_at: When the support was added.
+
+    Returns:
+        The support.
+    """
+    return MemorySupport(
+        points_at=PinPart(pin=pin),
+        origin=SupportOrigin.PINNED,
+        direction=SupportDirection.FOR,
+        backs_as_worded=True,
+        how_sure=ReadingCertainty.SURE,
+        when=when,
+        added_at=added_at,
+        added_by=MemoryWriterName.OBSERVER,
+    )
+
+
 def support_with_origin(  # noqa: PLR0911 — one arm per part §4's origin table names
     origin: SupportOrigin,
     *,
@@ -371,6 +405,8 @@ def support_with_origin(  # noqa: PLR0911 — one arm per part §4's origin tabl
             )
         case SupportOrigin.OBSERVER_INFERENCE:
             return inference_support(episode, when=when, added_at=added_at)
+        case SupportOrigin.PINNED:
+            return pinned_support(f"pin-{episode}", when=when or AT, added_at=added_at)
         case _:  # pragma: no cover - exhaustive
             assert_never(origin)
 

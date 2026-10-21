@@ -84,6 +84,7 @@ from ai_assistant.memory._channel_reads import (
 )
 from ai_assistant.memory._episode_format import (
     EPISODE_RECORD_FORMAT,
+    JOINED_RECORD_FORMAT,
     MEMORIES_RECORD_FORMAT,
     MEMORY_RECORD_FORMAT,
     MEMORY_RECORD_FORMATS,
@@ -556,6 +557,7 @@ class SqliteMemoryStore:
             self._migrate_walk_key(conn)
             self._upgrade_to_memories(conn, existing_format)
             self._upgrade_to_joined(conn, existing_format)
+            self._upgrade_to_pinned(conn, existing_format)
             self._index_channels(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
@@ -1049,6 +1051,33 @@ class SqliteMemoryStore:
         stage or a rule that did not exist. Nothing is rewritten, so nothing can be
         dropped (§4:4). What the label buys is §5:3's refusal: an older build, which
         reads 12 and 13, refuses a file whose records may carry what it would misread.
+        The label is :data:`JOINED_RECORD_FORMAT`, from which :meth:`_upgrade_to_pinned`
+        takes it on.
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which needs no upgrade, or a file already past this one.
+        """
+        if found is None or found >= JOINED_RECORD_FORMAT:
+            return
+        conn.execute("UPDATE episode_record_format SET version = ?", (JOINED_RECORD_FORMAT,))
+
+    @staticmethod
+    def _upgrade_to_pinned(conn: sqlite3.Connection, found: int | None) -> None:
+        """Upgrade a file at an earlier label to ADR-0338 §4:4's, in place.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, after
+        :meth:`_upgrade_to_joined` has carried a file at 13 to 14, so the upgrades chain
+        (ADR-0326 §4:5), and it completes or rolls back with the transaction (§4:3).
+
+        **The label alone advances.** A record written at 14 validates unchanged under
+        this build: no stored support names the ``pin`` part or the ``pinned`` origin,
+        which only this build admits, and every value one names keeps its meaning, its
+        standing and its band, so no ``band`` column moves. Nothing is rewritten, so
+        nothing can be dropped (§4:4). What the label buys is §5:3's refusal: an older
+        build, which reads 12 to 14, refuses a file whose memories may carry a pinned
+        support it would not read.
 
         Args:
             conn: The connection, inside :meth:`_setup`'s transaction.

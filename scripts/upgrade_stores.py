@@ -99,6 +99,7 @@ from ai_assistant.core.types import (
     PermissionRuling,
     PersonActHow,
     PersonModelAct,
+    PinPart,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -109,6 +110,7 @@ from ai_assistant.core.types import (
     Provenance,
     ProvisioningState,
     QuestionPart,
+    ReadingCertainty,
     ReadOutcome,
     RecordedChannelTrigger,
     RecordedInputMessage,
@@ -553,6 +555,42 @@ def _memory_record(
     )
 
 
+def _pinned_memory(episode: EpisodicMemory, moment: Moment) -> Memory:
+    """A memory the user said and then pinned, so a later base writes a pin's support.
+
+    The pin's support (ADR-0338 §4:4) is ``for``, backs the memory as worded, is
+    ``sure``, is dated at the pin's instant and was added by the observer (§4:6), so a
+    later build's upgrade check reads back the ``pin`` part and the ``pinned`` origin.
+    """
+    said = _support(InputPart(episode=episode.id), SupportOrigin.USER_MESSAGE, moment)
+    pinned = MemorySupport(
+        points_at=PinPart(pin="pin-upgrade"),
+        origin=SupportOrigin.PINNED,
+        direction=SupportDirection.FOR,
+        backs_as_worded=True,
+        how_sure=ReadingCertainty.SURE,
+        when=moment.ago(minutes=12),
+        added_at=moment.ago(minutes=11),
+        added_by=MemoryWriterName.OBSERVER,
+    )
+    created = _memory_record("mem-pinned", "The user is vegetarian.", said)
+    return Memory.model_validate(
+        created.model_dump()
+        | {
+            "supports": (said, pinned),
+            "operations": (
+                *created.operations,
+                MemoryOperation(
+                    kind=MemoryOperationKind.ADD_SUPPORT,
+                    cites=pinned.points_at,
+                    at=pinned.added_at,
+                    by=MemoryWriterName.OBSERVER,
+                ),
+            ),
+        }
+    )
+
+
 async def _write_memory(directory: Path, moment: Moment) -> None:
     traces = _traces(directory)
     store = _memory(directory, traces)
@@ -588,6 +626,7 @@ async def _write_memory(directory: Path, moment: Moment) -> None:
         )
         await store.add(episode)
         await store.add(_joined_episode(moment))
+        await store.add(_pinned_memory(episode, moment))
         chunk = await store.walk_records(_WALK, limit=2)
         if chunk.position is not None:
             await store.advance_walk(_WALK, position=chunk.position)
