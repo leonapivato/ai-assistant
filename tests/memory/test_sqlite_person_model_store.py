@@ -541,6 +541,45 @@ async def test_a_malformed_argument_is_a_value_error_before_any_read(
     assert before.persons
 
 
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda s: s.set_field(
+            OWNER_PERSON_ID,
+            ProfileField.NAME,
+            "Robin",
+            act=PANEL.model_copy(update={"by": ""}),
+        ),
+        lambda s: s.add_pin(
+            OWNER_PERSON_ID, MEMORY, act=PANEL.model_copy(update={"how": PersonActHow.SEED})
+        ),
+        lambda s: s.record_suggestion(
+            OWNER_PERSON_ID, pin_suggestion(MEMORY).model_copy(update={"episode_id": ""})
+        ),
+        lambda s: s.record_suggestion(
+            OWNER_PERSON_ID,
+            field_suggestion(ProfileField.NAME, "Robin").model_copy(update={"part": None}),
+        ),
+    ],
+    ids=["blank-by", "seed-act-naming-a-person", "blank-episode", "field-without-its-part"],
+)
+async def test_a_model_that_skipped_its_validation_is_refused_before_any_write(
+    tmp_path: Path, call: Callable[[SqlitePersonModelStore], object]
+) -> None:
+    """An instance copied past validation is a ``ValueError``; the model stays readable."""
+    store = _open(tmp_path / "person_model.db")
+    try:
+        before = await store.export()
+
+        with pytest.raises(ValueError, match="not a valid"):
+            await call(store)  # type: ignore[misc]  # each call is a coroutine
+
+        assert await store.export() == before
+        assert await store.read(OWNER_PERSON_ID) is not None
+    finally:
+        store.close()
+
+
 class _Minting:
     """A ``new_id`` that mints ``fixed`` first, then fresh ids."""
 
