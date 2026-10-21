@@ -203,12 +203,13 @@ class CommitReply(BaseModel):
 class PersonCommitReply(CommitReply):
     """The commit step's reply where it is given a person's fields (ADR-0338 §9:4-§9:5).
 
-    ``style`` says whether the memory the action creates or adds supports to states how
-    the person wants Aether to speak to them, and ``pin`` whether it matters in every
-    conversation. Each is read as any JSON value and counts only where it is ``true``:
-    a reply that leaves them out, as one written under an override that does not carry
-    the person sections does, records nothing more, and a value of another kind costs
-    the reply nothing.
+    ``style`` says whether the finding's claim, and so every memory the finding creates
+    or adds supports to, states how the person wants Aether to speak to them, and
+    ``pin`` whether it matters in every conversation; each is judged of the claim,
+    whatever the action, so a retry judges them again of the same claim. Each is read
+    as any JSON value and counts only where it is ``true``: a reply that leaves them
+    out, as one written under an override that does not carry the person sections does,
+    records nothing more, and a value of another kind costs the reply nothing.
     """
 
     style: JsonValue = None

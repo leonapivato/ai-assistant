@@ -48,7 +48,6 @@ from ai_assistant.core.types import (
     PersonModelWrite,
     PinPart,
     ProfileField,
-    ProposedSuggestion,
     ReadingCertainty,
     SuggestionKind,
     SupportDirection,
@@ -742,54 +741,54 @@ async def test_a_create_the_policy_may_supersede_with_confirms_every_pin_first()
     assert held.status is MemoryStatus.CURRENT
 
 
-class _FailingWritesOnce:
-    """The fake person-model store, whose first mark and first suggestion fail."""
+class _FailingMarksOnce:
+    """The fake person-model store, whose first style mark fails as a store fault would."""
 
     def __init__(self, store: FakePersonModelStore) -> None:
         self._store = store
-        self._failed: set[str] = set()
-
-    def _once(self, name: str) -> None:
-        if name not in self._failed:
-            self._failed.add(name)
-            msg = "the person-model store cannot be written"
-            raise PersonModelStoreError(msg)
+        self._failed = False
 
     async def add_style_mark(self, person_id: str, memory_id: str) -> PersonModelWrite:
-        self._once("mark")
+        if not self._failed:
+            self._failed = True
+            msg = "the person-model store cannot be written"
+            raise PersonModelStoreError(msg)
         return await self._store.add_style_mark(person_id, memory_id)
-
-    async def record_suggestion(
-        self, person_id: str, suggestion: ProposedSuggestion
-    ) -> PersonModelWrite:
-        self._once("suggestion")
-        return await self._store.record_suggestion(person_id, suggestion)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._store, name)
 
 
-async def test_a_mark_and_a_suggestion_the_store_failed_are_made_by_the_next_run() -> None:
-    """§9:4-§9:5: what the commit asked for is kept, never decided again by a retry."""
+async def test_a_mark_the_store_failed_is_made_on_the_retry_after_a_restart() -> None:
+    """§9:4-§9:5, ADR-0329 §16:4: the attempt fails, and the episode stays to be retried.
+
+    The memory the first attempt created is on the finding's ``written``, so the retry,
+    by an observer built afresh over the same stores, marks it, though its model now
+    keeps nothing new: style and pin are judged of the claim, whatever the action.
+    """
     harness = Harness()
     store = _store(harness)
     await _three(harness)
-    scout = FakeModelProvider.scripted(reply(findings=[{"claim": _CLAIM, "rests_on": ["P1"]}]))
-    commit = FakeModelProvider.scripted(_create(style=True, pin=True))
-    observer = harness.observer(
-        scout=scout, commit=commit, person_model=cast("PersonModelStore", _FailingWritesOnce(store))
+    first = harness.observer(
+        scout=FakeModelProvider.scripted(reply(findings=[{"claim": _CLAIM, "rests_on": ["P1"]}])),
+        commit=FakeModelProvider.scripted(_create(style=True, pin=True)),
+        person_model=cast("PersonModelStore", _FailingMarksOnce(store)),
     )
 
-    first = await observer.run()
+    failed = await first.run()
 
-    assert first.processed == 1
-    model = await _model(store)
-    assert (model.style_marks, model.suggestions) == ((), ())
-
-    await observer.run()
-
+    assert (failed.processed, failed.waiting) == (0, 1)
+    assert (await _model(store)).style_marks == ()
     (created,) = [one for one in await harness.memory.export() if isinstance(one, Memory)]
+    harness.clock.advance(timedelta(minutes=2))  # past the first backoff
+    restarted = harness.observer(
+        commit=FakeModelProvider.scripted(reply(action="nothing", style=True, pin=True)),
+        person_model=store,
+    )
+
+    retried = await restarted.run()
+
+    assert retried.processed == 1
     model = await _model(store)
     assert [one.memory_id for one in model.style_marks] == [created.id]
     assert [one.proposed.memory_id for one in model.suggestions] == [created.id]
-    assert len(commit.calls) == 1, "no second decision"
