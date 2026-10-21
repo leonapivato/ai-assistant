@@ -1295,9 +1295,21 @@ def test_backticks_inside_a_fenced_objects_string_do_not_close_its_fence() -> No
 
 
 def test_a_block_fenced_as_another_language_is_not_the_reply() -> None:
+    """Closed, unclosed, or with CRLF line endings, a quoted block is never the decision."""
     content = f"{_REASONING}\n```python\n{reply(**_ADD)}\n```\nThat is the code."
 
     assert parsed(content, CommitReply) is None
+    assert parsed(content.replace("\n", "\r\n"), CommitReply) is None
+    assert parsed(content[: content.index("\n```\nThat")], CommitReply) is None
+    assert parsed(content.replace("\n```python", " Code: ```python"), CommitReply) is None
+
+
+def test_a_fenced_reply_is_read_with_crlf_line_endings_or_no_closing_fence() -> None:
+    content = f"{_REASONING}\n```json\n{reply(**_ADD)}\n```\n"
+    expected = CommitReply.model_validate(_ADD)
+
+    assert parsed(content.replace("\n", "\r\n"), CommitReply) == expected
+    assert parsed(content.removesuffix("```\n"), CommitReply) == expected
 
 
 def test_a_reply_with_no_object_in_it_still_fails() -> None:
