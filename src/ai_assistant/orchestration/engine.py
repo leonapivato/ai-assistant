@@ -163,7 +163,6 @@ from ai_assistant.orchestration.channels import (
 )
 from ai_assistant.orchestration.chat import (
     CHAT_TURN_BUDGET,
-    CHAT_WINDOW_SIZE,
     DEFAULT_CHAT_COMPOSING_CAP,
     DEFAULT_CHAT_COMPOSING_LAPSE,
     DEFAULT_CHAT_START_WAIT,
@@ -184,7 +183,6 @@ from ai_assistant.orchestration.controller import (
 from ai_assistant.orchestration.conversations import (
     check_devices_fit,
     check_message_fits,
-    conversation_channel,
     episode_conversation,
     fit_changes,
     fit_transcript,
@@ -199,9 +197,10 @@ from ai_assistant.orchestration.disclosure import (
 from ai_assistant.orchestration.episode_reads import fit_chunk, fit_page
 from ai_assistant.orchestration.joining import (
     DEFAULT_JOIN_LIMIT,
+    JoinCheck,
+    check_join,
     input_standing,
     join_running,
-    joined_positions,
     place_busy,
     take_over,
     visible_running,
@@ -1999,9 +1998,7 @@ class Engine:
                 start_wait=chat_start_wait,
                 composing_lapse=chat_composing_lapse,
                 composing_cap=chat_composing_cap,
-                # ADR-0332 §3:18: what tells it, after a restart, that a joined
-                # message whose marking was lost was taken in.
-                joined=self._joined_in,
+                join_check=self._join_check,
             )
             if chat_reader
             else None
@@ -2044,6 +2041,7 @@ class Engine:
                 # ADR-0332 §3, §8: a message sent while an activation runs joins it where
                 # it may, and the line's `/stop` stops it.
                 join=self._join_running,
+                join_check=self._join_check,
                 stop=self._stop_line,
                 closing=lambda: self._closing,
                 mint=self._chat_activation_id,
@@ -6940,18 +6938,22 @@ class Engine:
             else:
                 _log.warning("takeover_stop_unrecorded", stage="takeover", reason="store_failed")
 
-    async def _joined_in(self, conversation_id: str) -> dict[int, str]:
-        """The positions a conversation's recent episodes record as joined (ADR-0332 §3:16).
+    def _join_check(self, joining: JoiningInput) -> tuple[JoinCheck, str | None]:
+        """Whether :meth:`_join_running` would take ``joining`` now (ADR-0332 §3:3).
 
-        Raises:
-            MemoryStoreError: If the episodes cannot be read.
+        Appends nothing: what a reader reads before it marks the input taken in by the
+        activation it would join (§3:18), so the marking lands before the activation
+        can read the input, as at admission. A closing engine joins nothing.
         """
-        page = await self._memory.channel_episodes(
-            conversation_channel(conversation_id), limit=CHAT_WINDOW_SIZE
+        if self._closing:
+            return JoinCheck.REFUSED, None
+        return check_join(
+            (one.state for one in self._running if one.state is not None),
+            joining,
+            limit=self._join_limit,
         )
-        return joined_positions(page)
 
-    def _join_running(self, joining: JoiningInput) -> str | None:
+    def _join_running(self, joining: JoiningInput, into: str | None = None) -> str | None:
         """The join's entry point (ADR-0332 §3:3, §3:6): join a place's running activation.
 
         For a place's reader, which holds §3:3's fourth condition itself: it hands an
@@ -6961,12 +6963,12 @@ class Engine:
         two inputs' standing, and appends the input where the activation has neither
         committed nor been stopped and has taken fewer joins than ``join_limit``. The
         open episode records it with the next append the activation makes (ADR-0286
-        §3), its freeze at the latest.
+        §3), its freeze at the latest. ``into`` is the activation the reader already
+        marked the input taken in by (§3:18, :meth:`_join_check`): only that one joins.
 
         Returns:
-            The id of the activation joined, which the reader marks the input's messages
-            taken in by (§3:18); ``None`` where it joined none, and the input waits
-            (§3:4).
+            The id of the activation joined; ``None`` where it joined none, and the input
+            waits (§3:4).
 
         Raises:
             TraceStoreError: If the clock's reading of when it joins is not usable, as
@@ -6979,6 +6981,7 @@ class Engine:
             joining,
             limit=self._join_limit,
             at=self._now(),
+            into=into,
         )
 
     async def _beliefs(

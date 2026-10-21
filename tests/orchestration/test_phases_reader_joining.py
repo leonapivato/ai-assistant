@@ -50,7 +50,6 @@ from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import (
     ConfigurationError,
     ConversationStoreError,
-    TelegramIntakeRecordError,
 )
 from ai_assistant.core.types import (
     ActivationStop,
@@ -374,20 +373,28 @@ async def test_a_join_on_a_place_that_runs_side_by_side_joins_nothing() -> None:
     assert not place_busy((), _LINE)
 
 
-# --- a joined message's marking lost with the process (§3:18) ----------------------------
+# --- the marking comes first, as at admission (§3:18), and joins once begun (§3:3) -------
 
 
-class _JoinMarkingFails(FakeConversationStore):
-    """A conversation store that refuses to mark one position, until told otherwise."""
+class _HeldMarking(FakeConversationStore):
+    """A store whose first marking waits for :attr:`release`, and whose ``refused`` fails."""
 
-    def __init__(self, refused: int) -> None:
+    def __init__(self, *, refused: int | None = None) -> None:
         super().__init__(now=lambda: AT)
-        self.refused: int | None = refused
+        self.release = asyncio.Event()
+        self.holding = asyncio.Event()
+        self.refused = refused
+        self._held = False
 
     async def take_in(
         self, conversation_id: str, *, positions: Sequence[int], activation_id: str
     ) -> tuple[int, ...]:
+        if not self._held:
+            self._held = True
+            self.holding.set()
+            await self.release.wait()
         if self.refused in positions:
+            self.refused = None  # once
             msg = "the store refuses the marking"
             raise ConversationStoreError(msg)
         return await super().take_in(
@@ -395,11 +402,39 @@ class _JoinMarkingFails(FakeConversationStore):
         )
 
 
-async def test_a_joined_message_whose_marking_never_landed_is_not_taken_in_after_a_restart() -> (
-    None
-):
-    """§3:18 through a restart: the episode records the join, so the next hub marks it."""
-    store = _JoinMarkingFails(refused=2)
+async def test_a_message_written_while_the_activation_is_admitted_joins_once_it_has_begun() -> None:
+    """§3:3: before the pass sets its standing the join is asked again, never refused."""
+    store = _HeldMarking()
+    completer = Gated()
+    harness = phases_harness(completer, conversation_store=store)
+    conversation = await open_conversation(harness)
+    await harness.engine.write_message(conversation, message=said("m-1", "book Riverside"))
+    await asyncio.wait_for(store.holding.wait(), SETTLE)
+    running = await working(harness, conversation)
+
+    await harness.engine.write_message(conversation, message=said("m-2", "for Saturday"))
+    for _ in range(10):
+        await asyncio.sleep(0.001)
+    store.release.set()
+    await asyncio.wait_for(completer.entered.wait(), SETTLE)
+
+    async def marked() -> bool:
+        return bool(await store.taken_in(conversation, positions=[2]))
+
+    await until(marked, what="the message to join")
+    completer.release.set()
+    (episode,) = await _frozen(harness, 1)
+    await harness.engine.aclose()
+
+    assert processing(episode).activation_id == running
+    assert [one.position for one in processing(episode).joined[0].messages] == [2]
+    assert await store.taken_in(conversation, positions=[1, 2]) == {1: running, 2: running}
+
+
+async def test_a_join_whose_marking_is_refused_joins_nothing_and_is_taken_in_after() -> None:
+    """§3:18: nothing is joined that the store does not hold taken in by the activation."""
+    store = _HeldMarking(refused=2)
+    store.release.set()
     completer = Gated()
     harness = phases_harness(completer, conversation_store=store)
     conversation = await open_conversation(harness)
@@ -407,70 +442,19 @@ async def test_a_joined_message_whose_marking_never_landed_is_not_taken_in_after
     await asyncio.wait_for(completer.entered.wait(), SETTLE)
     running = await working(harness, conversation)
     await harness.engine.write_message(conversation, message=said("m-2", "for Saturday"))
-    await until(
-        lambda: _joined_count(harness, running), what="the message to join, its marking refused"
-    )
+
+    async def refused() -> bool:
+        return store.refused is None
+
+    await until(refused, what="the join's marking to be refused")
     completer.release.set()
-    (episode,) = await _frozen(harness, 1)
+    found = await _frozen(harness, 2)
     await harness.engine.aclose()
-    assert [one.position for one in processing(episode).joined[0].messages] == [2]
-    assert await store.taken_in(conversation, positions=[2]) == {}, "never marked"
 
-    store.refused = None
-    again = phases_harness(memory=harness.memory, conversation_store=store)
-    await again.engine.start()
-    for _ in range(50):
-        await asyncio.sleep(0.001)
-    await again.engine.aclose()
-
-    assert await store.taken_in(conversation, positions=[2]) == {2: running}
-    assert len(await frozen(again)) == 1, "the restarted hub took nothing in again"
-
-
-async def _joined_count(harness: Harness, activation_id: str) -> bool:
-    for one in harness.engine._running:
-        state = one.state
-        if state is not None and state.activation_id == activation_id and state.joined:
-            return True
-    return False
-
-
-async def test_a_joined_update_whose_marking_never_landed_is_not_taken_in_after_a_restart(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """§3:18 through a restart on the line: Telegram hands it back, and the episode says."""
-    line = _Line()
-    completer = Gated()
-    harness = _line_harness(line, completer=completer)
-    take_in = line.intake.take_in
-
-    async def refusing(update_ids: Sequence[int], *, activation_id: str) -> tuple[int, ...]:
-        if 2 in update_ids:
-            msg = "the record refuses the marking"
-            raise TelegramIntakeRecordError(msg)
-        return await take_in(update_ids, activation_id=activation_id)
-
-    monkeypatch.setattr(line.intake, "take_in", refusing)
-    line.fake.hold(text(1, "book Riverside", message_id=40))
-    await harness.engine.start()
-    await asyncio.wait_for(completer.entered.wait(), SETTLE)
-    running = await _line_running(harness)
-    line.fake.hold(text(2, "for Saturday", message_id=41))
-    await until(
-        lambda: _joined_count(harness, running), what="the update to join, its marking refused"
-    )
-    completer.release.set()
-    (episode,) = await _frozen(harness, 1)
-    await harness.engine.aclose()
-    assert [one.position for one in processing(episode).joined[0].messages] == [41]
-
-    monkeypatch.setattr(line.intake, "take_in", take_in)
-    again = _line_harness(line, memory=harness.memory)
-    await again.engine.start()
-
-    async def confirmed() -> bool:
-        return line.fake.held == ()
-
-    await until(confirmed, what="Telegram to be told it was dealt with")
-    await again.engine.aclose()
-    assert len(await frozen(again)) == 1, "the restarted hub took nothing in again"
+    first = _started_by(found, "book Riverside")
+    later = _started_by(found, "for Saturday")
+    assert processing(first).joined == ()
+    assert await store.taken_in(conversation, positions=[1, 2]) == {
+        1: running,
+        2: processing(later).activation_id,
+    }
