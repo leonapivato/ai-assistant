@@ -3249,8 +3249,8 @@ class PlanStore(Protocol):
         Raises:
             ClaimStopped: If the store holds a stop record for the activation.
             PlanningError: If the store already holds a record under the id, the
-                record carries an outcome, a reason or a position, or the backend
-                fails. Nothing is written.
+                record carries an outcome, a reason or a position, ``match`` names an
+                id with no UTF-8 encoding, or the backend fails. Nothing is written.
         """
         ...
 
@@ -3277,9 +3277,9 @@ class PlanStore(Protocol):
 
         Raises:
             PlanningError: If the store holds no record under ``effect_id``, the
-                record is already finished, a reason rides on an outcome other than
-                ``FAILED``, or a position on anything but a message done. Nothing is
-                written.
+                record is already finished, the reason is blank or has no UTF-8
+                encoding, a reason rides on an outcome other than ``FAILED``, or a
+                position on anything but a message done. Nothing is written.
         """
         ...
 
@@ -3298,7 +3298,8 @@ class PlanStore(Protocol):
             The records, in claim order.
 
         Raises:
-            PlanningError: If the backend fails.
+            PlanningError: If ``activation_ids`` is a bare string, or not a sequence
+                of strings, names an id with no UTF-8 encoding, or the backend fails.
         """
         ...
 
@@ -3376,8 +3377,8 @@ class PlanStore(Protocol):
             The records.
 
         Raises:
-            PlanningError: If ``episode_ids`` is a bare string or holds anything but
-                strings, or the backend fails.
+            PlanningError: If ``episode_ids`` is a bare string, or not a sequence of
+                strings, names an id with no UTF-8 encoding, or the backend fails.
         """
         ...
 
