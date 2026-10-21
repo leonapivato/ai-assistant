@@ -78,6 +78,16 @@ referent recorded ``inferred`` — because a label the model misspelled twice is
 the stage cannot ground, not a mechanical failure. A ``ModelError`` propagates
 unchanged. Nothing here substitutes an empty, default or invented understanding.
 
+**A key the reply shape does not name is dropped before the parse** (ADR-0339 §2),
+at every depth, unless the reply proposes an answer: a reply whose top level holds
+``answers`` with any value but an empty array is parsed strictly, as before, so a
+misspelt ``parts`` or ``unresolved`` beside an answer is still refused and repaired
+rather than read as a wider yes. Whether the drop applies is decided from the reply's
+text alone, so the regression suite's reader, which is :func:`_parsed`, reads a reply
+as the stage does. A reply refused only for such keys is a parsed output and costs no
+repair; the types keep ``extra="forbid"``, the repair still carries the first output
+unpruned, and the diagnostic record keeps the reply as the model wrote it (§3).
+
 **Questions are marked and labelled** (ADR-0322 §4). A question is a message whose
 round recorded asked calls (ADR-0321 §2:8), and code marks it wherever understanding is
 shown it, with the parts it showed, read through ``project_episode`` from the round's
@@ -121,7 +131,10 @@ the template's two flags for each call; the rendered request, the label validati
 one repair and every rule above stay here, whatever a template says (§1:3, §7:2).
 
 **It logs stage and code-owned reason only** — no input, no window content, no model
-output and no exception content (ADR-0275 §8).
+output and no exception content (ADR-0275 §8) — save, on an output that parsed after
+the drop removed keys, the number removed, computed by code and logged as ``stray``
+(ADR-0339 §4): never a key's name, which is model output, and never under a field
+named for ``key``, which the hub's log redaction masks.
 """
 
 from __future__ import annotations
@@ -175,6 +188,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.channel_kinds import place_of
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.episode_reads import without_open_episodes
+from ai_assistant.orchestration.reply_keys import stray_keys
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_privacy import activation_of
 
@@ -227,6 +241,9 @@ _NO_TIME: Final = datetime.min.replace(tzinfo=UTC)
 #: whatever length a first output chose.
 _REPAIR_LABELS_SHOWN: Final = 20
 _REPAIR_LABEL_CHARS: Final = 32
+
+#: The code-owned reason the count of dropped unnamed keys is logged under (ADR-0339 §4:1).
+_UNNAMED_DROPPED: Final = "unnamed_keys_dropped"
 
 #: Understanding's prompt (ADR-0334 §2): its system message is the template
 #: ``understanding.txt`` shipped beside this module, or the owner's override of it, which
@@ -1185,9 +1202,17 @@ class UnderstandingStage:
         self, content: str, brief: _Brief
     ) -> tuple[ProposedActivationUnderstanding | None, _Problem | None]:
         """§6's three checks, in order, and the code-owned statement of what failed."""
-        proposal = _parsed(content)
+        proposal, dropped = _read(content)
         if proposal is None:
             return None, _Problem("unparseable", _UNPARSEABLE)
+        if dropped:
+            # ADR-0339 §4: the number of unnamed keys the drop removed, and nothing of them.
+            _log.info(
+                "understanding_stray_keys",
+                stage="understanding",
+                reason=_UNNAMED_DROPPED,
+                stray=dropped,
+            )
         unresolved = [label for label in _labels_of(proposal) if label not in brief.labels]
         unnamed = _unnamed_supplied(proposal)
         # ADR-0300 §6:8: a story label naming nothing a link can be made to is a label
@@ -1772,8 +1797,26 @@ class _RecalledFact:
 def _parsed(content: str) -> ProposedActivationUnderstanding | None:
     """One ``ProposedActivationUnderstanding``, or ``None`` — never a partial one.
 
+    The stage's reader, which ADR-0337's regression suite reads understanding replies
+    with, so the suite reads a reply as the stage does: :func:`_read`'s proposal,
+    without its count, which reaches the stage by :func:`_read` alone.
+    """
+    return _read(content)[0]
+
+
+def _read(content: str) -> tuple[ProposedActivationUnderstanding | None, int]:
+    """The reply's proposal, or ``None``, and how many unnamed keys were dropped from it.
+
     One enclosing Markdown code fence is removed first: a deterministic, code-owned
-    normalization of a wrapper, not a repair of the object inside it.
+    normalization of a wrapper, not a repair of the object inside it. Then, unless the
+    reply proposes an answer, every key the reply shape does not name is dropped, at
+    every depth, before the parse (ADR-0339 §2): pydantic's validation-time ``extra``
+    override, so a key is named only where it is exactly a field of the model expected
+    at its position, a dropped key's value is never validated, and the types keep their
+    own ``extra="forbid"`` for every other reader (§3:1). A reply that proposes an
+    answer is parsed strictly, exactly as it was before the drop (§2:2).
+
+    The count is ``0`` where nothing was dropped or nothing parsed.
     """
     body = content.strip()
     if body.startswith("```") and body.endswith("```") and len(body) >= 6:  # noqa: PLR2004 — two fences
@@ -1781,10 +1824,35 @@ def _parsed(content: str) -> ProposedActivationUnderstanding | None:
         newline = body.find("\n")
         if newline != -1 and body[:newline].strip() in {"", "json", "JSON"}:
             body = body[newline + 1 :]
+    strict = _proposes_an_answer(body)
     try:
-        return ProposedActivationUnderstanding.model_validate_json(body)
+        proposal = ProposedActivationUnderstanding.model_validate_json(
+            body, extra=None if strict else "ignore"
+        )
     except ValidationError, ValueError, RecursionError:
-        return None
+        return None, 0
+    return proposal, 0 if strict else stray_keys(body, proposal)
+
+
+class _Pairs(list[tuple[str, object]]):
+    """One decoded JSON object as its key-value pairs in order, a repeated key kept."""
+
+
+def _proposes_an_answer(body: str) -> bool:
+    """Whether the reply's top level holds ``answers`` with any value but ``[]`` (ADR-0339 §2:2).
+
+    Read from the reply's text alone. Every value a repeated top-level ``answers``
+    holds counts, not only the one the parse keeps. Text that does not decode as JSON
+    here is read as proposing one, so the drop never applies where this cannot tell:
+    the parse then judges it exactly as before.
+    """
+    try:
+        top = json.loads(body, object_pairs_hook=_Pairs)
+    except ValueError, RecursionError:
+        return True
+    if not isinstance(top, _Pairs):
+        return False
+    return any(not (type(value) is list and not value) for name, value in top if name == "answers")
 
 
 def _labels_of(proposal: ProposedActivationUnderstanding) -> list[str]:
