@@ -105,7 +105,7 @@ from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.diagnostics import failure_body
 from ai_assistant.core.errors import ConfigurationError, ModelError
 from ai_assistant.core.prompts import PromptOrigin, PromptTemplate
-from ai_assistant.core.types import Message, OfferedTool, Role
+from ai_assistant.core.types import Message, OfferedTool, ProposedActivationUnderstanding, Role
 from ai_assistant.evaluation.diagnostic_record import OBSERVER_SUFFIX, SUFFIX
 from ai_assistant.models import (
     PydanticAIProvider,
@@ -113,6 +113,7 @@ from ai_assistant.models import (
     ensure_credential_available,
     ensure_vendor_available,
 )
+from ai_assistant.models.tool_calling import ROUND_TOOL
 from ai_assistant.orchestration.observer.commit import CommitReply
 from ai_assistant.orchestration.observer.scout import ScoutReply, parsed
 
@@ -1749,6 +1750,33 @@ REPLY_READERS: Final[dict[str, Callable[[str], BaseModel | None]]] = {
     "observer_commit": lambda content: parsed(content, CommitReply),
 }
 
+#: The shape each reader reads a reply as, whose field names a case's ``no_label`` may
+#: name: a name no shape holds would leave the check reading nothing, and passing.
+REPLY_SHAPES: Final[dict[str, type[BaseModel]]] = {
+    "understanding": ProposedActivationUnderstanding,
+    "observer_scout": ScoutReply,
+    "observer_commit": CommitReply,
+}
+
+
+def reply_fields(prompt: str) -> frozenset[str]:
+    """Every field name the prompt's reply shape holds, nested shapes' included."""
+    found: set[str] = set()
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            properties = value.get("properties")
+            if isinstance(properties, dict):
+                found.update(str(name) for name in properties)
+            for inner in value.values():
+                walk(inner)
+        elif isinstance(value, list):
+            for inner in value:
+                walk(inner)
+
+    walk(REPLY_SHAPES[prompt].model_json_schema())
+    return frozenset(found)
+
 
 def completion_reply(prompt: str, text: str) -> Reply:
     """A completion's reply as its prompt's stage reads it (:data:`REPLY_READERS`)."""
@@ -2114,8 +2142,15 @@ def _check_no_label(given: Mapping[str, object], prompt: str) -> None:
     if not all(_LABEL_LETTERS.fullmatch(one) for one in letters):
         raise _CaseDefectError("the check no_label's labels are each one or two capital letters")
     fields = set(cast("list[str]", given["fields"]))
-    if prompt == PLANNING and not fields <= _ROUND_FIELDS:
-        raise _CaseDefectError(f"a planning round's text fields are {sorted(_ROUND_FIELDS)}")
+    if prompt == PLANNING:
+        if not fields <= _ROUND_FIELDS:
+            raise _CaseDefectError(f"a planning round's text fields are {sorted(_ROUND_FIELDS)}")
+        return
+    unknown = sorted(fields - reply_fields(prompt))
+    if unknown:
+        raise _CaseDefectError(
+            f"the check no_label names fields no {prompt} reply holds: {unknown}"
+        )
 
 
 def _case_input(
@@ -2172,9 +2207,15 @@ def _case_tools(held: object) -> tuple[OfferedTool, ...]:
     if not isinstance(held, list):
         raise _CaseDefectError("input.tools is not a list")
     try:
-        return tuple(OfferedTool.model_validate(one) for one in held)
+        tools = tuple(OfferedTool.model_validate(one) for one in held)
     except ValidationError:
         raise _CaseDefectError("input.tools holds a tool that is not an offered tool") from None
+    names = [one.name for one in tools]
+    if len(set(names)) != len(names):
+        raise _CaseDefectError("input.tools names one tool twice")
+    if ROUND_TOOL in names:
+        raise _CaseDefectError(f"input.tools offers {ROUND_TOOL}, which the completer adds itself")
+    return tools
 
 
 # --- running the suite (§4:2-§4:6, §5:3, §5:5) --------------------------------------------------
