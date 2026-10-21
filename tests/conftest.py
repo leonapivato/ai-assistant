@@ -65,7 +65,22 @@ from ai_assistant.core.config import Settings
 # `tests/core` sorts first, and not at all when that directory is run on its own.
 # Pinning it here, in the one conftest the corpus has (mypy refuses a second module
 # named `conftest`), makes a narrowed run import the same suite the gate does.
+#
+# `tests/orchestration/` is pinned for the same reason (issue #3337). Its shared
+# suites have an owning package, so they sit beside the engine's own tests rather
+# than under `tests/core/`, but other directories import them: `tests/wire/` holds
+# the wire client to the engine's suites (`chat_surface_contract` and its siblings),
+# the gateway's browser layer reads `pending_candidates_contract`, and the viewer's
+# tests build on `observer_support`. A pin is safe while no two modules under
+# `tests/` share a basename, which prepend mode already requires, and while no
+# pinned module is named like an importable one. `tests/core/
+# test_shared_suite_imports.py` holds both, and holds every bare import of a test
+# module to a directory it resolves from in a run of the importer's directory alone.
+# It reads the pins off the `sys.path.insert` calls below, so a pin stays one such
+# call naming its directory -- which is also the one statement E402 lets stand
+# before the imports that follow.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "core"))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "orchestration"))
 
 # `collection_guard` is registered by being imported: pluggy reads hook
 # implementations off a plugin module's namespace, and this conftest is the only
