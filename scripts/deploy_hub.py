@@ -190,6 +190,10 @@ are a contract with it:
   deploy left running, and a command a dead deploy sent is refused on the box
   however late it arrives. Anything else that takes the lock does the same before
   it touches the hub, writing what names no deploy (an empty file does).
+* A hub a taker finds stopped, it leaves stopped. A deploy that fails once it has
+  stopped the hub leaves it so on purpose, and releases the lock: the venv may
+  hold part of the new build, and starting that could upgrade the data directory
+  with nothing verified (above).
 
 The copies, ``scp`` or ``rsync``, are not box commands, and no fence holds them:
 each is checked here against the lock before it starts, and writes only this run's
@@ -225,7 +229,7 @@ import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Protocol
+from typing import IO, TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -466,9 +470,12 @@ _OWNER_DIR = "/run"
 #: leading ``-`` or ``.``, so ``/run/deploy-hub-<user>.owner`` is one file there.
 _SERVICE_USER = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
 #: How the holder's ssh session runs: never a prompt, since it runs in a session of
-#: its own with no terminal to prompt on, and with keepalives, so a link that drops
-#: ends it here within a minute and a half rather than whenever TCP notices.
+#: its own with no terminal to prompt on; never on a terminal (``-T``, whatever the
+#: ssh configuration asks), which would end its answers in ``\r\n``; and with
+#: keepalives, so a link that drops ends it here within a minute and a half rather
+#: than whenever TCP notices.
 _HOLDER_SSH = (
+    "-T",
     "-o",
     "BatchMode=yes",
     "-o",
@@ -584,10 +591,12 @@ class ProcessLease:
     deploy does, however it ends: a kill closes the pipe, the holder on the box
     reads its end and exits, and the kernel releases the lock with its
     descriptor. It runs in a session of its own, so a Ctrl-C at the terminal is
-    the deploy's to handle, and its handling still runs under the lock.
+    the deploy's to handle, and its handling still runs under the lock. Its
+    standard error goes to a file, which no amount of it can fill and stall.
     """
 
     process: subprocess.Popen[bytes]
+    errors: IO[bytes]
 
     def held(self) -> bool:
         """Whether the holder still runs.
@@ -599,23 +608,29 @@ class ProcessLease:
 
     def release(self) -> None:
         """Close the holder's standard input and wait for it to end."""
-        _end(self.process)
+        _end(self.process, self.errors)
 
 
-def _end(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
+def _end(process: subprocess.Popen[bytes], errors: IO[bytes]) -> tuple[bytes, bytes]:
     """Close a holder's standard input and collect what it printed once it ends.
 
     Args:
         process: The holder.
+        errors: The file its standard error went to, closed here.
 
     Returns:
         The rest of its standard output and its standard error.
     """
     try:
-        return process.communicate(timeout=_RELEASE_SECONDS)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        return process.communicate()
+        try:
+            out, _ = process.communicate(timeout=_RELEASE_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            out, _ = process.communicate()
+        errors.seek(0)
+        return out, errors.read()
+    finally:
+        errors.close()
 
 
 def _hold(argv: list[str], said: str) -> ProcessLease | tuple[int, str, str]:
@@ -632,26 +647,32 @@ def _hold(argv: list[str], said: str) -> ProcessLease | tuple[int, str, str]:
     Raises:
         DeployError: If the executable cannot be started.
     """
+    # A file, not a pipe: only standard output is read until the answer, and a
+    # pipe nobody drains stalls a holder with more to say there than it can hold.
+    errors = tempfile.TemporaryFile()  # noqa: SIM115  # the lease outlives this call; _end closes it
     try:
         process = subprocess.Popen(  # noqa: S603  # an argv, never a shell line
             [_binary(argv[0]), *argv[1:]],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=errors,
             start_new_session=True,
         )
-    except OSError as exc:
+    except (OSError, DeployError) as exc:
+        errors.close()
+        if isinstance(exc, DeployError):
+            raise
         raise DeployError(f"could not run {argv[0]}: {exc.strerror or exc}") from exc
     assert process.stdout is not None  # noqa: S101  # a pipe, asked for above
     held, answered = f"{said}=held\n".encode(), f"{said}=".encode()
     printed = b""
     while line := process.stdout.readline():
         if line == held:
-            return ProcessLease(process)
+            return ProcessLease(process, errors)
         if line.startswith(answered):
             break
         printed += line
-    out, err = _end(process)
+    out, err = _end(process, errors)
     return (
         process.returncode,
         (printed + out).decode("utf-8", "replace"),
