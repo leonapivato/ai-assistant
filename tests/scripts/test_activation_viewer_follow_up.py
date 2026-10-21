@@ -23,9 +23,9 @@ from _follow_up_record import (
     ACT_F,
     ANSWER,
     DIGEST_GIVEN,
-    MODEL_NAME,
     PLANNING_GIVEN,
     PLANNING_RETURNED,
+    ROUTE,
     SCOUT_GIVEN,
     UNDERSTANDING_GIVEN,
     UNDERSTANDING_RETURNED,
@@ -87,7 +87,7 @@ def test_a_completions_view_shows_its_follow_up_beside_it(server: Any, line: int
     assert asked["failure"] is None
     assert asked["origin"] == "default"
     assert isinstance(asked["version"], str)
-    assert asked["model"] == MODEL_NAME
+    assert asked["model"] == ROUTE
     assert asked["followed_version"] == "0123456789ab"
 
 

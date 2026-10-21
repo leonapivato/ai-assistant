@@ -266,7 +266,7 @@ class _Call:
 
     Attributes:
         route: The route its follow-up goes to.
-        model: That route's model.
+        model: The ``provider:model`` spec its follow-up is sent to (§8:8).
         given: Its given entry, as the first activation's file has it.
         returned: Its returned entry.
         targets: Its given entry under each activation it was written under, the first's
@@ -278,7 +278,7 @@ class _Call:
     """
 
     route: str
-    model: models.Model | str
+    model: str
     given: DiagnosticEntry
     returned: DiagnosticEntry
     targets: list[DiagnosticEntry]
@@ -315,11 +315,12 @@ class _Once(WrapperModel):
 
     A completion's agent may send a request of its own after an empty reply; for a
     follow-up that would be a retry, so it is refused and the follow-up recorded as
-    failed.
+    failed. The vendor client's own retries are turned off where the model is built
+    (:func:`_without_sdk_retries`), so the one request is one request on the wire.
     """
 
-    def __init__(self, wrapped: models.Model | str) -> None:
-        super().__init__(infer_model(wrapped))
+    def __init__(self, wrapped: models.Model) -> None:
+        super().__init__(wrapped)
         self._sent = False
 
     def _take(self) -> None:
@@ -364,17 +365,18 @@ class FollowUpAsker:
     it asks and when; the methods below say how it holds to it.
     """
 
-    def __init__(  # noqa: PLR0913 — the sink and the prompt, then keyword-only routes, budget, deadline, thinking and clocks
+    def __init__(  # noqa: PLR0913 — the sink and the prompt, then keyword-only routes, budget, deadline, thinking, clocks and the models' seam
         self,
         sink: DiagnosticSink,
         *,
         prompt: PromptTemplate,
-        routes: Mapping[str, models.Model | str],
+        routes: Mapping[str, str],
         daily_calls: int,
         timeout: float,
         thinking: ThinkingLevel = DEFAULT_THINKING,
         now: Callable[[], datetime] = _utcnow,
         clock: Callable[[], float] = time.monotonic,
+        build: Callable[[str], models.Model] = infer_model,
     ) -> None:
         """Wrap ``sink``, and hold what a follow-up is sent with.
 
@@ -382,9 +384,10 @@ class FollowUpAsker:
             sink: The sink every entry is passed on to, and each follow-up's entry
                 written through (§8:9).
             prompt: The ``follow_up`` template, as read at start (§6:1).
-            routes: The model each route's follow-up goes to (§8:8), one for each of
-                :data:`FOLLOW_UP_ROUTES`: the first model of the stage's route, which
-                the named model of a planning response must be.
+            routes: The ``provider:model`` spec of the first model of each route's
+                stage (§8:8), one for each of :data:`FOLLOW_UP_ROUTES`. A follow-up
+                goes to it, or, where the followed response names the model that
+                answered, to that model of the same provider.
             daily_calls: ``Settings.follow_up_daily_calls`` (§8:3).
             timeout: Seconds a follow-up may take before it is recorded as failed: the
                 stage's own deadline, ``Settings.model_timeout_seconds``.
@@ -393,6 +396,9 @@ class FollowUpAsker:
             now: The clock each follow-up's entry is stamped from.
             clock: The monotonic clock the budget's day and the copies' window are
                 measured on.
+            build: Builds the model a spec names: pydantic-ai's own resolution, and a
+                test's seam. Each spec's model is built once, at its first follow-up,
+                owned by the asker and closed with it.
 
         Raises:
             ValueError: If ``prompt`` is not the ``follow_up`` prompt's, ``routes``
@@ -403,8 +409,10 @@ class FollowUpAsker:
         if prompt.declaration != FOLLOW_UP_PROMPT:
             msg = "the follow-up asker asks the follow_up prompt (ADR-0337 §6:1)"
             raise ValueError(msg)
-        if set(routes) != FOLLOW_UP_ROUTES:
-            msg = "the follow-up asker is given one model for each follow-up route"
+        if set(routes) != FOLLOW_UP_ROUTES or not all(
+            isinstance(spec, str) and spec.partition(":")[2] for spec in routes.values()
+        ):
+            msg = "the follow-up asker is given one provider:model spec for each route"
             raise ValueError(msg)
         if type(daily_calls) is not int:
             msg = "the follow-up's daily budget must be an integer"
@@ -420,6 +428,11 @@ class FollowUpAsker:
         self._question = rendered.text
         self._follow_up_prompt = rendered.provenance()
         self._routes = dict(routes)
+        self._build = build
+        # The models built so far, by spec, each entered once and closed with the asker,
+        # so a follow-up opens no client of its own (its pool is the model's).
+        self._models: dict[str, models.Model] = {}
+        self._owned = contextlib.AsyncExitStack()
         self._timeout = timeout
         self._thinking: ThinkingLevel = thinking
         self._now = now
@@ -457,8 +470,8 @@ class FollowUpAsker:
     async def aclose(self) -> None:
         """Stop: a follow-up not yet sent is not sent, and one in flight is abandoned (§8:16).
 
-        Nothing keeps the queue. Idempotent; an entry handed on afterwards is passed on
-        and asked about no more.
+        Nothing keeps the queue, and the client of every model the asker built is closed.
+        Idempotent; an entry handed on afterwards is passed on and asked about no more.
         """
         self._closed = True
         self._queue.clear()
@@ -468,6 +481,9 @@ class FollowUpAsker:
             worker.cancel()
             # Waited without raising, so the worker's cancellation is not this caller's.
             await asyncio.wait({worker})
+        # Then each model's client, once nothing can be sending on it.
+        self._models.clear()
+        await self._owned.aclose()
 
     # --- pairing (§8:4, §8:5) ---------------------------------------------------
 
@@ -536,11 +552,10 @@ class FollowUpAsker:
             if not isinstance(response, Mapping):
                 return None
             named = response.get("model_name")
-            if isinstance(named, str) and not _answered_by(named, model):
-                # The model that answered is not the route's: §8:8 sends it to that one
-                # or to none, never to another.
-                self._skipped(returned, "model")
-                return None
+            if isinstance(named, str) and named:
+                # §8:8: the model that answered, as the provider named it, through the
+                # route's own provider, the one the call itself went to.
+                model = f"{model.partition(':')[0]}:{named}"
         elif not isinstance(returned.body.get("reply"), str):
             return None
         copies = None
@@ -641,7 +656,7 @@ class FollowUpAsker:
         given = call.given.model_dump(mode="json")["body"]
         returned = call.returned.model_dump(mode="json")["body"]
         messages = [Message.model_validate(one) for one in given["messages"]]
-        once = _Once(call.model)
+        once = _Once(await self._model(call.model))
         async with asyncio.timeout(self._timeout):
             if call.given.source is DiagnosticSource.PLANNING:
                 tools = [OfferedTool.model_validate(one) for one in given["tools"]]
@@ -661,6 +676,24 @@ class FollowUpAsker:
                 ]
             )
         return reply.content
+
+    async def _model(self, spec: str) -> models.Model:
+        """The model ``spec`` names: built at its first follow-up, then kept until closed.
+
+        Its vendor client's own retries are turned off, and its context entered once, so
+        its client is closed by :meth:`aclose` and by nothing a follow-up does.
+
+        Raises:
+            Exception: Whatever building it raises, a missing credential included; the
+                follow-up is recorded as failed, and the next one builds it again.
+        """
+        held = self._models.get(spec)
+        if held is None:
+            held = self._build(spec)
+            _without_sdk_retries(held)
+            await self._owned.enter_async_context(held)
+            self._models[spec] = held
+        return held
 
     async def _write(self, call: _Call, target: DiagnosticEntry) -> None:
         """Write the follow-up's entry under ``target``'s activation; no failure escapes."""
@@ -682,7 +715,7 @@ class FollowUpAsker:
                         "follows": follows,
                         "prompt": body["prompt"],
                         "follow_up_prompt": self._follow_up_prompt,
-                        "model": _model_name(call.model),
+                        "model": call.model,
                         **(call.outcome or {}),
                     },
                 }
@@ -729,15 +762,19 @@ def _within(call: _Call, now: float) -> bool:
     return now - call.paired_at <= COPIES_WITHIN_SECONDS
 
 
-def _model_name(model: models.Model | str) -> str:
-    return model if isinstance(model, str) else model.model_name
+def _without_sdk_retries(model: models.Model) -> None:
+    """Turn off the retries a vendor's own client makes inside one request (§8:15).
 
-
-def _answered_by(named: str, model: models.Model | str) -> bool:
-    """Whether a response naming ``named`` was answered by the route's ``model``.
-
-    The model a ``provider:model`` spec names, or a dated snapshot of it, as a provider
-    names the snapshot an alias resolved to.
+    Anthropic's and OpenAI's clients each retry a 429 or a 5xx twice by default
+    (ADR-0061 §3), inside one request of the model's: the follow-up's one request
+    would be three on the wire, and its budget would count one. The client is the
+    model's own, built for the asker alone, so nothing else's retries change. A
+    client without the setting retries as it does.
     """
-    route = model.partition(":")[2] if isinstance(model, str) else model.model_name
-    return bool(route) and (named == route or named.startswith(route + "-"))
+    inner = model
+    while isinstance(inner, WrapperModel):
+        inner = inner.wrapped
+    client: Any = getattr(inner, "client", None)
+    retries = getattr(client, "max_retries", None)
+    if type(retries) is int:
+        client.max_retries = 0

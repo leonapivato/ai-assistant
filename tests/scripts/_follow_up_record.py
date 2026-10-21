@@ -39,8 +39,9 @@ ACT_F: Final = "act-f"
 #: What the fake model answers every follow-up with.
 ANSWER: Final = "I had to guess which day you meant, and the rules on dates disagreed."
 
-#: The model planning's response names, which is the route's.
+#: The model planning's response names, and every route's spec: a follow-up goes to it.
 MODEL_NAME: Final = "claude-hub"
+ROUTE: Final = "fake:" + MODEL_NAME
 
 #: A user message marking the call whose follow-up fails.
 FAILING: Final = "this follow-up fails"
@@ -192,10 +193,11 @@ async def _write(directory: Path) -> None:
     asker = FollowUpAsker(
         store,
         prompt=default_prompt(FOLLOW_UP_PROMPT),
-        routes=dict.fromkeys(FOLLOW_UP_ROUTES, model),
+        routes=dict.fromkeys(FOLLOW_UP_ROUTES, ROUTE),
         daily_calls=100,
         timeout=10.0,
         now=lambda: at(5_000),
+        build=lambda _spec: model,
     )
     for entry in ENTRIES:
         await asker.write(entry)
