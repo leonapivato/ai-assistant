@@ -8,6 +8,7 @@ answers the hub would give, in the page's words (``person_inspection``).
 from __future__ import annotations
 
 import asyncio
+import shlex
 from io import StringIO
 from typing import TYPE_CHECKING
 
@@ -153,13 +154,14 @@ def test_show_renders_every_part_of_the_model_with_the_ids_its_commands_take(
     assert "  Your name: “Robin”" in said
     assert "  What you call me: Not set: I go by Aether." in said
     assert "using 13 of the 30 characters I keep in mind" in said
-    assert '  - pinned · “Eats no meat.” · memory "m:diet"' in said
+    assert "  - pinned · “Eats no meat.” · unpin with: assistant about unpin m:diet" in said
     assert person_inspection.LEFT_OUT_WORDS[next(iter(person_inspection.LEFT_OUT_WORDS))] in said
-    assert 'unpin with: assistant about unpin "m:old"' in said
-    assert f'remove with: assistant about remove-style "{mark.record_id}"' in said
+    assert "unpin with: assistant about unpin m:old" in said
+    assert f"remove-style with: assistant about remove-style {mark.record_id}" in said
     assert (
-        f'The language I write to you in: “Português” · suggestion "{suggestion.record_id}"' in said
-    )
+        f"The language I write to you in: “Português” · accept with: assistant about accept "
+        f"{suggestion.record_id} · dismiss with: assistant about dismiss {suggestion.record_id}"
+    ) in said
     assert "keep in mind “Short answers, please.”, which pins it and confirms" in said
 
 
@@ -251,7 +253,7 @@ def test_a_pin_the_budget_or_the_store_refuses_exits_non_zero_in_words(
 
     said = output.getvalue()
     assert person_inspection.REFUSAL_WORDS["over_budget"] in said
-    assert 'No live memory has the id "m:nothing", so nothing was pinned.' in said
+    assert 'No live memory has exactly the id "m:nothing", so nothing was pinned.' in said
 
 
 def test_unpin_remove_style_accept_and_dismiss_each_say_what_they_did(
@@ -289,3 +291,41 @@ def test_unpin_remove_style_accept_and_dismiss_each_say_what_they_did(
     assert held.profile.address == "Rob"
     assert held.standing_pins == ()
     assert held.standing_marks == ()
+
+
+def test_a_pin_is_refused_where_the_read_answered_for_another_id(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """§4:3: the wording shown is the wording confirmed. The belief read normalises an id
+    and the pin does not (§10:4), so a padded id is refused before anything is shown
+    (adversarial and architecture review, round 1)."""
+    engine, people, _ = _on(fact(" m:diet ", "Eats no meat."), fact("m:diet", "Eats meat."))
+    _wire(monkeypatch, engine)
+
+    assert _invoke("pin", " m:diet ", "--yes") == 1
+
+    said = output.getvalue()
+    assert "Eats meat." not in said
+    assert 'No live memory has exactly the id " m:diet ", so nothing was pinned.' in said
+    held = asyncio.run(people.read(OWNER_PERSON_ID))
+    assert held is not None
+    assert held.pins == ()
+
+
+@pytest.mark.parametrize("value", ["m:$(printf changed)", "m:`id`", "m:'q'", "m:\\x", "m x"])
+def test_a_suggested_command_hands_the_shell_the_id_and_nothing_to_expand(value: str) -> None:
+    """A pasted command reaches the hub with the id as it is (adversarial review, round 1)."""
+    said = person_inspection.pasteable("unpin", value)
+
+    assert said.startswith("unpin with: assistant about unpin ")
+    assert shlex.split(said.removeprefix("unpin with: "))[-1] == value
+
+
+@pytest.mark.parametrize("value", ["m:a\nb", "m:a\x1b[2Jb", "m:a\tb"])
+def test_an_id_that_would_not_paste_as_itself_gets_no_command(value: str) -> None:
+    said = person_inspection.pasteable("unpin", value)
+
+    assert "assistant about" not in said
+    assert "\n" not in said
+    assert "\x1b" not in said
+    assert said.endswith("cannot be pasted as a command here")

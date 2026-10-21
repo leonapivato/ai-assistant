@@ -3180,15 +3180,17 @@ def about_pin(
 
     async def write(engine: AssistantEngine) -> int:
         held = await engine.belief(memory_id)
-        if held is None:
+        # The wording shown is the wording the pin confirms (ADR-0338 §4:3), so the read
+        # must be of the very memory the pin names. The belief read normalises an id and
+        # the pin does not (§10:4), so a read that answered for another id than the one
+        # typed is refused before anything is shown or asked.
+        if held is None or held.id != memory_id:
             person_inspection.render_no_memory(console, memory_id)
             return _EXIT_ERROR
         person_inspection.render_pin_prompt(console, held.content)
         if not confirm():
             _print("[dim]Left alone. Nothing was pinned.[/]")
             return _EXIT_OK
-        # The id as typed, verbatim, and not the read's: the person model holds ids
-        # verbatim (ADR-0338 §10:4), and the pin is the check that the memory is current.
         edit = await engine.pin_memory(OWNER_PERSON_ID, memory_id=memory_id)
         return _about_written("pin", edit)
 
