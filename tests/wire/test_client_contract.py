@@ -60,8 +60,15 @@ from episode_inspection_contract import (
     EpisodeInspectionSubject,
 )
 from pending_candidates_contract import PENDING_AT, PENDING_LIMIT, PendingCandidatesSubject
+from person_model_contract import (
+    PERSON_BUDGET,
+    PERSON_LIMIT,
+    PersonModelSubject,
+    person_model_stores,
+)
 from story_surface_contract import STORY_LIMIT, STORY_SURFACE_AT, StorySurfaceSubject
 
+from ai_assistant.orchestration.person_block import PersonBlocks
 from ai_assistant.testing import FakeMemoryStore, FakePlanStore
 
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "orchestration"))
@@ -229,6 +236,24 @@ async def _pending(tmp_path: Path, *, candidates: bool) -> AsyncIterator[Pending
         yield PendingCandidatesSubject(engine=client, memory=memory, plans=plans)
 
 
+@contextlib.asynccontextmanager
+async def _person_model(tmp_path: Path, *, wired: bool) -> AsyncIterator[PersonModelSubject]:
+    """A client of a hub whose fake engine holds the injected stores; wired or not."""
+    people, memory = person_model_stores()
+    backing = FakeAssistantEngine(max_payload_bytes=PERSON_LIMIT)
+    backing.episode_memory = memory
+    if wired:
+        backing.person_blocks = PersonBlocks(
+            store=people, memory=memory, budget_chars=PERSON_BUDGET
+        )
+    async with serving(
+        backing,
+        tmp_path / ("hub.sock" if wired else "off.sock"),
+        max_frame_bytes=PERSON_LIMIT + ENVELOPE_RESERVE_BYTES,
+    ) as client:
+        yield PersonModelSubject(engine=client, people=people, memory=memory)
+
+
 class TestHubEngineClientContract(AssistantEngineContract):
     """The client, held to the shared contract over a real socket."""
 
@@ -309,6 +334,18 @@ class TestHubEngineClientContract(AssistantEngineContract):
     ) -> AsyncIterator[PendingCandidatesSubject]:
         """The same, the hub's switch off: the client has no switch of its own."""
         async with _pending(tmp_path, candidates=False) as subject:
+            yield subject
+
+    @pytest.fixture
+    async def person_model_subject(self, tmp_path: Path) -> AsyncIterator[PersonModelSubject]:
+        """The panels' members over an authenticated local socket, the store wired."""
+        async with _person_model(tmp_path, wired=True) as subject:
+            yield subject
+
+    @pytest.fixture
+    async def person_model_off(self, tmp_path: Path) -> AsyncIterator[PersonModelSubject]:
+        """The same, the hub's switch off: the client has no switch of its own."""
+        async with _person_model(tmp_path, wired=False) as subject:
             yield subject
 
     @pytest.fixture

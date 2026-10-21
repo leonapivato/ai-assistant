@@ -183,7 +183,9 @@ if TYPE_CHECKING:
         PermissionRuling,
         PersonModel,
         PersonModelAct,
+        PersonModelEdit,
         PersonModelExport,
+        PersonModelView,
         PersonModelWrite,
         Placement,
         PlanExport,
@@ -8937,6 +8939,212 @@ class AssistantEngine(Protocol):
         Raises:
             MemoryStoreError: If the episodes cannot be read.
             PlanningError: If the plan store cannot be read.
+        """
+        ...
+
+    # --- the person model, for the panels (ADR-0338 §8:1-§8:3) -------------
+    #
+    # Seven members: one read and six writes. **Shown only to that person and to the
+    # owner** (§8:3): on the wire each is in the route table's command row, so a device
+    # without the role of source of commands and queries, which the roster gives the
+    # owner's devices alone, is refused before dispatch (ADR-0298 §5:6). **Every write
+    # is a ``panel`` act by the owner**, the person the command role serves, on the
+    # person's model (§3:4, §4:2); where the person is the owner, as on today's
+    # one-person hub (§2:1), that is the person's act on their own.
+    #
+    # **Where the hub keeps no person model** — no person-model store is wired, which
+    # is where ``Settings.person_model`` is off (§11:2) — each member raises
+    # :class:`~ai_assistant.core.errors.PersonModelOffError`, after its arguments are
+    # validated and before anything is read.
+    #
+    # Every id argument is ``NonBlankEncodableText``, refused blank and **never
+    # stripped**: the person model holds every id verbatim, and a pointer that
+    # normalised what it was handed could name another record (ADR-0338 §10:4).
+
+    async def person_model(self, person_id: NonBlankEncodableText) -> PersonModelView | None:
+        """Read one person's model, as the About you panel shows it (ADR-0338 §8:1-§8:2).
+
+        The fields; the change log; the kept-in-mind slot, assembled as the person
+        block assembles it on a private place, which every place on the hub is today
+        (§7), with the budget it fills and the memories it left out and why (§6:2,
+        §6:4); the pins whose chain reaches no current memory (§4:8); the standing
+        style marks; and the pending suggestions, each marked where it rests on outside
+        content (§7:9), a pin suggestion's only while its memory is current (§9:5). A
+        pin or mark whose memory the memory store no longer holds is shown nowhere
+        (§4:10).
+
+        The only memory wording it carries is the slot's: a memory left out, a pin no
+        longer current and a pin suggestion are named by id, and the panel words them
+        from :meth:`belief`.
+
+        Args:
+            person_id: The person, by id: :data:`~ai_assistant.core.types.OWNER_PERSON_ID`
+                on today's hub.
+
+        Returns:
+            Their model, or ``None`` where the hub holds no such person.
+
+        Raises:
+            ValueError: If ``person_id`` is blank or unwritable. Refused locally.
+            PersonModelOffError: If the hub keeps no person model.
+            PersonModelStoreError: If the person-model store cannot be read.
+            MemoryStoreError: If the memory store cannot be read.
+        """
+        ...
+
+    async def set_profile_field(
+        self,
+        person_id: NonBlankEncodableText,
+        *,
+        field: ProfileField,
+        value: EncodableText | None = None,
+    ) -> PersonModelEdit:
+        """Set one of a person's five fields, or clear it with ``None`` (ADR-0338 §3, §8:2).
+
+        On the panel: validated and written by the store in one step with its
+        change-log entry, and every pending suggestion of that field and value accepted
+        in the same step (§3:2-§3:5, §8:8). A value equal to the one held changes and
+        logs nothing (§3:3).
+
+        Args:
+            person_id: Whose field.
+            field: Which field.
+            value: Its new value, or ``None`` to clear it. ``None`` is the default
+                because the wire carries an absent argument, never a ``null`` one
+                (ADR-0085 §10): a clear sent from a client arrives with no value.
+
+        Returns:
+            The store's write: ``written``; ``unchanged``; or ``refused`` with
+            ``unknown_person``, or ``invalid_value`` and its reason.
+
+        Raises:
+            ValueError: If ``person_id`` is blank, ``field`` is not one of the five, or
+                an argument is unwritable. Refused locally.
+            PersonModelOffError: If the hub keeps no person model.
+            PersonModelStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def pin_memory(
+        self, person_id: NonBlankEncodableText, *, memory_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Pin a memory for a person, on the beliefs panel (ADR-0338 §4:1-§4:3, §8:2).
+
+        Only a current memory is pinned, and only where the wordings of the memories
+        the person's pins show, with the new one's, stay within the slot's budget
+        (§4:2, §6:3); the check and the write are made under the one lock per person
+        every pin is made under. A memory already pinned changes nothing, and a pin
+        accepts every pending pin suggestion of its memory in the same write (§8:8).
+
+        Args:
+            person_id: Whose pin.
+            memory_id: The memory, by id.
+
+        Returns:
+            ``refused`` ``not_current`` or ``over_budget``, with nothing written; or the
+            store's write: ``written`` with the pin's id, ``unchanged`` with the
+            standing pin's, or ``refused`` ``unknown_person``.
+
+        Raises:
+            ValueError: If an id is blank or unwritable. Refused locally.
+            PersonModelOffError: If the hub keeps no person model.
+            PersonModelStoreError: If the person-model store cannot be read or written.
+            MemoryStoreError: If the memory store cannot be read.
+        """
+        ...
+
+    async def unpin_memory(
+        self, person_id: NonBlankEncodableText, *, memory_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Unpin a memory for a person, erasing nothing (ADR-0338 §4:7, §8:2).
+
+        Every standing pin that shows the memory — made on it, or whose chain's current
+        end it is (§4:8) — is marked removed; so is a pin no longer current, named by
+        the memory it was made on. The memory and its ``pinned`` support stay.
+
+        Args:
+            person_id: Whose pins.
+            memory_id: The memory, by id.
+
+        Returns:
+            The store's write: ``written`` where a pin was removed, ``unchanged`` where
+            no standing pin showed the memory, or the store's refusal that stopped the
+            removal.
+
+        Raises:
+            ValueError: If an id is blank or unwritable. Refused locally.
+            PersonModelOffError: If the hub keeps no person model.
+            PersonModelStoreError: If the person-model store cannot be read or written,
+                including after a first pin was removed: read :meth:`person_model`.
+            MemoryStoreError: If the memory store cannot be read.
+        """
+        ...
+
+    async def remove_style_mark(
+        self, person_id: NonBlankEncodableText, *, mark_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Remove a style mark, so its memory is not marked again (ADR-0338 §5:3, §8:2).
+
+        Args:
+            person_id: Whose mark.
+            mark_id: The mark, by the id :meth:`person_model` reads.
+
+        Returns:
+            The store's write: ``written``; ``unchanged`` where it was already removed;
+            or ``refused`` with ``unknown_person`` or ``unknown_record``.
+
+        Raises:
+            ValueError: If an id is blank or unwritable. Refused locally.
+            PersonModelOffError: If the hub keeps no person model.
+            PersonModelStoreError: If the store cannot be read or written.
+        """
+        ...
+
+    async def accept_person_suggestion(
+        self, person_id: NonBlankEncodableText, *, suggestion_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Accept a pending suggestion on the panel (ADR-0338 §8:2, §8:8, §9:2, §9:5).
+
+        A field suggestion takes its field to its value as an accepted suggestion, its
+        change logged naming the episode it rests on (§3:5). A pin suggestion pins its
+        memory as :meth:`pin_memory` does, checked the same way, and the pin accepts
+        the suggestion in the same write (§8:8).
+
+        Args:
+            person_id: Whose.
+            suggestion_id: The suggestion, by the id :meth:`person_model` reads.
+
+        Returns:
+            For a field suggestion, the store's write: ``written`` with the
+            suggestion's id, or ``refused`` with ``unknown_person``,
+            ``unknown_record`` or ``already_decided``. For a pin suggestion,
+            :meth:`pin_memory`'s outcome for its memory.
+
+        Raises:
+            ValueError: If an id is blank or unwritable. Refused locally.
+            PersonModelOffError: If the hub keeps no person model.
+            PersonModelStoreError: If the person-model store cannot be read or written.
+            MemoryStoreError: If the memory store cannot be read.
+        """
+        ...
+
+    async def dismiss_person_suggestion(
+        self, person_id: NonBlankEncodableText, *, suggestion_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Dismiss a pending suggestion, so an equal one is never recorded again (§9:2, §12).
+
+        Args:
+            person_id: Whose.
+            suggestion_id: The suggestion, by the id :meth:`person_model` reads.
+
+        Returns:
+            The store's write: ``written``; or ``refused`` with ``unknown_person``,
+            ``unknown_record`` or ``already_decided``.
+
+        Raises:
+            ValueError: If an id is blank or unwritable. Refused locally.
+            PersonModelOffError: If the hub keeps no person model.
+            PersonModelStoreError: If the store cannot be read or written.
         """
         ...
 

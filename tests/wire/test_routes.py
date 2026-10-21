@@ -84,6 +84,40 @@ def test_stop_activation_is_a_command() -> None:
     assert route_of("stop_activation") is Route.COMMAND
 
 
+#: ADR-0338 §8:1's seven person-model members.
+_PERSON_MODEL_MEMBERS: Final = frozenset(
+    {
+        "person_model",
+        "set_profile_field",
+        "pin_memory",
+        "unpin_memory",
+        "remove_style_mark",
+        "accept_person_suggestion",
+        "dismiss_person_suggestion",
+    }
+)
+
+
+@pytest.mark.parametrize("method", sorted(_PERSON_MODEL_MEMBERS))
+def test_a_persons_model_is_a_command_shown_only_to_the_owner(method: str) -> None:
+    """ADR-0338 §8:3: shown only to that person and to the owner, held by the command row.
+
+    The command role is the owner's devices' (ADR-0329 §18:1's placement of the
+    panel's read), and today's hub holds one person, the owner (ADR-0338 §2:1), so a
+    device without it is refused before dispatch and one holding it is let through.
+    """
+    assert route_of(method) is Route.COMMAND
+    with pytest.raises(DeviceRefusedError) as refused:
+        check_request(method, {}, device=_NOBODY, acting_for=None, knows=_everything_known)
+    assert refused.value.reason is DeviceRefusal.NOT_ALLOWED
+    check_request(method, {}, device=_COMMANDER, acting_for=None, knows=_everything_known)
+
+
+def test_the_person_model_members_are_the_surfaces_own() -> None:
+    """The seven are on the surface, so the row above names no stale method."""
+    assert _PERSON_MODEL_MEMBERS <= METHODS
+
+
 @pytest.mark.parametrize(
     "arguments", [_CONVERSATION_INPUT, _NEW_CONVERSATION_INPUT], ids=["channel", "new"]
 )

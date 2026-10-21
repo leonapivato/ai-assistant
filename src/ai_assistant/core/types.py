@@ -20901,3 +20901,227 @@ class PersonModelWrite(BaseModel):
             msg = "only a refused write carries a reason"
             raise ValueError(msg)
         return self
+
+
+# --- the person model as the panels read and edit it (ADR-0338 §8:1-§8:3) ----------
+#
+# What ``AssistantEngine``'s person-model members carry: a read of one person's model
+# for the About you panel (§8:2), and what a panel's write did. Built from the types
+# above and from what the kept-in-mind slot already shows (§6): the only memory wording
+# here is a wording the slot shows the models, and a memory the slot leaves out, a pin
+# no longer current and a pin suggestion are named by id alone, so nothing resting on
+# outside content is worded (§6:4).
+
+
+class KeptMemoryView(BaseModel):
+    """One memory the kept-in-mind slot shows, as the panel reads it (ADR-0338 §6:2, §8:2).
+
+    Attributes:
+        memory_id: The memory shown: the pinned or marked one, or the current
+            successor its chain reached (§4:8).
+        content: Its wording, as the slot shows it to the models.
+        pinned: ``True`` for a pinned memory, ``False`` for a style memory.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    memory_id: NonBlankEncodableText
+    content: EncodableText
+    pinned: bool
+
+
+class LeftOutReason(StrEnum):
+    """Why the kept-in-mind slot left a memory out (ADR-0338 §6:2, §6:4).
+
+    Closed, **added to and never renamed**.
+    """
+
+    BUDGET = "budget"
+    """The slot stopped before it: its wording would have exceeded the budget (§6:2)."""
+    OUTSIDE_CONTENT = "outside_content"
+    """It rests on outside content, which no slot shows (§6:4). A pinned one enters
+    once its ``pinned`` support has put it in band ``ASSERTED``."""
+
+
+class LeftOutMemory(BaseModel):
+    """A memory a pin or a style mark reaches that the slot does not show, and why (§6:4).
+
+    Named by id alone: the panel words it from the beliefs read, as it words any
+    memory.
+
+    Attributes:
+        memory_id: The memory: the pinned or marked one, or the current successor its
+            chain reached (§4:8).
+        pinned: ``True`` where a pin reaches it, ``False`` where only a style mark does.
+        reason: Why the slot left it out.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    memory_id: NonBlankEncodableText
+    pinned: bool
+    reason: LeftOutReason
+
+
+class SuggestionView(BaseModel):
+    """A pending suggestion as the panel shows it (ADR-0338 §7:9, §8:2, §9:2, §9:5).
+
+    Attributes:
+        suggestion: The suggestion as the store holds it, by its id, to accept or
+            dismiss.
+        rests_on_outside_content: Whether it rests on outside content: a field
+            suggestion's part has an outside origin, or a pin suggestion's memory rests
+            on outside content. Such a suggestion is shown on the panel alone, marked
+            so (§7:9).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    suggestion: PersonSuggestion
+    rests_on_outside_content: bool
+
+
+class PersonModelView(BaseModel):
+    """One person's model, as ``AssistantEngine.person_model`` reads it (ADR-0338 §8:1).
+
+    The fields, the change log, the kept-in-mind slot with its fill and what it left
+    out, the pins no longer current, the style marks and the pending suggestions.
+
+    Attributes:
+        person: The person.
+        profile: Their five fields, each set or not.
+        changes: The change log, in the order written (§3:5).
+        kept: The kept-in-mind slot, in its order: the pinned memories, oldest pin
+            first, then the style memories, the most recently marked first, each
+            memory once (§6:2).
+        budget_chars: The slot's budget, in characters of the wordings it shows (§6:1).
+        left_out: The memories a standing pin or mark reaches that the slot leaves
+            out, in the slot's order, each once, and why (§6:2, §6:4).
+        no_longer_current: The standing pins whose chain reaches no current memory, in
+            the order made: shown in no block, and on the panel until removed (§4:8).
+        style_marks: The standing style marks, in the order made, each with the id its
+            removal names (§5:3).
+        suggestions: The pending suggestions the panel shows, the most recent first
+            (§7:9, §9:5).
+
+    Raises:
+        ValueError: If a memory is in the slot twice, left out twice, or both.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    person: Person
+    profile: Profile
+    changes: tuple[ProfileChange, ...] = ()
+    kept: tuple[KeptMemoryView, ...] = ()
+    budget_chars: int = Field(strict=True, ge=1)
+    left_out: tuple[LeftOutMemory, ...] = ()
+    no_longer_current: tuple[Pin, ...] = ()
+    style_marks: tuple[StyleMark, ...] = ()
+    suggestions: tuple[SuggestionView, ...] = ()
+
+    @model_validator(mode="after")
+    def _each_memory_once(self) -> Self:
+        shown = [one.memory_id for one in self.kept] + [one.memory_id for one in self.left_out]
+        if len(shown) != len(set(shown)):
+            msg = "the slot shows or leaves out each memory once (ADR-0338 §6:2)"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def kept_chars(self) -> int:
+        """The slot's fill: the characters of the wordings it shows (§6:1)."""
+        return sum(len(one.content) for one in self.kept)
+
+
+class PersonModelEditRefusal(StrEnum):
+    """Why a panel's pin was refused before the store was written (ADR-0338 §4:2, §6:3).
+
+    Closed, **added to and never renamed**. A refusal the store gives is the store's
+    own :class:`PersonModelRefusal`, carried on the write.
+    """
+
+    NOT_CURRENT = "not_current"
+    """Only a current memory may be pinned (§4:2)."""
+    OVER_BUDGET = "over_budget"
+    """The pins' wordings, with the new one's, would exceed the slot's budget (§6:3)."""
+
+
+class PersonModelEdit(BaseModel):
+    """What a panel's write to a person's model did (ADR-0338 §8:1).
+
+    Exactly one of the two is set: the store's write — ``written``, ``unchanged`` or
+    the store's own refusal with its reason — or why the write was refused before the
+    store was written.
+
+    Attributes:
+        write: The store's write.
+        refused: Why it was refused before any write.
+
+    Raises:
+        ValueError: If neither or both is set.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    write: PersonModelWrite | None = None
+    refused: PersonModelEditRefusal | None = None
+
+    @model_validator(mode="after")
+    def _one_outcome(self) -> Self:
+        if (self.write is None) == (self.refused is None):
+            msg = "an edit is the store's write or a refusal before it, exactly one"
+            raise ValueError(msg)
+        return self
+
+
+def profile_field(value: object) -> ProfileField:
+    """One of the five fields, from an engine member's ``field`` argument (ADR-0338 §8:1).
+
+    Refused locally, before any I/O, by every implementation of
+    ``AssistantEngine.set_profile_field``, the wire client included (ADR-0085 §9).
+
+    Args:
+        value: The argument as the caller passed it: a :class:`ProfileField`, or its
+            value.
+
+    Returns:
+        The field.
+
+    Raises:
+        ValueError: If it names none of the five (ADR-0338 §3's table).
+    """
+    if isinstance(value, ProfileField):
+        return value
+    if isinstance(value, str):
+        try:
+            return ProfileField(value)
+        except ValueError:
+            pass
+    msg = "field must be one of the person's five fields (ADR-0338 §3)"
+    raise ValueError(msg)
+
+
+def profile_value(value: object) -> str | None:
+    """An engine member's ``value`` argument: ``None``, or text with a UTF-8 encoding.
+
+    Refused locally, before any I/O, by every implementation of
+    ``AssistantEngine.set_profile_field``, the wire client included (ADR-0085 §9).
+
+    Whether the text is a value the field admits is the store's to rule, as a refusal
+    with its reason (ADR-0338 §3:2); what is refused here is only what no
+    implementation could carry over the wire.
+
+    Args:
+        value: The argument as the caller passed it.
+
+    Returns:
+        The value, unchanged.
+
+    Raises:
+        ValueError: If it is neither ``None`` nor text with a UTF-8 encoding.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            return encodable_text(value)
+        except ValueError:
+            pass
+    msg = "value must be text with a UTF-8 encoding, or None to clear the field"
+    raise ValueError(msg)

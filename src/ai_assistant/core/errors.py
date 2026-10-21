@@ -1945,3 +1945,19 @@ class PersonModelStoreError(AssistantError):
     is a :class:`~ai_assistant.core.types.PersonModelWrite` carrying a closed reason,
     and a malformed *argument* is a ``ValueError``.
     """
+
+
+class PersonModelOffError(AssistantError):
+    """The person model is not switched on on this hub (ADR-0338 §8:1, §11:2).
+
+    Raised by every one of ``AssistantEngine``'s person-model members where no
+    person-model store is wired, which is where ``Settings.person_model`` is off: the
+    hub keeps no person model to read or to write, so a client shows "not switched
+    on" rather than an empty profile. Nothing is read and nothing is written.
+
+    **Not a fault and not a refused write.** A store that could not read or write is
+    :class:`PersonModelStoreError`, and a write the store or the engine refused is an
+    outcome the member returns. A malformed argument is still a ``ValueError``, refused
+    first, so every implementation refuses the same values whether or not the switch
+    is on.
+    """

@@ -71,6 +71,12 @@ from episode_inspection_contract import (
     EpisodeInspectionSubject,
 )
 from pending_candidates_contract import PENDING_AT, PENDING_LIMIT, PendingCandidatesSubject
+from person_model_contract import (
+    PERSON_BUDGET,
+    PERSON_LIMIT,
+    PersonModelSubject,
+    person_model_stores,
+)
 from phases_support import phase_path
 from story_surface_contract import STORY_LIMIT, STORY_SURFACE_AT, StorySurfaceSubject
 from understanding_support import VERSION_LIMIT, understanding_stage, windows_stage
@@ -115,6 +121,7 @@ from ai_assistant.orchestration import (
     GrantOperations,
     HeldSource,
 )
+from ai_assistant.orchestration.person_block import PersonBlocks
 from ai_assistant.testing import (
     FakeAuditTrail,
     FakeConnectionProvisioner,
@@ -322,6 +329,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     phases: Mapping[str, Any] | None = None,
     plans: FakePlanStore | None = None,
     candidates: bool = False,
+    person_blocks: PersonBlocks | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -369,6 +377,10 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     ``plans`` is the plan store, a knob so a case can seed the effect records and
     observation records the pending candidates' read joins; ``candidates`` is the
     composition root's switch that read honours (ADR-0329 §19:3), off as it is there.
+
+    ``person_blocks`` is the person block's assembly over a person-model store and
+    ``memory``, as the composition root wires it where ``Settings.person_model`` is on
+    (ADR-0338 §7:1); ``None``, the default, is the switch off (§11:2).
     """
     # **The conversation store's clock advances**, because ADR-0074 §2's sort key
     # is activity and a frozen clock cannot express "more recently active" at all —
@@ -464,6 +476,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         stories=stories,
         chat_reader=chat_reader,
         candidates=candidates,
+        person_blocks=person_blocks,
         # ADR-0309 §2:6: the phases plan what the chat's reader takes in and every event,
         # as they will on every deployment once the switch lane lands; they are wired
         # only beside the reader, so a subject with it off has none. Over the same
@@ -493,6 +506,20 @@ async def _pending(*, candidates: bool) -> AsyncIterator[PendingCandidatesSubjec
     await built.start()
     try:
         yield PendingCandidatesSubject(engine=built, memory=memory, plans=plans)
+    finally:
+        await built.aclose()
+
+
+async def _person_model(*, wired: bool) -> AsyncIterator[PersonModelSubject]:
+    """An engine at the person model's bound, its two stores injected; wired or not."""
+    people, memory = person_model_stores()
+    blocks = (
+        PersonBlocks(store=people, memory=memory, budget_chars=PERSON_BUDGET) if wired else None
+    )
+    built = _wire(memory=memory, max_payload_bytes=PERSON_LIMIT, person_blocks=blocks)
+    await built.start()
+    try:
+        yield PersonModelSubject(engine=built, people=people, memory=memory)
     finally:
         await built.aclose()
 
@@ -562,6 +589,18 @@ class TestEngineContract(AssistantEngineContract):
     async def pending_candidates_off(self) -> AsyncIterator[PendingCandidatesSubject]:
         """The production engine built as the composition root builds it, the switch off."""
         async for subject in _pending(candidates=False):
+            yield subject
+
+    @pytest.fixture
+    async def person_model_subject(self) -> AsyncIterator[PersonModelSubject]:
+        """The production engine with a person-model store wired, over injected stores."""
+        async for subject in _person_model(wired=True):
+            yield subject
+
+    @pytest.fixture
+    async def person_model_off(self) -> AsyncIterator[PersonModelSubject]:
+        """The production engine as the root builds it with the switch off: no store."""
+        async for subject in _person_model(wired=False):
             yield subject
 
     @pytest.fixture

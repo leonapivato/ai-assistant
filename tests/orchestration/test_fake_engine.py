@@ -66,6 +66,12 @@ from episode_inspection_contract import (
     EpisodeInspectionSubject,
 )
 from pending_candidates_contract import PENDING_AT, PENDING_LIMIT, PendingCandidatesSubject
+from person_model_contract import (
+    PERSON_BUDGET,
+    PERSON_LIMIT,
+    PersonModelSubject,
+    person_model_stores,
+)
 from story_surface_contract import STORY_LIMIT, STORY_SURFACE_AT, StorySurfaceSubject
 
 from ai_assistant.core.errors import (
@@ -108,6 +114,7 @@ from ai_assistant.core.types import (
     UserMessage,
 )
 from ai_assistant.orchestration.chat import COULDNT_FINISH
+from ai_assistant.orchestration.person_block import PersonBlocks
 from ai_assistant.testing import (
     FakeAssistantEngine,
     FakeMemoryStore,
@@ -175,6 +182,16 @@ def _pending(*, candidates: bool) -> PendingCandidatesSubject:
     return PendingCandidatesSubject(engine=built, memory=memory, plans=plans)
 
 
+def _person_model(*, wired: bool) -> PersonModelSubject:
+    """A fake at the person model's bound, its two stores injected; wired or not."""
+    people, memory = person_model_stores()
+    built = FakeAssistantEngine(max_payload_bytes=PERSON_LIMIT)
+    built.episode_memory = memory
+    if wired:
+        built.person_blocks = PersonBlocks(store=people, memory=memory, budget_chars=PERSON_BUDGET)
+    return PersonModelSubject(engine=built, people=people, memory=memory)
+
+
 class TestFakeAssistantEngineContract(AssistantEngineContract):
     """The canonical fake, held to the shared contract."""
 
@@ -219,6 +236,16 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
     def pending_candidates_off(self) -> PendingCandidatesSubject:
         """The same fake with its switch off, as the composition root's is."""
         return _pending(candidates=False)
+
+    @pytest.fixture
+    def person_model_subject(self) -> PersonModelSubject:
+        """The canonical fake with a person-model store wired, over injected stores."""
+        return _person_model(wired=True)
+
+    @pytest.fixture
+    def person_model_off(self) -> PersonModelSubject:
+        """The same fake with no store, as a hub with the switch off."""
+        return _person_model(wired=False)
 
     @pytest.fixture
     def engine(self) -> AssistantEngine:

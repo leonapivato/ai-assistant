@@ -405,6 +405,33 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         # ADR-0329 §18:2's read of the pending candidates, and the one type it returns:
         # a candidate by its episode and its fact (§18:1), which is no memory.
         "PendingCandidate",
+        # ADR-0338 §8:1's seven person-model members, and the types they carry: the
+        # panel's read of a person's model with its slot, what the slot left out and the
+        # suggestions as the panel shows them, and what a panel's write did — built from
+        # lane 1's person-model types (§10:4), which the walk reaches through them.
+        "PersonModelView",
+        "KeptMemoryView",
+        "LeftOutMemory",
+        "LeftOutReason",
+        "SuggestionView",
+        "PersonModelEdit",
+        "PersonModelEditRefusal",
+        "Person",
+        "PersonRole",
+        "Profile",
+        "ProfileField",
+        "ProfileChange",
+        "PersonModelAct",
+        "PersonActHow",
+        "Pin",
+        "StyleMark",
+        "PersonSuggestion",
+        "ProposedSuggestion",
+        "SuggestionKind",
+        "SuggestionState",
+        "PersonModelWrite",
+        "PersonModelWriteKind",
+        "PersonModelRefusal",
     }
 )
 
@@ -861,8 +888,13 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     **ADR-0332 §5:9 adds one**, ``composing``, the hub chat page's signal that the
     person is typing — so the count rises to sixty-one. The gateway serves it at
     ``POST /chat/composing`` (§5:10), which ADR-0332 §1:3's fourth step builds.
+
+    **ADR-0338 §8:1 adds seven**, the person model's panel members: ``person_model``,
+    ``set_profile_field``, ``pin_memory``, ``unpin_memory``, ``remove_style_mark``,
+    ``accept_person_suggestion`` and ``dismiss_person_suggestion`` — so the count rises
+    to sixty-eight.
     """
-    assert len(_method_names()) == 61
+    assert len(_method_names()) == 68
     assert "converse_spoken" not in _method_names()
     for retired in (
         "converse",
@@ -1800,6 +1832,13 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ``Belief.supports``. A peer at 114 refuses the new member as unknown (ADR-0124
     §9:2). **The method set does not move and stays at 61.**
 
+    **116 is ADR-0338 §8:1, on the method set and wire-carried core types.** The
+    promoted set gains the seven person-model members, the wire carries
+    ``PersonModelView`` and ``PersonModelEdit`` with the person model's types they are
+    built from, and ``core.errors`` gains ``PersonModelOffError``. A hub at 115 does not
+    route the methods a peer at 116 calls (ADR-0124 §9:2). **The method set moves from
+    61 to 68.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1808,7 +1847,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (61, 115), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (68, 116), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

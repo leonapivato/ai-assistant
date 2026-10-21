@@ -37,12 +37,15 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     HUB_DEVICE_ID,
     HUB_REQUESTING_DEVICE,
+    OWNER_PERSON_ID,
     ChatDevice,
     DeviceAccess,
     DeviceRole,
     RequestingDevice,
 )
-from ai_assistant.testing import FakeAssistantEngine
+from ai_assistant.orchestration.person_block import PersonBlocks
+from ai_assistant.testing import FakeAssistantEngine, FakePersonModelStore
+from ai_assistant.testing.memories import memory
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.client import HubEngineClient
 from ai_assistant.wire.codec import ENVELOPE_RESERVE_BYTES, canonical_payload
@@ -276,6 +279,37 @@ async def test_the_remote_listeners_connecting_device_is_its_admitted_identity(
             await server.wait_closed()
     assert answer.kind is env.FrameKind.RESULT
     assert roster.asked == [("laptop.tailnet", None)]
+
+
+async def test_a_persons_model_is_refused_to_a_device_without_the_command_role(
+    tmp_path: Path,
+) -> None:
+    """ADR-0338 §8:3, through a served connection: shown only to the person and the owner.
+
+    The command role is the owner's devices' and the hub's one person is the owner
+    (§2:1), so a device without it is refused the read and a pin before dispatch, and
+    nothing is read or written; the owner's device reads the model.
+    """
+    engine = FakeAssistantEngine()
+    people = FakePersonModelStore()
+    engine.person_blocks = PersonBlocks(store=people, memory=engine.episode_memory)
+    await engine.episode_memory.add(memory("m:diet", "Eats no meat."))
+    roster = _Roster(devices={"bare": _BARE, "phone": _PHONE})
+    async with _client(engine, roster, tmp_path) as client:
+        with acting_for("bare"), pytest.raises(DeviceRefusedError) as read:
+            await client.person_model(OWNER_PERSON_ID)
+        with acting_for("bare"), pytest.raises(DeviceRefusedError) as pinned:
+            await client.pin_memory(OWNER_PERSON_ID, memory_id="m:diet")
+        with acting_for("phone"):
+            view = await client.person_model(OWNER_PERSON_ID)
+    assert read.value.reason is DeviceRefusal.NOT_ALLOWED
+    assert pinned.value.reason is DeviceRefusal.NOT_ALLOWED
+    assert view is not None
+    assert view.person.id == OWNER_PERSON_ID
+    held = await people.read(OWNER_PERSON_ID)
+    assert held is not None
+    assert held.pins == ()
+    assert [name for name, _ in engine.calls] == ["person_model"]
 
 
 def test_every_refusal_this_lane_writes_fits_unreduced_at_the_floor() -> None:

@@ -125,6 +125,8 @@ from ai_assistant.core.types import (
     describe_untrusted,
     encodable_text,
     episode_view,
+    profile_field,
+    profile_value,
     secret_value,
     story_members,
     story_move_members,
@@ -132,6 +134,7 @@ from ai_assistant.core.types import (
     story_note_text,
     user_message,
 )
+from ai_assistant.orchestration import person_panel
 from ai_assistant.orchestration.candidates import held_candidates
 from ai_assistant.orchestration.change_stream import Activity, ChangeStream
 from ai_assistant.orchestration.channels import (
@@ -216,6 +219,9 @@ if TYPE_CHECKING:
         MessageReceipt,
         NonBlankEncodableText,
         NotificationPreferences,
+        PersonModelEdit,
+        PersonModelView,
+        ProfileField,
         ReplyCapability,
         SecretValue,
         SourceReadRecord,
@@ -229,6 +235,7 @@ if TYPE_CHECKING:
         TranscriptPage,
         UserMessage,
     )
+    from ai_assistant.orchestration.person_block import PersonBlocks
 
 #: A fixed instant, so a fake engine's output is deterministic without a clock.
 _AT = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
@@ -351,6 +358,15 @@ class FakeAssistantEngine:
         #: ``candidates`` says the same: off, the composition root's value until the
         #: observer is wired, and :meth:`pending_candidates` then answers none.
         self.candidates = False
+        #: The person-block assembly the seven person-model members answer from
+        #: (ADR-0338 §8:1), as the engine's ``person_blocks`` is: ``None``, the default,
+        #: is a hub with ``Settings.person_model`` off, where each member raises
+        #: :class:`~ai_assistant.core.errors.PersonModelOffError` (§11:2). A consumer
+        #: switches it on with a
+        #: :class:`~ai_assistant.orchestration.person_block.PersonBlocks` over a
+        #: :class:`~ai_assistant.testing.FakePersonModelStore` and
+        #: :attr:`episode_memory`, where the memories its pins point at are held.
+        self.person_blocks: PersonBlocks | None = None
         #: The placement each held belief carries (ADR-0217 §1), by record id. Held
         #: **beside** the beliefs rather than on them, because
         #: :class:`~ai_assistant.core.types.Belief` carries no placement: ADR-0217 §7
@@ -1103,6 +1119,108 @@ class FakeAssistantEngine:
             return self._checked((), "pending_candidates")
         held = await held_candidates(self.episode_memory, self.plan_store)
         return self._checked(held, "pending_candidates")
+
+    # --- the person model, for the panels (ADR-0338 §8:1-§8:3) ------------
+    #
+    # The engine's own reading and writes (:mod:`~ai_assistant.orchestration.person_panel`),
+    # over :attr:`person_blocks`, so the suite compares two implementations of the
+    # surface rather than two of the slot. Arguments are validated first, then a fake
+    # with no assembly refuses as a hub with the switch off does.
+
+    async def person_model(self, person_id: NonBlankEncodableText) -> PersonModelView | None:
+        """One person's model, as the About you panel shows it (ADR-0338 §8:1)."""
+        named = non_blank_text(person_id, name="person_id")
+        check_arguments("person_model", max_bytes=self._max_payload_bytes, person_id=named)
+        self.calls.append(("person_model", {"person_id": named}))
+        blocks = person_panel.wired(self.person_blocks)
+        return self._checked(await person_panel.person_model_view(blocks, named), "person_model")
+
+    async def set_profile_field(
+        self,
+        person_id: NonBlankEncodableText,
+        *,
+        field: ProfileField,
+        value: EncodableText | None = None,
+    ) -> PersonModelEdit:
+        """Set or clear one of a person's fields, on the panel (ADR-0338 §3)."""
+        named = non_blank_text(person_id, name="person_id")
+        which = profile_field(field)
+        held = profile_value(value)
+        check_arguments(
+            "set_profile_field",
+            max_bytes=self._max_payload_bytes,
+            person_id=named,
+            field=which,
+            value=held,
+        )
+        self.calls.append(
+            ("set_profile_field", {"person_id": named, "field": which, "value": held})
+        )
+        blocks = person_panel.wired(self.person_blocks)
+        return self._checked(
+            await person_panel.set_profile_field(blocks, named, which, held), "set_profile_field"
+        )
+
+    async def pin_memory(
+        self, person_id: NonBlankEncodableText, *, memory_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Pin a memory, through the one checked pin (ADR-0338 §4:2, §6:3)."""
+        named, memory = self._person_ids("pin_memory", person_id, memory_id=memory_id)
+        blocks = person_panel.wired(self.person_blocks)
+        return self._checked(await person_panel.pin_memory(blocks, named, memory), "pin_memory")
+
+    async def unpin_memory(
+        self, person_id: NonBlankEncodableText, *, memory_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Unpin a memory, erasing nothing, through the one unpin (ADR-0338 §4:7)."""
+        named, memory = self._person_ids("unpin_memory", person_id, memory_id=memory_id)
+        blocks = person_panel.wired(self.person_blocks)
+        return self._checked(await person_panel.unpin_memory(blocks, named, memory), "unpin_memory")
+
+    async def remove_style_mark(
+        self, person_id: NonBlankEncodableText, *, mark_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Remove a style mark (ADR-0338 §5:3)."""
+        named, mark = self._person_ids("remove_style_mark", person_id, mark_id=mark_id)
+        blocks = person_panel.wired(self.person_blocks)
+        return self._checked(
+            await person_panel.remove_style_mark(blocks, named, mark), "remove_style_mark"
+        )
+
+    async def accept_person_suggestion(
+        self, person_id: NonBlankEncodableText, *, suggestion_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Accept a pending suggestion (ADR-0338 §8:8, §9:2, §9:5)."""
+        named, suggestion = self._person_ids(
+            "accept_person_suggestion", person_id, suggestion_id=suggestion_id
+        )
+        blocks = person_panel.wired(self.person_blocks)
+        return self._checked(
+            await person_panel.accept_suggestion(blocks, named, suggestion),
+            "accept_person_suggestion",
+        )
+
+    async def dismiss_person_suggestion(
+        self, person_id: NonBlankEncodableText, *, suggestion_id: NonBlankEncodableText
+    ) -> PersonModelEdit:
+        """Dismiss a pending suggestion (ADR-0338 §9:2, §12)."""
+        named, suggestion = self._person_ids(
+            "dismiss_person_suggestion", person_id, suggestion_id=suggestion_id
+        )
+        blocks = person_panel.wired(self.person_blocks)
+        return self._checked(
+            await person_panel.dismiss_suggestion(blocks, named, suggestion),
+            "dismiss_person_suggestion",
+        )
+
+    def _person_ids(self, method: str, person_id: str, **record: str) -> tuple[str, str]:
+        """A person-model write's two ids, validated verbatim, measured and recorded."""
+        named = non_blank_text(person_id, name="person_id")
+        ((name, value),) = record.items()
+        other = non_blank_text(value, name=name)
+        check_arguments(method, max_bytes=self._max_payload_bytes, person_id=named, **{name: other})
+        self.calls.append((method, {"person_id": named, name: other}))
+        return named, other
 
     # --- the owner's placement acts (ADR-0217 §7) --------------------------
 
