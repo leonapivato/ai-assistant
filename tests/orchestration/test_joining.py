@@ -1,8 +1,9 @@
 """Joining a running activation and taking one over, over constructed states (ADR-0332).
 
 The engine drives these through whole passes in ``test_phases_joining``. Here each rule
-is held apart: who may join (§3:3), the one-step join and commitment (§3:5, §3:6), what
-another place is shown (§4:1-§4:3) and the takeover's one step (§4:6).
+is held apart: who may join (§3:3), what is a pure read (ADR-0341 §2), the one-step join
+and commitment (§3:5, §3:6), what another place is shown (§4:1-§4:3) and the takeover's
+one step (§4:6).
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import Final
 
 import pytest
 from test_engine import tool
+from test_engine_phases import _BOOK
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConversationStoreError
@@ -21,6 +23,7 @@ from ai_assistant.core.types import (
     CapabilityEffect,
     ChannelIdentity,
     ChannelInput,
+    DataTier,
     EpisodicMemory,
     InputOrigin,
     JoinedInput,
@@ -31,6 +34,7 @@ from ai_assistant.core.types import (
     Provenance,
     RecordedInputMessage,
     TextChannelPayload,
+    ToolDefinition,
     UnderstandingGround,
     UnderstandingProducer,
     WholeTextReply,
@@ -59,6 +63,10 @@ from ai_assistant.orchestration.joining import (
     take_over,
     visible_running,
 )
+from ai_assistant.orchestration.lookups import LOOK_UPS, READ_STORY, SEARCH_MEMORY
+from ai_assistant.orchestration.remembering import REMEMBER
+from ai_assistant.orchestration.story_calls import STORY_CALLS
+from ai_assistant.tools.web_search import WEB_SEARCH
 
 _AT: Final = datetime(2026, 10, 21, 9, tzinfo=UTC)
 _IDS: Final = (
@@ -183,22 +191,54 @@ def test_an_input_that_joins_carries_a_message() -> None:
         JoiningInput(channel=_place("a"), messages=(), standing=_USERS)
 
 
+# --- ADR-0341 §2: the pure read ------------------------------------------------------
+
+
+@pytest.mark.parametrize("declared", LOOK_UPS, ids=lambda one: str(one.capability))
+def test_each_look_up_is_a_pure_read(declared: ToolDefinition) -> None:
+    """§2:1: a look-up writes nothing, declares the own records and stays in the hub."""
+    assert declared.writes == ()
+    assert declared.effect is CapabilityEffect.OWN_RECORDS
+    assert not declared.leaves_hub
+    assert is_pure_read(declared)
+
+
 @pytest.mark.parametrize(
-    ("effect", "leaves_hub", "pure"),
-    [
-        (CapabilityEffect.NONE, False, True),
-        # A web search changes nothing and leaves the hub: it commits (§3:1's note).
-        (CapabilityEffect.NONE, True, False),
-        # A write to the hub's own records commits, even one safe to repeat.
-        (CapabilityEffect.OWN_RECORDS, False, False),
-        (CapabilityEffect.WORLD, True, False),
-    ],
+    "declared",
+    [*STORY_CALLS, REMEMBER, WEB_SEARCH, _BOOK],
+    ids=lambda one: str(one.capability),
 )
-def test_a_pure_read_changes_nothing_and_stays_in_the_hub(
-    effect: CapabilityEffect, leaves_hub: bool, pure: bool
+def test_a_story_write_remember_the_web_search_and_a_call_in_the_world_are_not(
+    declared: ToolDefinition,
 ) -> None:
-    declared = tool().model_copy(update={"effect": effect, "leaves_hub": leaves_hub})
-    assert is_pure_read(declared) is pure
+    """§2:1: a write to the hub's own records, a call that leaves the hub, the world."""
+    assert not is_pure_read(declared)
+
+
+def test_a_call_that_changes_nothing_and_stays_in_the_hub_is_still_a_pure_read() -> None:
+    """§2:1 keeps what ADR-0332 §3:1 counted: effect none, no writes, does not leave."""
+    declared = tool().model_copy(update={"effect": CapabilityEffect.NONE, "leaves_hub": False})
+    assert is_pure_read(declared)
+
+
+def _renamed(declared: ToolDefinition, name: str, **update: object) -> ToolDefinition:
+    """``declared`` under another id and capability, validated as a declaration."""
+    return ToolDefinition.model_validate(
+        {**declared.model_dump(), "id": name, "capability": name, **update}
+    )
+
+
+def test_the_look_ups_properties_under_another_name_are_a_pure_read() -> None:
+    """§2:2: the declaration decides, never the call's or its capability's name."""
+    assert is_pure_read(_renamed(SEARCH_MEMORY, "opening_hours"))
+
+
+def test_a_write_under_a_look_ups_name_is_not_a_pure_read() -> None:
+    """§2:2: a name admits nothing; a write the declaration names commits."""
+    assert not is_pure_read(
+        _renamed(READ_STORY, str(READ_STORY.capability), writes=(DataTier.PERSONAL,))
+    )
+    assert not is_pure_read(_renamed(SEARCH_MEMORY, str(SEARCH_MEMORY.capability), leaves_hub=True))
 
 
 # --- §3:6: the join, one step ------------------------------------------------------
