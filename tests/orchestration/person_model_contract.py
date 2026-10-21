@@ -169,6 +169,7 @@ def _write(edit: PersonModelEdit) -> tuple[PersonModelWriteKind, PersonModelRefu
 #: Each member, called once with ids of the owner's and well-formed arguments, by name.
 _MEMBERS: Final[dict[str, Callable[[AssistantEngine], Awaitable[Any]]]] = {
     "person_model": lambda engine: engine.person_model(OWNER_PERSON_ID),
+    "profile_changes": lambda engine: engine.profile_changes(OWNER_PERSON_ID),
     "set_profile_field": lambda engine: engine.set_profile_field(
         OWNER_PERSON_ID, field=ProfileField.NAME, value="Robin"
     ),
@@ -186,6 +187,7 @@ _MEMBERS: Final[dict[str, Callable[[AssistantEngine], Awaitable[Any]]]] = {
 #: Each member, called with a blank person id.
 _BLANK: Final[dict[str, Callable[[AssistantEngine], Awaitable[Any]]]] = {
     "person_model": lambda engine: engine.person_model("  "),
+    "profile_changes": lambda engine: engine.profile_changes("  "),
     "set_profile_field": lambda engine: engine.set_profile_field(
         "  ", field=ProfileField.NAME, value="Robin"
     ),
@@ -261,7 +263,8 @@ class PersonModelContract:
         assert view.person.id == OWNER_PERSON_ID
         assert view.profile.name is None
         assert view.budget_chars == PERSON_BUDGET
-        assert (view.changes, view.kept, view.left_out) == ((), (), ())
+        assert (view.kept, view.left_out) == ((), ())
+        assert await person_model_subject.engine.profile_changes(OWNER_PERSON_ID) == ()
         assert (view.no_longer_current, view.style_marks, view.suggestions) == ((), (), ())
 
     async def test_a_person_the_hub_does_not_hold_reads_none(
@@ -302,7 +305,11 @@ class PersonModelContract:
             ("m:brief", "Short answers.", False),
         ]
         assert view.kept_chars == sum(len(one.content) for one in view.kept)
-        assert [mark.memory_id for mark in view.style_marks] == ["m:brief", "m:dry", "m:diet"]
+        assert [(one.mark.memory_id, one.shows) for one in view.style_marks] == [
+            ("m:brief", "m:brief"),
+            ("m:dry", "m:dry"),
+            ("m:diet", "m:diet"),
+        ]
 
     async def test_the_slot_stops_at_the_budget_and_says_what_it_left_out(
         self, person_model_subject: PersonModelSubject
@@ -367,6 +374,28 @@ class PersonModelContract:
         ]
         assert view.no_longer_current == ()
 
+    async def test_a_style_mark_names_the_memory_it_shows_or_words_the_one_it_was_on(
+        self, person_model_subject: PersonModelSubject
+    ) -> None:
+        """§5:3: a mark follows its memory's successor; the panel ties each to its control."""
+        subject = person_model_subject
+        await _held(
+            subject,
+            ended("m:long", "Likes long answers.", successor="m:short"),
+            fact("m:short", "Likes short answers."),
+            ended("m:jokes", "Likes puns.", successor=None),
+        )
+        followed = await subject.people.add_style_mark(OWNER_PERSON_ID, "m:long")
+        ended_mark = await subject.people.add_style_mark(OWNER_PERSON_ID, "m:jokes")
+
+        view = await _read(subject)
+
+        assert [(one.mark.id, one.shows, one.content) for one in view.style_marks] == [
+            (followed.record_id, "m:short", None),
+            (ended_mark.record_id, None, "Likes puns."),
+        ]
+        assert [(one.memory_id, one.pinned) for one in view.kept] == [("m:short", False)]
+
     async def test_a_pin_reaching_no_current_memory_is_no_longer_current_until_removed(
         self, person_model_subject: PersonModelSubject
     ) -> None:
@@ -379,7 +408,9 @@ class PersonModelContract:
 
         assert view.kept == ()
         assert view.left_out == ()
-        assert [pin.memory_id for pin in view.no_longer_current] == ["m:old"]
+        assert [(one.pin.memory_id, one.content) for one in view.no_longer_current] == [
+            ("m:old", "Lives in Porto.")
+        ]
 
         unpinned = await subject.engine.unpin_memory(OWNER_PERSON_ID, memory_id="m:old")
 
@@ -455,7 +486,7 @@ class PersonModelContract:
         assert _write(edit) == (_WRITTEN, None)
         view = await _read(subject)
         assert view.profile.time_zone == "Europe/Lisbon"
-        (change,) = view.changes
+        (change,) = await subject.engine.profile_changes(OWNER_PERSON_ID)
         assert (change.field, change.old, change.new) == (
             ProfileField.TIME_ZONE,
             None,
@@ -501,7 +532,7 @@ class PersonModelContract:
             PersonModelRefusal.INVALID_VALUE,
         )
         assert edit.write.reason
-        assert (await _read(subject)).changes == ()
+        assert await subject.engine.profile_changes(OWNER_PERSON_ID) == ()
 
     async def test_setting_the_value_held_changes_nothing_and_clearing_logs_it(
         self, person_model_subject: PersonModelSubject
@@ -523,7 +554,8 @@ class PersonModelContract:
         assert _write(cleared) == (_WRITTEN, None)
         view = await _read(subject)
         assert view.profile.name is None
-        assert [(one.old, one.new) for one in view.changes] == [(None, "Rob"), ("Rob", None)]
+        changes = await subject.engine.profile_changes(OWNER_PERSON_ID)
+        assert [(one.old, one.new) for one in changes] == [("Rob", None), (None, "Rob")]
 
     async def test_a_field_of_a_person_the_hub_does_not_hold_is_refused(
         self, person_model_subject: PersonModelSubject
@@ -533,6 +565,57 @@ class PersonModelContract:
         )
 
         assert _write(edit) == (_REFUSED, PersonModelRefusal.UNKNOWN_PERSON)
+
+    async def test_the_change_log_is_paged_most_recent_first(
+        self, person_model_subject: PersonModelSubject
+    ) -> None:
+        """§3:5: every change, a page at a time, the most recent first."""
+        subject = person_model_subject
+        for index in range(5):
+            await subject.engine.set_profile_field(
+                OWNER_PERSON_ID, field=ProfileField.NAME, value=f"Robin {index}"
+            )
+
+        first = await subject.engine.profile_changes(OWNER_PERSON_ID, limit=2)
+        second = await subject.engine.profile_changes(OWNER_PERSON_ID, limit=2, offset=2)
+        rest = await subject.engine.profile_changes(OWNER_PERSON_ID, offset=4)
+        past = await subject.engine.profile_changes(OWNER_PERSON_ID, offset=1000)
+
+        assert [one.new for one in first] == ["Robin 4", "Robin 3"]
+        assert [one.new for one in second] == ["Robin 2", "Robin 1"]
+        assert [(one.old, one.new) for one in rest] == [(None, "Robin 0")]
+        assert past == ()
+
+    async def test_a_long_change_log_never_makes_the_model_unreadable(
+        self, person_model_subject: PersonModelSubject
+    ) -> None:
+        """The log grows without bound, and the model's read does not carry it."""
+        subject = person_model_subject
+        value = "R" * 150
+        for index in range(PERSON_LIMIT // len(value) + 5):
+            await subject.engine.set_profile_field(
+                OWNER_PERSON_ID, field=ProfileField.NAME, value=f"{value}{index}"
+            )
+
+        view = await _read(subject)
+
+        assert view.profile.name is not None
+        assert view.profile.name.startswith(value)
+
+    async def test_a_change_log_page_of_a_person_the_hub_does_not_hold_is_empty(
+        self, person_model_subject: PersonModelSubject
+    ) -> None:
+        assert await person_model_subject.engine.profile_changes("person:someone") == ()
+
+    @pytest.mark.parametrize(("limit", "offset"), [(-1, 0), (0, -1)])
+    async def test_a_malformed_change_log_page_is_refused_locally(
+        self, person_model_subject: PersonModelSubject, limit: int, offset: int
+    ) -> None:
+        """ADR-0085 §9, as every paged read on the surface refuses one."""
+        with pytest.raises(ValueError, match=r"limit|offset"):
+            await person_model_subject.engine.profile_changes(
+                OWNER_PERSON_ID, limit=limit, offset=offset
+            )
 
     # --- pins (§4) ---------------------------------------------------------------
 
@@ -684,7 +767,7 @@ class PersonModelContract:
         assert _write(edit) == (_WRITTEN, None)
         view = await _read(subject)
         assert view.profile.address == "Robin"
-        (change,) = view.changes
+        (change,) = await subject.engine.profile_changes(OWNER_PERSON_ID)
         assert (change.act.how, change.act.episode_id, change.suggestion_id) == (
             PersonActHow.SUGGESTION,
             "activation:a1",

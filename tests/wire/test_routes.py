@@ -84,10 +84,11 @@ def test_stop_activation_is_a_command() -> None:
     assert route_of("stop_activation") is Route.COMMAND
 
 
-#: ADR-0338 §8:1's seven person-model members.
+#: ADR-0338 §8:1's eight person-model members.
 _PERSON_MODEL_MEMBERS: Final = frozenset(
     {
         "person_model",
+        "profile_changes",
         "set_profile_field",
         "pin_memory",
         "unpin_memory",
@@ -114,7 +115,7 @@ def test_a_persons_model_is_a_command_shown_only_to_the_owner(method: str) -> No
 
 
 def test_the_person_model_members_are_the_surfaces_own() -> None:
-    """The seven are on the surface, so the row above names no stale method."""
+    """The eight are on the surface, so the row above names no stale method."""
     assert _PERSON_MODEL_MEMBERS <= METHODS
 
 

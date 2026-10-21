@@ -2683,12 +2683,12 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``pin``, carried on ``Belief.supports`` by ``belief``. A peer at 114 refuses the
 #:     new member as unknown (ADR-0124 §9:2). The method set does not move.
 #: 116: ADR-0338 §8:1 advances the version once for the panels' members, on these
-#:     grounds: the promoted method set gains ``person_model``, ``set_profile_field``,
-#:     ``pin_memory``, ``unpin_memory``, ``remove_style_mark``,
+#:     grounds: the promoted method set gains ``person_model``, ``profile_changes``,
+#:     ``set_profile_field``, ``pin_memory``, ``unpin_memory``, ``remove_style_mark``,
 #:     ``accept_person_suggestion`` and ``dismiss_person_suggestion``; the wire carries
 #:     ``PersonModelView`` and ``PersonModelEdit``, with the person model's types they
 #:     are built from; and ``core.errors`` gains ``PersonModelOffError``, which the wire
-#:     rebuilds by its name. A hub at 115 does not route the seven methods a peer at
+#:     rebuilds by its name. A hub at 115 does not route the eight methods a peer at
 #:     116 calls (ADR-0124 §9:2).
 PROTOCOL_VERSION: Final[int] = 116
 

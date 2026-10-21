@@ -496,6 +496,12 @@ class FakePersonModelStore:
         proposed = found.proposed
         if proposed.kind is SuggestionKind.FIELD:
             assert proposed.field is not None  # noqa: S101 — the type requires it
+            # §3:2: validated again, as every field write is, against the bound held now.
+            # This fake's bound is fixed for its lifetime and a suggestion is validated
+            # when recorded, so it cannot fail here; the check keeps it the contract's.
+            fault = profile_value_fault(proposed.field, proposed.value, chars=self._chars)
+            if fault is not None:
+                return _refused(PersonModelRefusal.INVALID_VALUE, reason=fault, record_id=found.id)
             act = PersonModelAct(how=PersonActHow.SUGGESTION, by=by, episode_id=proposed.episode_id)
             self._write_field(held, proposed.field, proposed.value, act, suggestion_id=found.id)
         else:
