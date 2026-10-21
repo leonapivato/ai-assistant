@@ -5226,29 +5226,31 @@ async function readAboutList(name, run) {
   }
 }
 
+// Per field: how many times the person has typed in its box, and which boxes hold text
+// they typed and that has not landed. Kept apart from the boxes, which every read of the
+// panel builds again, so both survive a rebuild.
+const fieldTyping = { revision: {}, draft: new Set() };
+
 // The five fields, each its own form: a Save writes that field and no other.
 //
-// **A box the person has typed in and not saved keeps what they typed** (adversarial
-// review, rounds 1 and 2): every write reads the panel again, which builds every form
-// again, and a draft in another field — or one typed while the write was in flight, even
-// one typed back to the value held — would be lost with it though it was never sent. So a
-// box typed in since it was built or last sent is marked, by the typing and not by
-// comparing values, and its text is carried over.
+// **A box the person has typed in, and whose text has not landed, keeps what they typed**
+// (adversarial review, rounds 1 to 4): every write reads the panel again, which builds
+// every form again, and a draft — in another field, refused, never arrived, or typed while
+// a write was in flight — would otherwise be lost though it was never stored. Whether
+// typing happened is counted, never inferred from the text's value.
 function renderProfile(profile) {
   const drafts = {};
-  PROFILE_FIELDS.forEach((spec) => {
-    const box = el(`field-${spec.field}`);
-    if (box !== null && box.dataset.typed === "yes") {
-      drafts[spec.field] = box.value;
+  fieldTyping.draft.forEach((field) => {
+    const box = el(`field-${field}`);
+    if (box !== null) {
+      drafts[field] = box.value;
     }
   });
   const fields = el("profile-fields");
   clearNode(fields);
   PROFILE_FIELDS.forEach((spec) => renderField(fields, spec, profile[spec.field]));
   Object.keys(drafts).forEach((field) => {
-    const box = el(`field-${field}`);
-    box.value = drafts[field];
-    box.dataset.typed = "yes";
+    el(`field-${field}`).value = drafts[field];
   });
 }
 
@@ -5268,7 +5270,8 @@ function renderField(fields, spec, value) {
   input.autocomplete = "off";
   input.value = value === null ? "" : value;
   input.addEventListener("input", () => {
-    input.dataset.typed = "yes";
+    fieldTyping.revision[spec.field] = (fieldTyping.revision[spec.field] || 0) + 1;
+    fieldTyping.draft.add(spec.field);
   });
   form.appendChild(input);
   const save = document.createElement("button");
@@ -5438,7 +5441,15 @@ async function aboutEdit(path, payload, act, landed) {
   aboutWriting.busy = true;
   try {
     const asked = Object.assign({ person_id: OWNER_PERSON_ID }, payload);
-    const body = await relay(half, path, asked, "about");
+    let body;
+    try {
+      body = await relay(half, path, asked, "about");
+    } finally {
+      // Held for the write and nothing after it: the read that follows is ordered by
+      // `aboutRuns`, and a lock held across it would let one stalled read refuse every
+      // later write (adversarial review, round 4).
+      aboutWriting.busy = false;
+    }
     // Not this session's answer (#2404).
     if (!sameSession(half, era)) {
       return;
@@ -5462,8 +5473,6 @@ async function aboutEdit(path, payload, act, landed) {
       return;
     }
     fault(GATEWAY_GONE, "about");
-  } finally {
-    aboutWriting.busy = false;
   }
 }
 
@@ -5513,12 +5522,12 @@ function setField(field, value) {
   // **A box stays a draft until its write lands** (adversarial review, round 3): a value
   // the hub refused is what the person corrects, and a write that never arrived is
   // theirs to send again, so neither may be replaced by what the hub held. Once the
-  // write lands the box shows what the hub now holds, unless it was typed in since.
-  const sent = el(`field-${field}`).value;
+  // write lands the box shows what the hub now holds, unless it was typed in since — which
+  // the field's typing count says, and never a comparison of text (round 4).
+  const sent = fieldTyping.revision[field] || 0;
   const landed = () => {
-    const box = el(`field-${field}`);
-    if (box !== null && box.value === sent) {
-      delete box.dataset.typed;
+    if ((fieldTyping.revision[field] || 0) === sent) {
+      fieldTyping.draft.delete(field);
     }
   };
   // An absent value is the clear: the gateway reads absent and `null` alike, and sends

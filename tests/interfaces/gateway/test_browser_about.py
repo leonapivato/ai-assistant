@@ -649,3 +649,83 @@ async def test_a_belief_panel_that_could_not_read_the_switch_says_so(
         )
         assert await page.locator("#belief-list button", has_text="Pin").count() == 0
         assert await page.locator("#belief-list .belief-row").count() == 1
+
+
+async def test_a_stalled_read_after_a_write_holds_up_no_later_write(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The one-write lock is the write's alone; the read after it is ordered by its run
+    (adversarial review, round 4)."""
+    loop = asyncio.get_running_loop()
+    release: asyncio.Future[None] = loop.create_future()
+    held_once: list[bool] = []
+
+    async def stall_first(route: Route) -> None:
+        if not held_once:
+            held_once.append(True)
+            await release
+        await route.fallback()
+
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        heard = _complaints(drive.page)
+        people, _ = switch_on(drive.engine)
+        await _open(drive)
+        page = drive.page
+        await page.route("**/person/changes", stall_first)
+
+        await page.fill("#field-name", "Robin")
+        async with page.expect_request("**/person/changes"):
+            await page.press("#field-name", "Enter")
+        async with page.expect_response("**/person/changes"):
+            await press(page, "#about-button")
+        await page.fill("#field-language", "Português")
+        async with page.expect_response("**/person/field/set"):
+            await page.press("#field-language", "Enter")
+
+        held = await people.read(OWNER_PERSON_ID)
+        assert held is not None
+        assert (held.profile.name, held.profile.language) == ("Robin", "Português")
+        release.set_result(None)
+        assert heard == []
+
+
+async def test_a_box_typed_in_while_a_clear_is_out_keeps_what_was_typed(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Typing is counted, not inferred from the text: typing the old value back during a
+    Clear is still a draft (adversarial review, round 4)."""
+    loop = asyncio.get_running_loop()
+    release: asyncio.Future[None] = loop.create_future()
+
+    async def hang(route: Route) -> None:
+        await release
+        await route.fallback()
+
+    async with driving(gateway_browser, tmp_path, viewport=PHONE) as drive:
+        heard = _complaints(drive.page)
+        people, _ = switch_on(drive.engine)
+        await drive.engine.set_profile_field(
+            OWNER_PERSON_ID, field=ProfileField.NAME, value="Robin"
+        )
+        await _open(drive)
+        page = drive.page
+        await page.route("**/person/field/set", hang)
+
+        async with page.expect_request("**/person/field/set"):
+            await (
+                page.locator("#profile-fields > form")
+                .nth(0)
+                .get_by_role("button", name="Clear")
+                .click()
+            )
+        await page.fill("#field-name", "Rob")
+        await page.fill("#field-name", "Robin")
+        async with page.expect_response("**/person/changes"):
+            release.set_result(None)
+
+        assert await page.locator("#about-outcome").inner_text() == "Cleared."
+        assert await page.locator("#field-name").input_value() == "Robin"
+        held = await people.read(OWNER_PERSON_ID)
+        assert held is not None
+        assert held.profile.name is None
+        assert heard == []
