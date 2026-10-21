@@ -533,10 +533,15 @@ class ActedRound:
     Attributes:
         round_id: The planning round.
         calls: What came of each call.
+        set_aside: A join set the round aside (ADR-0332 §3:7, §7:6): acting's commitment
+            step found joined input the understanding the round was planned from does
+            not cover, so none of its calls ran and its message was not written, by any
+            path. Each call is then not done, with the reason.
     """
 
     round_id: str
     calls: tuple[ActedCall, ...] = field(default=())
+    set_aside: bool = False
 
 
 def _utcnow() -> datetime:

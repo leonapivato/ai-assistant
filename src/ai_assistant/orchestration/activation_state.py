@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -27,6 +28,7 @@ from ai_assistant.core.types import (
     ControllerRule,
     EpisodeCaptureReport,
     EpisodeProcessingRecord,
+    JoinedInput,
     ProcessingReason,
     ProcessingStatus,
     RecordedChannelTrigger,
@@ -58,8 +60,25 @@ if TYPE_CHECKING:
         ReplyCapability,
         StageEntry,
     )
+    from ai_assistant.orchestration.joining import InputStanding
 
 _log = structlog.get_logger(__name__)
+
+
+class Commitment(StrEnum):
+    """What acting's commitment step found before a round's first act (ADR-0332 §3:5)."""
+
+    COMMITTED = "committed"
+    """No joined input is left uncovered: the activation is committed, and the round
+    runs."""
+
+    SET_ASIDE = "set_aside"
+    """A join brought input the understanding the round was planned from does not cover:
+    the round runs nothing, by any path (§3:7)."""
+
+    STOPPED = "stopped"
+    """The stop mark is set: the round runs nothing, and the pass ends on the stop
+    (ADR-0297 §4)."""
 
 
 @dataclass(frozen=True)
@@ -186,11 +205,31 @@ class ActivationState:
     #: controller reads it before each evaluation of the rules and once each stage's
     #: result is in hand (§4), and a resume reads it before it composes.
     stopped: bool = field(default=False, init=False)
+    #: ADR-0332 §3:2: the committed mark, set by acting's commitment step (:meth:`commit`)
+    #: before its first call that is not a pure read, or the round's message, and by a
+    #: takeover of this activation (§4:6); never cleared. Once set, no join is taken.
+    committed: bool = field(default=False, init=False)
+    #: ADR-0332 §3:16-§3:17: the inputs that joined, in the order they joined, a
+    #: takeover's among them; recorded on the episode's ``joined``.
+    joined: tuple[JoinedInput, ...] = field(default=(), init=False)
+    #: ADR-0332 §3:3: who wrote the trigger's input, as its place establishes it, and what
+    #: it carries; set when the pass begins, on a place that runs one activation at a
+    #: time. ``None`` until then, and on every other activation: nothing joins it, and it
+    #: neither sees nor is seen by another place's (§4:1-§4:3).
+    standing: InputStanding | None = None
+    #: The trigger's messages, each kept apart and dated, as the pass took them in: what
+    #: §4:1 shows of its input and what a takeover brings (§4:6). The line records the
+    #: same on its trigger (ADR-0323 §5:4); the hub chat's trigger records none, so its
+    #: messages are held here.
+    input_messages: tuple[RecordedInputMessage, ...] = ()
     #: The finalization reading was taken (ADR-0280 §6:2): an activation the
     #: controller never ended gains its end entry there, so for a stop it has ended
     #: from that reading on, whether or not the record carries the entry yet.
     _finalized: bool = field(default=False, init=False, repr=False)
     _last_understanding_version: int = field(default=0, init=False, repr=False)
+    #: How many inputs each recorded understanding version covers: those the activation
+    #: held when the stage that recorded it began (ADR-0332 §3:9, §3:10).
+    _covered: dict[int, int] = field(default_factory=dict, init=False, repr=False)
 
     @property
     def ended(self) -> bool:
@@ -217,6 +256,81 @@ class ActivationState:
             return False
         self.stopped = True
         return True
+
+    @property
+    def place(self) -> ChannelIdentity | None:
+        """The place the activation was started from, where its target names one.
+
+        The hub chat's conversation, the line's chat, an event's channel: what a join
+        on that place finds it by (ADR-0332 §3:3), and what §4:1 compares.
+        """
+        target = self.trigger.target
+        return target if isinstance(target, ChannelIdentity) else None
+
+    @property
+    def inputs_held(self) -> int:
+        """How many inputs the activation holds: its trigger's, and each joined (§3:9)."""
+        return 1 + len(self.joined)
+
+    @property
+    def whole_input(self) -> tuple[RecordedInputMessage, ...]:
+        """The activation's whole input: its trigger's messages, then each joined one's.
+
+        What §4:1 shows of a running activation, and what a takeover brings (§4:6): an
+        input that joined is the activation's input, as its trigger is (§3).
+        """
+        return (*self.input_messages, *(one for joined in self.joined for one in joined.messages))
+
+    def can_join(self, *, limit: int) -> bool:
+        """Whether a join may be taken now: running, uncommitted, unstopped, under ``limit``.
+
+        ADR-0332 §3:3, §3:6: the committed mark and the stop mark both unset, the
+        activation not ended, and fewer joins taken than ``join_limit``.
+        """
+        return (
+            not self.ended and not self.stopped and not self.committed and len(self.joined) < limit
+        )
+
+    def join(self, joined: JoinedInput, *, limit: int) -> bool:
+        """Take ``joined`` into the activation, where it may still join (ADR-0332 §3:6).
+
+        The check and the append are **one synchronous step with no await between
+        them**, on the hub's one event loop, as :meth:`stop` and :meth:`commit` are: so
+        a join either lands before the commitment step, which then finds it, or finds
+        the activation committed and is not taken.
+
+        Returns:
+            Whether it was taken; ``False`` where nothing changed.
+        """
+        if not self.can_join(limit=limit):
+            return False
+        self.joined = (*self.joined, joined)
+        return True
+
+    def commit(self, version: int | None) -> Commitment:
+        """Acting's commitment step, before a round's first act (ADR-0332 §3:5-§3:7).
+
+        One synchronous step with no await between the check and the mark: where the
+        stop mark is set, the round runs nothing; where the activation holds input that
+        ``version`` — the understanding the round was planned from — does not cover,
+        the round is set aside and nothing is marked; otherwise the activation is
+        marked committed, if it was not already. A round planned with no recorded
+        version is read as covering the trigger alone.
+
+        Returns:
+            What the step found.
+        """
+        if self.stopped:
+            return Commitment.STOPPED
+        covered = 1 if version is None else self._covered.get(version, 1)
+        if not self.committed and self.inputs_held > covered:
+            return Commitment.SET_ASIDE
+        self.committed = True
+        return Commitment.COMMITTED
+
+    def covers(self, version: int) -> int:
+        """How many inputs the recorded understanding ``version`` covers (§3:9)."""
+        return self._covered.get(version, 0)
 
     def recorded_round(
         self, planning_round: PlanningRound, labels: tuple[PlanningLabel, ...]
@@ -258,8 +372,14 @@ class ActivationState:
         """The version the next recorded understanding takes: one greater than the last."""
         return self._last_understanding_version + 1
 
-    def understood(self, understanding: ActivationUnderstanding, *, limit: int) -> None:
+    def understood(
+        self, understanding: ActivationUnderstanding, *, limit: int, inputs: int = 1
+    ) -> None:
         """Accumulate one version on the carrier, bounded at ``limit`` (ADR-0276 §7).
+
+        ``inputs`` is how many inputs the version covers: those the activation held when
+        the stage that recorded it began (ADR-0332 §3:9), which acting's commitment step
+        reads (§3:5).
 
         Where more than ``limit`` versions have been recorded, the history keeps
         version 1 and the latest ``limit - 1``, in version order, and
@@ -277,6 +397,7 @@ class ActivationState:
             msg = "an understanding version is one greater than the last recorded"
             raise ValueError(msg)
         self._last_understanding_version = understanding.version
+        self._covered[understanding.version] = inputs
         history = (*self.understanding, understanding)
         if len(history) > limit:
             self.understanding_elided += len(history) - limit
@@ -323,6 +444,7 @@ class ActivationState:
             rounds=self.rounds,
             labels=self.labels,
             digests=self.digests,
+            joined=self.joined,
         )
 
     def open_processing(self) -> EpisodeProcessingRecord:
@@ -356,6 +478,7 @@ class ActivationState:
             rounds=self.rounds,
             labels=self.labels,
             digests=self.digests,
+            joined=self.joined,
         )
 
     def _stage_record(
