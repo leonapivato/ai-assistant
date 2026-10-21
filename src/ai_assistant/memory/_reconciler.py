@@ -431,14 +431,8 @@ def _quoted_span(value: str) -> str:
     every non-ASCII character closes that by construction rather than by enumerating
     the two code points known today.
 
-    **A copy of this transform rather than an import, because golden rule 1 forbids
-    the import.** ``orchestration.consolidation`` calls :func:`json.dumps` directly,
-    one of the copies the inventory ADR-0183 §13 records, and ``memory`` may not
-    import that subsystem. The escaping is deliberately *identical* to
-    ``consolidation``'s and is pinned against it by a test, so the copies cannot
-    drift apart on the property that matters; whether the transform earns a shared
-    home is a decision reaching more than one subsystem and is filed as an issue
-    rather than taken inside this fence.
+    The escaping is pinned to :func:`json.dumps` by
+    ``test_the_assembler_escapes_a_span_with_the_json_transform``.
 
     Args:
         value: The held string, verbatim as this system carries it.
@@ -470,8 +464,7 @@ def _render(record: MemoryRecord, consulted: Sequence[MemoryRecord]) -> str:
     ingest whatever its band (ADR-0336 §2), a reader's proposal among them. With
     :func:`_quoted_span` the span is single-line printable ASCII, so it cannot reach
     the start of a line, and each belief is one line whose keyword is the assembler's
-    first token — the construction
-    ``orchestration.consolidation._render`` already carries, one subsystem over.
+    first token.
 
     ``kind`` is not escaped and does not need to be: every member of
     :data:`~ai_assistant.core.types.MemoryRecord` fixes it as a ``Literal``, so it is

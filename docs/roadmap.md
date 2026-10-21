@@ -98,10 +98,7 @@ becomes binding only when an ADR ratifies the slice that implements it.
    terms #879 sets. A box at home stays possible later. #879 holds the ruling and
    its reading of ADR-0155 §1:1 for a hosted hub; a clause that reading does not
    answer is raised there rather than built against. Moving a hub between boxes
-   is a data-directory copy under ADR-0083's layout, and it has one hard
-   constraint: **it must not land mid-#829-window**, because the consolidation
-   arming is a one-shot natural experiment a migration inside the window would
-   confound.
+   is a data-directory copy under ADR-0083's layout.
 7. **Ambient capture walks into a ratified pair, and pays for it first.** The
    historical voice discussion is on #1318; any new ambient-capture scope must
    be selected explicitly in a native GitHub milestone. The design is not what is
