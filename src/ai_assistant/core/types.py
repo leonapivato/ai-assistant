@@ -19784,7 +19784,7 @@ class StoryStanding(BaseModel):
 
 
 class DiagnosticSource(StrEnum):
-    """Which part of the pipeline wrote a diagnostic entry (ADR-0314 §4, §8).
+    """Which part of the hub wrote a diagnostic entry (ADR-0314 §4, §8; ADR-0337 §8:9).
 
     A **closed** enumeration, added to and never renamed: a member names the lines
     of files an owner reads with the server's own tools, and a renamed member would
@@ -19801,6 +19801,11 @@ class DiagnosticSource(StrEnum):
     """The observer, a background stage and no activation, writing under the activation
     of the episode it learned from (ADR-0333 §2:1); its entries go to a file of their
     own beside that activation's (§3:1)."""
+    FOLLOW_UP = "follow_up"
+    """The follow-up asker of ADR-0337 §8, writing one returned entry for each follow-up
+    it asked of a recorded call, under the activation that call was written under, and
+    no given entry (§8:9); its entries go to a file of their own beside that
+    activation's (§8:12)."""
 
 
 class DiagnosticKind(StrEnum):
