@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     Identifier,
     QuestionPart,
     ToolOutcome,
+    encodable_text,
 )
 
 if TYPE_CHECKING:
@@ -92,6 +93,15 @@ def revalidated_claim(effect: object) -> ActivationEffect:
 def matched_activations(match: object) -> tuple[str, ...] | None:
     """Return ``match`` as the tuple of activation ids it names, or refuse it.
 
+    **An id with no UTF-8 encoding is refused, not matched against nothing.** A record's
+    activation is an :data:`~ai_assistant.core.types.Identifier`, so no store can hold
+    one for such an id; but a SQLite store cannot even bind it, and the driver's
+    ``UnicodeEncodeError`` is no ``sqlite3.Error``, so it would escape the store as
+    something other than the ``PlanningError`` the Protocol raises (issue #3288). Refusing
+    it here, before any store's write, is what keeps every store agreeing. The message
+    names the id's place and the code point, and never echoes the id, which could not be
+    written down (:func:`~ai_assistant.core.types.encodable_text`).
+
     Args:
         match: What the caller passed as ``match``.
 
@@ -99,13 +109,20 @@ def matched_activations(match: object) -> tuple[str, ...] | None:
         ``None``, or the ids.
 
     Raises:
-        PlanningError: If ``match`` is neither ``None`` nor a tuple of strings.
+        PlanningError: If ``match`` is neither ``None`` nor a tuple of strings, or names
+            an id with no UTF-8 encoding.
     """
     if match is None:
         return None
     if not isinstance(match, tuple) or not all(isinstance(one, str) for one in match):
         msg = "match is None or a tuple of activation ids (ADR-0306 §6:2)"
         raise PlanningError(msg)
+    for index, one in enumerate(match):
+        try:
+            encodable_text(one)
+        except ValueError as exc:
+            msg = f"match names activation ids, and the one at index {index} is not: {exc}"
+            raise PlanningError(msg) from exc
     return match
 
 
