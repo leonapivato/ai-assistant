@@ -1930,3 +1930,18 @@ class TelegramIntakeRecordError(AssistantError):
     for refusal — the ``None`` of a fixed reply that may not be sent — that spelling
     is used and nothing is raised.
     """
+
+
+class PersonModelStoreError(AssistantError):
+    """The person-model store could not read or write its records (ADR-0338 §10:1).
+
+    Its own class in the :class:`AssistantError` hierarchy because the person model is
+    none of the things the existing errors name: a person, their set profile, its
+    change log and the pointers they keep, in a store of its own outside
+    ``MemoryStore``'s contract. A caller that degrades on a fault of this store, as
+    orchestration's person block does, can catch it without catching a memory one.
+
+    **It is raised only for a store fault**, never for a refused write: every refusal
+    is a :class:`~ai_assistant.core.types.PersonModelWrite` carrying a closed reason,
+    and a malformed *argument* is a ``ValueError``.
+    """
