@@ -85,6 +85,7 @@ from ai_assistant.testing.cancellation import (
 )
 from ai_assistant.testing.memories import (
     memory,
+    memory_in_band,
     remembered_support,
     said_support,
     sourced_support,
@@ -489,6 +490,89 @@ async def test_a_band_scoped_search_reports_a_corrupt_row_as_a_store_error(
         await reopened.search("coffee", bands=[BeliefBand.DERIVED])
     found = await reopened.search("coffee", bands=[BeliefBand.ASSERTED])
     assert [record.id for record in found.records] == ["ok"]
+
+
+#: The writes that overwrite a stored memory at its id: ``add``'s upsert, and
+#: ``write_atomic``'s two modes that land on a present row (ADR-0046 §2, ADR-0219 §2).
+_OverwritePath = Literal["add", "upsert", "if_unchanged"]
+
+
+async def _overwrite(
+    store: SqliteMemoryStore, path: _OverwritePath, record: Memory, *, read_revision: int
+) -> None:
+    """Overwrite ``record``'s stored row through ``path``."""
+    match path:
+        case "add":
+            await store.add(record)
+        case "upsert":
+            await store.write_atomic([MemoryWrite(record=record, mode=MemoryWriteMode.UPSERT)])
+        case "if_unchanged":
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=record,
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=read_revision,
+                    )
+                ]
+            )
+
+
+async def _found_in_each_band(store: SqliteMemoryStore) -> dict[BeliefBand, set[str]]:
+    """The ids a ``coffee`` search scoped to each band alone finds."""
+    return {
+        band: {
+            record.id for record in (await store.search("coffee", limit=10, bands=[band])).records
+        }
+        for band in BeliefBand
+    }
+
+
+@pytest.mark.parametrize("path", ["add", "upsert", "if_unchanged"])
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        pytest.param(before, after, id=f"{before}-to-{after}")
+        for before in BeliefBand
+        for after in BeliefBand
+        if before is not after
+    ],
+)
+async def test_an_overwrite_that_changes_a_memorys_band_moves_it_between_band_scoped_searches(
+    make_store: Callable[..., SqliteMemoryStore],
+    path: _OverwritePath,
+    before: BeliefBand,
+    after: BeliefBand,
+) -> None:
+    """ADR-0328 §7:11: the persisted band is rewritten on every write of the row.
+
+    A memory stored in one band and overwritten at its id by a version standing in
+    another, promoted or demoted, is found by a search scoped to its new band and by
+    none scoped to its old. ``search`` filters on the persisted ``band`` column, so an
+    overwrite that left the column at the old band would keep the memory in the old
+    band's search and out of the new one's. One neighbour stays in each band, so a
+    scoped search that comes back without the moved memory is still answering
+    (#3188 item 2).
+    """
+    store = make_store()
+    for band in BeliefBand:
+        await store.add(memory_in_band(f"stays-{band}", "coffee with oat milk", band))
+    first = memory_in_band("moved", "coffee in the morning", before)
+    assert first.band is before
+    await store.add(first)
+    stays = {band: {f"stays-{band}"} for band in BeliefBand}
+    assert await _found_in_each_band(store) == stays | {before: stays[before] | {"moved"}}
+    read = await store.get("moved")
+    assert read is not None
+    moved = memory_in_band("moved", "coffee in the morning", after)
+    assert moved.band is after
+
+    await _overwrite(store, path, moved, read_revision=read.revision)
+
+    assert await _found_in_each_band(store) == stays | {after: stays[after] | {"moved"}}
+    overwritten = await store.get("moved")
+    assert isinstance(overwritten, Memory)
+    assert overwritten.band is after
 
 
 async def test_empty_query_matches_nothing(make_store: Callable[..., SqliteMemoryStore]) -> None:
