@@ -50,7 +50,7 @@ import asyncio
 import contextvars
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final, TypeVar, cast
@@ -101,6 +101,7 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemoryWrite,
     MemoryWriteMode,
+    MessageAuthor,
     Modality,
     NotificationDelivery,
     PendingCandidate,
@@ -109,6 +110,7 @@ from ai_assistant.core.types import (
     PlacementSetter,
     ProcessingStatus,
     RecallOutcome,
+    RecordedInputMessage,
     ReplyCapability,
     SpokenAudioFormat,
     SpokenRendering,
@@ -185,6 +187,13 @@ from ai_assistant.orchestration.disclosure import (
     notification_is_speakable,
 )
 from ai_assistant.orchestration.episode_reads import fit_chunk, fit_page
+from ai_assistant.orchestration.joining import (
+    DEFAULT_JOIN_LIMIT,
+    input_standing,
+    join_running,
+    take_over,
+    visible_running,
+)
 from ai_assistant.orchestration.notifications import hand_off
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
@@ -297,6 +306,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.conversations import ConversationLifecycle
     from ai_assistant.orchestration.delivery import DeliveryOutbox
     from ai_assistant.orchestration.grants import GrantOperations
+    from ai_assistant.orchestration.joining import JoiningInput, RunningActivation
     from ai_assistant.orchestration.matters_pass import MattersPass, MattersPassReport
     from ai_assistant.orchestration.observer import Observer, RunOutcome
     from ai_assistant.orchestration.phase_path import PhasePath, PhaseWorking
@@ -873,7 +883,8 @@ class _ActivationPass:
             windows and recall filter by (ADR-0276 §4, ADR-0281 §4).
         understanding_wired: The deployment wired the understanding stage.
         recall_wired: The deployment wired the recall stage.
-        understood: The understanding stage ran for the input, whatever its outcome.
+        understood: How many inputs the latest understanding stage covered: those the
+            activation held when it began (ADR-0332 §3:9); 0 before it first ran.
         recalled: Recall's decision and the records it kept; never persisted — the
             decision is carried on the activation's state for capture (ADR-0281 §6).
         windows: The windows stage's decision, the episode window held as ids
@@ -892,6 +903,12 @@ class _ActivationPass:
             test hub (ADR-0309 §2:6, §3:2): each round's planning, authorizing and
             acting decisions, the digests and the held results. ``None`` on every
             pass the phases do not plan, which no phase rule answers on.
+        activation: The admitted activation's state, which holds the inputs that joined
+            it (ADR-0332 §3:16); ``None`` for a pass no channel admitted, which holds
+            its trigger's input alone.
+        takeovers: The takeover decision for each understanding version that named an
+            activation it continues (ADR-0332 §4:5, §7:6): whether it was taken over.
+            Written by the takeover stage alone, never persisted.
     """
 
     deadline: float
@@ -899,7 +916,7 @@ class _ActivationPass:
     understanding_wired: bool
     recall_wired: bool
     story_links_wired: bool = False
-    understood: bool = False
+    understood: int = 0
     recalled: Recalled | None = None
     windows: Windows | None = None
     understanding_fetch: Fetched | None = None
@@ -907,6 +924,8 @@ class _ActivationPass:
     story_candidates: Candidates | None = None
     story_links: StoryLinksDecision | None = None
     phases: PhaseWorking | None = None
+    activation: ActivationState | None = None
+    takeovers: dict[int, bool] = field(default_factory=dict)
 
     @property
     def text(self) -> str:
@@ -914,9 +933,29 @@ class _ActivationPass:
         raise NotImplementedError
 
     @property
+    def inputs_held(self) -> int:
+        """How many inputs the activation holds: its trigger's, and each joined (§3:9)."""
+        return 1 if self.activation is None else self.activation.inputs_held
+
+    @property
     def understanding_decided(self) -> bool:
-        """The understanding stage recorded an outcome."""
-        return self.understood
+        """An understanding decision covers every input held (ADR-0332 §3:9)."""
+        return self.understood >= self.inputs_held
+
+    @property
+    def understanding_version(self) -> int | None:
+        """The latest recorded understanding's version, or ``None`` before the first."""
+        return None if self.understanding is None else self.understanding.version
+
+    @property
+    def takeover_undecided(self) -> bool:
+        """The latest understanding continues an activation, undecided for it (§4:5)."""
+        understanding = self.understanding
+        return (
+            understanding is not None
+            and understanding.continues is not None
+            and understanding.version not in self.takeovers
+        )
 
     @property
     def windows_decided(self) -> bool:
@@ -1325,6 +1364,7 @@ class Engine:
         windows: WindowsStage | None = None,
         recall: RecallStage | None = None,
         stage_record_limit: int = DEFAULT_STAGE_RECORD_LIMIT,
+        join_limit: int = DEFAULT_JOIN_LIMIT,
         stories: StoryStore | None = None,
         story_summary_notes: int = DEFAULT_STORY_SUMMARY_VIEW_NOTES,
         story_candidates: StoryCandidates | None = None,
@@ -1564,6 +1604,10 @@ class Engine:
             stage_record_limit: ``STAGE_RECORD_LIMIT``, ADR-0280 §6's bound on the
                 entries one stage record retains; at least 2, so the first entry and
                 the end entry are both kept.
+            join_limit: ``Settings.join_limit`` (ADR-0332 §6:5): the most inputs one
+                activation takes in after its trigger, by a join on its place or a
+                takeover from another (§3:3, §4:6); at least 0, and 0 turns both off.
+                Defaults to the setting's own default.
             stories: ADR-0289 §1's story store, which the nine story methods read and
                 write and nothing else here touches — or ``None`` where this deployment
                 wired none, in which case each of those methods raises
@@ -1866,6 +1910,10 @@ class Engine:
             msg = "a stage record keeps its first entry and its end entry (ADR-0280 §6)"
             raise ConfigurationError(msg)
         self._stage_record_limit = stage_record_limit
+        if join_limit < 0:
+            msg = "join_limit is at least 0, which turns joining off (ADR-0332 §6:5)"
+            raise ConfigurationError(msg)
+        self._join_limit = join_limit
         self._stories = stories
         self._transcriber = transcriber
         self._synthesizer = synthesizer
@@ -5816,6 +5864,15 @@ class Engine:
         assert phases is not None  # noqa: S101 — the line is wired only beside them
         state = active_state()
         trigger = None if state is None else state.trigger
+        if state is not None and trigger is not None:
+            # ADR-0332 §3:3, §4:1: the line runs one activation at a time, and its kind
+            # establishes the user as the author of every message but a forward
+            # (ADR-0323 §4:6, §4:10).
+            state.input_messages = taken.recorded
+            state.standing = input_standing(
+                origin=trigger.origin,
+                established=all(one.forwarded_from is None for one in taken.recorded),
+            )
         resolved = ResolvedChannelInput(
             channel=taken.channel,
             text=taken.text,
@@ -5846,6 +5903,7 @@ class Engine:
                 owner_records=True,
             ),
             input=resolved,
+            activation=state,
         )
         stages: list[ControllerStageRun[_TurnPass]] = [
             Stage(ControllerStage.WINDOWS, self._windows_stage, expired=_windows_expired),
@@ -5857,6 +5915,7 @@ class Engine:
             TolerantStage(
                 ControllerStage.STORY_LINKS, self._story_links_stage, expired=_story_links_expired
             ),
+            Stage(ControllerStage.TAKEOVER, self._takeover_stage),
             *phases.stages(),
         ]
         await phases.run(
@@ -5879,6 +5938,17 @@ class Engine:
         assert phases is not None  # noqa: S101 — the reader is wired only beside them
         state = active_state()
         trigger = None if state is None else state.trigger
+        if state is not None and trigger is not None:
+            # ADR-0332 §3:3, §4:1: a conversation runs one activation at a time, and
+            # every message the reader takes in is the user's (ADR-0293 §6:1).
+            state.input_messages = tuple(
+                RecordedInputMessage(text=one.text, sent_at=one.written_at, position=one.position)
+                for one in taken.messages
+            )
+            state.standing = input_standing(
+                origin=trigger.origin,
+                established=all(one.author is MessageAuthor.USER for one in taken.messages),
+            )
         working = _TurnPass(
             utterance=taken.text,
             requested=taken.conversation_id,
@@ -5900,6 +5970,7 @@ class Engine:
                 trigger_origin=None if trigger is None else trigger.origin,
                 owner_records=True,
             ),
+            activation=state,
         )
         stages: list[ControllerStageRun[_TurnPass]] = [
             Stage(ControllerStage.BEGIN_CONVERSATION, self._begin_conversation_stage),
@@ -5914,6 +5985,7 @@ class Engine:
             TolerantStage(
                 ControllerStage.STORY_LINKS, self._story_links_stage, expired=_story_links_expired
             ),
+            Stage(ControllerStage.TAKEOVER, self._takeover_stage),
             *phases.stages(),
         ]
         await phases.run(
@@ -5968,6 +6040,7 @@ class Engine:
                 trigger_origin=None if trigger is None else trigger.origin,
                 owner_records=True,
             ),
+            activation=state,
         )
         stages: list[ControllerStageRun[_EventPass]] = [
             Stage(ControllerStage.WINDOWS, self._windows_stage, expired=_windows_expired),
@@ -5984,6 +6057,7 @@ class Engine:
             TolerantStage(
                 ControllerStage.STORY_LINKS, self._story_links_stage, expired=_story_links_expired
             ),
+            Stage(ControllerStage.TAKEOVER, self._takeover_stage),
             *phases.stages(),
         ]
         await phases.run(
@@ -6466,6 +6540,13 @@ class Engine:
         loop = asyncio.get_running_loop()
         if deadline <= loop.time():
             raise ModelTimeoutError(_UNDERSTANDING_EXPIRED)
+        # ADR-0332 §3:9-§3:10: the version covers the inputs held as the stage begins,
+        # each joined one read beside the trigger's; one that joins while it runs makes
+        # it due again. §4:1: the same person's running work on their other places, as
+        # it stands now.
+        held = working.inputs_held
+        joined = state.joined if state is not None else ()
+        running = self._visible_running(state, working)
         try:
             async with asyncio.timeout_at(deadline):
                 fetched = await self._fetch_held(working, windows)
@@ -6486,6 +6567,8 @@ class Engine:
                     # ADR-0284 §2:2: the origin admission recorded, which a kind
                     # declaring it per input sets for this input (ADR-0323 §4:11).
                     origin=None if state is None else state.trigger.origin,
+                    joined=joined,
+                    running=running,
                 )
         except BaseException as exc:
             # A timer fires only when the loop gets control, so a stage can cross the
@@ -6509,10 +6592,46 @@ class Engine:
         if expired:
             # Outside the handler: the timer's own exception rides along as nothing.
             raise ModelTimeoutError(_UNDERSTANDING_EXPIRED) from None
+        self._recorded_understanding(state, working, understood, covers=held)
+
+    def _recorded_understanding(
+        self,
+        state: ActivationState | None,
+        working: _ActivationPass,
+        understood: ActivationUnderstanding,
+        *,
+        covers: int,
+    ) -> None:
+        """Carry a recorded version on the state and the working set (ADR-0276 §7).
+
+        It covers ``covers`` inputs, those held as its stage began (ADR-0332 §3:9), and
+        planning starts over for it (§3:12). The story-links rule reads it off the
+        working set (ADR-0300 §6:11).
+        """
         if state is not None:
-            state.understood(understood, limit=self._understanding_version_limit)
-            # ADR-0300 §6:11: the story-links rule reads the recorded version.
+            state.understood(understood, limit=self._understanding_version_limit, inputs=covers)
             working.understanding = understood
+            if working.phases is not None:
+                working.phases.understood(understood.version)
+        working.understood = covers
+
+    def _visible_running(
+        self, state: ActivationState | None, working: _ActivationPass
+    ) -> tuple[RunningActivation, ...]:
+        """The same person's running work on their other places, as this pass sees it (§4:1).
+
+        Read now, in one synchronous step: each activation this engine holds as running
+        that :func:`~ai_assistant.orchestration.joining.visible_running` shows under the
+        pass's audience. None for a pass no channel admitted, or whose author its place
+        does not establish (§4:3).
+        """
+        if state is None:
+            return ()
+        return visible_running(
+            (one.state for one in self._running if one.state is not None),
+            state,
+            supply=working.supply,
+        )
 
     async def _assembled_candidates(
         self, working: _ActivationPass, fetched: Fetched
@@ -6640,7 +6759,6 @@ class Engine:
             ModelTimeoutError: If the deadline expired before the stage or inside it.
         """
         await self._understand(event.input, working=event)
-        event.understood = True
 
     async def _begin_conversation_stage(self, working: _TurnPass) -> None:
         """ADR-0074 §2: resolve the conversation before the turn's work, and bind it.
@@ -6669,7 +6787,81 @@ class Engine:
             ModelTimeoutError: If the deadline expired before the stage or inside it.
         """
         await self._understand(_resolved_turn(working), working=working)
-        working.understood = True
+
+    async def _takeover_stage(self, working: _ActivationPass) -> None:
+        """ADR-0332 §4:6's takeover stage, once for each understanding version.
+
+        In one synchronous step, :func:`~ai_assistant.orchestration.joining.take_over`
+        reads whether the activation the latest understanding continues still runs,
+        uncommitted and unstopped, the same person's with this input's authority and
+        origin, and whether this activation has taken fewer joins than ``join_limit``.
+        Where all of it holds it sets that activation's stop mark and committed mark
+        and appends its input here, naming it; the decision is recorded for the
+        version either way, so ``takeover_undecided`` does not answer again.
+
+        **The taken-over activation is stopped as a stop is** (§4:7, ADR-0297 §3): its
+        mark is set first, in that step, and only then is its stop record written. A
+        record that cannot be written is logged and the pass goes on: the marks are set,
+        so the other activation runs no further stage, commits nothing and takes no
+        join, and nothing it holds is claimed (§3:5).
+        """
+        understanding = working.understanding
+        assert understanding is not None  # noqa: S101 — the rule makes the stage due only once a version is recorded
+        named = understanding.continues
+        state = active_state()
+        taken = (
+            named is not None
+            and state is not None
+            and take_over(
+                [one.state for one in self._running if one.state is not None],
+                state,
+                named,
+                limit=self._join_limit,
+                at=self._now(),
+            )
+        )
+        working.takeovers[understanding.version] = taken
+        _log.info("activation_takeover", stage="takeover", taken=taken)
+        if not taken or named is None:
+            return
+        try:
+            await self._plans.record_stop(named)
+        except Exception as exc:  # the marks hold it: logged, never the pass's failure
+            if is_defect(exc):
+                log_defect(
+                    "takeover_stop_unrecorded",
+                    exc,
+                    stage="takeover",
+                    activation_id=None if state is None else state.activation_id,
+                )
+            else:
+                _log.warning("takeover_stop_unrecorded", stage="takeover", reason="store_failed")
+
+    def _join_running(self, joining: JoiningInput) -> str | None:
+        """The join's entry point (ADR-0332 §3:3, §3:6): join a place's running activation.
+
+        For a place's reader, which holds §3:3's fourth condition itself: it hands an
+        input here only where no earlier input on the place is waiting. In one
+        synchronous step with no await, :func:`~ai_assistant.orchestration.joining.
+        join_running` finds the activation running on the input's place, compares the
+        two inputs' standing, and appends the input where the activation has neither
+        committed nor been stopped and has taken fewer joins than ``join_limit``. The
+        open episode records it with the next append the activation makes (ADR-0286
+        §3), its freeze at the latest.
+
+        Returns:
+            The id of the activation joined, which the reader marks the input's messages
+            taken in by (§3:18); ``None`` where it joined none, and the input waits
+            (§3:4).
+        """
+        if self._closing:
+            return None
+        return join_running(
+            (one.state for one in self._running if one.state is not None),
+            joining,
+            limit=self._join_limit,
+            at=self._now(),
+        )
 
     async def _beliefs(
         self,

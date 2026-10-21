@@ -48,6 +48,18 @@ with its labels, to the activation's state and extends the open episode through 
 episode writer. A failed append is a capture failure, which the writer handles and
 which holds nothing back.
 
+**The commitment step** (ADR-0332 §3:5-§3:7). Before acting dispatches any call of a
+round that is not a pure read, or the round's message, it checks, in the same
+synchronous step as the stage's first line, for joined input the understanding the
+round was planned from does not cover, and where there is none marks the activation
+committed: after that no join is taken. Where there is some, the round is set aside —
+none of its calls runs and its message is not written, by any path, and acting's
+decision for it says so — and the rules start the activation over from understanding.
+Planning starts over for each understanding version (§3:12): each round records the
+version it was planned from, the rules count the latest version's rounds, and rounds of
+an earlier version stay in the record with their results. An input that joined on the
+activation's own place is shown to planning as an input item of the place.
+
 **The message** (ADR-0307 §3, ADR-0306 §5). The round's text is written into the
 input's place through the chat's writer, claimed first under an
 :class:`~ai_assistant.core.types.ActivationEffect` and finished with the position the
@@ -243,6 +255,7 @@ from ai_assistant.core.types import (
     ToolResult,
 )
 from ai_assistant.orchestration.acting import (
+    ActedCall,
     ActedOutcome,
     ActedRound,
     ActingStage,
@@ -250,7 +263,7 @@ from ai_assistant.orchestration.acting import (
     AuthorizedRound,
     ResultRoute,
 )
-from ai_assistant.orchestration.activation_state import CaptureFacts, active_state
+from ai_assistant.orchestration.activation_state import CaptureFacts, Commitment, active_state
 from ai_assistant.orchestration.authorizer import (
     AllowedCall,
     AuthorizingStage,
@@ -276,6 +289,7 @@ from ai_assistant.orchestration.defects import ToleratedStageError, is_defect, l
 from ai_assistant.orchestration.digesting import ActivationLabels, Digested, DigestingStage
 from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
+from ai_assistant.orchestration.joining import is_pure_read
 from ai_assistant.orchestration.lookups import (
     OLDER_NOTES_PAGE,
     READ_STORY_CAPABILITY,
@@ -336,6 +350,7 @@ if TYPE_CHECKING:
         AnsweredQuestion,
         ChannelIdentity,
         FrozenJson,
+        JoinedInput,
         MemoryRecord,
         MessageReceipt,
         PlanningRound,
@@ -1255,6 +1270,8 @@ class _Round:
         looking_for: What each allowed call is looking for, by its decision's id.
         step: The step running the round's calls, once it has begun.
         written: Whether its message was recorded in the conversation (ADR-0317 §3:4).
+        planned_from: The understanding version it was planned from, the latest when
+            planning ran (ADR-0332 §3:12); ``None`` where none was recorded.
     """
 
     planned: PlannedRound
@@ -1263,6 +1280,7 @@ class _Round:
     looking_for: dict[str, str] = field(default_factory=dict)
     written: bool = False
     step: _Step | None = None
+    planned_from: int | None = None
 
 
 class PhaseWorking:
@@ -1379,6 +1397,11 @@ class PhaseWorking:
         # once before the first round where candidates are recorded.
         self.pending: dict[str, tuple[str, ...]] | None = None
         self.pages: dict[str, PlanningStory] = {}
+        # ADR-0332 §3:12: the latest understanding version the pass recorded, which
+        # planning starts over for, and how many of the activation's joined inputs this
+        # working set has taken into its place and its yes (§3:16).
+        self.version: int | None = None
+        self._joined_taken = 0
         self._rounds: list[_Round] = []
 
     # --- what the rules read (PhaseFacts) ---
@@ -1400,8 +1423,13 @@ class PhaseWorking:
 
     @property
     def rounds(self) -> int:
-        """How many planning rounds the pass has run."""
-        return len(self._rounds)
+        """How many planning rounds were planned from the latest understanding version.
+
+        ADR-0332 §3:12: planning starts over for each version. Rounds planned from an
+        earlier one stay in the record, and their results stay for the new rounds
+        (§3:13), but are not counted.
+        """
+        return sum(one.planned_from == self.version for one in self._rounds)
 
     @property
     def round_limit(self) -> int:
@@ -1476,9 +1504,53 @@ class PhaseWorking:
         return self._rounds[-1]
 
     def planned(self, planned: PlannedRound) -> None:
-        """Hold a round planning decided, and the labels it assigned."""
+        """Hold a round planning decided, and the labels it assigned.
+
+        The round is planned from the latest understanding version (ADR-0332 §3:12).
+        """
         self.labels.add(planned.labels)
-        self._rounds.append(_Round(planned=planned))
+        self._rounds.append(_Round(planned=planned, planned_from=self.version))
+
+    def understood(self, version: int) -> None:
+        """Hold the latest recorded understanding version, which planning starts over for.
+
+        ADR-0332 §3:12: ``first_round_due`` answers until a round is planned from it,
+        and ``round_due`` and ``round_limit_reached`` count that version's rounds.
+        """
+        self.version = version
+
+    def take_joined(self, joined: Sequence[JoinedInput], place: ChannelIdentity | None) -> None:
+        """Take the inputs that joined on the activation's own place into what planning sees.
+
+        ADR-0332 §3:16, ADR-0292 §6:10: an input that joins is part of the activation's
+        input, so each of its messages is shown to planning as an input item of the
+        place, the user's, as the reader's own are; and a yes it carries is given when
+        its latest message was sent (ADR-0321 §4:6). An input a takeover brought came
+        from another place: it is not an item of this one, and reaches planning through
+        understanding's record alone. Each joined input is taken once.
+        """
+        fresh = list(joined[self._joined_taken :])
+        self._joined_taken = len(joined)
+        items: list[PlaceItem] = []
+        for one in fresh:
+            if one.taken_over_from is not None or one.channel != place:
+                continue
+            for message in one.messages:
+                items.append(
+                    PlaceItem(
+                        author=PlaceAuthor.USER,
+                        text=message.text,
+                        at=message.sent_at,
+                        is_input=True,
+                        referent_id=(
+                            None if message.position is None else f"message:{message.position}"
+                        ),
+                    )
+                )
+                if self.given_at is not None and message.sent_at > self.given_at:
+                    self.given_at = message.sent_at
+        if items:
+            self.place = replace(self.place, items=(*self.place.items, *items))
 
     @property
     def undelivered(self) -> bool:
@@ -1491,6 +1563,10 @@ class PhaseWorking:
         none undelivered.
         """
         for one in reversed(self._rounds):
+            # ADR-0332 §3:12-§3:13: a round planned from an earlier version was overtaken
+            # by a join before it committed, so it wrote nothing that needed writing.
+            if one.planned_from != self.version:
+                continue
             if one.planned.message is not None:
                 return not one.written
         return False
@@ -1962,6 +2038,62 @@ def _delivered_round(effects: Sequence[ActivationEffect], pointer: AnsweredQuest
         ):
             return one.round
     return None
+
+
+#: Why a call a join set aside was not done (ADR-0332 §3:7), as planning reads it.
+_SET_ASIDE: Final = "not run: new input joined before this round acted, so it was set aside"
+
+
+def _commits(latest: _Round, decided: RoundAuthorization) -> bool:
+    """Whether acting would dispatch something of the round that commits (ADR-0332 §3:2).
+
+    A call that is not a pure read, a tidy-up's write to the hub's own records among
+    them, or the round's message where it would be written.
+    """
+    verdict = decided.message
+    message = (
+        verdict is not None
+        and verdict.allowed
+        and verdict.effect_id is not None
+        and latest.planned.message is not None
+    )
+    return message or any(not is_pure_read(one.call.request.tool) for one in decided.allowed)
+
+
+def _commitment(latest: _Round, decided: RoundAuthorization) -> ActedRound | None:
+    """Acting's commitment step for the latest round, or ``None`` where it may run.
+
+    ADR-0332 §3:5-§3:7: before acting dispatches any call that is not a pure read, or the
+    round's message, it checks for joined input that the understanding the round was
+    planned from does not cover, and where there is none marks the activation committed
+    (:meth:`ActivationState.commit`), **in one synchronous step**: nothing here awaits,
+    and acting dispatches nothing before it returns. A round of pure reads alone commits
+    nothing and is not checked; a pass no channel admitted takes no join.
+
+    Returns:
+        ``None`` where the round runs. Otherwise acting's decision for it, present and
+        dispatching nothing by any path: set aside by a join, each allowed call not done
+        with the reason (§3:7), or, where the stop mark is set, nothing at all, and the
+        pass ends on the stop (ADR-0297 §4).
+    """
+    state = active_state()
+    if state is None or not _commits(latest, decided):
+        return None
+    found = state.commit(latest.planned_from)
+    if found is Commitment.COMMITTED:
+        return None
+    if found is Commitment.STOPPED:
+        _log.info("phase_round_not_acted", stage="acting", reason="stopped")
+        return ActedRound(round_id=decided.round_id)
+    _log.info("phase_round_set_aside", stage="acting", reason="joined")
+    return ActedRound(
+        round_id=decided.round_id,
+        calls=tuple(
+            ActedCall(call=one, outcome=ActedOutcome.NOT_DONE, reason=_SET_ASIDE)
+            for one in authorized_round(decided).calls
+        ),
+        set_aside=True,
+    )
 
 
 def _working(given: PhasePass) -> PhaseWorking:
@@ -2821,6 +2953,9 @@ class PhasePath:
         """One planning round, over everything the thin path gives it (ADR-0307 §6)."""
         working = _working(given)
         fetched = given.understanding_fetch
+        if (joining := active_state()) is not None:
+            # ADR-0332 §3:16: what joined on this place is input planning is shown.
+            working.take_joined(joining.joined, joining.place)
         try:
             async with asyncio.timeout_at(given.deadline):
                 found = await self._found(given, working)
@@ -3216,6 +3351,12 @@ class PhasePath:
             raise RuntimeError(msg)
         step = working.step(self._now(), self._wait(given))
         try:
+            # ADR-0332 §3:5-§3:7: the commitment step, before anything of the round is
+            # dispatched and in the same synchronous step as the stage's first line.
+            withheld = _commitment(latest, decided)
+            if withheld is not None:
+                latest.acted = withheld
+                return
             ran, wrote = await asyncio.gather(
                 self._calls(given, working, decided),
                 self._message(working, latest),

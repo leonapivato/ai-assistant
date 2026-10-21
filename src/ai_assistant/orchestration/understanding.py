@@ -48,6 +48,18 @@ referent, grounding a reading ``supplied`` as any label does; cited outside
 ``story_labels`` it links nothing (ADR-0304 §8). Where the candidates could not be read,
 or there are none, the section says so.
 
+**Joined input, and the same person's running work** (ADR-0332 §3:10, §4:1-§4:4). An
+input that joined the activation is part of its input: understanding, run again, reads
+the trigger's input and every joined one, each kept apart and dated, a takeover's marked
+as one, and records a new version. Beside the windows, a fifth section, ``running``,
+shows each activation running for the same person on another of their places that the
+pass may be shown — its input, and whether it has acted — labelled ``R1``, ``R2``… The
+proposal's ``continues`` names at most one by its ``R`` label, which resolves to that
+activation's id; a label naming no shown activation is a grounding defect, repaired once
+as any label naming nothing is and then dropped and counted (§7:4). An ``R`` label names
+no referent. The section and its instruction take no template flag: the instruction says
+what the section is wherever it is rendered, and a pass shown nothing renders none.
+
 **Two windows, two label sequences** (§3). The **channel window** is what the channel
 supplied — ``ChannelContext.history`` then ``reply_to`` — or, for an input the chat's
 reader brought in, the conversation's recent transcript, each message keeping its
@@ -204,13 +216,16 @@ if TYPE_CHECKING:
         ChannelIdentity,
         ClaimedAuthor,
         EpisodeProjection,
+        JoinedInput,
         ProjectedRound,
         ProposedAnswer,
+        RecordedInputMessage,
         StoryNote,
         StorySummaryLine,
         TranscriptMessage,
     )
     from ai_assistant.orchestration.disclosure import TurnSupply
+    from ai_assistant.orchestration.joining import RunningActivation
     from ai_assistant.orchestration.story_links import Candidates, ShortView
 
 __all__ = [
@@ -269,7 +284,9 @@ _UNNAMED_DROPPED: Final = "unnamed_keys_dropped"
 #: of an answer, as ADR-0322 §2 and §4 extend them, including when one reply approves
 #: several questions (§4:9), that a ``Q`` label goes only in ``answers`` (#3081), and
 #: that an unresolved matter names by ``Q`` label each question a bare yes could fit
-#: (#3080). Authority is not read here: whose
+#: (#3080); and ADR-0332's additions, which take no flag: that joined input is part of the
+#: input (§3:10), what the running section shows (§4:1), and that an ``R`` label goes only
+#: in ``continues`` (§4:4, §7:3). Authority is not read here: whose
 #: input approves is authorizing's check (ADR-0321 §3:3), and a pointer grants nothing.
 UNDERSTANDING_PROMPT: Final = PromptDeclaration(
     name="understanding",
@@ -768,6 +785,10 @@ class _Brief:
     #: What each ``Q`` label the call rendered names: the marked question, by its
     #: records (ADR-0322 §4:4-§4:5). A pointer naming a label not here is not recorded.
     questions: dict[str, _Question] = field(default_factory=dict)
+    #: What each ``R`` label the running section rendered names: the running activation,
+    #: by its id (ADR-0332 §4:4, §7:3-§7:4). A ``continues`` naming a label not here
+    #: resolves to no shown activation.
+    running: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -875,6 +896,8 @@ class UnderstandingStage:
         recalled: tuple[EpisodicMemory | Memory, ...] = (),
         stories: Candidates | None = None,
         origin: InputOrigin | None = None,
+        joined: Sequence[JoinedInput] = (),
+        running: Sequence[RunningActivation] | None = None,
     ) -> ActivationUnderstanding:
         """Read one input against its windows, and record what it was understood to mean.
 
@@ -909,6 +932,13 @@ class UnderstandingStage:
                 (ADR-0284 §2:2). A kind that declares its origin per input (ADR-0323
                 §4:11) is attributed by it; ``None`` reads the channel type's one
                 declaration, which is the same value for every other kind.
+            joined: The inputs that joined the activation, in the order they joined
+                (ADR-0332 §3:10): read with the trigger's as the activation's whole
+                input, each kept apart and dated, a takeover's marked as one.
+            running: The activations running for the same person on their other places,
+                as the pass may be shown them (§4:1-§4:3), rendered as a running section
+                labelled ``R``, which the proposal's ``continues`` names (§4:4). ``None``
+                or empty renders no section, and then ``continues`` resolves to nothing.
 
         Returns:
             The recorded understanding.
@@ -928,6 +958,8 @@ class UnderstandingStage:
             recalled=recalled,
             stories=stories,
             origin=origin,
+            joined=joined,
+            running=running or (),
         )
         _within(deadline)
         first = await self._completed(brief.messages, brief.instruction)
@@ -956,6 +988,7 @@ class UnderstandingStage:
             brief.questions,
             version=version,
             recorded_at=now(),
+            running=brief.running,
         )
 
     async def _completed(self, messages: Sequence[Message], instruction: RenderedPrompt) -> Message:
@@ -1001,11 +1034,15 @@ class UnderstandingStage:
         recalled: tuple[EpisodicMemory | Memory, ...],
         stories: Candidates | None,
         origin: InputOrigin | None = None,
+        joined: Sequence[JoinedInput] = (),
+        running: Sequence[RunningActivation] = (),
     ) -> _Brief:
         """Render the prompt, filtering the episode window's stored records first (§3, §4).
 
         Every question rendered is marked and given its ``Q`` label as it is rendered,
         so the labels run in the order the questions are first shown (ADR-0322 §4:4).
+        The inputs that joined render with the input, and the running activations as a
+        section of their own, each under its ``R`` label (ADR-0332 §3:10, §4:1).
         """
         placed = _Placed.of(window, audience, episodes)
         shared = placed.shared
@@ -1055,7 +1092,10 @@ class UnderstandingStage:
         received = _input_rendering(text, channel, origin)
         if isinstance(window, TranscriptWindow) and window.input_messages:
             received["messages"] = [_input_message(one, window) for one in window.input_messages]
-        payload = {
+        if joined:
+            # ADR-0332 §3:10: the activation's whole input, each joined one kept apart.
+            received["joined"] = [_joined_rendering(one) for one in joined]
+        payload: dict[str, object] = {
             "input": received,
             "channel_window": rendered_items
             or "missing: no recent context accompanies this input on its channel",
@@ -1078,6 +1118,15 @@ class UnderstandingStage:
             payload["stories"], story_count = self._stories_section(
                 stories, labels, story_members, marks
             )
+        shown_running: dict[str, str] = {}
+        if running:
+            # ADR-0332 §4:1, §4:4: beside the windows, each under its R label.
+            running_section: list[dict[str, object]] = []
+            for activation in running:
+                running_label = f"R{len(running_section) + 1}"
+                running_section.append(_running_rendering(running_label, activation))
+                shown_running[running_label] = activation.activation_id
+            payload["running"] = running_section
         instruction = self._prompt.rendered(
             flags={"recalled": recall is not None, "stories": stories is not None}
         )
@@ -1095,6 +1144,7 @@ class UnderstandingStage:
             story_members,
             story_count,
             marks.questions,
+            shown_running,
         )
 
     def _stories_section(
@@ -1214,6 +1264,10 @@ class UnderstandingStage:
                 stray=dropped,
             )
         unresolved = [label for label in _labels_of(proposal) if label not in brief.labels]
+        if proposal.continues is not None and proposal.continues not in brief.running:
+            # ADR-0332 §7:4: a grounding defect, repaired once as any label naming
+            # nothing is (ADR-0276 §6), and then dropped and counted, never a parse failure.
+            unresolved.append(proposal.continues)
         unnamed = _unnamed_supplied(proposal)
         # ADR-0300 §6:8: a story label naming nothing a link can be made to is a label
         # defect, and takes part in the one repair completion — except one naming a
@@ -2134,6 +2188,11 @@ def _label_statement(
         rendered.append(_sequence("M", brief.recalled_count, "recalled section"))
     if brief.story_count is not None:
         rendered.append(_sequence("S", brief.story_count, "stories section"))
+    if brief.running:
+        # ADR-0332 §4:4: an R label names a running activation, cited only in `continues`.
+        rendered.append(
+            _sequence("R", len(brief.running), "running section, cited only in `continues`")
+        )
     if brief.questions:
         # ADR-0322 §4:6: a Q label names a question, never a referent.
         rendered.append(_sequence("Q", len(brief.questions), "questions, cited only in `answers`"))
@@ -2215,8 +2274,13 @@ def _resolved(  # noqa: PLR0913 — the proposal, what each label kind resolves 
     *,
     version: int,
     recorded_at: datetime,
+    running: Mapping[str, str] | None = None,
 ) -> ActivationUnderstanding:
     """Resolve every label into a referent, dropping and counting what resolves to nothing.
+
+    ``continues`` resolves, by its ``R`` label, to the running activation the call
+    showed under it (ADR-0332 §7:4); a label naming no shown activation is dropped and
+    counted as a grounding defect, and the record continues none.
 
     No dropped or absent label becomes a grounded claim: a referent is recorded only for
     a label that resolved, and ``supplied`` survives only on an element still naming a
@@ -2278,6 +2342,11 @@ def _resolved(  # noqa: PLR0913 — the proposal, what each label kind resolves 
         *proposal.unresolved,
         *(UnresolvedMatter(matter=why, why_it_matters=_NOT_APPROVED) for why in whys),
     )
+    continues = None
+    if proposal.continues is not None:
+        continues = (running or {}).get(proposal.continues)
+        if continues is None:
+            resolution.dropped += 1
     return ActivationUnderstanding(
         version=version,
         recorded_at=recorded_at,
@@ -2291,6 +2360,7 @@ def _resolved(  # noqa: PLR0913 — the proposal, what each label kind resolves 
         grounding_dropped=resolution.dropped,
         story_links=tuple(links),
         answers=answers,
+        continues=continues,
     )
 
 
@@ -2443,6 +2513,55 @@ def _input_rendering(
     else:
         received = f"the message the user just sent on {_channel_text(channel)}"
     return {"received_as": received, "text": text}
+
+
+#: What a running activation shown beside the windows is (ADR-0332 §4:1).
+_RUNNING_ITEM: Final = (
+    "work the assistant is doing right now for the same user, started from another of their places"
+)
+#: What a joined input a takeover brought is (ADR-0332 §4:6, §3:17).
+_TAKEN_OVER_TEXT: Final = (
+    "the input of work that was running for the same user on another of their places, "
+    "taken over before it acted: that work was stopped, and its input is read here"
+)
+
+
+def _recorded_message(message: RecordedInputMessage) -> dict[str, object]:
+    """One message of a joined or running input, kept apart and dated (ADR-0323 §5:4)."""
+    rendered: dict[str, object] = {"sent_at": message.sent_at.isoformat(), "text": message.text}
+    if message.position is not None:
+        rendered["position"] = message.position
+    if message.forwarded_from is not None:
+        rendered["forwarded_from"] = _forward_of(message.forwarded_from)
+    return rendered
+
+
+def _joined_rendering(joined: JoinedInput) -> dict[str, object]:
+    """One input that joined, as the input renders it (ADR-0332 §3:10).
+
+    Where it came from and when it joined, and each of its messages apart and dated; a
+    takeover's says so, and never names the activation it stopped, which is no label.
+    """
+    rendered: dict[str, object] = {
+        "joined_at": joined.joined_at.isoformat(),
+        "place": _channel_text(joined.channel),
+        "messages": [_recorded_message(one) for one in joined.messages],
+    }
+    if joined.taken_over_from is not None:
+        rendered["taken_over"] = _TAKEN_OVER_TEXT
+    return rendered
+
+
+def _running_rendering(label: str, running: RunningActivation) -> dict[str, object]:
+    """One running activation under its ``R`` label: its input, and whether it acted (§4:1)."""
+    return {
+        "label": label,
+        "item": _RUNNING_ITEM,
+        "place": _channel_text(running.place),
+        "started_at": running.started_at.isoformat(),
+        "has_acted": running.committed,
+        "messages": [_recorded_message(one) for one in running.messages],
+    }
 
 
 def _channel_text(channel: ChannelIdentity) -> str:

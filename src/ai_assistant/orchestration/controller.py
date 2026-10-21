@@ -97,11 +97,38 @@ class PassFacts(Protocol):
 
     @property
     def understanding_decided(self) -> bool:
-        """The understanding stage has an outcome for the input."""
+        """An understanding decision covers every input the activation holds.
+
+        ADR-0332 §3:9: the trigger's input and every one that joined it, a takeover's
+        included, so a join makes understanding due again.
+        """
+
+    @property
+    def inputs_held(self) -> int:
+        """How many inputs the activation holds: its trigger's, and each joined (§3:9).
+
+        The scope of ADR-0280 §4:6's loop guard for understanding: it runs at most once
+        for each.
+        """
 
     @property
     def understanding_recorded(self) -> bool:
         """The understanding outcome is a recorded version (ADR-0300 §6:11)."""
+
+    @property
+    def understanding_version(self) -> int | None:
+        """The latest recorded understanding's version, or ``None`` before the first.
+
+        The scope of ADR-0280 §4:6's loop guard for ``takeover`` (ADR-0332 §4:5).
+        """
+
+    @property
+    def takeover_undecided(self) -> bool:
+        """The latest understanding continues an activation, undecided for it (§4:5).
+
+        ADR-0332 §4:5: it names a running activation this input continues, and there is
+        no takeover decision for that version.
+        """
 
     @property
     def story_links_wired(self) -> bool:
@@ -142,11 +169,16 @@ class PhaseFacts(Protocol):
 
     @property
     def rounds(self) -> int:
-        """How many planning rounds the pass has run."""
+        """How many planning rounds were planned from the latest understanding version.
+
+        ADR-0332 §3:12: planning starts over for each version, so ``first_round_due``,
+        ``round_due`` and ``round_limit_reached`` count these. Rounds planned from an
+        earlier version stay in the record (§3:13) and are not counted.
+        """
 
     @property
     def round_limit(self) -> int:
-        """The most rounds a pass runs (ADR-0307 §8:4); its value is #2589's."""
+        """The most rounds planned from one version (ADR-0307 §8:4, ADR-0332 §3:12)."""
 
     @property
     def latest_round(self) -> str | None:
@@ -249,6 +281,20 @@ def _another_round_called_for(facts: PassFacts) -> bool:
     return phases.rounds > 0 and phases.latest_calls_beyond_tidy_ups and _round_finished(phases)
 
 
+def _inputs_held(facts: PassFacts) -> object:
+    """The loop guard's scope for understanding: the inputs the activation holds.
+
+    ADR-0332 §3:9: understanding runs at most once for each, so a join makes it due
+    again, and ADR-0280 §4:6's guard ends a pass that would run it twice for one count.
+    """
+    return facts.inputs_held
+
+
+def _understanding_version(facts: PassFacts) -> object:
+    """The loop guard's scope for ``takeover``: the latest understanding version (§4:5)."""
+    return facts.understanding_version
+
+
 def _second_run(_: PassFacts) -> object:
     """The loop guard's scope for recall's second run (ADR-0308 §2:10).
 
@@ -302,10 +348,13 @@ ACTIVATION_RULES: Final[tuple[Rule, ...]] = (
         lambda f: f.recall_wired and f.understanding_wired and not f.recall_decided,
         ControllerStage.RECALL,
     ),
+    # ADR-0332 §3:9: understanding runs again where an input joined that no decision
+    # covers, at most once for each count of inputs held.
     Rule(
         ControllerRule.NOT_UNDERSTOOD,
         lambda f: f.understanding_wired and not f.understanding_decided,
         ControllerStage.UNDERSTANDING,
+        per=_inputs_held,
     ),
     # ADR-0300 §6:11: the understanding's story links are recorded once it is a
     # recorded version, before anything the pass does with the input.
@@ -313,6 +362,14 @@ ACTIVATION_RULES: Final[tuple[Rule, ...]] = (
         ControllerRule.STORY_LINKS_UNRECORDED,
         lambda f: f.story_links_wired and f.understanding_recorded and not f.story_links_decided,
         ControllerStage.STORY_LINKS,
+    ),
+    # ADR-0332 §4:5: the takeover of the activation the latest understanding says this
+    # input continues, decided once for each version, immediately after the story links.
+    Rule(
+        ControllerRule.TAKEOVER_UNDECIDED,
+        lambda f: f.takeover_undecided,
+        ControllerStage.TAKEOVER,
+        per=_understanding_version,
     ),
     # ADR-0308 §2:9: recall runs again once an understanding is recorded, where it is
     # wired, as the first run is (ADR-0281 §2:3).
@@ -332,7 +389,8 @@ ACTIVATION_RULES: Final[tuple[Rule, ...]] = (
     ),
     # ADR-0307 §8:6: planning's first round runs once understanding has recorded and
     # recall's second run has finished, its digest recorded where one is due (ADR-0308
-    # §4:6), which the two rows above settle first.
+    # §4:6), which the two rows above settle first. ADR-0332 §3:12: it is the first
+    # round planned from the latest version, and `rounds` counts that version's alone.
     Rule(
         ControllerRule.FIRST_ROUND_DUE,
         lambda f: f.understanding_recorded and _phases(f).rounds == 0,

@@ -61,6 +61,7 @@ from ai_assistant.orchestration import (
     digesting,
     disclosure,
     held_results,
+    joining,
     story_links,
     understanding,
 )
@@ -122,6 +123,7 @@ _NAMES: dict[str, Any] = (
     | vars(core_protocols)
     | vars(disclosure)
     | vars(held_results)
+    | vars(joining)
     | vars(story_links)
 )
 
@@ -403,7 +405,10 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     token never reaches any of them: the client binds it in ``tools/`` (§11:8). A joined
     input (ADR-0332 §3:16) is a time, the ``ChannelIdentity`` it came from, its
     ``RecordedInputMessage``s and the identifier of an activation a takeover stopped:
-    the user's words and identifiers, with no carrier.
+    the user's words and identifiers, with no carrier. A running activation shown
+    beside the windows (ADR-0332 §4:1), ``RunningActivation``, is its identifier, the
+    ``ChannelIdentity`` it was started from, when it began, its ``RecordedInputMessage``s
+    and whether it has committed: the same person's words and identifiers, no carrier.
 
     **The audience** (ADR-0203, ADR-0204). ``UnboundedAudienceSupply`` and
     ``BoundedAudienceSupply`` filter what is rendered and are never rendered: a set of
@@ -511,6 +516,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ReportedExtent",
         "RoundMessagePart",
         "RoundResponse",
+        "RunningActivation",
         "ShortView",
         "SpokenReply",
         "StageEntry",

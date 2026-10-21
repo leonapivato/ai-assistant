@@ -60,6 +60,9 @@ class _Facts:
     story_links_wired: bool = False
     story_links_decided: bool = False
     phases: _Phases | None = None
+    inputs_held: int = 1
+    understanding_version: int | None = None
+    takeover_undecided: bool = False
 
 
 @dataclass
@@ -884,8 +887,10 @@ def _phase_due(phases: _Phases, facts: _Facts = _PHASE_PASS) -> Rule:
 def test_the_controllers_one_table_is_section_3s_rows_in_order() -> None:
     """ADR-0309 §3's thirteen rows, in order, the last always answering (§2:6, §7:1).
 
-    The old path's rows are gone from it, and its stages and rules from ``core`` (§3:6):
-    no routing, event summary, goal, turn loop, drive or compose stage or rule remains.
+    With ADR-0332 §4:5's row, ``takeover_undecided``, immediately after
+    ``story_links_unrecorded``. The old path's rows are gone from it, and its stages and
+    rules from ``core`` (§3:6): no routing, event summary, goal, turn loop, drive or
+    compose stage or rule remains.
     """
     assert [rule.name for rule in ACTIVATION_RULES] == [
         ControllerRule.CONVERSATION_UNRESOLVED,
@@ -893,6 +898,7 @@ def test_the_controllers_one_table_is_section_3s_rows_in_order() -> None:
         ControllerRule.NOT_RECALLED,
         ControllerRule.NOT_UNDERSTOOD,
         ControllerRule.STORY_LINKS_UNRECORDED,
+        ControllerRule.TAKEOVER_UNDECIDED,
         ControllerRule.UNDERSTOOD_NOT_RECALLED,
         ControllerRule.RECALL_UNDIGESTED,
         ControllerRule.FIRST_ROUND_DUE,
