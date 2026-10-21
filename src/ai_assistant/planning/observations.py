@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Final
 from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.errors import PlanningError
-from ai_assistant.core.types import ObservationRecord, UtcInstant
+from ai_assistant.core.types import ObservationRecord, UtcInstant, encodable_text
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -118,9 +118,18 @@ def stamped(record: ObservationRecord, revision: int) -> ObservationRecord:
 def requested_episodes(episode_ids: object) -> tuple[str, ...]:
     """Return the episodes a read names, each once in the order named, or refuse them.
 
+    **An id with no UTF-8 encoding is refused, not answered with nothing.** A record's
+    episode is :data:`~ai_assistant.core.types.NonBlankEncodableText`, so no store can
+    hold one for such an id; but a SQLite store cannot even bind it, and the driver's
+    ``UnicodeEncodeError`` is no ``sqlite3.Error``, so it would escape the store as
+    something other than the ``PlanningError`` the Protocol raises (issue #3191).
+    Refusing it here, before any store's I/O, is what keeps every store agreeing. The
+    message names the id's place and the code point, and never echoes the id, which
+    could not be written down (:func:`~ai_assistant.core.types.encodable_text`).
+
     Raises:
         PlanningError: If ``episode_ids`` is a bare string, or not a sequence of
-            strings.
+            strings, or names an id with no UTF-8 encoding.
     """
     if (
         not isinstance(episode_ids, Sequence)
@@ -129,6 +138,12 @@ def requested_episodes(episode_ids: object) -> tuple[str, ...]:
     ):
         msg = "observations reads a sequence of episode ids, not one string or anything else"
         raise PlanningError(msg)
+    for index, one in enumerate(episode_ids):
+        try:
+            encodable_text(one)
+        except ValueError as exc:
+            msg = f"observations reads episode ids, and the one at index {index} is not: {exc}"
+            raise PlanningError(msg) from exc
     return tuple(dict.fromkeys(episode_ids))
 
 

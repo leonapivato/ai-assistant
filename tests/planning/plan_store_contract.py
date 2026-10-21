@@ -1138,6 +1138,26 @@ class PlanStoreContract:
             await store.observations(episodes)  # type: ignore[arg-type]  # the refusal under test
 
     @pytest.mark.parametrize(
+        "episodes",
+        [["\ud800"], ["activation:a", "activation:\udfff"]],
+        ids=["lone-surrogate", "after-a-valid-id"],
+    )
+    async def test_the_read_refuses_an_episode_id_with_no_utf8_encoding(
+        self, store: PlanStore, episodes: list[str]
+    ) -> None:
+        """An id no store could hold is refused as a ``PlanningError`` (issue #3191).
+
+        A record's episode is encodable text, so the id names nothing; but a SQLite
+        store cannot bind it, and its driver's ``UnicodeEncodeError`` would otherwise
+        escape as something other than the error the Protocol raises. Every store
+        refuses it alike, whatever it holds.
+        """
+        await store.write_observation(_observation("activation:a"), expected_revision=0)
+
+        with pytest.raises(PlanningError, match="index"):
+            await store.observations(episodes)
+
+    @pytest.mark.parametrize(
         "record",
         [
             "not a record",

@@ -43,6 +43,7 @@ from ai_assistant.core.types import (
     QuestionPart,
     ToolOutcome,
     UtcInstant,
+    encodable_text,
 )
 from ai_assistant.testing.cancellation import SuspendableResource
 
@@ -212,7 +213,16 @@ def _written_observation(record: object, expected: object) -> tuple[ObservationR
 
 
 def _named_episodes(episode_ids: object) -> tuple[str, ...]:
-    """Return the episodes a read names, each once in the order named, or refuse them."""
+    """Return the episodes a read names, each once in the order named, or refuse them.
+
+    Re-implemented here rather than imported from ``ai_assistant.planning``, for the
+    reason this module's docstring gives (ADR-0329 §16:9). An id with no UTF-8 encoding
+    is refused, as the SQLite store must refuse it (issue #3191).
+
+    Raises:
+        PlanningError: If ``episode_ids`` is a bare string, or not a sequence of
+            strings, or names an id with no UTF-8 encoding.
+    """
     if (
         not isinstance(episode_ids, Sequence)
         or isinstance(episode_ids, (str, bytes))
@@ -220,6 +230,12 @@ def _named_episodes(episode_ids: object) -> tuple[str, ...]:
     ):
         msg = "observations reads a sequence of episode ids (ADR-0329 §16:9)"
         raise PlanningError(msg)
+    for index, one in enumerate(episode_ids):
+        try:
+            encodable_text(one)
+        except ValueError as exc:
+            msg = f"observations reads episode ids, and the one at index {index} is not: {exc}"
+            raise PlanningError(msg) from exc
     return tuple(dict.fromkeys(episode_ids))
 
 
@@ -433,7 +449,8 @@ class FakePlanStore:
         """Return the named episodes' observation records, in the order named.
 
         Raises:
-            PlanningError: If ``episode_ids`` is not a sequence of strings.
+            PlanningError: If ``episode_ids`` is not a sequence of strings, or names an
+                id with no UTF-8 encoding.
         """
         named = _named_episodes(episode_ids)
         async with self._resource.held():
