@@ -239,7 +239,7 @@ async def test_the_template_is_handed_a_flag_for_each_section_the_message_carrie
     # computed it for the call and rendered the instruction under it.
     (given,) = sink.of(DiagnosticSource.UNDERSTANDING, DiagnosticKind.GIVEN)
     recorded = given.model_dump(mode="json")["body"]["prompt"]["flags"]
-    assert recorded == {flag: flag in handed for flag in ("recalled", "stories")}
+    assert recorded == {flag: flag in handed for flag in ("recalled", "stories", "person")}
 
 
 async def test_the_candidates_render_under_s_labels_attributed_by_their_records() -> None:

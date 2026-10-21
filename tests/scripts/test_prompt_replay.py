@@ -377,7 +377,11 @@ def test_a_template_is_rendered_under_stated_flags_where_the_entry_records_none(
         model,
         reports,
         candidates=(str(candidate), "recorded"),
-        flags=("understanding.recalled=true", "understanding.stories=false"),
+        flags=(
+            "understanding.recalled=true",
+            "understanding.stories=false",
+            "understanding.person=false",
+        ),
     )
 
     rendered = (
@@ -392,7 +396,7 @@ def test_a_template_is_rendered_under_stated_flags_where_the_entry_records_none(
     templated = [one for one in results if one["candidate"]["origin"] == "override"]
     assert len(templated) == 2
     for one in templated:
-        assert one["flags"] == {"recalled": True, "stories": False}
+        assert one["flags"] == {"recalled": True, "stories": False, "person": False}
         assert one["flags_from"] == "stated"
         assert one["candidate"]["instruction"] == rendered
         assert (
@@ -424,7 +428,7 @@ def test_a_template_is_rendered_under_the_flags_the_entry_records(tmp_path: Path
         record.read_text().replace(
             '"prompt":{"name":"understanding","version":"0123456789ab","origin":"default"}',
             '"prompt":{"name":"understanding","version":"0123456789ab","origin":"default",'
-            '"flags":{"recalled":false,"stories":true}}',
+            '"flags":{"recalled":false,"stories":true,"person":false}}',
         )
     )
     copy = tmp_path / "copy"
@@ -435,7 +439,7 @@ def test_a_template_is_rendered_under_the_flags_the_entry_records(tmp_path: Path
 
     assert model.systems == ["Candidate understanding instruction."]
     (only,) = _results(copy)[f"{ACT_A}.replay.jsonl"]
-    assert only["body"]["flags"] == {"recalled": False, "stories": True}
+    assert only["body"]["flags"] == {"recalled": False, "stories": True, "person": False}
     assert only["body"]["flags_from"] == "recorded"
 
 
@@ -477,8 +481,9 @@ def test_stated_flags_must_name_declared_flags_and_state_every_one(tmp_path: Pat
         with pytest.raises(replay_tool.ReplayError, match=defect):
             replay_tool.parse_flags(stated, declared)
     assert replay_tool.parse_flags(
-        ["understanding.recalled=yes", "understanding.stories=0"], declared
-    ) == {"understanding": {"recalled": True, "stories": False}}
+        ["understanding.recalled=yes", "understanding.stories=0", "understanding.person=no"],
+        declared,
+    ) == {"understanding": {"recalled": True, "stories": False, "person": False}}
 
 
 # --- §8: the bound -------------------------------------------------------------------------------
@@ -535,7 +540,11 @@ def test_nothing_printed_comes_from_an_entry_or_a_reply(tmp_path: Path) -> None:
         Model(),
         reports,
         candidates=(str(_template(tmp_path)), "recorded"),
-        flags=("understanding.recalled=true", "understanding.stories=true"),
+        flags=(
+            "understanding.recalled=true",
+            "understanding.stories=true",
+            "understanding.person=false",
+        ),
     )
     _replay(copy, Model(fail=RuntimeError(PRIVATE)), reports)
 
@@ -742,7 +751,9 @@ def test_the_prompt_key_the_package_writes_is_read_for_its_flags(tmp_path: Path)
         ).template
         for name in ("understanding", "digesting")
     }
-    understood = shipped["understanding"].rendered(flags={"recalled": True, "stories": False})
+    understood = shipped["understanding"].rendered(
+        flags={"recalled": True, "stories": False, "person": False}
+    )
     digested = shipped["digesting"].rendered()
     live = write_live(tmp_path)
     record = live / "diagnostics" / f"{ACT_A}.jsonl"
@@ -772,7 +783,11 @@ def test_the_prompt_key_the_package_writes_is_read_for_its_flags(tmp_path: Path)
     )
 
     bodies = {one["body"]["prompt"]: one["body"] for one in _results(copy)[f"{ACT_A}.replay.jsonl"]}
-    assert bodies["understanding"]["flags"] == {"recalled": True, "stories": False}
+    assert bodies["understanding"]["flags"] == {
+        "recalled": True,
+        "stories": False,
+        "person": False,
+    }
     assert bodies["understanding"]["flags_from"] == "recorded"
     assert bodies["understanding"]["candidate"]["instruction"] == (
         "Candidate understanding instruction.\nRecalled memories are shown.\nNo stories are shown."
@@ -862,7 +877,7 @@ def test_no_entry_is_rendered_from_another_entrys_flags(tmp_path: Path) -> None:
         "name": "understanding",
         "version": "v",
         "origin": "default",
-        "flags": {"recalled": False, "stories": True},
+        "flags": {"recalled": False, "stories": True, "person": False},
     }
     unflagged = {"name": "understanding", "version": "v", "origin": "default"}
     givens = [_given("understanding", 0, unflagged), _given("understanding", 1, flagged)]
@@ -872,7 +887,7 @@ def test_no_entry_is_rendered_from_another_entrys_flags(tmp_path: Path) -> None:
 
     ((key, call),) = _calls(plan).items()
     assert key == ("override", ((ACT_A, 1),))
-    assert call.flags == {"recalled": False, "stories": True}
+    assert call.flags == {"recalled": False, "stories": True, "person": False}
     assert call.flags_from == "recorded"
     assert plan.left_out == {"no flags recorded or stated": 1}
 

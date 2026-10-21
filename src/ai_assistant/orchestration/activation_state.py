@@ -61,6 +61,7 @@ if TYPE_CHECKING:
         StageEntry,
     )
     from ai_assistant.orchestration.joining import InputStanding
+    from ai_assistant.orchestration.person_block import PersonBlock
 
 _log = structlog.get_logger(__name__)
 
@@ -229,6 +230,13 @@ class ActivationState:
     #: same on its trigger (ADR-0323 §5:4); the hub chat's trigger records none, so its
     #: messages are held here.
     input_messages: tuple[RecordedInputMessage, ...] = ()
+    #: ADR-0338 §7:1: the activation's person block, assembled once, before understanding,
+    #: and read by every planning round, which writes back what §7:10 drops from it.
+    #: ``None`` for an activation that is no person's, before assembly, or where no
+    #: person-model store is wired.
+    person_block: PersonBlock | None = field(default=None, init=False)
+    #: Whether the block's assembly was made, whatever it gave: it is made once.
+    person_block_assembled: bool = field(default=False, init=False)
     #: The finalization reading was taken (ADR-0280 §6:2): an activation the
     #: controller never ended gains its end entry there, so for a stop it has ended
     #: from that reading on, whether or not the record carries the entry yet.

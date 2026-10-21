@@ -117,6 +117,7 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.delivery import DeliveryOutbox
     from ai_assistant.orchestration.matters_pass import MattersPass
+    from ai_assistant.orchestration.person_block import PersonBlocks
     from ai_assistant.orchestration.phase_path import PhasePath
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
@@ -323,6 +324,9 @@ class Harness:
         # ADR-0332 §6:5's `join_limit`, at the setting's own default unless a case
         # varies it.
         join_limit: int = DEFAULT_JOIN_LIMIT,
+        # ADR-0338 §7:1's person block. `None` is every other case's deployment, as
+        # every hub's until a person-model store is wired: no block is assembled.
+        person_blocks: PersonBlocks | None = None,
         # ADR-0332 §5:1's start wait on the hub chat: a millisecond unless a case
         # varies it, so a message is taken in at once, as before the wait, and a case
         # driving the wait sets its own.
@@ -450,6 +454,7 @@ class Harness:
             diagnostics=diagnostics,
             telegram=telegram,
             join_limit=join_limit,
+            person_blocks=person_blocks,
             chat_start_wait=chat_start_wait,
         )
 

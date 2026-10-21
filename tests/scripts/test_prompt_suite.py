@@ -56,6 +56,8 @@ PLANNING_FLAGS: Final = {
     "approved": False,
     "candidates": False,
     "reliance": False,
+    "person": False,
+    "suggestions": False,
 }
 
 WEB_SEARCH: Final = {
@@ -93,7 +95,7 @@ def _understanding(**changes: Any) -> dict[str, Any]:
         "came_from": "2026-10-21",
         "set": "development",
         "samples": 2,
-        "flags": {"recalled": False, "stories": False},
+        "flags": {"recalled": False, "stories": False, "person": False},
         "property": {"check": "no_label", "fields": ["meaning"], "labels": ["H", "P"]},
         "input": {"messages": [{"role": "user", "content": json.dumps({"input": PRIVATE})}]},
     }
@@ -214,7 +216,7 @@ def test_a_well_formed_case_reads_whole(tmp_path: Path) -> None:
     assert reading.defects == []
     (case,) = reading.cases
     assert case.name == "understanding/one"
-    assert case.flags == {"recalled": False, "stories": False}
+    assert case.flags == {"recalled": False, "stories": False, "person": False}
     assert case.samples == 2
     assert not case.held_out
     assert case.tools is None
@@ -248,9 +250,15 @@ def test_an_input_may_be_a_json_file_beside_the_case(tmp_path: Path) -> None:
         (_understanding(samples=0), "samples"),
         (_understanding(samples=True), "samples"),
         (_understanding(guards="approval_as_habit", samples=2), "at least 3"),
-        (_understanding(flags={"recalled": False}), "missing ['stories']"),
-        (_understanding(flags={"recalled": False, "stories": False, "x": True}), "['x']"),
-        (_understanding(flags={"recalled": "no", "stories": False}), "true and false"),
+        (_understanding(flags={"recalled": False, "person": False}), "missing ['stories']"),
+        (
+            _understanding(flags={"recalled": False, "stories": False, "person": False, "x": True}),
+            "['x']",
+        ),
+        (
+            _understanding(flags={"recalled": "no", "stories": False, "person": False}),
+            "true and false",
+        ),
         (_understanding(property={"check": "guess"}), "no code check"),
         (_understanding(property={"check": "asks_about", "calls": ["1.1"]}), "reads no reply"),
         (_understanding(property={"check": "no_label", "fields": ["meaning"]}), "takes exactly"),
@@ -561,7 +569,7 @@ def test_each_case_is_sent_for_each_sample_under_the_candidate_and_the_control(
 
     assert status == 0
     control = replay_tool.default_candidate(replay_tool.declared_prompts()["understanding"])
-    rendered = control.template.render(flags={"recalled": False, "stories": False})
+    rendered = control.template.render(flags={"recalled": False, "stories": False, "person": False})
     assert model.systems == ["Candidate understanding."] * 2 + [rendered] * 2
     lines = _lines(results)
     assert [(one["version"]["role"], one["sample"]) for one in lines] == [

@@ -223,7 +223,7 @@ async def test_understanding_writes_its_rendered_request_and_the_reply() -> None
             "name": "understanding",
             "version": _UNDERSTANDING.version,
             "origin": "default",
-            "flags": {"recalled": False, "stories": False},
+            "flags": {"person": False, "recalled": False, "stories": False},
         },
     }
     assert _body(returned) == {"reply": _PROPOSAL}
@@ -245,7 +245,11 @@ async def test_understanding_s_repair_is_a_second_given_and_returned_pair() -> N
     # The repair resends the system message, so its given entry names the template, and
     # the flags it was rendered under, too.
     assert _body(entries[2])["prompt"] == _body(entries[0])["prompt"]
-    assert _body(entries[2])["prompt"]["flags"] == {"recalled": False, "stories": False}
+    assert _body(entries[2])["prompt"]["flags"] == {
+        "person": False,
+        "recalled": False,
+        "stories": False,
+    }
     assert _body(sink.of(DiagnosticSource.UNDERSTANDING)[1]) == {"reply": "not json"}
 
 
@@ -321,9 +325,11 @@ async def test_planning_writes_its_rendered_request_and_offered_tools_before_the
             "flags": {
                 "approved": False,
                 "candidates": False,
+                "person": False,
                 "reliance": False,
                 "story_calls": False,
                 "story_reads": False,
+                "suggestions": False,
                 "takes_message": True,
             },
         },

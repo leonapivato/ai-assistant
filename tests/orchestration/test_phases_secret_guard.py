@@ -62,6 +62,7 @@ from ai_assistant.orchestration import (
     disclosure,
     held_results,
     joining,
+    person_block,
     story_links,
     understanding,
 )
@@ -124,6 +125,7 @@ _NAMES: dict[str, Any] = (
     | vars(disclosure)
     | vars(held_results)
     | vars(joining)
+    | vars(person_block)
     | vars(story_links)
 )
 
@@ -436,6 +438,13 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     with the ``AskedCall`` it names. ``AskedIn`` (ADR-0322 §4:2), on the chat's window,
     is the question a message is: a round's id and part numbers.
 
+    **The person block** (ADR-0338 §7). ``PersonBlock``, on understanding's ``person``
+    and planning's, is a person's id, their ``Profile`` — five fields they typed, the
+    person's own words, Tier 1 — the slot as ``KeptInMind``, each a ``Memory`` judged
+    above and a flag, a count, and the ``ShownSuggestion``s, each a closed kind, a clock,
+    a field and its value as text, or a ``Memory``. Nothing of a credential: the person
+    model holds the person's own choices and pointers to memories (§10:3).
+
     **Recall is not a seam.** :class:`~ai_assistant.orchestration.recall.RecallStage`
     calls no model (ADR-0281 §3); what it decides reaches a model as
     ``ActivationRecall`` through understanding's ``recall`` and as records through
@@ -478,6 +487,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "HeldResult",
         "InputPart",
         "JoinedInput",
+        "KeptInMind",
         "LegacyPart",
         "LineMessage",
         "Memory",
@@ -488,6 +498,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ObserverInferencePart",
         "OfferedTool",
         "OpenQuestion",
+        "PersonBlock",
         "PlaceItem",
         "PlaceWindow",
         "Placement",
@@ -498,6 +509,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "PlanningRound",
         "PlanningStories",
         "PlanningStory",
+        "Profile",
         "ProposedActivationUnderstanding",
         "ProposedAnswer",
         "ProposedCall",
@@ -518,6 +530,7 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "RoundResponse",
         "RunningActivation",
         "ShortView",
+        "ShownSuggestion",
         "SpokenReply",
         "StageEntry",
         "StoryHeader",
