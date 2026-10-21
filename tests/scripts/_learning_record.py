@@ -22,20 +22,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from datetime import timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
+
+from observer_support import AT, Harness, episode, reply
 
 from ai_assistant.core.types import DiagnosticEntry, DiagnosticKind, DiagnosticSource
 from ai_assistant.evaluation.diagnostic_record import FileDiagnosticRecord
 from ai_assistant.testing import FakeModelProvider
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "orchestration"))
-from observer_support import AT, Harness, episode, reply
-
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from ai_assistant.core.types import Message
 
