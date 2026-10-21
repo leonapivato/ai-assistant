@@ -461,9 +461,25 @@ async def test_a_pin_is_refused_where_the_id_now_names_another_wording_than_the_
         async with page.expect_response("**/person/pin"):
             await plain.get_by_role("button", name="Pin: confirms this wording").click()
         assert (await outcome.inner_text()).startswith("Pinned.")
+
+        # And the padded row's Unpin does not take the other memory's pin away.
+        await page.evaluate("() => { document.getElementById('belief-outcome').textContent = ''; }")
+        async with page.expect_response("**/belief"):
+            await padded.get_by_role("button", name="Unpin").click()
+        await page.wait_for_function(
+            "() => document.getElementById('belief-outcome').textContent !== ''"
+        )
+        assert (await outcome.inner_text()).startswith("That memory is not the one shown here")
         held = await people.read(OWNER_PERSON_ID)
         assert held is not None
         assert [pin.memory_id for pin in held.standing_pins] == ["m:diet"]
+
+        async with page.expect_response("**/person/unpin"):
+            await plain.get_by_role("button", name="Unpin").click()
+        assert await outcome.inner_text() == "Unpinned. The memory itself is kept."
+        held = await people.read(OWNER_PERSON_ID)
+        assert held is not None
+        assert held.standing_pins == ()
         assert heard == []
 
 
@@ -505,4 +521,41 @@ async def test_a_save_keeps_what_was_typed_in_other_fields_and_while_it_was_sent
             None,
             None,
         )
+        assert heard == []
+
+
+async def test_a_box_typed_back_to_its_old_value_while_saving_keeps_what_was_typed(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A correction typed into the field being saved is a draft too, whatever its value
+    (adversarial review, round 2)."""
+    loop = asyncio.get_running_loop()
+    release: asyncio.Future[None] = loop.create_future()
+
+    async def hang(route: Route) -> None:
+        await release
+        await route.fallback()
+
+    async with driving(gateway_browser, tmp_path, viewport=PHONE) as drive:
+        heard = _complaints(drive.page)
+        people, _ = switch_on(drive.engine)
+        await drive.engine.set_profile_field(
+            OWNER_PERSON_ID, field=ProfileField.NAME, value="Robin"
+        )
+        await _open(drive)
+        page = drive.page
+
+        await page.fill("#field-name", "Rob")
+        await page.route("**/person/field/set", hang)
+        async with page.expect_request("**/person/field/set"):
+            await page.press("#field-name", "Enter")
+        await page.fill("#field-name", "Robin")
+        async with page.expect_response("**/person/changes"):
+            release.set_result(None)
+
+        assert await page.locator("#about-outcome").inner_text() == "Saved."
+        assert await page.locator("#field-name").input_value() == "Robin"
+        held = await people.read(OWNER_PERSON_ID)
+        assert held is not None
+        assert held.profile.name == "Rob"
         assert heard == []

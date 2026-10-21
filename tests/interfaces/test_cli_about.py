@@ -154,13 +154,14 @@ def test_show_renders_every_part_of_the_model_with_the_ids_its_commands_take(
     assert "  Your name: “Robin”" in said
     assert "  What you call me: Not set: I go by Aether." in said
     assert "using 13 of the 30 characters I keep in mind" in said
-    assert "  - pinned · “Eats no meat.” · unpin with: assistant about unpin m:diet" in said
+    assert "  - pinned · “Eats no meat.” · unpin with: assistant about unpin -- m:diet" in said
     assert person_inspection.LEFT_OUT_WORDS[next(iter(person_inspection.LEFT_OUT_WORDS))] in said
-    assert "unpin with: assistant about unpin m:old" in said
-    assert f"remove-style with: assistant about remove-style {mark.record_id}" in said
+    assert "unpin with: assistant about unpin -- m:old" in said
+    assert f"remove-style with: assistant about remove-style -- {mark.record_id}" in said
     assert (
         f"The language I write to you in: “Português” · accept with: assistant about accept "
-        f"{suggestion.record_id} · dismiss with: assistant about dismiss {suggestion.record_id}"
+        f"-- {suggestion.record_id} · dismiss with: assistant about dismiss -- "
+        f"{suggestion.record_id}"
     ) in said
     assert "keep in mind “Short answers, please.”, which pins it and confirms" in said
 
@@ -317,7 +318,7 @@ def test_a_suggested_command_hands_the_shell_the_id_and_nothing_to_expand(value:
     """A pasted command reaches the hub with the id as it is (adversarial review, round 1)."""
     said = person_inspection.pasteable("unpin", value)
 
-    assert said.startswith("unpin with: assistant about unpin ")
+    assert said.startswith("unpin with: assistant about unpin -- ")
     assert shlex.split(said.removeprefix("unpin with: "))[-1] == value
 
 
@@ -329,3 +330,20 @@ def test_an_id_that_would_not_paste_as_itself_gets_no_command(value: str) -> Non
     assert "\n" not in said
     assert "\x1b" not in said
     assert said.endswith("cannot be pasted as a command here")
+
+
+def test_a_suggested_command_for_an_id_like_an_option_acts_on_the_id(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """``--`` ends the options, so ``--help`` is the id (adversarial review, round 2)."""
+    engine, people, _ = _on(fact("--help", "Eats no meat."))
+    asyncio.run(engine.pin_memory(OWNER_PERSON_ID, memory_id="--help"))
+    _wire(monkeypatch, engine)
+    said = person_inspection.pasteable("unpin", "--help")
+
+    assert _invoke(*shlex.split(said.removeprefix("unpin with: assistant about "))) == 0
+
+    assert output.getvalue().splitlines() == [person_inspection.DONE_WORDS["unpin"][0]]
+    held = asyncio.run(people.read(OWNER_PERSON_ID))
+    assert held is not None
+    assert held.standing_pins == ()

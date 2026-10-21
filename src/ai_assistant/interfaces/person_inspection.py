@@ -249,7 +249,8 @@ def pasteable(command: str, value: str) -> str:
 
     **The shell's quoting and the terminal's escaping are two questions.** The id is
     quoted by :func:`shlex.quote`, so a ``$``, a backtick, a quote or a space in it
-    reaches the command as itself and expands to nothing; and a command is offered only
+    reaches the command as itself and expands to nothing, and follows ``--``, so one
+    beginning with a hyphen is not read as an option; and a command is offered only
     where every character of the id prints as itself, because an escaped character
     would paste as a different id. Where one does not, the id is shown escaped and no
     command is offered: a wrong command is worse than none.
@@ -262,7 +263,8 @@ def pasteable(command: str, value: str) -> str:
         The command, or a sentence naming the id it cannot offer one for.
     """
     if value.isprintable():
-        return f"{command} with: assistant about {command} {shlex.quote(value)}"
+        # `--` ends the options, so an id that begins with a hyphen is an id.
+        return f"{command} with: assistant about {command} -- {shlex.quote(value)}"
     return f"{quoted(value)} cannot be pasted as a command here"
 
 

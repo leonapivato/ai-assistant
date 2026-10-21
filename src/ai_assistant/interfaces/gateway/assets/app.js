@@ -5226,36 +5226,29 @@ async function readAboutList(name, run) {
   }
 }
 
-// The field a Save or a Clear last sent, and what its box held when it was sent.
-const aboutSent = { field: null, box: null };
-
 // The five fields, each its own form: a Save writes that field and no other.
 //
 // **A box the person has typed in and not saved keeps what they typed** (adversarial
-// review, round 1): every write reads the panel again, which builds every form again, and
-// a draft in another field — or one typed while the write was in flight — would be lost
-// with it though it was never sent. So each box's unsaved text is carried over. The box
-// whose value was just sent shows what the hub now holds, unless it was typed in again
-// since it was sent.
+// review, rounds 1 and 2): every write reads the panel again, which builds every form
+// again, and a draft in another field — or one typed while the write was in flight, even
+// one typed back to the value held — would be lost with it though it was never sent. So a
+// box typed in since it was built or last sent is marked, by the typing and not by
+// comparing values, and its text is carried over.
 function renderProfile(profile) {
   const drafts = {};
   PROFILE_FIELDS.forEach((spec) => {
     const box = el(`field-${spec.field}`);
-    if (box === null || box.value === box.dataset.held) {
-      return;
+    if (box !== null && box.dataset.typed === "yes") {
+      drafts[spec.field] = box.value;
     }
-    if (spec.field === aboutSent.field && box.value === aboutSent.box) {
-      return;
-    }
-    drafts[spec.field] = box.value;
   });
-  aboutSent.field = null;
-  aboutSent.box = null;
   const fields = el("profile-fields");
   clearNode(fields);
   PROFILE_FIELDS.forEach((spec) => renderField(fields, spec, profile[spec.field]));
   Object.keys(drafts).forEach((field) => {
-    el(`field-${field}`).value = drafts[field];
+    const box = el(`field-${field}`);
+    box.value = drafts[field];
+    box.dataset.typed = "yes";
   });
 }
 
@@ -5274,8 +5267,9 @@ function renderField(fields, spec, value) {
   input.type = "text";
   input.autocomplete = "off";
   input.value = value === null ? "" : value;
-  // What the hub holds, so a box typed in since it was built is told from one that was not.
-  input.dataset.held = input.value;
+  input.addEventListener("input", () => {
+    input.dataset.typed = "yes";
+  });
   form.appendChild(input);
   const save = document.createElement("button");
   save.type = "submit";
@@ -5493,8 +5487,8 @@ async function beliefEdit(path, payload, act) {
 }
 
 function setField(field, value) {
-  aboutSent.field = field;
-  aboutSent.box = el(`field-${field}`).value;
+  // What is in the box now is what is sent; typing from here on is a new draft.
+  delete el(`field-${field}`).dataset.typed;
   // An absent value is the clear: the gateway reads absent and `null` alike, and sends
   // the hub no value (ADR-0085 §10).
   const payload = value === null ? { field: field } : { field: field, value: value };
@@ -5514,19 +5508,20 @@ function decideSuggestion(suggestionId, act) {
 }
 
 // What the belief panel says where the memory an id now names is not the one its row
-// shows, so the pin would confirm a wording the person was not shown.
-const PIN_NOT_SHOWN =
-  "That memory is not the one shown here any more, so it was not pinned. Open What I " +
+// shows, so a pin or unpin by that id would act on a memory the person was not shown.
+const NOT_THE_ROWS =
+  "That memory is not the one shown here any more, so nothing was changed. Open What I " +
   "believe again to see it as it is now.";
 
-// Pin the memory a row shows, which confirms the wording shown (ADR-0338 §4:3).
+// Pin or unpin the memory a row shows; a pin confirms the wording shown (ADR-0338 §4:3).
 //
-// **The wording is read again first, by the id the pin will name, and the pin is made
-// only where it is the row's** (adversarial review, round 1): the listing is as old as
-// the page's last read, and its id is the listing's, which a belief read normalises
+// **The wording is read again first, by the id the act will name, and the act is made
+// only where it is the row's** (adversarial review, rounds 1 and 2): the listing is as old
+// as the page's last read, and its id is the listing's, which a belief read normalises
 // where the person model does not (§10:4). A pin made by that id on a memory whose
-// wording is not the row's would confirm a wording the person never saw.
-async function pinBelief(belief) {
+// wording is not the row's would confirm a wording the person never saw, and an unpin
+// would take another memory's pin away.
+async function checkedBeliefEdit(belief, path, act) {
   fault(null, "beliefs");
   const half = headerHalf();
   if (half === null) {
@@ -5544,10 +5539,10 @@ async function pinBelief(belief) {
       return;
     }
     if (held.belief.id !== belief.id || held.belief.content !== belief.content) {
-      el("belief-outcome").textContent = PIN_NOT_SHOWN;
+      el("belief-outcome").textContent = NOT_THE_ROWS;
       return;
     }
-    await beliefEdit("/person/pin", { memory_id: belief.id }, "pin");
+    await beliefEdit(path, { memory_id: belief.id }, act);
   } catch (_) {
     // Not this session's condition to report (#2404).
     if (!sameSession(half, era)) {
@@ -5594,8 +5589,10 @@ function offerPinning(item, belief) {
     return;
   }
   controls(item, [
-    control("Pin: confirms this wording", () => pinBelief(belief)),
-    control("Unpin", () => beliefEdit("/person/unpin", { memory_id: belief.id }, "unpin")),
+    control("Pin: confirms this wording", () =>
+      checkedBeliefEdit(belief, "/person/pin", "pin")
+    ),
+    control("Unpin", () => checkedBeliefEdit(belief, "/person/unpin", "unpin")),
   ]);
 }
 
