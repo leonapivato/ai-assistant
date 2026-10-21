@@ -877,6 +877,44 @@ async def test_acting_reads_the_deadline_again_before_its_commitment_step() -> N
     ]
 
 
+async def test_a_takeover_reads_the_deadline_again_before_its_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0343 §4:3: a takeover whose wait ends past the deadline takes nothing over."""
+    completer = _Counting()
+    harness = phases_harness(completer, understanding=understanding_stage(model=_routed()))
+    engine = harness.engine
+    settled = engine._takeover_settled
+
+    async def expiring(named: str | None, working: Any) -> None:
+        # After the stage's entry checked the deadline; with no join pending, the wait
+        # returns without yielding, so only the check after it finds the deadline.
+        working.deadline = asyncio.get_running_loop().time()
+        await settled(named, working)
+
+    monkeypatch.setattr(engine, "_takeover_settled", expiring)
+    first = await open_conversation(harness)
+    await engine.write_message(first, message=said("a-1", "book Riverside"))
+    await asyncio.wait_for(completer.entered.wait(), SETTLE)
+    older = await working(harness, first)
+    second = (await engine.start_conversation()).id
+    await engine.write_message(second, message=said("b-1", "finish it: for two"))
+    (taker,) = await _frozen(harness, 1)
+    completer.release.set()
+    found = await _frozen(harness, 2)
+    await engine.aclose()
+
+    record = processing(taker)
+    assert (record.status, record.reason) == (ProcessingStatus.FAILED, ProcessingReason.TIMEOUT)
+    assert entries(record)[-2:] == [
+        (ControllerStage.TAKEOVER, ControllerRule.TAKEOVER_UNDECIDED, StageOutcome.TIMED_OUT),
+        (ControllerStage.END, ControllerRule.STAGE_TIMED_OUT, StageOutcome.DONE),
+    ]
+    assert record.joined == ()
+    assert _of(found, older).status is ProcessingStatus.COMPLETED, "it was not taken over"
+    assert older not in (await harness.plans.export()).stopped_activations
+
+
 async def test_a_shutdown_reaches_a_joiner_suspended_in_its_read() -> None:
     """A joiner waiting on the store's read is cancelled with its reader, not awaited."""
     store = _HeldRead()
