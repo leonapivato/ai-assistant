@@ -1,0 +1,32 @@
+# The user only says good morning. Earlier matters are in the windows, and one of them is
+# still open, but the user asked about none of them. Whether a greeting brings up what is
+# coming up is the person's taste, and the prompts hold no rule for it: what governs is a
+# preference they stated, kept as a style memory (ADR-0338 §5). This person said they don't
+# want earlier things brought up when they only say hello, so the round greets them back and
+# brings up none of them.
+prompt = "planning"
+guards = "greeting_recap"
+came_from = "2026-10-21"
+set = "development"
+samples = 2
+
+[flags]
+takes_message = true
+story_calls = false
+story_reads = false
+approved = false
+candidates = false
+reliance = false
+person = true
+suggestions = false
+
+[property]
+check = "read"
+read = """The message greets the user back, and may call them Maren. Because they said they \
+don't want earlier things brought up when they only say hello, it brings up no earlier \
+matter: not the dentist appointment, not the train times, not the gift for Ines, nor \
+anything else the user did not ask about in this input. It does not say that it is leaving \
+anything out, or that it knows or was told how they like a greeting answered."""
+
+[input]
+file = "greeting-no-recap-as-asked.json"

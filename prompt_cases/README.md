@@ -63,7 +63,7 @@ A `read` property names, in `read`, what a person reading the reply looks for:
 ```toml
 [property]
 check = "read"
-read = "Greets the user back and brings up no earlier matter they did not ask about."
+read = "Greets the user back and recites nothing of what the person block holds."
 ```
 
 The closed sets are the runner's, in `scripts/prompt_replay.py`, and a case names nothing
