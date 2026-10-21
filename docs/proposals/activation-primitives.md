@@ -25,6 +25,12 @@ draft tried to break it; what it found about the operations themselves is folded
 on 2026-10-21. It says only that whatever crosses between activations carries its author,
 its authority and its outside-content marks with it. What those mean is decided there.
 
+**It is the simple version.** The owner, the same day: *"For now, do a simple design that
+works. Don't worry much about who and what and privacy. That stuff will be addressed
+later."* So who may use these operations on whose activations, by person or by device, is
+left for later. For now the operations reach only what is already wired: what ADR-0332 §4
+shows understanding, and the places ADR-0340 already speaks into.
+
 ## Baseline
 
 **Wiki, read at revision `84f20c8`** (direction where not ratified):
@@ -129,7 +135,9 @@ it back.
    while the activation the web started has already acted. Today the takeover is *not
    taken* and *"nothing is stopped"* (ADR-0332 §4:8), so the older one goes on. With this
    route, the web one is stopped under every guarantee above, and the person hears what
-   finished and what didn't. This is the case ADR-0332 §9 left to #2515.
+   finished and what didn't. This is the case ADR-0332 §9 left to #2515. The owner,
+   2026-10-21: *"Yes, you should be able to cancel across devices. Maybe this has some sort
+   of permission depending on devices. For now, we can disregard it."*
 
 **How the cancel across places is decided.** It is a takeover's sibling, and decided the
 same way. ADR-0292 §11:2 already has the shape: *"Understanding judges how a new activation
@@ -181,8 +189,8 @@ it answers from what the search has found, and the search carries on.
   and approvals are never copied.
 - **What it carries:** no authority, because a copy informs. Each piece keeps its marks, so
   outside content stays outside content in B.
-- **Who it reaches:** for now, only activations of the same person, within ADR-0332 §4's
-  limits on what is shown. Crossing people is the privacy front's.
+- **Who it reaches:** whatever understanding is already shown under ADR-0332 §4. Who may
+  share with whom is decided later.
 - **The record:** B's episode records the share, naming A and the moment it was taken, so
   the viewer and the observer can see why B knew what it knew.
 
@@ -279,9 +287,9 @@ occurrences:
   spawns.
 - The report is set by rule when the task leaves *running*, however it leaves, which
   ADR-0340 §10:2 already asks for. A slice that was stopped can claim nothing, so the
-  report can't be the last slice's job, as ADR-0340 §10:1 has it. When the person stopped
-  it from a conversation, the pick is that the stopping reply says what was found, and no
-  separate report follows.
+  report can't be the last slice's job, as ADR-0340 §10:1 has it. This includes a stop by
+  the person: the stopping reply confirms the stop, and the report says what was found.
+  That is one rule with no exception.
 
 **Who may spawn what.** The rule that keeps spawns from multiplying:
 
@@ -329,9 +337,10 @@ already works, and it is what keeps the three operations small:
    was given in (ADR-0321 §4:1).
 4. **Marks travel.** Whatever crosses between activations carries its author, its
    authority and its outside-content marks. What they mean is the other designs'.
-5. **One person, for now.** Shares, merges and cancels stay within one person's
-   activations. A spawn speaks only into a place of the person it is for. Crossing people
-   is the audience redesign's.
+5. **Who comes later.** For now the operations reach only what ADR-0332 §4 already shows
+   understanding, and a spawn speaks only into the place it was set from or the line
+   (ADR-0340 §3:1). Who may do what to whose activations, by person or by device, is
+   decided later.
 6. **Each operation has one trigger.**
    - A stop: a command, a merge, or understanding's `cancels`, applied by a rule.
    - A share and a merge: code when the input arrives, or understanding's closed fields,
@@ -418,7 +427,7 @@ Status:
 | Situation | What happens | Status |
 | --- | --- | --- |
 | Two people in one shared place | One activation at a time; only the same author's input joins | The rule is decided (ADR-0332 §2:5); shared places themselves wait for the household design |
-| Your partner's activation could use what yours is finding ("are we having pasta?" while yours plans dinner) | No share across people until the audience redesign | Elsewhere (the privacy front) |
+| Your partner's activation could use what yours is finding ("are we having pasta?" while yours plans dinner) | No share across people yet; who may share with whom comes later | Later |
 | A forwarded message or an email, whose author is only claimed | Never merges with the person's own activation, because its authority differs | Built |
 
 **Races and bounds**
@@ -447,15 +456,11 @@ Status:
 | **Priority and preemption** | A long task runs in short slices on its own place, so nothing needs to be preempted. |
 | **Supersede** ("never mind, do X instead") | A merge before the first act; a cancel across places after it. |
 
-**Kill instead of stop.** Rejected. "Kill" means abrupt and without cleanup. Taken at its
-word it would drop the record of an act in flight, which is the unknown-outcome problem
-(#2584). And "stop" already names the mechanism: ADR-0295, ADR-0297, `/stop`, the stop
-control and the record's *stopped*.
-
-**Share's word.** The privacy front is likely to use "share" for what Aether tells people.
-The two meanings meet exactly where a share would cross people. Within one person's
-activations the overlap is harmless. If the privacy vocabulary settles on "share", this
-operation becomes **inform**, which also matches its rule: it informs and never authorizes.
+**The words** are spawn, stop and share, agreed with the owner on 2026-10-21. The owner first
+suggested "kill", and took "stop" instead. "Kill" means abrupt and without cleanup, and taken
+at its word it would drop the record of an act in flight, which is the unknown-outcome
+problem (#2584). "Stop" also already names the mechanism: ADR-0295, ADR-0297, `/stop`, the
+stop control and the record's *stopped*.
 
 ## 9. What it would change
 
@@ -485,15 +490,15 @@ without a home for longer.
 - **A reminder in a busy place, for ADR-0340.** The clock admits only when the place is
   idle (ADR-0340 §3:4), and it wakes on its own interval. Messages that waited are taken in
   the moment an activation ends (ADR-0332 §2:4), so in a busy chat a medicine reminder can
-  keep losing that race. The pick is that a due spawn takes its turn in the place's arrival
-  order, admitted as an input of its own and never folded into the person's messages.
-  ADR-0340's rebased round should settle it.
+  keep losing that race. The simple rule, taken here, is that a due spawn takes its turn in
+  the place's arrival order, admitted as an input of its own and never folded into the
+  person's messages. ADR-0340's rebased round carries it.
 - **How a task asks for a yes,** and how the yes reaches the call it proposed, is the
   background-work decision's, with the authority design.
 - **Exactly what a share copies.**
 - **Push shares,** where an activation offers what it found to another, wait for a case.
-- **Crossing people.** Shares, merges and cancels between household members wait for the
-  audience redesign.
+- **Who may do what.** Shares, merges and cancels between household members, and any
+  permission by device, come later.
 - **A background task's authority.** Whether a task's first yes can cover a stated set of
   later calls is the owner's authority design (the controller walk's answer 10, on #3257).
 - **Spawns on a condition** (#2585), and what an event's activation may spawn, wait for
@@ -504,20 +509,16 @@ without a home for longer.
 - **Who hears where the matter went** after a takeover or a cancel across places (#2588).
 - **The numbers:** the share limit per activation, and a task's default budget (#2589).
 
-## Questions for the walk
+## Where the walk stands (2026-10-21)
 
-1. **The words:** spawn, stop and share, with merge as share plus stop and **inform** in
-   reserve if the privacy front takes "share"?
-2. **Cancel across places:** may "never mind" on one place stop the same person's
-   activation on another place after it has acted, decided by understanding and applied
-   by a rule, as takeover is?
-3. **Share:** pull only, and within one person until the privacy front decides crossing
-   people?
-4. **A background task as one record** whose slices are its occurrences, with the report set
-   by rule however the task ends, and no separate report when the person stopped it?
-5. **A reminder in a busy place:** take its turn in the place's order? Or weave it into the
-   running reply, as a person would mention it mid-sentence? Weaving would make whether it
-   was said depend on how the other reply was worded.
-6. **Conversion:** one ADR, or the words now and each behaviour later?
-7. **Anything missing:** is there a situation above whose answer looks wrong, or one we
-   haven't listed?
+| Question | Answer |
+| --- | --- |
+| The words | Spawn, stop and share, with merge as share plus stop (the owner). |
+| Cancel across places | Yes; permission by device comes later (the owner). Decided by understanding and applied by a rule, as takeover is. |
+| Share | The simple version: pull only, reaching what understanding is already shown (the owner's *"simple design that works"*). |
+| A background task | One record whose slices are its occurrences, with one report however it ends, a stop by the person included. It is the simple rule that removes the wrong-moment failures. |
+| A reminder in a busy place | It takes its turn in the place's arrival order. That is the simple rule. Weaving it into a running reply would make whether it was said depend on how that reply was worded. |
+| Conversion | One ADR, as §9's pick, unless the owner says otherwise. |
+
+**Still open:** the ADR's number, which is assigned at conversion, and anything the owner
+finds missing or wrong in the situations above.
