@@ -668,6 +668,10 @@ async def test_row_8_a_requested_variable_absent_drops_every_day(variable: str) 
             id="a-unit-absent",
         ),
         pytest.param({**UNITS, "weather_code": "wmo\ncode"}, id="a-unit-carrying-a-line-break"),
+        # `json.dumps` writes the lone surrogate as `\ud800`, which the response then
+        # carries and the decoder hands back as a `str` no UTF-8 encoder accepts.
+        pytest.param({**UNITS, "weather_code": "\ud800"}, id="a-unit-with-a-lone-surrogate"),
+        pytest.param({**UNITS, "precipitation_sum": "m\udfffm"}, id="a-low-surrogate-inside"),
     ],
 )
 async def test_row_8_a_unit_daily_units_does_not_give_as_a_string_drops_every_day(
@@ -678,8 +682,10 @@ async def test_row_8_a_unit_daily_units_does_not_give_as_a_string_drops_every_da
 
     No day's transcription can carry what §5:5 says it carries — its unit "as
     ``daily_units`` spells it". A unit carrying a line break is in every day's
-    transcription and breaks the line structure that keeps its spans apart, so it drops
-    every day by the same rule one step on.
+    transcription and breaks the line structure that keeps its spans apart, and one
+    carrying a lone surrogate has no UTF-8 encoding no record can hold: each drops every
+    day by the same rule one step on, **returned** as ``NO_RESULT`` and never raised
+    (ADR-0260 §4).
     """
     payload = body(day(date="2026-09-05"), day(date="2026-09-06"), units=units)
     subject = await built(channels=[far_end(response(payload=payload))])

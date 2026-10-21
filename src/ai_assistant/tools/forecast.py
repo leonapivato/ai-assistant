@@ -540,12 +540,15 @@ def _declared_offset(value: object) -> timedelta | None:
 
 
 def _declared_units(decoded: Mapping[str, object]) -> dict[str, str] | None:
-    """Each requested variable's unit, as ``daily_units`` spells it, or ``None``.
+    r"""Each requested variable's unit, as ``daily_units`` spells it, or ``None``.
 
     §5's row 8: a variable whose unit ``daily_units`` does not give as a string drops
-    every day, because no day's transcription can carry what §5:5 says it carries. A
-    unit carrying a line break is in **every** day's transcription and would break each
-    one's line structure, so it drops every day by the same rule one step on.
+    every day, because no day's transcription can carry what §5:5 says it carries. Two
+    units that are strings are refused for the same reason one step on, since each is in
+    **every** day's transcription: one carrying a line break would break each day's line
+    structure, and one carrying a lone surrogate — JSON's ``"\ud800"`` decodes to one —
+    has no UTF-8 encoding, so no record could hold it (``EncodableText``) and minting
+    would raise where ADR-0260 §4 says a source reason is returned.
 
     Args:
         decoded: The decoded body.
@@ -560,6 +563,10 @@ def _declared_units(decoded: Mapping[str, object]) -> dict[str, str] | None:
     for variable in _DAILY_VARIABLES:
         unit = units.get(variable)
         if not isinstance(unit, str) or any(character in _LINE_BREAKS for character in unit):
+            return None
+        try:
+            unit.encode("utf-8")
+        except UnicodeEncodeError:
             return None
         declared[variable] = unit
     return declared
