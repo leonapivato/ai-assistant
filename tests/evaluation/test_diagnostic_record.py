@@ -27,7 +27,12 @@ from ai_assistant.core.errors import DiagnosticRecordError
 from ai_assistant.core.types import DiagnosticEntry, DiagnosticKind, DiagnosticSource
 from ai_assistant.evaluation import FileDiagnosticRecord
 from ai_assistant.evaluation import diagnostic_record as store_module
-from ai_assistant.evaluation.diagnostic_record import MIN_FILE_BYTES, OBSERVER_SUFFIX, SUFFIX
+from ai_assistant.evaluation.diagnostic_record import (
+    FOLLOW_UP_SUFFIX,
+    MIN_FILE_BYTES,
+    OBSERVER_SUFFIX,
+    SUFFIX,
+)
 from ai_assistant.testing import diagnostic_entry
 from ai_assistant.testing.cancellation import (
     ResourceLog,
@@ -586,3 +591,134 @@ async def test_an_id_too_long_for_the_observer_file_is_refused_for_it_alone(
     ]
     assert plain_file_name(long_id)
     assert not plain_file_name(long_id, DiagnosticSource.OBSERVER)
+
+
+# --- ADR-0337 §8:12-§8:13: the follow-up file beside the activation's -------------
+
+
+def _followed_up(
+    activation_id: str = DEFAULT_DIAGNOSED_ACTIVATION, **body: object
+) -> DiagnosticEntry:
+    """An entry the follow-up asker writes about a call of ``activation_id``."""
+    return diagnostic_entry(
+        activation_id,
+        source=DiagnosticSource.FOLLOW_UP,
+        kind=DiagnosticKind.RETURNED,
+        body={"answer": "a guess", **body},
+    )
+
+
+async def test_a_follow_up_entry_goes_to_its_own_file_and_never_the_others(
+    tmp_path: Path,
+) -> None:
+    """§8:12: ``<id>.followup.jsonl``; nothing the asker writes reaches either other file."""
+    directory = tmp_path / "diagnostics"
+    record = FileDiagnosticRecord(directory=directory, file_bytes=_BOUND)
+
+    await record.write(diagnostic_entry(body={"n": 1}))
+    await record.write(_observed(n=2))
+    await record.write(_followed_up(n=3))
+
+    assert FOLLOW_UP_SUFFIX == ".followup.jsonl"
+    assert sorted(one.name for one in directory.iterdir()) == [
+        f"{DEFAULT_DIAGNOSED_ACTIVATION}.followup.jsonl",
+        f"{DEFAULT_DIAGNOSED_ACTIVATION}.jsonl",
+        f"{DEFAULT_DIAGNOSED_ACTIVATION}.observer.jsonl",
+    ]
+    assert [one.body["n"] for one in _entries(directory, DEFAULT_DIAGNOSED_ACTIVATION)] == [1]
+    observed = _lines(directory / f"{DEFAULT_DIAGNOSED_ACTIVATION}{OBSERVER_SUFFIX}")
+    assert [one["body"]["n"] for one in observed] == [2]
+    followed = _lines(directory / f"{DEFAULT_DIAGNOSED_ACTIVATION}{FOLLOW_UP_SUFFIX}")
+    assert [(one["source"], one["kind"], one["body"]["n"]) for one in followed] == [
+        ("follow_up", "returned", 3)
+    ]
+
+
+async def test_the_follow_up_file_is_the_owners_alone(tmp_path: Path) -> None:
+    """§8:13, ADR-0314 §2:3: ``0600`` whatever the umask, as every file of the record."""
+    previous = os.umask(0)
+    try:
+        record = FileDiagnosticRecord(directory=tmp_path / "diagnostics", file_bytes=_BOUND)
+        await record.write(_followed_up())
+    finally:
+        os.umask(previous)
+
+    path = tmp_path / "diagnostics" / f"{DEFAULT_DIAGNOSED_ACTIVATION}{FOLLOW_UP_SUFFIX}"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
+async def test_the_follow_up_file_has_its_own_bound_and_marker(tmp_path: Path) -> None:
+    """§8:13, ADR-0314 §6:3: the follow-up file stops at its bound alone."""
+    directory = tmp_path / "diagnostics"
+    record = FileDiagnosticRecord(directory=directory, file_bytes=MIN_FILE_BYTES)
+    followed = directory / f"{DEFAULT_DIAGNOSED_ACTIVATION}{FOLLOW_UP_SUFFIX}"
+
+    await record.write(_followed_up(text="x" * (MIN_FILE_BYTES * 2)))
+    await record.write(_followed_up(n=1))
+    await record.write(diagnostic_entry(body={"n": 2}))
+
+    assert followed.stat().st_size <= MIN_FILE_BYTES
+    assert _lines(followed) == [
+        {
+            "activation_id": DEFAULT_DIAGNOSED_ACTIVATION,
+            "truncated": True,
+            "truncated_at": "2026-10-13T12:00:00.000000+00:00",
+        }
+    ]
+    assert [one.body for one in _entries(directory, DEFAULT_DIAGNOSED_ACTIVATION)] == [{"n": 2}]
+
+
+@pytest.mark.parametrize("stale", [SUFFIX, FOLLOW_UP_SUFFIX])
+async def test_the_follow_up_file_is_swept_by_its_own_last_write(
+    tmp_path: Path, stale: str
+) -> None:
+    """§8:13, ADR-0314 §7:2: the follow-up file ages from its own write, not the activation's."""
+    directory = tmp_path / "diagnostics"
+    record = FileDiagnosticRecord(directory=directory, file_bytes=_BOUND)
+    await record.write(diagnostic_entry())
+    await record.write(_followed_up())
+    old = (DEFAULT_RECORDED_AT - timedelta(days=40)).timestamp()
+    os.utime(directory / f"{DEFAULT_DIAGNOSED_ACTIVATION}{stale}", (old, old))
+
+    deleted = await record.purge_before(DEFAULT_RECORDED_AT - timedelta(days=30))
+
+    assert deleted == 1
+    kept = FOLLOW_UP_SUFFIX if stale == SUFFIX else SUFFIX
+    assert [one.name for one in directory.iterdir()] == [f"{DEFAULT_DIAGNOSED_ACTIVATION}{kept}"]
+
+
+@pytest.mark.parametrize("source", list(DiagnosticSource))
+async def test_an_id_ending_followup_names_no_file_of_any_source(
+    tmp_path: Path, source: DiagnosticSource
+) -> None:
+    """§8:12: an id ending ``.followup`` would name its own file like a follow-up file."""
+    directory = tmp_path / "diagnostics"
+    record = FileDiagnosticRecord(directory=directory, file_bytes=_BOUND)
+
+    with structlog.testing.capture_logs() as captured:
+        await record.write(diagnostic_entry("x.followup", source=source))
+
+    assert not directory.exists() or list(directory.iterdir()) == []
+    dropped = [one for one in captured if one["event"] == DIAGNOSTIC_NOT_WRITTEN]
+    assert [(one["activation_id"], one["source"]) for one in dropped] == [
+        ("unreadable", source.value)
+    ]
+
+
+async def test_an_id_too_long_for_the_follow_up_file_is_refused_for_it_alone(
+    tmp_path: Path,
+) -> None:
+    """§6:1 over the third name: the bound on a name holds for the follow-up's suffix too."""
+    directory = tmp_path / "diagnostics"
+    record = FileDiagnosticRecord(directory=directory, file_bytes=_BOUND)
+    long_id = "e" * (255 - len(SUFFIX))
+
+    with structlog.testing.capture_logs() as captured:
+        await record.write(diagnostic_entry(long_id))
+        await record.write(_followed_up(long_id))
+
+    assert [one.name for one in directory.iterdir()] == [f"{long_id}{SUFFIX}"]
+    assert [one["source"] for one in captured if one["event"] == DIAGNOSTIC_NOT_WRITTEN] == [
+        "follow_up"
+    ]

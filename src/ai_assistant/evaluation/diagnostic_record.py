@@ -22,9 +22,12 @@ the observer writes about an activation days after it ran, and its line in the
 activation's own file would restart that file's window from the observer's write. The
 second file is a file of the record like any other (§3:2): the same line, bound,
 truncation marker and modes, and the sweep deletes it by its own last write, since the
-sweep already deletes every regular file in the directory by its own. An id that would
-name its own file like an observer's — one ending ``.observer`` — is refused, so the two
-names never meet. Each entry is one line holding one JSON object, appended
+sweep already deletes every regular file in the directory by its own. The follow-up
+asker's entries go to a third, ``<activation_id>.followup.jsonl``, for the same reason and
+under the same rules (ADR-0337 §8:12, §8:13): it asks after a call has answered, the
+observer's calls days after the activation. An id that would name its own file like an
+observer's or a follow-up's — one ending ``.observer`` or ``.followup`` — is refused, so
+the names never meet. Each entry is one line holding one JSON object, appended
 whole in the order written (§6:2). A file holds at most the composition root's
 ``DIAGNOSTIC_FILE_BYTES``: an entry that would take it past is not written; one last
 line marks the file truncated and when, and nothing more is written to it (§6:3). The
@@ -80,6 +83,15 @@ SUFFIX: Final = ".jsonl"
 
 #: The suffix of the file an activation's observer entries go to (ADR-0333 §3:1).
 OBSERVER_SUFFIX: Final = ".observer" + SUFFIX
+
+#: The suffix of the file an activation's follow-up entries go to (ADR-0337 §8:12).
+FOLLOW_UP_SUFFIX: Final = ".followup" + SUFFIX
+
+#: Each source writing to a file of its own beside the activation's, by that file's suffix.
+_SECOND_FILES: Final = {
+    DiagnosticSource.OBSERVER: OBSERVER_SUFFIX,
+    DiagnosticSource.FOLLOW_UP: FOLLOW_UP_SUFFIX,
+}
 
 #: The smallest bound a file may be given: room for a truncation marker and a line.
 MIN_FILE_BYTES: Final = 4096
@@ -150,7 +162,10 @@ class FileDiagnosticRecord:
     # --- the write seam ------------------------------------------------------
 
     async def write(self, entry: DiagnosticEntry) -> None:
-        """Append ``entry`` to its activation's file, or its observer file (ADR-0333 §3:1).
+        """Append ``entry`` to its activation's file, its observer file or its follow-up file.
+
+        An observer entry goes to the observer file (ADR-0333 §3:1), a follow-up entry to
+        the follow-up file (ADR-0337 §8:12), and every other to the activation's own.
 
         No failure escapes (§2:4).
 
@@ -332,21 +347,25 @@ class _TornError(OSError):
 def _file_name(activation_id: str, source: DiagnosticSource) -> str:
     """The name of the file an entry goes to, or a refusal where the id names none.
 
-    The observer's entries go to the activation's second file, every other source's to
-    its own (ADR-0333 §3:1).
+    The observer's entries go to the activation's observer file (ADR-0333 §3:1), the
+    follow-up asker's to its follow-up file (ADR-0337 §8:12), and every other source's
+    to its own.
 
     Raises:
         _RefusedIdError: If the id is empty, ``.`` or ``..``, carries a separator or
-            a NUL, ends ``.observer`` so its own file would be named like an observer's,
-            or makes a name too long for a file system.
+            a NUL, ends ``.observer`` or ``.followup`` so its own file would be named
+            like an observer's or a follow-up's, or makes a name too long for a file
+            system.
     """
     separators = {os.sep, "\0"} | ({os.altsep} if os.altsep else set())
-    suffix = OBSERVER_SUFFIX if source is DiagnosticSource.OBSERVER else SUFFIX
+    suffix = _SECOND_FILES.get(source, SUFFIX)
     name = f"{activation_id}{suffix}"
     if (
         activation_id in {"", ".", ".."}
         or any(one in activation_id for one in separators)
-        or activation_id.endswith(OBSERVER_SUFFIX.removesuffix(SUFFIX))
+        or any(
+            activation_id.endswith(second.removesuffix(SUFFIX)) for second in _SECOND_FILES.values()
+        )
         or len(name.encode("utf-8", errors="replace")) > _NAME_BYTES
     ):
         msg = "an activation id that is not a plain file name names no diagnostic file"
@@ -453,4 +472,10 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
     return outcome[0]
 
 
-__all__ = ["MIN_FILE_BYTES", "OBSERVER_SUFFIX", "SUFFIX", "FileDiagnosticRecord"]
+__all__ = [
+    "FOLLOW_UP_SUFFIX",
+    "MIN_FILE_BYTES",
+    "OBSERVER_SUFFIX",
+    "SUFFIX",
+    "FileDiagnosticRecord",
+]
