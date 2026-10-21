@@ -5476,7 +5476,9 @@ async function aboutEdit(path, payload, act, landed) {
   }
 }
 
-// Whether an About you write is in flight, and what a second act meanwhile is told.
+// Whether a write to the person's model is in flight, from either panel, and what a
+// second act meanwhile is told. One lock for both panels: a pin from the belief panel and
+// an unpin from About you act on the same pins, and could land in either order too.
 const aboutWriting = { busy: false };
 const ABOUT_BUSY = "Your last change is still being made, so this one was not sent. Try again.";
 
@@ -5562,7 +5564,16 @@ const NOT_THE_ROWS =
 // where the person model does not (§10:4). A pin made by that id on a memory whose
 // wording is not the row's would confirm a wording the person never saw, and an unpin
 // would take another memory's pin away.
+//
+// **One write at a time, taken before the read** (adversarial review, round 6): the
+// read is the write's first half, so a Pin whose read was slow would otherwise be sent
+// after an Unpin pressed later, and leave pinned what the person last unpinned. The lock
+// is the About you panel's own, so neither panel's write overtakes the other's.
 async function checkedBeliefEdit(belief, path, act) {
+  if (aboutWriting.busy) {
+    el("belief-outcome").textContent = ABOUT_BUSY;
+    return;
+  }
   fault(null, "beliefs");
   const half = headerHalf();
   if (half === null) {
@@ -5570,6 +5581,7 @@ async function checkedBeliefEdit(belief, path, act) {
     return;
   }
   const era = sessionEra;
+  aboutWriting.busy = true;
   try {
     const held = await relay(half, "/belief", { record_id: belief.id }, "beliefs");
     // Not this session's answer (#2404).
@@ -5590,6 +5602,9 @@ async function checkedBeliefEdit(belief, path, act) {
       return;
     }
     fault(GATEWAY_GONE, "beliefs");
+  } finally {
+    // Held for the read and the write, and nothing after: no listing is read again.
+    aboutWriting.busy = false;
   }
 }
 
