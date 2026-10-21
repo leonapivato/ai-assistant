@@ -37,7 +37,7 @@ import structlog
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.service.enrolment import Refusal
 from ai_assistant.service.exits import ClearableRefusalError
-from ai_assistant.service.overlay import OverlayAgentRefusedError, OverlayIdentityUnavailableError
+from ai_assistant.service.overlay import OverlayIdentityUnavailableError, refuses_at_every_start
 from ai_assistant.service.transport import hold, refuse
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire import serve_connection
@@ -194,7 +194,7 @@ class RemoteListener:
             )
             # An agent that refused this process by policy, or a socket whose answerer
             # cannot be trusted, stays refused at every start (#3171): a ``78``.
-            if isinstance(exc, OverlayAgentRefusedError):
+            if refuses_at_every_start(exc):
                 raise ConfigurationError(msg) from exc
             raise ClearableRefusalError(msg) from exc
         if not reported.addresses:

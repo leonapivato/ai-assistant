@@ -35,6 +35,7 @@ from ai_assistant.service.overlay import (
     OverlayIdentityUnavailableError,
     TailscaleAgent,
     local_agent,
+    refuses_at_every_start,
 )
 from ai_assistant.wire.address import sun_path_limit
 from ai_assistant.wire.errors import ProtocolError
@@ -843,3 +844,22 @@ async def test_a_kernel_that_refuses_the_credential_read_says_so_rather_than_bla
     assert "the kernel would not say" in refusal
     assert "Operation not permitted" in refusal
     assert "did not answer" not in refusal
+    # The stay-down class, but retyping the kernel's errno, so a hub's start lets
+    # the errno decide rather than the class (#3171).
+    assert isinstance(raised.value, OverlayAgentRefusedError)
+    assert isinstance(raised.value.__cause__, OSError)
+    assert not refuses_at_every_start(raised.value)
+
+
+def test_only_a_refusal_that_is_a_verdict_refuses_at_every_start() -> None:
+    """#3171's split, on the seam's own classes: a refusal by policy or by the peer
+    check is a verdict; one retyping an ``OSError`` or any other way of not knowing
+    is not."""
+    verdict = OverlayAgentRefusedError("the overlay agent refused a local query: 403")
+    retyped = OverlayAgentRefusedError("the kernel would not say")
+    retyped.__cause__ = OSError(errno.ENOMEM, "Cannot allocate memory")
+    unanswered = OverlayIdentityUnavailableError("the overlay agent did not answer")
+
+    assert refuses_at_every_start(verdict)
+    assert not refuses_at_every_start(retyped)
+    assert not refuses_at_every_start(unanswered)

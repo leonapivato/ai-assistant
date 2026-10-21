@@ -83,9 +83,9 @@ from ai_assistant.service.exits import (
 )
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.service.overlay import (
-    OverlayAgentRefusedError,
     OverlayIdentityUnavailableError,
     local_agent,
+    refuses_at_every_start,
 )
 from ai_assistant.service.remote import RemoteListener
 from ai_assistant.service.roster import HubRoster
@@ -829,7 +829,7 @@ async def _build_devices(
         )
         # An agent that refused this process by policy, or a socket whose answerer
         # cannot be trusted, stays refused at every start (#3171): a ``78``.
-        if isinstance(exc, OverlayAgentRefusedError):
+        if refuses_at_every_start(exc):
             raise ConfigurationError(msg) from exc
         raise ClearableRefusalError(msg) from exc
     store = EnrolmentStore(data_dir / ENROLMENTS_FILENAME)
