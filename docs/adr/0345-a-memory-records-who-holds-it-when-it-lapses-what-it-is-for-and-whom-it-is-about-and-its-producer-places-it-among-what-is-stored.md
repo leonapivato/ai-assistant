@@ -147,6 +147,13 @@ labels, marks and whom it is about, and stops carrying `topics`.
 > part whose record carries no identifier has an unknown holder, which is never the same
 > holder as any other.
 
+> **Normative.** A support keeps the identifier its holder was recorded under, and no write
+> rewrites it. Which person an identifier belongs to is a link held outside the support,
+> by a later decision on identified people. Once such a link exists, every support
+> carrying that identifier is attributed to that person without being rewritten, and two
+> holders whose identifiers link to the same person are the same holder in every write
+> made after the link.
+
 > **Normative.** A memory's holders are the holders of its counted `for` supports. They
 > are a value ADR-0328 §7 computes from the stored record, never stored as a judgment.
 
