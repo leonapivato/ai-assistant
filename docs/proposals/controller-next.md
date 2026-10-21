@@ -445,6 +445,12 @@ The controller is unchanged, since the wait happens before admission.
     expires unused after a lifetime #2589 sets (an hour, say), and it is cleared when the
     person says otherwise.
   - The place's current state shows it ("next answer: quick") so you can see it is armed.
+  - **Where the question arrives in the same input**, because it came during the short
+    wait or joined before the activation acted, the instruction is fulfilled there.
+    Understanding reports the instruction and the question together, the mode switches
+    after understanding (precedence 1), and that activation answers in it. No pending mode
+    is recorded, so nothing stays armed for a later exchange. A pending mode is recorded
+    only when the input that carries the instruction holds no question for it to apply to.
   - The alternative, *leaving it in the window for the next understanding to notice*, needs
     no store. It lost because the mode would arrive only after understanding, too late to
     shape understanding itself, and because the instruction's expiry would be whatever the
