@@ -787,8 +787,11 @@ async def test_a_forecast_pull_is_digested_under_the_hubs_attribution_then_answe
     shown = completer.calls[1].messages[1].content
     assert json.loads(shown)["evidence"][0]["digest_of"] == "R1"
     assert "2026-09-05" not in shown
-    # The pull marks the activation (§9:1).
+    # The pull marks the activation (§9:1), and the records it returned were held by
+    # it, so the episode is placed for the owner alone (ADR-0309 §5:10).
     assert episode.provenance.derived_from_external
+    assert episode.placement.reach is PlacementReach.OWNER
+    assert episode.placement.set_by is PlacementSetter.DERIVED
     assert episode.processing_record is not None
     (digest,) = episode.processing_record.digests
     assert digest.outcome is DigestOutcome.ANSWERED
