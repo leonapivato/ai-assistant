@@ -150,8 +150,31 @@ class OverlayAgentRefusedError(OverlayIdentityUnavailableError):
     base class, so this adds no branch that could become "admit anyway". The one
     reader of the difference is a hub's *start*, which turns it into a stay-down
     ``78`` where every other way of not knowing — an agent not up yet at boot, one
-    that timed out — is a ``1`` (ADR-0083 §5, #3171).
+    that timed out — is a ``1`` (ADR-0083 §5, #3171). **Except where it retypes an
+    operating-system fault**: the peer check refuses this way when the kernel would
+    not read the peer's credentials, and whether *that* clears is the errno's to say
+    (:func:`refuses_at_every_start`).
     """
+
+
+def refuses_at_every_start(exc: OverlayIdentityUnavailableError) -> bool:
+    """Whether a hub's start that met ``exc`` would meet it at every start (#3171).
+
+    True for an :class:`OverlayAgentRefusedError` that is a verdict — the local API
+    declined this process, or the peer on the socket is not root or this process, or
+    this platform has no peer-credential call — and false for one raised *from* an
+    ``OSError``. That one is the kernel declining the credential read, which
+    :func:`ai_assistant.service.exits.classify` decides by its errno once the start
+    has marked the refusal clearable: ``EPERM`` stays down, ``ENOMEM`` comes back.
+    Every other way of not knowing is false.
+
+    Args:
+        exc: What the agent query raised.
+
+    Returns:
+        Whether the start's refusal is a stay-down ``ConfigurationError``.
+    """
+    return isinstance(exc, OverlayAgentRefusedError) and not isinstance(exc.__cause__, OSError)
 
 
 #: The local API's answers that mean *this process may not ask*, not *the daemon

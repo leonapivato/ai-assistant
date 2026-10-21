@@ -1679,6 +1679,38 @@ async def test_a_configured_hub_its_agent_refuses_by_policy_stays_down(
     assert code == EXIT_DEPLOYMENT
 
 
+@pytest.mark.parametrize(
+    "case",
+    [(errno.ENOMEM, EXIT_RESTART), (errno.ENOBUFS, EXIT_RESTART), (errno.EPERM, EXIT_DEPLOYMENT)],
+)
+async def test_a_credential_read_the_kernel_declined_exits_by_its_errno(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    case: tuple[int, int],
+) -> None:
+    """ADR-0131 §7's peer check refuses as the stay-down class when the kernel will
+    not read the peer's credentials, but that refusal retypes an ``OSError``, and an
+    exhausted kernel clears where a permission does not (#3171)."""
+    from ai_assistant.service import overlay as overlay_module  # noqa: PLC0415 - one call site
+
+    code, expected = case
+
+    async def _declined(self: overlay_module.TailscaleAgent, path: str) -> bytes:
+        del self, path
+        try:
+            raise OSError(code, os.strerror(code))
+        except OSError as exc:
+            msg = "the kernel would not say which process is listening on the socket"
+            raise overlay_module.OverlayAgentRefusedError(msg) from exc
+
+    monkeypatch.setattr(overlay_module.TailscaleAgent, "_request", _declined)
+    configured = settings.model_copy(update={"hub_remote_address": "100.64.0.9"})
+
+    assert await hub.serve(configured) == expected
+
+
 async def test_a_configured_hub_whose_agent_holds_another_address_stays_down(
     settings: Settings,
     wired: dict[str, list[Any]],
