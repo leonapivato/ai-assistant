@@ -19,7 +19,9 @@ the module's own justification for the default would have been false (#1410).
 
 from __future__ import annotations
 
+import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -554,6 +556,275 @@ def test_a_snapshot_of_another_loop_is_left_alone(tmp_path: Path) -> None:
 
     assert status == 0, out
     assert other.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Parts directories (ADR-0331 §5:11, issue #3184)                              #
+# --------------------------------------------------------------------------- #
+
+#: Old enough that an orphan is past the grace period.
+_AGED = _MODULE.ORPHAN_GRACE_SECONDS + 60
+
+
+def _parts(repo: Path, stem: str, *, age: float = 0) -> Path:
+    """Write a parted round's part messages for ``stem``, ``age`` seconds old."""
+    directory = repo / ".review" / "parts" / stem
+    directory.mkdir(parents=True)
+    (directory / "part-0001-of-0002.md").write_text(f"part one of {stem}\n")
+    (directory / "part-0002-of-0002.md").write_text(f"part two of {stem}\n")
+    if age:
+        stamp = time.time() - age
+        os.utime(directory, (stamp, stamp))
+    return directory
+
+
+def _dead(repo: Path, name: str, tree: str = "t1") -> Path:
+    """An artifact of a deleted branch, which the sweep classifies stale."""
+    return _artifact(repo, name, persona="adversarial", branch="gone/lane", sha="0" * 40, tree=tree)
+
+
+def test_an_artifact_is_swept_with_its_parts(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _dead(repo, "a.md")
+    parts = _parts(repo, "a")
+
+    status, out, _ = _sweep(repo)
+
+    archived = repo / ".review" / "archive" / "parts" / "a"
+    assert status == 0, out
+    assert not parts.exists()
+    assert (archived / "part-0001-of-0002.md").read_text() == "part one of a\n"
+    assert (archived / "part-0002-of-0002.md").exists()
+    assert "1 parts director(ies) archived" in out
+
+
+def test_delete_removes_the_parts_with_their_artifact(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _dead(repo, "a.md")
+    parts = _parts(repo, "a")
+
+    status, out, _ = _sweep(repo, "--delete")
+
+    assert status == 0, out
+    assert not parts.exists()
+    assert not (repo / ".review" / "archive").exists()
+
+
+def test_a_kept_artifact_keeps_its_parts(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    sha = _branch_with_commit(repo, "some/lane")
+    artifact = _artifact(
+        repo, "a.md", persona="adversarial", branch="some/lane", sha=sha, tree="t1"
+    )
+    parts = _parts(repo, "a")
+
+    status, out, _ = _sweep(repo)
+
+    assert status == 0, out
+    assert artifact.exists()
+    assert (parts / "part-0001-of-0002.md").exists()
+    assert not (repo / ".review" / "archive" / "parts").exists()
+
+
+@pytest.mark.parametrize("delete", [False, True])
+def test_parts_are_never_swept_while_their_artifact_is_kept(tmp_path: Path, delete: bool) -> None:
+    # However old the directory is, and for whatever reason its artifact is kept
+    # — `unreadable` is kept too — the messages stay beside the verdict.
+    repo = _repo(tmp_path)
+    sha = _branch_with_commit(repo, "some/lane")
+    _artifact(repo, "live.md", persona="adversarial", branch="some/lane", sha=sha, tree="t1")
+    (repo / ".review" / "unread.md").write_text("no provenance here\n")
+    live = _parts(repo, "live", age=_AGED * 100)
+    unread = _parts(repo, "unread", age=_AGED * 100)
+
+    status, out, _ = _sweep(repo, *(["--delete"] if delete else []))
+
+    assert status == 0, out
+    assert (live / "part-0001-of-0002.md").exists()
+    assert (unread / "part-0001-of-0002.md").exists()
+    assert "0 parts director(ies)" in out
+
+
+def test_an_orphan_parts_directory_is_swept(tmp_path: Path) -> None:
+    # No artifact of its stem — swept by an earlier sweep that left its parts
+    # behind, or withdrawn by a re-review that never finished.
+    repo = _repo(tmp_path)
+    orphan = _parts(repo, "gone", age=_AGED)
+
+    status, out, _ = _sweep(repo)
+
+    assert status == 0, out
+    assert not orphan.exists()
+    assert (repo / ".review" / "archive" / "parts" / "gone" / "part-0001-of-0002.md").exists()
+    assert "[orphan]" in out
+
+
+def test_a_stranded_staging_directory_is_an_orphan(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    staged = _parts(repo, "a.partial.12345", age=_AGED)
+
+    status, out, _ = _sweep(repo, "--delete")
+
+    assert status == 0, out
+    assert not staged.exists()
+
+
+def test_a_recent_orphan_is_kept_as_a_possible_install_in_flight(tmp_path: Path) -> None:
+    # `codex-review.sh` installs a round's parts and only then renames its
+    # artifact into place, so for that instant a live round's parts have no
+    # artifact beside them. A sweep landing then must not take them.
+    repo = _repo(tmp_path)
+    fresh = _parts(repo, "arriving")
+
+    status, out, _ = _sweep(repo, "--delete")
+
+    assert status == 0, out
+    assert (fresh / "part-0001-of-0002.md").exists()
+    assert "[recent]" in out
+
+
+def test_a_parts_directory_of_a_numbered_artifact_is_numbered_with_it(tmp_path: Path) -> None:
+    # The second recording of one name lands as `a-2.md`; its messages must land
+    # as `parts/a-2`, not beside the first recording's under `parts/a`.
+    repo = _repo(tmp_path)
+    _dead(repo, "a.md", tree="first")
+    _parts(repo, "a")
+    _sweep(repo)
+    _dead(repo, "a.md", tree="second")
+    (_parts(repo, "a") / "part-0001-of-0002.md").write_text("second recording\n")
+
+    status, out, _ = _sweep(repo)
+
+    archive = repo / ".review" / "archive"
+    assert status == 0, out
+    assert "tree=second" in (archive / "a-2.md").read_text()
+    assert (archive / "parts" / "a" / "part-0001-of-0002.md").read_text() == "part one of a\n"
+    assert (archive / "parts" / "a-2" / "part-0001-of-0002.md").read_text() == (
+        "second recording\n"
+    )
+
+
+def test_an_artifact_skips_a_number_its_parts_could_not_take(tmp_path: Path) -> None:
+    # `archive/a.md` is free but `archive/parts/a` is not: the pair moves on to
+    # the first number free for both, so the artifact never lands beside some
+    # other recording's messages.
+    repo = _repo(tmp_path)
+    taken = repo / ".review" / "archive" / "parts" / "a"
+    taken.mkdir(parents=True)
+    (taken / "other.md").write_text("someone else's\n")
+    _dead(repo, "a.md")
+    _parts(repo, "a")
+
+    status, out, _ = _sweep(repo)
+
+    archive = repo / ".review" / "archive"
+    assert status == 0, out
+    assert not (archive / "a.md").exists()
+    assert (archive / "a-2.md").exists()
+    assert (archive / "parts" / "a-2" / "part-0001-of-0002.md").exists()
+    assert (taken / "other.md").read_text() == "someone else's\n"
+    assert not (taken / "part-0001-of-0002.md").exists()
+
+
+def test_an_orphan_avoids_the_name_a_companion_of_the_same_sweep_takes(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    archive = repo / ".review" / "archive"
+    archive.mkdir(parents=True)
+    (archive / "a.md").write_text("already archived\n")
+    _dead(repo, "a.md")
+    _parts(repo, "a")
+    (_parts(repo, "a-2", age=_AGED) / "part-0001-of-0002.md").write_text("the orphan\n")
+
+    status, out, _ = _sweep(repo)
+
+    assert status == 0, out
+    assert (archive / "parts" / "a-2" / "part-0001-of-0002.md").read_text() == "part one of a\n"
+    assert (archive / "parts" / "a-2-2" / "part-0001-of-0002.md").read_text() == "the orphan\n"
+
+
+def test_dry_run_leaves_the_parts_alone(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _dead(repo, "a.md")
+    paired = _parts(repo, "a")
+    orphan = _parts(repo, "gone", age=_AGED)
+
+    status, out, _ = _sweep(repo, "--dry-run")
+
+    assert status == 0, out
+    assert paired.exists()
+    assert orphan.exists()
+    assert "2 parts director(ies) would archive" in out
+    assert not (repo / ".review" / "archive").exists()
+
+
+def test_a_symlink_under_parts_is_left_alone(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.md").write_text("not the sweep's\n")
+    _dead(repo, "a.md")
+    (repo / ".review" / "parts").mkdir()
+    (repo / ".review" / "parts" / "a").symlink_to(outside)
+
+    status, out, _ = _sweep(repo, "--delete")
+
+    assert status == 0, out
+    assert (repo / ".review" / "parts" / "a").is_symlink()
+    assert (outside / "keep.md").exists()
+
+
+def test_a_symlinked_parts_directory_is_not_swept_through(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    outside = tmp_path / "outside"
+    (outside / "gone").mkdir(parents=True)
+    (outside / "gone" / "keep.md").write_text("not the sweep's\n")
+    old = time.time() - _AGED
+    os.utime(outside / "gone", (old, old))
+    _dead(repo, "a.md")
+    (repo / ".review" / "parts").symlink_to(outside)
+
+    status, out, _ = _sweep(repo, "--delete")
+
+    assert status == 0, out
+    assert (outside / "gone" / "keep.md").exists()
+
+
+def test_a_directory_move_never_replaces_its_destination(tmp_path: Path) -> None:
+    # `rename` silently replaces an empty directory at the destination; the
+    # reservation `mkdir` makes is what turns a name taken since the plan into a
+    # refusal instead.
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "m.md").write_text("message\n")
+    destination = tmp_path / "destination"
+    destination.mkdir()
+
+    with pytest.raises(FileExistsError):
+        _MODULE._move_directory(source, destination)
+
+    assert (source / "m.md").exists()
+    assert destination.is_dir()
+    assert list(destination.iterdir()) == []
+
+
+def test_a_failed_directory_move_removes_its_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    destination = tmp_path / "destination"
+
+    def refuse(self: Path, target: Path) -> Path:
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "rename", refuse)
+
+    with pytest.raises(PermissionError):
+        _MODULE._move_directory(source, destination)
+    monkeypatch.undo()
+
+    assert source.is_dir()
+    assert not destination.exists()
 
 
 # --------------------------------------------------------------------------- #
