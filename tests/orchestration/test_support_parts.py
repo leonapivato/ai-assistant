@@ -25,6 +25,7 @@ from ai_assistant.core.types import (
     LegacyPart,
     MemorySource,
     ObserverInferencePart,
+    PinPart,
     PlanningRound,
     ProposedCall,
     Provenance,
@@ -44,6 +45,7 @@ from ai_assistant.orchestration.remembering import (
 )
 from ai_assistant.orchestration.support_parts import (
     INFERENCE_CONTENT,
+    PIN_CONTENT,
     episodes_to_read,
     part_content,
     remember_activations,
@@ -339,6 +341,13 @@ def test_an_observers_inference_reads_as_what_it_is_while_its_episode_is_held() 
 
     assert _content(part, {record.id: record}) == INFERENCE_CONTENT
     assert _content(part, {}) is None
+
+
+def test_a_pin_reads_as_what_it_is_and_is_never_gone() -> None:
+    """ADR-0338 §4:4, §4:7: a pin points into no episode and is kept once removed."""
+    part = PinPart(pin="pin-1")
+
+    assert _content(part, {}) == PIN_CONTENT
 
 
 def test_a_legacy_part_reads_as_the_record_it_carries() -> None:

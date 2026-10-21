@@ -121,6 +121,24 @@ def test_the_memory_writer_writes_the_shapes_adr_0332_adds(written: tuple[Path, 
     )
 
 
+def test_the_memory_writer_writes_a_pins_support(written: tuple[Path, Path]) -> None:
+    """ADR-0338 §4:4: a memory carrying a pinned support, so a later base writes one too.
+
+    The base's copy of the writer is what the next pull request's check runs, so the
+    ``pin`` part and the ``pinned`` origin are read back here, by this build, from what it
+    wrote.
+    """
+    record = _records(_snapshot(written[1]), "memory")["record/mem-pinned"]
+    assert isinstance(record, dict)
+    supports = record["supports"]
+    assert isinstance(supports, list)
+    pinned = [one for one in supports if isinstance(one, dict) and one["origin"] == "pinned"]
+    assert [one["points_at"] for one in pinned] == [{"part": "pin", "pin": "pin-upgrade"}]
+    assert {"direction": "for", "backs_as_worded": True, "how_sure": "sure"}.items() <= (
+        pinned[0].items()
+    )
+
+
 def test_the_reads_leave_the_directory_as_they_found_it(
     written: tuple[Path, Path], tmp_path: Path
 ) -> None:
@@ -196,8 +214,8 @@ def test_a_memory_store_that_loses_its_vectors_fails_the_check(
         conn.execute("DELETE FROM vec_records")
     conn.close()
     problems = read(directory, snapshot)
-    # One per record with content: two memories and three episodes.
-    assert len(problems) == 5, problems
+    # One per record with content: three memories and three episodes.
+    assert len(problems) == 6, problems
     assert all(p.startswith("memory nearest/") for p in problems), problems
     assert all(p.endswith(", the head reads []") for p in problems), problems
 

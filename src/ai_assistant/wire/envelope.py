@@ -2678,7 +2678,11 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     ``ControllerRule`` ``takeover_undecided``, which a peer at 113 refuses as
 #:     unknown (ADR-0124 §9:2). ``TelegramMessage.command`` is carried by no engine
 #:     method.
-PROTOCOL_VERSION: Final[int] = 114
+#: 115: ADR-0338 §4:4 advances the version once for the pin's support, on this
+#:     ground: ``SupportOrigin`` gains ``pinned`` and ``SupportView.part`` the part
+#:     ``pin``, carried on ``Belief.supports`` by ``belief``. A peer at 114 refuses the
+#:     new member as unknown (ADR-0124 §9:2). The method set does not move.
+PROTOCOL_VERSION: Final[int] = 115
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

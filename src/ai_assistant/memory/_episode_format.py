@@ -53,17 +53,25 @@ EPISODE_RECORD_FORMAT: Final[int] = 12
 #: rather than misreading it (ADR-0326 §5:3).
 MEMORIES_RECORD_FORMAT: Final[int] = 13
 
-#: The memory store's own label, the one this build writes. ADR-0332 §7:8 advances it
-#: to 14 for the episode record's ``joined``, its understandings' ``continues`` and the
-#: takeover's stage and rule: a file at 13 is upgraded in place by the label alone, since
-#: a record written at 13 validates unchanged, and an older build, which serves 12 and
-#: 13, refuses a file at 14, whose records it would misread (ADR-0326 §5:3).
-MEMORY_RECORD_FORMAT: Final[int] = 14
+#: The memory store's label for ADR-0332 §7:8's record. It advances to 14 for the
+#: episode record's ``joined``, its understandings' ``continues`` and the takeover's stage
+#: and rule: a file at 13 is upgraded in place by the label alone, since a record
+#: written at 13 validates unchanged, and an older build, which serves 12 and 13, refuses
+#: a file at 14, whose records it would misread (ADR-0326 §5:3).
+JOINED_RECORD_FORMAT: Final[int] = 14
+
+#: The memory store's own label, the one this build writes. ADR-0338 §4:4 advances it
+#: to 15 for the pin's support: ``SupportOrigin`` gains ``pinned`` and ``SupportPart``
+#: the part ``pin``, members of closed enumerations a stored memory names (ADR-0326
+#: §2:3). A file at 14 is upgraded in place by the label alone, since a record written at
+#: 14 validates unchanged, and an older build, which serves 12 to 14, refuses a file at
+#: 15, whose pinned supports it would not read (ADR-0326 §5:3).
+MEMORY_RECORD_FORMAT: Final[int] = 15
 
 #: The memory store's labels a build opens: its own, and each it upgrades from, in
 #: order (ADR-0326 §4:5, §5:1).
 MEMORY_RECORD_FORMATS: Final[frozenset[int]] = frozenset(
-    {EPISODE_RECORD_FORMAT, MEMORIES_RECORD_FORMAT, MEMORY_RECORD_FORMAT}
+    {EPISODE_RECORD_FORMAT, MEMORIES_RECORD_FORMAT, JOINED_RECORD_FORMAT, MEMORY_RECORD_FORMAT}
 )
 
 

@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     ObserverInferencePart,
     OpenQuestion,
     OpenQuestionKind,
+    PinPart,
     Provenance,
     ReadingCertainty,
     RecallCue,
@@ -53,6 +54,7 @@ from ai_assistant.core.types import (
     episode_view,
     origin_is_outside,
     origin_standing,
+    part_episode,
     record_attestation,
     record_band,
     record_rests_on_outside_content,
@@ -68,6 +70,7 @@ from ai_assistant.testing.memories import (
     legacy_support,
     memory,
     message_support,
+    pinned_support,
     remembered_support,
     said_support,
     sourced_support,
@@ -119,6 +122,7 @@ def _logged(held: Memory, operation: MemoryOperation, *added: MemorySupport) -> 
         (SupportOrigin.REMEMBERED_OVER_OUTSIDE, MemoryStanding.INFERENCE, True),
         (SupportOrigin.LEGACY, MemoryStanding.INFERENCE, False),
         (SupportOrigin.LEGACY_OUTSIDE, MemoryStanding.INFERENCE, True),
+        (SupportOrigin.PINNED, MemoryStanding.CONFIRMED, False),
     ],
 )
 def test_the_origin_table_ranks_every_origin(
@@ -169,6 +173,88 @@ def test_a_confirmation_is_sure_and_a_remember_call_is_not_judged() -> None:
         MemorySupport.model_validate(
             remembered_support().model_dump() | {"how_sure": ReadingCertainty.LIKELY}
         )
+
+
+# --- a pin's support (ADR-0338 §4:4) ---------------------------------------------
+
+
+def test_a_pin_is_a_part_addressed_by_the_pins_id_and_takes_only_pinned() -> None:
+    """§4:4: the part table gains a pin, by its id; the origin table gains ``pinned``."""
+    support = pinned_support("pin-7")
+    assert support.points_at == PinPart(pin="pin-7")
+    assert support.origin is SupportOrigin.PINNED
+    assert not support.outside
+    with pytest.raises(ValidationError, match="cannot take"):
+        MemorySupport.model_validate(support.model_dump() | {"origin": SupportOrigin.CONFIRMATION})
+    with pytest.raises(ValidationError, match="cannot take"):
+        MemorySupport.model_validate(said_support().model_dump() | {"origin": SupportOrigin.PINNED})
+    with pytest.raises(ValidationError):
+        PinPart(pin=" ")
+
+
+def test_a_pin_points_into_no_episode() -> None:
+    """ADR-0338 §4:5: the person-model store holds the pin, so §4:7's check does not bind."""
+    assert part_episode(PinPart(pin="pin-1")) is None
+    assert pinned_support().points_at.part == "pin"
+
+
+@pytest.mark.parametrize(
+    ("change", "match"),
+    [
+        ({"direction": SupportDirection.AGAINST, "backs_as_worded": False}, "for its memory"),
+        ({"backs_as_worded": False}, "as worded"),
+        ({"how_sure": ReadingCertainty.LIKELY}, "sure"),
+        ({"how_sure": None}, "sure"),
+        ({"when": None}, "instant the pin was made"),
+        ({"about_when": AT}, "about-when"),
+        ({"source_details": Attestation(reported_by="x", reported_at=AT)}, "source details"),
+        ({"added_by": MemoryWriterName.REMEMBER}, "only the observer"),
+    ],
+    ids=[
+        "against",
+        "not-as-worded",
+        "likely",
+        "not-judged",
+        "undated",
+        "about-when",
+        "source-details",
+        "not-the-observer",
+    ],
+)
+def test_a_pinned_support_is_for_as_worded_sure_and_dated_at_the_pin(
+    change: dict[str, object], match: str
+) -> None:
+    """§4:4, §4:6: ``for``, as worded, ``sure``, the pin's instant, nothing else; observer's."""
+    with pytest.raises(ValidationError, match=match):
+        MemorySupport.model_validate(pinned_support().model_dump() | change)
+
+
+def test_a_pinned_support_raises_its_memory_to_you_confirmed_this_wording() -> None:
+    """ADR-0338 §4:3 through ADR-0328 §6:1's bands: inference, then confirmed, ``ASSERTED``."""
+    inferred = memory("m", "c", remembered_support())
+    assert inferred.standing is MemoryStanding.INFERENCE
+    pinned = memory("m", "c", remembered_support(), pinned_support())
+    assert pinned.standing is MemoryStanding.CONFIRMED
+    assert pinned.band is BeliefBand.ASSERTED
+    assert record_band(pinned) is BeliefBand.ASSERTED
+    assert not pinned.rests_on_outside_content
+
+
+def test_a_pinned_support_shows_on_the_single_view_as_a_pin() -> None:
+    """ADR-0328 §15:2: the view carries the part's kind and its origin, never the pin's id."""
+    support = pinned_support("pin-secret")
+    view = belief_view(
+        memory("m", "c", said_support(), support),
+        now=_LATER,
+        contents={support.points_at: "you pinned this"},
+    )
+    shown = view.supports[1]
+    assert (shown.part, shown.origin, shown.content) == (
+        "pin",
+        SupportOrigin.PINNED,
+        "you pinned this",
+    )
+    assert "pin-secret" not in view.model_dump_json()
 
 
 def test_only_a_source_carries_source_details() -> None:

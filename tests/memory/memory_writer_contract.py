@@ -220,6 +220,7 @@ from ai_assistant.testing.memories import (
     inference_support,
     legacy_support,
     memory,
+    pinned_support,
     remembered_support,
     said_support,
     sourced_support,
@@ -4202,6 +4203,38 @@ class MemoryWriterContract:
 
         assert tuple(caught.value.unresolved_ids) == ("gone",)
         assert await store.get("existing") == read
+
+    async def test_apply_adds_a_pinned_support_which_points_into_no_episode(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0338 §4:4, §4:5: a pin's support is added, and its memory stands confirmed.
+
+        Its part is the pin, which the person-model store holds, so ADR-0328 §4:7's
+        episode check does not bind it: no episode of that id is held, and the support
+        is added all the same. It ranks at "you confirmed this wording" (ADR-0328 §6:1),
+        so the memory reaches the ``ASSERTED`` band, and it reads back whole.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        await _cite(store)
+        read = await self._stored(store, _preference("existing"))
+        assert read.standing is not MemoryStanding.CONFIRMED
+        support = pinned_support("pin-existing", when=_WHEN, added_at=_WHEN)
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.ADD_SUPPORT,
+            cites=support.points_at,
+            at=_WHEN,
+            by=MemoryWriterName.OBSERVER,
+        )
+
+        await make_writer(store, FakeMemoryPolicy()).apply(
+            MemoryChange(memory=read, operation=operation, support=support)
+        )
+
+        written = await store.get("existing")
+        assert isinstance(written, Memory)
+        assert written.support_at(support.points_at) == support
+        assert written.standing is MemoryStanding.CONFIRMED
+        assert written.band is BeliefBand.ASSERTED
 
     async def test_apply_refuses_a_memory_another_writer_moved(
         self, make_writer: WriterFactory

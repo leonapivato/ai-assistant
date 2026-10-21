@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     LegacyPart,
     Memory,
     ObserverInferencePart,
+    PinPart,
     PlanningRound,
     RecordedSpeechInput,
     RecordedTextInput,
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "INFERENCE_CONTENT",
+    "PIN_CONTENT",
     "episodes_to_read",
     "part_content",
     "remember_activations",
@@ -66,6 +68,11 @@ __all__ = [
 #: The part points at no text of the episode — the inference is the observer's reading
 #: of the other supports added with it — so it is said for what it is, never as gone.
 INFERENCE_CONTENT: Final = "my reading of the supports beside it, drawn looking back"
+
+#: What a pin resolves to (ADR-0338 §4:4). The part points into no episode and copies
+#: nothing of the pin, and the person-model store keeps a pin once it is removed
+#: (§4:7), so the part always resolves: it is said for what it is, never as gone.
+PIN_CONTENT: Final = "you pinned this wording to keep it in mind"
 
 
 def episodes_to_read(memories: Iterable[Memory]) -> tuple[str, ...]:
@@ -163,6 +170,8 @@ def part_content(  # noqa: C901, PLR0911 — one arm per part §4's table names,
             return _remembered(_round(processing, effect.round), effect)
         case ObserverInferencePart():
             return None if episodes.get(part.episode) is None else INFERENCE_CONTENT
+        case PinPart():
+            return PIN_CONTENT
         case _:  # pragma: no cover - exhaustive over the discriminated union
             assert_never(part)
 
