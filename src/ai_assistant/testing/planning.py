@@ -415,8 +415,9 @@ class FakePlanStore:
         """Write a claimed effect's outcome, once (ADR-0306 §6:4).
 
         Raises:
-            PlanningError: If the record is not held or already finished, or the
-                reason or position does not belong to the outcome.
+            PlanningError: If the record is not held or already finished, the reason
+                is blank or has no UTF-8 encoding, or the reason or position does not
+                belong to the outcome.
         """
         try:
             named = _ACTIVATION_ID.validate_python(effect_id)

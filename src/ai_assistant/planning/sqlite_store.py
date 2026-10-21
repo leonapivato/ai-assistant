@@ -966,7 +966,8 @@ class SqlitePlanStore:
 
         Raises:
             PlanningError: If the record is not held or already finished, the reason
-                or position does not belong to the outcome, or the backend fails.
+                is blank or has no UTF-8 encoding, the reason or position does not
+                belong to the outcome, or the backend fails.
         """
         named = checked_effect_id(effect_id)
         async with self._lock:

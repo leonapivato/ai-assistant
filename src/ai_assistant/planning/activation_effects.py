@@ -298,8 +298,9 @@ def finished(
 
     Raises:
         PlanningError: If no record is held, it is already finished, the outcome is
-            not a ``ToolOutcome``, a reason rides on an outcome other than not done,
-            or a position on anything but a message done.
+            not a ``ToolOutcome``, the reason is blank or has no UTF-8 encoding, a
+            reason rides on an outcome other than not done, or a position on anything
+            but a message done.
     """
     if held is None:
         msg = f"the plan store holds no activation effect {effect_id!r} to finish"
