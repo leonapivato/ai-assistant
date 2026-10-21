@@ -1,6 +1,6 @@
 # 342. The memory store reads a memory by id whatever its status, so a pin follows its successors
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-21
 - Scope: one read on `MemoryStore` that returns memories by id whether they are current, ended or wrong, and the rules that bind its callers. The callers are the ones [ADR-0338](0338-a-person-sets-their-profile-and-pins-what-aether-always-keeps-in-mind-their-style-is-learned-as-memories-and-each-reaches-the-models-for-that-persons-activations.md) needs: its person block, the observer's pin pass and the panels. The gap is [#3308](https://github.com/leonapivato/ai-assistant/issues/3308), found by ADR-0338's lane 1 ([#3306](https://github.com/leonapivato/ai-assistant/pull/3306)). A rendered history of what Aether used to believe is not decided here (§7).
 - Dependency: [ADR-0338](0338-a-person-sets-their-profile-and-pins-what-aether-always-keeps-in-mind-their-style-is-learned-as-memories-and-each-reaches-the-models-for-that-persons-activations.md), [ADR-0328](0328-a-memory-is-a-statement-resting-on-supports-its-standing-is-computed-from-them-and-every-change-to-it-is-an-operation-citing-one.md), [ADR-0073](0073-the-band-scoped-read-is-an-enumeration.md), [ADR-0045](0045-memory-records-carry-a-validity-window.md) and [ADR-0086](0086-a-beliefs-evidence-is-bounded-and-the-batch-read-lands.md), as their status lines leave them.
