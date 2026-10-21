@@ -3433,6 +3433,22 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- The person model (ADR-0338 §10, §11:2) ---------------------------
+    # Where this is true, the composition root opens the person-model store under
+    # `<data_dir>` and hands it to the engine, so an activation that is the owner's is
+    # given a person block. Where it is false, the default, no store is built or
+    # opened, and nothing of the person model reaches any model call. It is the switch
+    # that keeps the person model inert on a person's hub until its last lane has
+    # merged, and then turns it on there in one deploy (ADR-0338 §11:2, ADR-0342 §6:3).
+    # A boolean, so a value pydantic cannot read as one refuses the start.
+    person_model: bool = Field(
+        default=False,
+        description=(
+            "Keep the person model: open its store in the data directory and give each "
+            "of the owner's activations their person block (ADR-0338). Off by default."
+        ),
+    )
+
     # --- The calendar reader (ADR-0093 §7, §7a; ADR-0095 §1) --------------
     # Leg 6 configures **exactly one source, by explicit fields**. There is no
     # source registry and no list-valued source configuration, on ADR-0083 §7's

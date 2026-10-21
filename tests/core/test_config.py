@@ -2813,3 +2813,30 @@ def test_the_follow_up_budget_admits_zero_and_up(value: int) -> None:
 def test_the_follow_up_budget_refuses_below_zero_and_past_its_bound(value: int) -> None:
     with pytest.raises(ValidationError, match="follow_up_daily_calls"):
         Settings(follow_up_daily_calls=value)
+
+
+# --- ADR-0338 §11:2: the person model's switch ---------------------------------------
+
+
+def test_the_person_model_is_off_by_default() -> None:
+    """§11:2: every deploy stays inert until the switch is turned on at go-live."""
+    assert Settings().person_model is False
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("true", True), ("1", True), ("false", False)])
+def test_the_person_model_switch_is_read_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, raw: str, *, expected: bool
+) -> None:
+    monkeypatch.setenv("ASSISTANT_PERSON_MODEL", raw)
+
+    assert load_settings().person_model is expected
+
+
+@pytest.mark.parametrize("raw", ["maybe", "", "2"])
+def test_a_person_model_switch_that_is_no_boolean_refuses_the_start(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("ASSISTANT_PERSON_MODEL", raw)
+
+    with pytest.raises(ConfigurationError, match="person_model"):
+        load_settings()

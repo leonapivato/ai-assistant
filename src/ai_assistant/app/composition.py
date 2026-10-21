@@ -55,6 +55,7 @@ from ai_assistant.memory._reconciler import MEMORY_RECONCILER_PROMPT
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.memory.health import DEFAULT_K, DEFAULT_SAMPLE, MAX_K, StoreHealthReader
 from ai_assistant.memory.notification_store import check_notification_tuning
+from ai_assistant.memory.person_model_store import SqlitePersonModelStore
 from ai_assistant.memory.reembed import Reembedder
 from ai_assistant.models import (
     BoundedEmbedder,
@@ -98,6 +99,11 @@ from ai_assistant.orchestration.observer.prompts import (
     OBSERVER_SCOUT_PROMPT,
 )
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
+from ai_assistant.orchestration.person_block import (
+    KEPT_IN_MIND_CHARS,
+    PLANNING_SUGGESTIONS,
+    PersonBlocks,
+)
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, StoryReads
 from ai_assistant.orchestration.planning import PLANNING_PROMPT
 from ai_assistant.orchestration.recall import RecallStage
@@ -525,6 +531,15 @@ OBSERVER_STUCK_AFTER: Final = 10
 #: catch-up faster than the daily budget lets it spend.
 OBSERVER_PER_RUN: Final = 5
 
+#: The person-model store's file under the data directory (ADR-0338 §10:1), opened only
+#: where ``Settings.person_model`` is on (§11:2).
+PERSON_MODEL_FILENAME: Final = "person_model.db"
+
+#: ADR-0338 §3:2's bound on a profile field's length, in characters: a name, an address,
+#: an assistant's name, a zone or a language. A composition-root constant, handed to the
+#: person-model store, which validates every write against it.
+PROFILE_FIELD_CHARS: Final = 200
+
 
 @dataclass(frozen=True, slots=True)
 class Composition:
@@ -574,6 +589,24 @@ def telegram_intake_path(directory: Path, *, reference: str, chat_id: int) -> Pa
     """
     key = hashlib.sha256(f"{reference}\x00{chat_id}".encode()).hexdigest()[:24]
     return directory / f"telegram-{key}.db"
+
+
+def seeded_time_zone(settings: Settings) -> str | None:
+    """The owner's zone for the person model's seed, where one was given (ADR-0338 §3:7).
+
+    ``ASSISTANT_TIMEZONE``'s value where that variable is set — in the environment, the
+    environment file or the settings' own construction — and ``None`` where it is not.
+    ``Settings.timezone`` falls back to UTC when nothing set it, and that default is
+    the hub's, which no one chose, so it is never seeded as the owner's own: the zone is
+    left empty, and an empty zone reads as ``Settings.timezone`` anyway (§3:6).
+
+    Args:
+        settings: The loaded settings.
+
+    Returns:
+        The zone to seed, or ``None``.
+    """
+    return settings.timezone if "timezone" in settings.model_fields_set else None
 
 
 def _configured_telegram_relay(settings: Settings) -> TelegramRelay | None:
@@ -1098,6 +1131,26 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # (§6), and it joins the ordered shutdown below.
         stories = SqliteStoryStore(path=directory / "stories.db", now=_utcnow)
         opened.append(stories.close)
+        # **ADR-0338 §10's person-model store, on its own file, behind the switch.**
+        # Where ``person_model`` is off, the default, no store is built or opened and
+        # the engine is handed no person block, so nothing of the person model reaches
+        # a model and every deploy stays inert until its last lane has merged (§11:2,
+        # ADR-0342 §6:3). Where it is on, the store is created holding the owner, and
+        # seeded with their zone from ``ASSISTANT_TIMEZONE`` where that is set (§2:1,
+        # §3:7). It reads no other store and no store reads it; the person block reads it
+        # beside ``memory`` (§7:1).
+        person_model = (
+            SqlitePersonModelStore(
+                path=directory / PERSON_MODEL_FILENAME,
+                field_chars=PROFILE_FIELD_CHARS,
+                seed_time_zone=seeded_time_zone(settings),
+                now=_utcnow,
+            )
+            if settings.person_model
+            else None
+        )
+        if person_model is not None:
+            opened.append(person_model.close)
         # **The sole reader of ADR-0194 §1's four spend settings, and of the fifth
         # this mechanism depends on** (ADR-0194 §5, §11). The store takes explicit
         # values and never a `Settings` read, so this is the one place the two
@@ -1937,6 +1990,19 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # ADR-0329 §7:6, §15:1: the observer, run on each frozen episode and by the
             # scheduler's `observer` row.
             observer=observer,
+            # ADR-0338 §7:1: the person block's assembly over the person-model store and
+            # the same `memory`, with lane 1's two bounds, where the switch is on; none
+            # where it is off, so no activation is given a block (§11:2).
+            person_blocks=(
+                None
+                if person_model is None
+                else PersonBlocks(
+                    store=person_model,
+                    memory=memory,
+                    budget_chars=KEPT_IN_MIND_CHARS,
+                    suggestions=PLANNING_SUGGESTIONS,
+                )
+            ),
             # The capture/lifecycle stage, holding *both* durable stores — the same
             # `memory` again, so a captured turn is retrievable and destroyable
             # through the surfaces the user already has (ADR-0074 §9). Its
@@ -2082,6 +2148,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # §1), so nothing constrains its position, and the façade drains any
                 # story call in flight before this list is walked.
                 _as_async(stories.close),
+                # And the person-model store where it is open (ADR-0338 §10:1): it reads no
+                # other store and none reads it, and the façade has drained every
+                # activation that reads it through the person block before this runs.
+                *([_as_async(person_model.close)] if person_model is not None else []),
                 _as_async(plans.close),
                 _as_async(conversations.close),
                 # The grant store joins the same ordered shutdown as the other
