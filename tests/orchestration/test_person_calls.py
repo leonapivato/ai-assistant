@@ -9,13 +9,15 @@ are not done with the reason (§8:7); a pending suggestion is accepted in the sa
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 from test_activation_state import _admitted
-from test_person_block import _ended, _fact, _World
+from test_person_block import NOW, _ended, _fact, _World
 
+from ai_assistant.core.errors import PersonModelStoreError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ActionRequest,
@@ -42,6 +44,7 @@ from ai_assistant.core.types import (
     YesToQuestion,
 )
 from ai_assistant.orchestration.activation_state import CURRENT_ACTIVATION, ActivationScope
+from ai_assistant.orchestration.person_block import PersonBlocks
 from ai_assistant.orchestration.person_calls import (
     PERSON_MODEL_CALLS,
     PIN,
@@ -51,11 +54,18 @@ from ai_assistant.orchestration.person_calls import (
     PersonModelCalls,
     worded_argument,
 )
+from ai_assistant.testing import FakePersonModelStore
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from ai_assistant.core.types import ToolDefinition, ToolResult
+    from ai_assistant.core.protocols import PersonModelStore
+    from ai_assistant.core.types import (
+        PersonModel,
+        PersonModelWrite,
+        ToolDefinition,
+        ToolResult,
+    )
 
 pytestmark = pytest.mark.anyio
 
@@ -418,3 +428,88 @@ async def test_unpinning_a_memory_no_pin_shows_changes_nothing(owners: None) -> 
     model = await world.people.read(OWNER_PERSON_ID)
     assert model is not None
     assert [pin.memory_id for pin in model.standing_pins] == ["m:diet"]
+
+
+# --- two calls at once (§6:3) and an unpin left part done (§4:7) ------------------------
+
+
+class _Wrapped:
+    """The canonical fake, every member it does not override delegated to it."""
+
+    def __init__(self) -> None:
+        self.store = FakePersonModelStore(now=lambda: NOW)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.store, name)
+
+
+class _Yielding(_Wrapped):
+    """Yielding to the loop after each read, as a store's I/O does."""
+
+    async def read(self, person_id: str) -> PersonModel | None:
+        model = await self.store.read(person_id)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return model
+
+
+def _over(world: _World, store: _Wrapped, *, budget: int = 1600) -> None:
+    world.people = store.store
+    world.blocks = PersonBlocks(
+        store=cast("PersonModelStore", store), memory=world.memory, budget_chars=budget
+    )
+
+
+async def test_two_pins_at_once_never_pass_a_budget_only_one_fits(owners: None) -> None:
+    """§6:3: acting runs a round's calls at once; each pin's check and write hold the lock."""
+    world = _World()
+    _over(world, _Yielding(), budget=30)
+    await world.held(_fact("m:diet", "Eats no meat, ever."), _fact("m:tea", "Drinks green tea."))
+
+    first, second = await asyncio.gather(
+        _run(world, PIN, memory="m:diet"), _run(world, PIN, memory="m:tea")
+    )
+
+    assert _done(first) == "pinned"
+    assert "past its budget" in _reason(second)
+    model = await world.people.read(OWNER_PERSON_ID)
+    assert model is not None
+    assert [pin.memory_id for pin in model.standing_pins] == ["m:diet"]
+
+
+class _FailingSecondRemoval(_Wrapped):
+    """The second pin removal a store fault."""
+
+    removals = 0
+
+    async def remove_pin(self, person_id: str, pin_id: str) -> PersonModelWrite:
+        self.removals += 1
+        if self.removals == 2:
+            msg = "test: the store failed"
+            raise PersonModelStoreError(msg)
+        return await self.store.remove_pin(person_id, pin_id)
+
+
+async def test_an_unpin_left_part_done_says_so_and_is_not_done(owners: None) -> None:
+    """Two pins show the memory; the second's removal fails after the first's is written."""
+    world = _World()
+    _over(world, _FailingSecondRemoval())
+    await world.held(
+        _ended("m:old", "Lives in Porto.", successor="m:new"), _fact("m:new", "Lives in Lisbon.")
+    )
+    await world.pin("m:old", "m:new")
+
+    answer = await _run(world, UNPIN, memory="m:new")
+
+    assert _reason(answer) == (
+        "1 of the 2 pins showing it were removed and the rest could not be, so it is "
+        "still pinned; unpinning it again finishes it"
+    )
+    model = await world.people.read(OWNER_PERSON_ID)
+    assert model is not None
+    assert len(model.standing_pins) == 1
+    again = await _run(world, UNPIN, memory="m:new")
+    assert _done(again) == "unpinned"
+    model = await world.people.read(OWNER_PERSON_ID)
+    assert model is not None
+    assert model.standing_pins == ()
