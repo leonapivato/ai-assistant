@@ -8986,11 +8986,12 @@ class AssistantEngine(Protocol):
         the pin, mark or suggestion points at, so the panel reads no memory again by an
         id an implementation could normalise.
 
-        **The four lists that grow are paged together**: what the slot left out, the
-        pins no longer current, the style marks and the suggestions each hold the page
-        of their own order ``offset`` and ``limit`` name, beside their totals, so every
-        entry and its control is reached by bounded reads however many there are. The
-        slot is whole, bounded by its budget.
+        **Its five lists are paged together**: the slot, what it left out, the pins no
+        longer current, the style marks and the suggestions each hold the page of
+        their own order ``offset`` and ``limit`` name, beside their totals, so every
+        entry is reached by bounded reads however many there are. Each entry carries
+        its own wording beside the id its control names, so a page is rendered with no
+        other, and the slot's fill is the whole slot's, whatever the page.
 
         Args:
             person_id: The person, by id: :data:`~ai_assistant.core.types.OWNER_PERSON_ID`
