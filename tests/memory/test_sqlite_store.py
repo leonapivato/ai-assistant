@@ -92,7 +92,7 @@ from ai_assistant.testing.memories import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 
     from ai_assistant.core.protocols import Embedder
     from ai_assistant.core.types import Embedding
@@ -956,17 +956,23 @@ async def test_a_persist_holds_off_a_deletion_in_another_process(tmp_path: Path)
 #: comfortably under ``sqlite3.connect``'s 5.0 s default busy timeout, so the child
 #: waits the parent's read transaction out rather than giving up.
 _INTERLEAVE_HOLD_SECONDS = 1.0
-#: ``SQLITE_LIMIT_VARIABLE_NUMBER`` narrowed to leave room for exactly one id
-#: beside ``get_many``'s two ``now`` parameters, so a two-id call really is two
+#: ``SQLITE_LIMIT_VARIABLE_NUMBER`` narrowed, per batch read, to leave room for
+#: exactly one id beside that read's own ``now`` parameters — two for ``get_many``,
+#: which filters both retention and the window, and one for ``get_history``, which
+#: filters retention alone (ADR-0342 §3:1) — so a two-id call really is two
 #: statements and there is a chunk boundary to interleave at. The production limit
 #: is 32,766, which no test could reach by volume — and narrowing the *real* knob
 #: exercises the real chunking path rather than a stubbed one.
-_ONE_ID_PER_STATEMENT = 3
+_ONE_ID_PER_STATEMENT = {"get_many": 3, "get_history": 2}
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the child's hold assumes POSIX scheduling")
-async def test_get_many_is_one_snapshot_across_its_chunks(tmp_path: Path) -> None:
+@pytest.mark.parametrize("read", ["get_many", "get_history"])
+async def test_a_batch_read_is_one_snapshot_across_its_chunks(tmp_path: Path, read: str) -> None:
     """The chunked batch read is one snapshot of the *store*, not only of the clock.
+
+    Run over both batch reads, because both chunk through one reader and the history
+    read owes the same snapshot (ADR-0342 §2:3).
 
     ``get_many`` carries no size cap (ADR-0086 §6), so an ``IN`` clause has to be
     chunked to SQLite's bound-parameter limit. The ``asyncio.Lock`` does not make
@@ -1018,7 +1024,7 @@ async def test_get_many_is_one_snapshot_across_its_chunks(tmp_path: Path) -> Non
         )
         assert announcement.strip() == b"ready", "the child never opened its store"
 
-        store._conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, _ONE_ID_PER_STATEMENT)
+        store._conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, _ONE_ID_PER_STATEMENT[read])
         seen = 0
 
         def release_the_writer_between_chunks(statement: str) -> None:
@@ -1039,7 +1045,11 @@ async def test_get_many_is_one_snapshot_across_its_chunks(tmp_path: Path) -> Non
 
         store._conn.set_trace_callback(release_the_writer_between_chunks)
         try:
-            batch = await store.get_many(["a", "b"])
+            batch: Mapping[str, MemoryRecord] = (
+                await store.get_many(["a", "b"])
+                if read == "get_many"
+                else await store.get_history(["a", "b"])
+            )
         finally:
             store._conn.set_trace_callback(None)
     finally:
@@ -2269,6 +2279,17 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
             (walk, "written-by-a-build-that-is-not-this-one"),
         )
 
+    async def corrupt_stored_record(self, store: MemoryStore, record_id: str) -> bool:
+        """Overwrite the row's payload with text no decoder accepts (ADR-0342 §2:5).
+
+        Reaches past the Protocol on purpose: every write the contract admits is
+        validated, so a corrupt payload is reachable only by planting one the way a
+        damaged file would leave it.
+        """
+        assert isinstance(store, SqliteMemoryStore)
+        store._conn.execute("UPDATE records SET data = '{not json' WHERE id = ?", (record_id,))
+        return True
+
     async def record_walk_position_beyond_the_store(self, store: MemoryStore, walk: str) -> None:
         """Write a rowid above ``sqlite_sequence``'s high-water mark for ``records``.
 
@@ -2362,13 +2383,14 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
         would let the mutation land past every read, observe one coherent version,
         and certify the bug.
 
-        **Three of the six operations suspend on the embedder and three do not**,
+        **Three of the operations suspend on the embedder and the rest do not**,
         which is why the widened hook takes the operation's name (#436).
         ``add``, ``write_atomic`` and ``search`` all embed before they touch the
         connection, so the injected ``Embedder`` is their first ``await``.
-        ``list_beliefs``, ``get_many`` and ``select`` embed nothing: the first
-        ``await`` of each is ``async with self._lock``, so the lever there is the
-        lock itself, wrapped so one acquisition can be held at the door. ``select``
+        ``list_beliefs``, ``get_many``, ``get_history`` and ``select`` embed
+        nothing: the first ``await`` of each is ``async with self._lock``, so the
+        lever there is the lock itself, wrapped so one acquisition can be held at
+        the door. ``select``
         joins them because it carries no query and so reaches no embedder at all
         (ADR-0237 §4). Suspending it anywhere later — inside
         ``_list_beliefs_sync``, say — would put the mutation past the point a
@@ -2389,7 +2411,7 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
         lock = _GatedLock(store._lock)
 
         def arm(operation: str) -> SuspendedCall:
-            if operation in {"list_beliefs", "get_many", "select"}:
+            if operation in {"list_beliefs", "get_many", "get_history", "select"}:
                 # Installed only when it is needed, so every other case runs on the
                 # store's own lock. `_lock` is typed `asyncio.Lock`; this stands in
                 # for one and is only ever entered through `async with`.

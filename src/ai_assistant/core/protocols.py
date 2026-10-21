@@ -876,8 +876,8 @@ class MemoryStore(Protocol):
     about me" and "what do you retrieve" can never answer differently about a
     record's liveness.
 
-    Reads come in three shapes and none of them may disagree with another about a
-    record's liveness. :meth:`get` and :meth:`get_many` answer the same question
+    The live reads come in three shapes and none of them may disagree with another
+    about a record's liveness. :meth:`get` and :meth:`get_many` answer the same question
     about one id and about many; :meth:`search` is *retrieval* and :meth:`get_many`
     is neither — it resolves ids the caller already holds, in one snapshot, so a
     batch is internally consistent where a loop of singles is not (ADR-0086 §6).
@@ -891,6 +891,16 @@ class MemoryStore(Protocol):
     make unexpressible. Neither is a retrieval: the walk ranks nothing and its
     order is a position rather than a judgement of relevance, so it is no part of
     what ADR-0112 governs.
+
+    **The history read** answers a different question from every live read
+    (ADR-0342 §2). :meth:`get_history` resolves memory ids the caller already holds
+    to the memories the store holds at them, whatever their status, returning
+    exactly what :meth:`export` would carry at each and reaching no episode. It
+    makes no claim about liveness, so it cannot disagree with a live read about
+    one (ADR-0342 §4:4), and where :meth:`get` returns a memory it returns the same
+    record (ADR-0342 §3:3). The live reads stay live-only: none of :meth:`get`,
+    :meth:`get_many`, :meth:`search` or :meth:`list_beliefs` gains a parameter, a
+    mode or a default that reaches a memory that is not live (ADR-0342 §4:3).
 
     **Episodes are numbered** (ADR-0283 §1). The store gives every episodic record,
     when it inserts it, a **number**: a positive integer from one counter shared by
@@ -923,7 +933,8 @@ class MemoryStore(Protocol):
     (§6). :meth:`get`, :meth:`get_many`, :meth:`episodes`, :meth:`episode_chunk`,
     :meth:`channel_episode_ids`, :meth:`list_beliefs`,
     :meth:`export` and the deletions reach an open episode as they reach any other,
-    and :meth:`open_episodes` enumerates them.
+    and :meth:`open_episodes` enumerates them. :meth:`get_history` reaches no
+    episode, open or frozen.
 
     **A recorded processing record and response change only by extension**
     (ADR-0286 §12, partially superseding ADR-0275 §12:6). A write through :meth:`add`
@@ -940,7 +951,8 @@ class MemoryStore(Protocol):
 
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060). How :meth:`add` and :meth:`write_atomic` observe the records they
-    are handed, how :meth:`get_many` observes its ``record_ids``, and how
+    are handed, how :meth:`get_many` and :meth:`get_history` observe their
+    ``record_ids``, and how
     :meth:`search` and :meth:`list_beliefs` observe their ``Sequence`` filters, is
     governed by this module's input-observation clause (ADR-0065).
     """
@@ -1142,6 +1154,72 @@ class MemoryStore(Protocol):
         Raises:
             MemoryStoreError: If the store cannot be read, or a stored record is
                 corrupt.
+        """
+        ...
+
+    async def get_history(self, record_ids: Sequence[str]) -> Mapping[str, Memory]:
+        """Return the memories held at ``record_ids``, whatever their status (ADR-0342 §2).
+
+        **The history read.** It answers, by id, for each memory the store holds —
+        ``current``, ``ended`` or ``wrong``, its validity window open or closed — and
+        it does nothing else. It exists for a caller holding a pointer to a memory
+        that may since have been retired: a pin or a style mark, which follows the
+        memory's successors (ADR-0338 §4:8), and the observer's pin pass, which adds
+        a support to the pinned memory itself (ADR-0338 §9:6).
+
+        **It answers exactly what** :meth:`export` **would carry at each id**
+        (ADR-0342 §3:1). Where ``export`` would carry a memory at the read's
+        instant, this returns that memory; where it would carry none, the id is
+        omitted. So a memory past its ``expires_at`` is omitted: retention wins over
+        history here as it does in ``export`` (ADR-0045 §6), and a memory is never
+        more reachable through this read than through ``export``. A forgotten
+        (deleted) memory is omitted, because the store no longer holds it. An
+        episode is not a memory, so ``export`` carries no memory at an episode's id
+        and this read omits it: an episode has no status and names no successor
+        (ADR-0342 §3's table), and :meth:`get_many` already answers for episodes.
+
+        **Where** :meth:`get` **would return a memory, this returns the same
+        record** (ADR-0342 §3:3), so the two never disagree about a memory both
+        answer for. It makes **no claim about liveness** (ADR-0342 §4:4): a memory it
+        returns may be current, retired or outside its window, and only a live read
+        — :meth:`get`, :meth:`get_many`, :meth:`search` or :meth:`list_beliefs` —
+        answers whether it is held now. A caller presents a memory as current only
+        where a live read returned it (ADR-0342 §5:1).
+
+        Each memory comes back **whole, as stored** (ADR-0342 §2:2): its status, its
+        validity, its operations log with the successor any operation names, its
+        supports and its revision. The revision is the stored one, as every read's is
+        (ADR-0219 §1), so a caller can write to a retired memory conditionally on
+        what it read (ADR-0328 §5:4).
+
+        **It takes ids alone and follows no chain** (ADR-0342 §4:1, §4:2). It never
+        searches, ranks, lists, enumerates or pages, and it returns a successor only
+        where the successor's id is in the argument too. Following a chain is the
+        caller's, hop by hop (ADR-0342 §5:2, §5:3).
+
+        **It answers in** :meth:`get_many`'s **shape** (ADR-0342 §2:3, §2:4;
+        ADR-0086 §6). One call is one snapshot: every id is judged against one
+        instant and one state of the store. An id that does not resolve is simply
+        missing from the mapping, never an error and never a ``None`` value
+        (ADR-0342 §3:2). Duplicate ids collapse, there is deliberately no size cap on
+        the argument, and records are detached snapshots, like every other
+        ``MemoryStore`` read.
+
+        How this call observes ``record_ids`` is governed by this module's
+        input-observation clause (ADR-0065), exactly as :meth:`get_many`'s argument
+        is.
+
+        Args:
+            record_ids: The ids to resolve. An **empty sequence returns an empty
+                mapping** and requires no round trip, as :meth:`get_many`'s does.
+
+        Returns:
+            A mapping from id to memory, holding an entry for exactly those ids at
+            which :meth:`export` would carry a memory.
+
+        Raises:
+            MemoryStoreError: If the store cannot be read, or a stored record is
+                corrupt (ADR-0342 §2:5).
         """
         ...
 
@@ -1525,8 +1603,10 @@ class MemoryStore(Protocol):
         live at now — a closed ``valid_until`` or a not-yet-open ``valid_from``,
         both ends enforced (ADR-0007, ADR-0045 §6). Inspection reads **live
         beliefs only**: a retired record is not a belief the assistant holds but a
-        record of one it used to, and it stays reachable through ``export`` alone
-        (ADR-0073 §3). There is deliberately no ``include_retired`` axis.
+        record of one it used to. It stays reachable through ``export``, and by id
+        through :meth:`get_history` (ADR-0342 §4:3, partially superseding ADR-0073
+        §3), and never through this read: there is deliberately no
+        ``include_retired`` axis.
 
         **The order is total, stable and specified: transaction time descending,
         ties broken by ``id`` ascending** — a memory's latest operation's instant

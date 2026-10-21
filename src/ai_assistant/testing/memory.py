@@ -59,6 +59,7 @@ from ai_assistant.core.types import (
     EpisodeCursor,
     EpisodePage,
     EpisodicMemory,
+    Memory,
     MemoryKind,
     MemorySearchResult,
     MemoryWriteMode,
@@ -337,7 +338,8 @@ class FakeMemoryStore:
                 the fake touches its records** — inside the modelled resource,
                 *after* the argument checks and after any short-circuit that reads
                 nothing (``search`` with an empty query or a non-positive ``limit``,
-                ``get_many`` with no ids, ``list_beliefs`` with ``limit=0``). An
+                ``get_many`` or ``get_history`` with no ids, ``list_beliefs`` with
+                ``limit=0``). An
                 argument the store would refuse anyway is the caller's mistake
                 whether or not the backing answers, and a fake that failed a call the
                 real store never makes would certify a consumer against fiction
@@ -696,6 +698,39 @@ class FakeMemoryStore:
                 for record_id in wanted
                 if (record := self._records.get(record_id)) is not None
                 and self._is_readable(record, now)
+            }
+
+    async def get_history(self, record_ids: Sequence[str]) -> Mapping[str, Memory]:
+        """Return the memories held at ``record_ids``, whatever their status (ADR-0342 §2).
+
+        :meth:`export`'s predicate over the named ids — not past ``expires_at`` —
+        with episodes left out, so it answers what ``export`` would carry at each id
+        and never consults the validity window (ADR-0342 §3:1). One snapshot, as
+        :meth:`get_many` takes it: ``record_ids`` is materialised on the first
+        executed line, before the resource is entered (ADR-0065), and the clock is
+        read once inside it.
+
+        Unlike :meth:`export`, it is a read that reaches the stored records, so a
+        configured ``failure`` bites here as it does in :meth:`get_many`.
+
+        Raises:
+            MemoryStoreError: If the fake was constructed with a ``failure``, or the
+                injected clock's reading is not a conforming one. An empty
+                ``record_ids`` is answered without reaching either.
+        """
+        wanted = dict.fromkeys(record_ids)
+        if not wanted:
+            # No round trip for an empty argument, matching the persistent store
+            # and `get_many` (ADR-0026 §7).
+            return {}
+        async with self._resource.held():
+            self._refuse_read()
+            now = self._now_utc()
+            return {
+                record_id: record.model_copy(deep=True)
+                for record_id in wanted
+                if isinstance(record := self._records.get(record_id), Memory)
+                and not self._is_expired(record, now)
             }
 
     async def search(

@@ -40,6 +40,7 @@ from ai_assistant.core.types import (
     EpisodeCursor,
     EpisodePage,
     EpisodicMemory,
+    Memory,
     MemoryKind,
     MemorySearchResult,
     MemoryWriteMode,
@@ -425,6 +426,27 @@ class InMemoryMemoryStore:
             for record_id in wanted
             if (record := self._records.get(record_id)) is not None
             and self._is_readable(record, now)
+        }
+
+    async def get_history(self, record_ids: Sequence[str]) -> Mapping[str, Memory]:
+        """Return the memories held at ``record_ids``, whatever their status (ADR-0342 §2).
+
+        :meth:`export`'s predicate over the named ids — retained, not past
+        ``expires_at`` — with episodes left out, so it answers what ``export``
+        would carry at each id and ignores the validity window entirely (ADR-0342
+        §3:1). ``now`` is sampled once for the batch, as :meth:`get_many` samples
+        it, and the argument is materialised on the first executed line (ADR-0065).
+        An empty argument is answered without reading the clock.
+        """
+        wanted = dict.fromkeys(record_ids)
+        if not wanted:
+            return {}
+        now = self._now_utc()  # one reading for the whole batch, never one per id
+        return {
+            record_id: record.model_copy(deep=True)
+            for record_id in wanted
+            if isinstance(record := self._records.get(record_id), Memory)
+            and not self._is_expired(record, now)
         }
 
     async def search(
