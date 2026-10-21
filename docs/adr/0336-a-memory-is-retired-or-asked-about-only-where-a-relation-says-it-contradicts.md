@@ -1,12 +1,13 @@
 # 336. A memory is retired or asked about only where a relation says it contradicts
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0345 (§2:1, §3:1–§3:3, §4:1, §5:1 and §7:1, for a placed proposal)
 - Date: 2026-10-21
 - Scope: the memory write path wherever a conflict set holds a memory in band `ASSERTED` or the proposal is in it. When a reconciler labels the conflict set; what `DefaultMemoryPolicy` supersedes and defers on; what a `SUPERSEDE` retires; which stored memories a deferral names; and where the observer raises its question. The defect and its reproduction are draft PR [#3237](https://github.com/leonapivato/ai-assistant/pull/3237).
 - Dependency: ADR-0159, ADR-0171, ADR-0328 and ADR-0329, as their status lines leave them.
 - Authorization: the dispatcher assigned 0336 and recommends option A of #3237, with B and C under "Alternatives considered". That recommendation is not an owner ruling. The owner reads this decision before it is ratified (§1:1).
 - **Contract-surface decision.** It changes `core/types.py` (`MemoryIngestResult` gains one field, §7) and `core/protocols.py` (`MemoryWriter.ingest`'s documented retirement obligation, §5, and that field's meaning, §7). It adds no Protocol, no method, no parameter and no `ConflictRelation` value. A writer built from the contract as it stands would retire records §5 forbids retiring and would not fill §7's field, so it is a breaking change under golden rule 5, and both review lenses are required.
 - **Partially supersedes**, in the clauses §11's first table names: ADR-0038, ADR-0050, ADR-0079, ADR-0159, ADR-0171 and ADR-0329.
+- Partially superseded: 2026-10-21 by ADR-0345 — §2:1, §3:1–§3:3, §4:1, §5:1 and §7:1, for a placed proposal alone: a proposal whose producer names how it stands to each stored memory it retrieved invokes no reconciler, is ruled by `DefaultMemoryPolicy`'s admissibility floor and confirmation rule alone, and is written by that placement and the rule that a memory changes only in its own holder's beliefs (ADR-0345 §3–§5). A proposal with no placement is ruled as this decision says. Every other clause stands. This replacement takes effect on ratification of ADR-0345. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 
