@@ -64,8 +64,6 @@ from ai_assistant.core.types import (
     DataTier,
     Idempotency,
     LabelKind,
-    Memory,
-    MemoryStatus,
     PersonActHow,
     PersonModelAct,
     PersonModelRefusal,
@@ -79,7 +77,7 @@ from ai_assistant.core.types import (
     ToolResult,
 )
 from ai_assistant.orchestration.activation_state import active_state
-from ai_assistant.orchestration.person_block import activation_person
+from ai_assistant.orchestration.person_block import PinRefusal, activation_person
 from ai_assistant.orchestration.stories import episode_address
 
 if TYPE_CHECKING:
@@ -372,11 +370,9 @@ class PersonModelCalls:
         if capability == SET_PROFILE_CAPABILITY:
             return await self._set(person, parameters, act)
         if capability == PIN_CAPABILITY:
-            async with self._blocks.pinning(person):
-                return await self._pin(person, _memory_id(parameters), act)
+            return await self._pin(person, _memory_id(parameters), act)
         if capability == UNPIN_CAPABILITY:
-            async with self._blocks.pinning(person):
-                return await self._unpin(person, _memory_id(parameters))
+            return await self._unpin(person, _memory_id(parameters))
         return _not_done(_MALFORMED, "not_a_person_model_call")
 
     async def _set(
@@ -396,28 +392,15 @@ class PersonModelCalls:
         return _done(_CLEARED if value is None else _SET)
 
     async def _pin(self, person: str, memory_id: str, act: PersonModelAct) -> ToolResult | NotDone:
-        """Pin a current memory where the pins' wordings stay within the budget (§4:2, §6:3).
-
-        Checked against the memory store before the write, as the contract leaves both to
-        the caller: the memory is read live and pinned only where it is current, and the
-        wordings of the memories the person's standing pins show, each once, together
-        with the new one's where it is not among them already, must stay within the
-        slot's budget. The caller holds the person's pinning lock from the read to the
-        write, so no other pin is checked against the same pins meanwhile.
-        """
-        live = await self._blocks.memory.get_many([memory_id])
-        record = live.get(memory_id)
-        if not isinstance(record, Memory) or record.status is not MemoryStatus.CURRENT:
+        """Pin through the person block's assembly, which checks and writes it (§4:2, §6:3)."""
+        pinned = await self._blocks.pin(person, memory_id, act=act)
+        if pinned.refused is PinRefusal.NOT_CURRENT:
             return _not_done(_NOT_CURRENT, "not_current")
-        model = await self._blocks.store.read(person)
-        if model is None:
-            return _not_done(_UNKNOWN_PERSON, "unknown_person")
-        ends = await self._blocks.current_ends(pin.memory_id for pin in model.standing_pins)
-        shown = {end.id: end for end in ends.values()}
-        shown.setdefault(record.id, record)
-        if sum(len(one.content) for one in shown.values()) > self._blocks.budget_chars:
+        if pinned.refused is PinRefusal.OVER_BUDGET:
             return _not_done(_OVER_BUDGET, "over_budget")
-        written = await self._blocks.store.add_pin(person, memory_id, act=act)
+        written = pinned.write
+        if written is None:
+            return _not_done(_UNKNOWN_PERSON, "unknown_person")
         if written.kind is PersonModelWriteKind.REFUSED:
             return _refused(written)
         if written.kind is PersonModelWriteKind.UNCHANGED:
@@ -425,36 +408,22 @@ class PersonModelCalls:
         return _done(_PINNED)
 
     async def _unpin(self, person: str, memory_id: str) -> ToolResult | NotDone:
-        """Remove every standing pin that shows the memory, erasing nothing (§4:7).
+        """Unpin through the person block's assembly, which finds every pin showing it (§4:7).
 
-        Planning is shown a pin's chain's current end (§4:8), so the memory it names is
-        the one a pin was made on or the current successor a pin's chain reached. Where
-        more than one pin shows it and one cannot be removed after another was, the call
-        is not done, since a pin still shows the memory, and its reason says that some
-        were removed; an unpin is safe to repeat, so asking again finishes it.
+        Where more than one pin shows it and one cannot be removed after another was, the
+        call is not done, since a pin still shows the memory, and its reason says that
+        some were removed; an unpin is safe to repeat, so asking again finishes it.
         """
-        model = await self._blocks.store.read(person)
-        if model is None:
+        unpinned = await self._blocks.unpin(person, memory_id)
+        if unpinned.unknown_person:
             return _not_done(_UNKNOWN_PERSON, "unknown_person")
-        standing = model.standing_pins
-        ends = await self._blocks.current_ends(pin.memory_id for pin in standing)
-        showing = [
-            pin
-            for pin in standing
-            if pin.memory_id == memory_id
-            or (pin.memory_id in ends and ends[pin.memory_id].id == memory_id)
-        ]
-        if not showing:
+        if unpinned.removed < unpinned.showing:
+            if unpinned.removed:
+                return _partly(unpinned.removed, unpinned.showing)
+            if unpinned.refused is not None:
+                return _refused(unpinned.refused)
+        if not unpinned.showing:
             return _done(_NOT_PINNED)
-        for removed, pin in enumerate(showing):
-            try:
-                written = await self._blocks.store.remove_pin(person, pin.id)
-            except PersonModelStoreError:
-                if not removed:
-                    raise
-                return _partly(removed, len(showing))
-            if written.kind is PersonModelWriteKind.REFUSED:
-                return _partly(removed, len(showing)) if removed else _refused(written)
         return _done(_UNPINNED)
 
 

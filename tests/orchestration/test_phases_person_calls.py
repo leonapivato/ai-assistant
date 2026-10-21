@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Final
 import pytest
 from phases_support import processing
 from test_engine import AT
+from test_person_block import _ended
 from test_phases_yes_path import (
     _DONE,
     _ask,
@@ -201,6 +202,26 @@ async def test_a_pin_whose_memory_is_gone_by_the_asking_round_is_not_asked_about
 
     hub.planner.then(
         _Hooked(forget, RoundResponse(calls=(_call("c1", "pin", memory="M1"),))),
+        _ask(_ASKING_PIN),
+    )
+    conversation, asking = await hub.turn("I don't eat meat, keep that in mind.")
+
+    assert _asked_calls(asking)[1] == ()
+    assert "it cannot be asked about" in hub.planner.shown(1)
+    (message,) = await hub.said(conversation)
+    assert "pin —" not in message.text
+
+
+async def test_a_pin_whose_memory_is_retired_by_the_asking_round_is_not_asked_about() -> None:
+    """ADR-0342 §5:1: only a memory a live read returns current is shown as one."""
+    hub, _ = await _hub()
+    hub.reader.nothing()
+
+    async def retire() -> None:
+        await hub.memory.add(_ended(DIET.id, DIET.content, successor=None))
+
+    hub.planner.then(
+        _Hooked(retire, RoundResponse(calls=(_call("c1", "pin", memory="M1"),))),
         _ask(_ASKING_PIN),
     )
     conversation, asking = await hub.turn("I don't eat meat, keep that in mind.")
