@@ -3366,9 +3366,19 @@ class PhasePath:
         try:
             # ADR-0332 §3:18: a join taken whose marking has not landed is waited for,
             # so the reader's bookkeeping holds what joined before anything acts on it.
+            # The wait is inside the pass's deadline (§3:14: a join does not extend
+            # it), and the deadline is read again after it with no await before the
+            # commitment step: a wait that crosses it dispatches nothing, and acting
+            # fails with its classified expiry (ADR-0280 §5).
             state = active_state()
             if state is not None:
-                await state.settled()
+                try:
+                    async with asyncio.timeout_at(given.deadline):
+                        await state.settled()
+                except TimeoutError:
+                    raise ModelTimeoutError(_ACTING_EXPIRED) from None
+            if given.deadline <= asyncio.get_running_loop().time():
+                raise ModelTimeoutError(_ACTING_EXPIRED)
             # ADR-0332 §3:5-§3:7: the commitment step, before anything of the round is
             # dispatched, in one synchronous step with no await before the dispatch.
             withheld = _commitment(latest, decided)

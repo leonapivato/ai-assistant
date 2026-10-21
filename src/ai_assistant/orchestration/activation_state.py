@@ -352,7 +352,9 @@ class ActivationState:
         or withdrawn before the activation commits, ends, is taken over or is frozen,
         and the episode records every message the reader marked taken in by it. The
         wait is the reader's one marking write, which a reader awaits to its end
-        (:func:`~ai_assistant.orchestration.joining.settle`).
+        (:func:`~ai_assistant.orchestration.joining.settle`). Acting's and a takeover's
+        waits are bounded by the pass's deadline too, since a join does not extend it
+        (§3:14).
 
         Returns at once, without yielding, where none is.
         """
