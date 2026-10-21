@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from browser_drive import Drive
-    from playwright.async_api import Browser, Route, ViewportSize
+    from playwright.async_api import Browser, ViewportSize
 
     from ai_assistant.core.types import Identifier
 
@@ -39,9 +39,6 @@ pytestmark = [
 #: §5:5's bound, in milliseconds: no two signals closer than this.
 _EVERY: Final = 1000
 
-#: How long a signal may stay out before the next replaces it, in milliseconds.
-_STALE: Final = 3000
-
 #: Where the page's clock is paused from: any instant, so long as it is fixed.
 _PAUSED_AT: Final = 1_800_000_000_000
 
@@ -54,16 +51,37 @@ class _Signals:
     def __init__(self, drive: Drive) -> None:
         self.arrived: list[str] = []
         self.refuse = False
+        #: Set to hold every signal at the hub until it is released, as a slow hub would.
+        self.held: asyncio.Event | None = None
+        #: How many signals the hub was working on at once, at most.
+        self.most_at_once = 0
+        self._at_once = 0
         held = drive.engine.composing
 
         async def composing(conversation_id: Identifier) -> None:
             self.arrived.append(conversation_id)
+            self._at_once += 1
+            self.most_at_once = max(self.most_at_once, self._at_once)
+            try:
+                if self.held is not None:
+                    await self.held.wait()
+            finally:
+                self._at_once -= 1
             if self.refuse:
                 msg = "composing needs a device that is an end for writing of the conversation"
                 raise DeviceRefusedError(msg, reason=DeviceRefusal.NOT_ALLOWED)
             await held(conversation_id)
 
         drive.engine.composing = composing  # type: ignore[method-assign]
+
+    async def reached(self, count: int) -> None:
+        """Wait, bounded, until ``count`` signals have reached the hub."""
+        for _ in range(200):
+            if len(self.arrived) >= count:
+                return
+            await asyncio.sleep(0.025)
+        msg = f"{count} composing signals never reached the hub"
+        raise AssertionError(msg)
 
 
 async def _open(drive: Drive) -> str:
@@ -93,7 +111,7 @@ async def _quiet(drive: Drive) -> None:
     because that clock is paused.
     """
     for _ in range(200):
-        if await drive.page.evaluate("() => composingOut === null"):
+        if await drive.page.evaluate("() => !composingOut"):
             return
         await asyncio.sleep(0.025)
     msg = "a composing signal stayed out"
@@ -183,48 +201,40 @@ async def test_nothing_is_sent_once_the_typing_stops(
         assert len(signals.arrived) == 1
 
 
-async def test_a_signal_that_never_settles_is_replaced_once_it_is_stale(
+async def test_a_signal_still_out_holds_the_next_back_and_is_never_replaced(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """One signal out at a time, and never one that holds the rest back.
+    """One signal out at a time, and never a second relay behind it.
 
-    The first request is held unanswered. A key a second later sends nothing, because the
-    first is still out and young; a key once it has been out for the stale bound aborts
-    it and sends the next, which the hub receives.
+    The hub holds the first signal, as a slow hub would, after the gateway has admitted
+    it and taken a hub connection for it. Typing on for several seconds sends nothing
+    more, so the gateway never holds a second connection for the signal — a page that
+    replaced the slow one would take one more for each (ADR-0168 §8). Once the first is
+    answered, the next key past the cadence sends again.
     """
     async with driving(gateway_browser, tmp_path) as drive:
         conversation = await _open(drive)
         signals = _Signals(drive)
-        requested: list[Route] = []
-        failed: list[str] = []
-        drive.page.on("requestfailed", lambda request: failed.append(request.url))
-
-        async def hold_the_first(route: Route) -> None:
-            requested.append(route)
-            if len(requested) > 1:
-                await route.continue_()
-
-        await drive.page.route("**/chat/composing", hold_the_first)
+        signals.held = asyncio.Event()
         await _pause(drive)
 
         await drive.page.locator("#chat-text").press("a")
-        for _ in range(100):
-            if requested:
-                break
-            await asyncio.sleep(0.025)
-        await drive.page.clock.run_for(_EVERY)
-        await drive.page.locator("#chat-text").press("a")
+        await signals.reached(1)
+        for _ in range(10):
+            await drive.page.clock.run_for(_EVERY)
+            await drive.page.locator("#chat-text").press("a")
         await asyncio.sleep(0.2)
-        assert len(requested) == 1
-        assert not await drive.page.evaluate("() => composingOut === null")
+        assert signals.arrived == [conversation]
+        assert signals.most_at_once == 1
+        assert await drive.page.evaluate("() => composingOut")
 
-        await drive.page.clock.run_for(_STALE - _EVERY)
+        signals.held.set()
+        await _quiet(drive)
+        await drive.page.clock.run_for(_EVERY)
         await _key(drive)
 
-        assert len(requested) == 2
-        assert signals.arrived == [conversation]
-        assert any(url.endswith("/chat/composing") for url in failed)
-        await drive.page.unroute("**/chat/composing")
+        assert signals.arrived == [conversation] * 2
+        assert signals.most_at_once == 1
 
 
 async def test_the_signal_is_never_stored(gateway_browser: Browser, tmp_path: Path) -> None:
@@ -265,9 +275,10 @@ async def test_a_refused_signal_says_nothing_on_the_page(
         await _open(drive)
         signals = _Signals(drive)
         signals.refuse = True
+        await _pause(drive)
 
-        await drive.page.locator("#chat-text").press_sequentially("hello", delay=20)
-        await _quiet(drive)
+        for key in "hello":
+            await _key(drive, key)
 
         assert len(signals.arrived) == 1
         await expect(drive.page.locator("#chat .fault")).to_be_hidden()

@@ -3595,56 +3595,43 @@ async function deliverChat(one) {
 
 // The least time between two signals, which §5:5 bounds at once a second.
 const COMPOSING_EVERY_MILLISECONDS = 1000;
-// How long a signal may stay out before the next one replaces it: §6:2's default lapse,
-// past which it would be stale even if it landed.
-const COMPOSING_STALE_MILLISECONDS = 3000;
 // When the last signal was sent, by this page's monotonic clock.
 let composingAt = -Infinity;
-// The signal still out, or `null`: its abort controller, and the conversation and session
-// half it was sent for. **One out at a time**, so a slow hub is never sent a queue of them
-// and the browser's few connections to this origin are not held by signals. **And never
-// one that blocks the next for long**: a later signal replaces it — aborting it — once it
-// has been out past the stale bound, or at once where it was for another conversation or
-// another session. So a request that never settles costs one signal, not the rest of the
-// typing. No clock is armed for it: the next keystroke is when the question is asked.
-let composingOut = null;
+// Whether a signal is still out. **One out at a time, and it is never replaced**: the
+// next is sent only once it has settled, whichever way. A signal the browser abandoned
+// is not one the gateway abandoned — the gateway holds one of its few hub connections
+// (ADR-0168 §8) until the hub answers the relay, whatever the browser does — so a page
+// that replaced a slow signal with a fresh one would take a further connection for each,
+// and the person's own message would meet `hub-connection-ceiling`. A page that waits
+// takes one at most. While one is out, the typing goes unsignalled: the hub's start wait
+// then ends on its own figures, no later than `chat_composing_cap` (§5:2), and a reply
+// that crosses a follow-up does no harm, because the next activation sees it (§5).
+let composingOut = false;
 
 async function sendComposing() {
   const half = headerHalf();
   const conversation = chat.selected;
-  if (half === null || conversation === null) {
+  if (half === null || conversation === null || composingOut) {
     return;
   }
   const now = performance.now();
   if (now - composingAt < COMPOSING_EVERY_MILLISECONDS) {
     return;
   }
-  if (composingOut !== null) {
-    const same = composingOut.conversation === conversation && composingOut.half === half;
-    if (same && now - composingAt < COMPOSING_STALE_MILLISECONDS) {
-      return;
-    }
-    composingOut.stopping.abort();
-  }
-  const out = { stopping: new AbortController(), conversation: conversation, half: half };
   composingAt = now;
-  composingOut = out;
+  composingOut = true;
   try {
     const response = await fetch("/chat/composing", {
       method: "POST",
       headers: admitted(half, true),
       body: JSON.stringify({ conversation_id: conversation }),
-      signal: out.stopping.signal,
     });
     await response.text();
   } catch (_) {
-    // A lost or replaced signal is a signal not sent, and the next keystroke past the
-    // cadence sends another; the gateway having gone is said by whatever the person
-    // does next.
+    // A lost signal is a signal not sent, and the next keystroke past the cadence sends
+    // another; the gateway having gone is said by whatever the person does next.
   } finally {
-    if (composingOut === out) {
-      composingOut = null;
-    }
+    composingOut = false;
   }
 }
 
