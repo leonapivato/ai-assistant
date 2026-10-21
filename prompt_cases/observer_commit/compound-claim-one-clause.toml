@@ -6,6 +6,9 @@ came_from = "2026-10-21"
 set = "development"
 samples = 1
 
+[flags]
+person = false
+
 [property]
 check = "read"
 read = """Where the wording keeps both clauses, no support has backs_as_worded true: P1 states \

@@ -66,6 +66,31 @@ async def test_the_observer_is_wired_over_the_roots_own_stores_and_the_windows_s
         await engine.aclose()
 
 
+async def test_the_observer_holds_the_person_model_store_only_where_the_switch_is_on(
+    tmp_path: Path,
+) -> None:
+    """ADR-0338 §9:8, §11:2: the one store the person block reads, or none at all."""
+    off = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path / "off")
+    try:
+        observer = _observer(off)
+        assert (observer._people, observer._pins, observer._writer._pins) == (None, None, None)
+    finally:
+        await off.aclose()
+    on = build_engine(
+        Settings(embedder=EmbedderKind.HASHING, person_model=True), data_dir=tmp_path / "on"
+    )
+    try:
+        observer = _observer(on)
+        blocks = on._person_blocks
+        assert blocks is not None
+        assert observer._people is blocks._store, "the one store, read and written"
+        assert observer._pins is not None
+        assert observer._writer._pins is observer._pins, "the guard runs the run's own pass"
+        assert observer._pins._memory is on._memory
+    finally:
+        await on.aclose()
+
+
 async def test_every_bound_is_the_roots_constant_and_the_budget_is_the_setting(
     tmp_path: Path,
 ) -> None:

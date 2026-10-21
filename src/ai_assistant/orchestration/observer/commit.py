@@ -46,7 +46,7 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Final, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, ValidationError
+from pydantic import AwareDatetime, BaseModel, ConfigDict, JsonValue, ValidationError
 
 from ai_assistant.core.types import (
     BeliefBand,
@@ -110,6 +110,7 @@ __all__ = [
     "CommitReply",
     "CommitView",
     "Create",
+    "PersonCommitReply",
     "RaiseQuestion",
     "RecordUse",
     "Resolve",
@@ -197,6 +198,31 @@ class CommitReply(BaseModel):
     resolves: _ProposedResolve | None = None
     track_record: Literal["held_up", "let_down", "neither"] | None = None
     note: str = ""
+
+
+class PersonCommitReply(CommitReply):
+    """The commit step's reply where it is given a person's fields (ADR-0338 §9:4-§9:5).
+
+    ``style`` says whether the memory the action creates or adds supports to states how
+    the person wants Aether to speak to them, and ``pin`` whether it matters in every
+    conversation. Each is read as any JSON value and counts only where it is ``true``:
+    a reply that leaves them out, as one written under an override that does not carry
+    the person sections does, records nothing more, and a value of another kind costs
+    the reply nothing.
+    """
+
+    style: JsonValue = None
+    pin: JsonValue = None
+
+    @property
+    def marks_style(self) -> bool:
+        """Whether the step said the memory states how the person wants to be spoken to."""
+        return self.style is True
+
+    @property
+    def suggests_pin(self) -> bool:
+        """Whether the step said the memory matters in every conversation."""
+        return self.pin is True
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,12 +363,18 @@ class Create:
     ``asked_on`` is the support a ``policy_ask`` question rests on, where the policy
     asks (§13:1-§13:2): the new memory's leading support, ``against``, never a
     confirmation or an inference; ``None`` where none can be.
+
+    ``conflict`` is the ``conflict`` question a retirement raises instead where the
+    memory it retires ranks above its cited support once that memory's pins have added
+    their supports (ADR-0338 §9:9, ADR-0328 §6:5, §13:1); ``None`` on a create retiring
+    nothing, or where no support a question may rest on was read.
     """
 
     memory: Memory
     retiring: MemoryRetirement | None = None
     asked_on: MemorySupport | None = None
     rationale: str = _RATIONALE
+    conflict: RaiseQuestion | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -553,7 +585,12 @@ def _exchange_of(
     }
 
 
-def commit_messages(view: CommitView, instruction: RenderedPrompt) -> list[Message]:
+def commit_messages(
+    view: CommitView,
+    instruction: RenderedPrompt,
+    *,
+    person: dict[str, FrozenJson] | None = None,
+) -> list[Message]:
     """The commit step's one call for a finding: its instruction and what it is shown.
 
     Args:
@@ -561,13 +598,19 @@ def commit_messages(view: CommitView, instruction: RenderedPrompt) -> list[Messa
         instruction: ``OBSERVER_COMMIT_PROMPT`` rendered from its template, default or
             override, as the composition root read it at start (ADR-0334 §3:5); the
             call's given entry records its ``prompt`` key (ADR-0335 §9:1).
+        person: The leaving episode's person's five fields, beside what ADR-0329 §9:3
+            gives the step (ADR-0338 §9:1), shown first under ``person``; ``None``
+            where the step is given none, and the payload is then as it was.
 
     Returns:
         The conversation the commit step's route completes.
     """
+    payload = view.payload()
+    if person is not None:
+        payload = {"person": person, **payload}
     return [
         Message(role=Role.SYSTEM, content=instruction.text),
-        Message(role=Role.USER, content=json.dumps(view.payload(), ensure_ascii=True)),
+        Message(role=Role.USER, content=json.dumps(payload, ensure_ascii=True)),
     ]
 
 
@@ -1051,7 +1094,18 @@ def _retiring(
         )
     except ValidationError as exc:
         raise _Refused(FindingUnwritten.CHECK_FAILED) from exc
-    return Create(memory=memory, retiring=retiring, asked_on=created.asked_on)
+    try:
+        # ADR-0338 §9:9: what the retirement raises instead, should the pins the writer
+        # confirms first lift the memory above the cited support.
+        conflict: RaiseQuestion | None = RaiseQuestion(
+            target=target,
+            kind=OpenQuestionKind.CONFLICT,
+            asks=_CONFLICT_ASKS + memory.content,
+            support=_question_support(cited, SupportDirection.AGAINST, supports, context),
+        )
+    except _Refused:
+        conflict = None
+    return Create(memory=memory, retiring=retiring, asked_on=created.asked_on, conflict=conflict)
 
 
 def _question_support(

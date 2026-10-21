@@ -152,18 +152,19 @@ async def test_a_calls_entries_hold_its_request_and_its_reply() -> None:
     (call,) = scout.calls
     assert given.kind is DiagnosticKind.GIVEN
     assert _body(given)["messages"] == [one.model_dump(mode="json") for one in call.messages]
-    # ADR-0335 §9:1: neither prompt declares a flag, so each key records an empty set.
+    # ADR-0335 §9:1: each prompt's one flag, false where no person-model store is wired
+    # (ADR-0338 §11:2), as the instruction was rendered under it.
     assert _body(given)["prompt"] == {
         "name": "observer_scout",
         "version": default_prompt(OBSERVER_SCOUT_PROMPT).version,
         "origin": "default",
-        "flags": {},
+        "flags": {"person": False},
     }
     assert _body(commit_given)["prompt"] == {
         "name": "observer_commit",
         "version": default_prompt(OBSERVER_COMMIT_PROMPT).version,
         "origin": "default",
-        "flags": {},
+        "flags": {"person": False},
     }
     assert _body(returned)["reply"] == _scout("P1")
     assert _body(commit_given)["finding"] == {
@@ -461,7 +462,7 @@ def _target(activation_id: str = "act", episode_id: str = "activation:act") -> D
 
 
 _ASKED = (MessageType(role=Role.USER, content="{}"),)
-_SCOUT_PROMPT = default_prompt(OBSERVER_SCOUT_PROMPT).rendered()
+_SCOUT_PROMPT = default_prompt(OBSERVER_SCOUT_PROMPT).rendered(flags={"person": False})
 
 
 async def test_one_call_over_several_episodes_writes_under_each_activation() -> None:

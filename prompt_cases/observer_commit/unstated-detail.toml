@@ -6,6 +6,9 @@ came_from = "2026-10-21"
 set = "held_out"
 samples = 1
 
+[flags]
+person = false
+
 [property]
 check = "read"
 read = """The wording, and every support's note, state nothing P1 does not: no city, no \

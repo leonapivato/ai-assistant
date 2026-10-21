@@ -65,6 +65,18 @@ which a support's origin could be set (ADR-0328 §4:2), so it is skipped too.
 the steps, never a fact, a wording, a claim or an identifier that may carry personal
 data.
 
+**The person model, where the root wires its store** (ADR-0338 §9). Each run, before
+its episodes, confirms the pins (§9:6, ``PinConfirmations``). Each attempt reads the
+five fields of the leaving episode's person (§2:5, §7:4), and both steps are given them
+under the prompts' ``person`` flag (§9:1): the scout may then propose field suggestions
+and mark a finding as only restating a field, which is not committed (§9:2-§9:3), and
+the commit step says whether the memory its action creates or adds supports to states
+how the person wants to be spoken to, and whether it matters in every conversation,
+which code records as a style mark and a pin suggestion (§9:4-§9:5). Where no store is
+wired, or the episode is no person's, the flag is false: each step's instruction renders
+as it did, its reply is read in the shape it was, and nothing is read from or written to
+the person model (§11:2).
+
 **What it shows the owner goes to the diagnostic record** (ADR-0333 §2), where the record
 is on: each call's request and reply, the scout's findings, each finding's outcome with
 the words its commit decided, and how each attempt ended, under the leaving episode's
@@ -87,6 +99,7 @@ from ai_assistant.core.diagnostics import failure_body
 from ai_assistant.core.errors import (
     MemoryStoreError,
     ModelError,
+    PersonModelStoreError,
     PlanningError,
     StoryStoreError,
 )
@@ -103,23 +116,31 @@ from ai_assistant.core.types import (
     ObservationWrite,
     ObserverCall,
     ObserverStep,
+    PersonModelWriteKind,
     Placement,
+    ProposedSuggestion,
+    SuggestionKind,
 )
 from ai_assistant.orchestration.observer.commit import (
     CommitReply,
+    PersonCommitReply,
     checked,
     commit_messages,
     commit_view,
 )
 from ai_assistant.orchestration.observer.entries import Diagnosed, ObserverEntries
+from ai_assistant.orchestration.observer.person import PinConfirmations, person_of
 from ai_assistant.orchestration.observer.prompts import (
     OBSERVER_COMMIT_PROMPT,
     OBSERVER_SCOUT_PROMPT,
+    PERSON_FLAG,
 )
 from ai_assistant.orchestration.observer.reading import EpisodeReader, episode_text
 from ai_assistant.orchestration.observer.scout import (
+    PersonScoutReply,
     ScoutReply,
     parsed,
+    person_proposals,
     proposed_findings,
     scout_messages,
 )
@@ -134,11 +155,13 @@ if TYPE_CHECKING:
         DiagnosticSink,
         MemoryStore,
         ModelProvider,
+        PersonModelStore,
         PlanStore,
         StoryStore,
     )
     from ai_assistant.core.types import Message, ObservationFinding
     from ai_assistant.orchestration.observer.commit import Checked
+    from ai_assistant.orchestration.observer.person import PersonFields
     from ai_assistant.orchestration.observer.reading import Reading
     from ai_assistant.orchestration.understanding import EpisodeSelector
     from ai_assistant.orchestration.writes import MemoryWriteStage
@@ -212,6 +235,7 @@ class RunOutcome:
         waiting: Episodes it attempted that wait for a retry or the budget.
         stuck: Episodes it marked stuck (§16:5).
         held: Whether the daily budget stopped it (§16:9).
+        pinned: The ``pinned`` supports its pin pass added (ADR-0338 §9:6).
     """
 
     busy: bool = False
@@ -220,6 +244,7 @@ class RunOutcome:
     waiting: int = 0
     stuck: int = 0
     held: bool = False
+    pinned: int = 0
 
 
 class _Held(Exception):  # noqa: N818 — a control-flow signal: the budget, not a failure
@@ -265,8 +290,9 @@ class Observer:
     """The observer: a background stage that commits what a leaving episode shows (§15:1).
 
     It holds by injection its two model routes, the memory store, the write stage, the
-    plan store, the story store and the episode selector (§15:1, §15:3), and every bound
-    as :class:`ObserverLimits`. The composition root builds it; nothing here reads a
+    plan store, the story store and the episode selector (§15:1, §15:3), the
+    person-model store where one is wired (ADR-0338 §9:8), and every bound as
+    :class:`ObserverLimits`. The composition root builds it; nothing here reads a
     setting.
     """
 
@@ -286,6 +312,7 @@ class Observer:
         now: Callable[[], datetime],
         mint: Callable[[], str] | None = None,
         diagnostics: DiagnosticSink | None = None,
+        person_model: PersonModelStore | None = None,
     ) -> None:
         """Wire the observer.
 
@@ -312,6 +339,9 @@ class Observer:
                 one where ``None``.
             diagnostics: The diagnostic record's write seam (ADR-0333 §2:7), or ``None``
                 where ``diagnostic_record`` is false and no entry is built.
+            person_model: The person-model store (ADR-0338 §9:8), which must hold the
+                pins of memories ``memory`` holds; ``None`` where ``person_model`` is
+                off, and then nothing of the person model is read or written.
 
         Raises:
             ValueError: If ``scout_prompt`` or ``commit_prompt`` is not a template of
@@ -340,7 +370,15 @@ class Observer:
             story_episodes=limits.story_episodes,
             related=limits.related,
         )
-        self._writer = FindingWriter(writes=writes, memory=memory, now=self._now, mint=self._mint)
+        self._people = person_model
+        self._pins = (
+            None
+            if person_model is None
+            else PinConfirmations(people=person_model, memory=memory, writes=writes, now=self._now)
+        )
+        self._writer = FindingWriter(
+            writes=writes, memory=memory, now=self._now, mint=self._mint, pins=self._pins
+        )
         self._lock = asyncio.Lock()
         # A finding as this process last built it, while the plan store has not taken
         # the write carrying it: an outcome decided, or a write landed on a memory and
@@ -376,13 +414,16 @@ class Observer:
             skipped=outcome.skipped,
             waiting=outcome.waiting,
             stuck=outcome.stuck,
+            pinned=outcome.pinned,
         )
         return outcome
 
     async def _run(self) -> RunOutcome:
+        # ADR-0338 §9:6: before the episodes, with no model call and against no budget.
+        pinned = 0 if self._pins is None else await self._pins.run_pass()
         window = await self._episodes(frozenset())
         queue = await self.due(window)
-        outcome = RunOutcome()
+        outcome = RunOutcome(pinned=pinned)
         for episode, held in queue[: self._limits.per_run]:
             try:
                 state = await self._attempted(episode, held, window)
@@ -487,6 +528,7 @@ class Observer:
             MemoryStoreError,
             StoryStoreError,
             PlanningError,
+            PersonModelStoreError,
             WriteBlocked,
             _Unparsed,
         ) as exc:
@@ -535,12 +577,15 @@ class Observer:
         with an outcome stay as recorded (§16:4).
         """
         reading = await self._reader.read(episode, window)
+        # ADR-0338 §2:5, §7:4: the leaving episode's person's fields, read once per attempt
+        # and given to both steps; none where no store is wired or it is no person's.
+        person = None if self._people is None else await person_of(self._people, episode)
         findings = attempt.record.findings
         unknown = any(one.outcome is None and one.supply is None for one in findings)
         if not findings or unknown:
             kept = tuple(one for one in findings if one.outcome is not None)
             self._forget(episode.id)
-            await self._scouted(reading, attempt, kept)
+            await self._scouted(reading, attempt, kept, person)
         else:
             _narrow(attempt, reading.supplied)
         for finding_id in [one.id for one in attempt.record.findings if one.outcome is None]:
@@ -550,7 +595,7 @@ class Observer:
             # An outcome decided before its record failed to be written is recorded as
             # decided, never committed again over writes that already landed (§16:1).
             if current.outcome is None:
-                current, decided = await self._committed(finding_id, reading, attempt)
+                current, decided = await self._committed(finding_id, reading, attempt, person)
             self._unsaved[key] = current
             done = tuple(
                 current if one.id == finding_id else one for one in attempt.record.findings
@@ -581,31 +626,92 @@ class Observer:
         )
 
     async def _scouted(
-        self, reading: Reading, attempt: _Attempt, kept: tuple[ObservationFinding, ...]
+        self,
+        reading: Reading,
+        attempt: _Attempt,
+        kept: tuple[ObservationFinding, ...],
+        person: PersonFields | None,
     ) -> None:
         """The scout's one call, and its findings recorded after those kept (§9:1-§9:2).
 
         Each new finding carries the meet of what the scout was supplied (§12:6), so a
         commit in a later attempt, by this process or after a restart, starts from it.
+
+        Given a person (ADR-0338 §9:1-§9:3), a finding that only restates a field is
+        recorded already decided, nothing kept, and is never committed; its suggestion,
+        and each the scout proposed beside its findings, is recorded before the findings
+        are, so a store that fails leaves no finding behind, and the retry scouts again
+        rather than losing a suggestion (§16:1).
         """
+        rendered = None if person is None else person.rendered()
         reply = await self._call(
             attempt,
             ObserverStep.SCOUT,
             self._scout,
-            lambda instruction: scout_messages(reading, instruction),
+            lambda instruction: scout_messages(reading, instruction, person=rendered),
+            person=person is not None,
         )
-        proposal = parsed(reply, ScoutReply)
+        shape: type[ScoutReply | PersonScoutReply] = (
+            ScoutReply if person is None else PersonScoutReply
+        )
+        proposal = parsed(reply, shape)
         if proposal is None:
             raise _Unparsed(ObserverStep.SCOUT)
-        findings, dropped = proposed_findings(proposal, reading, numbered_from=_next_number(kept))
+        numbered_from = _next_number(kept)
+        findings, dropped = proposed_findings(proposal, reading, numbered_from=numbered_from)
         supply = Placement.narrowest_of(reading.supplied)
         _log.info("observer_scout", stage="scout", findings=len(findings), dropped=dropped)
         proposed = tuple(_updated(one, supply=supply) for one in findings)
+        restating: frozenset[str] = frozenset()
+        if person is not None and isinstance(proposal, PersonScoutReply):
+            proposals = person_proposals(proposal, reading, numbered_from=numbered_from)
+            restating = frozenset(proposals.restating)
+            await self._suggested(person, proposals.to_record)
+            not_kept = FindingOutcome(at=self._now(), unwritten=FindingUnwritten.NOT_KEPT)
+            proposed = tuple(
+                _updated(one, outcome=not_kept) if one.id in restating else one for one in proposed
+            )
+            _log.info(
+                "observer_scout",
+                stage="person",
+                restating=len(restating),
+                suggestions=len(proposals.to_record),
+                dropped=proposals.dropped,
+            )
         await self._save(attempt, findings=(*kept, *proposed))
         await self._entries.findings(attempt.diagnosed, proposed, dropped)
+        for one in proposed:
+            if one.id in restating and one.outcome is not None:
+                await self._entries.outcome(attempt.diagnosed, one, one.outcome)
+
+    async def _suggested(
+        self, person: PersonFields, suggestions: Sequence[ProposedSuggestion]
+    ) -> None:
+        """Record each suggestion as pending, unless the store says it changes nothing.
+
+        The store refuses a value the profile holds, an equal suggestion pending or
+        dismissed, and a memory already pinned (ADR-0338 §9:2, §9:5), and validates a
+        field's value as it validates a field's (§3:2): a refusal is logged under its
+        code-owned reason, never the value, and the next is recorded.
+
+        Raises:
+            PersonModelStoreError: If the store cannot be written: the attempt fails.
+        """
+        people = self._people
+        if people is None:  # pragma: no cover - called only with a person
+            return
+        for one in suggestions:
+            written = await people.record_suggestion(person.person_id, one)
+            if written.kind is PersonModelWriteKind.REFUSED:
+                _log.info(
+                    "observer_person",
+                    stage="suggestion",
+                    result="refused",
+                    reason=None if written.refusal is None else written.refusal.value,
+                )
 
     async def _committed(
-        self, finding_id: str, reading: Reading, attempt: _Attempt
+        self, finding_id: str, reading: Reading, attempt: _Attempt, person: PersonFields | None
     ) -> tuple[ObservationFinding, _Decided]:
         """One finding's commit call, code's checks, and its writes (§9:3-§9:5, §12).
 
@@ -619,7 +725,7 @@ class Observer:
         earlier = await self._recovered(finding.written)
         if earlier != finding.written:
             _set(attempt, _updated(finding, written=earlier))
-        decided = await self._decision(finding_id, reading, attempt, earlier)
+        decided = await self._decision(finding_id, reading, attempt, earlier, person)
         outcome = decided.outcome
         if earlier:
             outcome = _with_writes(outcome, earlier)
@@ -662,11 +768,15 @@ class Observer:
         reading: Reading,
         attempt: _Attempt,
         earlier: tuple[ObservationWrite, ...],
+        person: PersonFields | None,
     ) -> _Decided:
         """This commit's call, checks and writes: what it wrote, or why nothing was.
 
         Every write that lands is put in the finding's ``written`` beside ``earlier``
-        and saved before the next is made (§16:1).
+        and saved before the next is made (§16:1). Given a person, the style mark and the
+        pin suggestion the step asked for are recorded once the memory writes landed and
+        before the outcome is, so a store that fails fails the attempt and the retry
+        decides the finding again (ADR-0338 §9:4-§9:5).
         """
         view = await commit_view(
             _finding(attempt, finding_id),
@@ -680,14 +790,19 @@ class Observer:
             return _Decided(outcome=_check_failed(self._now()))
         _narrow(attempt, view.supplied)
         supply = _finding(attempt, finding_id).supply
+        rendered = None if person is None else person.rendered()
         reply = await self._call(
             attempt,
             ObserverStep.COMMIT,
             self._commit,
-            lambda instruction: commit_messages(view, instruction),
+            lambda instruction: commit_messages(view, instruction, person=rendered),
             finding=_finding(attempt, finding_id),
+            person=person is not None,
         )
-        decision = parsed(reply, CommitReply)
+        shape: type[CommitReply | PersonCommitReply] = (
+            CommitReply if person is None else PersonCommitReply
+        )
+        decision = parsed(reply, shape)
         if decision is None:
             raise _Unparsed(ObserverStep.COMMIT)
         verdict = checked(
@@ -710,9 +825,53 @@ class Observer:
         outcome = await self._writer.write(
             verdict, shown=[one.memory for one in view.similar], landed=landed
         )
+        if person is not None and isinstance(decision, PersonCommitReply):
+            await self._marked(person, decision, outcome, episode=attempt.record.episode)
         return _Decided(outcome=outcome, checked=verdict, note=decision.note)
 
-    async def _call(
+    async def _marked(
+        self,
+        person: PersonFields,
+        decision: PersonCommitReply,
+        outcome: FindingOutcome,
+        *,
+        episode: str,
+    ) -> None:
+        """The style mark and the pin suggestion a commit asked for (ADR-0338 §9:4-§9:5).
+
+        Each on the memory the commit created or added supports to, as its outcome names
+        it, never one it only retired, questioned or recorded a use of. The store keeps a
+        memory already marked, or whose mark the person removed, unmarked again, and
+        records no pin suggestion for a memory pinned or one equal to a pending or
+        dismissed one.
+
+        Raises:
+            PersonModelStoreError: If the store cannot be written: the attempt fails.
+        """
+        people = self._people
+        if people is None or not (decision.marks_style or decision.suggests_pin):
+            return
+        kept = (MemoryOperationKind.CREATE, MemoryOperationKind.ADD_SUPPORT)
+        memories = [
+            one.memory
+            for one in outcome.writes
+            if any(kind in one.operations for kind in kept)
+            and not RETIRING_OPERATIONS.intersection(one.operations)
+        ]
+        for memory_id in memories:
+            if decision.marks_style:
+                await people.add_style_mark(person.person_id, memory_id)
+            if decision.suggests_pin:
+                await self._suggested(
+                    person,
+                    [
+                        ProposedSuggestion(
+                            kind=SuggestionKind.PIN, memory_id=memory_id, episode_id=episode
+                        )
+                    ],
+                )
+
+    async def _call(  # noqa: PLR0913 — the step, its route, its request, its finding and flag
         self,
         attempt: _Attempt,
         step: ObserverStep,
@@ -720,17 +879,19 @@ class Observer:
         request: Callable[[RenderedPrompt], list[Message]],
         *,
         finding: ObservationFinding | None = None,
+        person: bool = False,
     ) -> str:
         """One model call, inside the daily budget (§16:9), recorded on the attempt.
 
         Its given entry is written once the budget admits it and before it is made, and
         its returned entry once it returns or fails (ADR-0333 §2:2); a failure is
         re-raised unchanged. ``request`` builds the call's messages around the step's
-        instruction, rendered here so that the given entry records the ``prompt`` key
-        of the very instruction they carry (ADR-0334 §8:2, ADR-0335 §9:1); the
-        observer's prompts declare no flag, so it records none.
+        instruction, rendered here under ``person`` — whether the step is given a
+        person's fields (ADR-0338 §9:1) — so that the given entry records the ``prompt``
+        key, flag included, of the very instruction they carry (ADR-0334 §8:2, ADR-0335
+        §9:1).
         """
-        instruction = self._prompts[step].rendered()
+        instruction = self._prompts[step].rendered(flags={PERSON_FLAG: person})
         messages = request(instruction)
         at = self._now()
         made = await self._plans.observer_calls_since(at - _A_DAY)

@@ -32,6 +32,17 @@ retried and in the end set aside as stuck (§16:4-§16:5): ``MemoryStoreError`` 
 store's failure as well as a refusal, and only a retry tells a passing outage from a
 refusal, so neither is recorded as a terminal outcome.
 
+**A retirement is ruled against the standing its memory's pins give it** (ADR-0338
+§9:9). Before a proposal that ends, marks wrong or replaces a stored memory, the pin pass
+is run on that memory alone (``PinConfirmations``): each pin a person made on their own
+profile that no support of it points at yet earns its ``pinned`` support, and the memory
+is read again. Where that lifts the memory above the support the retirement cites, the
+retirement is not proposed, and the ``conflict`` question the commit decided beside it is
+raised instead (ADR-0328 §6:5, §13:1). Those supports are the pin pass's writes, never
+the finding's, so its outcome does not list them; a retirement that already landed while
+a pin was being made stands, and the next run's pass adds that pin's support to the
+retired memory (§9:10).
+
 **What one finding wrote is handed to the caller as each write lands** (§16:1), before
 the write is verified and before anything else is read or written, so the caller can put
 it on the durable record and a later failure, a cancellation or a stop loses none of it.
@@ -53,6 +64,7 @@ from ai_assistant.core.errors import (
     UnresolvedEvidenceError,
 )
 from ai_assistant.core.types import (
+    BeliefBand,
     FindingOutcome,
     FindingUnwritten,
     Memory,
@@ -66,6 +78,10 @@ from ai_assistant.core.types import (
     ObservationWrite,
     OpenQuestion,
     OpenQuestionKind,
+    PinPart,
+    SupportOrigin,
+    origin_standing,
+    standing_rank,
 )
 from ai_assistant.orchestration.observer.commit import (
     AddSupports,
@@ -90,6 +106,7 @@ if TYPE_CHECKING:
         Placement,
         TrackRecordEntry,
     )
+    from ai_assistant.orchestration.observer.person import PinConfirmations
     from ai_assistant.orchestration.writes import MemoryWriteStage
 
 __all__ = ["FindingWriter", "Landed", "WriteBlocked", "policy_ask_wording"]
@@ -185,6 +202,7 @@ class FindingWriter:
         memory: MemoryStore,
         now: Callable[[], datetime],
         mint: Callable[[], str],
+        pins: PinConfirmations | None = None,
     ) -> None:
         """Wire the writer.
 
@@ -193,11 +211,15 @@ class FindingWriter:
             memory: The memory store a memory is read again from before it is written.
             now: The clock an operation, a question and an outcome are stamped from.
             mint: Mints a fresh id for a question.
+            pins: The pin pass a retirement first runs on its memory (ADR-0338 §9:9),
+                where the observer holds a person-model store; ``None`` where it holds
+                none, and a retirement is proposed as it was.
         """
         self._writes = writes
         self._memory = memory
         self._now = now
         self._mint = mint
+        self._pins = pins
         self._expected: dict[str, int] = {}
         self._shown: dict[str, Memory] = {}
         self._ledger = _Ledger()
@@ -291,8 +313,18 @@ class FindingWriter:
         """§12:2, §12:4: one proposal to ``ingest``, and what its ruling wrote."""
         retiring = create.retiring
         if retiring is not None:
+            shown = await self._fresh(retiring.memory)
+            fresh = await self._confirmed(shown)
+            if fresh is not shown and self._outranks(fresh, create):
+                # ADR-0338 §9:9, ADR-0328 §6:5: the pins lifted the memory above what the
+                # retirement cites, so its question is raised instead (§13:1).
+                conflict = create.conflict
+                if conflict is None:
+                    raise _Refusal(FindingUnwritten.REFUSED)
+                await self._raise(fresh, conflict.kind, conflict.asks, conflict.support, ledger)
+                return None
             retiring = MemoryRetirement(
-                memory=await self._fresh(retiring.memory),
+                memory=fresh,
                 kind=retiring.kind,
                 cites=retiring.cites,
                 note=retiring.note,
@@ -351,6 +383,60 @@ class FindingWriter:
                 ledger.wrote(retired.memory, *retired.operations)
             await self._kept()
         return None
+
+    async def _confirmed(self, memory: Memory) -> Memory:
+        """``memory`` with the ``pinned`` supports its own pins lack added (ADR-0338 §9:9).
+
+        Read again after they land, and adopted only where the pass's own add supports
+        are all that changed; the revision the retirement then expects is the one they
+        left (ADR-0219 §2).
+
+        Raises:
+            _Refusal: ``check_failed`` where the store no longer holds it as current.
+            MemoryStoreStaleError: Where another writer moved it beside the pass.
+            MemoryStoreError: Where the history read fails.
+            PersonModelStoreError: Where the pins cannot be read: the attempt fails, and
+                the retry reads them again.
+        """
+        if self._pins is None:
+            return memory
+        added = (await self._pins.confirm({memory.id})).get(memory.id, 0)
+        if not added:
+            return memory
+        after = await self._memory.get(memory.id)
+        if not isinstance(after, Memory):
+            raise _Refusal(FindingUnwritten.CHECK_FAILED)
+        if not _pinned(memory, after, added):
+            msg = "a memory moved beside the observer's confirmation of its pins"
+            raise MemoryStoreStaleError(msg)
+        self._expected[memory.id] = after.revision
+        return after
+
+    @staticmethod
+    def _outranks(target: Memory, create: Create) -> bool:
+        """Whether ``target`` stands above the support its retirement cites (§6:5).
+
+        Also where a confirmation is cited over a memory its pins made an assertion,
+        which only the commit step, shown the memory as it now stands, can rule on
+        (ADR-0329 §12:4): that is read as stale, and the finding decided again.
+
+        Raises:
+            MemoryStoreStaleError: Where a confirmation is cited over an assertion.
+        """
+        retiring = create.retiring
+        if retiring is None:  # pragma: no cover - called on a retirement alone
+            return False
+        cited = create.memory.support_at(retiring.cites)
+        if cited is None:  # pragma: no cover - the commit cites a support it adds
+            return False
+        if (
+            cited.origin is SupportOrigin.CONFIRMATION
+            and target.band is BeliefBand.ASSERTED
+            and retiring.memory.band is not BeliefBand.ASSERTED
+        ):
+            msg = "a memory's pins made it an assertion the retirement was not decided on"
+            raise MemoryStoreStaleError(msg)
+        return standing_rank(origin_standing(cited.origin)) < standing_rank(target.standing)
 
     async def retirements(self, installed: Sequence[str]) -> tuple[ObservationWrite, ...]:
         """The end on each memory the replacements ``installed`` retired (ADR-0328 §5:6).
@@ -616,6 +702,14 @@ def _extends(
         and all(one.by is MemoryWriterName.OBSERVER for one in tail)
         and after.track_record == before.track_record
         and after.placement == (before.placement if placement is None else placement)
+    )
+
+
+def _pinned(before: Memory, after: Memory, added: int) -> bool:
+    """``added`` add supports appended, each citing a pin, and nothing else changed."""
+    return _extends(before, after, added) and all(
+        one.kind is MemoryOperationKind.ADD_SUPPORT and isinstance(one.cites, PinPart)
+        for one in after.operations[len(before.operations) :]
     )
 
 

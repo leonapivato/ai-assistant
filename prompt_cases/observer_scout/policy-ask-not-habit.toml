@@ -7,6 +7,9 @@ came_from = "2026-10-21"
 set = "development"
 samples = 3
 
+[flags]
+person = false
+
 [property]
 check = "read"
 read = """Proposes no finding that the user likes to confirm, approve or be asked about \
