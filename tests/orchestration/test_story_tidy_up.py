@@ -432,10 +432,14 @@ async def _refused(reply: str, stories: FakeStoryStore, memory: FakeMemoryStore,
             json.dumps({"lines": [{"text": "x", "cites": ["N1"]}], "flags": []}),
             "the reply did not parse",
         ),
-        # Anything but lines and flags (§5:2), ADR-0300's safety net included.
-        (json.dumps({"lines": ["x"], "safety_net": []}), "the reply did not parse"),
-        (json.dumps({"lines": ["x"], "story": "made up"}), "the reply did not parse"),
         (json.dumps({"lines": [7]}), "the reply did not parse"),
+        # A stray key does not save a reply whose named fields fail (#3246).
+        (json.dumps({"summary": ["x"], "safety_net": []}), "the reply did not parse"),
+        (json.dumps({"lines": [7], "story": "made up"}), "the reply did not parse"),
+        (
+            _reply(["Trip."], flags=[{"story": "S1", "why": "made up"}]),
+            "the reply did not parse",
+        ),
         (_reply(["   "]), "a line's text is blank, not encodable, or over a line's bound"),
         (
             _reply(["x" * (STORY_NOTE_MAX_CHARS + 1)]),
@@ -461,6 +465,57 @@ async def test_an_output_that_fails_to_parse_or_a_check_is_refused_whole(
 ) -> None:
     stories, memory, trip = await _trip()
     assert await _refused(reply, stories, memory, trip) == problem
+
+
+@pytest.mark.parametrize(
+    ("reply", "stray"),
+    [
+        # ADR-0300's safety net, which ADR-0303 dropped: nothing is taken from it.
+        (json.dumps({"lines": ["A camping trip."], "safety_net": [{"text": "x"}]}), 1),
+        (json.dumps({"lines": ["A camping trip."], "flags": [], "story_zz": "made up"}), 1),
+        (
+            json.dumps(
+                {
+                    "lines": ["A camping trip."],
+                    "flags": [{"kind": "two_matters", "why_zz": "a dentist", "command": None}],
+                    "aside_zz": "x",
+                }
+            ),
+            3,
+        ),
+    ],
+)
+async def test_a_stray_key_is_dropped_and_counted_and_the_output_written(
+    reply: str, stray: int
+) -> None:
+    """#3246: a key the reply's shape does not name is dropped, counted, and never logged."""
+    stories, memory, trip = await _trip()
+
+    with capture_logs() as logs:
+        outcome = await _tidy_up(FakeModelProvider(reply), stories, memory).run(trip)
+
+    assert outcome.result is TidyUpResult.WRITTEN
+    assert await _summary(stories, trip) == ["A camping trip."]
+    counted = [one for one in logs if one["event"] == "story_tidy_up_stray_keys"]
+    assert counted == [
+        {
+            "event": "story_tidy_up_stray_keys",
+            "log_level": "info",
+            "stage": "tidy_up",
+            "stray": stray,
+        }
+    ]
+    for name in ("safety_net", "story_zz", "made up", "why_zz", "command", "aside_zz"):
+        assert name not in repr(logs)
+
+
+async def test_an_output_with_no_stray_key_logs_no_count() -> None:
+    stories, memory, trip = await _trip()
+
+    with capture_logs() as logs:
+        await _tidy_up(FakeModelProvider(_reply(["A camping trip."])), stories, memory).run(trip)
+
+    assert [one for one in logs if one["event"] == "story_tidy_up_stray_keys"] == []
 
 
 async def test_lines_over_the_summarys_cap_are_refused_whole_before_the_store_is_asked() -> None:

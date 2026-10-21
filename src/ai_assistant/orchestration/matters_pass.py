@@ -88,7 +88,9 @@ the phases' decision gives episodes notes (#2723), which binds no lane before th
 
 **It logs code-owned text only**: its counts, and for each refused completion whether
 the parse or a check refused it and the code-owned problem, never a story id, a line,
-a note, an episode's content or the reply's own text (ADR-0275 §8).
+a note, an episode's content or the reply's own text (ADR-0275 §8). A reply carrying
+keys its decision's shape does not name is read without them, and the pass logs how
+many it dropped, never which (#3246).
 """
 
 from __future__ import annotations
@@ -120,6 +122,7 @@ from ai_assistant.core.types import (
     StoryRefusalReason,
 )
 from ai_assistant.orchestration.episode_reads import is_open_episode
+from ai_assistant.orchestration.reply_keys import shape_keys, stray_keys
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_flags import (
     StoryRecords,
@@ -296,19 +299,19 @@ _NO_SUMMARY: Final = "missing: no summary has been written for this story yet"
 
 
 class _Leave(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="ignore")
     decision: Literal["leave"]
 
 
 class _Merge(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="ignore")
     decision: Literal["merge"]
     story: str
     into: str
 
 
 class _Split(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="ignore")
     decision: Literal["split"]
     story: str
     episodes: tuple[str, ...] = Field(min_length=1)
@@ -318,7 +321,7 @@ class _Split(BaseModel):
 class _Move(BaseModel):
     """A move: its episodes may be none where it names notes alone (ADR-0304 §9)."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="ignore")
     decision: Literal["move"]
     source: str = Field(alias="from")
     to: str
@@ -327,14 +330,26 @@ class _Move(BaseModel):
 
 
 class _Group(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="ignore")
     decision: Literal["group"]
     stories: tuple[str, ...] = Field(min_length=1)
     under: str | None
 
 
+#: A decision's shapes drop a key they do not name, counted and never named (#3246), as the
+#: observer's reply drops one: every field a shape names is validated as before, so a
+#: decision missing a required field, or carrying a value of the wrong kind, is none.
 _Proposed = Annotated[_Leave | _Merge | _Split | _Move | _Group, Field(discriminator="decision")]
 _PROPOSED: Final[TypeAdapter[_Leave | _Merge | _Split | _Move | _Group]] = TypeAdapter(_Proposed)
+
+#: Every key some decision's shape names. One a decision carries that its own shape does
+#: not name is another decision's field, such as a split naming a story to move ``to`` or
+#: a merge naming notes (ADR-0303 §6:3): an object mixing two decisions is no decision,
+#: as before, rather than one with the field dropped, so a dropped key never turns one
+#: decision into another.
+_DECISION_KEYS: Final = frozenset[str]().union(
+    *(shape_keys(shape) for shape in (_Leave, _Merge, _Split, _Move, _Group))
+)
 
 
 _DECODER: Final = json.JSONDecoder()
@@ -351,10 +366,22 @@ class _Unparsed(_Refused):
 
 
 def _decision(text: str) -> _Leave | _Merge | _Split | _Move | _Group | None:
+    """The decision ``text`` is, or ``None`` where it is none.
+
+    An object carrying another decision's field is none, as it was before #3246 dropped
+    a key no decision names.
+    """
     try:
-        return _PROPOSED.validate_json(text)
+        decision = _PROPOSED.validate_json(text)
     except ValidationError, ValueError, RecursionError:
         return None
+    try:
+        carried = _DECODER.decode(text)
+    except ValueError, RecursionError:  # pragma: no cover — ``text`` validated as a decision
+        return None
+    if isinstance(carried, dict) and (_DECISION_KEYS & carried.keys()) - shape_keys(type(decision)):
+        return None
+    return decision
 
 
 def _openers(body: str) -> Iterator[tuple[int, int | None]]:
@@ -388,8 +415,8 @@ def _unfenced(content: str) -> str:
     return body
 
 
-def _parsed(content: str) -> _Leave | _Merge | _Split | _Move | _Group:
-    """The reply's one decision: never a partial one, and never one of two.
+def _parsed(content: str) -> tuple[_Leave | _Merge | _Split | _Move | _Group, int]:
+    """The reply's one decision and the keys it dropped: never a partial one, nor one of two.
 
     One enclosing Markdown code fence is removed first, as the tidy-up removes it: a
     deterministic normalization of a wrapper, not a repair. A reply that is then one
@@ -409,14 +436,18 @@ def _parsed(content: str) -> _Leave | _Merge | _Split | _Move | _Group:
       and all). A bracket in prose before it refuses it too, the cheaper of the two
       errors.
 
+    Two objects are the same decision whatever keys each dropped, and the keys counted
+    are the first one's.
+
     Raises:
         _Unparsed: If the reply holds no one decision, saying which way.
     """
     body = _unfenced(content)
     whole = _decision(body)
     if whole is not None:
-        return whole
+        return whole, stray_keys(body, whole)
     found: list[_Leave | _Merge | _Split | _Move | _Group] = []
+    first = ""
     after = 0
     unfinished = False
     for start, end in _openers(body):
@@ -429,6 +460,8 @@ def _parsed(content: str) -> _Leave | _Merge | _Split | _Move | _Group:
         if unfinished:
             msg = "the reply's decision follows a brace or bracket opening no whole JSON value"
             raise _Unparsed(msg)
+        if not found:
+            first = body[start:end]
         found.append(decision)
         after = end
     if not found:
@@ -440,7 +473,7 @@ def _parsed(content: str) -> _Leave | _Merge | _Split | _Move | _Group:
     if body[after:].strip() not in {"", _FENCE}:
         msg = "the reply goes on after its decision"
         raise _Unparsed(msg)
-    return found[0]
+    return found[0], stray_keys(first, found[0])
 
 
 # --- what one flag's run read --------------------------------------------------------
@@ -944,7 +977,17 @@ class MattersPass:
             ]
         )
         try:
-            choice = _checked(_parsed(reply.content), reading)
+            proposed, stray = _parsed(reply.content)
+            if stray:
+                # #3246: a key the reply's shape does not name, dropped and counted, never
+                # named; logged before the checks, so a refused decision's count is too.
+                _log.info(
+                    "matters_pass_stray_keys",
+                    stage="matters_pass",
+                    flag=_kind(flag.name),
+                    stray=stray,
+                )
+            choice = _checked(proposed, reading)
         except _Refused as refused:
             # Code-owned text only: which of the parse or a check refused the reply,
             # and why, never the reply's own words or anything it was shown (#2778).

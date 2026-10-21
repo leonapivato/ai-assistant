@@ -63,7 +63,8 @@ follow-up's question.
 that fails is a capture failure: it is logged and holds nothing back.
 
 **It logs stage and code-owned reason only**, never the question, the records or the
-reply (ADR-0275 §8).
+reply (ADR-0275 §8). A reply carrying keys its shape does not name is read without them,
+and the stage logs how many it dropped, never which (#3246).
 
 **What it gives the diagnostic record** (ADR-0314 §4), through the sink the composition
 root hands it where the record is on: each part's rendered prompt before its call, with
@@ -101,6 +102,7 @@ from ai_assistant.core.types import (
     Role,
     label_prefix,
 )
+from ai_assistant.orchestration.reply_keys import stray_keys
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Sequence
@@ -360,15 +362,21 @@ def _thawed(value: object) -> object:
 
 
 class _ProposedItem(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+    model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
     text: NonBlankEncodableText
     source: str
 
 
 class _Proposed(BaseModel):
-    """The completion's one JSON object, exactly; anything else does not parse (§4:11)."""
+    """The completion's one JSON object; anything else does not parse (§4:11).
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+    A key this shape, or the item shape in it, does not name is dropped and counted
+    (#3246), as the observer's reply drops one: every field it names is validated as
+    before, so a reply missing a required field, or carrying a value of the wrong kind,
+    still does not parse.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
     evidence: tuple[_ProposedItem, ...]
 
 
@@ -409,9 +417,14 @@ def _parsed(content: str) -> _Proposed | None:
         if newline != -1 and body[:newline].strip() in {"", "json", "JSON"}:
             body = body[newline + 1 :]
     try:
-        return _Proposed.model_validate_json(body)
+        proposed = _Proposed.model_validate_json(body)
     except ValidationError, ValueError, RecursionError:
         return None
+    stray = stray_keys(body, proposed)
+    if stray:
+        # #3246: a key the reply's shape does not name, dropped and counted, never named.
+        _log.info("digest_stray_keys", stage="digesting", stray=stray)
+    return proposed
 
 
 @dataclass(frozen=True, slots=True)
