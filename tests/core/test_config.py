@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, get_args
-from zoneinfo import ZoneInfo
 
 import numpy
 import pytest
@@ -37,19 +37,32 @@ def test_unknown_timezone_is_rejected() -> None:
         Settings(timezone="Mars/Olympus_Mons")
 
 
-@pytest.mark.parametrize("zone", ["é" * 200, "a" * 256], ids=["non-ascii", "ascii"])
-def test_a_timezone_the_file_system_refuses_is_rejected_as_unknown(
-    monkeypatch: pytest.MonkeyPatch, zone: str
+def test_a_timezone_whose_lookup_raises_oserror_is_rejected_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#3328: a name too long for a path is an unknown zone, never raised as OSError."""
-    with pytest.raises(OSError, match="too long"):
-        ZoneInfo(zone)  # the premise: the lookup itself raises OSError (ENAMETOOLONG)
+    """#3328: a lookup the file system refuses (ENAMETOOLONG) is an unknown zone.
+
+    The `OSError` is injected, since whether a given name raises it is the file
+    system's to decide (its ``NAME_MAX``); the case below holds real names.
+    """
+
+    def refused_by_the_file_system(key: str) -> None:
+        raise OSError(errno.ENAMETOOLONG, "File name too long", key)
+
+    monkeypatch.setattr("ai_assistant.core.config.ZoneInfo", refused_by_the_file_system)
 
     with pytest.raises(ValidationError, match="unknown timezone"):
-        Settings(timezone=zone)
-    monkeypatch.setenv("ASSISTANT_TIMEZONE", zone)
+        Settings(timezone="Europe/Lisbon")
+    monkeypatch.setenv("ASSISTANT_TIMEZONE", "Europe/Lisbon")
     with pytest.raises(ConfigurationError, match="invalid configuration"):
         load_settings()
+
+
+@pytest.mark.parametrize("zone", ["é" * 200, "a" * 256], ids=["non-ascii", "ascii"])
+def test_a_timezone_too_long_for_a_path_is_rejected_as_unknown(zone: str) -> None:
+    """#3328: refused whichever exception the platform's lookup raises for it."""
+    with pytest.raises(ValidationError, match="unknown timezone"):
+        Settings(timezone=zone)
 
 
 def test_load_settings_wraps_invalid_config_as_configuration_error(

@@ -313,10 +313,12 @@ class PersonModelStoreContract:
     ) -> None:
         """§3:2: a name too long for a path is refused as a value, never raised as OSError.
 
-        Built with a bound the name is within, so the zone lookup is what refuses it (#3328).
+        Built with a bound the name is within, so the zone lookup is what refuses it
+        (#3328). Where the file system's ``NAME_MAX`` is 255 bytes, as on Linux and
+        macOS, that lookup raises ``OSError`` (ENAMETOOLONG); where it admits the name,
+        ``ZoneInfoNotFoundError``. Either way the refusal is the same, so the case
+        pins the refusal rather than the platform.
         """
-        with pytest.raises(OSError, match="too long"):
-            ZoneInfo(zone)  # the premise: the lookup itself raises OSError (ENAMETOOLONG)
         store = factory(field_chars=len(zone))
         before = await store.export()
 
