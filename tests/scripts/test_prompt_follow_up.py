@@ -75,7 +75,7 @@ def _question() -> str:
 
 def _replay(copy: Path, model: Any, reports: list[str] | None = None, **options: Any) -> int:
     told = [] if reports is None else reports
-    caller = model if isinstance(model, replay_tool.ModelCaller) else model.caller()
+    caller = model.caller() if isinstance(model, Model) else model
     status: int = asyncio.run(
         replay_tool.replay(
             replay_tool.ReplayOptions(copy=copy, model="fake:model", **options),
@@ -302,6 +302,42 @@ def test_a_follow_up_that_fails_is_written_into_its_responses_result(tmp_path: P
     assert held["failure"]["class"] == "ModelRateLimitError"
     assert "follow-ups: 1 sent, 0 answered" in reports
     assert "follow-ups failed: 1 (ModelRateLimitError)" in reports
+
+
+class _Cut:
+    """A caller whose every follow-up is cut by the run stopping, as Ctrl-C cancels it."""
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+        self.model_name = inner.model_name
+
+    async def complete(self, messages: Any) -> str:
+        reply: str = await self.inner.complete(messages)
+        return reply
+
+    async def replay_round(self, messages: Any, tools: Any) -> Any:
+        return await self.inner.replay_round(messages, tools)
+
+    async def follow_up(self, messages: Any, reply: str, question: str) -> str:
+        del messages, reply, question
+        raise asyncio.CancelledError
+
+    async def follow_up_round(self, messages: Any, tools: Any, response: Any, question: str) -> str:
+        del messages, tools, response, question
+        raise asyncio.CancelledError
+
+
+def test_a_replay_stopped_during_a_follow_up_still_writes_the_response(tmp_path: Path) -> None:
+    copy = make_copy(tmp_path)
+    model = Model()
+
+    with pytest.raises(asyncio.CancelledError):
+        _replay(copy, _Cut(model.caller()), sources=frozenset({"digesting"}), follow_up="")
+
+    (only,) = _results(copy)
+    assert only["body"]["reply"] == model.reply
+    assert only["body"]["follow_up"]["failure"]["class"] == "CancelledError"
+    assert "answer" not in only["body"]["follow_up"]
 
 
 def test_a_call_that_failed_is_not_followed_up(tmp_path: Path) -> None:
@@ -643,6 +679,20 @@ def test_a_suite_run_asks_the_follow_up_after_each_sample_but_a_follow_up_cases(
         assert held["answer"] == model.reply
         assert held["origin"] == "default"
     assert not any(PRIVATE in one for one in reports)
+
+
+def test_a_suite_stopped_during_a_follow_up_still_writes_the_sample(tmp_path: Path) -> None:
+    directory = tmp_path / "cases"
+    _understanding_case(directory, samples=2)
+    model = Model()
+
+    with pytest.raises(asyncio.CancelledError):
+        _suite(directory, _Cut(model.caller()), [], tmp_path / "results", follow_up="")
+
+    (only,) = _suite_lines(tmp_path / "results")
+    assert (only["case"], only["sample"]) == ("understanding/plain", 1)
+    assert only["reply"] == model.reply
+    assert only["follow_up"]["failure"]["class"] == "CancelledError"
 
 
 def test_a_suites_follow_ups_count_against_its_bound(tmp_path: Path) -> None:
