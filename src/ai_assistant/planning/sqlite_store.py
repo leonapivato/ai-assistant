@@ -222,8 +222,10 @@ _OBSERVATION_COLUMNS = "episode_id, revision, last_call_us, data"
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
-#: How many episode ids one statement of :meth:`SqlitePlanStore.observations` binds,
-#: well under the smallest limit SQLite has shipped (999).
+#: How many ids one statement binds where a read names any number of them —
+#: :meth:`SqlitePlanStore.observations`' episodes, and the activations
+#: :meth:`SqlitePlanStore.activation_effects` and a claim's ``match`` name (issue #3296)
+#: — well under the smallest limit SQLite has shipped (999).
 _IN_SLICE = 500
 
 #: The column each record table's ``PRIMARY KEY`` is, checked against the key's own
@@ -908,17 +910,12 @@ class SqlitePlanStore:
                     ).fetchall()
                 ]
             )
-            matched: list[ActivationEffect] = []
-            if named:
-                marks = ", ".join("?" for _ in named)
-                matched = [
-                    _checked_activation_effect(str(self._path), row)
-                    for row in conn.execute(
-                        "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only placeholders are interpolated
-                        f"WHERE activation_id IN ({marks}) ORDER BY claimed_seq ASC",
-                        named,
-                    ).fetchall()
-                ]
+            # Read in slices on this transaction's own connection, so a match past
+            # SQLite's bound is still read whole under the write lock (issue #3296).
+            matched = [
+                _checked_activation_effect(str(self._path), row)
+                for row in _effect_rows(conn, named or ())
+            ]
             answer = decide_activation_claim(
                 record,
                 match=named,
@@ -990,8 +987,8 @@ class SqlitePlanStore:
         """Return the named activations' effect records, in claim order (ADR-0306 §6:5).
 
         Raises:
-            PlanningError: If ``activation_ids`` is a bare string or holds anything but
-                strings, names an id with no UTF-8 encoding (which SQLite could not
+            PlanningError: If ``activation_ids`` is a bare string, or not a sequence
+                of strings, names an id with no UTF-8 encoding (which SQLite could not
                 bind), or the backend fails.
         """
         named = requested_activations(activation_ids)
@@ -1002,18 +999,12 @@ class SqlitePlanStore:
         return tuple(_checked_activation_effect(str(self._path), row) for row in rows)
 
     def _activation_effects_sync(self, named: tuple[str, ...]) -> list[tuple[Any, ...]]:
-        marks = ", ".join("?" for _ in named)
-        try:
-            return [
-                tuple(row)
-                for row in self._conn.execute(
-                    "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only placeholders are interpolated
-                    f"WHERE activation_id IN ({marks}) ORDER BY claimed_seq ASC",
-                    named,
-                ).fetchall()
-            ]
-        except sqlite3.Error as exc:
-            raise _wrap("read activation effects", "", exc) from exc
+        # Several statements under one read transaction, so the slices see one snapshot
+        # (issue #3296).
+        with transaction(
+            self._conn, "read activation effects", error=PlanningError, immediate=False
+        ) as conn:
+            return _effect_rows(conn, named)
 
     async def part_effects(self, parts: Sequence[QuestionPart], /) -> tuple[ActivationEffect, ...]:
         """Return the records carrying any of ``parts``, in claim order (ADR-0321 §4:9).
@@ -1317,6 +1308,57 @@ def _checked_observation(path: str, row: Sequence[Any]) -> ObservationRecord:
         )
         raise PlanningError(msg)
     return record
+
+
+def _effect_rows(conn: sqlite3.Connection, activations: Sequence[str]) -> list[tuple[Any, ...]]:
+    """The effect rows of ``activations``, in claim order, read in slices of the ids.
+
+    In slices, because SQLite bounds the parameters one statement binds, and a read or a
+    match names any number of activations (issue #3296). The caller holds the
+    transaction the slices run in, so they see one state of the table. Each id is read
+    once, so no row is answered twice, and the rows are put in claim order across the
+    slices by :func:`_claim_order`, which orders as ``ORDER BY claimed_seq`` would.
+
+    Args:
+        conn: The connection, inside the caller's transaction.
+        activations: The activations whose rows to read.
+
+    Returns:
+        ``(id, activation_id, data, part_round, part_number)`` per row, in claim order.
+    """
+    named = tuple(dict.fromkeys(activations))
+    keyed: list[tuple[Any, ...]] = []
+    for start in range(0, len(named), _IN_SLICE):
+        part = named[start : start + _IN_SLICE]
+        marks = ", ".join("?" for _ in part)
+        keyed.extend(
+            tuple(row)
+            for row in conn.execute(
+                "SELECT claimed_seq, " + _EFFECT_COLUMNS + " FROM activation_effects "  # noqa: S608 — only placeholders are interpolated
+                f"WHERE activation_id IN ({marks})",
+                part,
+            ).fetchall()
+        )
+    keyed.sort(key=lambda row: _claim_order(row[0]))
+    return [row[1:] for row in keyed]
+
+
+def _claim_order(seq: object) -> tuple[int, Any]:
+    """Sort key putting ``claimed_seq`` values in the order SQLite's ``ORDER BY`` does.
+
+    The column is ``INTEGER`` and the store writes integers alone, but an outside writer
+    can store text or a blob in it, which Python will not compare with an integer. SQLite
+    orders ``NULL``, then numbers, then text, then blobs, each by value (text in UTF-8
+    byte order, which is code point order), so the merged slices answer exactly as the
+    single statement they replace did.
+    """
+    if seq is None:
+        return (0, 0)
+    if isinstance(seq, (int, float)):
+        return (1, seq)
+    if isinstance(seq, str):
+        return (2, seq)
+    return (3, seq)
 
 
 def _wrap(action: str, subject: str, exc: sqlite3.Error) -> PlanningError:

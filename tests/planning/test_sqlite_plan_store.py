@@ -367,6 +367,10 @@ async def test_every_transaction_path_opens_and_closes_exactly_one(tmp_path: Pat
             lambda: store.claim_activation_effect(_acted("e2"), match=("act-1",)),
         )
         await recorded(
+            "claim_activation_effect (a match read in several slices, issue #3296)",
+            lambda: store.claim_activation_effect(_acted("e2"), match=_SLICED_ACTIVATIONS),
+        )
+        await recorded(
             "finish_activation_effect",
             lambda: store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED),
         )
@@ -386,6 +390,60 @@ async def test_every_transaction_path_opens_and_closes_exactly_one(tmp_path: Pat
         await recorded("clear", store.clear)
     finally:
         store.close()
+
+
+#: More activations than one statement binds (``sqlite_store._IN_SLICE``), ``act-1``
+#: named last and ``act-2`` first, so a read of them is several statements.
+_SLICED_ACTIVATIONS = (*(f"act-{index}" for index in range(2, 1202)), "act-1")
+
+
+async def test_a_read_in_several_slices_is_one_read_transaction(tmp_path: Path) -> None:
+    """Issue #3296: the slices of one ``activation_effects`` read see one snapshot.
+
+    Each slice is its own statement, so a racing write landing between two of them
+    would otherwise be half seen. The read opens one deferred ``BEGIN``, runs every
+    slice inside it, and closes it.
+    """
+    store = SqlitePlanStore(path=tmp_path / "plans.db", now=_fixed_now)
+    try:
+        await store.claim_activation_effect(_acted("e1"), match=None)
+        with _traced(store) as statements:
+            read = await store.activation_effects(_SLICED_ACTIVATIONS)
+    finally:
+        store.close()
+
+    assert [one.id for one in read] == ["e1"]
+    selects = [one for one in statements if one.lstrip().upper().startswith("SELECT")]
+    assert len(selects) == -(-len(_SLICED_ACTIVATIONS) // sqlite_store._IN_SLICE) > 1
+    assert statements[0].strip().upper() == "BEGIN"
+    assert [one for one in statements if one.strip().upper().startswith("BEGIN")] == ["BEGIN"]
+    assert statements[-1].strip().upper() == "COMMIT"
+
+
+async def test_the_claim_order_survives_a_claimed_seq_an_outside_writer_retyped(
+    tmp_path: Path,
+) -> None:
+    """Rows read in several slices are merged as ``ORDER BY claimed_seq`` orders them.
+
+    The column is ``INTEGER``, but an outside writer can store text or a blob in it,
+    which a Python sort will not compare with an integer. SQLite orders numbers, then
+    text, then blobs, and the merged read answers in that order rather than raising.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.claim_activation_effect(_acted("e1"), match=None)
+        await store.claim_activation_effect(_acted("e2"), match=None)
+        await store.claim_activation_effect(_acted("e3", activation="act-2"), match=None)
+        with sqlite3.connect(path) as conn:
+            conn.execute("UPDATE activation_effects SET claimed_seq = X'00' WHERE id = 'e1'")
+            conn.execute("UPDATE activation_effects SET claimed_seq = 'later' WHERE id = 'e2'")
+
+        read = await store.activation_effects(_SLICED_ACTIVATIONS)
+    finally:
+        store.close()
+
+    assert [one.id for one in read] == ["e3", "e2", "e1"]
 
 
 async def test_a_refusal_inside_a_transaction_leaves_the_store_usable(tmp_path: Path) -> None:
