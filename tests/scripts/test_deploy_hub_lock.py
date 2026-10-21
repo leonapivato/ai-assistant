@@ -225,3 +225,44 @@ def test_the_lock_file_is_the_service_users_and_its_existence_means_nothing(box:
     lease = box.hold(box.plan())
     assert isinstance(lease, _MODULE.ProcessLease), lease
     lease.release()
+
+
+@pytest.mark.timeout(30)
+def test_a_holder_with_more_to_say_on_standard_error_than_a_pipe_holds_still_answers(
+    box: _Box,
+) -> None:
+    # ssh and a login shell may say a lot there before the answer; only standard
+    # output is read until then, so standard error must never be a pipe to fill.
+    del box
+    noisy = (
+        "i=0; while [ $i -lt 4000 ]; do echo 'a warning from a login script' >&2;"
+        " i=$((i + 1)); done; echo said=held; exec cat"
+    )
+
+    lease = _MODULE._hold(["sh", "-c", noisy], "said")
+
+    assert isinstance(lease, _MODULE.ProcessLease), lease
+    lease.release()
+    assert not lease.held()
+
+
+@pytest.mark.timeout(30)
+def test_a_refused_holder_reports_what_it_said_on_standard_error(box: _Box) -> None:
+    del box
+
+    refused = _MODULE._hold(
+        ["sh", "-c", "echo 'su: no such user' >&2; echo said=1; exit 1"], "said"
+    )
+
+    assert refused == (1, "", "su: no such user\n")
+
+
+def test_the_holders_ssh_never_takes_a_terminal() -> None:
+    # A terminal would end the holder's answers in \r\n, which is no answer, and an
+    # ssh configuration can ask for one (RequestTTY); -T refuses it whatever it says.
+    parsed = _MODULE._parser().parse_args(["hub.example"])
+    argv = _MODULE.Plan(parsed, "w.whl").holder_command()
+
+    assert argv[0] == "ssh"
+    assert "-T" in argv[: argv.index("root@hub.example")]
+    assert "BatchMode=yes" in argv

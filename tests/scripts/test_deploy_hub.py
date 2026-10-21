@@ -3400,7 +3400,7 @@ def test_the_dry_run_shows_the_lock_before_any_box_command(tmp_path: Path) -> No
     plan = _dry_run(_repo(tmp_path), "hub")
 
     lines = plan.splitlines()
-    lock = _line_index(plan, "lock    : ssh -o BatchMode=yes")
+    lock = _line_index(plan, "lock    : ssh -T -o BatchMode=yes")
     assert lock < _line_index(plan, "marker  : ssh root@hub.example")
     assert "su - hub -c 'if [ -d ~/.deploy-lock ]" in lines[lock + 1]
     assert "flock -- /run/deploy-hub-hub.owner sh -c" in plan
