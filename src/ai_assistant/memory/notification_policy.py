@@ -116,13 +116,15 @@ class DefaultNotificationPolicy:
         """Build the policy over the zone its quiet windows are read in.
 
         Args:
-            timezone: The IANA zone ``Settings.timezone`` holds, or a
-                :class:`zoneinfo.ZoneInfo`. **The only configuration a ruling
-                reads**, and a construction-time property rather than an argument
-                because a caller free to vary it per call could move the user's
-                night (ADR-0130 §6). It is the same value ADR-0008 §5 gives the
-                temporal context and ADR-0093 §7b binds the calendar reader to;
-                no second timezone source is introduced.
+            timezone: The IANA zone its quiet windows are read in, or a
+                :class:`zoneinfo.ZoneInfo`: the zone of the person the rulings it
+                is handed are for, and ``Settings.timezone``, the hub's default,
+                where theirs is empty (ADR-0338 §3:6, superseding ADR-0130 §6:4's
+                single source). **The only configuration a ruling reads**, and a
+                construction-time property rather than an argument because a
+                caller free to vary it per call could move the user's night
+                (ADR-0130 §6): a ruling in another zone is handed another
+                instance, which the caller picks before the ruling.
 
         Raises:
             ZoneInfoNotFoundError: If the named zone is unknown. ``Settings``

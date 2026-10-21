@@ -22,6 +22,14 @@ and owes the same handoff — §3b: "It is also the reconsideration path's answe
 without a second clause… so the same handoff runs" — and two copies of a
 four-line rule are two places for it to drift.
 
+**Each ruling is handed the policy of its person's zone** (ADR-0338 §3:6, as §13 reads
+it over ADR-0130 §6:4): quiet windows are read in the zone of the person a notification
+is for, and in ``Settings.timezone`` where theirs is empty. A policy's zone stays a
+construction-time property of the instance, as ``NotificationPolicy`` requires, so what
+varies is *which* instance a ruling is handed: :class:`RulingPolicy` reads the zone just
+before each ruling and picks the hub's policy or one built for that zone. Both ruling
+paths, this stage's and the engine's reconsideration, pick through it.
+
 Nothing concrete is imported: the store, the policy and the outbox all arrive by
 injection and are seen only through their Protocols (CLAUDE.md golden rule 1).
 """
@@ -30,15 +38,105 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ai_assistant.core.types import NotificationDispositionKind
+import structlog
+
+from ai_assistant.core.errors import PersonModelStoreError
+from ai_assistant.core.types import OWNER_PERSON_ID, NotificationDispositionKind
+from ai_assistant.orchestration.person_block import person_zone
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from zoneinfo import ZoneInfo
+
     from ai_assistant.core.protocols import (
         NotificationOutbox,
         NotificationPolicy,
         NotificationStore,
+        PersonModelStore,
     )
     from ai_assistant.core.types import NotificationCandidate, NotificationDisposition
+
+_log = structlog.get_logger(__name__)
+
+#: Builds the policy whose quiet windows are read in one zone: the composition root's,
+#: over the concrete policy it holds (ADR-0338 §3:6).
+type PolicyForZone = Callable[[ZoneInfo], NotificationPolicy]
+
+
+class RulingPolicy:
+    """The policy one ruling is handed, in its person's zone (ADR-0338 §3:6).
+
+    **Whose notification it is.** A candidate names no person, and the person-model store
+    holds one, the owner (§2:1), so every notification is the owner's: a producer notices
+    for the user, from a source the owner connected (§2:2's third limb). A second person's
+    notifications wait on the members decision (#691), which is where a candidate would
+    gain whose it is.
+
+    **Read just before each ruling, never cached**, so a zone the person changes governs
+    the next ruling with no restart. A record already held keeps the ``reconsider_at`` its
+    ruling computed in the zone then set, and is re-ruled in the new one when it falls due:
+    no setting write re-rules on a zone (ADR-0130 §6:7 names three standing settings, and
+    a profile field is none of them).
+
+    **A store fault rules nothing.** Where the person-model store cannot be read,
+    :meth:`pick` raises and the caller hands no policy to the notification store, so no
+    record is written or changed and no unit of budget is spent. That is the one reading
+    that cannot move the person's night: the hub's zone would put their quiet window at
+    the wrong hours wherever the two differ, and a guess at their zone is no better. The
+    held record stays due and the next reconsideration run tries it again, which ADR-0130
+    §5 rules is no fault; a fresh candidate is offered again on the producer's next pass,
+    which §8 rules is the normal case.
+
+    **Inert unwired.** With no person-model store, or no factory, every ruling is handed
+    the hub's policy, exactly as before the person model.
+    """
+
+    def __init__(
+        self,
+        *,
+        default: NotificationPolicy,
+        policy_for: PolicyForZone | None = None,
+        people: PersonModelStore | None = None,
+    ) -> None:
+        """Wire the pick to the hub's policy, the factory and the person-model store.
+
+        Args:
+            default: The policy over ``Settings.timezone``, handed to every ruling whose
+                person sets no zone, and to every ruling where either of the other two is
+                ``None``.
+            policy_for: Builds the policy for a person's zone, or ``None``.
+            people: The person-model store the zone is read from, or ``None`` where the
+                person model is off (``Settings.person_model``).
+        """
+        self._default = default
+        self._policy_for = policy_for
+        self._people = people
+
+    @property
+    def default(self) -> NotificationPolicy:
+        """The policy over ``Settings.timezone``."""
+        return self._default
+
+    async def pick(self) -> NotificationPolicy:
+        """The policy the next ruling is handed: its person's zone, or the hub's.
+
+        Returns:
+            A policy built for the owner's zone where their profile sets one that
+            resolves, and the hub's policy otherwise, or where nothing is wired.
+
+        Raises:
+            PersonModelStoreError: If the person-model store cannot be read. Nothing has
+                been ruled, and the caller rules nothing.
+        """
+        if self._people is None or self._policy_for is None:
+            return self._default
+        try:
+            model = await self._people.read(OWNER_PERSON_ID)
+        except PersonModelStoreError:
+            _log.warning("notification_zone_unread", stage="notifications", reason="store_fault")
+            raise
+        zone = person_zone(None if model is None else model.profile, stage="notifications")
+        return self._default if zone is None else self._policy_for(zone)
 
 
 async def hand_off(
@@ -93,8 +191,9 @@ class NotificationWriteStage:
 
     Deliberately thin, and the thinness is the contract's shape rather than a
     shortcut: §3 puts the whole ruling inside the store's critical section, so
-    what this holds is the policy the store is handed per call. It adds exactly
-    one thing of its own — ADR-0131 §3b's live handoff, on the way out.
+    what this holds is the policy the store is handed per call, picked per call in
+    the zone of the person the notification is for (:class:`RulingPolicy`). It adds
+    exactly one thing of its own — ADR-0131 §3b's live handoff, on the way out.
     """
 
     def __init__(
@@ -103,6 +202,8 @@ class NotificationWriteStage:
         store: NotificationStore,
         policy: NotificationPolicy,
         outbox: NotificationOutbox | None,
+        policy_for: PolicyForZone | None = None,
+        people: PersonModelStore | None = None,
     ) -> None:
         """Wire the seam to the store it writes through, its policy and its outbox.
 
@@ -123,9 +224,14 @@ class NotificationWriteStage:
                 says so: an omitted argument and a deliberate absence look
                 identical afterwards, and the difference is whether §3b's primary
                 path exists at all.
+            policy_for: Builds the policy for a person's zone (ADR-0338 §3:6), or
+                ``None``, where every ruling is handed ``policy``.
+            people: The person-model store the owner's zone is read from before each
+                ruling, or ``None`` where the person model is off, where every ruling
+                is handed ``policy``.
         """
         self._store = store
-        self._policy = policy
+        self._policies = RulingPolicy(default=policy, policy_for=policy_for, people=people)
         self._outbox = outbox
 
     async def offer(self, candidate: NotificationCandidate) -> NotificationDisposition:
@@ -149,13 +255,20 @@ class NotificationWriteStage:
             NotificationOutboxError: If the ruling was ``INTERRUPT`` and the
                 enqueue could not commit. The record stays actionable and the next
                 reconciliation offers it (ADR-0131 §3b).
+            PersonModelStoreError: If the owner's zone could not be read. Nothing
+                was ruled, so the person's night is not read in a zone that is not
+                theirs, and the producer's next pass offers the candidate again
+                (:class:`RulingPolicy`).
         """
-        ruling = await self._store.admit(candidate, policy=self._policy)
+        policy = await self._policies.pick()
+        ruling = await self._store.admit(candidate, policy=policy)
         await hand_off(self._outbox, ruling, candidate)
         return ruling
 
 
 __all__ = [
     "NotificationWriteStage",
+    "PolicyForZone",
+    "RulingPolicy",
     "hand_off",
 ]

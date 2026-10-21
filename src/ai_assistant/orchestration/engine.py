@@ -206,7 +206,7 @@ from ai_assistant.orchestration.joining import (
     take_over,
     visible_running,
 )
-from ai_assistant.orchestration.notifications import hand_off
+from ai_assistant.orchestration.notifications import RulingPolicy, hand_off
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     check_arguments,
@@ -321,6 +321,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.grants import GrantOperations
     from ai_assistant.orchestration.joining import JoiningInput, RunningActivation
     from ai_assistant.orchestration.matters_pass import MattersPass, MattersPassReport
+    from ai_assistant.orchestration.notifications import PolicyForZone
     from ai_assistant.orchestration.observer import Observer, RunOutcome
     from ai_assistant.orchestration.person_block import PersonBlock, PersonBlocks
     from ai_assistant.orchestration.phase_path import PhasePath, PhaseWorking
@@ -1381,6 +1382,43 @@ def _check_chat_waits(start_wait: timedelta, lapse: timedelta, cap: timedelta) -
         raise ConfigurationError(msg)
 
 
+def _ruling_policy(
+    policy: NotificationPolicy | None,
+    policy_for: PolicyForZone | None,
+    person_blocks: PersonBlocks | None,
+) -> RulingPolicy | None:
+    """The pick each reconsideration's policy comes from (ADR-0338 §3:6).
+
+    The owner's zone where their profile sets one, read from the store the person block
+    reads, and the hub's policy otherwise; ``None`` where no policy is wired.
+
+    Args:
+        policy: The policy over ``Settings.timezone``, or ``None``.
+        policy_for: Builds the policy for a person's zone, or ``None``.
+        person_blocks: The person block's assembly, whose store the zone is read from.
+
+    Returns:
+        The pick, or ``None`` where there is no policy to hand over.
+
+    Raises:
+        ConfigurationError: If a factory is wired with no policy beside it.
+    """
+    if policy is None:
+        if policy_for is not None:
+            msg = (
+                "a policy for a person's zone is wired only beside the hub's policy: with "
+                "no notification store and policy there is nothing to rule (ADR-0130 §3, "
+                "ADR-0338 §3:6)"
+            )
+            raise ConfigurationError(msg)
+        return None
+    return RulingPolicy(
+        default=policy,
+        policy_for=policy_for,
+        people=None if person_blocks is None else person_blocks.store,
+    )
+
+
 class Engine:
     """The concrete façade an interface adapter drives (ADR-0042 §1).
 
@@ -1406,6 +1444,7 @@ class Engine:
         upcoming: UpcomingEventStage | None = None,
         notifications: NotificationStore | None = None,
         notification_policy: NotificationPolicy | None = None,
+        notification_policy_for: PolicyForZone | None = None,
         notification_outbox: DeliveryOutbox | None = None,
         understanding: UnderstandingStage | None = None,
         understanding_version_limit: int | None = None,
@@ -1710,7 +1749,14 @@ class Engine:
                 wired **together with** ``notifications`` or not at all. §3 puts
                 the ruling inside the store's critical section, so this façade
                 only ever hands it over — it never rules anything itself, and a
-                policy without a store would have nothing to rule about.
+                policy without a store would have nothing to rule about. Its zone
+                is ``Settings.timezone``, the hub's default.
+            notification_policy_for: Builds the policy whose quiet windows are read
+                in a person's zone (ADR-0338 §3:6), or ``None``. With it and
+                ``person_blocks`` both wired, each reconsideration is handed the
+                policy of the owner's zone where their profile sets one, read just
+                before it rules (:class:`~ai_assistant.orchestration.notifications.RulingPolicy`);
+                with either ``None``, every one is handed ``notification_policy``.
             closers: The resources the façade owns, as async close callables, in
                 the order :meth:`aclose` must run them. The composition root hands
                 these over so the façade is the defined owner that releases every
@@ -1905,6 +1951,9 @@ class Engine:
             raise ConfigurationError(msg)
         self._notifications = notifications
         self._notification_policy = notification_policy
+        self._notification_policies = _ruling_policy(
+            notification_policy, notification_policy_for, person_blocks
+        )
         self._notification_outbox = notification_outbox
         #: Whether this engine has already closed the open episodes a dead process
         #: left (ADR-0286 §7). Guarded because ``start`` is also the scheduler's
@@ -2449,6 +2498,9 @@ class Engine:
                 claims nothing about what it did not (ADR-0132 §5).
             NotificationOutboxError: If a ruled interruption could not be handed to
                 the delivery seam (ADR-0131 §3b).
+            PersonModelStoreError: If the owner's zone could not be read before a
+                ruling (ADR-0338 §3:6). That candidate is not ruled, and the next
+                pass offers it again (ADR-0130 §8).
         """
         self._reject_if_closing()
         if self._upcoming is None:
@@ -3835,6 +3887,10 @@ class Engine:
             ValueError: If ``page`` is not an integer in ``(0, 2**63)``.
             ConfigurationError: If no notification store is wired.
             NotificationStoreError: If the store cannot be read or written.
+            PersonModelStoreError: If the owner's zone could not be read before a
+                ruling (ADR-0338 §3:6). That record is not ruled, so its quiet
+                window is never read in a zone that is not theirs: it stays due, and
+                the next run rules it (ADR-0130 §5).
         """
         self._reject_if_closing()
         positive_page_argument(page, name="page")
@@ -3903,6 +3959,10 @@ class Engine:
         means the store is handing back records this run has dealt with, whatever
         their instants now say.
 
+        **Each ruling is handed the policy of the owner's zone**, read just before it
+        (ADR-0338 §3:6, :class:`~ai_assistant.orchestration.notifications.RulingPolicy`),
+        so a zone changed mid-drain governs the records ruled after it.
+
         Args:
             page: How many due records one store read takes.
 
@@ -3910,8 +3970,8 @@ class Engine:
             How many were re-ruled.
         """
         store = self._notification_surface()
-        assert self._notification_policy is not None  # noqa: S101 — wired together (see __init__)
-        policy = self._notification_policy
+        assert self._notification_policies is not None  # noqa: S101 — wired together (see __init__)
+        policies = self._notification_policies
         seen: set[str] = set()
         ruled = 0
         while due := await store.due(limit=page):
@@ -3921,7 +3981,7 @@ class Engine:
             before = ruled
             for record in fresh:
                 seen.add(record.id)
-                ruling = await store.reconsider(record.id, policy=policy)
+                ruling = await store.reconsider(record.id, policy=await policies.pick())
                 if ruling is not None:
                     ruled += 1
                     await self._hand_off(ruling, record.candidate)

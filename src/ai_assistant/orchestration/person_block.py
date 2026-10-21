@@ -50,6 +50,7 @@ import asyncio
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
 
@@ -95,6 +96,7 @@ __all__ = [
     "ShownSuggestion",
     "Unpinned",
     "activation_person",
+    "person_zone",
     "still_held",
 ]
 
@@ -140,6 +142,34 @@ def activation_person(trigger: RecordedChannelTrigger | None) -> str | None:
     if establishes_the_user(kind) or kind in _PUSHED_BY_A_CONNECTED_SOURCE:
         return OWNER_PERSON_ID
     return None
+
+
+def person_zone(profile: Profile | None, *, stage: str) -> ZoneInfo | None:
+    """The person's own zone, or ``None`` where ``Settings.timezone`` governs (ADR-0338 §3:6).
+
+    The one reading of a profile's zone, for every read of time code makes for a person:
+    planning's current time (ADR-0307 §6:1) and the quiet windows (ADR-0130 §6:4). Each
+    caller holds the hub's default and uses it where this answers ``None``: where the
+    profile sets no zone, or there is no profile to read, as for an activation that is no
+    person's (§2:3). The store validates a zone on every write (§3:2), so one that does
+    not resolve is a store's defect: it is logged under a fixed event name, never with
+    the value, and the hub's zone governs.
+
+    Args:
+        profile: The person's profile, or ``None`` where there is none to read.
+        stage: The caller, named in the log entry of a zone that does not resolve.
+
+    Returns:
+        The person's zone; ``None`` where the hub's default governs.
+    """
+    held = None if profile is None else profile.time_zone
+    if held is None:
+        return None
+    try:
+        return ZoneInfo(held)
+    except ZoneInfoNotFoundError, ValueError:
+        _log.warning("person_zone_unresolved", stage=stage, reason="person_zone")
+        return None
 
 
 @dataclass(frozen=True, slots=True)

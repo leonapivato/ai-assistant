@@ -142,7 +142,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final, Protocol
 from uuid import uuid4
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -176,6 +176,7 @@ from ai_assistant.core.types import (
     StoryRelation,
     label_prefix,
 )
+from ai_assistant.orchestration.person_block import person_zone
 from ai_assistant.orchestration.reliance import NOTE_RELIANCE_CAPABILITY
 from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY
 from ai_assistant.orchestration.stories import episode_address
@@ -2679,14 +2680,8 @@ class PlanningStage:
         store validates a zone on every write (§3:2), so one that does not resolve is a
         store's defect: it is logged, and the hub's zone is used.
         """
-        held = None if person is None else person.profile.time_zone
-        if held is None:
-            return self._zone
-        try:
-            return ZoneInfo(held)
-        except ZoneInfoNotFoundError, ValueError:
-            _log.warning("planning_zone_unresolved", stage="planning", reason="person_zone")
-            return self._zone
+        zone = person_zone(None if person is None else person.profile, stage="planning")
+        return self._zone if zone is None else zone
 
     async def plan(self, inputs: PlanningInputs) -> PlannedRound:
         """Run one round over ``inputs``: ask, record, then judge its calls.

@@ -413,6 +413,9 @@ class UpcomingEventStage:
                 record.
             NotificationOutboxError: If a ruled interruption could not be handed to
                 the delivery seam (ADR-0131 §3b).
+            PersonModelStoreError: If the owner's zone could not be read before a
+                ruling (ADR-0338 §3:6). That candidate is not ruled, and the next
+                pass offers it again (ADR-0130 §8).
             ReadTrailError: If the attempt could not be recorded (ADR-0185 §5).
                 **No candidate is concluded**: the reading is discarded, exactly as
                 it is across a revocation.

@@ -16,7 +16,9 @@ what it built.
 from __future__ import annotations
 
 import stat
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import pytest
 from phases_composition_support import build_phased
@@ -25,17 +27,28 @@ from ai_assistant.app import build_engine
 from ai_assistant.app.composition import (
     PERSON_MODEL_FILENAME,
     PROFILE_FIELD_CHARS,
+    _policy_for_zone,
     seeded_time_zone,
 )
 from ai_assistant.core.config import EmbedderKind, Settings, load_settings
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
+    ClassReach,
+    DataTier,
+    NotificationCandidate,
+    NotificationCondition,
+    NotificationDispositionKind,
+    NotificationPreferences,
+    NotificationReach,
     PersonActHow,
     PersonModelAct,
     PersonModelWriteKind,
     ProfileField,
+    QuietWindow,
 )
+from ai_assistant.memory import DefaultNotificationPolicy
 from ai_assistant.memory.person_model_store import SqlitePersonModelStore
+from ai_assistant.orchestration import NotificationWriteStage
 from ai_assistant.orchestration.person_block import (
     KEPT_IN_MIND_CHARS,
     PLANNING_SUGGESTIONS,
@@ -48,6 +61,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import PersonModel
     from ai_assistant.orchestration.engine import Engine
+    from ai_assistant.orchestration.notifications import RulingPolicy
 
 pytestmark = pytest.mark.anyio
 
@@ -203,6 +217,118 @@ def test_the_seed_reads_the_variable_through_settings(monkeypatch: pytest.Monkey
 
     monkeypatch.setenv("ASSISTANT_TIMEZONE", "Europe/Lisbon")
     assert seeded_time_zone(load_settings()) == "Europe/Lisbon"
+
+
+# --- the quiet windows in the owner's zone (§3:6) ------------------------------------
+
+
+def _writer_pick(engine: Engine) -> RulingPolicy:
+    """The live path's pick, inside the producer's write stage: a deliberate reach-in."""
+    stage = engine._upcoming
+    assert stage is not None, "a configured calendar builds the producer"
+    writer = stage._writer
+    assert isinstance(writer, NotificationWriteStage)
+    return writer._policies
+
+
+def _engine_pick(engine: Engine) -> RulingPolicy:
+    pick = engine._notification_policies
+    assert pick is not None
+    return pick
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["switch_on", "switch_off"])
+async def test_both_ruling_paths_pick_from_the_one_store_with_the_one_factory(
+    tmp_path: Path, *, on: bool
+) -> None:
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        person_model=on,
+        calendar_reader_path=tmp_path / "calendar.ics",
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        default = engine._notification_policy
+        picks = (_engine_pick(engine), _writer_pick(engine))
+        for pick in picks:
+            assert pick.default is default, "one hub policy, held twice"
+            assert pick._policy_for is _policy_for_zone
+        if not on:
+            assert all(pick._people is None for pick in picks)
+            assert [await pick.pick() for pick in picks] == [default, default]
+            return
+        store = _store(engine)
+        assert all(pick._people is store for pick in picks)
+        await store.set_field(OWNER_PERSON_ID, ProfileField.TIME_ZONE, "Asia/Kolkata", act=_PANEL)
+        for pick in picks:
+            picked = await pick.pick()
+            assert isinstance(picked, DefaultNotificationPolicy)
+            assert picked._zone == ZoneInfo("Asia/Kolkata")
+    finally:
+        await engine.aclose()
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["switch_on", "switch_off"])
+async def test_a_held_record_is_reconsidered_in_the_owners_quiet_window(
+    tmp_path: Path, *, on: bool
+) -> None:
+    """End to end over the real stores, on the hub's own clock.
+
+    The quiet window is the hour around now in Kolkata, five and a half hours from the
+    hub's UTC: quiet for the owner, and not for the hub. With the switch off, the
+    owner's zone is nowhere to be read, and the record interrupts as it did before.
+    """
+    kolkata = ZoneInfo("Asia/Kolkata")
+    local = datetime.now(UTC).astimezone(kolkata)
+    window = QuietWindow.between(
+        (local - timedelta(minutes=30)).time(), (local + timedelta(minutes=30)).time()
+    )
+    engine = build_engine(
+        Settings(embedder=EmbedderKind.HASHING, person_model=on), data_dir=tmp_path
+    )
+    try:
+        if on:
+            await _store(engine).set_field(
+                OWNER_PERSON_ID, ProfileField.TIME_ZONE, "Asia/Kolkata", act=_PANEL
+            )
+        notifications = engine._notifications
+        assert notifications is not None
+        noticed = datetime.now(UTC)
+        held = await notifications.admit(
+            NotificationCandidate(
+                candidate_key="k1",
+                producer="a-producer",
+                notification_class="calendar",
+                summary="something the user did not ask for",
+                noticed_at=noticed,
+                expires_at=noticed + timedelta(days=1),
+                confidence=0.5,
+                sensitivity=DataTier.PERSONAL,
+            ),
+            policy=DefaultNotificationPolicy(),
+        )
+        assert held.kind is NotificationDispositionKind.HOLD, "every class holds by default"
+        await engine.set_notification_preferences(
+            NotificationPreferences(
+                reaches=(
+                    ClassReach(notification_class="calendar", reach=NotificationReach.INTERRUPT),
+                ),
+                quiet_windows=(window,),
+            )
+        )
+
+        assert await engine.reconsider_notifications() == 1
+
+        assert held.notification_id is not None
+        ruled = await notifications.get(held.notification_id)
+        assert ruled is not None
+        if on:
+            assert ruled.kind is NotificationDispositionKind.HOLD
+            assert ruled.reason is NotificationCondition.QUIET_WINDOW
+        else:
+            assert ruled.kind is NotificationDispositionKind.INTERRUPT
+    finally:
+        await engine.aclose()
 
 
 # --- deleting the owner's data (ADR-0126 §1, §10:5) --------------------------------
