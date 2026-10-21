@@ -833,9 +833,9 @@ async def test_a_keyring_holding_nothing_under_the_recorded_slot_refuses_the_cal
 async def test_a_successful_call_reads_the_credential_it_does_not_use() -> None:
     """The other half of the same fact: the read happens on every call.
 
-    ADR-0260 §12's *"accepts a credential and does not use it"* is a fact about the far
-    end and changes nothing about ADR-0148 §6's conditions on this side — so
-    ``reads=(SECRET, …)`` is true, and ``reads=()`` would be the silent no-reach claim
+    ADR-0273 §1's *"accepts and does not use"* is a fact about the far end and changes
+    nothing about ADR-0148 §6's conditions on this side — so ``reads=(SECRET, …)`` is
+    true, and ``reads=()`` would be the silent no-reach claim
     ADR-0016 §1 makes the field required to prevent.
     """
     ring = await keyring()

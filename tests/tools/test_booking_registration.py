@@ -124,8 +124,8 @@ async def test_the_availability_reads_declaration_is_exactly_what_the_adr_fixes(
     definition rather than over the module constant.
 
     ``reads`` names ``SECRET`` because the callable reads the credential the bound
-    connection names on every call — *"including for the reference provider, which
-    accepts a credential and does not use it"* — and ``()`` there would be the silent
+    connection names on every call, a credential the simulated provider *"accepts and
+    does not use"* (ADR-0273 §1) — and ``()`` there would be the silent
     no-reach claim ADR-0016 §1 makes the field required to prevent.
     """
     booking = await configured()

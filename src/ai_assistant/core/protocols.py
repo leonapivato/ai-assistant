@@ -2917,15 +2917,15 @@ class Forecaster(Protocol):
     an :class:`ActionPolicy`, not an :class:`AuditTrail` — and **no later lane
     adds one that does**.
 
-    **A ``Forecaster`` holds the credential and this contract never carries one**
-    (§4). Any ``Secrets`` read is at ``SecretScope.INTEGRATION`` *inside*
+    **This contract never carries a credential** (§4). No credential crosses this
+    seam in either direction, and none is in a binding. **The production forecaster
+    holds none and reads none** (ADR-0344 §3): its transport holds no ``Secrets``
+    face, and its connection is made by ADR-0325's keyless act, which supplies an
+    identity alone. Any ``Secrets`` read is at ``SecretScope.INTEGRATION`` *inside*
     :meth:`read`, after the checks §6 names have passed — ADR-0148 §7's positional
-    gate with one word changed — and it is the read ADR-0148 §6's third pre-transmit
-    condition obliges, under the slot the connection record names. No credential
-    crosses this seam in either direction. **This seam claims no exemption from the
-    connection model and decides no new connection shape**: the provider is
-    provisioned by the explicit user act ADR-0149 §4 requires, supplying an identity
-    and a credential.
+    gate with one word changed. **This seam claims no exemption from the connection
+    model and decides no new connection shape**: §6's binding still needs the
+    ``ACTIVE`` record ``Settings.forecast_connection`` names.
 
     **Neither acting member raises for a source reason** (§4). A failed transport,
     an expired deadline, an over-large response, a provider that answered something
