@@ -13,11 +13,13 @@ browser lane drive, with no horizontal scroll and an empty console.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import TYPE_CHECKING, Final
 
 import pytest
 from browser_drive import DESKTOP, PHONE, driving, press
 from person_seed import ended, fact, field_suggestion, hold, outside, pin_suggestion, switch_on
+from playwright.async_api import expect
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -121,9 +123,24 @@ async def _open(drive: Drive) -> None:
     await drive.page.wait_for_selector("#about:not([hidden])")
 
 
-async def _texts(page: Page, selector: str) -> list[str]:
+async def _texts(page: Page, selector: str, count: int) -> list[str]:
+    """The text of ``count`` rows, read once that many are on the page.
+
+    A list is rendered whole in one pass from one answer, so waiting for its count waits
+    for the render: the rows read after it are that answer's, never the page's last.
+    """
     rows = page.locator(selector)
-    return [await rows.nth(index).inner_text() for index in range(await rows.count())]
+    await expect(rows).to_have_count(count)
+    return [await rows.nth(index).inner_text() for index in range(count)]
+
+
+def _opening(words: str) -> re.Pattern[str]:
+    """A text that starts with ``words``, for a waiting assertion on a line's opening.
+
+    The pattern is run by the browser's ``RegExp``, so only what is special to both is
+    escaped (``re.escape`` also escapes spaces, which only a lenient ``RegExp`` reads).
+    """
+    return re.compile("^" + re.sub(r"[.*+?^${}()|[\]\\/]", r"\\\g<0>", words))
 
 
 def _lines(text: str) -> list[str]:
@@ -145,10 +162,11 @@ async def test_a_hub_with_no_person_model_shows_the_panel_as_not_switched_on(
             await press(drive.page, "#about-button")
         await drive.page.wait_for_selector("#about:not([hidden])")
 
-        state = await drive.page.locator("#about-state").inner_text()
-        assert state.startswith("The person model is not switched on on this hub yet")
-        assert await drive.page.locator("#about-body").is_hidden()
-        assert await drive.page.locator("#about > .fault:not([hidden])").count() == 0
+        await expect(drive.page.locator("#about-state")).to_have_text(
+            _opening("The person model is not switched on on this hub yet")
+        )
+        await expect(drive.page.locator("#about-body")).to_be_hidden()
+        await expect(drive.page.locator("#about > .fault:not([hidden])")).to_have_count(0)
         asked = [name for name, _ in drive.engine.calls]
         assert "person_model" in asked
         assert "profile_changes" not in asked
@@ -168,11 +186,12 @@ async def test_a_belief_panel_on_such_a_hub_offers_no_pin(
         async with drive.page.expect_response("**/candidates/pending"):
             await press(drive.page, "#beliefs-button")
 
-        assert await drive.page.locator("#belief-pin-state").inner_text() == (
+        await expect(drive.page.locator("#belief-pin-state")).to_have_text(
             "Pinning is not switched on on this hub yet."
         )
-        assert await drive.page.locator("#belief-list button", has_text="Pin").count() == 0
-        assert await drive.page.locator("#belief-list button", has_text="Forget").count() == 1
+        # The row first, so that no Pin is counted on a list not yet rendered.
+        await expect(drive.page.locator("#belief-list button", has_text="Forget")).to_have_count(1)
+        await expect(drive.page.locator("#belief-list button", has_text="Pin")).to_have_count(0)
         assert heard == []
 
 
@@ -192,33 +211,30 @@ async def test_the_panel_shows_every_part_of_the_model_in_words(
         await _open(drive)
 
         page = drive.page
-        assert await page.locator("#field-name").input_value() == "Robin"
-        fields = await _texts(page, "#profile-fields > form")
-        assert "Not set: I go by Aether." in fields[2]
-        assert "Not set: I use the hub's own time zone." in fields[3]
-        assert await page.locator("#kept-fill").inner_text() == (
+        await expect(page.locator("#field-name")).to_have_value("Robin")
+        fields = page.locator("#profile-fields > form")
+        await expect(fields.nth(2)).to_contain_text("Not set: I go by Aether.")
+        await expect(fields.nth(3)).to_contain_text("Not set: I use the hub's own time zone.")
+        await expect(page.locator("#kept-fill")).to_have_text(
             "Using 13 of the 60 characters I keep in mind."
         )
-        assert [_lines(text) for text in await _texts(page, "#kept-list > .about-row")] == [
+        assert [_lines(text) for text in await _texts(page, "#kept-list > .about-row", 1)] == [
             ["Pinned", "Eats no meat.", "Unpin"]
         ]
-        left = await _texts(page, "#left-out-list > .about-row")
-        assert len(left) == 2
+        left = await _texts(page, "#left-out-list > .about-row", 2)
         assert "The shop's page says Robin likes jazz." in left[0]
         assert "it rests on outside content" in left[0]
         assert _LONG in left[1]
         assert "no room left for it" in left[1]
-        stale = await _texts(page, "#no-longer-current-list > .about-row")
-        assert len(stale) == 1
+        stale = await _texts(page, "#no-longer-current-list > .about-row", 1)
         assert "Lives in Porto." in stale[0]
-        styles = await _texts(page, "#style-list > .about-row")
+        styles = await _texts(page, "#style-list > .about-row", 1)
         assert [_lines(text) for text in styles] == [[_LONG, "Remove"]]
-        suggestions = await _texts(page, "#suggestion-list > .about-row")
-        assert len(suggestions) == 3
+        suggestions = await _texts(page, "#suggestion-list > .about-row", 3)
         assert any("Sister Ada lives in Lisbon." in text for text in suggestions)
         assert any("“Português”" in text for text in suggestions)
-        changes = await _texts(page, "#change-list > .about-row")
-        assert len(changes) == 1
+        # The change log is read after the rest of the panel has been rendered.
+        changes = await _texts(page, "#change-list > .about-row", 1)
         assert _lines(changes[0])[0] == "Your name: not set → “Robin”"
         assert _lines(changes[0])[1].endswith("· by you, on the panel or the command line")
         assert await _overflow(page) <= 0
@@ -240,21 +256,23 @@ async def test_a_field_is_saved_cleared_and_refused_in_words(
         await page.fill("#field-time_zone", "Mars/Olympus")
         async with page.expect_response("**/person/changes"):
             await page.press("#field-time_zone", "Enter")
-        assert (await outcome.inner_text()).startswith("That value was not saved. The rule is:")
+        await expect(outcome).to_have_text(_opening("That value was not saved. The rule is:"))
         # What was refused is what the person corrects, so it stays in the box.
-        assert await page.locator("#field-time_zone").input_value() == "Mars/Olympus"
+        await expect(page.locator("#field-time_zone")).to_have_value("Mars/Olympus")
 
         await page.fill("#field-time_zone", "Europe/Lisbon")
         async with page.expect_response("**/person/changes"):
             await page.press("#field-time_zone", "Enter")
-        assert await outcome.inner_text() == "Saved."
-        # The panel is built again, and the keyboard is left where it was.
-        assert await page.evaluate("() => document.activeElement.id") == "field-time_zone"
+        await expect(outcome).to_have_text("Saved.")
+        # The panel is built again, its change log last, and only then is the keyboard
+        # left where it was: the focus is read once the log shows the save.
+        await expect(page.locator("#change-list > .about-row")).to_have_count(1)
+        await expect(page.locator("#field-time_zone")).to_be_focused()
         held = await people.read(OWNER_PERSON_ID)
         assert held is not None
         assert held.profile.time_zone == "Europe/Lisbon"
-        assert (
-            "Now: Europe/Lisbon" in await page.locator("#profile-fields > form").nth(3).inner_text()
+        await expect(page.locator("#profile-fields > form").nth(3)).to_contain_text(
+            "Now: Europe/Lisbon"
         )
 
         async with page.expect_response("**/person/changes"):
@@ -264,11 +282,11 @@ async def test_a_field_is_saved_cleared_and_refused_in_words(
                 .get_by_role("button", name="Clear")
                 .click()
             )
-        assert await outcome.inner_text() == "Cleared."
+        await expect(outcome).to_have_text("Cleared.")
         held = await people.read(OWNER_PERSON_ID)
         assert held is not None
         assert held.profile.time_zone is None
-        changes = await _texts(page, "#change-list > .about-row")
+        changes = await _texts(page, "#change-list > .about-row", 2)
         assert [_lines(text)[0] for text in changes] == [
             "Your time zone: “Europe/Lisbon” → not set",
             "Your time zone: not set → “Europe/Lisbon”",
@@ -289,24 +307,24 @@ async def test_a_stale_pin_is_unpinned_a_style_memory_removed_and_suggestions_de
 
         async with page.expect_response("**/person/changes"):
             await page.locator("#no-longer-current-list button", has_text="Unpin").click()
-        assert await outcome.inner_text() == "Unpinned. The memory itself is kept."
-        assert await page.locator("#no-longer-current").is_hidden()
+        await expect(outcome).to_have_text("Unpinned. The memory itself is kept.")
+        await expect(page.locator("#no-longer-current")).to_be_hidden()
 
         async with page.expect_response("**/person/changes"):
             await page.locator("#style-list button", has_text="Remove").click()
-        assert (await outcome.inner_text()).startswith("Removed.")
-        assert await page.locator("#style-list").inner_text() == "Nothing yet."
+        await expect(outcome).to_have_text(_opening("Removed."))
+        await expect(page.locator("#style-list")).to_have_text("Nothing yet.")
 
         language = page.locator("#suggestion-list > .about-row", has_text="Português")
         async with page.expect_response("**/person/changes"):
             await language.get_by_role("button", name="Accept").click()
-        assert await outcome.inner_text() == "Accepted."
-        assert await page.locator("#field-language").input_value() == "Português"
+        await expect(outcome).to_have_text("Accepted.")
+        await expect(page.locator("#field-language")).to_have_value("Português")
 
         address = page.locator("#suggestion-list > .about-row", has_text="“Rob”")
         async with page.expect_response("**/person/changes"):
             await address.get_by_role("button", name="Dismiss").click()
-        assert await outcome.inner_text() == "Dismissed. I will not suggest it again."
+        await expect(outcome).to_have_text("Dismissed. I will not suggest it again.")
 
         held = await people.read(OWNER_PERSON_ID)
         assert held is not None
@@ -330,18 +348,16 @@ async def test_a_list_past_a_page_offers_the_rest_and_reads_that_list_alone(
         await _open(drive)
         page = drive.page
 
-        assert await page.locator("#style-list > .about-row").count() == 25
+        await expect(page.locator("#style-list > .about-row")).to_have_count(25)
         async with page.expect_request("**/person") as asked:
             await page.locator("#style-list > button", has_text="Show more").click()
         await (await asked.value).response()
-        await page.wait_for_function(
-            "() => document.querySelectorAll('#style-list > .about-row').length === 27"
-        )
+        await expect(page.locator("#style-list > .about-row")).to_have_count(27)
 
         sent = (await asked.value).post_data_json
         assert sent is not None
         assert (sent["lists"], sent["offset"]) == (["style_marks"], 25)
-        assert await page.locator("#style-list > button").count() == 0
+        await expect(page.locator("#style-list > button")).to_have_count(0)
         assert heard == []
 
 
@@ -365,7 +381,7 @@ async def test_a_memory_is_pinned_from_the_belief_panel_whose_control_says_it_co
         page = drive.page
         async with page.expect_response("**/candidates/pending"):
             await press(page, "#beliefs-button")
-        assert await page.locator("#belief-pin-state").inner_text() == (
+        await expect(page.locator("#belief-pin-state")).to_have_text(
             "Pinning a memory keeps it in mind in every conversation, and confirms its "
             "wording as yours."
         )
@@ -377,17 +393,19 @@ async def test_a_memory_is_pinned_from_the_belief_panel_whose_control_says_it_co
         await pin.focus()
         async with page.expect_response("**/person/pin"):
             await page.keyboard.press("Enter")
-        assert (await outcome.inner_text()).startswith("Pinned.")
+        # The outcome is written once the page has read the answer's body, which can be
+        # after the response has arrived, so each one is waited for, never read straight off.
+        await expect(outcome).to_have_text(_opening("Pinned."))
 
         async with page.expect_response("**/person/pin"):
             await long.get_by_role("button", name="Pin: confirms this wording").click()
-        assert (await outcome.inner_text()).startswith(
-            "Pinning it would take what I keep in mind over its budget"
+        await expect(outcome).to_have_text(
+            _opening("Pinning it would take what I keep in mind over its budget")
         )
 
         async with page.expect_response("**/person/unpin"):
             await diet.get_by_role("button", name="Unpin").click()
-        assert await outcome.inner_text() == "Unpinned. The memory itself is kept."
+        await expect(outcome).to_have_text("Unpinned. The memory itself is kept.")
 
         held = await people.read(OWNER_PERSON_ID)
         assert held is not None
@@ -406,21 +424,26 @@ async def test_a_memory_confirmed_by_a_pin_says_it_was_pinned_not_asked(
         _, store = switch_on(drive.engine)
         await hold(drive.engine, store, memory("m:sun", "Calls home on Sundays.", pinned_support()))
         shown: list[str] = []
+        asked = asyncio.Event()
 
         async def answer(dialog: Dialog) -> None:
             shown.append(dialog.message)
             await dialog.dismiss()
+            asked.set()
 
         drive.page.on("dialog", answer)
         page = drive.page
         async with page.expect_response("**/candidates/pending"):
             await press(page, "#beliefs-button")
         row = page.locator("#belief-list > .belief-row", has_text="Calls home on Sundays.")
-        assert "Why: You confirmed this wording." in _lines(await row.inner_text())
+        await expect(row).to_contain_text(
+            re.compile(r"^Why: You confirmed this wording\.$", re.MULTILINE), use_inner_text=True
+        )
 
-        async with page.expect_response("**/belief"):
-            await row.get_by_role("button", name="Forget").click()
-        await page.wait_for_function("() => true")
+        # The question is asked once the page has read the single view's body, so it is
+        # waited for, not assumed to have come with the response.
+        await row.get_by_role("button", name="Forget").click()
+        await asyncio.wait_for(asked.wait(), timeout=5)
 
         assert len(shown) == 1
         assert "Why: You confirmed this wording by pinning it." in shown[0]
@@ -452,33 +475,26 @@ async def test_a_pin_is_refused_where_the_id_now_names_another_wording_than_the_
 
         async with page.expect_response("**/belief"):
             await padded.get_by_role("button", name="Pin: confirms this wording").click()
-        await page.wait_for_function(
-            "() => document.getElementById('belief-outcome').textContent !== ''"
-        )
-        assert (await outcome.inner_text()).startswith("That memory is not the one shown here")
+        await expect(outcome).to_have_text(_opening("That memory is not the one shown here"))
         held = await people.read(OWNER_PERSON_ID)
         assert held is not None
         assert held.pins == ()
 
         async with page.expect_response("**/person/pin"):
             await plain.get_by_role("button", name="Pin: confirms this wording").click()
-        assert (await outcome.inner_text()).startswith("Pinned.")
+        await expect(outcome).to_have_text(_opening("Pinned."))
 
         # And the padded row's Unpin does not take the other memory's pin away.
-        await page.evaluate("() => { document.getElementById('belief-outcome').textContent = ''; }")
         async with page.expect_response("**/belief"):
             await padded.get_by_role("button", name="Unpin").click()
-        await page.wait_for_function(
-            "() => document.getElementById('belief-outcome').textContent !== ''"
-        )
-        assert (await outcome.inner_text()).startswith("That memory is not the one shown here")
+        await expect(outcome).to_have_text(_opening("That memory is not the one shown here"))
         held = await people.read(OWNER_PERSON_ID)
         assert held is not None
         assert [pin.memory_id for pin in held.standing_pins] == ["m:diet"]
 
         async with page.expect_response("**/person/unpin"):
             await plain.get_by_role("button", name="Unpin").click()
-        assert await outcome.inner_text() == "Unpinned. The memory itself is kept."
+        await expect(outcome).to_have_text("Unpinned. The memory itself is kept.")
         held = await people.read(OWNER_PERSON_ID)
         assert held is not None
         assert held.standing_pins == ()
@@ -512,10 +528,10 @@ async def test_a_save_keeps_what_was_typed_in_other_fields_and_while_it_was_sent
         async with page.expect_response("**/person/changes"):
             release.set_result(None)
 
-        assert await page.locator("#about-outcome").inner_text() == "Saved."
-        assert await page.locator("#field-name").input_value() == "Robin"
-        assert await page.locator("#field-language").input_value() == "Português"
-        assert await page.locator("#field-address").input_value() == "Rob"
+        await expect(page.locator("#about-outcome")).to_have_text("Saved.")
+        await expect(page.locator("#field-name")).to_have_value("Robin")
+        await expect(page.locator("#field-language")).to_have_value("Português")
+        await expect(page.locator("#field-address")).to_have_value("Rob")
         held = await people.read(OWNER_PERSON_ID)
         assert held is not None
         assert (held.profile.name, held.profile.language, held.profile.address) == (
@@ -555,8 +571,8 @@ async def test_a_box_typed_back_to_its_old_value_while_saving_keeps_what_was_typ
         async with page.expect_response("**/person/changes"):
             release.set_result(None)
 
-        assert await page.locator("#about-outcome").inner_text() == "Saved."
-        assert await page.locator("#field-name").input_value() == "Robin"
+        await expect(page.locator("#about-outcome")).to_have_text("Saved.")
+        await expect(page.locator("#field-name")).to_have_value("Robin")
         held = await people.read(OWNER_PERSON_ID)
         assert held is not None
         assert held.profile.name == "Rob"
@@ -589,15 +605,15 @@ async def test_a_second_save_while_one_is_out_is_said_and_not_sent(
             await page.press("#field-name", "Enter")
         await page.fill("#field-name", "Robert")
         await page.press("#field-name", "Enter")
-        assert (await page.locator("#about-outcome").inner_text()).startswith(
-            "Your last change is still being made"
+        await expect(page.locator("#about-outcome")).to_have_text(
+            _opening("Your last change is still being made")
         )
         async with page.expect_response("**/person/changes"):
             release.set_result(None)
 
+        await expect(page.locator("#about-outcome")).to_have_text("Saved.")
+        await expect(page.locator("#field-name")).to_have_value("Robert")
         assert len(sent) == 1
-        assert await page.locator("#about-outcome").inner_text() == "Saved."
-        assert await page.locator("#field-name").input_value() == "Robert"
         held = await people.read(OWNER_PERSON_ID)
         assert held is not None
         assert held.profile.name == "Rob"
@@ -620,7 +636,7 @@ async def test_a_save_that_never_arrived_leaves_its_text_for_sending_again(
         async with page.expect_response("**/person/changes"):
             await press(page, "#about-button")
 
-        assert await page.locator("#field-language").input_value() == "Português"
+        await expect(page.locator("#field-language")).to_have_value("Português")
 
 
 async def test_a_belief_panel_that_could_not_read_the_switch_says_so(
@@ -644,11 +660,12 @@ async def test_a_belief_panel_that_could_not_read_the_switch_says_so(
         async with page.expect_response("**/candidates/pending"):
             await press(page, "#beliefs-button")
 
-        assert (await page.locator("#belief-pin-state").inner_text()).startswith(
-            "I could not read whether pinning is switched on"
+        await expect(page.locator("#belief-pin-state")).to_have_text(
+            _opening("I could not read whether pinning is switched on")
         )
-        assert await page.locator("#belief-list button", has_text="Pin").count() == 0
-        assert await page.locator("#belief-list .belief-row").count() == 1
+        # The row first, so that no Pin is counted on a list not yet rendered.
+        await expect(page.locator("#belief-list .belief-row")).to_have_count(1)
+        await expect(page.locator("#belief-list button", has_text="Pin")).to_have_count(0)
 
 
 async def test_a_stalled_read_after_a_write_holds_up_no_later_write(
@@ -723,8 +740,8 @@ async def test_a_box_typed_in_while_a_clear_is_out_keeps_what_was_typed(
         async with page.expect_response("**/person/changes"):
             release.set_result(None)
 
-        assert await page.locator("#about-outcome").inner_text() == "Cleared."
-        assert await page.locator("#field-name").input_value() == "Robin"
+        await expect(page.locator("#about-outcome")).to_have_text("Cleared.")
+        await expect(page.locator("#field-name")).to_have_value("Robin")
         held = await people.read(OWNER_PERSON_ID)
         assert held is not None
         assert held.profile.name is None
