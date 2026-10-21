@@ -955,6 +955,10 @@ def test_every_integer_setting_is_discovered() -> None:
         # again: ``join_limit=True`` is one join while it reads as joining on. Zero is
         # admitted and turns joining and takeover off.
         "join_limit",
+        # ADR-0337 §8:3's daily budget of the hub's follow-up calls, and the ``bool``
+        # argument again: ``follow_up_daily_calls=True`` is one follow-up a day while it
+        # reads as the follow-up on. Zero is admitted and asks none.
+        "follow_up_daily_calls",
     }
 
 
@@ -2786,3 +2790,26 @@ def test_a_deployment_still_setting_the_retired_email_variables_starts(
         field = name.removeprefix("ASSISTANT_").lower()
         assert field not in Settings.model_fields, field
         assert not hasattr(settings, field), field
+
+
+# --- ADR-0337 §8:1-§8:3: the follow-up question on the owner's hub -----------------
+
+
+def test_the_follow_up_is_off_by_default_with_a_budget_of_a_hundred() -> None:
+    """§8:1, §8:3: no hub asks unless it is told to; told to, 100 a day."""
+    settings = Settings()
+
+    assert settings.follow_up_question is False
+    assert settings.follow_up_daily_calls == 100
+
+
+@pytest.mark.parametrize("value", [0, 1, 2**63 - 1])
+def test_the_follow_up_budget_admits_zero_and_up(value: int) -> None:
+    """§8:3: an integer of at least zero; zero asks none."""
+    assert Settings(follow_up_daily_calls=value).follow_up_daily_calls == value
+
+
+@pytest.mark.parametrize("value", [-1, 2**63])
+def test_the_follow_up_budget_refuses_below_zero_and_past_its_bound(value: int) -> None:
+    with pytest.raises(ValidationError, match="follow_up_daily_calls"):
+        Settings(follow_up_daily_calls=value)

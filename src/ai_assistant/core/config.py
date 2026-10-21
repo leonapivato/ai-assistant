@@ -3389,6 +3389,34 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- The follow-up question on the owner's hub (ADR-0337 §8) ----------
+    # Where this is true, the hub asks each recorded model call, after it has answered,
+    # what it had to guess, what it lacked and which rules pulled against each other,
+    # and keeps the answer in the diagnostic record beside the activation (§8:4,
+    # §8:12). True only on the owner's hub; a hub hosted for another person never asks
+    # one (§8:1, §2:1). It needs the record, so the hub refuses to start where it is
+    # true and `diagnostic_record` is false (§8:2).
+    follow_up_question: bool = Field(
+        default=False,
+        description=(
+            "After each recorded model call, ask the model what it had to guess and keep "
+            "its answer in the diagnostic record (ADR-0337 §8). Only on the owner's own "
+            "hub, and only with diagnostic_record on. Off by default."
+        ),
+    )
+    # The follow-up's budget (§8:3): the most follow-up calls in any 24 hours of one run,
+    # counted from zero when the hub starts. A follow-up it does not admit is not asked,
+    # and nothing waits for it; 0 asks none.
+    follow_up_daily_calls: _IntegerSetting = Field(
+        default=100,
+        ge=0,
+        lt=2**63,
+        description=(
+            "The most follow-up calls the hub makes in any 24 hours, counted from zero "
+            "when it starts (ADR-0337 §8:3). A follow-up past it is not asked."
+        ),
+    )
+
     # --- Prompt overrides (ADR-0334 §3:3, §6:2) ---------------------------
     # Each model call's instruction is a template shipped in the package; where this is
     # true, a file `<name>.txt` under `<data_dir>/prompts` replaces that prompt's
