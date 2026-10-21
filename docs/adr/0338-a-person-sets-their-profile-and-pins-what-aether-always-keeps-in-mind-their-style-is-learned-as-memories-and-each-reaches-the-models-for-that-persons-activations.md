@@ -199,6 +199,12 @@ claims would break ADR-0292 §5:8 and show one person's pins to whoever typed th
 > as the person's own. A zone that is not set is shown as not set, beside the hub's default
 > zone that the current time is given in.
 
+> **Normative.** Where a memory states a value for one of the five fields, such as an older
+> "address the user as Leo", the field governs. The person block says that its fields are
+> the person's current choice, and planning's instruction says that a field outweighs any
+> memory stating another value for it. No memory is retired, rewritten or withheld for this,
+> so its history stays.
+
 **Language.**
 
 > **Normative.** Planning is shown the language as the one Aether writes to the person in.
@@ -245,8 +251,9 @@ standing commitment, the people someone lives with. The person chooses them by p
 
 > **Normative.** A `pinned` support is added only to the memory its pin was made on, only
 > while that memory is current, and only where the person-model store holds the pin when the
-> support is added, not marked removed. The observer's code checks all three before the
-> write, in place of ADR-0328 §4:7's check that a support's episode is held.
+> support is added, whether or not it has been removed since: the confirmation is earned when
+> the pin is made. The observer's code checks all three before the write, in place of
+> ADR-0328 §4:7's check that a support's episode is held.
 
 > **Normative.** Only the observer adds a `pinned` support (§9:6).
 
@@ -370,7 +377,9 @@ person whose pins fill the budget sees, on the panel, which style memories were 
 > **Normative.** The observer receives the five fields of the leaving episode's person, and
 > nothing else of the person model.
 
-> **Normative.** No other stage is given any part of the person model.
+> **Normative.** No other stage is given any part of the person model. A recorded call's
+> request that ADR-0337's follow-up or ADR-0335's replay re-sends whole is that call's
+> request, and is not a further stage given it.
 
 > **Normative.** The person block is data, rendered by code into the stage's data and never
 > into an instruction template (ADR-0334). A field or a style memory is rendered as the
@@ -444,7 +453,7 @@ or spoken place may show of the block is the privacy redesign's (§12).
 
 > **Normative.** The exact line (ADR-0321 §2:5) of a `pin` or `unpin` call shows, in place
 > of the memory's label, the memory's wording as the store holds it when the round is
-> recorded.
+> recorded. ADR-0321 §2:7's test reads that wording as the argument the call sends.
 
 > **Normative.** A `set_profile` call whose value fails §3:2, and a `pin` call that §4:2 or
 > §6:3 refuses, are not done, and the result gives the reason.
@@ -461,7 +470,8 @@ Aether to remember something: only input that carries the user's authority appro
 ### 9. The observer
 
 > **Normative.** The observer reads the five fields of the leaving episode's person (§7:4),
-> beside what ADR-0329 §8:1 names.
+> beside what ADR-0329 §8:1 names, and both its steps are given them: the scout, and the
+> commit step beside what ADR-0329 §9:3 gives it.
 
 > **Normative.** The scout may propose a **field suggestion**: a field and a value, naming
 > the episode and the part it rests on. Code validates it (§3:2) and records it as pending,
@@ -486,10 +496,10 @@ Aether to remember something: only input that carries the user's authority appro
 > nowhere.
 
 > **Normative.** Each observer run, before its episodes, adds a `pinned` support (§4:4) for
-> every pin that a person made on their own profile, that is not marked removed, whose
-> memory is current, and which no support of that memory points at yet. It writes through the write stage by ADR-0328
-> §11:3's operation member, one add support each, conditional on the revision read, with no
-> model call. A write that fails is tried again on the next run, and the pass counts toward
+> every pin that a person made on their own profile, removed since or not, whose memory is
+> current, and which no support of that memory points at yet. It writes through the write
+> stage by ADR-0328 §11:3's operation member, one add support each, conditional on the
+> revision read, with no model call. A write that fails is tried again on the next run, and the pass counts toward
 > no model-call budget (ADR-0329 §16:9).
 
 > **Normative.** The observer writes to the person-model store only suggestions and style
@@ -600,9 +610,9 @@ Superseded in part. Every clause the middle column does not name stands:
 | ADR-0276 | §1:5's *no retrieved memory* and *nothing else*, in the addition alone: the person block's five fields and pinned memories | §7:2 |
 | ADR-0281 | §7:2, in the addition alone: the person block's memories are labelled `M` first, the `recalled` section's numbering continues after them, and a recalled record the block shows is rendered there only | §7:7 |
 | ADR-0307 | §6:1, in the addition alone: the person block's five fields, its slot and the pending suggestions, with the current time given in the person's zone | §3:6, §7:3 |
-| ADR-0321 | §2:5, in the addition alone: a `pin` or `unpin` call's exact line shows the memory's wording in place of its label; §4:4 and §4:17, in the additions alone: `set_profile`, `pin` and `unpin` as a source of *needs you* by rule | §8:5, §8:6 |
+| ADR-0321 | §2:5 and §2:7, in the additions alone: a `pin` or `unpin` call's exact line shows the memory's wording in place of its label, and the test reads it as that argument; §4:4 and §4:17, in the additions alone: `set_profile`, `pin` and `unpin` as a source of *needs you* by rule | §8:5, §8:6 |
 | ADR-0328 | §4:1's points-at field and §4:2's origin table, in the additions alone: a pin as a part, and the origin `pinned`; §4:7, for that part alone: the pin is checked as held by the person-model store; §4:11 and §4:12, in the additions alone: code sets `sure` on a `pinned` support, and its `when` is the pin's instant | §4:4, §4:5 |
-| ADR-0329 | §8:1, in the addition alone: the five fields; §9:1 and §9:4, in the additions alone: field suggestions, pin suggestions and style marks; §9:6, in the addition alone: a support pointing at a pin; §11:1, for a finding that only restates a field; §15:1, in the addition alone: the person-model store | §9:1–§9:6, §9:8 |
+| ADR-0329 | §8:1 and §9:3, in the additions alone: the five fields, read by the observer and given to both its steps; §9:1 and §9:4, in the additions alone: field suggestions, pin suggestions and style marks; §9:6, in the addition alone: a support pointing at a pin; §11:1, for a finding that only restates a field; §15:1, in the addition alone: the person-model store | §9:1–§9:6, §9:8 |
 
 Read through and not superseded:
 
@@ -617,6 +627,7 @@ Read through and not superseded:
 | ADR-0292 §5 | Nothing: the person is read from the author the hub states (§2:2) |
 | ADR-0008 §5, ADR-0093 §7b | Nothing: `Settings.timezone` stays, as the hub's default and for the calendar reader |
 | ADR-0334 | Nothing: the person model is data, and the templates stay the rules (§7:6) |
+| ADR-0335 §4, ADR-0337 §6 | Nothing: a replay or a follow-up re-sends a recorded request whole, the person block in it included (§7:5) |
 | ADR-0326, ADR-0126 §1 | Nothing: the new store is a store under ADR-0326, and lies in the data directory the delete destroys |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
@@ -667,7 +678,7 @@ Read through and not superseded:
 | 4 | Style dials | None: style is learned as memories and marked (§5) |
 | 5 | The observer's suggestions | On the panel, and in planning's block (§7:3, §9) |
 | 6 | The time zone | `ASSISTANT_TIMEZONE` stays as the default, and the profile overrides it (§3:6–§3:8) |
-| 7 | Language | What Aether writes in, and a hint for reading (§3:10) |
+| 7 | Language | What Aether writes in, and a hint for reading (§3:11) |
 | 8 | Conversion | Two ADRs. This one first, and the situation block next (§12) |
 
 **What would reopen it.**
