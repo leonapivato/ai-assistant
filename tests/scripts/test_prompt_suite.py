@@ -262,6 +262,10 @@ def test_an_input_may_be_a_json_file_beside_the_case(tmp_path: Path) -> None:
             _understanding(property={"check": "no_label", "fields": ["a"], "labels": ["h1"]}),
             "capital letters",
         ),
+        (
+            _understanding(property={"check": "no_label", "fields": ["meanign"], "labels": ["H"]}),
+            "names fields no understanding reply holds: ['meanign']",
+        ),
         (_understanding(property={"check": "read"}), "a read property"),
         (_understanding(property={"check": "read", "read": " "}), "a read property"),
         (_understanding(property={"check": "read", "read": "x", "more": "y"}), "a read property"),
@@ -317,6 +321,24 @@ def test_a_malformed_case_is_a_defect_naming_its_file(
             "a planning round's text fields",
         ),
         (_planning(property={"check": "memory_kept", "memory": "M1"}), "reads no reply"),
+        (
+            _planning(
+                input={
+                    "messages": [{"role": "user", "content": "x"}],
+                    "tools": [WEB_SEARCH, WEB_SEARCH],
+                }
+            ),
+            "names one tool twice",
+        ),
+        (
+            _planning(
+                input={
+                    "messages": [{"role": "user", "content": "x"}],
+                    "tools": [{**WEB_SEARCH, "name": "planning_round"}],
+                }
+            ),
+            "which the completer adds itself",
+        ),
         (
             _planning(
                 input={
@@ -442,6 +464,16 @@ def test_a_key_the_stage_drops_is_not_read() -> None:
     reply = json.dumps({"findings": [{"claim": "prefers window seats", "aside": "see P1"}]})
 
     assert _judge("no_label", params, "observer_scout", reply) is None
+
+
+def test_no_label_may_name_a_nested_field_of_the_reply_shape() -> None:
+    declared = replay_tool.reply_fields
+
+    assert {"meaning", "phrase", "statement", "matter", "why_it_matters"} <= declared(
+        "understanding"
+    )
+    assert "claim" in declared("observer_scout")
+    assert {"wording", "note", "asks"} <= declared("observer_commit")
 
 
 def test_no_label_takes_a_label_as_a_whole_word_alone() -> None:
