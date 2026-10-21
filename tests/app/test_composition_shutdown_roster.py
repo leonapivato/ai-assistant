@@ -58,7 +58,8 @@ def _settings(*, booking: bool) -> Settings:
     here needs no keyring and no connection record (ADR-0273 §5).
 
     Args:
-        booking: Whether to name the nine ``booking_*`` settings.
+        booking: Whether to name the nine ``booking_*`` settings, and turn the person
+            model on.
 
     Returns:
         The settings.
@@ -76,6 +77,8 @@ def _settings(*, booking: bool) -> Settings:
         booking_billed_amount=Decimal("120.00"),
         booking_billed_currency="EUR",
         booking_retained_records=2,
+        # The person-model store, opened only where its switch is on (ADR-0338 §11:2).
+        person_model=True,
     )
 
 

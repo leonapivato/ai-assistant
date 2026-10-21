@@ -47,10 +47,15 @@ from typing import TYPE_CHECKING, Final, cast
 
 from pydantic import BaseModel
 
-from ai_assistant.app.composition import telegram_intake_path
+from ai_assistant.app.composition import (
+    PERSON_MODEL_FILENAME,
+    PROFILE_FIELD_CHARS,
+    telegram_intake_path,
+)
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
+    OWNER_PERSON_ID,
     ActionRequest,
     ActivationEffect,
     ActivationUnderstanding,
@@ -92,13 +97,18 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
+    PersonActHow,
+    PersonModelAct,
     Placement,
     PlacementReach,
     PlacementSetter,
     ProcessingReason,
     ProcessingStatus,
+    ProfileField,
+    ProposedSuggestion,
     Provenance,
     ProvisioningState,
+    QuestionPart,
     ReadOutcome,
     RecordedChannelTrigger,
     RecordedInputMessage,
@@ -118,6 +128,7 @@ from ai_assistant.core.types import (
     StoryNoteAuthor,
     StorySummaryDraft,
     StorySummaryLine,
+    SuggestionKind,
     SupportDirection,
     SupportOrigin,
     TelegramOutcome,
@@ -142,6 +153,7 @@ from ai_assistant.memory import (
 )
 from ai_assistant.memory._legacy import LEGACY_KINDS, LEGACY_NOTE, legacy_wording
 from ai_assistant.memory.conversation_store import SqliteConversationStore
+from ai_assistant.memory.person_model_store import SqlitePersonModelStore
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.permissions import (
     SqliteAuditTrail,
@@ -191,9 +203,9 @@ def check_settings(directory: Path) -> Settings:
     """The settings both builds compose the data directory with.
 
     Every store the composition opens only on a setting is switched on: the Telegram
-    line's intake record and the booking provider's store. The hashing embedder keeps
-    the check offline and quick; the memory store's schema and its upgrades are the
-    same code whichever embedder fills the vectors.
+    line's intake record, the booking provider's store and the person-model store. The
+    hashing embedder keeps the check offline and quick; the memory store's schema and its
+    upgrades are the same code whichever embedder fills the vectors.
 
     Args:
         directory: The data directory, absolute and canonical.
@@ -217,6 +229,7 @@ def check_settings(directory: Path) -> Settings:
         booking_billed_amount=Decimal("120.00"),
         booking_billed_currency="EUR",
         booking_retained_records=BOOKING_RETAINED,
+        person_model=True,
     )
 
 
@@ -1378,6 +1391,77 @@ async def _read_bookings(directory: Path) -> Records:
         store.close()
 
 
+# --- person_model.db ------------------------------------------------------------------
+
+
+def _person_model(directory: Path) -> SqlitePersonModelStore:
+    return SqlitePersonModelStore(
+        path=directory / PERSON_MODEL_FILENAME, field_chars=PROFILE_FIELD_CHARS
+    )
+
+
+async def _write_person_model(directory: Path, moment: Moment) -> None:
+    del moment  # the store stamps its own instants
+    panel = PersonModelAct(how=PersonActHow.PANEL, by=OWNER_PERSON_ID)
+    by_a_yes = PersonModelAct(
+        how=PersonActHow.APPROVAL,
+        by=OWNER_PERSON_ID,
+        approval=QuestionPart(round="round-upgrade-1", part=1),
+        episode_id="act-upgrade-1",
+    )
+    field = ProposedSuggestion(
+        kind=SuggestionKind.FIELD,
+        field=ProfileField.ADDRESS,
+        value="Robin",
+        episode_id="act-upgrade-1",
+        part=InputPart(episode="act-upgrade-1"),
+        origin=SupportOrigin.USER_MESSAGE,
+    )
+    store = _person_model(directory)
+    try:
+        owner = OWNER_PERSON_ID
+        await store.set_field(owner, ProfileField.NAME, "Robin Vale", act=panel)
+        await store.set_field(owner, ProfileField.TIME_ZONE, "Europe/Lisbon", act=by_a_yes)
+        await store.set_field(owner, ProfileField.LANGUAGE, "Português", act=panel)
+        removed = await store.add_pin(owner, "mem-upgrade-1", act=panel)
+        if removed.record_id is not None:
+            await store.remove_pin(owner, removed.record_id)
+        await store.add_pin(owner, "mem-upgrade-2", act=by_a_yes)
+        await store.add_style_mark(owner, "mem-upgrade-3")
+        unmarked = await store.add_style_mark(owner, "mem-upgrade-4")
+        if unmarked.record_id is not None:
+            await store.remove_style_mark(owner, unmarked.record_id)
+        await store.record_suggestion(owner, field)
+        dismissed = await store.record_suggestion(
+            owner,
+            ProposedSuggestion(
+                kind=SuggestionKind.PIN, memory_id="mem-upgrade-3", episode_id="act-upgrade-1"
+            ),
+        )
+        if dismissed.record_id is not None:
+            await store.dismiss_suggestion(owner, dismissed.record_id)
+        accepted = await store.record_suggestion(
+            owner,
+            ProposedSuggestion(
+                kind=SuggestionKind.PIN, memory_id="mem-upgrade-5", episode_id="act-upgrade-1"
+            ),
+        )
+        if accepted.record_id is not None:
+            await store.accept_suggestion(owner, accepted.record_id, by=owner)
+    finally:
+        store.close()
+
+
+async def _read_person_model(directory: Path) -> Records:
+    store = _person_model(directory)
+    try:
+        exported = to_json(await store.export())
+        assert isinstance(exported, dict)  # noqa: S101  # a model dumps to an object
+        return {f"export/{name}": value for name, value in exported.items()}
+    finally:
+        store.close()
+
+
 # --- devices.db -----------------------------------------------------------------------
 
 
@@ -1442,6 +1526,7 @@ STORES: Final[tuple[Store, ...]] = (
     Store("connections", ("connections.db",), _write_connections, _read_connections),
     Store("telegram", ("telegram-*.db",), _write_telegram, _read_telegram),
     Store("bookings", ("bookings.db",), _write_bookings, _read_bookings),
+    Store("person_model", (PERSON_MODEL_FILENAME,), _write_person_model, _read_person_model),
     Store("devices", (ENROLMENTS_FILENAME,), _write_devices, _read_devices),
 )
 
