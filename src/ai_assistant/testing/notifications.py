@@ -144,11 +144,13 @@ class FakeNotificationPolicy:
         """Build the policy over the zone its quiet windows are read in.
 
         Args:
-            timezone: The IANA zone ``Settings.timezone`` holds, or a
-                :class:`zoneinfo.ZoneInfo`. **The only configuration a ruling
-                reads**, and a construction-time property rather than an
-                argument because a caller free to vary it per call could move
-                the user's night (ADR-0130 §6).
+            timezone: The IANA zone quiet windows are read in, or a
+                :class:`zoneinfo.ZoneInfo`: the zone of the person the ruling is
+                for, or ``Settings.timezone`` where theirs is empty (ADR-0130 §6,
+                as ADR-0338 §3:6 supersedes §6:4). **The only configuration a
+                ruling reads**, and a construction-time property rather than an
+                argument because a caller free to vary it per call could move the
+                user's night: a ruling in another zone is handed another instance.
         """
         self._zone = ZoneInfo(timezone) if isinstance(timezone, str) else timezone
 

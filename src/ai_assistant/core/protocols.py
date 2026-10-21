@@ -190,6 +190,7 @@ if TYPE_CHECKING:
         Placement,
         PlanExport,
         ProcessingStatus,
+        ProfileChange,
         ProfileField,
         ProposedSuggestion,
         QuestionPart,
@@ -7274,12 +7275,12 @@ class NotificationPolicy(Protocol):
     producer a score is self-granted authority, weighed by the policy it is a
     threshold nobody can calibrate on the first day.
 
-    **The one construction-time input is the timezone.** §6 rules quiet windows
-    read in ``Settings.timezone`` — the same value ADR-0008 §5 gives the temporal
-    context and ADR-0093 §7b binds the calendar reader to — and introduces no
-    second timezone source. It is a property of the implementation rather than an
-    argument because it is configuration read once, and because a caller free to
-    vary it per call could move the user's night.
+    **The one construction-time input is the timezone.** Quiet windows are read in
+    the zone of the person the ruling is for, and in ``Settings.timezone`` where
+    theirs is empty (ADR-0130 §6, as ADR-0338 §3:6 supersedes §6:4). It is a property
+    of the implementation rather than an argument, because a caller free to vary it
+    per call could move the user's night: a ruling in another zone is handed another
+    instance.
 
     **A DST-ambiguous local instant resolves at ``fold=0``**, on ADR-0093 §7b's
     rule for the same hazard. A local time the spring transition skips entirely
@@ -8944,7 +8945,7 @@ class AssistantEngine(Protocol):
 
     # --- the person model, for the panels (ADR-0338 §8:1-§8:3) -------------
     #
-    # Seven members: one read and six writes. **Shown only to that person and to the
+    # Eight members: two reads and six writes. **Shown only to that person and to the
     # owner** (§8:3): on the wire each is in the route table's command row, so a device
     # without the role of source of commands and queries, which the roster gives the
     # owner's devices alone, is refused before dispatch (ADR-0298 §5:6). **Every write
@@ -8964,18 +8965,19 @@ class AssistantEngine(Protocol):
     async def person_model(self, person_id: NonBlankEncodableText) -> PersonModelView | None:
         """Read one person's model, as the About you panel shows it (ADR-0338 §8:1-§8:2).
 
-        The fields; the change log; the kept-in-mind slot, assembled as the person
-        block assembles it on a private place, which every place on the hub is today
-        (§7), with the budget it fills and the memories it left out and why (§6:2,
-        §6:4); the pins whose chain reaches no current memory (§4:8); the standing
-        style marks; and the pending suggestions, each marked where it rests on outside
-        content (§7:9), a pin suggestion's only while its memory is current (§9:5). A
-        pin or mark whose memory the memory store no longer holds is shown nowhere
-        (§4:10).
+        The fields; the kept-in-mind slot, assembled as the person block assembles it
+        on a private place, which every place on the hub is today (§7), with the budget
+        it fills and the memories it left out and why (§6:2, §6:4); the pins whose chain
+        reaches no current memory, each with the wording of the memory it was made on
+        (§4:8); the standing style marks, each with the current memory it shows, or the
+        wording of the one it was made on where it shows none (§5:3); and the pending
+        suggestions, each marked where it rests on outside content (§7:9), a pin
+        suggestion's only while its memory is current (§9:5). A pin or mark whose memory
+        the memory store no longer holds is shown nowhere (§4:10). The change log is
+        :meth:`profile_changes`'s, a page at a time.
 
-        The only memory wording it carries is the slot's: a memory left out, a pin no
-        longer current and a pin suggestion are named by id, and the panel words them
-        from :meth:`belief`.
+        A live memory the slot left out, and a pin suggestion's memory, are named by
+        id, and the panel words them from :meth:`belief`.
 
         Args:
             person_id: The person, by id: :data:`~ai_assistant.core.types.OWNER_PERSON_ID`
@@ -8989,6 +8991,36 @@ class AssistantEngine(Protocol):
             PersonModelOffError: If the hub keeps no person model.
             PersonModelStoreError: If the person-model store cannot be read.
             MemoryStoreError: If the memory store cannot be read.
+        """
+        ...
+
+    async def profile_changes(
+        self,
+        person_id: NonBlankEncodableText,
+        *,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> tuple[ProfileChange, ...]:
+        """One page of a person's change log, the most recent change first (ADR-0338 §3:5).
+
+        Every change to a field, with the old value, the new, who made it, when and how.
+        The log is append-only and kept until the person's data is deleted, so it is
+        read here a page at a time and never with the rest of :meth:`person_model`.
+
+        Args:
+            person_id: Whose log.
+            limit: How many entries the page holds at most.
+            offset: How many of the most recent to skip.
+
+        Returns:
+            The page; empty where the hub holds no such person, or past the log's end.
+
+        Raises:
+            ValueError: If ``person_id`` is blank or unwritable, or ``limit`` or
+                ``offset`` falls outside ``0 <= value < 2**63``. Refused locally.
+            TypeError: If ``limit`` or ``offset`` is not an integer.
+            PersonModelOffError: If the hub keeps no person model.
+            PersonModelStoreError: If the person-model store cannot be read.
         """
         ...
 
@@ -9117,7 +9149,8 @@ class AssistantEngine(Protocol):
         Returns:
             For a field suggestion, the store's write: ``written`` with the
             suggestion's id, or ``refused`` with ``unknown_person``,
-            ``unknown_record`` or ``already_decided``. For a pin suggestion,
+            ``unknown_record``, ``already_decided``, or ``invalid_value`` and its
+            reason where the value no longer passes the store's bound (§3:2). For a pin suggestion,
             :meth:`pin_memory`'s outcome for its memory.
 
         Raises:
@@ -13097,7 +13130,11 @@ class PersonModelStore(Protocol):
         naming the episode it rests on, and logs the change; a pin suggestion pins its
         memory as made on the panel (ADR-0338 §4:1). Either marks the suggestion, and
         every pending one equal to it, accepted (§8:9). The caller has checked a pin's
-        memory as :meth:`add_pin` requires.
+        memory as :meth:`add_pin` requires. A field suggestion's value is validated
+        again, as every field write is (§3:2), against the bound the store holds now,
+        which may be tighter than the one it was recorded under: a value that fails is
+        refused ``invalid_value`` with its reason, nothing is written, and the
+        suggestion stays pending.
 
         Args:
             person_id: Whose.
@@ -13106,7 +13143,8 @@ class PersonModelStore(Protocol):
 
         Returns:
             ``written`` with the suggestion's id; or ``refused`` with
-            ``unknown_person``, ``unknown_record`` or ``already_decided``.
+            ``unknown_person``, ``unknown_record``, ``already_decided``, or
+            ``invalid_value`` and its reason.
 
         Raises:
             ValueError: If ``suggestion_id`` or ``by`` is blank.

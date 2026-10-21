@@ -221,6 +221,7 @@ if TYPE_CHECKING:
         NotificationPreferences,
         PersonModelEdit,
         PersonModelView,
+        ProfileChange,
         ProfileField,
         ReplyCapability,
         SecretValue,
@@ -358,7 +359,7 @@ class FakeAssistantEngine:
         #: ``candidates`` says the same: off, the composition root's value until the
         #: observer is wired, and :meth:`pending_candidates` then answers none.
         self.candidates = False
-        #: The person-block assembly the seven person-model members answer from
+        #: The person-block assembly the eight person-model members answer from
         #: (ADR-0338 §8:1), as the engine's ``person_blocks`` is: ``None``, the default,
         #: is a hub with ``Settings.person_model`` off, where each member raises
         #: :class:`~ai_assistant.core.errors.PersonModelOffError` (§11:2). A consumer
@@ -1134,6 +1135,31 @@ class FakeAssistantEngine:
         self.calls.append(("person_model", {"person_id": named}))
         blocks = person_panel.wired(self.person_blocks)
         return self._checked(await person_panel.person_model_view(blocks, named), "person_model")
+
+    async def profile_changes(
+        self,
+        person_id: NonBlankEncodableText,
+        *,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> tuple[ProfileChange, ...]:
+        """One page of a person's change log, the most recent first (ADR-0338 §3:5)."""
+        named = non_blank_text(person_id, name="person_id")
+        page_argument(limit, name="limit")
+        page_argument(offset, name="offset")
+        check_arguments(
+            "profile_changes",
+            max_bytes=self._max_payload_bytes,
+            person_id=named,
+            limit=limit,
+            offset=offset,
+        )
+        self.calls.append(
+            ("profile_changes", {"person_id": named, "limit": limit, "offset": offset})
+        )
+        blocks = person_panel.wired(self.person_blocks)
+        page = await person_panel.profile_changes(blocks, named, limit=limit, offset=offset)
+        return self._checked(page, "profile_changes")
 
     async def set_profile_field(
         self,

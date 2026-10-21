@@ -33,8 +33,10 @@ from ai_assistant.testing import FakeMemoryStore, FakePersonModelStore
 from ai_assistant.testing.memories import memory, remembered_support, said_support
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from ai_assistant.core.protocols import PersonModelStore
-    from ai_assistant.core.types import Memory, PersonModelWrite
+    from ai_assistant.core.types import Memory, MemoryRecord, PersonModelWrite
 
 pytestmark = pytest.mark.anyio
 
@@ -138,14 +140,54 @@ async def test_the_scenario_reads_each_part_once() -> None:
         ("m:brief", LeftOutReason.BUDGET),
         ("m:tiny", LeftOutReason.BUDGET),
     ]
-    assert [pin.memory_id for pin in view.no_longer_current] == ["m:stale"]
-    # §4:10: the mark on a memory the store does not hold is shown nowhere.
-    assert [mark.memory_id for mark in view.style_marks] == [
-        "m:tiny",
-        "m:brief",
-        "m:long",
-        "m:diet",
+    assert [(one.pin.memory_id, one.content) for one in view.no_longer_current] == [
+        ("m:stale", "Works at the bakery.")
     ]
+    # §4:10: the mark on a memory the store does not hold is shown nowhere.
+    assert [(one.mark.memory_id, one.shows) for one in view.style_marks] == [
+        ("m:tiny", "m:tiny"),
+        ("m:brief", "m:brief"),
+        ("m:long", "m:long"),
+        ("m:diet", "m:diet"),
+    ]
+
+
+class _ForgettingDuringTheWalk(FakeMemoryStore):
+    """The canonical store, which forgets ``m:diet`` as the walk's live read is made.
+
+    The walk reads the memory current, and the history read made after it no longer
+    holds it: a forget landing between the two reads.
+    """
+
+    async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+        held = await super().get_many(record_ids)
+        if "m:diet" in record_ids:
+            await self.delete("m:diet")
+        return held
+
+
+@pytest.mark.parametrize("pinned", [True, False], ids=["pin", "mark"])
+async def test_a_memory_forgotten_while_the_chains_are_walked_is_shown_nowhere(
+    *, pinned: bool
+) -> None:
+    """§4:10: the history read is made after the walk, and what it no longer holds goes."""
+    world = _World()
+    world.memory = _ForgettingDuringTheWalk(now=lambda: NOW)
+    world.blocks = PersonBlocks(store=world.people, memory=world.memory, budget_chars=60)
+    await world.held(_fact("m:diet", "Eats no meat."), _fact("m:brief", "Short answers."))
+    if pinned:
+        await world.people.add_pin(OWNER_PERSON_ID, "m:diet", act=person_panel.PANEL_ACT)
+    else:
+        await world.people.add_style_mark(OWNER_PERSON_ID, "m:diet")
+    await world.people.add_style_mark(OWNER_PERSON_ID, "m:brief")
+
+    view = await person_panel.person_model_view(world.blocks, OWNER_PERSON_ID)
+
+    assert view is not None
+    assert [one.memory_id for one in view.kept] == ["m:brief"]
+    assert view.left_out == ()
+    assert view.no_longer_current == ()
+    assert [one.mark.memory_id for one in view.style_marks] == ["m:brief"]
 
 
 async def test_a_store_fault_reaches_the_caller_and_never_an_empty_view() -> None:

@@ -20907,10 +20907,10 @@ class PersonModelWrite(BaseModel):
 #
 # What ``AssistantEngine``'s person-model members carry: a read of one person's model
 # for the About you panel (§8:2), and what a panel's write did. Built from the types
-# above and from what the kept-in-mind slot already shows (§6): the only memory wording
-# here is a wording the slot shows the models, and a memory the slot leaves out, a pin
-# no longer current and a pin suggestion are named by id alone, so nothing resting on
-# outside content is worded (§6:4).
+# above. The memory wording here is the slot's, which it shows the models (§6), and a
+# retired memory's that a pin or mark no longer current was made on, which no live
+# read can word (§4:8). A live memory the slot leaves out and a pin suggestion's memory
+# are named by id, and the panel words them from the beliefs read.
 
 
 class KeptMemoryView(BaseModel):
@@ -20978,16 +20978,66 @@ class SuggestionView(BaseModel):
     rests_on_outside_content: bool
 
 
+class StalePinView(BaseModel):
+    """A standing pin whose chain reaches no current memory (ADR-0338 §4:8, §8:2).
+
+    Shown in no block, and on the panel as no longer current until it is removed. Its
+    memory is no longer live, so no live read words it: the view carries the wording of
+    the memory the pin was made on, as the history read holds it (ADR-0342 §4:3).
+
+    Attributes:
+        pin: The pin, as the store holds it.
+        content: The wording of the memory it was made on.
+        rests_on_outside_content: Whether that memory rests on outside content.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    pin: Pin
+    content: EncodableText
+    rests_on_outside_content: bool
+
+
+class StyleMarkView(BaseModel):
+    """A standing style mark, and the memory it shows (ADR-0338 §5:3, §8:2).
+
+    A mark follows its memory's successors as a pin does (§4:8), so the memory it shows
+    may be another than the one it was made on. Where its chain reaches a current
+    memory, ``shows`` names it, as the slot or what it left out names it; where it
+    reaches none, ``shows`` is ``None`` and ``content`` is the wording of the memory the
+    mark was made on, as the history read holds it, since no live read words it.
+
+    Attributes:
+        mark: The mark, by the id its removal names.
+        shows: The current memory it shows, or ``None`` where its chain reaches none.
+        content: The marked memory's wording; set exactly where ``shows`` is ``None``.
+
+    Raises:
+        ValueError: If ``content`` is set beside ``shows``, or neither is.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    mark: StyleMark
+    shows: NonBlankEncodableText | None = None
+    content: EncodableText | None = None
+
+    @model_validator(mode="after")
+    def _shows_or_words(self) -> Self:
+        if (self.shows is None) == (self.content is None):
+            msg = "a mark shows a current memory, or carries the wording of the one it was on"
+            raise ValueError(msg)
+        return self
+
+
 class PersonModelView(BaseModel):
     """One person's model, as ``AssistantEngine.person_model`` reads it (ADR-0338 §8:1).
 
-    The fields, the change log, the kept-in-mind slot with its fill and what it left
-    out, the pins no longer current, the style marks and the pending suggestions.
+    The fields, the kept-in-mind slot with its fill and what it left out, the pins no
+    longer current, the style marks and the pending suggestions. The change log, which
+    grows with every change, is read a page at a time by ``profile_changes``.
 
     Attributes:
         person: The person.
         profile: Their five fields, each set or not.
-        changes: The change log, in the order written (§3:5).
         kept: The kept-in-mind slot, in its order: the pinned memories, oldest pin
             first, then the style memories, the most recently marked first, each
             memory once (§6:2).
@@ -20996,8 +21046,8 @@ class PersonModelView(BaseModel):
             out, in the slot's order, each once, and why (§6:2, §6:4).
         no_longer_current: The standing pins whose chain reaches no current memory, in
             the order made: shown in no block, and on the panel until removed (§4:8).
-        style_marks: The standing style marks, in the order made, each with the id its
-            removal names (§5:3).
+        style_marks: The standing style marks, in the order made, each with the
+            memory it shows (§5:3).
         suggestions: The pending suggestions the panel shows, the most recent first
             (§7:9, §9:5).
 
@@ -21008,12 +21058,11 @@ class PersonModelView(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     person: Person
     profile: Profile
-    changes: tuple[ProfileChange, ...] = ()
     kept: tuple[KeptMemoryView, ...] = ()
     budget_chars: int = Field(strict=True, ge=1)
     left_out: tuple[LeftOutMemory, ...] = ()
-    no_longer_current: tuple[Pin, ...] = ()
-    style_marks: tuple[StyleMark, ...] = ()
+    no_longer_current: tuple[StalePinView, ...] = ()
+    style_marks: tuple[StyleMarkView, ...] = ()
     suggestions: tuple[SuggestionView, ...] = ()
 
     @model_validator(mode="after")

@@ -97,10 +97,11 @@ class Route(StrEnum):
 #: records, which ADR-0151's connection surface already puts in this row. ADR-0332
 #: §5:11 places ``composing`` in the Writing row beside ``write_message``: the requesting
 #: device must be the named conversation's end for writing, which the engine checks.
-#: ADR-0338 §8:1's seven person-model members, ``person_model``, ``set_profile_field``,
-#: ``pin_memory``, ``unpin_memory``, ``remove_style_mark``, ``accept_person_suggestion``
-#: and ``dismiss_person_suggestion``, are placed in the command-or-query row by the same
-#: class, beside ``beliefs`` and ``pending_candidates``: commands and queries on the
+#: ADR-0338 §8:1's eight person-model members, ``person_model``, ``profile_changes``,
+#: ``set_profile_field``, ``pin_memory``, ``unpin_memory``, ``remove_style_mark``,
+#: ``accept_person_suggestion`` and ``dismiss_person_suggestion``, are placed in the
+#: command-or-query row by the same class, beside ``beliefs`` and
+#: ``pending_candidates``: commands and queries on the
 #: assistant's own records, which the command role scopes to the owner. That is how
 #: §8:3's rule holds on the wire: a person's model is shown only to that person and to
 #: the owner, and on a hub whose one person is the owner (§2:1) a device without the
@@ -139,6 +140,7 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
             "pending_candidates",
             "person_model",
             "pin_memory",
+            "profile_changes",
             "recent_connection_acts",
             "recent_decisions",
             "recent_grants",

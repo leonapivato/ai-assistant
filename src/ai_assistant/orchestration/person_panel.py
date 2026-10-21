@@ -1,13 +1,13 @@
 """The person model on the panels: the read and the writes behind them (ADR-0338 §8:1-§8:3).
 
-``AssistantEngine``'s seven person-model members, answered here over orchestration's
+``AssistantEngine``'s eight person-model members, answered here over orchestration's
 person-block assembly (:class:`~ai_assistant.orchestration.person_block.PersonBlocks`),
 so the engine and the canonical fake answer them alike, as both answer
 ``pending_candidates`` from one reading. Neither reads a store for them itself.
 
 **The read** (§8:1) is one read of the person-model store and of the memory store:
 
-- the fields and the change log, as the store holds them;
+- the fields, as the store holds them;
 - the kept-in-mind slot, assembled as the person block assembles it on a private
   place, which every place on the hub is today (§7's privacy note): the standing pins,
   oldest first, then the standing style marks, the most recently marked first, each
@@ -17,13 +17,20 @@ so the engine and the canonical fake answer them alike, as both answer
   resting on outside content is left out, as the block leaves it out (§6:4);
 - what the slot left out, and why: the budget, or outside content;
 - the standing pins whose memory the store holds and whose chain reaches no current
-  memory: no longer current, shown until removed (§4:8);
-- the standing style marks whose memory the store holds;
+  memory: no longer current, shown until removed (§4:8), with the wording of the
+  memory they were made on, as the history read holds it, since no live read words it;
+- the standing style marks whose memory the store holds, each with the current memory
+  it shows, or the wording of the one it was made on where it shows none;
 - and the pending suggestions, the most recent first, each marked where it rests on
   outside content (§7:9), a pin suggestion's only while its memory is current (§9:5).
 
 A pin or mark whose memory the store no longer holds is shown nowhere (§4:10). The
 store holds a memory exactly where the history read returns it (ADR-0342 §5:4).
+
+**The change log** grows with every change and is kept until the person's data is
+deleted (§3:5), so it is a read of its own, a page at a time, the most recent first
+(:func:`profile_changes`), and never part of the view: a log that outgrew the frame
+would otherwise take the profile, the slot and every control down with it.
 
 **The writes** are a ``panel`` act by the owner, the person the command role serves
 (§3:4, §8:3). A pin and an unpin go through
@@ -59,6 +66,8 @@ from ai_assistant.core.types import (
     PersonModelView,
     PersonModelWrite,
     PersonModelWriteKind,
+    StalePinView,
+    StyleMarkView,
     SuggestionKind,
     SuggestionView,
 )
@@ -73,6 +82,7 @@ if TYPE_CHECKING:
         PersonModel,
         PersonSuggestion,
         Pin,
+        ProfileChange,
         ProfileField,
         StyleMark,
     )
@@ -84,6 +94,7 @@ __all__ = [
     "dismiss_suggestion",
     "person_model_view",
     "pin_memory",
+    "profile_changes",
     "remove_style_mark",
     "set_profile_field",
     "unpin_memory",
@@ -121,6 +132,14 @@ def wired(blocks: PersonBlocks | None) -> PersonBlocks:
 async def person_model_view(blocks: PersonBlocks, person_id: str) -> PersonModelView | None:
     """Read one person's model as the About you panel shows it (ADR-0338 §8:1-§8:2).
 
+    The chains are walked first, live read first (:meth:`PersonBlocks.current_ends`),
+    and the history read is made **after** that walk, over every memory a pin or mark
+    was made on and every current end the walk reached: a memory forgotten while the
+    walk ran is then not held, and whatever rests on it is shown nowhere (§4:10;
+    ADR-0342 §5:4), as :func:`~ai_assistant.orchestration.person_block.still_held`
+    drops it before a planning round. A start held whose current end is not is a
+    chain that reaches no current memory.
+
     Args:
         blocks: The person-block assembly over the two stores.
         person_id: The person, by id.
@@ -138,12 +157,15 @@ async def person_model_view(blocks: PersonBlocks, person_id: str) -> PersonModel
     pins = _ordered(model.standing_pins, _pinned)
     marks = _ordered(model.standing_marks, _marked, newest_first=True)
     pending = _ordered(model.suggestions, _recorded, newest_first=True)
-    starts = [*(pin.memory_id for pin in pins), *(mark.memory_id for mark in marks)]
+    starts = list(dict.fromkeys([*(pin.memory_id for pin in pins), *(m.memory_id for m in marks)]))
     reached = await blocks.current_ends(starts)
-    held = set(await blocks.memory.get_history(list(dict.fromkeys(starts)))) if starts else set()
+    asked = list(dict.fromkeys([*starts, *(end.id for end in reached.values())]))
+    history = await blocks.memory.get_history(asked) if asked else {}
+    # A chain's current end, only where the start and the end are both still held.
+    ends = {start: end for start, end in reached.items() if start in history and end.id in history}
     kept, left_out = _slot(
         [(pin.memory_id, True) for pin in pins] + [(mark.memory_id, False) for mark in marks],
-        reached,
+        ends,
         budget=blocks.budget_chars,
     )
     suggested = [
@@ -155,18 +177,60 @@ async def person_model_view(blocks: PersonBlocks, person_id: str) -> PersonModel
     return PersonModelView(
         person=model.person,
         profile=model.profile,
-        changes=model.changes,
         kept=kept,
         budget_chars=blocks.budget_chars,
         left_out=left_out,
         no_longer_current=tuple(
-            pin
+            StalePinView(
+                pin=pin,
+                content=history[pin.memory_id].content,
+                rests_on_outside_content=history[pin.memory_id].rests_on_outside_content,
+            )
             for pin in model.standing_pins
-            if pin.memory_id in held and pin.memory_id not in reached
+            if pin.memory_id in history and pin.memory_id not in ends
         ),
-        style_marks=tuple(mark for mark in model.standing_marks if mark.memory_id in held),
+        style_marks=tuple(
+            _mark(mark, ends, history) for mark in model.standing_marks if mark.memory_id in history
+        ),
         suggestions=_suggestions(pending, live),
     )
+
+
+def _mark(
+    mark: StyleMark, ends: Mapping[str, Memory], history: Mapping[str, Memory]
+) -> StyleMarkView:
+    """A held mark, with the current memory it shows or the wording of the one it was on."""
+    end = ends.get(mark.memory_id)
+    if end is not None:
+        return StyleMarkView(mark=mark, shows=end.id)
+    return StyleMarkView(mark=mark, content=history[mark.memory_id].content)
+
+
+async def profile_changes(
+    blocks: PersonBlocks, person_id: str, *, limit: int, offset: int
+) -> tuple[ProfileChange, ...]:
+    """One page of a person's change log, the most recent change first (ADR-0338 §3:5).
+
+    The log is append-only and kept until the person's data is deleted, so it is read a
+    page at a time and never whole with the rest of the model.
+
+    Args:
+        blocks: The person-block assembly over the person-model store.
+        person_id: Whose log.
+        limit: How many entries the page holds at most.
+        offset: How many of the most recent to skip.
+
+    Returns:
+        The page; empty where the store holds no such person, or past the log's end.
+
+    Raises:
+        PersonModelStoreError: If the store cannot be read.
+    """
+    model = await blocks.store.read(person_id)
+    if model is None:
+        return ()
+    newest_first = model.changes[::-1]
+    return tuple(newest_first[offset : offset + limit])
 
 
 def _slot(

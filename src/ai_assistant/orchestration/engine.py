@@ -303,6 +303,7 @@ if TYPE_CHECKING:
         PermissionDecision,
         PersonModelEdit,
         PersonModelView,
+        ProfileChange,
         ProfileField,
         RecordedInvocation,
         RequestingDevice,
@@ -3471,7 +3472,7 @@ class Engine:
 
     # --- the person model, for the panels (ADR-0338 §8:1-§8:3) -------------
     #
-    # Each member validates its arguments locally, then refuses on a hub that keeps no
+    # Each of the eight validates its arguments locally, then refuses on a hub that keeps no
     # person model (``person_blocks`` not wired: ``Settings.person_model`` off, §11:2),
     # then runs :mod:`~ai_assistant.orchestration.person_panel` over the person block's
     # assembly, tracked and measured as every member is. The canonical fake answers them
@@ -3493,6 +3494,41 @@ class Engine:
         blocks = person_panel.wired(self._person_blocks)
         return await self._tracked(
             person_panel.person_model_view(blocks, named), "person_model", checked=True
+        )
+
+    async def profile_changes(
+        self,
+        person_id: NonBlankEncodableText,
+        *,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> tuple[ProfileChange, ...]:
+        """One page of a person's change log, the most recent first (ADR-0338 §3:5).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``person_id`` is blank or unwritable, or a page argument is
+                out of range.
+            TypeError: If a page argument is not an integer.
+            PersonModelOffError: If no person-model store is wired.
+            PersonModelStoreError: If the person-model store cannot be read.
+        """
+        self._reject_if_closing()
+        named = non_blank_text(person_id, name="person_id")
+        page_argument(limit, name="limit")
+        page_argument(offset, name="offset")
+        check_arguments(
+            "profile_changes",
+            max_bytes=self._max_payload_bytes,
+            person_id=named,
+            limit=limit,
+            offset=offset,
+        )
+        blocks = person_panel.wired(self._person_blocks)
+        return await self._tracked(
+            person_panel.profile_changes(blocks, named, limit=limit, offset=offset),
+            "profile_changes",
+            checked=True,
         )
 
     async def set_profile_field(

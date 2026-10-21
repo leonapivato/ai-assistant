@@ -144,6 +144,7 @@ if TYPE_CHECKING:
         PersonModelEdit,
         PersonModelView,
         Placement,
+        ProfileChange,
         ProfileField,
         RecordedInvocation,
         SecretValue,
@@ -682,6 +683,30 @@ class HubClient:
         """
         named = non_blank_text(person_id, name="person_id")
         return await self._call("person_model", person_id=named)  # type: ignore[no-any-return]
+
+    async def profile_changes(
+        self,
+        person_id: NonBlankEncodableText,
+        *,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> tuple[ProfileChange, ...]:
+        """One page of a person's change log, the most recent first (ADR-0338 §3:5).
+
+        Args:
+            person_id: Whose log.
+            limit: How many entries the page holds at most.
+            offset: How many of the most recent to skip.
+
+        Returns:
+            The page.
+        """
+        named = non_blank_text(person_id, name="person_id")
+        page_argument(limit, name="limit")
+        page_argument(offset, name="offset")
+        return await self._call(  # type: ignore[no-any-return]
+            "profile_changes", person_id=named, limit=limit, offset=offset
+        )
 
     async def set_profile_field(
         self,
