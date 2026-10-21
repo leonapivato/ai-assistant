@@ -163,10 +163,15 @@ from ai_assistant.orchestration.understanding import (
     WindowsStage,
     WrittenBy,
 )
-from ai_assistant.permissions.policy import ConfiguredSearchDestination, ThresholdActionPolicy
+from ai_assistant.permissions.policy import (
+    ConfiguredForecastDestination,
+    ConfiguredSearchDestination,
+    ThresholdActionPolicy,
+)
 from ai_assistant.testing import (
     FakeDiagnosticSink,
     FakeEgressBinder,
+    FakeForecaster,
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
@@ -175,6 +180,11 @@ from ai_assistant.testing import (
     FakeToolCallingCompleter,
     FakeWebSearcher,
     default_prompt,
+)
+from ai_assistant.testing.forecasting import (
+    DEFAULT_FORECAST_LATITUDE,
+    DEFAULT_FORECAST_ORIGIN,
+    DEFAULT_FORECAST_REPORTED_AT,
 )
 from ai_assistant.testing.memories import memory as memory_record
 from ai_assistant.testing.memories import (
@@ -220,6 +230,22 @@ _CONFIGURED_SEARCH: Final = ConfiguredSearchDestination(
         {
             CanonicalDestination(
                 protocol=DestinationProtocol.HTTPS, canonical=f"{DEFAULT_SEARCH_ORIGIN}:443"
+            )
+        }
+    ),
+)
+
+#: The keyless connection the fake forecaster's origin is registered against (ADR-0325).
+_FORECAST_ACCOUNT: Final = BoundAccount(identity="Open-Meteo", reference="forecast-account")
+
+#: The forecast destination this deployment is configured with (ADR-0260 §6), equal by
+#: construction to what the binder registers for :data:`_FORECAST_ACCOUNT`.
+_CONFIGURED_FORECAST: Final = ConfiguredForecastDestination(
+    reference=_FORECAST_ACCOUNT.reference,
+    destinations=frozenset(
+        {
+            CanonicalDestination(
+                protocol=DestinationProtocol.HTTPS, canonical=f"{DEFAULT_FORECAST_ORIGIN}:443"
             )
         }
     ),
@@ -313,9 +339,11 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
     *,
     digests: FakeModelProvider | None = None,
     searcher: FakeWebSearcher | None = None,
+    forecaster: FakeForecaster | None = None,
     policy: ActionPolicy | None = None,
     binder: EgressBinder | None = None,
     registered_search: frozenset[str] = frozenset(),
+    registered_forecast: frozenset[str] = frozenset(),
     writer: MessageWriter | None = None,
     wrap: Callable[[ChatWriter], MessageWriter] | None = None,
     recall_digest_wait: timedelta = timedelta(seconds=5),
@@ -372,6 +400,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
                 *(LOOK_UPS if looking is not None else ()),
             ),
             searcher=searcher,
+            forecaster=forecaster,
             search_query="query",
         )
         memory_writer = FakeMemoryWriter(
@@ -399,6 +428,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
                 memory=harness.memory,
                 binder=binder,
                 registered_search=registered_search,
+                registered_forecast=registered_forecast,
                 now=lambda: AT,
                 diagnostics=diagnostics,
             ),
@@ -700,6 +730,144 @@ async def test_without_the_registration_the_real_policy_sends_the_search_to_the_
     decisions = [one for one in await harness.trail.recent(limit=10) if one.tool.id == search_id]
     assert decisions
     assert all(one.ruling.outcome is PermissionOutcome.CONFIRM for one in decisions)
+
+
+async def test_a_forecast_pull_is_digested_under_the_hubs_attribution_then_answered() -> None:
+    """ADR-0324 §5, §2:3-§2:4, §3, §9: the weather pull, end to end through the phases.
+
+    Planning is offered the forecast read with no argument but the *looking for*; the hub
+    fills the origin and the coordinate from the forecaster's proposal; the answer
+    reaches planning only as a digest's evidence, the digest given the channel and the
+    author as the hub's attribution; and the activation has read outside content.
+    """
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_call("c1", "forecast_read", looking_for="rain tomorrow"),)),
+        RoundResponse(text="No rain tomorrow."),
+    )
+    digests = FakeModelProvider(reply=_DIGESTED)
+    forecaster = FakeForecaster()
+    harness = _harness(
+        completer,
+        digests=digests,
+        forecaster=forecaster,
+        capabilities=(*_CAPABILITIES, "forecast_read"),
+    )
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "will it rain tomorrow?")
+    episode = await _settled(harness, conversation)
+
+    assert _said(await _messages(harness, conversation))[-1] == (
+        MessageAuthor.ASSISTANT,
+        "No rain tomorrow.",
+    )
+    # Offered with none of its arguments: the place never crosses the planning seam.
+    (offered,) = [one for one in completer.calls[0].tools if one.name == "forecast_read"]
+    schema = offered.model_dump()["parameters"]
+    assert set(schema["properties"]) == {"looking_for"}
+    assert schema["required"] == ["looking_for"]
+    # Sent to `Forecaster.read` with exactly the arguments its proposal names.
+    (read,) = forecaster.read_calls
+    proposal = await forecaster.request()
+    assert proposal is not None
+    assert read.request.parameters == proposal.parameters
+    assert read.request.parameters["origin"] == DEFAULT_FORECAST_ORIGIN
+    assert read.request.parameters["latitude"] == DEFAULT_FORECAST_LATITUDE
+    # The digest read the forecast as quoted data under the hub's attribution.
+    (digest_call,) = digests.calls
+    document = json.loads(digest_call.messages[1].content)
+    (record,) = document["records"]
+    assert record["from"].startswith("outside content: the weather channel")
+    assert '"fake forecast"' in record["from"]
+    assert "a service, the forecast provider, claimed" in record["from"]
+    assert DEFAULT_FORECAST_REPORTED_AT.isoformat() in record["from"]
+    assert "2026-09-05" in record["text"]
+    assert "2026-09-05" not in record["from"]
+    # Planning saw evidence under the result's label, never the forecast itself.
+    shown = completer.calls[1].messages[1].content
+    assert json.loads(shown)["evidence"][0]["digest_of"] == "R1"
+    assert "2026-09-05" not in shown
+    # The pull marks the activation (§9:1).
+    assert episode.provenance.derived_from_external
+    assert episode.processing_record is not None
+    (digest,) = episode.processing_record.digests
+    assert digest.outcome is DigestOutcome.ANSWERED
+    assert digest.question == "rain tomorrow"
+
+
+async def test_without_a_forecaster_planning_is_not_offered_the_weather_pull() -> None:
+    """ADR-0324 §5:4: offered only where a forecaster is configured."""
+    completer = FakeToolCallingCompleter.scripted(RoundResponse(text="I can't check that."))
+    harness = _harness(completer, capabilities=(*_CAPABILITIES, "forecast_read"))
+    conversation = await _conversation(harness)
+
+    await _say(harness, conversation, "will it rain tomorrow?")
+    await _settled(harness, conversation)
+
+    assert all(one.name != "forecast_read" for one in completer.calls[0].tools)
+
+
+async def _configured_forecast_run(*, registered: bool) -> tuple[Harness, FakeForecaster, str]:
+    """One forecast read and an answer, under the real policy over a configured forecast.
+
+    The deployment's own ``ThresholdActionPolicy`` over its configured forecast provider,
+    and a binding seam holding the forecast read against the keyless connection;
+    ``registered`` is whether authorizing is told it is the deployment's forecast read.
+    """
+    # A free provider states its cost as zero (ADR-0344 §7:3), so the unknown-cost
+    # floor does not bind (ADR-0236 §4).
+    forecaster = FakeForecaster(cost_per_call=Decimal(0), cost_currency="USD")
+    proposal = await forecaster.request()
+    assert proposal is not None
+    binder = FakeEgressBinder()
+    binder.register_egress(
+        proposal.tool,
+        reference=_FORECAST_ACCOUNT.reference,
+        identity=_FORECAST_ACCOUNT.identity,
+    )
+    completer = FakeToolCallingCompleter.scripted(
+        RoundResponse(calls=(_call("c1", "forecast_read", looking_for="rain"),)),
+        RoundResponse(text="No rain."),
+    )
+    harness = _harness(
+        completer,
+        forecaster=forecaster,
+        policy=ThresholdActionPolicy(configured_forecast=_CONFIGURED_FORECAST),
+        binder=binder,
+        registered_forecast=frozenset({str(proposal.tool.id)}) if registered else frozenset(),
+        capabilities=(*_CAPABILITIES, "forecast_read"),
+    )
+    conversation = await _conversation(harness)
+    await _say(harness, conversation, "will it rain?")
+    await _settled(harness, conversation)
+    return harness, forecaster, str(proposal.tool.id)
+
+
+async def test_the_real_policy_allows_the_configured_forecast_with_no_grant() -> None:
+    """ADR-0324 §5:7, ADR-0260 §6: checked as every call is, on its configured route.
+
+    Authorizing writes ``forecast_reach`` for the deployment's forecast read, so the
+    policy's configured-provider route allows it, and no grant is asked for.
+    """
+    harness, forecaster, forecast_id = await _configured_forecast_run(registered=True)
+
+    assert len(forecaster.read_calls) == 1
+    decisions = [one for one in await harness.trail.recent(limit=10) if one.tool.id == forecast_id]
+    assert [one.ruling.outcome for one in decisions] == [PermissionOutcome.ALLOW]
+    (binding,) = [one.egress_binding for one in decisions]
+    assert isinstance(binding, EgressBinding)
+    assert binding.forecast_reach
+    assert not binding.closed_loop
+
+
+async def test_without_the_registration_the_real_policy_does_not_run_the_forecast() -> None:
+    """No ``forecast_reach``, so the configured route is never reached and nothing is sent."""
+    harness, forecaster, forecast_id = await _configured_forecast_run(registered=False)
+
+    assert forecaster.read_calls == []
+    decisions = [one for one in await harness.trail.recent(limit=10) if one.tool.id == forecast_id]
+    assert decisions
+    assert all(one.ruling.outcome is not PermissionOutcome.ALLOW for one in decisions)
 
 
 async def test_a_remember_is_written_once_through_the_assistants_own_records() -> None:

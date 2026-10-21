@@ -183,6 +183,7 @@ if TYPE_CHECKING:
         DiagnosticSink,
         EgressBinder,
         Embedder,
+        Forecaster,
         MemoryStore,
         MemoryWriter,
         ModelProvider,
@@ -1654,11 +1655,12 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # no face to read one with. Which shape it is lives in the builder's code, not
         # here and not in `Settings` (ADR-0325 §2:2, ADR-0344 §2:4).
         #
-        # **No ledger and no gate are passed, and ADR-0260 §6 is why**: that section
-        # enumerates what `Forecaster.read` performs and states that this seam
-        # "inherits nothing written about `WEB_SEARCH`". The configured cost pair
-        # reaches the **declaration**, which is what ADR-0236 §4's unknown-cost floor
-        # reads at the ruling (§11).
+        # **The ledger is passed and no gate is** (ADR-0324 §5:8): the weather pull's
+        # attempt and outcomes are its `InvocationLedger` claim and completion, as the
+        # searcher's are, through the **same** object the invoker and the searcher are
+        # handed (ADR-0192 §9). ADR-0260 §6 names no admission, so no gate: the
+        # configured cost pair reaches the **declaration**, which is what ADR-0236 §4's
+        # unknown-cost floor reads at the ruling (§11).
         #
         # **No ``close`` is registered for it, and that is ADR-0042 §2 read rather
         # than skipped** — the searcher's reasoning one integration along. That
@@ -1670,10 +1672,11 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # **holding an opened resource**", and this one holds none; a no-op `close`
         # registered here would be a lifecycle nobody has.
         #
-        # **Nothing calls it since the old path's servicing was deleted** (ADR-0309
-        # §5): the forecast read is kept out of every registry (ADR-0260 §1), so the
-        # phases offer it to no plan. What this root still does is build it and put
-        # its registration in the seam's table, and no subsystem holds the reference.
+        # **The one caller is the phases' tools, as the weather pull** (ADR-0324 §5:4):
+        # this root wires the forecaster into :func:`_build_phase_path` and into nothing
+        # else, and puts its registration in the seam's table. The forecast read stays
+        # out of every registry (ADR-0260 §1, ADR-0324 §5:5); the phases' tools offer it
+        # beside the registry's capabilities, as they offer the search.
         forecast = (
             None
             if settings.forecast_connection is None
@@ -1687,6 +1690,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 longitude=settings.forecast_longitude,
                 records=connections,
                 transport=StreamOutboundTransport() if transport is None else transport,
+                ledger=trail,
                 max_days=settings.forecast_max_days,
                 max_day_chars=settings.forecast_max_day_chars,
                 max_response_bytes=settings.forecast_max_response_bytes,
@@ -1808,7 +1812,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 binder=binder,
                 chat=conversations,
                 searcher=None if search is None else search.searcher,
-                forecast_configured=forecast is not None,
+                forecaster=None if forecast is None else forecast.forecaster,
                 booking_configured=booking is not None,
                 max_payload_bytes=settings.hub_max_frame_bytes - ENVELOPE_RESERVE_BYTES,
                 diagnostics=diagnostics,
@@ -2504,7 +2508,7 @@ class _PhaseSeams:
     chat: ConversationStore
     searcher: WebSearcher | None
     max_payload_bytes: int
-    forecast_configured: bool
+    forecaster: Forecaster | None
     booking_configured: bool
     tidy_up: StoryTidyUp
     diagnostics: DiagnosticSink | None = None
@@ -2534,8 +2538,11 @@ def _build_phase_path(
     same runner checking a move or a split before it is authorized (§5:3-§5:4). **And
     planning's look-ups** (§6:6): a memory search, a story's full view and the
     follow-up, in no registry either, each run through the own-records seam by one
-    :class:`LookUps` over the one memory store and the story views' reads. The forecast
-    read is kept out of every registry (ADR-0260 §1), so it is not offered.
+    :class:`LookUps` over the one memory store and the story views' reads. **And the
+    weather pull** (ADR-0324 §5:4), where a forecaster is configured: the forecast read
+    is in no registry (ADR-0260 §1, ADR-0324 §5:5), so :class:`PhaseTools` offers it
+    beside the registry's capabilities as it offers the search, fills every argument it
+    takes from the forecaster's own proposal and sends its call to ``Forecaster.read``.
 
     **Candidates, behind one switch** (ADR-0329 §19:3): where
     :data:`REMEMBER_RECORDS_CANDIDATES` is on, ``remember`` is offered recording a
@@ -2610,6 +2617,8 @@ def _build_phase_path(
         own_records=(REMEMBER_CANDIDATE if candidates else REMEMBER, *STORY_CALLS, *LOOK_UPS),
         reliance=NOTE_RELIANCE if candidates else None,
         searcher=seams.searcher,
+        # ADR-0324 §5:4: the weather pull, where a forecaster is configured.
+        forecaster=seams.forecaster,
         search_query=SEARCH_QUERY_ARGUMENT,
         # Both of the simulated provider's capabilities are offered (ADR-0309 §4:2), and
         # both name the configured endpoint as their ``origin``: the hub's to fill and
@@ -2644,7 +2653,7 @@ def _build_phase_path(
                 frozenset() if seams.searcher is None else frozenset({WEB_SEARCH_ID})
             ),
             registered_forecast=(
-                frozenset({FORECAST_READ_ID}) if seams.forecast_configured else frozenset()
+                frozenset({FORECAST_READ_ID}) if seams.forecaster is not None else frozenset()
             ),
             now=_utcnow,
             diagnostics=seams.diagnostics,

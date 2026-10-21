@@ -18,6 +18,8 @@ from ai_assistant.core.types import (
     ActivationDigest,
     DigestOutcome,
     EvidenceItem,
+    ForecastOutcome,
+    ForecastRefusal,
     LabelKind,
     MessageAuthor,
     PlanningLabel,
@@ -31,10 +33,12 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.authorizer import CallVerdict, RoundAuthorization, Verdict
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.digesting import Digested
+from ai_assistant.orchestration.held_results import HeldResult
 from ai_assistant.orchestration.phase_path import (
     PhaseTools,
     PhaseWorking,
     _extended,
+    _forecasted,
     _searched,
     call_outcomes,
     digested_evidence,
@@ -49,8 +53,15 @@ from ai_assistant.orchestration.planning import (
 )
 from ai_assistant.orchestration.remembering import REMEMBER
 from ai_assistant.orchestration.story_calls import TIDY_STORY_CAPABILITY
+from ai_assistant.orchestration.supplied_records import SuppliedRecords
 from ai_assistant.orchestration.understanding import TranscriptWindow, _channel_items
-from ai_assistant.testing import FakeAuditTrail, FakeToolInvoker, FakeWebSearcher
+from ai_assistant.testing import FakeAuditTrail, FakeForecaster, FakeToolInvoker, FakeWebSearcher
+from ai_assistant.testing.forecasting import (
+    DEFAULT_FORECAST_LATITUDE,
+    DEFAULT_FORECAST_LONGITUDE,
+    DEFAULT_FORECAST_ORIGIN,
+    DEFAULT_FORECAST_REPORTED_AT,
+)
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import ToolCall
@@ -226,6 +237,131 @@ async def test_a_search_call_goes_to_its_searcher_and_comes_back_as_its_records(
     assert result.outcome is ToolOutcome.SUCCEEDED
     assert result.output == ("first", "second")
     assert searcher.searched == [call]
+
+
+async def test_the_tools_offer_the_weather_pull_beside_the_registry_with_no_argument() -> None:
+    """ADR-0324 §5:4-§5:5, §3:1, §3:4: the forecast read is offered as the search is.
+
+    The deployment's registry never holds it, the tools list it beside the registry's
+    capabilities, planning is offered it with every argument the hub's, and the hub fills
+    them all from the forecaster's own proposal, whatever planning wrote for them.
+    """
+    trail = FakeAuditTrail()
+    registry = FakeToolInvoker([], ledger=trail, gate=trail)
+    tools = PhaseTools(registry=registry, invoker=registry, forecaster=FakeForecaster())
+
+    assert "forecast_read" not in await registry.capabilities()
+    assert [str(one.id) for one in await registry.all_tools()] == []
+    assert await tools.capabilities() == ("forecast_read",)
+    (offered,) = await tools.offered(("forecast_read",))
+    assert set(offered.system_supplied) >= {"origin", "latitude", "longitude"}
+    (registered,) = await tools.find("forecast_read")
+    assert registered.system_supplied == ()
+    filled = await tools.filled(
+        ProposedCall(call_id="c1", name="forecast_read", arguments={"latitude": 0.0})
+    )
+    assert filled.arguments == {
+        "origin": DEFAULT_FORECAST_ORIGIN,
+        "latitude": DEFAULT_FORECAST_LATITUDE,
+        "longitude": DEFAULT_FORECAST_LONGITUDE,
+    }
+
+
+async def test_no_forecaster_or_none_configured_offers_no_weather_pull() -> None:
+    """ADR-0324 §5:4: offered only where a forecaster is configured (ADR-0260 §4)."""
+    trail = FakeAuditTrail()
+    registry = FakeToolInvoker([], ledger=trail, gate=trail)
+    unconfigured = PhaseTools(
+        registry=registry, invoker=registry, forecaster=FakeForecaster(origin=None)
+    )
+    absent = PhaseTools(registry=registry, invoker=registry)
+
+    assert await unconfigured.capabilities() == ()
+    assert await absent.capabilities() == ()
+    assert await unconfigured.forecast_declaration() is None
+
+
+async def test_a_forecast_read_goes_to_its_forecaster_and_is_attributed_by_the_hub() -> None:
+    """ADR-0324 §5:4, §2:4: sent to ``Forecaster.read``, its records held and attributed.
+
+    The records are handed to the activation, and the answer's channel and author are
+    noted under the call's decision from the hub's own data: the forecaster's name and
+    the instant the provider declared, never the answer's text.
+    """
+    trail = FakeAuditTrail()
+    registry = FakeToolInvoker([], ledger=trail, gate=trail)
+    forecaster = FakeForecaster()
+    tools = PhaseTools(registry=registry, invoker=registry, forecaster=forecaster)
+    proposal = await forecaster.request()
+    assert proposal is not None
+    call = _allowed(proposal)
+    supplied = SuppliedRecords()
+    attributions: dict[str, str] = {}
+
+    with PhaseTools.holding(supplied, attributions):
+        result = await tools.invoke(call, timeout=timedelta(seconds=5))
+
+    assert forecaster.read_calls == [call]
+    assert result.outcome is ToolOutcome.SUCCEEDED
+    assert isinstance(result.output, tuple)
+    assert len(result.output) == 3
+    assert all(isinstance(text, str) and text.startswith("2026-09-0") for text in result.output)
+    attribution = attributions[call.decision.id]
+    assert '"fake forecast"' in attribution
+    assert "a service, the forecast provider, claimed" in attribution
+    assert DEFAULT_FORECAST_REPORTED_AT.isoformat() in attribution
+    assert "Clear" not in attribution, "never from the answer's text"
+
+
+@pytest.mark.parametrize(
+    ("refusal", "outcome"),
+    [
+        (ForecastRefusal.NO_RESULT, ToolOutcome.SUCCEEDED),
+        (ForecastRefusal.DEADLINE_EXPIRED, ToolOutcome.INDETERMINATE),
+        (ForecastRefusal.TRANSPORT_FAILED, ToolOutcome.INDETERMINATE),
+        (ForecastRefusal.PROVIDER_REFUSED, ToolOutcome.FAILED),
+        (ForecastRefusal.RESPONSE_TOO_LARGE, ToolOutcome.FAILED),
+        (ForecastRefusal.UNATTESTED, ToolOutcome.FAILED),
+    ],
+)
+def test_a_forecast_refusal_is_a_result_unknown_or_not_done(
+    refusal: ForecastRefusal, outcome: ToolOutcome
+) -> None:
+    """ADR-0324 §8:1: a read cut short may have reached the provider, so it is unknown."""
+    assert _forecasted(ForecastOutcome(refusal=refusal)).outcome is outcome
+
+
+def test_a_pulls_attribution_follows_its_result_when_a_follow_up_offers_it_again() -> None:
+    """ADR-0324 §2:4, ADR-0308 §6:7: noted by decision, carried on by the result's id.
+
+    A follow-up offers the held result under its own decision, so the attribution the
+    tools noted under the first call's decision is taken when the result is first held.
+    A result no pull brought has none.
+    """
+    working = PhaseWorking(
+        activation_id="act",
+        place=place_window(TranscriptWindow(conversation=conversation_channel("c1"), messages=())),
+        conversation_id="c1",
+        trigger_origin=None,
+        owner_records=True,
+        round_limit=2,
+    )
+    working.attributions["decision:forecast"] = "outside content: the weather channel"
+    pulled = HeldResult(
+        result_id="result:1", round_id="r1", decision_id="decision:forecast", content=("day",)
+    )
+    other = HeldResult(
+        result_id="result:2", round_id="r1", decision_id="decision:search", content=()
+    )
+
+    working.held.hold(pulled)
+    working.held.hold(other)
+    offered = working.held.offer_again("result:1", round_id="r2", decision_id="decision:again")
+
+    assert offered is not None
+    assert working.attribution(pulled) == "outside content: the weather channel"
+    assert working.attribution(offered) == "outside content: the weather channel"
+    assert working.attribution(other) is None
 
 
 def _allowed(proposal: object) -> ToolCall:

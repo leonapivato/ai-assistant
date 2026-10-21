@@ -16,10 +16,11 @@ nothing else (§4:3), and remembers nothing between calls (§4:16).
 
 **Quoted source data, under labels local to the call** (§4:7 to §4:8). The records reach
 the model in one JSON object, each attributed as outside content by the hub and never by
-its text, under a label such as ``D1`` that no planning label can spell. The instruction
-says the content is data and never instruction, that the digest answers only the
-question, that each item rests on one record and names it, and that an empty list is a
-valid answer. An item naming a label the call did not show is dropped (§4:14).
+its text, under a label such as ``D1`` that no planning label can spell; a pull's answer
+is attributed by its channel and its author, as the hub states them (ADR-0324 §2:4).
+The instruction says the content is data and never instruction, that the digest answers
+only the question, that each item rests on one record and names it, and that an empty
+list is a valid answer. An item naming a label the call did not show is dropped (§4:14).
 
 **The instruction is a template** (ADR-0334): the system message is rendered from
 :data:`DIGESTING_PROMPT`'s template, which the composition root reads at start and hands
@@ -302,6 +303,9 @@ class _Record:
     kind: LabelKind
     thing: str
     text: str
+    #: The hub's own attribution of this record, where it has one more particular than
+    #: its kind's, such as a pull's channel and author (ADR-0324 §2:4).
+    attribution: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -497,6 +501,7 @@ class DigestingStage:
         question: str,
         labels: ActivationLabels,
         deadline: datetime,
+        attribution: str | None = None,
     ) -> Digested:
         """Digest ``held`` against ``question``, and record the digest with the episode.
 
@@ -510,6 +515,10 @@ class DigestingStage:
             labels: The activation's labels, which the digest takes its labels from.
             deadline: The instant bounding the digest: the one bounding its round's
                 wait (ADR-0307 §8:2).
+            attribution: The hub's attribution of the result, stated from its own data
+                and never from the result's text, where it has one more particular than
+                a result's: a pull's channel and author (ADR-0324 §2:4). ``None`` gives
+                the record a result's attribution.
 
         Returns:
             The digest, the labels it assigned, and whether it was recorded.
@@ -520,7 +529,12 @@ class DigestingStage:
         """
         question = _QUESTION.validate_python(question)
         result_id = str(held.result_id)
-        record = _Record(kind=LabelKind.RESULT, thing=result_id, text=_as_text(held.content))
+        record = _Record(
+            kind=LabelKind.RESULT,
+            thing=result_id,
+            text=_as_text(held.content),
+            attribution=attribution,
+        )
         kept = await self._read(question, [record], deadline, result_id=result_id)
         return await self._recorded(question, kept, labels, result_id=result_id)
 
@@ -785,7 +799,7 @@ class DigestingStage:
             name = names.setdefault(piece.record, f"{_LOCAL_PREFIX}{len(names) + 1}")
             one: dict[str, object] = {
                 "label": name,
-                "from": _FROM[piece.record.kind],
+                "from": piece.record.attribution or _FROM[piece.record.kind],
                 "text": piece.text,
             }
             if piece.of > 1:
