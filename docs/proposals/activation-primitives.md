@@ -18,8 +18,12 @@ The conversation that followed agreed the shape below. Merge is a share and a st
 one step, joining and takeover are just merges, start is a normal activation, and the
 primitives are **spawn, stop and share**. This file writes that down, tests it against every
 situation we could find, and names what it would change. An independent read of an earlier
-draft tried to break it; what it found is folded in, and the changes it forced are called
-out where they land.
+draft tried to break it; what it found about the operations themselves is folded in.
+
+**What it assumes.** Outside content, disclosure (who may see what) and authority
+(approvals) are other designs, and this proposal assumes they work, as the owner directed
+on 2026-10-21. It says only that whatever crosses between activations carries its author,
+its authority and its outside-content marks with it. What those mean is decided there.
 
 ## Baseline
 
@@ -41,9 +45,8 @@ proposal takes that sentence as its seed.
   words is input like any other).
 - ADR-0295 (a stop: a command naming one activation, and what it guarantees) and ADR-0297
   (the stop mark).
-- ADR-0306 §4–§5 (what counts as having read outside content; acting's claims and records),
-  ADR-0308 (outside content reaches planning only as a digest's evidence) and ADR-0321 §4
-  (an approval is used only by the activation the yes was given in).
+- ADR-0306 §5 (acting's claims and records) and ADR-0321 §4 (an approval is used only by
+  the activation the yes was given in).
 - ADR-0332 §2–§4 (one at a time within a place, joining until the first act, the
   cross-place takeover), §8 (the line's `/stop`) and §9, which leaves open *"whether a typed
   'scratch that' can halt an activation that has committed"* (#2515) and background work.
@@ -129,21 +132,17 @@ it back.
    finished and what didn't. This is the case ADR-0332 §9 left to #2515.
 
 **How the cancel across places is decided.** It is a takeover's sibling, and decided the
-same way:
+same way. ADR-0292 §11:2 already has the shape: *"Understanding judges how a new activation
+relates to one running, and a rule acts on the judgment."*
 
 - Understanding is already shown the person's running work on their other places, under
   ADR-0332 §4's limits. Its reply may name one shown activation that this input
   **cancels**, in a closed field beside `continues`.
-- A rule then stops it, in one step, after checking that it is still running and that its
-  input carries the person's authority. The controller reads no text (ADR-0280 §3:4): the
-  judgment is understanding's and the act is a rule's.
-- It is never planning's call. Planning has read whatever pages and emails the activation
-  fetched, so a stop chosen there could be planted by a page saying "never mind the
-  booking". Understanding reads the person's own input before anything is fetched. The
-  earlier draft had planning choose it, and the independent read caught that.
-- Its targets are only activations started by the person's own instructions. A reminder, a
-  report or a task's slice is never a target, because a misread "never mind" would end a
-  reminder for good (ADR-0340 §3:6). A task is stopped through its record (§4).
+- A rule then stops it, in one step, after checking that it is still running. The controller
+  reads no text (ADR-0280 §3:4): the judgment is understanding's and the act is a rule's.
+- Its targets are activations started by the person's own requests. A task is stopped
+  through its record (§4). A reminder that is being said is stopped by the stop control, so
+  a misread "never mind" can't end it for good (ADR-0340 §3:6).
 - Where "never mind" could mean either of two running activations, understanding names
   neither, and the reply asks which.
 
@@ -178,20 +177,12 @@ it answers from what the search has found, and the search carries on.
   may name A as one it draws on, in a closed field beside `continues` and `cancels`. A rule
   then copies A's findings into B's working set, and B's planning is shown them labelled as
   A's.
-- **What is copied: only what A's planning was shown.** That means digests' evidence and
-  the outcomes of A's calls to the hub's own records. It never includes a raw outside
-  result, because outside content reaches planning only as a digest's evidence (ADR-0308).
-  The earlier draft copied "the outcomes of its finished calls", which would have put raw
-  web text in front of B's planning. Drafts and approvals are never copied.
-- **Never passed on.** B never shares a copy it received. Without this, C could pull from B
-  what B pulled from A, and the disclosure check would run A→B and B→C but never A→C.
-- **What it carries:** no authority, because a copy informs. A's outside-content mark goes
-  with it: where the copy holds outside evidence, B has read outside content, so B's calls
-  that leave the hub need the person. This widens ADR-0306 §4:5's closed list of what
-  counts.
-- **Who it reaches:** only activations of the same person, established, and only where the
-  disclosure rules would admit A's place to B's pass. These are ADR-0332 §4's own limits on
-  what is shown.
+- **What is copied:** what A has found so far, in the form A's planning was shown it. Drafts
+  and approvals are never copied.
+- **What it carries:** no authority, because a copy informs. Each piece keeps its marks, so
+  outside content stays outside content in B.
+- **Who it reaches:** for now, only activations of the same person, within ADR-0332 §4's
+  limits on what is shown. Crossing people is the privacy front's.
 - **The record:** B's episode records the share, naming A and the moment it was taken, so
   the viewer and the observer can see why B knew what it knew.
 
@@ -206,9 +197,9 @@ after B's first act does not come up yet.
 receiver, and the giver is stopped. The receiver re-reads everything from understanding,
 with the authority each input carries.
 
-**Why it isn't a fourth primitive.** The independent read argued that a merge *moves* an
-input with its authority, while a share copies without authority, so merge is really
-"move and stop". But a move is exactly a copy and the original's removal. Stopping the giver
+**Why it isn't a fourth primitive.** It can look as if a merge *moves* an input with its
+authority, while a share copies without authority, so merge would be "move and stop". But a
+move is exactly a copy and the original's removal. Stopping the giver
 in the same step is the removal: once it is stopped, the copy is the only live one, so it
 can keep the authority. A share on its own can't, because the original is still live and
 one yes would count twice. The atomic stop is what turns a share into a move.
@@ -250,7 +241,7 @@ restart, can be listed, and can be changed or cancelled by the person.
 | **When** | Now; an instant; or a rule such as every weekday at 8. A condition, such as "when I get home", is a watch and comes later (#2585). |
 | **What it carries** | A reminder's text; or a task's statement, its stories, its budget and what counts as done. |
 | **Its state** | For a reminder, each occurrence's state (ADR-0340 §4:2). For a task: running, paused until a time, stopped, or ended, plus each slice's state. |
-| **Author and origin** | Its author is whoever set it, written when they set it (ADR-0292 §5's table). A report's author is the assistant (ADR-0340 §10:3). Its origin is `outside` where the setting activation had read outside content (ADR-0340 §2:6). |
+| **Author and marks** | Its author is whoever set it, written when they set it (ADR-0292 §5's table). A report's author is the assistant (ADR-0340 §10:3). It carries its setter's outside-content mark (ADR-0340 §2:6). |
 | **Authority** | None, and no approval the setter held carries over (ADR-0321 §4:1). ADR-0292 §5:6 says this of reminders; this proposal extends it to every spawn. |
 
 **How it starts.** When it comes due, a sensor in the hub pushes it, and that starts an
@@ -264,7 +255,8 @@ moment later by "make it 9" is one input if the second arrives during the short 
 arrives after the reminder is set, it waits, and the next activation changes the record.
 
 **A background task is one record, worked in slices.** The earlier draft had each slice
-spawn the next. The independent read showed three ways that breaks:
+spawn the next. The independent read showed three ways that breaks, none of them about
+anything outside these operations:
 
 - a slice stopped before it spawned its successor would end the task silently, with no
   report;
@@ -335,10 +327,8 @@ already works, and it is what keeps the three operations small:
 3. **Only a merged input carries authority**, because its giver is stopped in the same step.
    A share and a spawn carry none, and an approval is used only by the activation its yes
    was given in (ADR-0321 §4:1).
-4. **Outside content stays marked and stays digested.** A shared copy holds only what
-   planning was shown, so outside content stays digests' evidence. A copy holding outside
-   evidence marks its receiver. A spawn set after reading outside content has origin
-   `outside`.
+4. **Marks travel.** Whatever crosses between activations carries its author, its
+   authority and its outside-content marks. What they mean is the other designs'.
 5. **One person, for now.** Shares, merges and cancels stay within one person's
    activations. A spawn speaks only into a place of the person it is for. Crossing people
    is the audience redesign's.
@@ -360,7 +350,7 @@ already works, and it is what keeps the three operations small:
    The viewer and the observer can always explain why something happened.
 8. **Everything is bounded.**
    - Merges, by the join limit.
-   - Shares, by a limit per activation and by never being passed on.
+   - Shares, by a limit per activation.
    - Spawns, by who may spawn what, and by a task's budget.
    - Every activation, by its deadline, its round limit and the spend ceiling.
 9. **Nothing runs unseen.** A person can see their running activations in each place's
@@ -397,7 +387,7 @@ Status:
 | --- | --- | --- |
 | Start a thought on Telegram, finish it on the web, before any reply | Merge (takeover): the Telegram activation is stopped, and its input moves to the web one | Built, not yet seen live |
 | The same, but Telegram already replied | No merge; the web activation sees how far Telegram's got | Built |
-| "What's the cheapest so far?" on Telegram while the web activation is mid-search | Share: Telegram answers from what the search's planning was shown, and the search goes on | New |
+| "What's the cheapest so far?" on Telegram while the web activation is mid-search | Share: Telegram answers from what the search has found, and the search goes on | New |
 | "Never mind the booking" on Telegram after the web activation has acted | Cancel across places: understanding names it, and a rule stops it; the reply says what finished | New |
 | "Never mind" while two activations run on other places | Understanding names neither, and the reply asks which | New |
 | A misread "never mind" stopped the wrong work | "Go on" picks it up again: a stop abandons no goal | New, by ADR-0295 §4:1 |
@@ -431,17 +421,15 @@ Status:
 | Your partner's activation could use what yours is finding ("are we having pasta?" while yours plans dinner) | No share across people until the audience redesign | Elsewhere (the privacy front) |
 | A forwarded message or an email, whose author is only claimed | Never merges with the person's own activation, because its authority differs | Built |
 
-**Safety and races**
+**Races and bounds**
 
 | Situation | What happens | Status |
 | --- | --- | --- |
-| A web page or an email says "never mind the booking" | Nothing stops. A cancel comes only from understanding reading the person's own input, never from what planning fetched | New |
-| A web page says "remind me to wire money" | Planning may set the reminder only in an activation carrying the person's authority, and its origin is `outside`. ADR-0340 already allows this, and it is the owner's *defensible, not trick-proof* line | Drafted |
 | Two activations try to merge with each other at once | The atomic step decides: the first wins, and the second finds its target stopped and takes nothing | Built (ADR-0332 §4) |
 | A chain of merges | Bounded by the join limit | Built |
+| A cancel and a takeover aimed at the same activation at once | Both set the same stop mark in one step; whichever lands second finds it stopped | New |
 | A task that never finishes | Its budget, and only its record's sensor pushes slices | New |
 | A yes given in one activation used by a spawned or shared one | Impossible: an approval is used only by its yes's activation | Built (ADR-0321 §4:1) |
-| A shared copy built from a web page | It holds only digests' evidence, marks its receiver as having read outside content, and is never passed on | New |
 
 ## 8. Operations considered and not added
 
@@ -476,7 +464,7 @@ operation becomes **inform**, which also matches its rule: it informs and never 
 | **The words** | Spawn, stop, share and merge become the names later decisions use; joining and takeover are restated as merges | Nothing: no behaviour changes |
 | **The rules of §6** | Gathered in one place as the floors every operation keeps | Nothing new, except where the rows below name it |
 | **Cancel across places** | Understanding may name a shown activation the input cancels, and a rule stops it even after it has acted | ADR-0332 §4:8 (*"nothing is stopped"* where it has committed), and ADR-0332 §4:4, which names only `continues`; ADR-0295 §1:1 and §1:4 (a stop is a command, accepted only as a device's structured act) and §1:5 (typed words are never a stop), for this route alone; it answers the item ADR-0332 §9 left to #2515, and ADR-0292 §11:2's end state |
-| **Share by pull** | Understanding may name a running activation it draws on, and a rule copies what that activation's planning was shown | ADR-0332 §2:1 (no activation reads another's state except as §3 and §4 state) and §4:1 (what understanding is shown); ADR-0280 §3:5 (the working set gains the copy); ADR-0306 §4:5 (a copy holding outside evidence counts as having read outside content) |
+| **Share by pull** | Understanding may name a running activation it draws on, and a rule copies what it has found | ADR-0332 §2:1 (no activation reads another's state except as §3 and §4 state) and §4:1 (what understanding is shown); ADR-0280 §3:5 (the working set gains the copy). How a copy's outside-content marks count is the outside-content design's |
 | **Spawn** | Every spawn carries no authority; a task is one record whose slices are its occurrences | ADR-0292 §5:6, widened from reminders to every spawn; for ADR-0340, still a draft: §10:1, so that a rule sets the report when a task leaves *running* rather than its last slice |
 
 **How it might convert.** My pick is one ADR that:
@@ -500,16 +488,9 @@ without a home for longer.
   keep losing that race. The pick is that a due spawn takes its turn in the place's arrival
   order, admitted as an input of its own and never folded into the person's messages.
   ADR-0340's rebased round should settle it.
-- **A task's question and the yes to it.** A report activation is offered no capability
-  that acts (ADR-0340 §3:7), so it cannot record the proposed call with its question. Then
-  the yes fails ADR-0321 §4:4's *exactly the call shown*, and the person is asked twice.
-  The background-work decision should let a report carry the proposed call without running
-  it.
-- **A task that reads outside content.** Every later slice is marked, so each of its calls
-  that leaves the hub needs the person, except a search at the configured provider
-  (ADR-0306 §4:4). Slices can't ask, so such a task ends early. That decision has to choose
-  how a task reads beyond search.
-- **Exactly what a share copies,** within *what planning was shown*.
+- **How a task asks for a yes,** and how the yes reaches the call it proposed, is the
+  background-work decision's, with the authority design.
+- **Exactly what a share copies.**
 - **Push shares,** where an activation offers what it found to another, wait for a case.
 - **Crossing people.** Shares, merges and cancels between household members wait for the
   audience redesign.
@@ -529,9 +510,9 @@ without a home for longer.
    reserve if the privacy front takes "share"?
 2. **Cancel across places:** may "never mind" on one place stop the same person's
    activation on another place after it has acted, decided by understanding and applied
-   by a rule, and never planning's choice?
-3. **Share:** pull only, within one person, copying only what the other activation's
-   planning was shown, and never passed on?
+   by a rule, as takeover is?
+3. **Share:** pull only, and within one person until the privacy front decides crossing
+   people?
 4. **A background task as one record** whose slices are its occurrences, with the report set
    by rule however the task ends, and no separate report when the person stopped it?
 5. **A reminder in a busy place:** take its turn in the place's order? Or weave it into the
