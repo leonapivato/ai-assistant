@@ -38,7 +38,6 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     EpisodicMemory,
     InputOrigin,
-    JoinedInput,
     MessageAuthor,
     PlanningRound,
     ProcessingReason,
@@ -55,7 +54,7 @@ from ai_assistant.core.types import (
     TelegramQuotedMessage,
     TelegramUpdate,
 )
-from ai_assistant.orchestration.joining import THE_USER
+from ai_assistant.orchestration.joining import THE_USER, JoinCheck
 from ai_assistant.orchestration.telegram import (
     DEFAULT_TELEGRAM_START_WAIT,
     INTERRUPTED_LINE,
@@ -83,8 +82,6 @@ from ai_assistant.testing.telegram import GET_UPDATES, SEND_MESSAGE
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
-
-    import pytest
 
     from ai_assistant.orchestration.joining import JoiningInput
 
@@ -125,9 +122,14 @@ class _Line:
         self.closing = False
         # ADR-0332 §3, §8: what the reader handed the join and the stop, and what each
         # answers: no join is taken, and a stop stops what runs, unless a case says.
+        # What the reader asked the check (`joins`) and handed the join once it had
+        # marked it (`joined_inputs`); the check finds the activation `answer` names
+        # joinable, and the join takes it unless `refuse_join` (the race, §3:18).
         self.joins: list[JoiningInput] = []
+        self.joined_inputs: list[JoiningInput] = []
         self.joined: str | None = None
         self.answer: Callable[[JoiningInput], str | None] = lambda joining: self.joined
+        self.refuse_join = False
         self.stops: list[str] = []
         self._ids = iter(f"act-{n}" for n in range(1, 100))
         self.reader = TelegramReader(
@@ -142,6 +144,7 @@ class _Line:
             memory=self.memory,
             activate=self._activate,
             join=self._join,
+            join_check=self._check,
             stop=self._stop,
             closing=lambda: self.closing,
             mint=lambda: next(self._ids),
@@ -154,9 +157,14 @@ class _Line:
         self.rests.append(seconds)
         await asyncio.sleep(0.001)
 
-    def _join(self, joining: JoiningInput) -> str | None:
+    def _check(self, joining: JoiningInput) -> tuple[JoinCheck, str | None]:
         self.joins.append(joining)
-        return self.answer(joining)
+        into = self.answer(joining)
+        return (JoinCheck.REFUSED, None) if into is None else (JoinCheck.JOINABLE, into)
+
+    def _join(self, joining: JoiningInput, into: str) -> str | None:
+        self.joined_inputs.append(joining)
+        return None if self.refuse_join else into
 
     async def _stop(self, activation_id: str) -> bool:
         self.stops.append(activation_id)
@@ -475,47 +483,6 @@ async def test_only_the_lines_newest_episode_is_the_one_a_restart_cut_off() -> N
     assert line.sent() == []
 
 
-async def test_an_update_an_episode_records_as_joined_is_marked_and_not_taken_in_again(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """ADR-0332 §3:18: a joined update whose marking a restart lost is taken in by its join."""
-    memory = FakeMemoryStore(now=lambda: AT)
-    record = _line_episode(
-        "act-joined",
-        (RecordedInputMessage(text="book Riverside", sent_at=AT, position=59),),
-        channel=line_channel(REFERENCE, CHAT),
-    )
-    processing = record.processing_record
-    assert processing is not None
-    joined = JoinedInput(
-        joined_at=AT,
-        channel=line_channel(REFERENCE, CHAT),
-        messages=(RecordedInputMessage(text="for Saturday", sent_at=AT, position=60),),
-    )
-    await memory.add(
-        record.model_copy(
-            update={"processing_record": processing.model_copy(update={"joined": (joined,)})}
-        )
-    )
-    line = _Line(memory=memory)
-    marks: list[tuple[tuple[int, ...], str]] = []
-    take_in = line.intake.take_in
-
-    async def spy(update_ids: Sequence[int], *, activation_id: str) -> tuple[int, ...]:
-        marks.append((tuple(update_ids), activation_id))
-        return await take_in(update_ids, activation_id=activation_id)
-
-    monkeypatch.setattr(line.intake, "take_in", spy)
-    line.fake.hold(text(2, "for Saturday", message_id=60), text(3, "and at seven"))
-    line.start()
-    await line.until(lambda: bool(line.inputs), what="the reader took the rest in")
-    await line.stop()
-
-    assert marks[0] == ((2,), "act-joined"), "marked by its join, before anything is admitted"
-    (taken,) = line.inputs
-    assert taken.update_ids == (3,), "the joined update is not taken in again"
-
-
 async def test_a_restart_that_cut_off_a_cancelled_activation_sends_it_too() -> None:
     intake, memory = await _cut_off(ProcessingStatus.INTERRUPTED, ProcessingReason.CANCELLED)
     line = _Line(intake=intake, memory=memory)
@@ -812,35 +779,72 @@ async def test_nothing_joins_past_a_message_that_waits_and_the_polls_are_paced()
     assert line.inputs[1].text == "actually Saturday\n\nand at seven"
 
 
-async def test_a_joined_update_whose_marking_failed_is_marked_later_never_taken_in_again() -> None:
-    """§3:18: the marking is owed until it lands; the update is handed to nothing else."""
-    line = _Line()
-    running = await _running(line)
-    armed: list[bool] = []
+def _failing_marking(line: _Line, running: str) -> Callable[[JoiningInput], str]:
+    """A check that finds the run joinable, and makes the record refuse its marking."""
 
     def answer(joining: JoiningInput) -> str:
         del joining
-        if not armed:
-            # The join's marking is the record's very next call: it fails, once.
-            line.intake.fail_next()
-            armed.append(True)
+        # The join's marking is the record's very next call: it fails.
+        line.intake.fail_next()
         return running
 
-    line.answer = answer
-    line.fake.hold(text(2, "actually Saturday"))
+    return answer
 
-    held = await _until_held(line, 2)
-    assert armed == [True]
-    assert (held.kind, held.activation_id) == (TelegramIntakeKind.TAKEN_IN, running), (
-        "marked by a later poll, once the first marking failed"
-    )
-    assert len(line.joins) == 1, "handed to the join once"
+
+async def test_a_join_whose_marking_failed_joins_nothing_and_is_taken_in_after() -> None:
+    """§3:18: the marking comes first, so a refused one leaves the update waiting."""
+    line = _Line()
+    running = await _running(line)
+    line.answer = _failing_marking(line, running)
+    line.fake.hold(text(2, "actually Saturday"))
+    await line.until(lambda: bool(line.joins), what="the join was asked")
+    for _ in range(20):
+        await asyncio.sleep(0.001)
+    assert line.joined_inputs == [], "nothing the record does not hold taken in is joined"
 
     assert line.gate is not None
     line.gate.set()
-    await line.until(lambda: line.fake.held == (), what="everything was confirmed")
+    await line.until(lambda: len(line.inputs) == 2, what="it was taken in after")
     await line.stop()
-    assert len(line.inputs) == 1
+    assert line.inputs[1].update_ids == (2,)
+
+
+async def test_a_stop_after_a_join_whose_marking_failed_still_stops() -> None:
+    """§8:4: a marking the record refused never keeps a stop in the page from acting."""
+    line = _Line()
+    running = await _running(line)
+    line.answer = _failing_marking(line, running)
+    line.fake.hold(text(2, "actually Saturday"), stop_command(3))
+
+    await line.until(lambda: STOPPED_LINE in line.sent(), what="the stop was answered")
+    assert line.stops == [running]
+    assert line.joined_inputs == []
+
+    assert line.gate is not None
+    line.gate.set()
+    await line.until(lambda: len(line.inputs) == 2, what="the correction was taken in after")
+    await line.stop()
+    assert line.inputs[1].update_ids == (2,)
+
+
+async def test_a_join_the_activation_refused_once_marked_is_the_next_ones_input() -> None:
+    """§3:18: committed, stopped or ended while the marking was written: retaken."""
+    line = _Line()
+    running = await _running(line)
+    line.joined = running
+    line.refuse_join = True
+    line.fake.hold(text(2, "actually Saturday"))
+    held = await _until_held(line, 2)
+    assert (held.kind, held.activation_id) == (TelegramIntakeKind.TAKEN_IN, running)
+    await line.until(lambda: line.fake.held == (), what="it was confirmed")
+
+    assert line.gate is not None
+    line.gate.set()
+    await line.until(lambda: len(line.inputs) == 2, what="the next activation took it in")
+    await line.stop()
+    (taken,) = line.inputs[1:]
+    assert taken.update_ids == (2,), "its input, though the record names the other"
+    assert line.marked[1] == (2,), "and counted as taken in by it"
 
 
 # --- the line's /stop (ADR-0332 §8) -----------------------------------------------------

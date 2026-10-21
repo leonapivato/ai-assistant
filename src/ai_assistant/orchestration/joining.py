@@ -43,12 +43,12 @@ episode carries only the :class:`~ai_assistant.core.types.JoinedInput` records (
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.types import (
     CapabilityEffect,
     ChannelIdentity,
-    EpisodicMemory,
     InputOrigin,
     JoinedInput,
     RecordedInputMessage,
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from datetime import datetime
 
-    from ai_assistant.core.types import ChannelEpisodePage, ToolDefinition
+    from ai_assistant.core.types import ToolDefinition
     from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.orchestration.disclosure import TurnSupply
 
@@ -68,12 +68,13 @@ __all__ = [
     "DEFAULT_JOIN_LIMIT",
     "THE_USER",
     "InputStanding",
+    "JoinCheck",
     "JoiningInput",
     "RunningActivation",
+    "check_join",
     "input_standing",
     "is_pure_read",
     "join_running",
-    "joined_positions",
     "place_busy",
     "take_over",
     "visible_running",
@@ -87,6 +88,23 @@ DEFAULT_JOIN_LIMIT: Final = 3
 #: hub chat and on the line from the configured account (ADR-0323 §4:1). The household
 #: design names more (ADR-0332 §9).
 THE_USER: Final = "user"
+
+
+class JoinCheck(StrEnum):
+    """What :func:`check_join` found of an input a reader would hand the join (§3:3)."""
+
+    JOINABLE = "joinable"
+    """The activation running on its place would take it now: the reader marks it taken
+    in by that activation, and then hands it to the join, as at admission (§3:18)."""
+
+    NOT_YET = "not_yet"
+    """An activation runs on its place whose pass has not begun, so its input's standing
+    is not yet set (it is set once its own messages are marked): the reader asks again
+    shortly, and the input neither joins nor waits until then."""
+
+    REFUSED = "refused"
+    """It would not join: nothing runs there, the activation committed, was stopped or
+    took ``join_limit`` joins, or the input is not of its standing. It waits (§3:4)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,12 +227,51 @@ def _running(state: ActivationState) -> bool:
     return not state.ended and not state.stopped
 
 
+def _on_place(
+    running: Iterable[ActivationState], channel: ChannelIdentity
+) -> ActivationState | None:
+    """The one activation running on ``channel``'s place, where its kind runs one at a time.
+
+    ``None`` where none runs, where the place's kind runs its activations side by side,
+    and where more than one runs, failing closed.
+    """
+    if not one_at_a_time(channel.channel_type):
+        return None
+    on_place = [one for one in running if one.place == channel and not one.ended]
+    return on_place[0] if len(on_place) == 1 else None
+
+
+def check_join(
+    running: Iterable[ActivationState], joining: JoiningInput, *, limit: int
+) -> tuple[JoinCheck, str | None]:
+    """Whether :func:`join_running` would take ``joining`` now, appending nothing (§3:3).
+
+    What a reader reads before it marks an input taken in by the activation it would
+    join (§3:18): the marking is the reader's durable bookkeeping, so it lands before
+    the activation can read the input, as at admission (ADR-0293 §6:8).
+
+    Returns:
+        The finding, and the activation's id where it is :attr:`JoinCheck.JOINABLE`.
+    """
+    state = _on_place(running, joining.channel)
+    if state is None or state.activation_id is None:
+        return JoinCheck.REFUSED, None
+    if state.standing is None:
+        if state.stopped or state.committed:
+            return JoinCheck.REFUSED, None
+        return JoinCheck.NOT_YET, None
+    if not joining.standing.joins(state.standing) or not state.can_join(limit=limit):
+        return JoinCheck.REFUSED, None
+    return JoinCheck.JOINABLE, state.activation_id
+
+
 def join_running(
     running: Iterable[ActivationState],
     joining: JoiningInput,
     *,
     limit: int,
     at: datetime,
+    into: str | None = None,
 ) -> str | None:
     """Join ``joining`` to the activation running on its place, where §3:3 allows.
 
@@ -233,47 +290,22 @@ def join_running(
         joining: The input a reader brings, with its standing.
         limit: ``join_limit`` (§6:5): the most joins one activation takes.
         at: When it joins.
+        into: The activation the reader marked the input taken in by (§3:18), where it
+            did; then only that one is joined.
 
     Returns:
-        The id of the activation it joined, which the reader marks its messages taken
-        in by (§3:18); ``None`` where it joined none, and then it waits (§3:4).
+        The id of the activation it joined; ``None`` where it joined none, and then it
+        waits (§3:4).
     """
-    if not one_at_a_time(joining.channel.channel_type):
+    state = _on_place(running, joining.channel)
+    if state is None or state.activation_id is None or state.standing is None:
         return None
-    on_place = [one for one in running if one.place == joining.channel and not one.ended]
-    if len(on_place) != 1:
-        return None
-    (state,) = on_place
-    if state.activation_id is None or state.standing is None:
+    if into is not None and state.activation_id != into:
         return None
     if not joining.standing.joins(state.standing):
         return None
     joined = JoinedInput(joined_at=at, channel=joining.channel, messages=joining.messages)
     return state.activation_id if state.join(joined, limit=limit) else None
-
-
-def joined_positions(page: ChannelEpisodePage) -> dict[int, str]:
-    """The positions a page's episodes record as joined, by the activation each joined.
-
-    ADR-0332 §3:16, §3:18: an episode records each joined input before any stage acts on
-    it, so where a reader's marking of a joined message never landed before a restart,
-    this is what tells it the message was taken in, and by which activation. A takeover's
-    joined input is its own place's, and its messages carry that place's positions, so
-    only the inputs that joined from the page's own place are read.
-    """
-    joined: dict[int, str] = {}
-    for entry in page.entries:
-        record = entry.record
-        if not isinstance(record, EpisodicMemory) or record.processing_record is None:
-            continue
-        processing = record.processing_record
-        for one in processing.joined:
-            if one.taken_over_from is not None or one.channel != processing.trigger.channel:
-                continue
-            for message in one.messages:
-                if message.position is not None:
-                    joined[message.position] = processing.activation_id
-    return joined
 
 
 def place_busy(running: Iterable[ActivationState], channel: ChannelIdentity) -> bool:

@@ -28,9 +28,10 @@ came back. Where nothing is running, the first message starts the start wait
 everything that has arrived **together, as one input**, each message keeping the time
 Telegram gave it (§5:4), and runs its activation beside the loop. While it runs, the
 loop keeps polling: a message from the same author **joins it** where ADR-0332 §3:3
-allows, through the engine's join, and is marked taken in by it (§3:18); one that does
-not join waits in Telegram, unconfirmed, and so does everything after it, until the
-activation ends and the next poll takes them in. Those polls are paced
+allows: the reader marks it taken in by that activation first, as at admission, and
+then hands it to the engine's join (§3:18). One that does not join waits in Telegram,
+unconfirmed, and so does everything after it, until the activation ends and the next
+poll takes them in. Those polls are paced
 (:data:`RUNNING_POLL_PACE`), so updates left waiting never make the reader poll in a
 loop.
 
@@ -52,11 +53,11 @@ it back.
 **Restarts** (§5:10, §6:10). The activation takes its updates in as its first step once
 its episode is written, as the chat's does (ADR-0293 §6:8): so after a restart, updates
 an interrupted activation took in are not taken in again, and updates never taken in
-are taken in as usual; an update an episode records as joined is marked taken in by
-that activation, where its marking never landed, and not taken in again (ADR-0332
-§3:18). Before its first poll the reader looks at the chat's last activation, by its
-newest episode, and where the restart cut it off — its episode closed *interrupted*,
-and not by the user's stop — the writer sends :data:`INTERRUPTED_LINE` once, by rule.
+are taken in as usual. A joined update is marked so too, before the activation can
+read it (ADR-0332 §3:18). Before its first poll the reader looks at the chat's last
+activation, by its newest episode, and where the restart cut it off — its episode
+closed *interrupted*, and not by the user's stop — the writer sends
+:data:`INTERRUPTED_LINE` once, by rule.
 
 **The window** (§10). A bot cannot read its chat's history, so the kind declares an
 episode window: the recent episodes on the line's channel and place, each linked to
@@ -125,7 +126,7 @@ from ai_assistant.orchestration.channel_kinds import (
 )
 from ai_assistant.orchestration.chat import CHAT_WINDOW_SIZE, COULDNT_FINISH
 from ai_assistant.orchestration.defects import is_defect, log_defect
-from ai_assistant.orchestration.joining import JoiningInput, input_standing, joined_positions
+from ai_assistant.orchestration.joining import JoinCheck, JoiningInput, input_standing
 from ai_assistant.orchestration.phase_path import Delivery, Fitted
 from ai_assistant.orchestration.understanding import (
     AskedIn,
@@ -789,7 +790,8 @@ class TelegramReader:
         writer: TelegramWriter,
         memory: MemoryStore,
         activate: Callable[[TelegramInput], Awaitable[bool]],
-        join: Callable[[JoiningInput], str | None],
+        join: Callable[[JoiningInput, str], str | None],
+        join_check: Callable[[JoiningInput], tuple[JoinCheck, str | None]],
         stop: Callable[[str], Awaitable[bool]],
         closing: Callable[[], bool],
         mint: Callable[[], str],
@@ -810,8 +812,14 @@ class TelegramReader:
                 was marked, once the activation has ended, or raises
                 ``CancelledError`` where a shutdown cancelled it.
             join: The engine's join (ADR-0332 §3:3, §3:6): it joins an input to the
-                activation running on the line's chat where that activation may take
-                it, and answers the activation's id, or ``None`` where it joined none.
+                activation running on the line's chat, the one named, where that
+                activation may take it, and answers its id, or ``None`` where it joined
+                none.
+            join_check: Whether the join would take an input now, appending nothing
+                (:func:`~ai_assistant.orchestration.joining.check_join`): read before the
+                reader marks the input taken in by the activation it would join, so the
+                marking lands before the activation can read it (§3:18), as at
+                admission.
             stop: Stops a running activation as ``stop_activation`` does (ADR-0332
                 §8:4), and answers whether it stopped one.
             closing: Whether the engine has begun shutting down, after which nothing
@@ -836,6 +844,7 @@ class TelegramReader:
         self._written = written
         self._sleep = sleep
         self._join = join
+        self._join_check = join_check
         self._stop = stop
         self._start_wait = seams.start_wait
         self._task: asyncio.Task[object] | None = None
@@ -853,11 +862,12 @@ class TelegramReader:
         # poll that returns it takes it in. Also set when an activation ends with input
         # left waiting, which arrived while it ran, so it is taken in at once (§5:5).
         self._started = False
-        # ADR-0332 §3:18: the updates a join took whose marking has not yet landed, by
-        # the activation they joined. Each later poll marks them first and hands none of
-        # them to anything else, so a marking refused never lets a joined update be
-        # taken in again while this process runs.
-        self._owed: dict[int, str] = {}
+        # ADR-0332 §3:18: updates marked taken in by an activation that the join then did
+        # not take, as it committed, was stopped or ended while the marking was written.
+        # They are no input of that one: the next activation takes them in, though the
+        # record names the other.
+        self._retake: list[TelegramUpdate] = []
+        self._retaken: set[int] = set()
 
     @property
     def channel(self) -> ChannelIdentity:
@@ -901,6 +911,8 @@ class TelegramReader:
     async def _once(self) -> None:
         """One poll, what it returned dealt with, and the rest before the next."""
         try:
+            if self._retake and self._turn is None and not self._closing():
+                await self._admit(())
             outcome = await self._poll()
             if outcome.done:
                 wait = await self._deal_with(outcome.updates)
@@ -989,7 +1001,6 @@ class TelegramReader:
         Raises:
             TelegramIntakeRecordError: If the record cannot be read or written.
         """
-        await self._settle()
         batch = _Batch(ids=[one.update_id for one in updates])
         if not batch.ids:
             return None
@@ -1032,9 +1043,7 @@ class TelegramReader:
             if update.update_id in recorded:
                 batch.dealt.add(update.update_id)  # §5:9: taken in or answered once
                 continue
-            if update.update_id in self._owed or (
-                turn is not None and update.update_id in turn.handed
-            ):
+            if turn is not None and update.update_id in turn.handed:
                 continue  # the running activation's, its marking not yet landed
             message = self._own(update)
             if message is None:
@@ -1091,10 +1100,16 @@ class TelegramReader:
         while it runs, and its updates are dealt with once a later poll finds them taken
         in.
         """
+        if self._retake:
+            # Marked by an activation the join did not take them into: this one's (§3:18),
+            # held until it takes them in.
+            self._retaken = {one.update_id for one in self._retake}
+            held = {one.update_id for one in updates}
+            updates = sorted(
+                (*(one for one in self._retake if one.update_id not in held), *updates),
+                key=lambda one: one.update_id,
+            )
         page = await self._memory.channel_episodes(self._channel, limit=_WINDOW_EPISODES)
-        updates = await self._joined_before(updates, page)
-        if not updates:
-            return
         messages = [one.message for one in updates if one.message is not None]
         taken = TelegramInput(
             channel=self._channel,
@@ -1109,33 +1124,6 @@ class TelegramReader:
             activation_id=taken.activation_id, task=task, handed=set(taken.update_ids)
         )
         task.add_done_callback(self._ended)
-
-    async def _joined_before(
-        self, updates: Sequence[TelegramUpdate], page: ChannelEpisodePage
-    ) -> list[TelegramUpdate]:
-        """``updates`` but those a recent episode records as joined, marked by its activation.
-
-        ADR-0332 §3:18: a joined update is marked taken in by the activation it joined,
-        as at admission. Where that marking never landed before a restart, the episode,
-        which records each joined input before any stage acts on it (§3:16), is what
-        says it was taken in: it is marked so now, and is not taken in again (§5:10).
-
-        Raises:
-            TelegramIntakeRecordError: If the record cannot be written.
-        """
-        joined = joined_positions(page)
-        again: dict[str, list[int]] = {}
-        kept: list[TelegramUpdate] = []
-        for update in updates:
-            by = None if update.message is None else joined.get(update.message.message_id)
-            if by is None:
-                kept.append(update)
-            else:
-                again.setdefault(by, []).append(update.update_id)
-        for activation_id, update_ids in again.items():
-            _log.info("telegram_join_marked_late", stage="reader", updates=len(update_ids))
-            await self._intake.take_in(update_ids, activation_id=activation_id)
-        return kept
 
     async def _running(self, taken: TelegramInput) -> None:
         """Run the input's activation, showing typing while it runs (§6:7)."""
@@ -1171,22 +1159,24 @@ class TelegramReader:
     async def _joined(self, turn: _Turn | None, updates: Sequence[TelegramUpdate]) -> set[int]:
         """Join ``updates`` to the running activation, in order, as far as they may.
 
-        ADR-0332 §3:3: each run of consecutive updates of one standing is one input,
-        handed to the engine's join, which takes it in one step or not at all; the first
-        that does not join waits, and so does everything after it (§3:4). An update that
-        joined is marked taken in by the activation it joined (§3:18), the marking owed
-        until it lands (:meth:`_settle`).
+        ADR-0332 §3:3: each run of consecutive updates of one standing is one input. **Its
+        marking comes first**, as at admission (§3:18, ADR-0293 §6:8): where the check
+        finds the running activation would take it, the run is marked taken in by that
+        activation, and only then handed to the join, so the intake record is what a
+        restart reads, and an update the activation could act on is never taken in
+        again. The first run the check refuses waits, and so does everything after it
+        (§3:4); one whose activation has not begun its pass is asked again by the next
+        poll. Where the join refuses what was marked, because the activation committed,
+        was stopped or ended while the marking was written, the next activation takes
+        it in (:attr:`_retake`). A record that cannot be written leaves the run waiting,
+        and the rest of the page is still dealt with, a stop command among it.
 
         Returns:
-            The updates that joined and are marked.
-
-        Raises:
-            TelegramIntakeRecordError: If the record cannot be written; the marking
-                stays owed.
+            The updates marked, which are dealt with.
         """
-        if turn is None or not updates:
-            return set()
-        joined: list[tuple[int, str]] = []
+        dealt: set[int] = set()
+        if turn is None:
+            return dealt
         for run in _runs(updates):
             if turn.task.done():
                 # It ended meanwhile: what is left arrived while it ran, so it is taken
@@ -1195,46 +1185,49 @@ class TelegramReader:
                 self._started = True
             if turn.waited:
                 break
-            messages = [one.message for one in run if one.message is not None]
-            forward = any(one.forward_origin is not None for one in messages)
-            joining = JoiningInput(
-                channel=self._channel,
-                messages=_recorded(messages),
-                standing=input_standing(
-                    origin=TELEGRAM.input_origin(self._channel, takes_in_forward=forward),
-                    established=not forward,
-                ),
-            )
-            try:
-                into = self._join(joining)
-            except TraceStoreError:
-                _log.warning("telegram_join_failed", stage="reader", reason="clock")
-                into = None
-            if into is None:
+            found, into = self._join_check(self._joining(run))
+            if found is JoinCheck.NOT_YET:
+                break
+            if found is JoinCheck.REFUSED or into is None:
                 turn.waited = True
                 break
-            for one in run:
-                turn.handed.add(one.update_id)
-                self._owed[one.update_id] = into
-                joined.append((one.update_id, into))
-        if not joined:
-            return set()
-        await self._settle()
-        return {update_id for update_id, _ in joined if update_id not in self._owed}
+            try:
+                marked = set(
+                    await self._intake.take_in([one.update_id for one in run], activation_id=into)
+                )
+            except TelegramIntakeRecordError:
+                _log.warning("telegram_join_failed", stage="reader", reason="store_failed")
+                turn.waited = True
+                break
+            kept = [one for one in run if one.update_id in marked]
+            turn.handed.update(marked)
+            dealt.update(marked)
+            if kept and not self._joined_into(kept, into):
+                self._retake.extend(kept)
+                turn.waited = True
+                break
+        return dealt
 
-    async def _settle(self) -> None:
-        """Mark the updates a join took, where their marking has not landed (§3:18).
+    def _joining(self, updates: Sequence[TelegramUpdate]) -> JoiningInput:
+        """The updates as one input a join takes, each message kept apart and dated."""
+        messages = [one.message for one in updates if one.message is not None]
+        forward = any(one.forward_origin is not None for one in messages)
+        return JoiningInput(
+            channel=self._channel,
+            messages=_recorded(messages),
+            standing=input_standing(
+                origin=TELEGRAM.input_origin(self._channel, takes_in_forward=forward),
+                established=not forward,
+            ),
+        )
 
-        Raises:
-            TelegramIntakeRecordError: If the record cannot be written; the marking
-                stays owed.
-        """
-        while self._owed:
-            activation_id = next(iter(self._owed.values()))
-            update_ids = sorted(one for one, by in self._owed.items() if by == activation_id)
-            await self._intake.take_in(update_ids, activation_id=activation_id)
-            for one in update_ids:
-                self._owed.pop(one, None)
+    def _joined_into(self, updates: Sequence[TelegramUpdate], into: str) -> bool:
+        """Hand marked updates to the join, into the activation they were marked by."""
+        try:
+            return self._join(self._joining(updates), into) is not None
+        except TraceStoreError:
+            _log.warning("telegram_join_failed", stage="reader", reason="clock")
+            return False
 
     async def _stopping(self, update_id: int) -> bool:
         """Act on a stop command: record it answered, stop what runs, answer (§8:4-§8:6).
@@ -1278,9 +1271,15 @@ class TelegramReader:
         Raises:
             TelegramIntakeRecordError: If the record cannot be written.
         """
-        marked = await self._intake.take_in(taken.update_ids, activation_id=taken.activation_id)
-        into.extend(marked)
-        self._marked.setdefault(taken.activation_id, []).extend(marked)
+        retaken = [one for one in taken.update_ids if one in self._retaken]
+        fresh = [one for one in taken.update_ids if one not in self._retaken]
+        self._retaken.difference_update(retaken)
+        self._retake = [one for one in self._retake if one.update_id not in retaken]
+        marked = (
+            await self._intake.take_in(fresh, activation_id=taken.activation_id) if fresh else ()
+        )
+        into.extend((*retaken, *marked))
+        self._marked.setdefault(taken.activation_id, []).extend((*retaken, *marked))
 
     async def _after_restart(self) -> None:
         """Send the restart's one fixed message, where it cut the chat's last activation off.
