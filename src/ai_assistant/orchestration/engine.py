@@ -6936,13 +6936,14 @@ class Engine:
         **A join of the other's pending its reader's marking is waited for first**
         (:meth:`_takeover_settled`, §3:18), and refuses nothing: so the takeover takes
         the other's whole input, a join confirmed by then among it, and nothing is
-        confirmed into an activation already taken over.
+        confirmed into an activation already taken over. A join of this activation's
+        own pending its marking is waited for too, so the takeover joins after it.
         """
         understanding = working.understanding
         assert understanding is not None  # noqa: S101 — the rule makes the stage due only once a version is recorded
         named = understanding.continues
         state = active_state()
-        await self._takeover_settled(named, working)
+        await self._takeover_settled(named, state, working)
         # No await between the settle's end and the check: one synchronous step (§4:6).
         taken = (
             named is not None
@@ -6973,13 +6974,19 @@ class Engine:
             else:
                 _log.warning("takeover_stop_unrecorded", stage="takeover", reason="store_failed")
 
-    async def _takeover_settled(self, named: str | None, working: _ActivationPass) -> None:
-        """Wait for a join of the named activation's pending its marking (ADR-0332 §3:18).
+    async def _takeover_settled(
+        self, named: str | None, taker: ActivationState | None, working: _ActivationPass
+    ) -> None:
+        """Wait for the joins pending their marking on both sides (ADR-0343 §3:3, §4:3).
 
-        §4:6's conditions are exhaustive, so a pending join refuses no takeover: it is
-        waited for, inside the pass's deadline, and the takeover then takes the other's
-        whole input with that join confirmed in it, or withdrawn. The wait is the
-        reader's one marking write.
+        §4:6's conditions are exhaustive, so a pending join refuses no takeover: the
+        named activation's is waited for, inside the pass's deadline, and the takeover
+        then takes the other's whole input with that join confirmed in it, or released.
+        So is a join of the taker's own taken before this step: it joined first, so it
+        is confirmed first, and the episode records the joins in the order they joined
+        (ADR-0332 §3:16, ADR-0343 §2:1). Each wait is a reader's one marking write, and
+        both are read again, with no await before the takeover's step, until neither
+        side holds one.
 
         Raises:
             ModelTimeoutError: If the deadline passed first, or had passed once the
@@ -6996,9 +7003,12 @@ class Engine:
         )
         if named is None or other is None:
             return
+        sides = (other,) if taker is None else (other, taker)
         try:
             async with asyncio.timeout_at(working.deadline):
-                await other.settled()
+                while any(one.joining for one in sides):
+                    for one in sides:
+                        await one.settled()
         except TimeoutError:
             raise ModelTimeoutError(_TAKEOVER_EXPIRED) from None
         # Read again with no await before the takeover's step: a wait resumed after
