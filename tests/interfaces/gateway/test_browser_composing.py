@@ -12,8 +12,6 @@ the gateway's real relay.
 from __future__ import annotations
 
 import asyncio
-import time
-from itertools import pairwise
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -27,7 +25,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from browser_drive import Drive
-    from playwright.async_api import Browser, ViewportSize
+    from playwright.async_api import Browser, Route, ViewportSize
 
     from ai_assistant.core.types import Identifier
 
@@ -38,40 +36,34 @@ pytestmark = [
     pytest.mark.asyncio(loop_scope="session"),
 ]
 
-#: §5:5's bound, in seconds: no two signals closer than this.
-_EVERY: Final = 1.0
+#: §5:5's bound, in milliseconds: no two signals closer than this.
+_EVERY: Final = 1000
 
-#: What a gap between two arrivals may lose to the page's own scheduling and the relay,
-#: below §5:5's second. The page counts from when it *sent*, the record from when the
-#: hub was reached, so two arrivals can sit a little closer than two sends did.
-_JITTER: Final = 0.15
+#: How long a signal may stay out before the next replaces it, in milliseconds.
+_STALE: Final = 3000
+
+#: Where the page's clock is paused from: any instant, so long as it is fixed.
+_PAUSED_AT: Final = 1_800_000_000_000
 
 _VIEWPORTS: Final = [DESKTOP, PHONE]
 
 
 class _Signals:
-    """Every composing signal the hub was handed, with when it arrived."""
+    """Every composing signal the hub was handed, in order."""
 
     def __init__(self, drive: Drive) -> None:
-        self.arrived: list[tuple[float, str]] = []
+        self.arrived: list[str] = []
         self.refuse = False
         held = drive.engine.composing
 
         async def composing(conversation_id: Identifier) -> None:
-            self.arrived.append((time.monotonic(), conversation_id))
+            self.arrived.append(conversation_id)
             if self.refuse:
                 msg = "composing needs a device that is an end for writing of the conversation"
                 raise DeviceRefusedError(msg, reason=DeviceRefusal.NOT_ALLOWED)
             await held(conversation_id)
 
         drive.engine.composing = composing  # type: ignore[method-assign]
-
-    async def settled(self, count: int) -> None:
-        """Wait, bounded, until ``count`` signals have arrived; the case asserts after."""
-        for _ in range(100):
-            if len(self.arrived) >= count:
-                return
-            await asyncio.sleep(0.05)
 
 
 async def _open(drive: Drive) -> str:
@@ -88,6 +80,32 @@ async def _open(drive: Drive) -> str:
     return started.id
 
 
+async def _pause(drive: Drive) -> None:
+    """Take the page's clock off the wall, so time moves only when the case moves it."""
+    await drive.page.clock.install(time=_PAUSED_AT)
+    await drive.page.clock.pause_at(_PAUSED_AT + _EVERY)
+
+
+async def _quiet(drive: Drive) -> None:
+    """Wait, bounded, until the page has no signal out: each it sent has been answered.
+
+    Asked of the page in real time rather than through a wait the page's clock drives,
+    because that clock is paused.
+    """
+    for _ in range(200):
+        if await drive.page.evaluate("() => composingOut === null"):
+            return
+        await asyncio.sleep(0.025)
+    msg = "a composing signal stayed out"
+    raise AssertionError(msg)
+
+
+async def _key(drive: Drive, key: str = "a") -> None:
+    """Press one key in the composer, and wait until what it sent, if anything, landed."""
+    await drive.page.locator("#chat-text").press(key)
+    await _quiet(drive)
+
+
 async def _storage(drive: Drive) -> list[list[str]]:
     """Every key and value this page holds in browser storage, of both kinds."""
     held: list[list[str]] = await drive.page.evaluate(
@@ -98,71 +116,115 @@ async def _storage(drive: Drive) -> list[list[str]]:
 
 
 @pytest.mark.parametrize("viewport", _VIEWPORTS)
-async def test_typing_sends_the_signal_for_the_open_conversation(
+async def test_a_burst_of_keys_inside_a_second_is_one_signal_for_the_open_conversation(
     gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
 ) -> None:
-    """§5:5: a burst of keys inside one second is one signal, naming the conversation.
+    """§5:5: the signal names the conversation typed into, at most once a second.
 
     Driven at both widths, because the person types on a phone as often as at a desk.
     """
     async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
         conversation = await _open(drive)
         signals = _Signals(drive)
+        await _pause(drive)
 
-        await drive.page.locator("#chat-text").press_sequentially("on my", delay=20)
-        await signals.settled(1)
-        await asyncio.sleep(0.3)
+        for _ in range(5):
+            await _key(drive)
+            await drive.page.clock.run_for(150)
 
-        assert [named for _, named in signals.arrived] == [conversation]
+        assert signals.arrived == [conversation]
         assert await drive.page.evaluate(
             "() => document.documentElement.scrollWidth <= document.documentElement.clientWidth"
         )
 
 
-async def test_the_signal_is_renewed_while_typing_goes_on_and_never_more_than_once_a_second(
+async def test_the_signal_is_renewed_once_a_second_while_typing_goes_on(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """§5:5's cadence: renewed while the person keeps typing, never closer than a second.
+    """§5:5's cadence, on the boundary: a key a millisecond short of a second sends
+    nothing, one at the second sends the renewal, and steady typing renews it every
+    second after — inside §6:2's three-second lapse, so the hub never lets it go."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        conversation = await _open(drive)
+        signals = _Signals(drive)
+        await _pause(drive)
 
-    About three and a half seconds of steady typing, a key every tenth of a second, so
-    the hub is told again before §6:2's three-second lapse could run out — and every two
-    signals stand at least a second apart.
+        await _key(drive)
+        assert len(signals.arrived) == 1
+        await drive.page.clock.run_for(_EVERY - 1)
+        await _key(drive)
+        assert len(signals.arrived) == 1
+        await drive.page.clock.run_for(1)
+        await _key(drive)
+        assert len(signals.arrived) == 2
+
+        # Two more seconds of a key every tenth: renewed at the second and the third.
+        for _ in range(20):
+            await drive.page.clock.run_for(100)
+            await _key(drive)
+
+        assert signals.arrived == [conversation] * 4
+
+
+async def test_nothing_is_sent_once_the_typing_stops(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """No clock sends the signal: once the keys stop, the page says nothing more, and the
+    hub lets the last one lapse (§5:6)."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        await _open(drive)
+        signals = _Signals(drive)
+        await _pause(drive)
+
+        await _key(drive)
+        await drive.page.clock.run_for(10 * _EVERY)
+        await _quiet(drive)
+
+        assert len(signals.arrived) == 1
+
+
+async def test_a_signal_that_never_settles_is_replaced_once_it_is_stale(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """One signal out at a time, and never one that holds the rest back.
+
+    The first request is held unanswered. A key a second later sends nothing, because the
+    first is still out and young; a key once it has been out for the stale bound aborts
+    it and sends the next, which the hub receives.
     """
     async with driving(gateway_browser, tmp_path) as drive:
         conversation = await _open(drive)
         signals = _Signals(drive)
-        box = drive.page.locator("#chat-text")
+        requested: list[Route] = []
+        failed: list[str] = []
+        drive.page.on("requestfailed", lambda request: failed.append(request.url))
 
-        started = time.monotonic()
-        while time.monotonic() - started < 3.5:
-            await box.press("a")
-            await asyncio.sleep(0.1)
-        await asyncio.sleep(0.3)
+        async def hold_the_first(route: Route) -> None:
+            requested.append(route)
+            if len(requested) > 1:
+                await route.continue_()
 
-        times = [at for at, _ in signals.arrived]
-        assert len(times) >= 3, times
-        assert len(times) <= 4, times
-        gaps = [later - earlier for earlier, later in pairwise(times)]
-        assert all(gap >= _EVERY - _JITTER for gap in gaps), gaps
-        # Renewed: no gap a lapse of three seconds would have run out in.
-        assert all(gap < 3.0 for gap in gaps), gaps
-        assert {named for _, named in signals.arrived} == {conversation}
+        await drive.page.route("**/chat/composing", hold_the_first)
+        await _pause(drive)
 
+        await drive.page.locator("#chat-text").press("a")
+        for _ in range(100):
+            if requested:
+                break
+            await asyncio.sleep(0.025)
+        await drive.page.clock.run_for(_EVERY)
+        await drive.page.locator("#chat-text").press("a")
+        await asyncio.sleep(0.2)
+        assert len(requested) == 1
+        assert not await drive.page.evaluate("() => composingOut === null")
 
-async def test_the_signal_stops_when_the_typing_does(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """Nothing is sent on a clock: once the keys stop, the page says nothing more, and the
-    hub lets the last signal lapse (§5:6)."""
-    async with driving(gateway_browser, tmp_path) as drive:
-        await _open(drive)
-        signals = _Signals(drive)
+        await drive.page.clock.run_for(_STALE - _EVERY)
+        await _key(drive)
 
-        await drive.page.locator("#chat-text").press_sequentially("hi", delay=20)
-        await signals.settled(1)
-        await asyncio.sleep(2.5)
-
-        assert len(signals.arrived) == 1
+        assert len(requested) == 2
+        assert signals.arrived == [conversation]
+        assert any(url.endswith("/chat/composing") for url in failed)
+        await drive.page.unroute("**/chat/composing")
 
 
 async def test_the_signal_is_never_stored(gateway_browser: Browser, tmp_path: Path) -> None:
@@ -177,12 +239,11 @@ async def test_the_signal_is_never_stored(gateway_browser: Browser, tmp_path: Pa
         signals = _Signals(drive)
         before = await _storage(drive)
         shown = await drive.page.locator("#chat-transcript").inner_text()
+        await _pause(drive)
 
-        await drive.page.locator("#chat-text").press_sequentially("half a thought", delay=30)
-        await signals.settled(1)
-        await asyncio.sleep(1.1)
-        await drive.page.locator("#chat-text").press_sequentially(" more", delay=30)
-        await signals.settled(2)
+        for key in "half a thought":
+            await _key(drive, key)
+            await drive.page.clock.run_for(300)
 
         assert len(signals.arrived) >= 2
         assert await _storage(drive) == before
@@ -206,8 +267,7 @@ async def test_a_refused_signal_says_nothing_on_the_page(
         signals.refuse = True
 
         await drive.page.locator("#chat-text").press_sequentially("hello", delay=20)
-        await signals.settled(1)
-        await asyncio.sleep(0.3)
+        await _quiet(drive)
 
         assert len(signals.arrived) == 1
         await expect(drive.page.locator("#chat .fault")).to_be_hidden()
@@ -221,18 +281,18 @@ async def test_sending_the_message_sends_no_signal(
     """Emptying the composer once the message is sent is the page's act, not typing."""
     async with driving(gateway_browser, tmp_path) as drive:
         await _open(drive)
-        await drive.page.fill("#chat-text", "Book the usual campsite.")
-        await drive.page.wait_for_function(
-            "() => !composingOut"
-        )  # the one signal the fill sent has been answered
         signals = _Signals(drive)
-        await asyncio.sleep(_EVERY + 0.1)
+        await drive.page.fill("#chat-text", "Book the usual campsite.")
+        await _quiet(drive)
+        assert len(signals.arrived) == 1
+        # Past the cadence, so a signal the send fired would be sent rather than held.
+        await drive.page.evaluate("() => { composingAt = -Infinity; }")
 
         await drive.page.click("#chat-send")
         await expect(drive.page.locator("#chat-transcript li").last).to_contain_text(
             "Book the usual campsite."
         )
-        await asyncio.sleep(0.3)
+        await _quiet(drive)
 
-        assert signals.arrived == []
+        assert len(signals.arrived) == 1
         assert await drive.page.locator("#chat-text").input_value() == ""

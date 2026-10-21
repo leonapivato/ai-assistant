@@ -3584,9 +3584,9 @@ async function deliverChat(one) {
 //
 // **It is not input** (§5:8): it starts nothing, joins nothing, and is never written into
 // the transcript, any store or any episode. So nothing of it is kept here either — not in
-// `chat.pending`, not in the transcript on screen, and not in browser storage. The two
-// values below are this tab's memory of its own last send, which is what the cadence is
-// counted from, and they are gone with the tab.
+// `chat.pending`, not in the transcript on screen, and not in browser storage. The values
+// below are this tab's memory of its own last send, which the cadence is counted from,
+// and they are gone with the tab.
 //
 // **Nothing the signal answers is said on the page.** It is not something the person
 // asked for, so a refusal of it (a device that only reads the conversation, which the hub
@@ -3595,34 +3595,56 @@ async function deliverChat(one) {
 
 // The least time between two signals, which §5:5 bounds at once a second.
 const COMPOSING_EVERY_MILLISECONDS = 1000;
+// How long a signal may stay out before the next one replaces it: §6:2's default lapse,
+// past which it would be stale even if it landed.
+const COMPOSING_STALE_MILLISECONDS = 3000;
+// When the last signal was sent, by this page's monotonic clock.
 let composingAt = -Infinity;
-// One signal out at a time, so a slow hub is never sent a queue of them.
-let composingOut = false;
+// The signal still out, or `null`: its abort controller, and the conversation and session
+// half it was sent for. **One out at a time**, so a slow hub is never sent a queue of them
+// and the browser's few connections to this origin are not held by signals. **And never
+// one that blocks the next for long**: a later signal replaces it — aborting it — once it
+// has been out past the stale bound, or at once where it was for another conversation or
+// another session. So a request that never settles costs one signal, not the rest of the
+// typing. No clock is armed for it: the next keystroke is when the question is asked.
+let composingOut = null;
 
 async function sendComposing() {
   const half = headerHalf();
   const conversation = chat.selected;
-  if (half === null || conversation === null || composingOut) {
+  if (half === null || conversation === null) {
     return;
   }
   const now = performance.now();
   if (now - composingAt < COMPOSING_EVERY_MILLISECONDS) {
     return;
   }
+  if (composingOut !== null) {
+    const same = composingOut.conversation === conversation && composingOut.half === half;
+    if (same && now - composingAt < COMPOSING_STALE_MILLISECONDS) {
+      return;
+    }
+    composingOut.stopping.abort();
+  }
+  const out = { stopping: new AbortController(), conversation: conversation, half: half };
   composingAt = now;
-  composingOut = true;
+  composingOut = out;
   try {
     const response = await fetch("/chat/composing", {
       method: "POST",
       headers: admitted(half, true),
       body: JSON.stringify({ conversation_id: conversation }),
+      signal: out.stopping.signal,
     });
     await response.text();
   } catch (_) {
-    // A lost signal is a signal not sent, and the next keystroke past the cadence sends
-    // another; the gateway having gone is said by whatever the person does next.
+    // A lost or replaced signal is a signal not sent, and the next keystroke past the
+    // cadence sends another; the gateway having gone is said by whatever the person
+    // does next.
   } finally {
-    composingOut = false;
+    if (composingOut === out) {
+      composingOut = null;
+    }
   }
 }
 
