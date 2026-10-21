@@ -1,6 +1,6 @@
 # 337. A prompt change is judged on a regression suite with repeated samples, each recorded call is asked what it had to guess, and a candidate is promoted after three clean days
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-21
 - Scope: the first, deliberately slim version of a continuing process for improving the hub's prompts on the owner's hub: a regression suite of prompt cases and its runner, repeated samples for the properties that guard the user's authority and memory, a follow-up question asked after a model call both in the replay tool and on the owner's hub, and the rule by which a candidate becomes the default. Everything else the proposal carried is named in §10 as not decided here.
 - Dependency: [ADR-0314](0314-a-diagnostic-record-keeps-what-each-phase-was-given-and-returned-and-nothing-reads-it-back.md), [ADR-0316](0316-an-activation-viewer-outside-the-package-shows-the-diagnostic-record-to-the-owner-on-the-server.md), [ADR-0333](0333-the-observer-writes-diagnostic-entries-in-a-file-of-its-own-beside-the-activation-it-learned-from-and-the-viewer-shows-what-was-learned.md), [ADR-0334](0334-a-prompt-is-a-template-the-hub-loads-at-start-the-owners-hub-may-override-it-from-its-data-directory-and-each-model-call-records-the-version-it-sent.md) and [ADR-0335](0335-a-replay-re-sends-recorded-model-calls-from-a-copy-of-the-owners-hub-through-a-candidate-prompt-and-keeps-each-new-reply-beside-the-original.md), as their status lines leave them.
