@@ -35,6 +35,11 @@ from _activation_record import (
     viewer,
     write_record,
 )
+from _follow_up_record import ACT_A as FOLLOWED_A
+from _follow_up_record import ACT_F as FOLLOWED_F
+from _follow_up_record import ANSWER as FOLLOW_UP_ANSWER
+from _follow_up_record import MODEL_NAME as FOLLOW_UP_MODEL
+from _follow_up_record import write_followed
 from _learning_record import (
     ALONE_CLAIM,
     EVIDENCE_CLAIM,
@@ -707,3 +712,56 @@ async def test_a_replayed_call_reads_at_a_phones_width_with_no_sideways_scroll(
         await readable.locator("#call-replays details.part summary").click()
         wide = await readable.evaluate("node => node.scrollWidth - node.clientWidth")
         assert wide <= 0
+
+
+# --- ADR-0337 §8:17: the hub's follow-up, one click from the call it follows ---------------
+
+
+@pytest.fixture
+def followed(tmp_path: Path) -> Iterator[Any]:
+    """The viewer over a record the hub's follow-up asker followed up."""
+    with serving(write_followed(tmp_path)) as bound:
+        yield bound
+
+
+@pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "phone"])
+async def test_a_calls_follow_up_is_shown_beside_it_off_the_timeline(
+    followed: Any, gateway_browser: Browser, width: int
+) -> None:
+    async with _page(gateway_browser, width=width) as page:
+        await _open(page, followed.port, FOLLOWED_A)
+        await expect(page.locator("#detail-body")).not_to_contain_text(FOLLOW_UP_ANSWER)
+        await page.locator(".round").first.click()
+        readable = page.locator("#drawer-read")
+        asked = readable.locator("#call-follow-ups .follow-up")
+        await expect(asked).to_have_count(1, timeout=_SHOWN)
+        await expect(readable.locator(".call-nav button", has_text="Follow-up")).to_be_visible()
+        await expect(asked.locator("h5")).to_contain_text("follow-up")
+        await expect(asked.locator("h5")).to_contain_text("default")
+        await expect(asked.locator(".kv")).to_contain_text(FOLLOW_UP_MODEL)
+        await expect(asked.locator(".part-text").first).to_have_text(FOLLOW_UP_ANSWER)
+        wide = await readable.evaluate("node => node.scrollWidth - node.clientWidth")
+        assert wide <= 0
+
+
+@pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "phone"])
+async def test_a_hub_follow_up_that_failed_is_shown_as_its_failure(
+    followed: Any, gateway_browser: Browser, width: int
+) -> None:
+    async with _page(gateway_browser, width=width) as page:
+        await _open(page, followed.port, FOLLOWED_F)
+        await page.locator(".round").first.click()
+        readable = page.locator("#drawer-read")
+        asked = readable.locator("#call-follow-ups .follow-up")
+        await expect(asked).to_have_count(1, timeout=_SHOWN)
+        await expect(asked.locator(".fail")).to_contain_text("failed: ModelRateLimitError")
+        await expect(asked.locator(".part-head .name", has_text="Answer")).to_have_count(0)
+        wide = await readable.evaluate("node => node.scrollWidth - node.clientWidth")
+        assert wide <= 0
+
+
+async def test_a_follow_up_file_is_not_in_the_list(followed: Any, gateway_browser: Browser) -> None:
+    async with _page(gateway_browser) as page:
+        await page.goto(f"http://127.0.0.1:{followed.port}/")
+        await expect(page.locator("#list li")).to_have_count(2, timeout=_SHOWN)
+        await expect(page.locator("#list")).not_to_contain_text("followup")
