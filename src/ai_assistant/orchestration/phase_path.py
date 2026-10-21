@@ -1597,6 +1597,27 @@ class PhaseWorking:
         """Every acting decision, in round order."""
         return tuple(one.acted for one in self._rounds if one.acted is not None)
 
+    def fetched_resting_on_outside(self, outside: Sequence[str]) -> None:
+        """Note what was fetched resting on outside content, and mark the episode now.
+
+        Sets ``fetched_outside`` with what set it, each named once, in the order seen.
+        ADR-0223's value for the episode is a disjunction over what the pass was given,
+        and this term already makes it true, so the pass holds it from here: ADR-0286
+        §4:3 carries it into every append after this one. A restart's close keeps what
+        the episode stored, so without this the mark reached only the freezing write,
+        which a pass cut off before it never makes (#3270).
+
+        Args:
+            outside: The ids of what was fetched resting on outside content. Nothing is
+                noted where it is empty.
+        """
+        if not outside:
+            return
+        self.fetched_outside = True
+        self.fetched_outside_from.update(dict.fromkeys(outside))
+        if (state := active_state()) is not None:
+            state.holds_external(value=True)
+
     @property
     def read_outside_content(self) -> bool:
         """Whether a ruling or a digest says the activation has read outside content.
@@ -2816,11 +2837,9 @@ class PhasePath:
             *_found_outside(found),
             *(() if stories is None else _stories_outside(stories)),
         )
-        if outside:
-            # Carried into planning's notes and authorizing's rulings from the first
-            # round, not only into the frozen episode (ADR-0181 §4, ADR-0306 §4:6).
-            working.fetched_outside = True
-            working.fetched_outside_from.update(dict.fromkeys(outside))
+        # Carried into planning's notes and authorizing's rulings from the first round,
+        # not only into the frozen episode (ADR-0181 §4, ADR-0306 §4:6).
+        working.fetched_resting_on_outside(outside)
         if stories is not None:
             working.notes.update((one.note_id, one) for one in _shown_notes(stories))
         _hold_given(given, working)
@@ -3284,9 +3303,7 @@ class PhasePath:
             working.pages[one.result_id] = view
             shown = PlanningStories(stories=(view,))
             working.notes.update((note.note_id, note) for note in _shown_notes(shown))
-            if outside := _stories_outside(shown):
-                working.fetched_outside = True
-                working.fetched_outside_from.update(dict.fromkeys(outside))
+            working.fetched_resting_on_outside(_stories_outside(shown))
 
     def _start_tidies(
         self,
