@@ -131,6 +131,9 @@ ORIGIN_WORDS: Final[Mapping[SupportOrigin, str]] = {
     SupportOrigin.LEGACY: "a record kept before supports existed",
     SupportOrigin.LEGACY_OUTSIDE: "a record kept before supports existed, from outside",
     SupportOrigin.OBSERVER_INFERENCE: "an inference drawn looking back",
+    # ADR-0338 §4:3-§4:4: the user pinned the memory on their own profile, which confirms
+    # the wording it then had (#3335).
+    SupportOrigin.PINNED: "the user's pin, confirming this wording",
 }
 
 #: How a memory stands, in the words a surface uses (ADR-0328 §6:1, §15:4).
