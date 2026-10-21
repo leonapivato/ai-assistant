@@ -11,6 +11,7 @@ stores in the last cases.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
@@ -69,6 +70,7 @@ from ai_assistant.orchestration.observer.scout import parsed
 from ai_assistant.testing import FakeDiagnosticSink, FakeModelProvider
 from ai_assistant.testing.memories import (
     inference_support,
+    legacy_support,
     memory,
     said_support,
     sourced_support,
@@ -765,11 +767,150 @@ async def test_the_view_shows_only_the_claim_its_parts_and_similar_memories() ->
     assert view is not None
     assert gone is None
     payload = view.payload()
-    assert set(payload) == {"claim", "parts", "memories"}
-    assert payload["parts"] == [part.rendered(answers=True)]
+    assert set(payload) == {"claim", "under_review", "parts", "memories"}
+    assert payload["parts"] == [part.rendered(answers=True, exchange="E1")]
     rendered = json.loads(json.dumps(payload))
     assert rendered["memories"][0]["supports"][0]["text"] == "Window seats please."
     assert "effect-1" not in json.dumps(payload)
+
+
+_EXCHANGE_KEYS = {"exchange", "occurred_at"}
+
+
+def test_each_part_names_the_exchange_it_belongs_to_and_when_that_occurred() -> None:
+    """§8:5: a part is attributed to its exchange from the record, one label per exchange."""
+    view = _view(
+        _input("P1", "leaving"),
+        _input("P2", "later", at_minutes=5),
+        _part(
+            "P3",
+            RoundMessagePart(episode=address("leaving"), round="r1"),
+            origin=SupportOrigin.ASSISTANT_MESSAGE,
+        ),
+        _input("P4", "earlier", at_minutes=-60),
+    )
+
+    parts = json.loads(json.dumps(view.payload()))["parts"]
+
+    assert [(one["part"], one["exchange"], one["occurred_at"]) for one in parts] == [
+        ("P1", "E1", AT.isoformat()),
+        ("P2", "E2", (AT + timedelta(minutes=5)).isoformat()),
+        ("P3", "E1", AT.isoformat()),
+        ("P4", "E3", (AT - timedelta(minutes=60)).isoformat()),
+    ]
+
+
+def test_the_exchange_under_review_is_the_leaving_episode_whatever_the_parts() -> None:
+    """§8:2: the step is told which exchange is under review, even where no part is in it."""
+    carried = _view(_input("P1", "earlier", at_minutes=-60), _input("P2", "leaving"))
+    elsewhere = _view(_input("P1", "later", at_minutes=5))
+
+    shown = json.loads(json.dumps(carried.payload()))
+    other = json.loads(json.dumps(elsewhere.payload()))
+
+    assert shown["under_review"] == "E1"
+    assert carried.exchanges()[address("leaving")] == "E1"
+    assert [one["exchange"] for one in shown["parts"]] == ["E2", "E1"]
+    assert other["under_review"] == "E1"
+    assert [one["exchange"] for one in other["parts"]] == ["E2"]
+
+
+async def test_a_memorys_support_names_its_exchange_and_when_it_occurred_where_known() -> None:
+    """§11:6: a stored memory's supports share the parts' labels, so occasions can be counted.
+
+    A support on an episode a part is from takes that part's label; one on an earlier
+    episode read for the call takes its own label and that episode's time; one whose
+    episode is not read keeps its label and shows no time; a legacy one has neither.
+    """
+    harness = Harness()
+    leaving = episode("leaving", text="Window seats please.")
+    earlier = episode("earlier", at=AT - timedelta(days=3), text="A window seat again.")
+    held = memory(
+        "m-seat",
+        "The user prefers window seats.",
+        said_support(address("earlier")),
+        said_support(address("leaving")),
+        said_support(address("nowhere")),
+        legacy_support({"id": "old", "content": "Likes windows."}),
+    )
+    await harness.hold(leaving, earlier, held)
+    part = ReadPart(
+        handle="P1",
+        part=InputPart(episode=address("leaving")),
+        episode=address("leaving"),
+        occurred_at=AT,
+        text="Window seats please.",
+        origin=SupportOrigin.USER_MESSAGE,
+        when=AT,
+    )
+    reading = Reading(leaving=ReadEpisode(handle="E1", record=leaving, parts=(part,)))
+    finding = ObservationFinding(
+        id="f1",
+        episode=address("leaving"),
+        claim="The user prefers window seats.",
+        rests_on=(part.part,),
+    )
+    reader = EpisodeReader(
+        memory=harness.memory,
+        plans=harness.plans,
+        stories=harness.stories,
+        story_episodes=0,
+        related=0,
+    )
+
+    view = await commit_view(
+        finding, reading, reader=reader, memory=harness.memory, plans=harness.plans, similar=5
+    )
+
+    assert view is not None
+    rendered = json.loads(json.dumps(view.payload()))
+    supports = rendered["memories"][0]["supports"]
+    assert [(one["exchange"], one["occurred_at"]) for one in supports] == [
+        ("E2", (AT - timedelta(days=3)).isoformat()),
+        ("E1", AT.isoformat()),
+        ("E3", None),
+        (None, None),
+    ]
+    assert rendered["parts"][0]["exchange"] == "E1"
+
+
+def test_the_exchanges_add_their_keys_and_change_nothing_else_shown() -> None:
+    """§9:3: beside the exchange keys and ``under_review``, the payload is as it was."""
+    held = memory("m-seat", "The user prefers window seats.", said_support(address("past")))
+    reliance = Reliance(handle="M1", memory=held, shaped="the seat", relied_at=AT)
+    answered = replace(_input("P1", "leaving"), answers="Window or aisle?")
+    view = _view(answered, similar=(_similar("M1", held),), reliance=reliance)
+
+    payload = json.loads(json.dumps(view.payload()))
+
+    assert set(payload) == {"claim", "under_review", "parts", "memories", "relied_on"}
+    assert payload["claim"] == "The user prefers window seats."
+    assert payload["parts"] == [
+        {**answered.rendered(answers=True), "exchange": "E1", "occurred_at": AT.isoformat()}
+    ]
+    # The scout's rendering of a part, which passes no exchange, is unchanged.
+    assert set(answered.rendered(answers=True)) == {
+        "part",
+        "from",
+        "outside",
+        "at",
+        "text",
+        "answers",
+    }
+    (shown,) = payload["memories"]
+    assert set(shown) == {"memory", "claim", "stands", "status", "supports", "open_questions"}
+    (support,) = shown["supports"]
+    assert set(support) - _EXCHANGE_KEYS == {
+        "from",
+        "outside",
+        "direction",
+        "backs_as_worded",
+        "counted",
+        "at",
+        "text",
+    }
+    assert (support["exchange"], support["occurred_at"]) == ("E2", None)
+    assert payload["relied_on"] == {"memory": "M1", "shaped": "the seat"}
 
 
 _OWNER_ONLY = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)

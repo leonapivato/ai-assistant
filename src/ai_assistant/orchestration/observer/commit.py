@@ -7,6 +7,14 @@ is shown the reliance call and the memory it named as well (§14:2). Nothing els
 reading reaches it, so a manipulated or confused scout can propose, but cannot launder
 content into a memory it does not rest on.
 
+**Which exchange each part comes from.** Each part, and each support of a memory shown,
+names the exchange it belongs to by a label (``E1``, ``E2``, ...) handed out afresh for
+the call, and when that exchange occurred, read from the record (§8:5); the view names
+the exchange under review, the leaving episode, which is always ``E1``. So the step can
+see which parts the leaving episode carries (§8:2) and tell separate exchanges and
+sittings apart (§11:5-§11:6). A legacy support belongs to no exchange, and one whose
+episode is not read shows no time.
+
 **What it decides** (§9:4): the memory's wording, which supports to add and, for each,
 its direction, whether it backs the claim as worded, how sure the reading is, its
 about-when and its note; and which of ADR-0328 §5's operations to apply, or that nothing
@@ -76,7 +84,7 @@ from ai_assistant.orchestration.support_parts import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
     from datetime import datetime
 
     from ai_assistant.core.prompts import RenderedPrompt
@@ -207,8 +215,18 @@ class Similar:
     supports: tuple[str | None, ...]
     questions: dict[str, str] = field(default_factory=dict)
 
-    def rendered(self) -> dict[str, FrozenJson]:
-        """The memory as the commit step is shown it, attributed from the record."""
+    def rendered(
+        self, *, exchanges: Mapping[str, str], occurred: Mapping[str, datetime]
+    ) -> dict[str, FrozenJson]:
+        """The memory as the commit step is shown it, attributed from the record.
+
+        Args:
+            exchanges: Each exchange's label, by its episode's id.
+            occurred: When each exchange read for the call occurred, by its episode's id.
+
+        Returns:
+            One JSON object.
+        """
         stopped = self.memory.stopped
         open_ = {question_id: handle for handle, question_id in self.questions.items()}
         return {
@@ -218,6 +236,7 @@ class Similar:
             "status": self.memory.status.value,
             "supports": [
                 {
+                    **_exchange_of(support.points_at, exchanges, occurred),
                     "from": ORIGIN_WORDS[support.origin],
                     "outside": support.outside,
                     "direction": support.direction.value,
@@ -251,6 +270,8 @@ class CommitView:
         supplied: The placement of every record the call is supplied beyond the
             reading: the memories, the episodes their supports were resolved from, and
             any part read again (§12:6).
+        occurred: When each episode the memories' supports were resolved from occurred,
+            by its id, which the supports' exchanges are shown with.
     """
 
     finding: ObservationFinding
@@ -260,6 +281,7 @@ class CommitView:
     reliance: Reliance | None = None
     yes_inputs: dict[str, ReadPart] = field(default_factory=dict)
     supplied: tuple[Placement, ...] = ()
+    occurred: dict[str, datetime] = field(default_factory=dict)
 
     def part(self, handle: str) -> ReadPart | None:
         """The part a label names, among those shown."""
@@ -269,12 +291,38 @@ class CommitView:
         """The memory a label names, among those shown."""
         return next((one for one in self.similar if one.handle == handle), None)
 
+    def exchanges(self) -> dict[str, str]:
+        """Each exchange the call shows, its episode's id to its label (``E1``, ``E2``...).
+
+        The exchange under review is ``E1``; then each part's, in the parts' order, and
+        each support's of the memories shown, in theirs, once each.
+        """
+        episodes = [self.leaving.id, *(one.episode for one in self.parts)]
+        episodes.extend(
+            episode
+            for shown in self.similar
+            for support in shown.memory.supports
+            if (episode := part_episode(support.points_at)) is not None
+        )
+        return {episode: f"E{index}" for index, episode in enumerate(dict.fromkeys(episodes), 1)}
+
     def payload(self) -> dict[str, FrozenJson]:
         """What the commit step is shown: one JSON object of quoted source data (§8:5)."""
+        exchanges = self.exchanges()
+        occurred = {
+            **self.occurred,
+            **{one.episode: one.occurred_at for one in self.parts},
+            self.leaving.id: self.leaving.occurred_at,
+        }
         shown: dict[str, FrozenJson] = {
             "claim": self.finding.claim,
-            "parts": [one.rendered(answers=True) for one in self.parts],
-            "memories": [one.rendered() for one in self.similar],
+            "under_review": exchanges[self.leaving.id],
+            "parts": [
+                one.rendered(answers=True, exchange=exchanges[one.episode]) for one in self.parts
+            ],
+            "memories": [
+                one.rendered(exchanges=exchanges, occurred=occurred) for one in self.similar
+            ],
         }
         if self.reliance is not None:
             held = next(one for one in self.similar if one.memory.id == self.reliance.memory.id)
@@ -434,7 +482,7 @@ async def commit_view(  # noqa: PLR0913 — the finding, what it is read against
             memories.append(one)
     shown, episodes = await _resolved(memories, memory=memory, plans=plans)
     supplied.extend(one.memory.placement for one in shown)
-    supplied.extend(episodes)
+    supplied.extend(one.placement for one in episodes)
     return CommitView(
         finding=finding,
         leaving=reading.leaving.record,
@@ -443,17 +491,19 @@ async def commit_view(  # noqa: PLR0913 — the finding, what it is read against
         reliance=reliance,
         yes_inputs={episode: held[part] for episode, part in yes_inputs.items() if part in held},
         supplied=tuple(supplied),
+        occurred={one.id: one.occurred_at for one in episodes},
     )
 
 
 async def _resolved(
     memories: Sequence[Memory], *, memory: MemoryStore, plans: PlanStore
-) -> tuple[tuple[Similar, ...], tuple[Placement, ...]]:
+) -> tuple[tuple[Similar, ...], tuple[EpisodicMemory, ...]]:
     """Each memory with its supports' parts resolved to readable content (ADR-0328 §15:2).
 
     Returns:
-        The memories as shown, and the placement of every episode read to resolve their
-        supports, which the commit call is supplied with them (§12:6).
+        The memories as shown, and every episode read to resolve their supports, whose
+        placement the commit call is supplied with them (§12:6) and whose ``occurred_at``
+        their exchanges are shown with.
     """
     if not memories:
         return (), ()
@@ -488,7 +538,19 @@ async def _resolved(
                 questions=questions,
             )
         )
-    return tuple(shown), tuple(one.placement for one in episodes.values())
+    return tuple(shown), tuple(episodes.values())
+
+
+def _exchange_of(
+    part: SupportPart, exchanges: Mapping[str, str], occurred: Mapping[str, datetime]
+) -> dict[str, FrozenJson]:
+    """The exchange a support's part belongs to, and when it occurred, where known."""
+    episode = part_episode(part)
+    at = None if episode is None else occurred.get(episode)
+    return {
+        "exchange": None if episode is None else exchanges.get(episode),
+        "occurred_at": None if at is None else at.isoformat(),
+    }
 
 
 def commit_messages(view: CommitView, instruction: RenderedPrompt) -> list[Message]:
