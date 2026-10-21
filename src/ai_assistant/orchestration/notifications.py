@@ -36,21 +36,20 @@ injection and are seen only through their Protocols (CLAUDE.md golden rule 1).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import structlog
 
 from ai_assistant.core.errors import NotificationStoreError, PersonModelStoreError
+from ai_assistant.core.protocols import NotificationPolicy
 from ai_assistant.core.types import OWNER_PERSON_ID, NotificationDispositionKind
 from ai_assistant.orchestration.person_block import person_zone
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-    from zoneinfo import ZoneInfo
-
     from ai_assistant.core.protocols import (
         NotificationOutbox,
-        NotificationPolicy,
         NotificationStore,
         PersonModelStore,
     )
