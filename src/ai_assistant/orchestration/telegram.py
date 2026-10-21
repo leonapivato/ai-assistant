@@ -29,7 +29,7 @@ everything that has arrived **together, as one input**, each message keeping the
 Telegram gave it (§5:4), and runs its activation beside the loop. While it runs, the
 loop keeps polling: a message from the same author **joins it** where ADR-0332 §3:3
 allows: the engine's join takes it pending the reader's marking of it, taken in by
-that activation, which commits nothing until the marking has landed (§3:18). One that
+that activation, which leaves running by no route until the marking has settled (§3:18). One that
 does not join waits in Telegram,
 unconfirmed, and so does everything after it, until the activation ends and the next
 poll takes them in. Those polls are paced
@@ -127,7 +127,7 @@ from ai_assistant.orchestration.channel_kinds import (
 )
 from ai_assistant.orchestration.chat import CHAT_WINDOW_SIZE, COULDNT_FINISH
 from ai_assistant.orchestration.defects import is_defect, log_defect
-from ai_assistant.orchestration.joining import JoinCheck, JoiningInput, input_standing
+from ai_assistant.orchestration.joining import JoinCheck, JoiningInput, input_standing, settle
 from ai_assistant.orchestration.phase_path import Delivery, Fitted
 from ai_assistant.orchestration.understanding import (
     AskedIn,
@@ -1140,12 +1140,13 @@ class TelegramReader:
         ADR-0332 §3:3: each run of consecutive updates of one standing is one input. The
         engine's join checks and takes it in one step, **pending this marking** (§3:6,
         §3:18): the reader marks the run taken in by that activation, as at admission
-        (ADR-0293 §6:8), and only what the record marked joins. Acting's commitment step
-        waits for it, so the activation acts on nothing the record does not hold taken
-        in by it, and a marking that fails leaves the run waiting with nothing having
-        read it; the rest of the page is still dealt with, a stop command among it. The
-        first run the join refuses waits, and so does everything after it (§3:4); one
-        whose activation has not begun its pass is asked again by the next poll.
+        (ADR-0293 §6:8), and only what the record marked joins. Every route out of
+        running waits for it, so the activation acts on nothing, and freezes on nothing,
+        the record does not hold taken in by it, and a marking that fails leaves the run
+        waiting with nothing having read it; the rest of the page is still dealt with, a
+        stop command among it. The first run the join refuses waits, and so does
+        everything after it (§3:4); one whose activation has not begun its pass is asked
+        again by the next poll.
 
         Returns:
             The updates marked, which are dealt with.
@@ -1171,28 +1172,50 @@ class TelegramReader:
             if pending is None:
                 turn.waited = True
                 break
-            marked: set[int] = set()
             try:
-                marked.update(
-                    await self._intake.take_in(
-                        [one.update_id for one in run], activation_id=pending.activation_id
-                    )
-                )
+                marked = await self._marked_joining(run, pending)
             except TelegramIntakeRecordError:
                 _log.warning("telegram_join_failed", stage="reader", reason="store_failed")
                 turn.waited = True
                 break
-            finally:
-                # Settled however the marking ended: what the record holds joins, and the
-                # activation's commitment step goes on.
-                pending.confirm(
-                    one.message.message_id
-                    for one in run
-                    if one.update_id in marked and one.message is not None
-                )
-                turn.handed.update(marked)
-                dealt.update(marked)
+            turn.handed.update(marked)
+            dealt.update(marked)
         return dealt
+
+    async def _marked_joining(
+        self, run: Sequence[TelegramUpdate], pending: PendingJoin
+    ) -> set[int]:
+        """Mark ``run`` taken in by the activation it joins, and settle the join (§3:18).
+
+        Settled however the marking ended, and written to its end through a shutdown's
+        cancellation (:func:`~ai_assistant.orchestration.joining.settle`):
+        what the record holds joins, and the activation, whose every route out of
+        running waits for this, goes on.
+
+        Returns:
+            The updates the record marked.
+
+        Raises:
+            TelegramIntakeRecordError: If the record cannot be written; nothing joined.
+        """
+        marked: set[int] = set()
+
+        async def marking() -> None:
+            marked.update(
+                await self._intake.take_in(
+                    [one.update_id for one in run], activation_id=pending.activation_id
+                )
+            )
+
+        def messages() -> list[int]:
+            return [
+                one.message.message_id
+                for one in run
+                if one.update_id in marked and one.message is not None
+            ]
+
+        await settle(pending, marking(), messages)
+        return marked
 
     def _joining(self, updates: Sequence[TelegramUpdate]) -> JoiningInput:
         """The updates as one input a join takes, each message kept apart and dated."""

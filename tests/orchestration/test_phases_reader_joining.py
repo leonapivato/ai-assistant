@@ -44,18 +44,22 @@ from telegram_support import (
     text,
 )
 from test_engine import AT
+from test_phases_joining import _Counting, _routed
 from understanding_support import STATED_PROPOSAL, understanding_stage
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import (
     ConfigurationError,
     ConversationStoreError,
+    ModelError,
 )
 from ai_assistant.core.types import (
     ActivationStop,
     ChannelIdentity,
     InputOrigin,
     MessageAuthor,
+    ProcessingReason,
+    ProcessingStatus,
     RecordedInputMessage,
     RoundResponse,
     TelegramIntakeKind,
@@ -95,7 +99,12 @@ if TYPE_CHECKING:
 
     from test_engine import Harness
 
-    from ai_assistant.core.types import EpisodicMemory, Message, TelegramIntake
+    from ai_assistant.core.types import (
+        EpisodeProcessingRecord,
+        EpisodicMemory,
+        Message,
+        TelegramIntake,
+    )
     from ai_assistant.orchestration.phase_path import PhasePass
 
 #: The line's channel, keyed by its connection and its chat.
@@ -467,6 +476,24 @@ async def test_a_join_whose_marking_is_refused_joins_nothing_and_is_taken_in_aft
     }
 
 
+# --- §3:16, §3:18: every route out of running settles a pending join first ---------------
+#
+# One matrix, route by route, each with the join's marking held: the activation's
+# second message is reserved to it, and the store's marking of it waits. Each route out
+# of running must wait for that marking to settle before it leaves, so the episode
+# records the joined message the store marked taken in by the activation:
+#
+# - ``commit``: acting's commitment step (§3:5), which then sets its round aside;
+# - ``end``: the rules read once a stage ends, here after a silent round, which commits
+#   nothing and leaves nothing due, so the pass does not end past the join but
+#   understands it (§3:9);
+# - ``stop``: a stop while understanding runs, and the stopped activation's end;
+# - ``failure``: a pass whose planning fails;
+# - ``shutdown``: the engine's close, whose drain cancels the activation and the reader;
+# - ``takeover``: another place's activation that continues it takes it over (§4:6),
+#   waiting for the marking rather than refusing, and takes the joined message with it.
+
+
 def _held_acting(entered: asyncio.Event, release: asyncio.Event) -> type[PhasePath]:
     """A path whose acting stage waits for ``release`` before its first line."""
 
@@ -479,42 +506,259 @@ def _held_acting(entered: asyncio.Event, release: asyncio.Event) -> type[PhasePa
     return _Held
 
 
-async def test_acting_waits_for_a_joins_marking_and_then_sets_its_round_aside() -> None:
-    """§3:5, §3:18: nothing commits while a join's marking is written; then it is found.
+class _FailingPlanning(Gated):
+    """Planning's round, failing once :attr:`release` is set."""
 
-    The join is taken before acting's first line, and its marking held: acting waits
-    for it rather than committing past it, so the round planned before it runs nothing
-    and the one planned after it is the one whose message is written.
-    """
-    store = _HeldMarking(held=2)
-    entered, release = asyncio.Event(), asyncio.Event()
-    completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(text="Riverside, Friday."), RoundResponse(text="Riverside, Saturday.")
-    )
+    async def respond(
+        self, messages: Any, tools: Any, *, model: str | None = None
+    ) -> RoundResponse:
+        self.entered.set()
+        await self.release.wait()
+        msg = "the model is down"
+        raise ModelError(msg)
+
+
+class _Route:
+    """One route out of running, driven while a join's marking is held."""
+
+    #: The episodes frozen once the route has ended.
+    frozen = 1
+    #: The conversation the activation runs in, once it is opened.
+    conversation = ""
+
+    def __init__(self) -> None:
+        self.store = _HeldMarking(held=2)
+        self.reached = asyncio.Event()
+        self.release = asyncio.Event()
+        self.harness = self.build()
+
+    def build(self) -> Harness:
+        """The engine, over :attr:`store`."""
+        raise NotImplementedError
+
+    async def leave(self, running: str) -> None:
+        """Take the route out of running; it then waits for the marking."""
+        del running
+        self.release.set()
+
+    async def ended(self) -> None:
+        """Once the marking is released: what the route waits for to end."""
+
+    async def check(self, found: Sequence[EpisodicMemory], running: str) -> None:
+        """What the route's ending shows beside the join."""
+
+
+class _Commit(_Route):
+    def build(self) -> Harness:
+        self.completer = FakeToolCallingCompleter.scripted(
+            RoundResponse(text="Riverside, Friday."), RoundResponse(text="Riverside, Saturday.")
+        )
+        return phases_harness(
+            self.completer,
+            conversation_store=self.store,
+            phases={"path": _held_acting(self.reached, self.release)},
+        )
+
+    async def check(self, found: Sequence[EpisodicMemory], running: str) -> None:
+        record = _of(found, running)
+        assert [one.text for one in record.rounds] == ["Riverside, Friday.", "Riverside, Saturday."]
+        assert record.status is ProcessingStatus.COMPLETED
+        assert [
+            one.text for one in await written_by_assistant(self.harness, self.conversation)
+        ] == ["Riverside, Saturday."], (
+            "the round planned before the join was set aside, and wrote nothing"
+        )
+
+
+class _End(_Route):
+    def build(self) -> Harness:
+        completer = Gated(RoundResponse(), RoundResponse(text="Riverside, Saturday."))
+        completer.entered = self.reached
+        completer.release = self.release
+        return phases_harness(completer, conversation_store=self.store)
+
+    async def check(self, found: Sequence[EpisodicMemory], running: str) -> None:
+        record = _of(found, running)
+        assert len(record.understanding) == 2, "the join was understood, not ended past"
+        assert [one.text for one in record.rounds] == ["", "Riverside, Saturday."]
+
+
+class _Stop(_Route):
+    def build(self) -> Harness:
+        self.model = _GatedUnderstanding()
+        self.model.entered = self.reached
+        self.model.release = self.release
+        return phases_harness(
+            understanding=understanding_stage(model=self.model), conversation_store=self.store
+        )
+
+    async def leave(self, running: str) -> None:
+        assert await self.harness.engine.stop_activation(running) is ActivationStop.STOPPED
+        self.release.set()
+
+    async def check(self, found: Sequence[EpisodicMemory], running: str) -> None:
+        stopped(_episode_of(found, running))
+
+
+class _Failure(_Route):
+    def build(self) -> Harness:
+        completer = _FailingPlanning()
+        completer.entered = self.reached
+        completer.release = self.release
+        return phases_harness(completer, conversation_store=self.store)
+
+    async def check(self, found: Sequence[EpisodicMemory], running: str) -> None:
+        assert _of(found, running).status is ProcessingStatus.FAILED
+
+
+class _Shutdown(_Route):
+    def build(self) -> Harness:
+        completer = Gated()
+        completer.entered = self.reached
+        return phases_harness(
+            completer, conversation_store=self.store, drain_timeout=timedelta(milliseconds=10)
+        )
+
+    async def leave(self, running: str) -> None:
+        del running
+        self.closing = asyncio.ensure_future(self.harness.engine.aclose())
+
+    async def ended(self) -> None:
+        await asyncio.wait_for(self.closing, SETTLE)
+
+    async def check(self, found: Sequence[EpisodicMemory], running: str) -> None:
+        record = _of(found, running)
+        assert (record.status, record.reason) == (
+            ProcessingStatus.INTERRUPTED,
+            ProcessingReason.CANCELLED,
+        )
+
+
+class _Takeover(_Route):
+    frozen = 2
+
+    def build(self) -> Harness:
+        self.completer = _Counting()
+        self.completer.entered = self.reached
+        return phases_harness(
+            self.completer,
+            understanding=understanding_stage(model=_routed()),
+            conversation_store=self.store,
+        )
+
+    async def leave(self, running: str) -> None:
+        engine = self.harness.engine
+        self.elsewhere = (await engine.start_conversation()).id
+        await engine.write_message(self.elsewhere, message=said("b-1", "finish it: for two"))
+        self.taker = await working(self.harness, self.elsewhere)
+
+        async def understood() -> bool:
+            return any(
+                one.state is not None
+                and one.state.activation_id == self.taker
+                and bool(one.state.understanding)
+                for one in engine._running
+            )
+
+        await until(understood, what="the taker to name the running one")
+        assert running not in (await self.harness.plans.export()).stopped_activations
+
+    async def ended(self) -> None:
+        self.completer.release.set()
+
+    async def check(self, found: Sequence[EpisodicMemory], running: str) -> None:
+        stopped(_episode_of(found, running))
+        (taken,) = _of(found, self.taker).joined
+        assert taken.taken_over_from == running
+        assert [one.text for one in taken.messages] == ["book Riverside", "make it Saturday"]
+
+
+def _episode_of(found: Sequence[EpisodicMemory], activation_id: str) -> EpisodicMemory:
+    (episode,) = [one for one in found if processing(one).activation_id == activation_id]
+    return episode
+
+
+def _of(found: Sequence[EpisodicMemory], activation_id: str) -> EpisodeProcessingRecord:
+    return processing(_episode_of(found, activation_id))
+
+
+@pytest.mark.parametrize(
+    "route",
+    [_Commit, _End, _Stop, _Failure, _Shutdown, _Takeover],
+    ids=["commit", "end", "stop", "failure", "shutdown", "takeover"],
+)
+async def test_every_route_out_of_running_settles_a_pending_join_first(
+    route: type[_Route],
+) -> None:
+    """§3:16, §3:18: the route waits for the marking; the episode records what it marked."""
+    case = route()
+    harness, store = case.harness, case.store
+    conversation = case.conversation = await open_conversation(harness)
+    await harness.engine.write_message(conversation, message=said("m-1", "book Riverside"))
+    await asyncio.wait_for(case.reached.wait(), SETTLE)
+    running = await working(harness, conversation)
+    await harness.engine.write_message(conversation, message=said("m-2", "make it Saturday"))
+    await asyncio.wait_for(store.holding.wait(), SETTLE)
+
+    await case.leave(running)
+    for _ in range(50):
+        await asyncio.sleep(0.001)
+    assert [
+        one for one in await frozen(harness) if processing(one).activation_id == running
+    ] == [], "it does not leave running past the join's marking"
+    assert await harness.plans.activation_effects([running]) == (), "nothing committed"
+
+    store.release.set()
+    await case.ended()
+    found = await _frozen(harness, case.frozen)
+    await harness.engine.aclose()
+
+    (joined, *_) = _of(found, running).joined
+    assert [one.position for one in joined.messages] == [2], "its episode records the join"
+    assert await store.taken_in(conversation, positions=[1, 2]) == {1: running, 2: running}
+    await case.check(found, running)
+
+
+async def test_a_shutdown_reaches_a_joiner_suspended_in_its_read() -> None:
+    """A joiner waiting on the store's read is cancelled with its reader, not awaited."""
+    store = _HeldRead()
+    completer = Gated()
     harness = phases_harness(
-        completer, conversation_store=store, phases={"path": _held_acting(entered, release)}
+        completer, conversation_store=store, drain_timeout=timedelta(milliseconds=10)
     )
     conversation = await open_conversation(harness)
     await harness.engine.write_message(conversation, message=said("m-1", "book Riverside"))
-    await asyncio.wait_for(entered.wait(), SETTLE)
-    running = await working(harness, conversation)
-
+    await asyncio.wait_for(completer.entered.wait(), SETTLE)
+    store.hold = True
     await harness.engine.write_message(conversation, message=said("m-2", "make it Saturday"))
     await asyncio.wait_for(store.holding.wait(), SETTLE)
-    release.set()
-    for _ in range(20):
-        await asyncio.sleep(0.001)
-    assert await harness.plans.activation_effects([running]) == (), "nothing committed yet"
-    store.release.set()
-    (episode,) = await _frozen(harness, 1)
-    await harness.engine.aclose()
 
-    assert [one.text for one in await written_by_assistant(harness, conversation)] == [
-        "Riverside, Saturday."
-    ]
-    record = processing(episode)
-    assert [one.position for one in record.joined[0].messages] == [2]
-    assert [one.text for one in record.rounds] == ["Riverside, Friday.", "Riverside, Saturday."]
+    await asyncio.wait_for(harness.engine.aclose(), SETTLE)
+
+    assert store.cancelled, "the read was cancelled, not waited out"
+    assert await store.taken_in(conversation, positions=[2]) == {}, "it waits for a restart"
+
+
+class _HeldRead(FakeConversationStore):
+    """A store whose waiting-message read, once :attr:`hold` is set, never returns."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+        self.hold = False
+        self.holding = asyncio.Event()
+        self.cancelled = False
+
+    async def untaken_messages(
+        self, conversation_id: str, *, limit: int = 100
+    ) -> tuple[TranscriptMessage, ...]:
+        if self.hold:
+            self.holding.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+        return await super().untaken_messages(conversation_id, limit=limit)
 
 
 async def written_by_assistant(harness: Harness, conversation: str) -> list[TranscriptMessage]:
