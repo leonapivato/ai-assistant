@@ -189,7 +189,24 @@ The privacy that matters most is privacy toward people. An assistant that lives 
 a home must not repeat one person's things to someone who should not hear them: a
 roommate, a guest, whoever is in the room. Disclosure to a service the user chose
 is a different question, governed by grants and destinations rather than by
-audience. Secrets never leave on any channel.
+audience.
+
+The test for how it handles people is what a trusted human assistant or companion
+would do. Such a person knows what they need to know and is careful with it. They
+deflect a nosy question naturally, keep other people's confidences, stay discreet
+when they can't tell who is listening, and say plainly whom they work for. The
+assistant behaves the same way, by judgment rather than by a rule for every case.
+Where it differs from a person, judgment alone is not enough:
+
+- it remembers everything, word for word, so what is kept and what forgetting means
+  are explicit rules;
+- it often cannot see who is present, so when it cannot tell, it acts as a discreet
+  person would who doesn't know who is listening;
+- it is easier to manipulate than a person, so a few things are hard rules in code:
+  secrets are never said, nothing it reads can make it act without the user's yes,
+  and someone else claiming the user's permission is not permission;
+- its judgment can shift when its model changes, so the cases that matter are
+  tested.
 
 ### 4. Context Determines Usefulness
 
