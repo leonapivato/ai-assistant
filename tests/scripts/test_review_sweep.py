@@ -20,6 +20,7 @@ the module's own justification for the default would have been false (#1410).
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -787,6 +788,87 @@ def test_a_symlinked_parts_directory_is_not_swept_through(tmp_path: Path) -> Non
 
     assert status == 0, out
     assert (outside / "gone" / "keep.md").exists()
+
+
+@pytest.mark.parametrize("delete", [False, True])
+def test_parts_a_round_installs_after_classification_are_left_alone(
+    tmp_path: Path, delete: bool
+) -> None:
+    # Classify an hour-old orphan, then let a round install its parts at that
+    # stem exactly as `codex-review.sh` does — the messages staged, the old
+    # directory removed, the staged one moved in, the artifact renamed into
+    # place. Acting on the name would take the live round's messages.
+    repo = _repo(tmp_path)
+    review = repo / ".review"
+    old = _parts(repo, "a", age=_AGED)
+    (part,) = _MODULE.classify_parts(review, [], time.time())
+    assert part.state == "orphan"
+    staged = review / "parts" / "a.partial.999"
+    staged.mkdir()
+    (staged / "part-0001-of-0002.md").write_text("the live round's\n")
+    shutil.rmtree(old)
+    staged.rename(old)
+    (review / "a.md").write_text("the live round's verdict\n")
+    plan = [] if delete else _MODULE.archive_plan([part.path], review)
+
+    with pytest.raises(_MODULE.SweepError, match="changed after it was classified"):
+        _MODULE._act([part.path], plan, delete=delete, dry_run=False, parts=[part])
+
+    assert (old / "part-0001-of-0002.md").read_text() == "the live round's\n"
+    assert [p.name for p in (review / "parts").iterdir()] == ["a"]
+    assert not (review / "archive" / "parts" / "a").exists()
+
+
+@pytest.mark.parametrize("delete", [False, True])
+def test_parts_gone_since_classification_are_nothing_to_sweep(tmp_path: Path, delete: bool) -> None:
+    repo = _repo(tmp_path)
+    review = repo / ".review"
+    old = _parts(repo, "a", age=_AGED)
+    (part,) = _MODULE.classify_parts(review, [], time.time())
+    shutil.rmtree(old)
+    plan = [] if delete else _MODULE.archive_plan([part.path], review)
+
+    _MODULE._act([part.path], plan, delete=delete, dry_run=False, parts=[part])
+
+    assert list((review / "parts").iterdir()) == []
+    assert not (review / "archive" / "parts" / "a").exists()
+
+
+def test_a_pair_whose_parts_cannot_be_archived_is_put_back_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The artifact is numbered `a-2.md` because `archive/a.md` is an earlier
+    # recording. Were the artifact left archived when its parts fail to follow,
+    # only this sweep would know `parts/a` belongs at `a-2`: the next would file
+    # it as an orphan under `archive/parts/a`, beside the wrong recording.
+    repo = _repo(tmp_path)
+    archive = repo / ".review" / "archive"
+    archive.mkdir(parents=True)
+    (archive / "a.md").write_text("an earlier recording\n")
+    artifact = _dead(repo, "a.md")
+    parts = _parts(repo, "a")
+    move = _MODULE._move_directory
+
+    def refuse(source: Path, destination: Path) -> None:
+        if destination.parent == archive / "parts":
+            raise PermissionError(13, "Permission denied", str(destination))
+        move(source, destination)
+
+    monkeypatch.setattr(_MODULE, "_move_directory", refuse)
+    assert _MODULE.main(["--repo", str(repo)]) == 1
+    monkeypatch.undo()
+
+    assert "tree=t1" in artifact.read_text()
+    assert (parts / "part-0001-of-0002.md").exists()
+    assert [p.name for p in (repo / ".review" / "parts").iterdir()] == ["a"]
+    assert not (archive / "a-2.md").exists()
+
+    status, out, _ = _sweep(repo)
+
+    assert status == 0, out
+    assert "tree=t1" in (archive / "a-2.md").read_text()
+    assert (archive / "parts" / "a-2" / "part-0001-of-0002.md").exists()
+    assert not (archive / "parts" / "a").exists()
 
 
 def test_a_directory_move_never_replaces_its_destination(tmp_path: Path) -> None:
