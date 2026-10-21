@@ -53,7 +53,9 @@ marked in the list, and a model call's readable view shows each result that repl
 beside the original reply, headed by its prompt's name, version and origin, with the
 candidate's instruction one click away (§6:4-§6:5). A run that sent a call several times
 under one candidate (ADR-0337 §5:4) writes one result for each sample, and the samples
-are shown together, under that candidate's one heading, each naming its sample.
+are shown together, under that candidate's one heading, each naming its sample. Where the
+run asked the follow-up question (ADR-0337 §7), its answer as text, or its failure, is
+shown beside the response it follows, with its version, and its question a click away.
 """
 
 from __future__ import annotations
@@ -2292,6 +2294,27 @@ def _replay_result(line: Entry, body: Mapping[str, object], source: str) -> dict
         "original_model": _text(body.get("original_model")),
         "instruction": None if instruction is None else _sized(instruction),
         "did": _did(source, body),
+        "follow_up": _follow_up(body.get("follow_up")),
+    }
+
+
+def _follow_up(value: object) -> dict[str, object] | None:
+    """The follow-up a run asked after this result's response, as text (ADR-0337 §6:5).
+
+    Its answer as text, or its failure, with its version, origin, file and question;
+    ``None`` where the result carries none.
+    """
+    held = _mapping(value)
+    if not held:
+        return None
+    answer, question = held.get("answer"), _text(held.get("question"))
+    return {
+        "version": _text(held.get("version")),
+        "origin": _text(held.get("origin")),
+        "file": _text(held.get("file")),
+        "question": None if question is None else _sized(question),
+        "answer": _sized(answer) if isinstance(answer, str) else None,
+        "failure": _failure_text(held.get("failure")) if "failure" in held else None,
     }
 
 
@@ -2932,6 +2955,7 @@ button { font: inherit; }
 .replay-head .m { color: var(--muted); font-size: 12px; }
 .replay-head h5 { margin: 0; font-size: 12px; font-family: var(--mono); color: var(--muted); }
 .replay-sample { border-top: 1px dashed var(--line); padding-top: 6px; margin-top: 8px; }
+.follow-up { border-left: 2px dashed var(--accent); padding: 2px 0 2px 8px; margin: 8px 0 0; }
 .call-sec > .sec-head {
   display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
   border-bottom: 1px solid var(--line); padding-bottom: 4px; margin-bottom: 6px;
@@ -4266,6 +4290,7 @@ SCRIPT: Final = r"""
       }
       if (r.sample === null || r.sample === undefined) {
         if (r.did) didInto(one, r.did);
+        if (r.follow_up) followUpInto(one, r.follow_up);
       } else {
         for (const s of samples) {
           const sampled = el("div", "replay-sample");
@@ -4274,11 +4299,35 @@ SCRIPT: Final = r"""
           named.appendChild(el("span", "m", clock(s.at, true)));
           sampled.appendChild(named);
           if (s.did) didInto(sampled, s.did);
+          if (s.follow_up) followUpInto(sampled, s.follow_up);
           one.appendChild(sampled);
         }
       }
       box.appendChild(one);
     }
+  }
+
+  // The follow-up asked after a replayed response: its answer as text, or its failure,
+  // with its version, and its question one click away (ADR-0337 \u00a76:5).
+  function followUpInto(parent, f) {
+    const box = el("div", "follow-up");
+    const head = el("div", "replay-head");
+    head.appendChild(el("h5", null, "follow-up \u00b7 " + (f.version || "no version")
+      + " \u00b7 " + (f.origin || "origin not named")));
+    box.appendChild(head);
+    if (f.failure) box.appendChild(el("p", "fail", "failed: " + f.failure));
+    if (f.answer) {
+      const said = part(box, { name: "Answer", what: "the follow-up\u2019s answer",
+        size: size(f.answer.chars, f.answer.tokens), copy: f.answer.text });
+      prose(said, f.answer.text || "(no text returned)");
+    }
+    if (f.question) {
+      const asked = part(box, { name: "Question", collapsed: true,
+        what: "the follow-up\u2019s question",
+        size: size(f.question.chars, f.question.tokens), copy: f.question.text });
+      prose(asked, f.question.text);
+    }
+    parent.appendChild(box);
   }
 
   function diffText(d) { return d.lines.join("\n"); }

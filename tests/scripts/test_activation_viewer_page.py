@@ -21,6 +21,9 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from playwright.async_api import expect
+from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _activation_record import (
@@ -49,6 +52,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
     from playwright.async_api import Browser, Locator, Page, Route
+    from pydantic_ai.messages import ModelMessage
 
 pytestmark = [
     pytest.mark.integration,
@@ -598,12 +602,16 @@ async def test_a_replayed_activation_is_marked_and_its_call_shows_the_result(
 
 @pytest.fixture
 def sampled(tmp_path: Path) -> Iterator[Any]:
-    """The viewer over a copy whose planning round a replay sent twice (ADR-0337 §5:4)."""
+    """The viewer over a copy whose planning round a replay sent twice, each followed up."""
     copy = make_copy(tmp_path)
     status = asyncio.run(
         replay_tool.replay(
             replay_tool.ReplayOptions(
-                copy=copy, model="fake:model", sources=frozenset({"planning"}), samples=2
+                copy=copy,
+                model="fake:model",
+                sources=frozenset({"planning"}),
+                samples=2,
+                follow_up="",
             ),
             report=lambda _: None,
             caller=Model().caller(),
@@ -628,8 +636,62 @@ async def test_a_calls_samples_are_shown_together_under_one_heading(
         await expect(one.locator("h4")).to_have_text("planning · 0123456789ab · recorded")
         samples = one.locator(".replay-sample")
         await expect(samples).to_have_count(2)
-        await expect(samples.locator("h5")).to_have_text(["sample 1 of 2", "sample 2 of 2"])
+        await expect(samples.locator(":scope > .replay-head h5")).to_have_text(
+            ["sample 1 of 2", "sample 2 of 2"]
+        )
         await expect(samples.nth(1).locator(".part-head .name", has_text="Text")).to_be_visible()
+        # Each sample's follow-up beside it: the answer as text, the question a click away.
+        asked = samples.locator(".follow-up")
+        await expect(asked).to_have_count(2)
+        first = asked.first
+        await expect(first.locator("h5")).to_contain_text("follow-up")
+        await expect(first.locator(".part-text").first).to_have_text(Model().reply)
+        question = first.locator("details.part")
+        await expect(question.locator(".part-text")).to_be_hidden()
+        await question.locator("summary").click()
+        await expect(question.locator(".part-text")).to_be_visible()
+        wide = await readable.evaluate("node => node.scrollWidth - node.clientWidth")
+        assert wide <= 0
+
+
+@pytest.fixture
+def cut(tmp_path: Path) -> Iterator[Any]:
+    """The viewer over a copy whose planning round was replayed and its follow-up failed."""
+    copy = make_copy(tmp_path)
+
+    def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del info
+        if any(isinstance(one, ModelResponse) for one in messages):
+            raise ModelHTTPError(status_code=429, model_name="named")
+        return ModelResponse(parts=[TextPart("a replayed reply")])
+
+    status = asyncio.run(
+        replay_tool.replay(
+            replay_tool.ReplayOptions(
+                copy=copy, model="fake:model", sources=frozenset({"planning"}), follow_up=""
+            ),
+            report=lambda _: None,
+            caller=replay_tool.ModelCaller(FunctionModel(answer), timeout=10),
+            now=replay_now,
+        )
+    )
+    assert status == 0
+    with serving(copy / "diagnostics") as bound:
+        yield bound
+
+
+@pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "phone"])
+async def test_a_follow_up_that_failed_is_shown_as_its_failure(
+    cut: Any, gateway_browser: Browser, width: int
+) -> None:
+    async with _page(gateway_browser, width=width) as page:
+        await _open(page, cut.port, ACT_A)
+        await page.locator(".round").first.click()
+        readable = page.locator("#drawer-read")
+        asked = readable.locator("#call-replays .replay .follow-up")
+        await expect(asked).to_have_count(1, timeout=_SHOWN)
+        await expect(asked.locator(".fail")).to_contain_text("failed: ModelRateLimitError")
+        await expect(asked.locator(".part-head .name", has_text="Answer")).to_have_count(0)
         wide = await readable.evaluate("node => node.scrollWidth - node.clientWidth")
         assert wide <= 0
 
