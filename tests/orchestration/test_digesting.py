@@ -385,10 +385,12 @@ async def test_a_call_that_raises_fails_the_digest() -> None:
         "not json",
         "[]",
         '{"evidence": "none"}',
-        '{"evidence": [], "note": "extra"}',
         '{"evidence": [{"text": "", "source": "D1"}]}',
-        '{"evidence": [{"text": "x", "source": "D1", "why": "extra"}]}',
         '{"evidence": [{"text": "x"}]}',
+        # A stray key does not save a reply whose named fields fail (#3246).
+        '{"evidence_items": [], "note": "extra"}',
+        '{"evidence": [{"text": "x", "why": "extra"}]}',
+        '{"evidence": [{"text": 7, "source": "D1", "why": "extra"}]}',
     ],
 )
 async def test_a_reply_that_does_not_parse_fails_the_digest(reply: str) -> None:
@@ -400,6 +402,46 @@ async def test_a_reply_that_does_not_parse_fails_the_digest(reply: str) -> None:
 
     assert (digested.digest.outcome, digested.digest.evidence) == (DigestOutcome.FAILED, ())
     assert [one["reason"] for one in logs if one["event"] == "digest_failed"] == ["unparsable"]
+
+
+@pytest.mark.parametrize(
+    ("reply", "stray"),
+    [
+        ('{"evidence": [{"text": "closes on the 15th", "source": "D1"}], "aside_zz": "x"}', 1),
+        ('{"evidence": [{"text": "closes on the 15th", "source": "D1", "why_zz": {"a": 1}}]}', 1),
+        (
+            '{"evidence": [{"text": "closes on the 15th", "source": "D1", "command": null}],'
+            ' "aside_zz": "x", "confidence_zz": 0.9}',
+            3,
+        ),
+    ],
+)
+async def test_a_stray_key_is_dropped_and_counted_and_the_reply_read(
+    reply: str, stray: int
+) -> None:
+    """#3246: a key the reply's shape does not name is dropped, counted, and never logged."""
+    stage, _ = _stage(FakeModelProvider(reply))
+
+    with capture_logs() as logs:
+        digested = await _digest(stage)
+
+    assert digested.digest.outcome is DigestOutcome.ANSWERED
+    assert digested.digest.evidence == (EvidenceItem(text="closes on the 15th", source="R1"),)
+    counted = [one for one in logs if one["event"] == "digest_stray_keys"]
+    assert counted == [
+        {"event": "digest_stray_keys", "stage": "digesting", "stray": stray, "log_level": "info"}
+    ]
+    for name in ("aside_zz", "why_zz", "command", "confidence_zz"):
+        assert name not in repr(logs)
+
+
+async def test_a_reply_with_no_stray_key_logs_no_count() -> None:
+    stage, _ = _stage(FakeModelProvider(_reply(("closes on the 15th", "D1"))))
+
+    with capture_logs() as logs:
+        await _digest(stage)
+
+    assert [one for one in logs if one["event"] == "digest_stray_keys"] == []
 
 
 async def test_a_deadline_already_passed_fails_the_digest_without_a_call() -> None:

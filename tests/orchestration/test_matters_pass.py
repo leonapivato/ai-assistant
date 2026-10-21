@@ -691,7 +691,14 @@ async def test_a_flag_another_writer_decided_meanwhile_gets_nothing_more_written
         json.dumps({"decision": "split", "story": "S1", "episodes": ["E9"]}),
         json.dumps({"decision": "split", "story": "S1", "episodes": []}),
         json.dumps({"decision": "group", "stories": ["S1"], "under": None}),
-        json.dumps({"decision": "leave", "because": "no"}),
+        # A stray key does not save a reply whose named fields fail (#3246).
+        json.dumps({"decision": "split", "story": "S1", "because": "no"}),
+        json.dumps({"decision": "split", "story": "S1", "episodes": "E2", "because": "no"}),
+        json.dumps({"decision": "move", "source": "S1", "to": "S2", "because": "no"}),
+        json.dumps({"verdict": "leave", "because": "no"}),
+        # Another decision's field is not dropped: the object mixes two decisions.
+        json.dumps({"decision": "split", "story": "S1", "episodes": ["E2"], "to": "S2"}),
+        json.dumps({"decision": "leave", "story": "S1", "because": "no"}),
     ],
 )
 async def test_a_reply_that_fails_to_parse_or_a_check_writes_nothing(reply: str) -> None:
@@ -787,6 +794,11 @@ async def test_a_decision_after_prose_is_taken(reply: str) -> None:
             "check",
             "the reply names an episode this run did not show held by that story",
         ),
+        (
+            json.dumps({"decision": "split", "story": "S1", "episodes": ["E2"], "to": "S2"}),
+            "parse",
+            "the reply holds no decision",
+        ),
     ],
     ids=[
         "no-decision",
@@ -801,6 +813,7 @@ async def test_a_decision_after_prose_is_taken(reply: str) -> None:
         "bracket-in-prose",
         "merge-itself",
         "unshown",
+        "another-decisions-field",
     ],
 )
 async def test_a_refused_reply_writes_nothing_and_logs_why_without_its_text(
@@ -828,6 +841,74 @@ async def test_a_refused_reply_writes_nothing_and_logs_why_without_its_text(
     # Code-owned text only: nothing of the reply, the summary or an episode.
     for text in ("camping", "dentist", "reconsider", "Riverside"):
         assert text not in str(logs)
+
+
+_STRAY_SPLIT: Final = json.dumps(
+    {"decision": "split", "story": "S1", "episodes": ["E2"], "why_zz": "two", "command": None}
+)
+
+
+@pytest.mark.parametrize(
+    ("reply", "stray"),
+    [
+        (_STRAY_SPLIT, 2),
+        (f"{_REASONING}\n\n{_STRAY_SPLIT}", 2),
+        (f"```json\n{_STRAY_SPLIT}\n```", 2),
+        # Two objects are one decision whatever keys each dropped; the first's are counted.
+        (f"{_REASONING} So: {_STRAY_SPLIT}\n\n{_SPLIT}", 2),
+        (f"{_REASONING} So: {_SPLIT}\n\n{_STRAY_SPLIT}", 0),
+    ],
+    ids=["whole", "after-prose", "fenced", "repeated-stray-first", "repeated-stray-second"],
+)
+async def test_a_stray_key_is_dropped_and_counted_and_the_decision_taken(
+    reply: str, stray: int
+) -> None:
+    """#3246: a key a decision's shape does not name is dropped, counted, and never logged."""
+    stories, memory, trip = await _split_flag()
+
+    with capture_logs() as logs:
+        report = await _pass(FakeModelProvider(reply), stories, memory).run()
+
+    assert (report.decided, report.refused) == (1, 0)
+    assert await _members(stories, trip) == ["a-1"]
+    counted = [entry for entry in logs if entry["event"] == "matters_pass_stray_keys"]
+    expected = {
+        "event": "matters_pass_stray_keys",
+        "log_level": "info",
+        "stage": "matters_pass",
+        "flag": "two_matters",
+        "stray": stray,
+    }
+    assert counted == ([expected] if stray else [])
+    for name in ("why_zz", "command"):
+        assert name not in str(logs)
+
+
+async def test_a_leave_with_a_stray_key_is_recorded() -> None:
+    stories, memory, trip = await _split_flag()
+    reply = json.dumps({"decision": "leave", "because": "they are one matter"})
+
+    report = await _pass(FakeModelProvider(reply), stories, memory).run()
+
+    assert (report.decided, report.refused) == (1, 0)
+    assert await _members(stories, trip) == ["a-1", "a-2"]
+
+
+async def test_a_stray_key_is_counted_where_a_check_then_refuses_the_decision() -> None:
+    stories, memory, trip = await _split_flag()
+    before = await _log(stories, trip)
+    reply = json.dumps({"decision": "merge", "story": "S1", "into": "S1", "why_zz": "same"})
+
+    with capture_logs() as logs:
+        report = await _pass(FakeModelProvider(reply), stories, memory).run()
+
+    assert (report.refused, report.decided) == (1, 0)
+    assert await _log(stories, trip) == before
+    assert [entry["event"] for entry in logs if entry["event"].startswith("matters_pass_")] == [
+        "matters_pass_stray_keys",
+        "matters_pass_refused",
+    ]
+    assert "why_zz" not in str(logs)
 
 
 async def test_a_flag_whose_reply_failed_goes_behind_flags_that_have_not() -> None:

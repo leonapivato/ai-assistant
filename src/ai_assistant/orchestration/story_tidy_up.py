@@ -88,7 +88,8 @@ it. Nobody waits for a run, and its finishing starts nothing (§5:11); a caller 
 starts one in the background does not await it.
 
 **It logs code-owned counts only**: no story id, no note, no line and no episode
-content (ADR-0275 §8).
+content (ADR-0275 §8). A reply carrying keys its shape does not name is read without them,
+and the run logs how many it dropped, never which (#3246).
 """
 
 from __future__ import annotations
@@ -124,6 +125,7 @@ from ai_assistant.core.types import (
     StorySummaryLine,
 )
 from ai_assistant.orchestration.episode_reads import is_open_episode, without_open_episodes
+from ai_assistant.orchestration.reply_keys import stray_keys
 from ai_assistant.orchestration.stories import episode_address
 from ai_assistant.orchestration.story_flags import (
     StoryRecords,
@@ -267,15 +269,21 @@ _THIS_STORY: Final = "this story"
 
 
 class _ProposedFlag(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="ignore")
     kind: StoryFlagKind
     story: str | None = None
 
 
 class _Proposed(BaseModel):
-    """The completion's one JSON object, exactly; any other key refuses it (§5:2)."""
+    """The completion's one JSON object: its lines and its flags, and nothing else (§5:2).
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+    Nothing else is taken from it: a key this shape, or the flag shape in it, does not
+    name is dropped and counted (#3246), as the observer's reply drops one. Every field
+    it names is validated as before, so a reply missing its lines, or carrying a value
+    of the wrong kind, still does not parse and is refused whole (§5:6).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
     lines: tuple[str, ...]
     flags: tuple[_ProposedFlag, ...] = ()
 
@@ -293,9 +301,14 @@ def _parsed(content: str) -> _Proposed | None:
         if newline != -1 and body[:newline].strip() in {"", "json", "JSON"}:
             body = body[newline + 1 :]
     try:
-        return _Proposed.model_validate_json(body)
+        proposed = _Proposed.model_validate_json(body)
     except ValidationError, ValueError, RecursionError:
         return None
+    stray = stray_keys(body, proposed)
+    if stray:
+        # #3246: a key the reply's shape does not name, dropped and counted, never named.
+        _log.info("story_tidy_up_stray_keys", stage="tidy_up", stray=stray)
+    return proposed
 
 
 # --- what one run read ---------------------------------------------------------------
