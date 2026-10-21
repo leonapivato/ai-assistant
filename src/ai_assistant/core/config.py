@@ -2975,15 +2975,15 @@ class Settings(BaseSettings):
     # The consolidation stage retired, and this route stays for the background work
     # that rides it: the story tidy-up and the matters pass (ADR-0328 §14:4).
     #
-    # Which model consolidation reads through (ADR-0285 §5). A **first-class named
-    # setting** rather than an accident of ``default_model``, because a
-    # consolidation prompt carries a whole chunk of stored records — among the most
-    # sensitive data the system holds — and that choice should be explicit and
-    # separable from the route the user's answers come from. Renamed from
-    # ``observer_model`` with no alias (ADR-0285 §5): the observer whose route it
-    # was is retired, and an alias is the in-between state that decision removes.
+    # Which model that work reads through (ADR-0285 §5). A **first-class named
+    # setting** rather than an accident of ``default_model``, because its prompts
+    # carry stored records — among the most sensitive data the system holds — and
+    # that choice should be explicit and separable from the route the user's
+    # answers come from. Renamed from ``observer_model`` with no alias (ADR-0285
+    # §5): the observer whose route it was is retired, and an alias is the
+    # in-between state that decision removes.
     #
-    # **Unset — the default — means consolidation reads through the route already
+    # **Unset — the default — means that work reads through the route already
     # configured for conversation** (``default_model``). That *widens nothing*:
     # ADR-0004 §2's property is that user data reaches only providers the user
     # explicitly configured, and a default naming no new provider cannot breach it,
@@ -3327,12 +3327,9 @@ class Settings(BaseSettings):
     # The one setting the trace store takes, parsed from an ISO-8601 duration or
     # `HH:MM:SS` string (`ASSISTANT_TRACE_RETENTION=P365D`). A trace is deleted
     # only for being older than this; **there is no count cap and no size cap**,
-    # and that absence is the decision. A cap evicts the *oldest* rows, and in
-    # #829's design the oldest rows are the unarmed baseline — the half of the
-    # natural experiment that cannot be re-created, because consolidation writes
-    # durably and "unarming later does not restore one". A horizon deletes rows
-    # nobody is measuring; a cap deletes the rows the measurement is *about*,
-    # silently, at exactly the moment the store has accumulated enough to be
+    # and that absence is the decision. A horizon deletes rows nobody is
+    # measuring; a cap evicts the *oldest* rows whether or not a measurement spans
+    # them, silently, at exactly the moment the store has accumulated enough to be
     # interesting. The unbounded-growth worry a cap answers is answered by the
     # arithmetic instead: a trace is a row of numbers and ids, a busy single-user
     # day is on the order of a few hundred events, and a year of them is tens of
