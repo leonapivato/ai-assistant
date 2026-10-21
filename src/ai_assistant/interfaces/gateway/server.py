@@ -166,6 +166,7 @@ from ai_assistant.core.errors import (
     DeviceRefusedError,
     DisplacedProvisioningError,
     IncompleteProvisioningError,
+    PersonModelOffError,
     ProvisioningOutcomeUnknownError,
     ResidualCredentialError,
     UnknownConnectionError,
@@ -206,6 +207,8 @@ from ai_assistant.core.types import (
     NotificationPreferences,
     NotificationReach,
     PendingCandidate,
+    PersonModelList,
+    ProfileField,
     QuietWindow,
     SourceGrant,
     SupportView,
@@ -215,7 +218,7 @@ from ai_assistant.core.types import (
     secret_value,
 )
 from ai_assistant.interfaces.devices import this_device
-from ai_assistant.interfaces.gateway import streams
+from ai_assistant.interfaces.gateway import person_views, streams
 from ai_assistant.interfaces.gateway.change_stream import paced
 from ai_assistant.interfaces.gateway.delivery import DeliveryFanOut, DeliveryStream, write_stream
 from ai_assistant.interfaces.gateway.edge import (
@@ -430,6 +433,33 @@ _FORGET_BELIEF_PATH: Final = "/belief/forget"
 #: it has no band, standing or support, and ``forget`` names nothing by it.
 _PENDING_CANDIDATES_PATH: Final = "/candidates/pending"
 
+#: ADR-0338 §8:2's About you panel, and the pin and unpin the belief panel gains: one
+#: path per ``AssistantEngine`` member §8:1 adds, two reads and six writes. A read and a
+#: write never share a path, for the reason the notification surface's write has its
+#: own: the door classifies "from its method and path alone" (ADR-0168 §6).
+#:
+#: **ADR-0177 §1's closed enumeration is widened by these and ADR-0338's own
+#: ``- Status:`` line does not record it**, the shape of #2714 and of
+#: :data:`_PENDING_CANDIDATES_PATH`: §8:2 rules that "the web page gains an About you
+#: panel" and that "the beliefs panel gains pin and unpin on each current memory", and
+#: the page reaches the hub through this gateway alone, so the routes follow the
+#: governing decision and the reciprocal header record on ADR-0177 is ADR-0338's to
+#: make.
+#:
+#: **Who may see a person's model is not decided here** (§8:3). Each member sits in the
+#: hub's route table's command row, so a request from a device without the role of
+#: source of commands and queries is refused at the hub before dispatch (ADR-0298 §5:6),
+#: and this gateway relays that refusal as every other (:meth:`Gateway._device_refused`).
+#: A second rule here could only differ from that one.
+_PERSON_MODEL_PATH: Final = "/person"
+_PROFILE_CHANGES_PATH: Final = "/person/changes"
+_SET_PROFILE_FIELD_PATH: Final = "/person/field/set"
+_PIN_MEMORY_PATH: Final = "/person/pin"
+_UNPIN_MEMORY_PATH: Final = "/person/unpin"
+_REMOVE_STYLE_MARK_PATH: Final = "/person/style-mark/remove"
+_ACCEPT_SUGGESTION_PATH: Final = "/person/suggestion/accept"
+_DISMISS_SUGGESTION_PATH: Final = "/person/suggestion/dismiss"
+
 #: ADR-0177 §10's notification review surface. Five paths for five operations, and
 #: **none of them is** :data:`_DELIVERIES_PATH`: what these operate on is the
 #: notification *record* (ADR-0130), where a delivery is what the gateway's own poll
@@ -498,6 +528,14 @@ _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _BELIEF_PATH): "belief",
     ("POST", _FORGET_BELIEF_PATH): "forget",
     ("POST", _PENDING_CANDIDATES_PATH): "pending_candidates",
+    ("POST", _PERSON_MODEL_PATH): "person_model",
+    ("POST", _PROFILE_CHANGES_PATH): "profile_changes",
+    ("POST", _SET_PROFILE_FIELD_PATH): "set_profile_field",
+    ("POST", _PIN_MEMORY_PATH): "pin_memory",
+    ("POST", _UNPIN_MEMORY_PATH): "unpin_memory",
+    ("POST", _REMOVE_STYLE_MARK_PATH): "remove_style_mark",
+    ("POST", _ACCEPT_SUGGESTION_PATH): "accept_person_suggestion",
+    ("POST", _DISMISS_SUGGESTION_PATH): "dismiss_person_suggestion",
     ("POST", _NOTIFICATIONS_PATH): "notifications",
     ("POST", _DISMISS_NOTIFICATION_PATH): "dismiss_notification",
     ("POST", _FORGET_NOTIFICATION_PATH): "forget_notification",
@@ -1467,6 +1505,14 @@ class Gateway:
             _BELIEF_PATH: self._belief,
             _FORGET_BELIEF_PATH: self._forget_belief,
             _PENDING_CANDIDATES_PATH: self._pending_candidates,
+            _PERSON_MODEL_PATH: self._person_model,
+            _PROFILE_CHANGES_PATH: self._profile_changes,
+            _SET_PROFILE_FIELD_PATH: self._set_profile_field,
+            _PIN_MEMORY_PATH: self._pin_memory,
+            _UNPIN_MEMORY_PATH: self._unpin_memory,
+            _REMOVE_STYLE_MARK_PATH: self._remove_style_mark,
+            _ACCEPT_SUGGESTION_PATH: self._accept_person_suggestion,
+            _DISMISS_SUGGESTION_PATH: self._dismiss_person_suggestion,
             _NOTIFICATIONS_PATH: self._notifications,
             _DISMISS_NOTIFICATION_PATH: self._dismiss_notification,
             _FORGET_NOTIFICATION_PATH: self._forget_notification,
@@ -3722,6 +3768,189 @@ class Gateway:
         held = await self._relayed(self._engine.pending_candidates)
         return _rendered({"candidates": [_pending_candidate_view(one) for one in held]})
 
+    # --- ADR-0338 §8:1-§8:3: the person model, for the panels -------------
+    #
+    # Each handler is one engine call with the browser's own arguments, the person's id
+    # among them: the page names the person whose model it shows, as every caller of the
+    # promoted surface does, and the gateway supplies no person of its own (ADR-0177
+    # §1:5). Where the hub keeps no person model, every one of the eight answers `off`
+    # (:func:`_person_model_fault`).
+
+    async def _person_model(self, request: Request) -> Response:
+        """Read one page of a person's model (ADR-0338 §8:1-§8:2).
+
+        Args:
+            request: The admitted request, carrying ``person_id`` and an optional
+                ``lists``, ``limit`` and ``offset``. An absent ``lists`` fills every
+                list and an empty one fills none, as the contract says.
+
+        Returns:
+            The model, ``null`` where the hub holds no such person, or ``off``.
+        """
+        payload = _payload(request)
+        held = await self._relayed(
+            partial(
+                self._engine.person_model,
+                _required_string(payload, "person_id"),
+                lists=_members(payload, "lists", PersonModelList),
+                limit=_page(payload, "limit", DEFAULT_PAGE_SIZE),
+                offset=_page(payload, "offset", 0),
+            ),
+            fault=_person_model_fault,
+        )
+        return _rendered(
+            {"person_model": None if held is None else person_views.person_model_view(held)}
+        )
+
+    async def _profile_changes(self, request: Request) -> Response:
+        """Read one page of a person's change log, the most recent first (ADR-0338 §3:5).
+
+        Args:
+            request: The admitted request, carrying ``person_id`` and an optional
+                ``limit`` and ``offset``.
+
+        Returns:
+            The page, or ``off``.
+        """
+        payload = _payload(request)
+        page = await self._relayed(
+            partial(
+                self._engine.profile_changes,
+                _required_string(payload, "person_id"),
+                limit=_page(payload, "limit", DEFAULT_PAGE_SIZE),
+                offset=_page(payload, "offset", 0),
+            ),
+            fault=_person_model_fault,
+        )
+        return _rendered({"changes": [person_views.profile_change_view(one) for one in page]})
+
+    async def _set_profile_field(self, request: Request) -> Response:
+        """Set one of a person's five fields, or clear it (ADR-0338 §3, §8:2).
+
+        **A clear is an absent or ``null`` value**, and nothing else is: the contract
+        clears on ``None``, and a value of any other type is refused here rather than
+        read as a clear, so a page that sent a number cannot empty a field. Validation
+        of the value itself is the store's (§3:2), and its refusal crosses in the edit.
+
+        Args:
+            request: The admitted request, carrying ``person_id``, ``field`` and an
+                optional ``value``.
+
+        Returns:
+            What the write did, or ``off``.
+        """
+        payload = _payload(request)
+        edit = await self._relayed(
+            partial(
+                self._engine.set_profile_field,
+                _required_string(payload, "person_id"),
+                field=_member(payload, "field", ProfileField),
+                value=_optional_string(payload, "value"),
+            ),
+            fault=_person_model_fault,
+        )
+        return _rendered({"edit": person_views.edit_view(edit)})
+
+    async def _pin_memory(self, request: Request) -> Response:
+        """Pin a memory, which confirms its wording (ADR-0338 §4:2-§4:3, §6:3).
+
+        Args:
+            request: The admitted request, carrying ``person_id`` and ``memory_id``.
+
+        Returns:
+            What the pin did, a refusal before any write among them, or ``off``.
+        """
+        payload = _payload(request)
+        edit = await self._relayed(
+            partial(
+                self._engine.pin_memory,
+                _required_string(payload, "person_id"),
+                memory_id=_required_string(payload, "memory_id"),
+            ),
+            fault=_person_model_fault,
+        )
+        return _rendered({"edit": person_views.edit_view(edit)})
+
+    async def _unpin_memory(self, request: Request) -> Response:
+        """Unpin a memory, erasing nothing (ADR-0338 §4:7).
+
+        Args:
+            request: The admitted request, carrying ``person_id`` and ``memory_id``.
+
+        Returns:
+            What the unpin did, or ``off``.
+        """
+        payload = _payload(request)
+        edit = await self._relayed(
+            partial(
+                self._engine.unpin_memory,
+                _required_string(payload, "person_id"),
+                memory_id=_required_string(payload, "memory_id"),
+            ),
+            fault=_person_model_fault,
+        )
+        return _rendered({"edit": person_views.edit_view(edit)})
+
+    async def _remove_style_mark(self, request: Request) -> Response:
+        """Remove a style mark, so its memory is not marked again (ADR-0338 §5:3).
+
+        Args:
+            request: The admitted request, carrying ``person_id`` and ``mark_id``.
+
+        Returns:
+            What the removal did, or ``off``.
+        """
+        payload = _payload(request)
+        edit = await self._relayed(
+            partial(
+                self._engine.remove_style_mark,
+                _required_string(payload, "person_id"),
+                mark_id=_required_string(payload, "mark_id"),
+            ),
+            fault=_person_model_fault,
+        )
+        return _rendered({"edit": person_views.edit_view(edit)})
+
+    async def _accept_person_suggestion(self, request: Request) -> Response:
+        """Accept a pending suggestion (ADR-0338 §8:2, §8:8).
+
+        Args:
+            request: The admitted request, carrying ``person_id`` and ``suggestion_id``.
+
+        Returns:
+            What accepting it did, or ``off``.
+        """
+        payload = _payload(request)
+        edit = await self._relayed(
+            partial(
+                self._engine.accept_person_suggestion,
+                _required_string(payload, "person_id"),
+                suggestion_id=_required_string(payload, "suggestion_id"),
+            ),
+            fault=_person_model_fault,
+        )
+        return _rendered({"edit": person_views.edit_view(edit)})
+
+    async def _dismiss_person_suggestion(self, request: Request) -> Response:
+        """Dismiss a pending suggestion, so an equal one is not recorded again (§9:2).
+
+        Args:
+            request: The admitted request, carrying ``person_id`` and ``suggestion_id``.
+
+        Returns:
+            What dismissing it did, or ``off``.
+        """
+        payload = _payload(request)
+        edit = await self._relayed(
+            partial(
+                self._engine.dismiss_person_suggestion,
+                _required_string(payload, "person_id"),
+                suggestion_id=_required_string(payload, "suggestion_id"),
+            ),
+            fault=_person_model_fault,
+        )
+        return _rendered({"edit": person_views.edit_view(edit)})
+
     # --- ADR-0078 §8: the deferred-question surface -----------------------
 
     async def _notifications(self, request: Request) -> Response:
@@ -4580,6 +4809,30 @@ def _string(payload: Mapping[str, Any], name: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _optional_string(payload: Mapping[str, Any], name: str) -> str | None:
+    """One optional string member: absent or ``null`` is ``None``, anything else refused.
+
+    Not :func:`_string`, which reads a member of the wrong type as absent: here absent
+    *means* something — ``set_profile_field`` clears a field on ``None`` — so a value of
+    another type is refused rather than taken for a clear. Relayed verbatim, as
+    :func:`_required_string` relays.
+
+    Args:
+        payload: The request's JSON object.
+        name: The member to read.
+
+    Returns:
+        The value, or ``None`` where it is absent or ``null``.
+
+    Raises:
+        _Refused: If the member is present and is neither a string nor ``null``.
+    """
+    value = payload.get(name)
+    if value is None or isinstance(value, str):
+        return value
+    raise _malformed()
+
+
 def _integer(payload: Mapping[str, Any], name: str, fallback: int) -> int | None:
     """One integer member of a payload, its default where absent, ``None`` where wrong.
 
@@ -4670,6 +4923,22 @@ def _chat_fault(exc: Exception) -> Response:
     """
     if isinstance(exc, UnknownConversationError):
         return _fault(404, "Not Found", "no-such-conversation", close=False)
+    return _relay_fault(exc)
+
+
+def _person_model_fault(exc: Exception) -> Response:
+    """One person-model act on a hub that keeps no person model, answered as that state.
+
+    :class:`~ai_assistant.core.errors.PersonModelOffError` is "not a fault and not a
+    refused write" in its own words: the hub keeps no person model to read or write,
+    "so a client shows 'not switched on' rather than an empty profile". So it crosses as
+    an answer that says so, ``{"off": true}``, and never as a refusal the page would
+    render in its fault surface. It stays distinguishable from every answer the hub
+    gives a person model, each of which carries its own member and never ``off``.
+    Everything else is ADR-0168 §9's three conditions, unchanged.
+    """
+    if isinstance(exc, PersonModelOffError):
+        return _rendered({"off": True})
     return _relay_fault(exc)
 
 

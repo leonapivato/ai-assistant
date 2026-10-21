@@ -1192,6 +1192,16 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
         # ADR-0329 §18:2: "AssistantEngine gains a read of the pending candidates,
         # which the panel calls" places it here by the same route (#3201).
         "pending_candidates",
+        # ADR-0338 §8:2: the About you panel and the belief panel's pin and unpin, one
+        # path per member §8:1 adds, by the same route.
+        "person_model",
+        "profile_changes",
+        "set_profile_field",
+        "pin_memory",
+        "unpin_memory",
+        "remove_style_mark",
+        "accept_person_suggestion",
+        "dismiss_person_suggestion",
         "delivery-stream",
     }
 
