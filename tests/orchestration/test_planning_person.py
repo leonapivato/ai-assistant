@@ -15,6 +15,7 @@ person model is shown.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
@@ -57,6 +58,7 @@ FLAG_ECHO: Final = prompt_from(
 DIET: Final = memory("m:diet", "Eats no meat.", said_support(when=AT, added_at=AT))
 BRIEF: Final = memory("m:brief", "Likes short answers.", said_support(when=AT, added_at=AT))
 SISTER: Final = memory("m:sister", "Has a sister called Ada.", said_support(when=AT, added_at=AT))
+NEW: Final = memory("m:new", "Walks to work.", said_support(when=AT, added_at=AT))
 
 BLOCK: Final = PersonBlock(
     person_id=OWNER_PERSON_ID,
@@ -202,15 +204,34 @@ async def test_a_found_memory_the_block_shows_is_named_by_its_label_alone() -> N
 
 
 async def test_labels_recorded_in_an_earlier_round_are_kept() -> None:
-    stage, completer, _ = _stage()
-    first, _, recorder = _stage()
+    """§7:7, §7:10: a memory left after a drop keeps its label, and a new one takes a new one.
+
+    The first memory is dropped before the second round, as §7:10 drops a forgotten one,
+    so a round numbering afresh would show the survivor as ``M1``; and a memory shown for
+    the first time takes the next label, never one an earlier round assigned.
+    """
+    first, _, earlier = _stage()
     await first.plan(_inputs(person=BLOCK))
-    (_, labels) = recorder.recorded[0]
+    (_, labels) = earlier.recorded[0]
+    assert [(one.label, one.id) for one in labels] == [
+        ("M1", "m:diet"),
+        ("M2", "m:brief"),
+        ("M3", "m:sister"),
+    ]
+    stage, completer, recorder = _stage()
+    dropped = replace(BLOCK, kept=BLOCK.kept[1:])
 
-    await stage.plan(_inputs(person=BLOCK, labels=labels))
+    await stage.plan(_inputs(person=dropped, labels=labels, recalled=(NEW,)))
 
-    shown = _sent(completer)["person"]
-    assert [one["label"] for one in shown["kept_in_mind"]] == ["M1", "M2"]
+    sent = _sent(completer)
+    assert [(one["label"], one["fact"]) for one in sent["person"]["kept_in_mind"]] == [
+        ("M2", "Likes short answers.")
+    ]
+    assert sent["person"]["suggestions"][0]["pin"]["label"] == "M3"
+    [found] = sent["recalled"]
+    assert (found["label"], found["fact"]) == ("M4", NEW.content)
+    (_, minted) = recorder.recorded[0]
+    assert [(one.label, one.id) for one in minted] == [("M4", "m:new")]
 
 
 @pytest.mark.parametrize(
