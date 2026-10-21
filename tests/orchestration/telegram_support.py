@@ -31,6 +31,15 @@ AT: Final = datetime(2026, 10, 17, 9, 0, tzinfo=UTC)
 #: How long a case waits for the reader before it fails rather than hangs.
 SETTLE: Final = 5.0
 
+#: The line's start wait in a case that runs the engine's reader on the real clock
+#: (ADR-0332 §5:3): short, so a message is taken in at once.
+CASE_START_WAIT: Final = timedelta(milliseconds=5)
+
+
+def stop_command(update_id: int, *, minute: int = 0) -> TelegramUpdate:
+    """The owner's bare ``/stop``, marked by its ``bot_command`` entity (ADR-0332 §8:1)."""
+    return text(update_id, "/stop", minute=minute, command="/stop")
+
 
 def text(  # noqa: PLR0913 — one knob per field of the message a case varies
     update_id: int,
@@ -44,8 +53,13 @@ def text(  # noqa: PLR0913 — one knob per field of the message a case varies
     minute: int = 0,
     forward: TelegramForwardOrigin | None = None,
     reply_to: TelegramQuotedMessage | None = None,
+    command: str | None = None,
 ) -> TelegramUpdate:
-    """One update carrying a message, by default the owner's text in their chat."""
+    """One update carrying a message, by default the owner's text in their chat.
+
+    ``command`` is the part of the text a ``bot_command`` entity at its first character
+    covers, as the client reads it (ADR-0332 §7:9).
+    """
     return TelegramUpdate(
         update_id=update_id,
         message=TelegramMessage(
@@ -58,6 +72,7 @@ def text(  # noqa: PLR0913 — one knob per field of the message a case varies
             text=words,
             forward_origin=forward,
             reply_to=reply_to,
+            command=command,
         ),
     )
 

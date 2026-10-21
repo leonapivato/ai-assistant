@@ -5,10 +5,14 @@ engine's does, so each case reads what the reader brought in and what it told
 Telegram. What comes in is a text message or a forward from the configured account in
 its private chat with the bot (§5:1); anything else is ignored and recorded nowhere
 (§5:2), and a non-text message is answered by rule (§5:3). One activation runs at a
-time and nothing is asked of Telegram while it does (§5:5, §5:7); an update is
-confirmed only once dealt with (§5:6), and one taken in or answered once is never
-taken in or answered again (§5:9). After a restart the activation it cut off gets the
-one fixed message (§6:10). The window is the line's recent episodes (§10).
+time, taken in once the start wait has passed (ADR-0332 §5:3), and the reader keeps
+polling, paced, while it runs (ADR-0332 §8:7-§8:8, amending §5:7): a message joins it
+where the join takes it and is marked taken in by it (ADR-0332 §3:3, §3:18), and
+otherwise waits. A bare ``/stop`` with its entity stops what runs and is answered by
+rule (ADR-0332 §8). An update is confirmed only once dealt with (§5:6), and one taken
+in or answered once is never taken in or answered again (§5:9). After a restart the
+activation it cut off gets the one fixed message (§6:10). The window is the line's
+recent episodes (§10).
 """
 
 from __future__ import annotations
@@ -19,11 +23,21 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from story_support import episode
-from telegram_support import AT, CHAT, REFERENCE, SETTLE, YieldingTelegram, photo, text
+from telegram_support import (
+    AT,
+    CHAT,
+    REFERENCE,
+    SETTLE,
+    YieldingTelegram,
+    photo,
+    stop_command,
+    text,
+)
 
 from ai_assistant.core.types import (
     ChannelIdentity,
     EpisodicMemory,
+    InputOrigin,
     MessageAuthor,
     PlanningRound,
     ProcessingReason,
@@ -36,20 +50,26 @@ from ai_assistant.core.types import (
     TelegramForwardOrigin,
     TelegramIntake,
     TelegramIntakeKind,
+    TelegramMessage,
     TelegramQuotedMessage,
     TelegramUpdate,
 )
+from ai_assistant.orchestration.joining import THE_USER
 from ai_assistant.orchestration.telegram import (
     DEFAULT_TELEGRAM_START_WAIT,
     INTERRUPTED_LINE,
     NON_TEXT_LINE,
+    NOTHING_RUNNING_LINE,
     POLL_BACKOFF,
     RUNNING_POLL_PACE,
+    STOPPED_LINE,
+    TYPING_RENEWAL,
     UNAVAILABLE_BACKOFF,
     TelegramInput,
     TelegramLineSeams,
     TelegramReader,
     TelegramWriter,
+    is_stop_command,
     line_channel,
 )
 from ai_assistant.orchestration.understanding import AskedIn, LineMessage, WrittenBy
@@ -104,6 +124,7 @@ class _Line:
         # answers: no join is taken, and a stop stops what runs, unless a case says.
         self.joins: list[JoiningInput] = []
         self.joined: str | None = None
+        self.answer: Callable[[JoiningInput], str | None] = lambda joining: self.joined
         self.stops: list[str] = []
         self._ids = iter(f"act-{n}" for n in range(1, 100))
         self.reader = TelegramReader(
@@ -132,7 +153,7 @@ class _Line:
 
     def _join(self, joining: JoiningInput) -> str | None:
         self.joins.append(joining)
-        return self.joined
+        return self.answer(joining)
 
     async def _stop(self, activation_id: str) -> bool:
         self.stops.append(activation_id)
@@ -145,8 +166,9 @@ class _Line:
         self.marked.append(tuple(marked))
         self.held_then.append(dict(await self.intake.recorded(taken.update_ids)))
         self.entered.set()
-        if self.gate is not None:
-            await self.gate.wait()
+        gate = self.gate
+        if gate is not None:
+            await gate.wait()
         return bool(marked)
 
     def start(self) -> None:
@@ -603,3 +625,245 @@ async def test_a_reply_to_the_last_part_of_a_long_message_finds_its_question_who
     assert said.text.endswith("Would you prefer Tuesday?")
     assert window.asked == {26: AskedIn(round="round:1", parts=(1,))}
     assert window.input_messages[0].replies_to == 26
+
+
+# --- joining while one runs (ADR-0332 §3:3, §3:18) ----------------------------------------
+
+
+async def _running(line: _Line) -> str:
+    """The line with its first activation admitted and held."""
+    line.gate = asyncio.Event()
+    line.fake.hold(text(1, "book Riverside"))
+    line.start()
+    await asyncio.wait_for(line.entered.wait(), SETTLE)
+    return line.inputs[0].activation_id
+
+
+async def _held(line: _Line, update_id: int) -> TelegramIntake | None:
+    return (await line.intake.recorded([update_id])).get(update_id)
+
+
+async def _until_held(line: _Line, update_id: int) -> TelegramIntake:
+    deadline = asyncio.get_running_loop().time() + SETTLE
+    while (held := await _held(line, update_id)) is None:
+        if asyncio.get_running_loop().time() > deadline:
+            msg = f"update {update_id} was never recorded"
+            raise AssertionError(msg)
+        await asyncio.sleep(0.001)
+    return held
+
+
+async def test_a_message_sent_while_one_runs_joins_it_and_is_marked_taken_in_by_it() -> None:
+    """§3:3, §3:18: handed to the join, marked by the activation it joined, confirmed."""
+    line = _Line()
+    running = await _running(line)
+    line.joined = running
+
+    line.fake.hold(text(2, "actually Saturday", message_id=60, minute=1))
+    held = await _until_held(line, 2)
+    await line.until(lambda: line.fake.held == (), what="it was confirmed")
+
+    assert (held.kind, held.activation_id) == (TelegramIntakeKind.TAKEN_IN, running)
+    (joining,) = line.joins
+    assert joining.channel == line.seams.channel
+    assert joining.messages == (
+        RecordedInputMessage(
+            text="actually Saturday", sent_at=AT + timedelta(minutes=1), position=60
+        ),
+    )
+    assert (joining.standing.author, joining.standing.users_authority) == (THE_USER, True)
+    assert joining.standing.origin is InputOrigin.USER
+
+    assert line.gate is not None
+    line.gate.set()
+    await line.until(lambda: line.reader.working is None, what="the activation ended")
+    for _ in range(10):
+        await asyncio.sleep(0.001)
+    await line.stop()
+    assert len(line.inputs) == 1, "a joined message is never taken in again"
+
+
+async def test_a_forward_is_handed_to_the_join_apart_from_the_users_own_message() -> None:
+    """§3:3: a forward's author is claimed, so it is an input of its own standing."""
+    line = _Line()
+    running = await _running(line)
+    line.answer = lambda joining: running if joining.standing.author is not None else None
+    origin = TelegramForwardOrigin(kind=TelegramForwardKind.USER, name="Sam", account_id=77)
+
+    line.fake.hold(text(2, "also this"), text(3, "Sam's note", forward=origin), text(4, "and"))
+    await line.until(lambda: len(line.joins) == 2, what="both runs were handed")
+    await _until_held(line, 2)
+    for _ in range(20):
+        await asyncio.sleep(0.001)
+
+    own, forwarded = line.joins
+    assert [one.text for one in own.messages] == ["also this"]
+    assert [one.text for one in forwarded.messages] == ["Sam's note"]
+    assert forwarded.standing.author is None
+    assert forwarded.standing.origin is not InputOrigin.USER
+    assert len(line.joins) == 2, "nothing after the forward that waits is handed on"
+    assert await _held(line, 3) is None
+    assert await _held(line, 4) is None
+
+    assert line.gate is not None
+    line.gate.set()
+    await line.until(lambda: len(line.inputs) == 2, what="what waited was taken in")
+    await line.stop()
+    assert line.inputs[1].text == "Sam's note\n\nand"
+
+
+async def test_nothing_joins_past_a_message_that_waits_and_the_polls_are_paced() -> None:
+    """§3:3's fourth condition, §8:8: once one waits nothing after it joins."""
+    line = _Line()
+    await _running(line)
+    line.fake.hold(text(2, "actually Saturday"))
+    await line.until(lambda: len(line.joins) == 1, what="the join was asked")
+
+    line.joined = line.inputs[0].activation_id
+    line.fake.hold(text(3, "and at seven"))
+    rests = len(line.rests)
+    polls = len(line.polls())
+    await line.until(lambda: len(line.rests) > rests + 5, what="the reader went on polling")
+
+    assert len(line.joins) == 1, "nothing is handed to the join past what waits"
+    typing = TYPING_RENEWAL.total_seconds()  # the writer's, which rests on the same sleep
+    paced = [one for one in line.rests[rests:] if one != typing]
+    assert set(paced) == {RUNNING_POLL_PACE.total_seconds()}
+    assert len(line.polls()) - polls <= len(paced) + 1, "a rest before every poll"
+
+    assert line.gate is not None
+    line.gate.set()
+    await line.until(lambda: len(line.inputs) == 2, what="what waited was taken in")
+    await line.stop()
+    assert line.inputs[1].text == "actually Saturday\n\nand at seven"
+
+
+async def test_a_joined_update_whose_marking_failed_is_marked_later_never_taken_in_again() -> None:
+    """§3:18: the marking is owed until it lands; the update is handed to nothing else."""
+    line = _Line()
+    running = await _running(line)
+    armed: list[bool] = []
+
+    def answer(joining: JoiningInput) -> str:
+        del joining
+        if not armed:
+            # The join's marking is the record's very next call: it fails, once.
+            line.intake.fail_next()
+            armed.append(True)
+        return running
+
+    line.answer = answer
+    line.fake.hold(text(2, "actually Saturday"))
+
+    held = await _until_held(line, 2)
+    assert armed == [True]
+    assert (held.kind, held.activation_id) == (TelegramIntakeKind.TAKEN_IN, running), (
+        "marked by a later poll, once the first marking failed"
+    )
+    assert len(line.joins) == 1, "handed to the join once"
+
+    assert line.gate is not None
+    line.gate.set()
+    await line.until(lambda: line.fake.held == (), what="everything was confirmed")
+    await line.stop()
+    assert len(line.inputs) == 1
+
+
+# --- the line's /stop (ADR-0332 §8) -----------------------------------------------------
+
+
+async def test_a_bare_stop_stops_what_runs_and_is_answered_once_by_rule() -> None:
+    """§8:4-§8:6: recorded answered, the activation stopped, "Stopped." sent once."""
+    line = _Line()
+    running = await _running(line)
+    line.fake.hold(stop_command(2))
+
+    await line.until(lambda: STOPPED_LINE in line.sent(), what="the stop was answered")
+    held = await _until_held(line, 2)
+    for _ in range(20):
+        await asyncio.sleep(0.001)
+
+    assert line.stops == [running], "it stopped the activation running from the chat"
+    assert held.kind is TelegramIntakeKind.ANSWERED
+    assert line.sent() == [STOPPED_LINE], "answered once, however often a poll returns it"
+    assert line.joins == [], "a stop command is not input: it joins nothing"
+
+    assert line.gate is not None
+    line.gate.set()
+    await line.until(lambda: line.fake.held == (), what="everything was confirmed")
+    await line.stop()
+    assert len(line.inputs) == 1, "and starts nothing"
+
+
+async def test_a_stop_with_nothing_running_is_answered_nothing_was_running() -> None:
+    """§8:5: the fixed line where none ran, and nothing is stopped."""
+    line = _Line()
+    line.fake.hold(stop_command(1))
+    line.start()
+    await line.until(lambda: line.fake.held == (), what="it was confirmed")
+    await line.stop()
+
+    assert line.sent() == [NOTHING_RUNNING_LINE]
+    assert line.stops == []
+    assert line.inputs == []
+
+
+async def test_two_stops_alike_but_for_the_entity_are_a_stop_and_a_message() -> None:
+    """§1:4, §8:1-§8:2: only the one Telegram marked as a ``bot_command`` is a stop."""
+    line = _Line()
+    line.fake.hold(stop_command(1), text(2, "/stop"))
+    line.start()
+    await line.until(lambda: bool(line.inputs), what="the message was taken in")
+    await line.stop()
+
+    assert line.sent() == [NOTHING_RUNNING_LINE], "the marked one is answered as a stop"
+    (taken,) = line.inputs
+    assert taken.update_ids == (2,), "the unmarked one is a message like any other"
+    assert taken.text == "/stop"
+
+
+def test_only_a_bare_marked_unforwarded_stop_is_one() -> None:
+    """§8:2: a forward, ``/stop@`` a name, the text unmarked or only mentioning it."""
+    origin = TelegramForwardOrigin(kind=TelegramForwardKind.USER, name="Sam", account_id=77)
+
+    def message(update: TelegramUpdate) -> TelegramMessage:
+        assert update.message is not None
+        return update.message
+
+    assert is_stop_command(message(stop_command(1)))
+    for update in (
+        text(1, "/stop", command="/stop", forward=origin),
+        text(1, "/stop@AetherBot", command="/stop@AetherBot"),
+        text(1, "/stop"),
+        text(1, "/stop now", command="/stop"),
+        text(1, "please /stop"),
+        text(1, "/stopping", command="/stopping"),
+    ):
+        assert not is_stop_command(message(update))
+
+
+async def test_a_stop_behind_a_full_page_waits_and_is_acted_on_when_a_poll_returns_it() -> None:
+    """§1:4, §8:4: past one page of waiting updates, it waits with them."""
+    line = _Line()
+    first = await _running(line)
+    line.fake.hold(*(text(n, f"m{n}") for n in range(2, 102)), stop_command(102))
+    await line.until(lambda: len(line.joins) == 1, what="the page was handed to the join")
+    rests = len(line.rests)
+    await line.until(lambda: len(line.rests) > rests + 3, what="the reader went on polling")
+    assert line.stops == [], "a full page waits in front of it, so no poll returned it"
+    assert line.sent() == []
+
+    released = line.gate
+    assert released is not None
+    line.gate = asyncio.Event()
+    released.set()
+    await line.until(lambda: len(line.inputs) == 2, what="the page was taken in")
+    await line.until(lambda: bool(line.stops), what="a poll returned the stop")
+    await line.until(lambda: STOPPED_LINE in line.sent(), what="the stop was answered")
+
+    second = line.inputs[1].activation_id
+    assert second != first
+    assert line.stops == [second], "it stops what runs when a poll first returns it"
+    assert len(line.inputs[1].updates) == 100
+    line.gate.set()
+    await line.stop()
