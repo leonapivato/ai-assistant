@@ -62,6 +62,7 @@ from ai_assistant.core.types import (
     PersonModelAct,
     PersonModelEdit,
     PersonModelEditRefusal,
+    PersonModelList,
     PersonModelRefusal,
     PersonModelView,
     PersonModelWrite,
@@ -75,7 +76,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.person_block import PinRefusal
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Collection, Mapping, Sequence
     from datetime import datetime
 
     from ai_assistant.core.types import (
@@ -131,7 +132,12 @@ def wired(blocks: PersonBlocks | None) -> PersonBlocks:
 
 
 async def person_model_view(
-    blocks: PersonBlocks, person_id: str, *, limit: int, offset: int
+    blocks: PersonBlocks,
+    person_id: str,
+    *,
+    limit: int,
+    offset: int,
+    lists: Collection[PersonModelList] | None = None,
 ) -> PersonModelView | None:
     """Read one person's model as the About you panel shows it (ADR-0338 §8:1-§8:2).
 
@@ -153,6 +159,8 @@ async def person_model_view(
         person_id: The person, by id.
         limit: How many entries each list's page holds at most.
         offset: How many of each list's entries to skip.
+        lists: The lists the page fills, or ``None`` for every one; a list not named
+            is empty, and its total is still given.
 
     Returns:
         The view, or ``None`` where the store holds no such person.
@@ -198,16 +206,22 @@ async def person_model_view(
     ]
     shown = _suggestions(pending, live)
     window = slice(offset, offset + limit)
+
+    def page[E](which: PersonModelList, entries: Sequence[E]) -> tuple[E, ...]:
+        if lists is not None and which not in lists:
+            return ()
+        return tuple(entries[window])
+
     return PersonModelView(
         person=model.person,
         profile=model.profile,
-        kept=kept[window],
+        kept=page(PersonModelList.KEPT, kept),
         budget_chars=blocks.budget_chars,
         kept_chars=sum(len(one.content) for one in kept),
-        left_out=tuple(left_out[window]),
-        no_longer_current=tuple(stale[window]),
-        style_marks=tuple(marked[window]),
-        suggestions=tuple(shown[window]),
+        left_out=page(PersonModelList.LEFT_OUT, left_out),
+        no_longer_current=page(PersonModelList.NO_LONGER_CURRENT, stale),
+        style_marks=page(PersonModelList.STYLE_MARKS, marked),
+        suggestions=page(PersonModelList.SUGGESTIONS, shown),
         kept_total=len(kept),
         left_out_total=len(left_out),
         no_longer_current_total=len(stale),

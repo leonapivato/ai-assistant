@@ -416,6 +416,7 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "SuggestionView",
         "StalePinView",
         "StyleMarkView",
+        "PersonModelList",
         "PersonModelEdit",
         "PersonModelEditRefusal",
         "Person",

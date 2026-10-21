@@ -185,6 +185,7 @@ if TYPE_CHECKING:
         PersonModelAct,
         PersonModelEdit,
         PersonModelExport,
+        PersonModelList,
         PersonModelView,
         PersonModelWrite,
         Placement,
@@ -8966,6 +8967,7 @@ class AssistantEngine(Protocol):
         self,
         person_id: NonBlankEncodableText,
         *,
+        lists: Sequence[PersonModelList] | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
     ) -> PersonModelView | None:
@@ -8996,6 +8998,9 @@ class AssistantEngine(Protocol):
         Args:
             person_id: The person, by id: :data:`~ai_assistant.core.types.OWNER_PERSON_ID`
                 on today's hub.
+            lists: The lists the page fills, or ``None`` for every one; an empty
+                sequence fills none. A list not named is empty and its total still
+                given, so one entry of one list is the smallest read.
             limit: How many entries each list's page holds at most.
             offset: How many of each list's entries to skip.
 

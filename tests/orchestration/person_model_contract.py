@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     PersonActHow,
     PersonModelEdit,
     PersonModelEditRefusal,
+    PersonModelList,
     PersonModelRefusal,
     PersonModelWriteKind,
     ProfileField,
@@ -961,6 +962,54 @@ class PersonModelContract:
         assert [(one.mark.memory_id, one.content) for one in second.style_marks] == [
             ("m:newer", "n" * PERSON_BUDGET)
         ]
+
+    async def test_one_list_can_be_read_alone_so_a_long_wording_never_hides_a_control(
+        self, person_model_subject: PersonModelSubject
+    ) -> None:
+        """The smallest read is one entry of one list; the others' totals still come."""
+        subject = person_model_subject
+        long = "w" * (PERSON_LIMIT * 5 // 8)
+        await _held(subject, fact("m:long", long))
+        await subject.people.add_style_mark(OWNER_PERSON_ID, "m:long")
+        await subject.people.record_suggestion(
+            OWNER_PERSON_ID, field_suggestion(ProfileField.NAME, "Robin")
+        )
+
+        with pytest.raises(OversizedValueError):
+            await subject.engine.person_model(OWNER_PERSON_ID, limit=1)
+        marks = await subject.engine.person_model(
+            OWNER_PERSON_ID, lists=[PersonModelList.STYLE_MARKS], limit=1
+        )
+        suggestions = await subject.engine.person_model(
+            OWNER_PERSON_ID, lists=[PersonModelList.SUGGESTIONS], limit=1
+        )
+        totals = await subject.engine.person_model(OWNER_PERSON_ID, lists=[])
+
+        assert marks is not None
+        assert [(one.mark.memory_id, one.content) for one in marks.style_marks] == [
+            ("m:long", long)
+        ]
+        assert (marks.left_out, marks.suggestions) == ((), ())
+        assert (marks.left_out_total, marks.suggestions_total) == (1, 1)
+        assert suggestions is not None
+        assert [one.suggestion.proposed.value for one in suggestions.suggestions] == ["Robin"]
+        assert totals is not None
+        assert (totals.kept, totals.left_out, totals.style_marks, totals.suggestions) == (
+            (),
+            (),
+            (),
+            (),
+        )
+        assert (totals.style_marks_total, totals.suggestions_total) == (1, 1)
+
+    async def test_a_list_that_is_none_of_the_five_is_refused_locally(
+        self, person_model_subject: PersonModelSubject
+    ) -> None:
+        with pytest.raises(ValueError, match="lists"):
+            await person_model_subject.engine.person_model(
+                OWNER_PERSON_ID,
+                lists=["changes"],  # type: ignore[list-item]  # not one of the five
+            )
 
     async def test_accepting_an_id_not_pending_writes_nothing(
         self, person_model_subject: PersonModelSubject

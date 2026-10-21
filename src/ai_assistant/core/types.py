@@ -21036,6 +21036,53 @@ class StyleMarkView(BaseModel):
     content: EncodableText
 
 
+class PersonModelList(StrEnum):
+    """One of a person-model view's five lists, as a read selects it (ADR-0338 §8:1).
+
+    Closed, **added to and never renamed**.
+    """
+
+    KEPT = "kept"
+    LEFT_OUT = "left_out"
+    NO_LONGER_CURRENT = "no_longer_current"
+    STYLE_MARKS = "style_marks"
+    SUGGESTIONS = "suggestions"
+
+
+def person_model_lists(value: object) -> tuple[PersonModelList, ...] | None:
+    """A person-model read's ``lists`` argument, materialised before any I/O.
+
+    Refused locally by every implementation of ``AssistantEngine.person_model``, the
+    wire client included (ADR-0085 §9). ``None`` selects every list; an empty sequence
+    selects none, as ``beliefs``' filters do (ADR-0085 §3d).
+
+    Args:
+        value: The argument as the caller passed it.
+
+    Returns:
+        The lists, in the order given, or ``None``.
+
+    Raises:
+        ValueError: If it is not a sequence of the five lists' names.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str) or not isinstance(value, Sequence):
+        msg = "lists must be a sequence of a person model's lists, or None for every one"
+        raise ValueError(msg)
+    named: list[PersonModelList] = []
+    for one in value:
+        if isinstance(one, PersonModelList):
+            named.append(one)
+            continue
+        try:
+            named.append(PersonModelList(one))
+        except ValueError:
+            msg = "lists names only a person model's five lists (ADR-0338 §8:1)"
+            raise ValueError(msg) from None
+    return tuple(named)
+
+
 class PersonModelView(BaseModel):
     """One person's model, as ``AssistantEngine.person_model`` reads it (ADR-0338 §8:1).
 
@@ -21047,8 +21094,11 @@ class PersonModelView(BaseModel):
     ``style_marks`` and ``suggestions`` each hold the entries of their own order from
     the read's ``offset``, at most its ``limit``, and each ``*_total`` says how many
     the whole list holds, so every entry is reached by bounded reads however many there
-    are. Every entry carries its own wording and the id its control names, so a page is
-    rendered with no other. ``kept_chars`` is the whole slot's fill, whatever the page.
+    are. A read may select the lists it fills (:class:`PersonModelList`); a list it
+    does not select is empty, and its total is still given, so one entry of one list
+    is the smallest read. Every entry carries its own wording and the id its control
+    names, so a page is rendered with no other. ``kept_chars`` is the whole slot's
+    fill, whatever the page.
 
     Attributes:
         person: The person.
