@@ -9467,6 +9467,33 @@ class AssistantEngine(Protocol):
         """
         ...
 
+    async def composing(self, conversation_id: Identifier) -> None:
+        """Say that the person is typing into a conversation's composer (ADR-0332 §5).
+
+        An act in the medium that writes nothing into it (§5:9): the signal goes to the
+        chat's reader and is answered with nothing. It is live for
+        ``Settings.chat_composing_lapse`` after it arrives (§5:6), and only extends a
+        start wait already running for the conversation: it starts no read and no wait,
+        and does nothing where no wait is running (§5:7). It is not input. It starts no
+        activation, joins nothing and holds no act, and it is never written into the
+        transcript, any store or any episode (§5:8). So a signal for a conversation with
+        no wait, or for one the hub no longer holds, has no effect.
+
+        The requesting device must be the conversation's end for writing: ADR-0298
+        §5:1's Writing row, where §5:11 places the method.
+
+        Args:
+            conversation_id: The conversation being typed into.
+
+        Raises:
+            ValueError: If ``conversation_id`` is blank.
+            DeviceRefusedError: If the requesting device is not one of the conversation's
+                ends for writing.
+            ConversationStoreError: If the conversation's devices could not be read to
+                check that.
+        """
+        ...
+
     async def delete_message(self, conversation_id: Identifier, *, position: int) -> bool:
         """Delete one message of either author, leaving its marker (§5:8, §5:9, §5:12).
 
@@ -12441,11 +12468,19 @@ class TelegramIntakeRecord(Protocol):
         ...
 
     async def claim_reply(self, update_id: int) -> str | None:
-        """Answer the non-text message ``update_id`` carries, by claiming its fixed reply.
+        """Answer the non-text message or stop command ``update_id`` carries, by its reply.
 
         One step that is both §5:8's "which non-text messages it answered" and
         §13:2's claim: from it the record holds the update answered, so it is never
-        taken in, and a duplicate fetch sends no second fixed line (§5:9). It claims
+        taken in, and a duplicate fetch sends no second fixed line (§5:9).
+
+        **A stop command is answered here too** (ADR-0332 §8:6): the reader records it
+        as an update it answered, as it records a non-text message, before it acts on
+        it. The record holds no more of a stop than of any other answered update: its
+        id, and the fixed reply's call record. So the reader tells a stop it has already
+        acted on from a new one by :meth:`recorded`, read before this claim. An update
+        the record holds as answered is a repeat, which stops nothing, and the claim
+        then only retries a reply that came back retryable. It claims
         nothing, and answers ``None``, where the update was taken in, or where a
         fixed reply to it was already claimed and has not come back with a failure
         Telegram did not get or said it did not send — that is, where a reply is
@@ -12455,8 +12490,8 @@ class TelegramIntakeRecord(Protocol):
         a new one, which is the retry.
 
         Args:
-            update_id: The update the non-text message came in, an ``int`` in
-                ``[0, 2**63)``.
+            update_id: The update the non-text message or the stop command came in,
+                an ``int`` in ``[0, 2**63)``.
 
         Returns:
             The claimed record's attempt, or ``None`` where no reply may be sent.

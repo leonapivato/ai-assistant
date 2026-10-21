@@ -72,7 +72,12 @@ from typing import TYPE_CHECKING, ClassVar, Final, Protocol, get_type_hints
 import pytest
 from channel_receiver_contract import ChannelReceiverContract
 from chat_reader_lifecycle_contract import ChatReaderLifecycleContract
-from chat_surface_contract import ChatReaderContract, ChatSurfaceContract
+from chat_surface_contract import (
+    ChatReaderContract,
+    ChatReaderSubject,
+    ChatSurfaceContract,
+    ChatSurfaceSubject,
+)
 from episode_inspection_contract import EpisodeInspectionContract
 from pending_candidates_contract import PendingCandidatesContract
 from pydantic import SecretStr
@@ -102,7 +107,9 @@ from ai_assistant.core.types import (
     BeliefSummary,
     CapabilityEffect,
     CapabilityResult,
+    ChatDevice,
     CostBasis,
+    DeviceAccess,
     GrantScope,
     Idempotency,
     MemoryKind,
@@ -118,6 +125,7 @@ from ai_assistant.core.types import (
     RecordedInvocation,
     Reversibility,
     RiskLevel,
+    SendOutcome,
     SourceReadRecord,
     SpendPeriod,
     SpokenAudioFormat,
@@ -1906,6 +1914,76 @@ class AssistantEngineContract(
         # ``None`` kinds is memories alone (ADR-0328 §11:2), never every kind.
         assert await beliefs.engine.beliefs(kinds=None) != ()
         assert await beliefs.engine.beliefs(kinds=[MemoryKind.EPISODIC]) == ()
+
+    # --- the composing signal (ADR-0332 §5:6 to §5:9) -----------------------
+
+    async def test_a_composing_signal_answers_nothing_and_writes_nothing(
+        self, chat_surface: ChatSurfaceSubject
+    ) -> None:
+        """ADR-0332 §5:8, §5:9: an act in the medium that writes nothing into it.
+
+        The signal is answered with nothing, which its type says, and nothing a read
+        returns moves: not the transcript, not the conversation's digest, not the change
+        log, and no memory or episode. A repeated signal is the same nothing.
+        """
+        engine = chat_surface.engine
+        phone = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
+        await engine.set_my_devices([phone])
+        conversation = (await engine.start_conversation()).id
+        receipt = await engine.write_message(
+            conversation, message=UserMessage(device_id="phone", message_id="m-1", text="hi")
+        )
+        assert receipt.outcome is SendOutcome.RECORDED
+        before = (
+            await engine.transcript(conversation),
+            await engine.conversation(conversation),
+            await engine.chat_changes(after=0),
+            await engine.recent_conversations(),
+            await chat_surface.memory.export(),
+        )
+
+        await engine.composing(conversation)
+        await engine.composing(conversation)
+
+        assert (
+            await engine.transcript(conversation),
+            await engine.conversation(conversation),
+            await engine.chat_changes(after=0),
+            await engine.recent_conversations(),
+            await chat_surface.memory.export(),
+        ) == before
+
+    async def test_a_composing_signal_starts_no_activation(
+        self, chat_reader_surface: ChatReaderSubject
+    ) -> None:
+        """ADR-0332 §5:7, §5:8: it starts no read and no wait, and is not input.
+
+        With the chat's reader on and nothing waiting, a signal takes nothing in and
+        captures no episode.
+        """
+        engine, chat = chat_reader_surface.engine, chat_reader_surface.chat
+        phone = ChatDevice(device_id="phone", access=DeviceAccess.READ_WRITE)
+        await engine.set_my_devices([phone])
+        conversation = (await engine.start_conversation()).id
+
+        for _ in range(3):
+            await engine.composing(conversation)
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        assert await chat.untaken_messages(conversation) == ()
+        assert await chat_reader_surface.memory.export() == []
+        digest = await engine.conversation(conversation)
+        assert digest is not None
+        assert not digest.state.working
+        assert digest.state.last_ended is None
+
+    async def test_a_composing_signal_for_a_blank_conversation_is_refused(
+        self, engine: AssistantEngine
+    ) -> None:
+        """ADR-0332 §5:9: the signal names its conversation, and a blank id names none."""
+        with pytest.raises(self.refuses_a_malformed_argument_with):
+            await engine.composing("   ")
 
     # --- clause 5: the size limit, in both directions (§8c) ----------------
 

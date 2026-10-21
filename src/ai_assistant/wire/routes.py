@@ -94,7 +94,9 @@ class Route(StrEnum):
 #: query on the assistant's own records, which the command role scopes to the owner
 #: (§18:1). ADR-0325 §5:1's ``connect_keyless_account`` is placed there beside
 #: ``connect_account``, by the same class: a command on the hub's own connection
-#: records, which ADR-0151's connection surface already puts in this row.
+#: records, which ADR-0151's connection surface already puts in this row. ADR-0332
+#: §5:11 places ``composing`` in the Writing row beside ``write_message``: the requesting
+#: device must be the named conversation's end for writing, which the engine checks.
 ROWS: Final[Mapping[Route, frozenset[str]]] = {
     Route.COMMAND: frozenset(
         {
@@ -149,7 +151,9 @@ ROWS: Final[Mapping[Route, frozenset[str]]] = {
     Route.SETTING_DEVICES: frozenset({"set_my_devices", "set_conversation_devices"}),
     Route.FORGETTING: frozenset({"forget_conversation"}),
     Route.STARTING: frozenset({"start_conversation"}),
-    Route.WRITING: frozenset({"write_message", "delete_message", "delete_conversation"}),
+    Route.WRITING: frozenset(
+        {"write_message", "composing", "delete_message", "delete_conversation"}
+    ),
     Route.READING_ONE: frozenset({"transcript", "conversation"}),
     # ADR-0298 §5 names "the change stream" in this row; `follow_chat` is its name.
     Route.READING_MANY: frozenset({"recent_conversations", "chat_changes", "follow_chat"}),

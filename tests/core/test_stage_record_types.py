@@ -86,6 +86,8 @@ def test_the_stage_enumeration_carries_exactly_the_members_the_adr_lists() -> No
         "authorizing",
         "acting",
         "digesting",
+        # ADR-0332 §4:5's takeover, added without renaming one.
+        "takeover",
     ]
     # ADR-0309 §3:6: the old path's stages left, a recorded exception to *added to
     # and never renamed*.
@@ -121,6 +123,8 @@ def test_the_rule_enumeration_carries_the_table_the_guard_and_the_endings() -> N
         "understood_not_recalled",
         # ADR-0308 §4:5's row for recall's digest.
         "recall_undigested",
+        # ADR-0332 §4:5's row for the takeover.
+        "takeover_undecided",
     ]
 
 

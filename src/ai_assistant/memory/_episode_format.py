@@ -45,18 +45,25 @@ from ai_assistant.core.errors import IncompatibleStateError, MemoryStoreError
 #: an older store (ADR-0309 §6:4).
 EPISODE_RECORD_FORMAT: Final[int] = 12
 
-#: The memory store's own label, written into the same ``episode_record_format`` table
-#: of ``memory.db`` alone (ADR-0328 §16:8). ADR-0328 advances it from
-#: :data:`EPISODE_RECORD_FORMAT`, which the conversation store keeps, to 13 for the
-#: memory record: a file at 12 is **upgraded** in place when the store opens, never
-#: refused (ADR-0326 §4:7), and an older build, which serves exactly 12, refuses a file
-#: at 13 rather than misreading it (ADR-0326 §5:3).
-MEMORY_RECORD_FORMAT: Final[int] = 13
+#: The memory store's label for ADR-0328's memory record, written into the same
+#: ``episode_record_format`` table of ``memory.db`` alone (ADR-0328 §16:8). ADR-0328
+#: advances it from :data:`EPISODE_RECORD_FORMAT`, which the conversation store keeps,
+#: to 13: a file at 12 is **upgraded** in place when the store opens, never refused
+#: (ADR-0326 §4:7), and an older build, which serves exactly 12, refuses a file at 13
+#: rather than misreading it (ADR-0326 §5:3).
+MEMORIES_RECORD_FORMAT: Final[int] = 13
 
-#: The memory store's labels a build opens: its own, and each it upgrades from
-#: (ADR-0326 §4:5, §5:1).
+#: The memory store's own label, the one this build writes. ADR-0332 §7:8 advances it
+#: to 14 for the episode record's ``joined``, its understandings' ``continues`` and the
+#: takeover's stage and rule: a file at 13 is upgraded in place by the label alone, since
+#: a record written at 13 validates unchanged, and an older build, which serves 12 and
+#: 13, refuses a file at 14, whose records it would misread (ADR-0326 §5:3).
+MEMORY_RECORD_FORMAT: Final[int] = 14
+
+#: The memory store's labels a build opens: its own, and each it upgrades from, in
+#: order (ADR-0326 §4:5, §5:1).
 MEMORY_RECORD_FORMATS: Final[frozenset[int]] = frozenset(
-    {EPISODE_RECORD_FORMAT, MEMORY_RECORD_FORMAT}
+    {EPISODE_RECORD_FORMAT, MEMORIES_RECORD_FORMAT, MEMORY_RECORD_FORMAT}
 )
 
 
@@ -138,8 +145,8 @@ def inspect_existing(
 
     ``accepted`` is the opener's own set of markers, so a file the opener would then
     refuse is refused here, before a writable open could recover its journal: the
-    conversation store opens 12 alone, the memory store 12 and 13 (ADR-0328 §16:8,
-    ADR-0326 §5).
+    conversation store opens 12 alone, the memory store 12, 13 and 14 (ADR-0328 §16:8,
+    ADR-0332 §7:8, ADR-0326 §5).
 
     Args:
         path: The store's file, or ``":memory:"``.

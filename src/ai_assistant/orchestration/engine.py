@@ -4148,6 +4148,34 @@ class Engine:
             self._chat_reader.notice(conversation_id)
         return receipt
 
+    async def composing(self, conversation_id: Identifier) -> None:
+        """Take the hub chat page's signal that the person is typing (ADR-0332 §5:9).
+
+        It writes nothing into the medium, into any store or into any episode, and
+        answers nothing (§5:8). ADR-0298 §5's Writing row comes first (ADR-0332 §5:11).
+        The signal then goes nowhere yet: it only extends a start wait already running
+        for the conversation, and does nothing where none is (§5:7), and no reader runs
+        a start wait before ADR-0332 §1:3's third step builds it.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If the id is blank.
+            DeviceRefusedError: If the requesting device is not one of the
+                conversation's ends for writing.
+            ConversationStoreError: If the conversation's devices could not be read.
+        """
+        self._reject_if_closing()
+        named = identifier(conversation_id, name="conversation_id")
+        check_arguments("composing", max_bytes=self._max_payload_bytes, conversation_id=named)
+        device = current_requesting_device()
+        # Untraced: a signal is written into no store (§5:8), the trace store included,
+        # and a page sends one a second while the person types (§5:5).
+        await self._tracked(self._composed(device, named), "composing", checked=True, traced=False)
+
+    async def _composed(self, device: RequestingDevice, conversation_id: str) -> None:
+        """ADR-0298 §5 "Writing", and then nothing: the signal has no wait to extend."""
+        await self._device_checks.writing(device, conversation_id, "composing")
+
     async def delete_message(self, conversation_id: Identifier, *, position: int) -> bool:
         """Delete one message, leaving its marker (ADR-0293 §5:8, §5:12).
 

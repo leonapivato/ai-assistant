@@ -3582,6 +3582,12 @@ class ProposedActivationUnderstanding(BaseModel):
     question, a bare yes that could fit more than one included (ADR-0321 §3:5). Each is
     a reading and grants nothing; two naming one question are the stage's to drop
     (ADR-0322 §2:7), so this type does not refuse them.
+
+    ``continues`` (ADR-0332 §4:4, §7:3) is the label of one running activation shown
+    beside the window that this input continues: completes, corrects or adds to. Its
+    label is of the kind ``R`` that ADR-0332 adds to ADR-0276 §3:3's scheme. ``None``
+    where the input continues none. A label that resolves to no shown activation is a
+    grounding defect the stage drops (§7:4), so this type validates nothing about it.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3593,6 +3599,7 @@ class ProposedActivationUnderstanding(BaseModel):
     unresolved: tuple[UnresolvedMatter, ...] = ()
     story_labels: tuple[EncodableText, ...] = ()
     answers: tuple[ProposedAnswer, ...] = ()
+    continues: EncodableText | None = None
 
 
 #: ADR-0276 §2: an excerpt is a bounded prefix of the referent's rendered text.
@@ -3664,6 +3671,14 @@ class ActivationUnderstanding(BaseModel):
     naming no question twice (ADR-0322 §2:7); empty where the input approves no
     question. Like every other field here they grant no authority: authorizing checks
     each against the records (ADR-0321 §4:4, ADR-0322 §3:1).
+
+    ``continues`` (ADR-0332 §7:4) is the activation the proposal's ``continues`` label
+    resolved to: a running activation on another of the same person's places that this
+    input continues, which the takeover stage reads (§4:5, §4:6). ``None`` where the
+    proposal named none, or named a label that resolved to no shown activation, which
+    the stage drops as a grounding defect (ADR-0276 §6). Like ``answers``, it grants
+    nothing: the takeover stage checks it against the running activation (§4:6). A
+    record written before the field validates unchanged.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -3679,6 +3694,7 @@ class ActivationUnderstanding(BaseModel):
     grounding_dropped: int = Field(default=0, strict=True, ge=0, lt=2**31)
     story_links: tuple[StoryMember, ...] = ()
     answers: tuple[AnsweredQuestion, ...] = ()
+    continues: Identifier | None = None
 
     @model_validator(mode="after")
     def _no_story_link_twice(self) -> Self:
@@ -3745,6 +3761,10 @@ class ControllerStage(StrEnum):
     DIGESTING = "digesting"
     """Outside text read for planning as marked evidence, beside acting (ADR-0308 §4:5,
     ADR-0309 §3:3)."""
+    TAKEOVER = "takeover"
+    """Take over the running activation the latest understanding says this input
+    continues, where it has not committed, or record that it was not taken (ADR-0332
+    §4:5, §4:6). At most once per understanding version."""
 
 
 class ControllerRule(StrEnum):
@@ -3804,6 +3824,11 @@ class ControllerRule(StrEnum):
     """The second-run decision is made, either run kept a memory record whose source is
     outside, and there is no recall digest (ADR-0308 §4:5, ADR-0309 §3):
     ``digesting`` is due, for recall's digest."""
+    TAKEOVER_UNDECIDED = "takeover_undecided"
+    """The latest understanding names a running activation it continues, and there is
+    no takeover decision for that version (ADR-0332 §4:5): ``takeover`` is due. Its row
+    sits immediately after ``story_links_unrecorded``. It makes a stage due, so it is not
+    among the ending rules."""
 
 
 #: The rules that end a pass rather than make a stage due (ADR-0280 §4, §5).
@@ -4278,6 +4303,25 @@ class ActivationDigest(BaseModel):
         return self
 
 
+class JoinedInput(BaseModel):
+    """One input that joined a running activation, as the episode records it (ADR-0332 §3).
+
+    ``joined_at`` is when it joined; ``channel`` the place it came from; ``messages`` its
+    messages, each kept apart and dated, as a trigger's are (ADR-0323 §5:4); and
+    ``taken_over_from`` the activation a takeover stopped to bring it (§4:6), or ``None``
+    for a join on the activation's own place (§3:16, §3:17).
+
+    Raises:
+        ValueError: If it carries no message.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    joined_at: UtcInstant
+    channel: ChannelIdentity
+    messages: tuple[RecordedInputMessage, ...] = Field(min_length=1)
+    taken_over_from: Identifier | None = None
+
+
 class EpisodeProcessingRecord(BaseModel):
     """The facts about one activation's processing, open while it runs (ADR-0286 §1).
 
@@ -4301,6 +4345,14 @@ class EpisodeProcessingRecord(BaseModel):
     ``recall_second_run`` is recall's second decision, made on what understanding
     found (ADR-0308 §2, §7), held beside the first's ``recall``. It is ``None`` where
     no second run was decided.
+
+    ``joined`` are the inputs that joined the activation, each a :class:`JoinedInput`,
+    in the order they joined (ADR-0332 §3:16, §3:17). Appended to as the episode is
+    extended, and empty by default, so a record written before the field validates
+    unchanged and ``schema_version`` does not move. It is a field of the record, not a
+    stage's result (ADR-0286 §3:8, as ADR-0332 §10 adds to it). No takeover names the
+    activation itself, and none names one activation twice: a taken-over activation is
+    stopped, so it is taken over once.
 
     ``schema_version`` is 11 because the record loses the old path's links, resume
     trigger and compose-stage degradation, and its stages their verdicts (ADR-0318
@@ -4330,6 +4382,7 @@ class EpisodeProcessingRecord(BaseModel):
     labels: tuple[PlanningLabel, ...] = ()
     digests: tuple[ActivationDigest, ...] = ()
     recall_second_run: ActivationRecall | None = None
+    joined: tuple[JoinedInput, ...] = ()
 
     @property
     def is_open(self) -> bool:
@@ -4347,6 +4400,19 @@ class EpisodeProcessingRecord(BaseModel):
             previous = one.id
         if len({one.id for one in self.rounds}) != len(self.rounds):
             msg = "a processing record's rounds carry distinct ids"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _takeovers_name_others_once(self) -> Self:
+        # ADR-0332 §4:6: a takeover stops another activation, so it never names this one,
+        # and a stopped activation is taken over once.
+        taken = [one.taken_over_from for one in self.joined if one.taken_over_from is not None]
+        if self.activation_id in taken:
+            msg = "a joined input is never taken over from its own activation"
+            raise ValueError(msg)
+        if len(set(taken)) != len(taken):
+            msg = "a processing record takes each activation over at most once"
             raise ValueError(msg)
         return self
 
@@ -19961,6 +20027,11 @@ class TelegramMessage(BaseModel):
         forward_origin: Who it was forwarded from, or ``None`` where it is not a
             forward.
         reply_to: The message it replies to, or ``None``.
+        command: The part of :attr:`text` that a ``bot_command`` entity starting at
+            its first character covers, by the entity's offset and length (ADR-0332
+            §7:9); ``None`` where the message has no such entity. It is what Telegram
+            marked, read unjudged: whether the message is a stop is the reader's
+            (§8:1, §8:2).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -19976,6 +20047,22 @@ class TelegramMessage(BaseModel):
     text: EncodableText | None = None
     forward_origin: TelegramForwardOrigin | None = None
     reply_to: TelegramQuotedMessage | None = None
+    command: EncodableText | None = None
+
+    @model_validator(mode="after")
+    def _a_command_opens_the_text(self) -> Self:
+        """Refuse a command that is not a non-empty prefix of the message's text (§7:9).
+
+        Raises:
+            ValueError: If :attr:`command` is set and is empty, or is not where the
+                text begins.
+        """
+        if self.command is not None and (
+            not self.command or self.text is None or not self.text.startswith(self.command)
+        ):
+            msg = "a message's command is the part of its text at its first character"
+            raise ValueError(msg)
+        return self
 
 
 class TelegramUpdate(BaseModel):

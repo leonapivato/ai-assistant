@@ -53,10 +53,13 @@ from ai_assistant.core.types import (
     MAX_STORY_PAGE,
     ActionRequest,
     ActivationEffect,
+    ActivationUnderstanding,
     Attestation,
     ChannelContext,
     ChannelIdentity,
     ChatDevice,
+    ControllerRule,
+    ControllerStage,
     CostBasis,
     DataTier,
     DeviceAccess,
@@ -68,6 +71,7 @@ from ai_assistant.core.types import (
     Idempotency,
     InputOrigin,
     InputPart,
+    JoinedInput,
     Memory,
     MemoryOperation,
     MemoryOperationKind,
@@ -97,6 +101,7 @@ from ai_assistant.core.types import (
     ProvisioningState,
     ReadOutcome,
     RecordedChannelTrigger,
+    RecordedInputMessage,
     RecordedTextInput,
     RememberCallPart,
     Reversibility,
@@ -105,6 +110,8 @@ from ai_assistant.core.types import (
     SecretScope,
     SourceGrant,
     SourceReadRecord,
+    StageEntry,
+    StageOutcome,
     StoryActor,
     StoryMember,
     StoryMemberKind,
@@ -119,7 +126,9 @@ from ai_assistant.core.types import (
     ToolOutcome,
     TraceKind,
     TraceOutcome,
+    UnderstandingGround,
     UnderstandingOmission,
+    UnderstandingProducer,
     rests_on_recorded_external_content,
 )
 from ai_assistant.evaluation import SqliteTraceStore
@@ -421,6 +430,79 @@ def _activation_episode(moment: Moment) -> EpisodicMemory:
     )
 
 
+#: The line a taken-over activation ran on, so a joined input names another place.
+_LINE: Final = ChannelIdentity(channel_type="telegram", instance_id="upgrade-line")
+
+
+def _stage(stage: ControllerStage, due: ControllerRule, at: datetime) -> StageEntry:
+    return StageEntry(stage=stage, due=due, started_at=at, ended_at=at, outcome=StageOutcome.DONE)
+
+
+def _joined_episode(moment: Moment) -> EpisodicMemory:
+    """An ended activation that took a join on its place and a takeover (ADR-0332 §3, §4).
+
+    Its processing record carries ``joined``, an understanding version that
+    ``continues`` another activation, and the takeover's stage and rule, so a later
+    build's upgrade check reads back each shape ADR-0332 §7 adds to the record.
+    """
+    started, ended = moment.ago(minutes=9), moment.ago(minutes=8)
+    joined_at = moment.ago(minutes=8, seconds=50)
+
+    def understood(version: int, *, continues: str | None = None) -> ActivationUnderstanding:
+        return ActivationUnderstanding(
+            version=version,
+            recorded_at=joined_at,
+            producer=UnderstandingProducer.INTERPRETATION,
+            meaning="Book Riverside for Saturday, for four.",
+            meaning_ground=UnderstandingGround.STATED,
+            continues=continues,
+        )
+
+    return EpisodicMemory(
+        id="mem-episode-joined",
+        content="The user booked Riverside for Saturday, for four.",
+        provenance=_provenance(moment),
+        occurred_at=ended,
+        processing_record=EpisodeProcessingRecord(
+            activation_id="act-upgrade-2",
+            started_at=started,
+            ended_at=ended,
+            trigger=RecordedChannelTrigger(
+                target=_CHANNEL,
+                channel=_CHANNEL,
+                payload=RecordedTextInput(text="Book Riverside for Friday"),
+                context=ChannelContext(),
+                reply=None,
+                origin=InputOrigin.USER,
+            ),
+            status=ProcessingStatus.COMPLETED,
+            reason=ProcessingReason.RETURNED,
+            understanding=(understood(1), understood(2, continues="act-upgrade-line")),
+            stages=(
+                _stage(ControllerStage.UNDERSTANDING, ControllerRule.NOT_UNDERSTOOD, started),
+                _stage(ControllerStage.TAKEOVER, ControllerRule.TAKEOVER_UNDECIDED, joined_at),
+                _stage(ControllerStage.UNDERSTANDING, ControllerRule.NOT_UNDERSTOOD, joined_at),
+                _stage(ControllerStage.END, ControllerRule.NOTHING_DUE, ended),
+            ),
+            joined=(
+                JoinedInput(
+                    joined_at=joined_at,
+                    channel=_CHANNEL,
+                    messages=(RecordedInputMessage(text="Actually, Saturday", sent_at=joined_at),),
+                ),
+                JoinedInput(
+                    joined_at=joined_at,
+                    channel=_LINE,
+                    messages=(
+                        RecordedInputMessage(text="for four", sent_at=joined_at, position=12),
+                    ),
+                    taken_over_from="act-upgrade-line",
+                ),
+            ),
+        ),
+    )
+
+
 def _support(
     part: InputPart | RememberCallPart, origin: SupportOrigin, moment: Moment
 ) -> MemorySupport:
@@ -492,6 +574,7 @@ async def _write_memory(directory: Path, moment: Moment) -> None:
             )
         )
         await store.add(episode)
+        await store.add(_joined_episode(moment))
         chunk = await store.walk_records(_WALK, limit=2)
         if chunk.position is not None:
             await store.advance_walk(_WALK, position=chunk.position)

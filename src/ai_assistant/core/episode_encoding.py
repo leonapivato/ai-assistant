@@ -433,6 +433,9 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
       alone);
     - entries appended at the end of ``digests``, every earlier entry unchanged, and
       unbounded (ADR-0308 §7, in the addition alone);
+    - entries appended at the end of ``joined``, every earlier entry unchanged, and
+      unbounded: each input that joined, in the order it joined (ADR-0332 §3:16, as its
+      §10 adds to ADR-0286 §3:3);
     - in the one revision that freezes it, ``status``, ``reason``, ``ended_at`` and
       ``understanding_omitted``, with the end entry the record's own validators then
       require last.
@@ -482,6 +485,7 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
         after.rounds[: len(before.rounds)] != before.rounds
         or after.labels[: len(before.labels)] != before.labels
         or after.digests[: len(before.digests)] != before.digests
+        or after.joined[: len(before.joined)] != before.joined
     ):
         return False
     settled = before.model_copy(
@@ -501,6 +505,7 @@ def episode_extends(stored: EpisodicMemory, revision: EpisodicMemory) -> bool:
             "rounds": after.rounds,
             "labels": after.labels,
             "digests": after.digests,
+            "joined": after.joined,
             "status": after.status,
             "reason": after.reason,
             "ended_at": after.ended_at,

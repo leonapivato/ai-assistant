@@ -91,6 +91,36 @@ def test_every_store_is_written_and_read_back(written: tuple[Path, Path]) -> Non
         assert _records(snapshot, store.name), f"{store.name} reads back no record"
 
 
+def test_the_memory_writer_writes_the_shapes_adr_0332_adds(written: tuple[Path, Path]) -> None:
+    """ADR-0332 §7:1 to §7:5: an episode carrying each, so a later base writes them too.
+
+    The base's copy of the writer is what the next pull request's check runs, so the
+    record's ``joined``, an understanding's ``continues`` and the takeover's stage and rule
+    are each read back here, by this build, from what it wrote.
+    """
+    episode = _records(_snapshot(written[1]), "memory")["record/mem-episode-joined"]
+    assert isinstance(episode, dict)
+    record = episode["processing_record"]
+    assert isinstance(record, dict)
+    joined = record["joined"]
+    assert isinstance(joined, list)
+    assert [one["taken_over_from"] for one in joined if isinstance(one, dict)] == [
+        None,
+        "act-upgrade-line",
+    ]
+    understanding = record["understanding"]
+    assert isinstance(understanding, list)
+    assert [one["continues"] for one in understanding if isinstance(one, dict)] == [
+        None,
+        "act-upgrade-line",
+    ]
+    stages = record["stages"]
+    assert isinstance(stages, list)
+    assert {"stage": "takeover", "due": "takeover_undecided"}.items() <= next(
+        one.items() for one in stages if isinstance(one, dict) and one["stage"] == "takeover"
+    )
+
+
 def test_the_reads_leave_the_directory_as_they_found_it(
     written: tuple[Path, Path], tmp_path: Path
 ) -> None:
@@ -166,7 +196,8 @@ def test_a_memory_store_that_loses_its_vectors_fails_the_check(
         conn.execute("DELETE FROM vec_records")
     conn.close()
     problems = read(directory, snapshot)
-    assert len(problems) == 4, problems
+    # One per record with content: two memories and three episodes.
+    assert len(problems) == 5, problems
     assert all(p.startswith("memory nearest/") for p in problems), problems
     assert all(p.endswith(", the head reads []") for p in problems), problems
 

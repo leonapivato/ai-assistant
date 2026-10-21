@@ -75,7 +75,8 @@ from phases_support import phase_path
 from story_surface_contract import STORY_LIMIT, STORY_SURFACE_AT, StorySurfaceSubject
 from understanding_support import VERSION_LIMIT, understanding_stage, windows_stage
 
-from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.core.device_context import serving_device
+from ai_assistant.core.errors import ConfigurationError, DeviceRefusal, DeviceRefusedError
 from ai_assistant.core.protocols import (
     AuditTrail,
     InvocationLedger,
@@ -86,8 +87,10 @@ from ai_assistant.core.protocols import (
 from ai_assistant.core.types import (
     CapabilityEffect,
     CapabilityResult,
+    ChatDevice,
     CostBasis,
     DataTier,
+    DeviceAccess,
     GrantScope,
     Idempotency,
     MemoryWrite,
@@ -95,6 +98,7 @@ from ai_assistant.core.types import (
     Placement,
     PlacementReach,
     PlacementSetter,
+    RequestingDevice,
     Reversibility,
     RiskLevel,
     StoryMember,
@@ -1004,5 +1008,39 @@ async def test_an_engine_with_no_story_store_refuses_the_story_surface(call: str
     try:
         with pytest.raises(ConfigurationError, match="story store"):
             await calls[call](built)
+    finally:
+        await built.aclose()
+
+
+async def test_a_composing_signal_needs_the_conversations_end_for_writing() -> None:
+    """ADR-0332 §5:11: ``composing`` is in ADR-0298 §5:1's Writing row, which the engine checks.
+
+    A device that is an end for writing is answered with nothing; one that only reads the
+    conversation, and one in no set, are refused as a writing call is. The hub's own
+    machine passes every row (ADR-0298 §3:2).
+    """
+    built = _wire(chat_reader=False)
+    await built.start()
+    try:
+        await built.set_my_devices(
+            [
+                ChatDevice(device_id="pen", access=DeviceAccess.WRITE),
+                ChatDevice(device_id="watch", access=DeviceAccess.READ),
+            ]
+        )
+        conversation = (await built.start_conversation()).id
+        await built.composing(conversation)
+        with serving_device(RequestingDevice(device_id="pen")):
+            await built.composing(conversation)
+        for device, reason in (
+            ("watch", DeviceRefusal.NOT_ALLOWED),
+            ("stranger", DeviceRefusal.NO_ROLE),
+        ):
+            with (
+                serving_device(RequestingDevice(device_id=device)),
+                pytest.raises(DeviceRefusedError) as refused,
+            ):
+                await built.composing(conversation)
+            assert refused.value.reason is reason
     finally:
         await built.aclose()

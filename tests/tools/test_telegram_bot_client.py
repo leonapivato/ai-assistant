@@ -131,7 +131,17 @@ def message_json(message: TelegramMessage) -> dict[str, Any]:
         raw["from"] = {"id": message.sender_id, "is_bot": message.sender_is_bot, "first_name": "O"}
     if message.text is not None:
         raw["text"] = message.text
+    if message.command is not None:
+        raw["entities"] = [command_entity(message.command)]
     return raw
+
+
+def command_entity(command: str) -> dict[str, Any]:
+    """The ``bot_command`` entity Telegram marks ``command`` with, at the first character.
+
+    Its length counts UTF-16 code units, as the Bot API counts them (ADR-0332 §7:9).
+    """
+    return {"type": "bot_command", "offset": 0, "length": len(command.encode("utf-16-le")) // 2}
 
 
 def update_json(update: TelegramUpdate) -> dict[str, Any]:
@@ -832,6 +842,104 @@ async def test_a_message_with_no_text_is_read_with_none() -> None:
 
     assert message is not None
     assert message.text is None
+
+
+def _command(length: int, *, offset: int = 0, kind: str = "bot_command") -> dict[str, Any]:
+    return {"type": kind, "offset": offset, "length": length}
+
+
+@pytest.mark.parametrize(
+    ("text", "entities", "expected"),
+    [
+        ("/stop", [_command(5)], "/stop"),
+        ("/stop now", [_command(5)], "/stop"),
+        ("/stop@line_bot", [_command(14)], "/stop@line_bot"),
+        # Bold over the whole text beside the command changes nothing.
+        ("/stop", [_command(5, kind="bold"), _command(5)], "/stop"),
+        # UTF-16: the emoji is two code units, and the command spans it whole.
+        ("/s\U0001f600p x", [_command(5)], "/s\U0001f600p"),
+    ],
+    ids=["bare", "with-words", "addressed", "beside-another-entity", "utf-16-units"],
+)
+async def test_a_command_is_the_span_its_entity_covers(
+    text: str, entities: list[dict[str, Any]], expected: str
+) -> None:
+    """ADR-0332 §7:9: the text a ``bot_command`` entity at the first character covers."""
+    message = await _polled_one(_raw(text=text, entities=entities))
+
+    assert message is not None
+    assert message.text == text
+    assert message.command == expected
+
+
+@pytest.mark.parametrize(
+    "entities",
+    [
+        None,
+        [],
+        [_command(5, offset=1)],
+        [_command(5, kind="mention")],
+        "not a list",
+        [["bot_command", 0, 5]],
+        [{"type": "bot_command", "offset": 0}],
+        [{"type": "bot_command", "offset": 0, "length": "5"}],
+        [{"type": "bot_command", "offset": True, "length": 5}],
+        [{"type": 7, "offset": 0, "length": 5}],
+        [_command(0)],
+        [_command(6)],
+        [_command(5, offset=-1)],
+        [_command(5), _command(5)],
+        [_command(3), _command(5)],
+        # A malformed entity elsewhere voids the command too: the safe side (§8:1).
+        [_command(5), _command(9, offset=2, kind="bold")],
+    ],
+    ids=[
+        "absent",
+        "empty",
+        "not-at-the-start",
+        "another-kind",
+        "not-a-list",
+        "not-an-object",
+        "no-length",
+        "text-length",
+        "flag-offset",
+        "non-text-type",
+        "empty-span",
+        "past-the-text",
+        "negative-offset",
+        "two-at-the-start",
+        "two-lengths",
+        "a-bad-neighbour",
+    ],
+)
+async def test_a_message_with_no_readable_command_entity_is_read_with_none(
+    entities: object,
+) -> None:
+    """§7:9: no command, and the message is still read whole, never dropped."""
+    message = await _polled_one(_raw(text="/stop", entities=entities))
+
+    assert message is not None
+    assert message.text == "/stop"
+    assert message.command is None
+
+
+async def test_a_command_span_ending_inside_a_character_is_no_command() -> None:
+    """A span that splits a surrogate pair names no text, so the message has no command."""
+    message = await _polled_one(_raw(text="/\U0001f600", entities=[_command(2)]))
+
+    assert message is not None
+    assert message.command is None
+
+
+async def test_a_message_with_no_text_carries_no_command() -> None:
+    """A caption's entities are not the text's: a photo is never a command (§7:9)."""
+    message = await _polled_one(
+        _raw(text=None, caption="/stop", caption_entities=[_command(5)], entities=[_command(5)])
+    )
+
+    assert message is not None
+    assert message.text is None
+    assert message.command is None
 
 
 @pytest.mark.parametrize(

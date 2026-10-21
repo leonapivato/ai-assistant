@@ -109,3 +109,38 @@ def test_an_id_that_is_a_flag_is_refused() -> None:
     """``True`` is not an update id."""
     with pytest.raises(ValidationError):
         TelegramUpdate(update_id=True)
+
+
+def _message(text: str | None, command: str | None) -> TelegramMessage:
+    return TelegramMessage(
+        message_id=1,
+        chat_id=1,
+        private_chat=True,
+        sent_at=datetime(2026, 10, 21, tzinfo=UTC),
+        text=text,
+        command=command,
+    )
+
+
+def test_a_message_carries_no_command_by_default() -> None:
+    """ADR-0332 §7:9: ``None`` where the message has no ``bot_command`` entity."""
+    assert _message("/stop", None).command is None
+
+
+@pytest.mark.parametrize(("text", "command"), [("/stop", "/stop"), ("/stop now", "/stop")])
+def test_a_command_is_where_the_text_begins(text: str, command: str) -> None:
+    """§7:9: the part of the text an entity at its first character covers."""
+    assert _message(text, command).command == command
+
+
+@pytest.mark.parametrize(
+    ("text", "command"),
+    [(None, "/stop"), ("/stop", ""), ("please /stop", "/stop"), ("/st", "/stop")],
+    ids=["no-text", "empty", "not-at-the-start", "longer-than-the-text"],
+)
+def test_a_command_that_is_not_the_start_of_the_text_is_refused(
+    text: str | None, command: str
+) -> None:
+    """No implementation can hand the reader a command Telegram could not have marked."""
+    with pytest.raises(ValidationError, match="first character"):
+        _message(text, command)
