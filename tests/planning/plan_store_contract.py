@@ -1007,6 +1007,26 @@ class PlanStoreContract:
         assert (await store.export()).activation_effects == ()
 
     @pytest.mark.parametrize(
+        "effect_id", ["", "   ", "\ud800"], ids=["empty", "whitespace", "lone-surrogate"]
+    )
+    async def test_a_finish_refuses_an_effect_id_that_is_no_identifier(
+        self, store: PlanStore, effect_id: str
+    ) -> None:
+        """§6:4: a value that is not an identifier names no record, and is refused as input.
+
+        The Protocol's ``Raises:`` names this refusal (issue #3373). The refusal is
+        ``planning``'s own error, and it writes nothing: the record already claimed
+        stays claimed and unfinished.
+        """
+        record = _effect("e1")
+        await store.claim_activation_effect(record, match=None)
+
+        with pytest.raises(PlanningError):
+            await store.finish_activation_effect(effect_id, ToolOutcome.SUCCEEDED)
+
+        assert (await store.export()).activation_effects == (record,)
+
+    @pytest.mark.parametrize(
         "outcome", [ToolOutcome.SUCCEEDED, ToolOutcome.INDETERMINATE], ids=["done", "unknown"]
     )
     async def test_a_reason_rides_only_on_not_done(

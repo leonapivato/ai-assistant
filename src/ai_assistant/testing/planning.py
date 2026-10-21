@@ -209,7 +209,8 @@ def _finished_effect(
 
     Raises:
         PlanningError: If the record is not held or already finished, the outcome is
-            not a ``ToolOutcome``, or the reason or position does not belong to it.
+            not a ``ToolOutcome``, the reason is blank or has no UTF-8 encoding, or the
+            reason or position does not belong to it.
     """
     if held is None:
         msg = f"the plan store holds no activation effect {effect_id!r} to finish"
@@ -415,9 +416,9 @@ class FakePlanStore:
         """Write a claimed effect's outcome, once (ADR-0306 §6:4).
 
         Raises:
-            PlanningError: If the record is not held or already finished, the reason
-                is blank or has no UTF-8 encoding, or the reason or position does not
-                belong to the outcome.
+            PlanningError: If ``effect_id`` is not an identifier, the record is not
+                held or already finished, the reason is blank or has no UTF-8
+                encoding, or the reason or position does not belong to the outcome.
         """
         try:
             named = _ACTIVATION_ID.validate_python(effect_id)
