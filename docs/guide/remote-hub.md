@@ -321,10 +321,10 @@ for this repository's own hosts rather than part of a first run.
 
 Over a slow uplink, `--delta` sends the wheel as an `rsync` delta against a
 wheel already on the box, at `--bwlimit` KB/s, instead of whole with `scp`.
-Each `--delta` deploy keeps the wheel it installed at `--delta-keep` for the next
-one to start from; a box that has none yet is given one with `--delta-base`. A
-delta that cannot run is refused rather than sent whole. `--help` has the
-defaults, and `--dry-run` shows every step.
+Each `--delta` deploy keeps the wheel it installed, in the login user's home,
+for the next one to start from; a box that has none yet is given one with
+`--delta-base`. A delta that cannot run is refused rather than sent whole.
+`--help` has the defaults, and `--dry-run` shows every step.
 
 ## When it does not work
 

@@ -2772,8 +2772,6 @@ def test_the_delta_settings_are_parameters(tmp_path: Path) -> None:
         "--delta",
         "--delta-base",
         "/srv/old builds/w.whl",
-        "--delta-keep",
-        "/srv/keep/base.whl",
         "--bwlimit",
         "0",
     )
@@ -2781,14 +2779,24 @@ def test_the_delta_settings_are_parameters(tmp_path: Path) -> None:
     assert "--bwlimit=0 <the wheel above>" in plan
     assert re.search(r"cp -- '/srv/old builds/w\.whl' /tmp/deploy-hub-", plan)
     assert "[ ! -s '/srv/old builds/w.whl' ]" in plan
-    assert "mv -fT -- /srv/keep/base.whl." in plan
-    assert "mkdir -p -m 0700 /srv/keep " in plan
-    assert "~/deploy-hub" not in plan
+    # The base it names is read; the kept one is still where the next deploy looks.
+    assert "mv -fT -- ~/deploy-hub/base.whl." in plan
+    assert "[ ! -s ~/deploy-hub/base.whl ]" not in plan
 
 
-@pytest.mark.parametrize(
-    "flag", [("--bwlimit", "10"), ("--delta-base", "/x"), ("--delta-keep", "/y")]
-)
+def test_where_the_base_is_kept_is_not_a_parameter(tmp_path: Path) -> None:
+    # The keep writes as the login user, root by default; a path an operator could
+    # point through directories another user can rename would let that user aim it.
+    result = run(
+        "deploy_hub",
+        ["hub.example", "--delta", "--delta-keep", "/srv/shared/base.whl", "--dry-run"],
+    )
+
+    assert result.returncode == 2
+    assert _MODULE.DELTA_KEEP == "~/deploy-hub/base.whl"
+
+
+@pytest.mark.parametrize("flag", [("--bwlimit", "10"), ("--delta-base", "/x")])
 def test_a_delta_setting_without_delta_is_refused_not_ignored(
     tmp_path: Path, flag: tuple[str, str]
 ) -> None:
@@ -3099,25 +3107,6 @@ def test_the_real_rsync_replaces_a_base_that_matches_in_size_and_time(tmp_path: 
     assert seeded.read_bytes() == local.read_bytes()
 
 
-@pytest.mark.parametrize("keep", ["/srv/cache/", ""])
-def test_a_keep_path_that_names_a_directory_is_refused(tmp_path: Path, keep: str) -> None:
-    result = run(
-        "deploy_hub",
-        [
-            "hub.example",
-            "--delta",
-            "--delta-keep",
-            keep,
-            "--repo",
-            str(_repo(tmp_path)),
-            "--dry-run",
-        ],
-    )
-
-    assert result.returncode == 1
-    assert "must name the file" in result.stderr
-
-
 @_NEEDS_SHELL
 @pytest.mark.parametrize("shape", ["directory", "link to a directory"])
 def test_the_real_delta_check_refuses_a_keep_path_that_is_not_a_file(
@@ -3128,12 +3117,13 @@ def test_the_real_delta_check_refuses_a_keep_path_that_is_not_a_file(
     home, env = _login_home(tmp_path)
     cache = tmp_path / "cache"
     cache.mkdir()
-    keep = home / "keep"
+    (home / "deploy-hub").mkdir(mode=0o700)
+    keep = home / "deploy-hub" / "base.whl"
     if shape == "directory":
         keep.mkdir()
     else:
         keep.symlink_to(cache)
-    plan = _delta_plan(tmp_path, "--delta-keep", str(keep))
+    plan = _delta_plan(tmp_path)
 
     probed = _sh_login(plan.probe_delta(), env)
 
@@ -3143,17 +3133,18 @@ def test_the_real_delta_check_refuses_a_keep_path_that_is_not_a_file(
 @_NEEDS_SHELL
 def test_the_real_keep_will_not_rename_into_a_directory_that_appeared(tmp_path: Path) -> None:
     home, env = _login_home(tmp_path)
-    keep = home / "keep"
-    plan = _delta_plan(tmp_path, "--delta-keep", str(keep))
+    kept = home / "deploy-hub"
+    kept.mkdir(mode=0o700)
+    plan = _delta_plan(tmp_path)
     Path(plan.stage_dir).mkdir()
     Path(plan.staged).write_bytes(b"the new wheel")
-    keep.mkdir()
+    (kept / "base.whl").mkdir()
 
     status, _out, _err = _sh_login(plan.keep_base(), env)
 
     assert status != 0
-    assert list(keep.iterdir()) == []
-    assert sorted(p.name for p in home.iterdir()) == ["keep"]
+    assert list((kept / "base.whl").iterdir()) == []
+    assert sorted(p.name for p in kept.iterdir()) == ["base.whl"]
 
 
 @_NEEDS_SHELL
@@ -3164,12 +3155,12 @@ def test_the_real_delta_check_keeps_only_in_a_directory_no_one_else_can_write(
     tmp_path: Path, mode: int, state: str
 ) -> None:
     # Anyone who can create names there could put a link at the scratch path the
-    # keep step copies onto, as root, before it does.
+    # keep step copies onto, as root, before it does. The probe makes it 0700; one
+    # an operator made or loosened is judged as it stands.
     home, env = _login_home(tmp_path)
-    shared = home / "shared"
-    shared.mkdir()
-    shared.chmod(mode)
-    plan = _delta_plan(tmp_path, "--delta-keep", str(shared / "base.whl"))
+    (home / "deploy-hub").mkdir()
+    (home / "deploy-hub").chmod(mode)
+    plan = _delta_plan(tmp_path)
 
     probed = _sh_login(plan.probe_delta(), env)
 
@@ -3184,8 +3175,8 @@ def test_a_keep_directory_reached_through_a_link_is_judged_by_what_it_names(
     private = tmp_path / "private"
     private.mkdir()
     private.chmod(0o700)
-    (home / "kept").symlink_to(private)
-    plan = _delta_plan(tmp_path, "--delta-keep", str(home / "kept" / "base.whl"))
+    (home / "deploy-hub").symlink_to(private)
+    plan = _delta_plan(tmp_path)
 
     assert _MODULE._labelled(_sh_login(plan.probe_delta(), env)[1], "DELTA_KEEP=") == "writable"
     private.chmod(0o777)
