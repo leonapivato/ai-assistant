@@ -56,6 +56,13 @@ under one candidate (ADR-0337 §5:4) writes one result for each sample, and the 
 are shown together, under that candidate's one heading, each naming its sample. Where the
 run asked the follow-up question (ADR-0337 §7), its answer as text, or its failure, is
 shown beside the response it follows, with its version, and its question a click away.
+
+What the owner's hub asked each recorded call afterwards, the follow-up question of
+ADR-0337 §8, is in a fourth file beside the activation's, ``<activation_id>.followup.jsonl``,
+joined to it by name and never listed as an activation of its own name (§8:17). A model
+call's readable view shows each follow-up that follows it, its answer as text or its
+failure, with the version of the follow-up prompt and the model it went to: a section of
+its own beside the call, one click from it, and never on the timeline.
 """
 
 from __future__ import annotations
@@ -99,6 +106,10 @@ OBSERVER_SUFFIX: Final = ".observer" + SUFFIX
 #: The suffix of the file beside it holding what a replay sent again and got back (ADR-0335
 #: §6:1). Never listed as an activation of its own name (§6:5).
 REPLAY_SUFFIX: Final = ".replay" + SUFFIX
+
+#: The suffix of the file beside it holding what the owner's hub asked its recorded calls
+#: afterwards (ADR-0337 §8:12). Never listed as an activation of its own name (§8:17).
+FOLLOW_UP_SUFFIX: Final = ".followup" + SUFFIX
 
 #: The record's directory's name in a data directory (ADR-0314 §6:1).
 RECORD_DIRECTORY: Final = "diagnostics"
@@ -1312,38 +1323,44 @@ class Record:
         """Every replay's results file in the directory, by its activation's id (ADR-0335 §6:1)."""
         return self._scan()[2]
 
-    def _scan(self) -> tuple[dict[str, Path], dict[str, Path], dict[str, Path]]:
-        """The directory's activations' own files, observer files and results files, by id.
+    def follow_up_listing(self) -> dict[str, Path]:
+        """Every follow-up file in the directory, by its activation's id (ADR-0337 §8:17)."""
+        return self._scan()[3]
 
-        An observer file or a results file is joined to its activation by name alone, and
-        is never taken for an activation of its own name (ADR-0333 §5:1, §5:6; ADR-0335
-        §6:5).
+    def _scan(
+        self,
+    ) -> tuple[dict[str, Path], dict[str, Path], dict[str, Path], dict[str, Path]]:
+        """The directory's activations' own files, observer, results and follow-up files, by id.
+
+        An observer file, a results file or a follow-up file is joined to its activation by
+        name alone, and is never taken for an activation of its own name (ADR-0333 §5:1,
+        §5:6; ADR-0335 §6:5; ADR-0337 §8:17).
         """
         own: dict[str, Path] = {}
-        learned: dict[str, Path] = {}
-        replayed: dict[str, Path] = {}
+        beside: dict[str, dict[str, Path]] = {
+            OBSERVER_SUFFIX: {},
+            REPLAY_SUFFIX: {},
+            FOLLOW_UP_SUFFIX: {},
+        }
         directory = self.directory
         try:
             with os.scandir(directory) as entries:
                 for one in entries:
                     if not one.name.endswith(SUFFIX) or not one.is_file(follow_symlinks=False):
                         continue
-                    if one.name.endswith(OBSERVER_SUFFIX):
-                        learned[one.name[: -len(OBSERVER_SUFFIX)]] = directory / one.name
-                    elif one.name.endswith(REPLAY_SUFFIX):
-                        replayed[one.name[: -len(REPLAY_SUFFIX)]] = directory / one.name
-                    else:
-                        own[one.name[: -len(SUFFIX)]] = directory / one.name
+                    suffix = next((each for each in beside if one.name.endswith(each)), SUFFIX)
+                    held = beside.get(suffix, own)
+                    held[one.name[: -len(suffix)]] = directory / one.name
         except _NO_DIRECTORY:
-            return {}, {}, {}
-        return own, learned, replayed
+            return {}, {}, {}, {}
+        return own, beside[OBSERVER_SUFFIX], beside[REPLAY_SUFFIX], beside[FOLLOW_UP_SUFFIX]
 
     def activations(self) -> dict[str, object]:
         """The list: every activation's summary, newest first, and a version for polling.
 
         An activation with a replay's results file is marked ``replayed`` (ADR-0335 §6:5).
         """
-        listing, _, replayed = self._scan()
+        listing, _, replayed, _ = self._scan()
         with self._lock:
             for gone in set(self._watched) - set(listing):
                 del self._watched[gone]
@@ -1424,6 +1441,18 @@ class Record:
         """
         return _whole(self.replay_listing().get(activation_id))
 
+    def follow_up_lines(self, activation_id: str) -> tuple[list[Line], str] | None:
+        """An activation's follow-up file's complete lines, read, and a version.
+
+        Args:
+            activation_id: An id, looked up in the directory's listing and never used
+                as a path.
+
+        Returns:
+            ``None`` where no follow-up file in the listing has that id.
+        """
+        return _whole(self.follow_up_listing().get(activation_id))
+
     def learning(self) -> dict[str, object]:
         """The learning overview: every activation with an observer file (ADR-0333 §5:4).
 
@@ -1435,7 +1464,7 @@ class Record:
             Each activation's learning summary, newest observer entry first, and a
             version for polling.
         """
-        own, learned, _ = self._scan()
+        own, learned, _, _ = self._scan()
         with self._lock:
             for gone in set(self._learned) - set(learned):
                 del self._learned[gone]
@@ -2318,6 +2347,63 @@ def _follow_up(value: object) -> dict[str, object] | None:
     }
 
 
+# --- the hub's follow-ups, beside the call they follow -------------------------------
+# What the owner's hub asked a recorded call after it answered, one returned entry of the
+# activation's follow-up file for each (ADR-0337 §8:9). An entry names the given entry it
+# follows by its source, its instant and the step or part its body names (§8:10). Every
+# key read here is a hint, as an entry's are (ADR-0316 §5:2).
+
+#: What a follow-up entry may name of the given entry it follows, beside its source and
+#: instant, each to be matched where it is named.
+_FOLLOWS_NAMING: Final = ("stage", "result", "part", "parts")
+
+
+def follow_ups_of(lines: Sequence[Line], given: Entry) -> list[dict[str, object]]:
+    """Each follow-up entry that follows the given entry ``given`` (ADR-0337 §8:17).
+
+    Args:
+        lines: The activation's follow-up file's complete lines.
+        given: The call's given entry, from the activation's own file or its observer file.
+
+    Returns:
+        Each follow-up, in the order written: the version and origin of the follow-up
+        prompt, the model it went to, the version of the followed call's prompt, and its
+        answer as text or its failure.
+    """
+    named = _mapping(given.body)
+    shown: list[dict[str, object]] = []
+    for line in lines:
+        if not isinstance(line, Entry) or line.source != "follow_up" or line.kind != "returned":
+            continue
+        body = _mapping(line.body)
+        follows = _mapping(body.get("follows"))
+        if (
+            follows.get("source") != given.source
+            or instant(follows.get("recorded_at")) != given.at
+            or any(follows.get(key) != named.get(key) for key in _FOLLOWS_NAMING if key in follows)
+        ):
+            continue
+        shown.append(_hub_follow_up(line, body))
+    return shown
+
+
+def _hub_follow_up(line: Entry, body: Mapping[str, object]) -> dict[str, object]:
+    """One follow-up as the call's view shows it, headed by the prompt it asked (§8:10)."""
+    asked = _mapping(body.get("follow_up_prompt"))
+    followed = _mapping(body.get("prompt"))
+    answer = body.get("answer")
+    return {
+        "line": line.line,
+        "at": _ms(line.at),
+        "version": _text(asked.get("version")),
+        "origin": _text(asked.get("origin")),
+        "model": _text(body.get("model")),
+        "followed_version": _text(followed.get("version")),
+        "answer": _sized(answer) if isinstance(answer, str) else None,
+        "failure": _failure_text(body.get("failure")) if "failure" in body else None,
+    }
+
+
 # --- the server ------------------------------------------------------------------------
 
 
@@ -2494,7 +2580,28 @@ class ViewerHandler(BaseHTTPRequestHandler):
         if shown is None:
             self._json({"error": "no such model call"}, HTTPStatus.NOT_FOUND)
             return
-        self._json({**shown, "replays": self._replays(query, shown)})
+        self._json(
+            {
+                **shown,
+                "replays": self._replays(query, shown),
+                "follow_ups": self._follow_ups(query, [] if read is None else read[0], shown),
+            }
+        )
+
+    def _follow_ups(
+        self, query: Mapping[str, str], lines: Sequence[Line], shown: Mapping[str, object]
+    ) -> list[object]:
+        """The follow-ups of the call's given entry, from its activation's follow-up file."""
+        given = shown.get("given")
+        if type(given) is not int or not 0 <= given < len(lines):
+            return []
+        entry = lines[given]
+        if not isinstance(entry, Entry):
+            return []
+        read = self.server.record.follow_up_lines(query.get("id", ""))
+        if read is None:
+            return []
+        return list(follow_ups_of(read[0], entry))
 
     def _replays(self, query: Mapping[str, str], shown: Mapping[str, object]) -> list[object]:
         """The results that replay the call's given entry, from its activation's results file."""
@@ -4075,6 +4182,7 @@ SCRIPT: Final = r"""
     const keys = [["told", "Told"], ["given", "Given"], ["tools", "Could do"], ["did", "Did"]];
     if (v.source === "planning") keys.push(["changes", "Changed"]);
     if (v.replays && v.replays.length) keys.push(["replays", "Replays"]);
+    if (v.follow_ups && v.follow_ups.length) keys.push(["follow-ups", "Follow-up"]);
     for (const [key, label] of keys) {
       const go = el("button", null, label);
       go.type = "button";
@@ -4091,6 +4199,7 @@ SCRIPT: Final = r"""
     renderDid(holder, v);
     if (v.source === "planning") renderChanges(holder, v);
     if (v.replays && v.replays.length) renderReplays(holder, v);
+    if (v.follow_ups && v.follow_ups.length) renderFollowUps(holder, v);
   }
 
   // Why a request's part is not shown, where the record does not hold it to read.
@@ -4309,12 +4418,13 @@ SCRIPT: Final = r"""
 
   // The follow-up asked after a replayed response: its answer as text, or its failure,
   // with its version, and its question one click away (ADR-0337 \u00a76:5).
-  function followUpInto(parent, f) {
+  function followUpInto(parent, f, rows) {
     const box = el("div", "follow-up");
     const head = el("div", "replay-head");
     head.appendChild(el("h5", null, "follow-up \u00b7 " + (f.version || "no version")
       + " \u00b7 " + (f.origin || "origin not named")));
     box.appendChild(head);
+    if (rows) kv(box, rows);
     if (f.failure) box.appendChild(el("p", "fail", "failed: " + f.failure));
     if (f.answer) {
       const said = part(box, { name: "Answer", what: "the follow-up\u2019s answer",
@@ -4328,6 +4438,19 @@ SCRIPT: Final = r"""
       prose(asked, f.question.text);
     }
     parent.appendChild(box);
+  }
+
+  // What the owner's hub asked this call after it answered: each answer as text, or its
+  // failure, with the follow-up prompt's version and the model it went to, in a section of
+  // its own beside the call and never on the timeline (ADR-0337 \u00a78:17).
+  function renderFollowUps(holder, v) {
+    const box = callSec(holder, "follow-ups", "Asked afterwards",
+      plural(v.follow_ups.length, "follow-up", "follow-ups")
+        + " the hub asked this call after it answered");
+    for (const f of v.follow_ups) {
+      followUpInto(box, f, [["asked", clock(f.at, true)], ["model", f.model || "not named"],
+        ["followed prompt", f.followed_version || "no version"]]);
+    }
   }
 
   function diffText(d) { return d.lines.join("\n"); }
