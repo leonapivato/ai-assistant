@@ -1750,8 +1750,9 @@ REPLY_READERS: Final[dict[str, Callable[[str], BaseModel | None]]] = {
     "observer_commit": lambda content: parsed(content, CommitReply),
 }
 
-#: The shape each reader reads a reply as, whose field names a case's ``no_label`` may
-#: name: a name no shape holds would leave the check reading nothing, and passing.
+#: The shape each reader reads a reply as, whose text fields a case's ``no_label`` may
+#: name: a name no shape holds, or one holding a list or an object, would leave the check
+#: reading nothing, and passing.
 REPLY_SHAPES: Final[dict[str, type[BaseModel]]] = {
     "understanding": ProposedActivationUnderstanding,
     "observer_scout": ScoutReply,
@@ -1760,22 +1761,45 @@ REPLY_SHAPES: Final[dict[str, type[BaseModel]]] = {
 
 
 def reply_fields(prompt: str) -> frozenset[str]:
-    """Every field name the prompt's reply shape holds, nested shapes' included."""
+    """Every text field of the prompt's reply shape, nested shapes' included.
+
+    A text field is one whose value is a string, or a string or null: the fields whose
+    value ``no_label`` reads as text.
+    """
+    schema = REPLY_SHAPES[prompt].model_json_schema()
+    defs = schema.get("$defs", {})
     found: set[str] = set()
 
     def walk(value: object) -> None:
         if isinstance(value, dict):
             properties = value.get("properties")
             if isinstance(properties, dict):
-                found.update(str(name) for name in properties)
+                found.update(str(name) for name, held in properties.items() if _text(held, defs))
             for inner in value.values():
                 walk(inner)
         elif isinstance(value, list):
             for inner in value:
                 walk(inner)
 
-    walk(REPLY_SHAPES[prompt].model_json_schema())
+    walk(schema)
     return frozenset(found)
+
+
+def _text(schema: object, defs: Mapping[str, object], depth: int = 0) -> bool:
+    """Whether a property's schema is a string's, or a string's or null's."""
+    if not isinstance(schema, dict) or depth > 8:  # noqa: PLR2004 — a reference chain's bound
+        return False
+    reference = schema.get("$ref")
+    if isinstance(reference, str) and reference.startswith("#/$defs/"):
+        return _text(defs.get(reference.removeprefix("#/$defs/")), defs, depth + 1)
+    if schema.get("type") == "string":
+        return True
+    options = schema.get("anyOf")
+    if not isinstance(options, list):
+        return False
+    texts = [_text(one, defs, depth + 1) for one in options]
+    nulls = [isinstance(one, dict) and one.get("type") == "null" for one in options]
+    return any(texts) and all(t or n for t, n in zip(texts, nulls, strict=True))
 
 
 def completion_reply(prompt: str, text: str) -> Reply:
@@ -2149,7 +2173,7 @@ def _check_no_label(given: Mapping[str, object], prompt: str) -> None:
     unknown = sorted(fields - reply_fields(prompt))
     if unknown:
         raise _CaseDefectError(
-            f"the check no_label names fields no {prompt} reply holds: {unknown}"
+            f"the check no_label names fields no {prompt} reply holds as text: {unknown}"
         )
 
 
