@@ -62,6 +62,30 @@ publishes beside a verdict (ADR-0025 §4), and it fails closed on a snapshot tha
 is missing *or* ambiguous. A snapshot is swept only when no retained artifact
 carries its ``(loop, persona, tree)``, so a sweep can never strand a retained
 artifact without its evidence.
+
+**A parted round's part messages follow their artifact, always** (issue #3184).
+``.review/parts/<stem>/`` holds the part turns' captured messages beside the
+artifact ``<stem>.md`` the round records (ADR-0331 §5:11). That directory is
+swept exactly when its artifact is, and kept exactly when its artifact is — for
+whatever reason it is kept, ``unreadable`` included — so a sweep can never leave
+a retained verdict without the messages it was given over. Archived, it lands
+under ``archive/parts/`` at the archived artifact's own stem, numbered with it
+when the artifact is, so the pair is still a pair in the archive.
+
+**A parts directory with no artifact of its stem is swept too, once it has sat
+unchanged for an hour.** Nothing reads it: ``ship`` and the round aggregate glob
+``.review/*.md``, and its artifact is already gone — swept by a sweep that
+predates this rule, deleted, or withdrawn for a re-review that never finished
+(``codex-review.sh`` withdraws the old artifact before it swaps the parts). It
+carries no provenance of its own, so the ref classification above has nothing
+to ask about, and the only thing that tells such remains apart from a round's
+install *in flight* is time. ``codex-review.sh`` installs the parts first and
+renames the artifact into place a few filesystem operations later, so for that
+instant a live round's parts are an orphan here; the hour is what keeps a sweep
+that lands in the instant from archiving them out from under the verdict about
+to appear beside them. The same rule covers a ``<stem>.partial.<pid>`` staging
+directory an interrupted install stranded. Nothing that is not a plain
+directory is touched: what this cannot classify, it keeps.
 """
 
 from __future__ import annotations
@@ -73,11 +97,12 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
 #: The review directory, relative to the repository root.
 REVIEW_DIR = ".review"
@@ -86,6 +111,12 @@ REVIEW_DIR = ".review"
 ARCHIVE_DIR = "archive"
 #: The disposition snapshots `ship` publishes beside a verdict (ADR-0025 §4).
 DISPOSITIONS_DIR = "dispositions"
+#: A parted round's part messages, one directory per artifact stem (ADR-0331 §5:11).
+PARTS_DIR = "parts"
+#: How long a parts directory with no artifact must sit unchanged before it is
+#: swept: far longer than the instant between `codex-review.sh` installing a
+#: round's parts and renaming its artifact into place.
+ORPHAN_GRACE_SECONDS = 3600
 #: Candidate default branches, most authoritative first: an artifact's commit is
 #: "merged" when it is an ancestor of the first of these the clone actually has.
 DEFAULT_BRANCHES = ("origin/main", "main")
@@ -420,7 +451,81 @@ def snapshots_to_sweep(
     return found
 
 
-def archive_plan(paths: Sequence[Path], review: Path) -> list[tuple[Path, Path]]:
+class PartsVerdict(NamedTuple):
+    """One parts directory's classification.
+
+    Attributes:
+        path: The entry under ``.review/parts/``.
+        swept: Whether the sweep acts on it.
+        state: ``paired`` (it follows its artifact), ``orphan`` (no artifact of
+            its stem, unchanged for the grace period), ``recent`` (no artifact,
+            but changed within the grace period) or ``unreadable`` (not a plain
+            directory).
+        detail: Why, in one phrase.
+        artifact: The artifact it follows, or ``None`` when it has none.
+    """
+
+    path: Path
+    swept: bool
+    state: str
+    detail: str
+    artifact: Path | None
+
+
+def classify_parts(review: Path, verdicts: Iterable[Verdict], now: float) -> list[PartsVerdict]:
+    """Classify every entry under ``.review/parts/`` against the artifact verdicts.
+
+    Args:
+        review: The review directory.
+        verdicts: Every artifact's classification.
+        now: The current time, as a POSIX timestamp, the grace period is read
+            against.
+
+    Returns:
+        One verdict per entry, sorted by name. Empty when there is no plain
+        ``parts`` directory to read — a symbolic link there is left alone, since
+        sweeping through it would move or delete what lies outside the review
+        directory.
+    """
+    root = review / PARTS_DIR
+    if root.is_symlink() or not root.is_dir():
+        return []
+    by_name = {v.path.name: v for v in verdicts}
+    found: list[PartsVerdict] = []
+    for entry in sorted(root.iterdir()):
+        artifact = review / f"{entry.name}.md"
+        verdict = by_name.get(artifact.name)
+        if entry.is_symlink() or not entry.is_dir():
+            found.append(PartsVerdict(entry, False, "unreadable", "not a directory", None))
+        elif verdict is not None:
+            swept = verdict.state in SWEEPABLE
+            detail = f"its artifact is {verdict.state}"
+            found.append(PartsVerdict(entry, swept, "paired", detail, verdict.path))
+        elif os.path.lexists(artifact):
+            # An artifact of the stem that was never classified is not one this
+            # can call gone.
+            detail = f"{artifact.name} exists but was not classified"
+            found.append(PartsVerdict(entry, False, "unreadable", detail, None))
+        else:
+            try:
+                age = now - entry.lstat().st_mtime
+            except OSError as exc:
+                found.append(PartsVerdict(entry, False, "unreadable", str(exc), None))
+                continue
+            # A modification time in the future reads as a negative age, and so
+            # as recent: a skewed clock costs a later sweep, never this round.
+            if age < ORPHAN_GRACE_SECONDS:
+                detail = "no artifact, but changed within the hour; a round may be installing it"
+                found.append(PartsVerdict(entry, False, "recent", detail, None))
+            else:
+                detail = f"no {artifact.name}, and unchanged for over an hour"
+                found.append(PartsVerdict(entry, True, "orphan", detail, None))
+    return found
+
+
+def archive_plan(
+    paths: Sequence[Path], review: Path, companions: Mapping[Path, Path] | None = None
+) -> list[tuple[Path, Path]]:
     """Pair each swept file with the name it lands under in the archive.
 
     The layout is mirrored, so a swept disposition snapshot cannot collide with a
@@ -435,39 +540,106 @@ def archive_plan(paths: Sequence[Path], review: Path) -> list[tuple[Path, Path]]
     script decides everything else — a plan that is wrong is then wrong before it
     has changed anything.
 
+    An artifact with a parts directory takes the first number free for *both*:
+    the directory lands at ``archive/parts/<the artifact's archived stem>``, so a
+    numbered artifact keeps its own messages beside it rather than an earlier
+    recording's (issue #3184).
+
     Args:
-        paths: The files being swept, each under ``review``.
+        paths: The files being swept, each under ``review``, and then any parts
+            directory being swept on its own. Every artifact precedes those
+            directories, so the names its companion takes are reserved before
+            they are planned.
         review: The review directory.
+        companions: Each swept artifact's parts directory, keyed on the artifact.
 
     Returns:
-        One ``(source, destination)`` pair per path, in the order given.
+        One ``(source, destination)`` pair per path, in the order given, and then
+        one per companion.
     """
     archive = review / ARCHIVE_DIR
+    companions = companions or {}
     taken: set[Path] = set()
-    plan: list[tuple[Path, Path]] = []
-    for path in paths:
-        destination = archive / path.relative_to(review)
-        stem, suffix = destination.stem, destination.suffix
-        ordinal = 1
+
+    def free(destination: Path) -> bool:
         # `taken` as well as the filesystem: a numbered name can collide with
         # another file of *this* sweep — `a.md` becoming `a-2.md` while
         # `.review/a-2.md` is itself on its way to `archive/a-2.md`.
-        while destination in taken or destination.is_symlink() or destination.exists():
+        return not (destination in taken or destination.is_symlink() or destination.exists())
+
+    plan: list[tuple[Path, Path]] = []
+    following: list[tuple[Path, Path]] = []
+    for path in paths:
+        destination = archive / path.relative_to(review)
+        stem, suffix = destination.stem, destination.suffix
+        companion = companions.get(path)
+        ordinal = 1
+        while not free(destination) or (
+            companion is not None and not free(archive / PARTS_DIR / destination.stem)
+        ):
             ordinal += 1
             destination = destination.with_name(f"{stem}-{ordinal}{suffix}")
         taken.add(destination)
         plan.append((path, destination))
-    return plan
+        if companion is not None:
+            beside = archive / PARTS_DIR / destination.stem
+            taken.add(beside)
+            following.append((companion, beside))
+    return plan + following
+
+
+def _plain_directory(path: Path) -> bool:
+    """Report whether a path is a directory and not a symbolic link to one.
+
+    Args:
+        path: The path.
+
+    Returns:
+        True for a plain directory.
+    """
+    return path.is_dir() and not path.is_symlink()
+
+
+def _move_directory(source: Path, destination: Path) -> None:
+    """Move a directory to a name nothing holds, never replacing anything.
+
+    A directory cannot be hard-linked, and ``rename`` onto a directory name
+    silently replaces one that is empty. So the destination is *made* first —
+    ``mkdir`` fails if anything holds the name, which reserves it — and the
+    rename then replaces only that empty directory, which this call just
+    created. Anything that lands in it meanwhile makes the rename fail rather
+    than be replaced.
+
+    Args:
+        source: The directory to move.
+        destination: Where it goes; its parent exists.
+
+    Raises:
+        OSError: If the name is taken or the move fails. The reservation is
+            removed again on a failed move, while it is still empty.
+    """
+    destination.mkdir()
+    try:
+        source.rename(destination)
+    except OSError:
+        with contextlib.suppress(OSError):
+            destination.rmdir()
+        raise
 
 
 def _act(
     paths: Sequence[Path], plan: Sequence[tuple[Path, Path]], *, delete: bool, dry_run: bool
 ) -> None:
-    """Archive or delete the swept files.
+    """Archive or delete the swept files and parts directories.
+
+    Every file is acted on before any directory, and a swept artifact precedes
+    its parts directory in both ``paths`` and ``plan``: a failure partway leaves
+    at worst a parts directory whose artifact is gone, which the next sweep
+    reads as an orphan — never a retained artifact whose messages went.
 
     Args:
-        paths: The files to act on. Deletion needs nothing else; it has no
-            destinations to reason about.
+        paths: The files and directories to act on. Deletion needs nothing else;
+            it has no destinations to reason about.
         plan: Where each of those files lands under the archive, from
             :func:`archive_plan`. Empty when deleting, which computes none.
         delete: Delete rather than archive.
@@ -485,10 +657,16 @@ def _act(
     try:
         if delete:
             for path in paths:
-                path.unlink()
+                if _plain_directory(path):
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
         else:
             for path, destination in plan:
                 destination.parent.mkdir(parents=True, exist_ok=True)
+                if _plain_directory(path):
+                    _move_directory(path, destination)
+                    continue
                 # `link` then `unlink`, not `rename`: a rename replaces whatever
                 # is at the destination, and not replacing is the whole point.
                 # `link` fails with EEXIST instead, so a name that appeared since
@@ -521,9 +699,10 @@ def _act(
         raise SweepError(f"could not sweep the review directory: {exc}") from exc
 
 
-def _report(
+def _report(  # noqa: PLR0913 — what was classified, what follows it, and how it was acted on
     verdicts: Sequence[Verdict],
     snapshots: Sequence[Path],
+    parts: Sequence[PartsVerdict],
     renamed: Sequence[tuple[Path, Path]],
     *,
     delete: bool,
@@ -534,7 +713,8 @@ def _report(
     Args:
         verdicts: Every artifact's classification.
         snapshots: The disposition snapshots being swept.
-        renamed: The swept files whose archived name was already taken, each with
+        parts: Every parts directory's classification.
+        renamed: The swept paths whose archived name was already taken, each with
             the name it lands under instead. Reported rather than left to be
             found, because the numbered name is the one thing the per-file line
             above does not already say.
@@ -546,10 +726,14 @@ def _report(
     for verdict in sorted(verdicts, key=lambda v: (v.state, v.path.name)):
         mark = verb if verdict.state in SWEEPABLE else "keep"
         print(f"{mark:>14}  {verdict.path.name}  [{verdict.state}] {verdict.detail}")
+    for part in parts:
+        mark = verb if part.swept else "keep"
+        print(f"{mark:>14}  {PARTS_DIR}/{part.path.name}/  [{part.state}] {part.detail}")
     for path, destination in renamed:
         lands = "would land" if dry_run else "landed"
+        shown = f"{PARTS_DIR}/{path.name}/" if path.parent.name == PARTS_DIR else path.name
         print(
-            f"{'renamed':>14}  {path.name}  [taken] already under the archive; "
+            f"{'renamed':>14}  {shown}  [taken] already under the archive; "
             f"{lands} as {destination.name}"
         )
     states = ("live", "merged", "stale", "unreadable")
@@ -557,7 +741,8 @@ def _report(
     print(
         f"\n{len(verdicts)} artifact(s): {counts['live']} live, {counts['merged']} merged, "
         f"{counts['stale']} stale, {counts['unreadable']} unreadable; "
-        f"{len(snapshots)} disposition snapshot(s) {verb}."
+        f"{len(snapshots)} disposition snapshot(s) {verb}; "
+        f"{sum(1 for p in parts if p.swept)} parts director(ies) {verb}."
     )
 
 
@@ -592,11 +777,22 @@ def _sweep(args: argparse.Namespace) -> int:
     swept = [v for v in verdicts if v.state in SWEEPABLE]
     retained = [v for v in verdicts if v.state not in SWEEPABLE]
     snapshots = snapshots_to_sweep(review, swept, retained)
-    sweeping = [v.path for v in swept] + snapshots
-    plan = [] if args.delete else archive_plan(sweeping, review)
+    parts = classify_parts(review, verdicts, time.time())
+    companions = {p.artifact: p.path for p in parts if p.swept and p.artifact is not None}
+    orphans = [p.path for p in parts if p.swept and p.artifact is None]
+    # Files first, then directories, and each artifact before its own parts:
+    # `_act` relies on that order, and `archive_plan` on artifacts preceding the
+    # orphans whose names must avoid their companions'.
+    files = [v.path for v in swept] + snapshots
+    if args.delete:
+        plan: list[tuple[Path, Path]] = []
+        sweeping = [*files, *companions.values(), *orphans]
+    else:
+        plan = archive_plan([*files, *orphans], review, companions)
+        sweeping = [source for source, _ in plan]
     _act(sweeping, plan, delete=args.delete, dry_run=args.dry_run)
     renamed = [pair for pair in plan if pair[1].name != pair[0].name]
-    _report(verdicts, snapshots, renamed, delete=args.delete, dry_run=args.dry_run)
+    _report(verdicts, snapshots, parts, renamed, delete=args.delete, dry_run=args.dry_run)
     return 0
 
 
