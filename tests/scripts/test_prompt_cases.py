@@ -83,7 +83,25 @@ def test_every_case_renders_from_its_prompts_default_under_its_flags() -> None:
 
     assert len(calls) == sum(case.samples for case in reading.cases)
     for call in calls:
-        assert call.messages[0].role.value == "system"
-        assert call.messages[0].content.strip()
-        assert call.messages[1:] == call.case.messages
-        assert (call.case.tools is not None) == (call.case.prompt == replay_tool.PLANNING)
+        followed = call.case.followed
+        if followed is None:
+            assert call.messages[0].role.value == "system"
+            assert call.messages[0].content.strip()
+            assert call.messages[1:] == call.case.messages
+            assert (call.case.tools is not None) == (call.case.prompt == replay_tool.PLANNING)
+            continue
+        # A follow-up's instruction is the request's last user message, after the
+        # followed request whole and its response (§3:5).
+        assert call.case.prompt == replay_tool.FOLLOW_UP
+        assert call.case.flags == {}
+        assert (call.case.tools is not None) == (followed.prompt == replay_tool.PLANNING)
+        question = call.question if call.question is not None else call.messages[-1].content
+        assert question.strip()
+        assert call.messages[: len(call.case.messages)] == call.case.messages
+
+
+def test_the_follow_up_has_a_seed_case() -> None:
+    """§3:5: the suite holds a case of the ninth prompt once it is declared."""
+    reading = replay_tool.read_cases(replay_tool.CASES_DIRECTORY, replay_tool.declared_prompts())
+
+    assert any(case.prompt == replay_tool.FOLLOW_UP for case in reading.cases)

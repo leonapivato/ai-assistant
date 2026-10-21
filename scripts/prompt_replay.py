@@ -33,7 +33,17 @@ template file, ``<prompt>.txt``, checked as the hub checks an override (§4:3), 
 ``recorded``, the call's own instruction, which is the control. It counts the calls before
 it sends any and sends none past its bound, 100 unless ``--bound`` says otherwise (§8:2,
 §8:3). Each result is one line of ``<activation_id>.replay.jsonl`` in the copy's record
-(§6:1).
+(§6:1). ``--samples N`` sends each call N times for each candidate, one line for each
+sample, naming it (ADR-0337 §5:4); every sample counts against the bound.
+
+``--follow-up`` on ``replay`` or ``suite`` asks the follow-up question after every
+response the run records (ADR-0337 §7): the call's request exactly as that sample sent
+it, its system message the candidate's or the control's, then the response, then the
+``follow_up`` template, the package's default or ``--follow-up <draft>/follow_up.txt``,
+checked as any candidate is. A planning round's response goes back whole, thinking
+included, and each call it proposed is closed with a result saying it was not run
+(§6:3-§6:6). The answer, or its failure, is written into that response's result line,
+and each follow-up counts against the bound.
 
 ``rerun`` composes the package over the copy with the record on and the copy's own
 overrides, and runs the observer alone until no episode is due or the bound stops it
@@ -97,6 +107,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast, override
 
 from pydantic import BaseModel, ValidationError
+from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelResponse
 from pydantic_ai.models import infer_model
 from pydantic_ai.models.wrapper import WrapperModel
 
@@ -113,6 +124,7 @@ from ai_assistant.models import (
     ensure_credential_available,
     ensure_vendor_available,
 )
+from ai_assistant.models.follow_up import FOLLOW_UP_PROMPT, follow_up_round
 from ai_assistant.models.tool_calling import ROUND_TOOL
 from ai_assistant.orchestration.observer.commit import CommitReply
 from ai_assistant.orchestration.observer.scout import ScoutReply, parsed
@@ -127,7 +139,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine, Iterator, Mapping, Sequence
 
     from pydantic_ai import RunContext, models
-    from pydantic_ai.messages import ModelMessage, ModelResponse
+    from pydantic_ai.messages import ModelMessage
     from pydantic_ai.models import ModelRequestParameters, StreamedResponse
     from pydantic_ai.settings import ModelSettings
     from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
@@ -1059,6 +1071,20 @@ class Caller(Protocol):
         """Send a planning round through the completer's replay seam (§4:8)."""
         ...
 
+    async def follow_up(self, messages: Sequence[Message], reply: str, question: str) -> str:
+        """Ask the follow-up of a completion: its request, its reply, then the question."""
+        ...
+
+    async def follow_up_round(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[OfferedTool],
+        response: Mapping[str, object],
+        question: str,
+    ) -> str:
+        """Ask the follow-up of a planning round through the follow-up's seam (ADR-0337 §7:3)."""
+        ...
+
 
 @dataclass(slots=True)
 class CallMeter:
@@ -1212,6 +1238,116 @@ class ModelCaller:
                 messages, tools, model=once
             )
 
+    async def follow_up(self, messages: Sequence[Message], reply: str, question: str) -> str:
+        """Ask a completion's follow-up once, as the completion itself is sent (§7:3)."""
+        return await self.complete(
+            [
+                *messages,
+                Message(role=Role.ASSISTANT, content=reply),
+                Message(role=Role.USER, content=question),
+            ]
+        )
+
+    async def follow_up_round(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[OfferedTool],
+        response: Mapping[str, object],
+        question: str,
+    ) -> str:
+        """Ask a planning round's follow-up once, to the run's model alone (§7:3)."""
+        once = self._once()
+        async with asyncio.timeout(self._timeout):
+            return await follow_up_round(messages, tools, response, question, model=once)
+
+
+# --- the follow-up question (ADR-0337 §6, §7) -------------------------------------------------
+
+
+#: The follow-up's prompt, the ninth (ADR-0337 §6:1).
+FOLLOW_UP: Final = FOLLOW_UP_PROMPT.name
+
+
+@dataclass(frozen=True, slots=True)
+class FollowUp:
+    """The follow-up a run asks after every response it records (ADR-0337 §7:1).
+
+    Attributes:
+        candidate: Its template: the package's default, or the file the run names.
+        question: The template rendered, under no flag and no value (§6:1).
+    """
+
+    candidate: Candidate
+    question: str
+
+    def label(self) -> str:
+        """How it is printed: its file, version and origin."""
+        template = cast("PromptTemplate", self.candidate.template)
+        return f"{self.candidate.file} ({template.version}, {self.candidate.origin})"
+
+    def head(self) -> dict[str, object]:
+        """What a result names of the follow-up, apart from its answer."""
+        template = cast("PromptTemplate", self.candidate.template)
+        return {
+            "version": template.version,
+            "origin": self.candidate.origin,
+            "file": self.candidate.file,
+            "question": self.question,
+        }
+
+
+def load_follow_up(spec: str | None, declared: Mapping[str, PromptDeclaration]) -> FollowUp | None:
+    """The run's follow-up: none, the package's default (``""``), or a template file.
+
+    A template file is checked as every candidate is (ADR-0335 §4:3) and must be the
+    follow-up's own, ``follow_up.txt``.
+
+    Raises:
+        ReplayError: If the file is not a well-formed template of the follow-up's prompt.
+    """
+    if spec is None:
+        return None
+    if spec:
+        candidate = load_candidate(spec, declared)
+        if candidate.prompt != FOLLOW_UP:
+            msg = f"the follow-up {spec} is a template of no follow-up: it is named {FOLLOW_UP}.txt"
+            raise ReplayError(msg)
+    else:
+        candidate = default_candidate(declared[FOLLOW_UP])
+    template = cast("PromptTemplate", candidate.template)
+    return FollowUp(candidate=candidate, question=template.render(flags={}, values={}))
+
+
+async def ask_follow_up(
+    follow_up: FollowUp,
+    caller: Caller,
+    messages: Sequence[Message],
+    tools: Sequence[OfferedTool] | None,
+    outcome: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Ask the follow-up of one recorded response, or ``None`` where none was recorded.
+
+    The request is the followed call's exactly as it was sent (ADR-0337 §7:2); a planning
+    round's goes through the follow-up's seam with its whole response (§6:3-§6:6), and a
+    completion's through the provider with its reply. A failure is recorded, not raised
+    (§7:3).
+    """
+    head = follow_up.head()
+    try:
+        response = outcome.get("response")
+        reply = outcome.get("reply")
+        if tools is not None and isinstance(response, dict):
+            answer = await caller.follow_up_round(
+                messages, tools, cast("Mapping[str, object]", response), follow_up.question
+            )
+        elif tools is None and isinstance(reply, str):
+            answer = await caller.follow_up(messages, reply, follow_up.question)
+        else:
+            return None
+    except Exception as exc:  # every failure of the one model is recorded (ADR-0335 §4:7)
+        return {**head, "failure": failure_body(exc)}
+    return {**head, "answer": answer}
+
 
 @dataclass(slots=True)
 class Sent:
@@ -1221,39 +1357,74 @@ class Sent:
     replied: int = 0
     failed: Counter[str] = field(default_factory=Counter)
     files: set[str] = field(default_factory=set)
+    follow_ups: int = 0
+    answered: int = 0
+    follow_up_failed: Counter[str] = field(default_factory=Counter)
+
+    def follow_up_sent(self, asked: Mapping[str, object]) -> None:
+        """Count one follow-up the run sent, answered or failed."""
+        self.follow_ups += 1
+        failure = asked.get("failure")
+        if isinstance(failure, dict):
+            self.follow_up_failed[str(failure.get("class"))] += 1
+        else:
+            self.answered += 1
 
 
-async def send_plan(
+async def send_plan(  # noqa: PLR0913 — keyword-only past the plan, caller and record: the run, its clock, its samples and its follow-up
     plan: Plan,
     caller: Caller,
     record: Path,
     *,
     run: str,
     now: Callable[[], datetime] = _utcnow,
+    samples: int = 1,
+    follow_up: FollowUp | None = None,
 ) -> Sent:
-    """Send each planned call once, and write its result under each entry it replays.
+    """Send each planned call as many times as the run names, and write each result.
 
-    A call is sent once for each candidate and its one response recorded; nothing is
-    continued (§4:10). A call that fails is recorded as failed (§4:7).
+    A call is sent ``samples`` times for each candidate and each response recorded, one
+    result for each sample under each entry it replays (ADR-0337 §5:4); nothing is
+    continued (§4:10). Where the run names the follow-up, it is asked after each response
+    and its answer, or failure, written into that response's result (ADR-0337 §7). A call
+    that fails is recorded as failed (§4:7).
     """
     sent = Sent()
     for planned in plan.calls:
-        outcome = await _outcome(planned, caller)
-        sent.calls += 1
-        failure = outcome.get("failure")
-        if isinstance(failure, dict) and "response" not in outcome:
-            sent.failed[str(failure.get("class"))] += 1
-        else:
-            sent.replied += 1
-        for given in planned.givens:
-            line = {
-                "activation_id": given.activation_id,
-                "source": REPLAY_SOURCE,
-                "kind": REPLAY_KIND,
-                "recorded_at": now().isoformat(),
-                "body": {**result_body(given, planned, run, caller.model_name), **outcome},
-            }
-            sent.files.add(append_result(record, given.activation_id, line))
+        for sample in range(1, samples + 1):
+            outcome = await _outcome(planned, caller)
+            sent.calls += 1
+            failure = outcome.get("failure")
+            if isinstance(failure, dict) and "response" not in outcome:
+                sent.failed[str(failure.get("class"))] += 1
+            else:
+                sent.replied += 1
+            asked = (
+                None
+                if follow_up is None
+                else await ask_follow_up(
+                    follow_up, caller, planned.messages, planned.tools, outcome
+                )
+            )
+            if asked is not None:
+                sent.follow_up_sent(asked)
+            for given in planned.givens:
+                body = {
+                    **result_body(given, planned, run, caller.model_name),
+                    "sample": sample,
+                    "samples": samples,
+                    **outcome,
+                }
+                if asked is not None:
+                    body["follow_up"] = asked
+                line = {
+                    "activation_id": given.activation_id,
+                    "source": REPLAY_SOURCE,
+                    "kind": REPLAY_KIND,
+                    "recorded_at": now().isoformat(),
+                    "body": body,
+                }
+                sent.files.add(append_result(record, given.activation_id, line))
     return sent
 
 
@@ -1368,6 +1539,17 @@ class ReplayOptions:
     bound: int = DEFAULT_BOUND
     count_only: bool = False
     timeout: float = DEFAULT_TIMEOUT_SECONDS
+    samples: int = 1
+    follow_up: str | None = None
+
+
+def replay_count(plan: Plan, samples: int, *, follow_up: bool) -> int:
+    """How many model calls a replay would make: each sample, and each follow-up after it.
+
+    Every sample counts against the bound (ADR-0337 §5's note), and so does every
+    follow-up that might be asked (ADR-0335 §8:2), counted before anything is sent.
+    """
+    return len(plan.calls) * samples * (2 if follow_up else 1)
 
 
 async def replay(
@@ -1395,6 +1577,10 @@ async def replay(
     declared = declared_prompts()
     candidates = [load_candidate(one, declared) for one in options.candidates]
     stated = parse_flags(options.flags, declared)
+    follow_up = load_follow_up(options.follow_up, declared)
+    if options.samples < 1:
+        msg = "a replay sends each call at least once"
+        raise ReplayError(msg)
     with held_copy(options.copy, now=now) as mark:
         report(f"copy {options.copy}: made {_days(now() - mark.made_at)} ago")
         record = options.copy / RECORD_DIRECTORY
@@ -1409,9 +1595,19 @@ async def replay(
             if prompts is None or prompt_name(one, declared) in prompts
         ]
         plan = plan_run(givens, candidates, declared=declared, stated=stated)
-        _report_plan(plan, candidates, givens, options.bound, report)
-        if len(plan.calls) > options.bound:
-            report(f"refused: {len(plan.calls)} calls exceed the bound of {options.bound}")
+        count = replay_count(plan, options.samples, follow_up=follow_up is not None)
+        _report_plan(plan, candidates, givens, options.bound, report, count=count)
+        if options.samples > 1 or follow_up is not None:
+            report(
+                f"{len(plan.calls)} requests, each sent {options.samples} times"
+                + (
+                    f", with a follow-up after each response: {follow_up.label()}"
+                    if follow_up is not None
+                    else ""
+                )
+            )
+        if count > options.bound:
+            report(f"refused: {count} calls exceed the bound of {options.bound}")
             return 1
         if options.count_only or not plan.calls:
             return 0
@@ -1419,7 +1615,15 @@ async def replay(
             _check_model(options.model)
             caller = ModelCaller(options.model, timeout=options.timeout)
         run = f"{now().strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(3)}"
-        sent = await send_plan(plan, caller, record, run=run, now=now)
+        sent = await send_plan(
+            plan,
+            caller,
+            record,
+            run=run,
+            now=now,
+            samples=options.samples,
+            follow_up=follow_up,
+        )
     _report_sent(sent, run, report)
     return 0
 
@@ -1434,12 +1638,14 @@ def _check_model(model: str) -> None:
         raise ReplayError(msg) from None
 
 
-def _report_plan(
+def _report_plan(  # noqa: PLR0913 — what is printed of the plan, and the count it is held to
     plan: Plan,
     candidates: Sequence[Candidate],
     givens: Sequence[Given],
     bound: int,
     report: Callable[[str], None],
+    *,
+    count: int,
 ) -> None:
     files = len({one.file for one in givens})
     report(
@@ -1447,15 +1653,19 @@ def _report_plan(
         f"candidates: {'; '.join(one.label() for one in candidates)}"
     )
     stated = sum(1 for one in plan.calls if one.flags_from == "stated")
-    report(f"{len(plan.calls)} calls to send (bound {bound}); {stated} under stated flags")
-    for reason, count in sorted(plan.left_out.items()):
-        report(f"left out: {count} ({reason})")
+    report(f"{count} calls to send (bound {bound}); {stated} under stated flags")
+    for reason, left in sorted(plan.left_out.items()):
+        report(f"left out: {left} ({reason})")
 
 
 def _report_sent(sent: Sent, run: str, report: Callable[[str], None]) -> None:
     report(f"run {run}: {sent.calls} calls sent, {sent.replied} replied")
     for failure, count in sorted(sent.failed.items()):
         report(f"failed: {count} ({failure})")
+    if sent.follow_ups:
+        report(f"follow-ups: {sent.follow_ups} sent, {sent.answered} answered")
+        for failure, count in sorted(sent.follow_up_failed.items()):
+            report(f"follow-ups failed: {count} ({failure})")
     report(f"results in {len(sent.files)} files: {', '.join(sorted(sent.files))}")
 
 
@@ -1654,8 +1864,9 @@ class FailureClass:
     safety: bool
 
 
-#: The failure classes a case may name, the seven reading found first (§3:7). A class
-#: found later is added here, with whether its property is one of §5:1's three.
+#: The failure classes a case may name: the seven reading found first (§3:7), and the
+#: follow-up's own (§6:2). A class found later is added here, with whether its property
+#: is one of §5:1's three.
 FAILURE_CLASSES: Final[dict[str, FailureClass]] = {
     "greeting_recap": FailureClass("a greeting answered with a recap", safety=False),
     "label_in_text": FailureClass("a prompt label in a claim or a note", safety=False),
@@ -1669,6 +1880,9 @@ FAILURE_CLASSES: Final[dict[str, FailureClass]] = {
     "unstated_detail": FailureClass("a detail the parts do not state", safety=False),
     "narrower_write_loses_fact": FailureClass(
         "a fact lost from current memory by a narrower write", safety=True
+    ),
+    "follow_up_unanchored": FailureClass(
+        "a follow-up point naming no passage of the instruction or the data", safety=False
     ),
 }
 
@@ -1928,8 +2142,11 @@ class Case:
         flags: The flags its prompt is rendered under.
         check: The code check it names, or :data:`READ`.
         params: The code check's parameters, or ``{"read": ...}`` for a read property.
-        messages: The call's request after the system message (§3:4).
-        tools: A planning call's offered tools, or ``None`` for a completion.
+        messages: The call's request after the system message (§3:4); for a
+            ``follow_up`` case, the followed call's request whole (§3:5).
+        tools: A planning call's offered tools, or ``None`` for a completion; for a
+            ``follow_up`` case, the followed round's.
+        followed: For a ``follow_up`` case, the call it follows; ``None`` for any other.
     """
 
     name: str
@@ -1943,6 +2160,7 @@ class Case:
     params: Mapping[str, object]
     messages: tuple[Message, ...]
     tools: tuple[OfferedTool, ...] | None
+    followed: Followed | None = None
 
     @property
     def safety(self) -> bool:
@@ -1953,6 +2171,23 @@ class Case:
     def set_name(self) -> str:
         """``development`` or ``held_out``."""
         return SETS[1] if self.held_out else SETS[0]
+
+
+@dataclass(frozen=True, slots=True)
+class Followed:
+    """The call a ``follow_up`` case follows (ADR-0337 §3:5).
+
+    Attributes:
+        prompt: The followed call's prompt.
+        flags: The flags it was rendered under, kept only as a record of where the case
+            came from; ``None`` where they are not known.
+        response: Its reply as text, for a completion, or a planning round's whole
+            response as pydantic-ai serialises it.
+    """
+
+    prompt: str
+    flags: Mapping[str, bool] | None
+    response: str | Mapping[str, object]
 
 
 class _CaseDefectError(Exception):
@@ -2000,13 +2235,14 @@ def read_cases(directory: Path, declared: Mapping[str, PromptDeclaration]) -> Ca
         if entry.name not in declared:
             reading.defects.append(f"{entry.name}/: names no prompt the package declares")
             continue
-        _read_prompt_directory(entry, declared[entry.name], reading)
+        _read_prompt_directory(entry, declared, reading)
     return reading
 
 
 def _read_prompt_directory(
-    directory: Path, declaration: PromptDeclaration, reading: CaseReading
+    directory: Path, declared: Mapping[str, PromptDeclaration], reading: CaseReading
 ) -> None:
+    declaration = declared[directory.name]
     named: set[str] = set()
     inputs: set[str] = set()
     for entry in sorted(directory.iterdir()):
@@ -2020,7 +2256,7 @@ def _read_prompt_directory(
         else:
             named |= _named_input(entry)
             try:
-                reading.cases.append(_read_case(entry, declaration))
+                reading.cases.append(_read_case(entry, declaration, declared))
             except _CaseDefectError as exc:
                 reading.defects.append(f"{where}: {exc}")
     for orphan in sorted(inputs - named):
@@ -2041,7 +2277,9 @@ def _named_input(path: Path) -> set[str]:
     return {named} if isinstance(named, str) else set()
 
 
-def _read_case(path: Path, declaration: PromptDeclaration) -> Case:
+def _read_case(
+    path: Path, declaration: PromptDeclaration, declared: Mapping[str, PromptDeclaration]
+) -> Case:
     """One case file, checked whole (§3:3-§3:5, §5:2).
 
     Returns:
@@ -2080,7 +2318,7 @@ def _read_case(path: Path, declaration: PromptDeclaration) -> Case:
         raise _CaseDefectError(f"samples is not a whole number of at least {least} (ADR-0337 §5:2)")
     flags = _case_flags(held.get("flags", {}), declaration)
     check, params = _case_property(held["property"], declaration.name)
-    messages, tools = _case_input(held["input"], path, declaration.name)
+    messages, tools, followed = _case_input(held["input"], path, declaration.name, declared)
     return Case(
         name=f"{declaration.name}/{path.stem}",
         prompt=declaration.name,
@@ -2093,6 +2331,7 @@ def _read_case(path: Path, declaration: PromptDeclaration) -> Case:
         params=params,
         messages=messages,
         tools=tools,
+        followed=followed,
     )
 
 
@@ -2178,9 +2417,9 @@ def _check_no_label(given: Mapping[str, object], prompt: str) -> None:
 
 
 def _case_input(
-    held: object, path: Path, prompt: str
-) -> tuple[tuple[Message, ...], tuple[OfferedTool, ...] | None]:
-    """A case's input, held in the case or in a JSON file beside it (§3:4)."""
+    held: object, path: Path, prompt: str, declared: Mapping[str, PromptDeclaration]
+) -> tuple[tuple[Message, ...], tuple[OfferedTool, ...] | None, Followed | None]:
+    """A case's input, held in the case or in a JSON file beside it (§3:4, §3:5)."""
     if not isinstance(held, dict):
         raise _CaseDefectError("input is not a table")
     if "file" in held:
@@ -2195,15 +2434,63 @@ def _case_input(
             raise _CaseDefectError(f"its input file {named} is not a JSON file beside it") from None
         if not isinstance(held, dict):
             raise _CaseDefectError(f"its input file {named} holds no JSON object")
+    if prompt == FOLLOW_UP:
+        return _follow_up_input(held, declared)
     allowed = {"messages", "tools"} if prompt == PLANNING else {"messages"}
     if set(held) != allowed:
         raise _CaseDefectError(f"the input of a {prompt} case holds exactly {sorted(allowed)}")
     messages = _case_messages(held["messages"])
     tools = None if prompt != PLANNING else _case_tools(held["tools"])
-    return messages, tools
+    return messages, tools, None
 
 
-def _case_messages(held: object) -> tuple[Message, ...]:
+def _follow_up_input(
+    held: Mapping[str, object], declared: Mapping[str, PromptDeclaration]
+) -> tuple[tuple[Message, ...], tuple[OfferedTool, ...] | None, Followed]:
+    """A ``follow_up`` case's input: the followed call's request whole, and its response.
+
+    It names the followed call's prompt and, as a record of where it came from, its flags;
+    holds that call's messages, its system message included, and a planning round's
+    offered tools; and holds its response, a completion's reply as text or a round's
+    whole response (ADR-0337 §3:5).
+    """
+    followed = held.get("followed")
+    if not isinstance(followed, dict) or not set(followed) <= {"prompt", "flags"}:
+        raise _CaseDefectError("input.followed is not a table of its prompt and its flags")
+    prompt = followed.get("prompt")
+    if not isinstance(prompt, str) or prompt not in declared or prompt == FOLLOW_UP:
+        raise _CaseDefectError("input.followed names no prompt a follow-up may follow")
+    flags = None if "flags" not in followed else _case_flags(followed["flags"], declared[prompt])
+    allowed = {"followed", "messages", "response"} | ({"tools"} if prompt == PLANNING else set())
+    if set(held) != allowed:
+        raise _CaseDefectError(
+            f"the input of a follow-up of a {prompt} call holds exactly {sorted(allowed)}"
+        )
+    messages = _case_messages(held["messages"], whole=True)
+    tools = None if prompt != PLANNING else _case_tools(held["tools"])
+    response = held["response"]
+    if prompt == PLANNING:
+        if not isinstance(response, dict) or not _one_response(response):
+            raise _CaseDefectError("input.response is not a planning round's whole response")
+        kept: str | Mapping[str, object] = cast("dict[str, object]", response)
+    elif isinstance(response, str) and response.strip():
+        kept = response
+    else:
+        raise _CaseDefectError("input.response is not the followed call's reply as text")
+    return messages, tools, Followed(prompt=prompt, flags=flags, response=kept)
+
+
+def _one_response(held: Mapping[str, object]) -> bool:
+    """Whether ``held`` is one model response as pydantic-ai serialises it to JSON."""
+    try:
+        read = ModelMessagesTypeAdapter.validate_python([held])
+    except ValidationError, TypeError, ValueError:
+        return False
+    return len(read) == 1 and isinstance(read[0], ModelResponse)
+
+
+def _case_messages(held: object, *, whole: bool = False) -> tuple[Message, ...]:
+    """A case's messages: after the system message, or ``whole``, holding exactly one."""
     if not isinstance(held, list) or not held:
         raise _CaseDefectError("input.messages is not a list of one message or more")
     messages: list[Message] = []
@@ -2216,12 +2503,17 @@ def _case_messages(held: object) -> tuple[Message, ...]:
             message = Message.model_validate(one)
         except ValidationError:
             raise _CaseDefectError(f"input message {number} is not a message") from None
-        if message.role in {Role.SYSTEM, Role.TOOL}:
+        if message.role is Role.TOOL or (message.role is Role.SYSTEM and not whole):
             raise _CaseDefectError(
                 f"input message {number} is a {message.role.value} message: the input is "
                 "the request after the system message (ADR-0337 §3:4)"
             )
         messages.append(message)
+    if whole and sum(1 for one in messages if one.role is Role.SYSTEM) != 1:
+        raise _CaseDefectError(
+            "a follow-up case's messages are the followed request whole, with its one "
+            "system message (ADR-0337 §3:5)"
+        )
     if messages[-1].role is not Role.USER:
         raise _CaseDefectError("the input ends on a message other than the user's")
     return tuple(messages)
@@ -2278,13 +2570,18 @@ class SuiteCall:
         case: The case.
         version: The version.
         sample: Which sample, from 1.
-        messages: The request: the rendered instruction, then the case's input.
+        messages: The request: the rendered instruction, then the case's input; for a
+            ``follow_up`` case of a completion, the followed request, its reply and the
+            rendered question; of a planning round, the followed request alone.
+        question: For a ``follow_up`` case of a planning round, the rendered question,
+            sent after the round's whole response (§3:5); ``None`` for any other.
     """
 
     case: Case
     version: SuiteVersion
     sample: int
     messages: tuple[Message, ...]
+    question: str | None = None
 
 
 def default_candidate(declaration: PromptDeclaration) -> Candidate:
@@ -2328,9 +2625,31 @@ def suite_versions(
     return (SuiteVersion(CANDIDATE, candidate), SuiteVersion(CONTROL, default))
 
 
-def suite_count(cases: Sequence[Case], versions: Mapping[str, tuple[SuiteVersion, ...]]) -> int:
-    """How many calls a run would make, samples included, counted before any is built (§4:4)."""
-    return sum(case.samples * len(versions[case.prompt]) for case in cases)
+def suite_count(
+    cases: Sequence[Case],
+    versions: Mapping[str, tuple[SuiteVersion, ...]],
+    *,
+    follow_up: bool = False,
+) -> int:
+    """How many calls a run would make, counted before any is built (§4:4).
+
+    Samples are included, and so is every follow-up that might be asked: one after each
+    sample of a case that is not itself a follow-up (:func:`asks_follow_up`).
+    """
+    return sum(
+        case.samples * len(versions[case.prompt]) * (2 if follow_up and asks_follow_up(case) else 1)
+        for case in cases
+    )
+
+
+def asks_follow_up(case: Case) -> bool:
+    """Whether a run naming the follow-up asks it after the case's samples.
+
+    Not after a ``follow_up`` case's: its reply is itself a follow-up's answer, and the
+    follow-up is asked about the stages' calls, as the hub asks it only of a call whose
+    given entry carries its prompt (ADR-0337 §8:4), which no follow-up has.
+    """
+    return case.followed is None
 
 
 def plan_suite(
@@ -2355,12 +2674,32 @@ def plan_suite(
             except ValueError:
                 msg = f"the case {case.name} cannot be rendered under its flags"
                 raise ReplayError(msg) from None
-            messages = (Message(role=Role.SYSTEM, content=instruction), *case.messages)
+            messages, question = _suite_request(case, instruction)
             calls.extend(
-                SuiteCall(case=case, version=version, sample=sample, messages=messages)
+                SuiteCall(
+                    case=case, version=version, sample=sample, messages=messages, question=question
+                )
                 for sample in range(1, case.samples + 1)
             )
     return calls
+
+
+def _suite_request(case: Case, instruction: str) -> tuple[tuple[Message, ...], str | None]:
+    """A case's request under a rendered instruction, and a round's follow-up question.
+
+    A case's instruction is its system message; a ``follow_up`` case's is its last user
+    message, after the followed request and its response (ADR-0337 §3:5, §6:3).
+    """
+    followed = case.followed
+    if followed is None:
+        return (Message(role=Role.SYSTEM, content=instruction), *case.messages), None
+    if isinstance(followed.response, str):
+        return (
+            *case.messages,
+            Message(role=Role.ASSISTANT, content=followed.response),
+            Message(role=Role.USER, content=instruction),
+        ), None
+    return case.messages, instruction
 
 
 @dataclass(slots=True)
@@ -2372,15 +2711,20 @@ class Tally:
     failed: Counter[str] = field(default_factory=Counter)
 
 
-async def send_suite(
+async def send_suite(  # noqa: PLR0913 — keyword-only past the calls, caller and results: the run, its clock and its follow-up
     calls: Sequence[SuiteCall],
     caller: Caller,
     results: Path,
     *,
     run: str,
     now: Callable[[], datetime] = _utcnow,
+    follow_up: FollowUp | None = None,
 ) -> dict[tuple[str, str], Tally]:
     """Send each sample once, judge it, and write it to the results file (§4:2, §4:6).
+
+    Where the run names the follow-up, it is asked after each recorded response of a
+    case that is not itself a follow-up, and its answer, or failure, is written into that
+    sample's line (ADR-0337 §7).
 
     Returns:
         Each case's tally under each version, by case name and role.
@@ -2407,6 +2751,10 @@ async def send_suite(
             "reason": reason,
             **outcome,
         }
+        if follow_up is not None and asks_follow_up(call.case):
+            asked = await ask_follow_up(follow_up, caller, call.messages, call.case.tools, outcome)
+            if asked is not None:
+                line["follow_up"] = asked
         _append_line(results, line)
     return tallies
 
@@ -2428,6 +2776,13 @@ def _judged(case: Case, reply: Reply | None) -> Judgement:
 async def _suite_outcome(call: SuiteCall, caller: Caller) -> tuple[dict[str, object], Reply | None]:
     """The reply, or the planning response whole, or the failure; and the reply as read."""
     try:
+        followed = call.case.followed
+        if call.question is not None and followed is not None and call.case.tools is not None:
+            response = cast("Mapping[str, object]", followed.response)
+            text = await caller.follow_up_round(
+                call.messages, call.case.tools, response, call.question
+            )
+            return {"reply": text}, completion_reply(call.case.prompt, text)
         if call.case.tools is None:
             text = await caller.complete(call.messages)
             return {"reply": text}, completion_reply(call.case.prompt, text)
@@ -2464,6 +2819,12 @@ def suite_result(call: SuiteCall, model: str) -> dict[str, object]:
         "samples": case.samples,
         "check": case.check,
         "read": case.params.get("read") if case.check == READ else None,
+        "followed": None
+        if case.followed is None
+        else {
+            "prompt": case.followed.prompt,
+            "flags": None if case.followed.flags is None else dict(case.followed.flags),
+        },
     }
 
 
@@ -2480,6 +2841,7 @@ class SuiteOptions:
     bound: int = DEFAULT_BOUND
     count_only: bool = False
     timeout: float = DEFAULT_TIMEOUT_SECONDS
+    follow_up: str | None = None
 
 
 def select_cases(
@@ -2569,6 +2931,7 @@ async def suite(
     """
     declared = declared_prompts()
     candidates = suite_candidates(options.candidates, declared)
+    follow_up = load_follow_up(options.follow_up, declared)
     reading = read_cases(options.cases, declared)
     cases = select_cases(reading, options, candidates, declared)
     versions = {
@@ -2576,8 +2939,8 @@ async def suite(
     }
     for prompt in sorted(set(candidates) - set(versions)):
         report(f"{prompt}: no case of this prompt is selected")
-    count = suite_count(cases, versions)
-    _report_suite_plan(cases, versions, count, options.bound, report)
+    count = suite_count(cases, versions, follow_up=follow_up is not None)
+    _report_suite_plan(cases, versions, count, options.bound, report, follow_up=follow_up)
     if count > options.bound:
         report(f"refused: {count} calls exceed the bound of {options.bound}")
         return 1
@@ -2592,7 +2955,7 @@ async def suite(
         caller = ModelCaller(options.model, timeout=options.timeout)
     run = f"{now().strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(3)}"
     results = _new_results_file(options.results, run)
-    tallies = await send_suite(calls, caller, results, run=run, now=now)
+    tallies = await send_suite(calls, caller, results, run=run, now=now, follow_up=follow_up)
     _report_suite(cases, versions, tallies, report)
     report(f"run {run}: {len(calls)} calls sent; results in {results}")
     return 0
@@ -2617,12 +2980,14 @@ def _new_results_file(directory: Path, run: str) -> Path:
     return path
 
 
-def _report_suite_plan(
+def _report_suite_plan(  # noqa: PLR0913 — what is printed of the plan, its count, its bound and its follow-up
     cases: Sequence[Case],
     versions: Mapping[str, tuple[SuiteVersion, ...]],
     count: int,
     bound: int,
     report: Callable[[str], None],
+    *,
+    follow_up: FollowUp | None = None,
 ) -> None:
     held_out = sum(1 for one in cases if one.held_out)
     report(
@@ -2636,7 +3001,11 @@ def _report_suite_plan(
         )
         alone = [one.role for one in versions[prompt]] == [CANDIDATE]
         report(f"{prompt}: {shown}" + (": the default itself, so no control" if alone else ""))
-    report(f"{count} calls to send, samples included (bound {bound})")
+    if follow_up is None:
+        report(f"{count} calls to send, samples included (bound {bound})")
+        return
+    report(f"follow-up after each response: {follow_up.label()}")
+    report(f"{count} calls to send, samples and follow-ups included (bound {bound})")
 
 
 def _report_suite(
@@ -2713,6 +3082,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     replaying.add_argument("--flag", action="append", default=[])
     replaying.add_argument("--count", action="store_true", help="count the calls and stop")
     replaying.add_argument("--timeout", type=_positive_float, default=DEFAULT_TIMEOUT_SECONDS)
+    replaying.add_argument(
+        "--samples",
+        type=_positive_int,
+        default=1,
+        help="how many times each call is sent for each candidate (ADR-0337 §5:4)",
+    )
+    _follow_up_argument(replaying)
     rerunning = commands.add_parser("rerun", help="rerun the observer over a copy (§7)")
     rerunning.add_argument("copy", type=Path)
     _model_and_bound(rerunning)
@@ -2732,9 +3108,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     running.add_argument("--results", type=Path, default=None)
     running.add_argument("--count", action="store_true", help="count the calls and stop")
     running.add_argument("--timeout", type=_positive_float, default=DEFAULT_TIMEOUT_SECONDS)
+    _follow_up_argument(running)
     deleting = commands.add_parser("delete", help="delete a copy (§3:6)")
     deleting.add_argument("copy", type=Path)
     return parser.parse_args(argv)
+
+
+def _follow_up_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--follow-up",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="FILE",
+        help="ask the follow-up after every response: the default, or a follow_up.txt",
+    )
 
 
 def _model_and_bound(parser: argparse.ArgumentParser) -> None:
@@ -2807,6 +3195,7 @@ def _run_async(
                 bound=arguments.bound,
                 count_only=arguments.count,
                 timeout=arguments.timeout,
+                follow_up=arguments.follow_up,
             ),
             report=report,
         )
@@ -2834,6 +3223,8 @@ def _run_async(
             bound=arguments.bound,
             count_only=arguments.count,
             timeout=arguments.timeout,
+            samples=arguments.samples,
+            follow_up=arguments.follow_up,
         ),
         report=report,
     )

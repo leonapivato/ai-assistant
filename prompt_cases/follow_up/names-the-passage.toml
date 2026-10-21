@@ -1,0 +1,16 @@
+# The follow-up asked of an understanding call that answered a question about a channel
+# window. Each point it makes is a lead only where it can be found again: it names the
+# passage of the instruction it read, or the field or label of the data. A point that
+# names nothing, or calls missing what the request plainly gives, points nowhere.
+prompt = "follow_up"
+guards = "follow_up_unanchored"
+came_from = "2026-10-21"
+set = "development"
+samples = 1
+
+[property]
+check = "read"
+read = "Every point names the passage of the instruction, or the field or label of the data, that it is about, and none says the request lacked something it gives."
+
+[input]
+file = "names-the-passage.json"
