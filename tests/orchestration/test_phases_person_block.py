@@ -38,8 +38,10 @@ from ai_assistant.testing import (
 from ai_assistant.testing.memories import memory, said_support
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ai_assistant.core.protocols import PersonModelStore
-    from ai_assistant.core.types import Memory, PersonModel
+    from ai_assistant.core.types import Memory, Message, PersonModel
 
 pytestmark = pytest.mark.anyio
 
@@ -173,3 +175,44 @@ async def test_an_understanding_run_again_is_given_no_memory_forgotten_since() -
     assert again.profile == first.profile
     assert counting.reads == 1
     assert state.person_block is again
+
+
+async def test_a_pin_understanding_was_shown_is_inherited_though_dropped_before_planning() -> None:
+    """ADR-0309 §5:10: forgotten before the first round, it was still given to understanding."""
+    memory_store, _, blocks = await _wired(ABOUT_ADA)
+
+    def forgets_while_understanding(messages: Sequence[Message]) -> str:
+        # The memory is forgotten after understanding was shown it, before planning: the
+        # fake's own record and its walk key, as its delete removes them.
+        memory_store._records.pop(ABOUT_ADA.id, None)
+        memory_store._keys.pop(ABOUT_ADA.id, None)
+        return STATED_PROPOSAL
+
+    completer = FakeToolCallingCompleter()
+    harness = phases_harness(
+        completer,
+        memory=memory_store,
+        understanding=understanding_stage(model=FakeModelProvider(forgets_while_understanding)),
+        person_blocks=blocks,
+    )
+
+    _, episode = await chat_turn(harness, "What should I cook tonight?")
+
+    assert _planned(completer)["person"]["kept_in_mind"] == "none: they keep nothing in mind yet"
+    assert episode.placement.reach is PlacementReach.OWNER
+
+
+async def test_a_pin_understanding_was_shown_is_inherited_where_no_round_is_planned() -> None:
+    memory_store, _, blocks = await _wired(ABOUT_ADA)
+    completer = FakeToolCallingCompleter()
+    harness = phases_harness(
+        completer,
+        memory=memory_store,
+        understanding=understanding_stage(model=FakeModelProvider("not json")),
+        person_blocks=blocks,
+    )
+
+    _, episode = await chat_turn(harness, "What should I cook tonight?")
+
+    assert completer.calls == []
+    assert episode.placement.reach is PlacementReach.OWNER
