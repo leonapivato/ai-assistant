@@ -364,7 +364,8 @@ person whose pins fill the budget sees, on the panel, which style memories were 
 
 > **Normative.** Code assembles one **person block** for an activation's person, from the
 > person-model store and the memory store, with no model call, once per activation before
-> understanding. The same block reaches every planning round of that activation.
+> understanding. The same block reaches every planning round of that activation, except as
+> §7:10 drops from it.
 
 > **Normative.** Understanding receives the person block's five fields and its pinned
 > memories, and nothing else of the person model.
@@ -400,6 +401,10 @@ person whose pins fill the budget sees, on the panel, which style memories were 
 > labels a memory (ADR-0307 §5:1, ADR-0328 §15:5), and only where that memory is current,
 > does not rest on outside content (ADR-0328 §15:6) and passes the record rule (§6:5). Every
 > other pin suggestion is shown on the panel alone.
+
+> **Normative.** Before each planning round after the first, code drops from the block every
+> memory the memory store no longer holds, so a memory forgotten while the activation runs
+> reaches no later request.
 
 Within a stage's data, the person block comes before the parts that change from round to
 round, so that it caches across rounds
@@ -564,31 +569,34 @@ naturally if it comes up.
 
 The lanes, each after this decision merges `Accepted`:
 
-1. **The contract, with its primary production implementation (ADR-0137 §2):**
+1. **The contract, with its first caller (ADR-0137 §2):**
    - `PersonModelStore` and its types;
    - the conformance suite and the canonical fake;
-   - the SQLite store in `memory/`;
-   - and, in `app/`, creating the owner's person and the seed (§3:7).
-2. **The `pinned` part and origin:** in `core/types.py` and the memory store, as a schema
-   change with its upgrade and test (ADR-0326 §4:1, §4:2).
-3. **Orchestration:**
-   - resolving the person (§2);
-   - the person block for understanding and planning (§6, §7);
-   - the three capabilities and their *needs you* (§8:4–§8:8);
-   - and the person's zone on planning's clock (§3:6).
-4. **The observer (§9).**
-5. **The engine's members, the wire and the panels (§8:1–§8:3).**
-6. **The quiet windows in the person's zone (§3:6).** The dispatcher may fold this into
-   lane 3.
+   - and, in `orchestration/`, resolving the person and assembling the person block for
+     understanding and planning (§2, §6, §7), built and tested against the fake.
 
-> **Normative.** Lane 1 merges before lanes 3, 4, 5 and 6, and lane 2 before lane 4. Each
+   The block is the caller whose demands shape the contract: it reads every part of it the
+   models see, follows pins through successors, applies the budget and the record rule, and
+   leaves out what rests on outside content.
+2. **The SQLite store in `memory/`:** creating the owner's person and the seed (§3:7) and
+   the wiring, in `app/`, with the store added to the upgrade check (§10:6).
+3. **The `pinned` part and origin:** in `core/types.py` and the memory store, as a schema
+   change with its upgrade and test (ADR-0326 §4:1, §4:2).
+4. **Orchestration's other consumers:** the three capabilities and their *needs you*
+   (§8:4–§8:8), and the person's zone on planning's clock (§3:6).
+5. **The observer (§9).**
+6. **The engine's members, the wire and the panels (§8:1–§8:3).**
+7. **The quiet windows in the person's zone (§3:6).** The dispatcher may fold this into
+   lane 2.
+
+> **Normative.** Lane 1 merges before lanes 2, 4, 5, 6 and 7, and lane 3 before lane 5. Each
 > lane that consumes the contract is briefed after lane 1 has merged (ADR-0137 §4:1).
 
 > **Normative.** The person model goes live on a person's hub in one deploy, after the last
 > of its lanes has merged. No build that offers pinning, on the panel or as a capability, is
 > deployed to a person's hub before the observer's pin pass (§9:6) is in it.
 
-> **Normative.** Lane 3 adds synthetic prompt cases (ADR-0337 §3) for at least three things:
+> **Normative.** Lane 1 adds synthetic prompt cases (ADR-0337 §3) for at least three things:
 > a greeting answered without reciting the profile, a pinned memory used without being
 > announced, and a style memory that does not override a rule.
 
