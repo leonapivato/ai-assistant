@@ -1128,13 +1128,28 @@ class FakeAssistantEngine:
     # surface rather than two of the slot. Arguments are validated first, then a fake
     # with no assembly refuses as a hub with the switch off does.
 
-    async def person_model(self, person_id: NonBlankEncodableText) -> PersonModelView | None:
+    async def person_model(
+        self,
+        person_id: NonBlankEncodableText,
+        *,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> PersonModelView | None:
         """One person's model, as the About you panel shows it (ADR-0338 §8:1)."""
         named = non_blank_text(person_id, name="person_id")
-        check_arguments("person_model", max_bytes=self._max_payload_bytes, person_id=named)
-        self.calls.append(("person_model", {"person_id": named}))
+        page_argument(limit, name="limit")
+        page_argument(offset, name="offset")
+        check_arguments(
+            "person_model",
+            max_bytes=self._max_payload_bytes,
+            person_id=named,
+            limit=limit,
+            offset=offset,
+        )
+        self.calls.append(("person_model", {"person_id": named, "limit": limit, "offset": offset}))
         blocks = person_panel.wired(self.person_blocks)
-        return self._checked(await person_panel.person_model_view(blocks, named), "person_model")
+        view = await person_panel.person_model_view(blocks, named, limit=limit, offset=offset)
+        return self._checked(view, "person_model")
 
     async def profile_changes(
         self,

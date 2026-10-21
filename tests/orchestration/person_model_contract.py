@@ -156,7 +156,7 @@ async def _held(subject: PersonModelSubject, *records: Memory) -> None:
 
 
 async def _read(subject: PersonModelSubject) -> PersonModelView:
-    view = await subject.engine.person_model(OWNER_PERSON_ID)
+    view = await subject.engine.person_model(OWNER_PERSON_ID, limit=20)
     assert view is not None
     return view
 
@@ -330,9 +330,14 @@ class PersonModelContract:
 
         assert [one.memory_id for one in view.kept] == ["m:long"]
         assert view.left_out == (
-            LeftOutMemory(memory_id="m:wide", pinned=False, reason=LeftOutReason.BUDGET),
-            LeftOutMemory(memory_id="m:tiny", pinned=False, reason=LeftOutReason.BUDGET),
+            LeftOutMemory(
+                memory_id="m:wide", content="y" * 20, pinned=False, reason=LeftOutReason.BUDGET
+            ),
+            LeftOutMemory(
+                memory_id="m:tiny", content="z", pinned=False, reason=LeftOutReason.BUDGET
+            ),
         )
+        assert view.left_out_total == len(view.left_out)
 
     async def test_a_memory_resting_on_outside_content_is_left_out_for_it(
         self, person_model_subject: PersonModelSubject
@@ -351,7 +356,12 @@ class PersonModelContract:
 
         assert [one.memory_id for one in view.kept] == ["m:diet"]
         assert view.left_out == (
-            LeftOutMemory(memory_id="m:out", pinned=True, reason=LeftOutReason.OUTSIDE_CONTENT),
+            LeftOutMemory(
+                memory_id="m:out",
+                content="The shop closes at six, its page says.",
+                pinned=True,
+                reason=LeftOutReason.OUTSIDE_CONTENT,
+            ),
         )
 
     async def test_a_pin_shows_its_memorys_current_successor(
@@ -464,14 +474,67 @@ class PersonModelContract:
             (
                 one.suggestion.proposed.field or one.suggestion.proposed.memory_id,
                 one.rests_on_outside_content,
+                one.content,
             )
             for one in view.suggestions
         ] == [
-            ("m:out", True),
-            ("m:diet", False),
-            (ProfileField.NAME, True),
-            (ProfileField.ADDRESS, False),
+            ("m:out", True, "The newsletter says Robin likes jazz."),
+            ("m:diet", False, "Eats no meat."),
+            (ProfileField.NAME, True, None),
+            (ProfileField.ADDRESS, False, None),
         ]
+        assert view.suggestions_total == 4
+
+    async def test_a_pin_suggestion_is_worded_by_the_id_it_names_verbatim(
+        self, person_model_subject: PersonModelSubject
+    ) -> None:
+        """§4:3: what the panel shows is what accepting pins, padded id or not (§10:4)."""
+        subject = person_model_subject
+        await _held(subject, fact(" m:diet ", "Eats no meat."), fact("m:diet", "Eats meat."))
+        recorded = await subject.people.record_suggestion(
+            OWNER_PERSON_ID, pin_suggestion(" m:diet ")
+        )
+        assert recorded.record_id is not None
+
+        (shown,) = (await _read(subject)).suggestions
+        await subject.engine.accept_person_suggestion(
+            OWNER_PERSON_ID, suggestion_id=recorded.record_id
+        )
+
+        assert shown.content == "Eats no meat."
+        assert [(one.memory_id, one.content) for one in (await _read(subject)).kept] == [
+            (" m:diet ", "Eats no meat.")
+        ]
+
+    async def test_the_growing_lists_are_paged_and_every_entry_stays_reachable(
+        self, person_model_subject: PersonModelSubject
+    ) -> None:
+        """However many there are, each entry and its control is reached by bounded reads."""
+        subject = person_model_subject
+        many = 30
+        for index in range(many):
+            await subject.people.record_suggestion(
+                OWNER_PERSON_ID, field_suggestion(ProfileField.NAME, f"Robin {index}")
+            )
+
+        seen: list[str] = []
+        offset = 0
+        while True:
+            view = await subject.engine.person_model(OWNER_PERSON_ID, limit=4, offset=offset)
+            assert view is not None
+            assert view.suggestions_total == many
+            if not view.suggestions:
+                break
+            seen += [one.suggestion.id for one in view.suggestions]
+            offset += 4
+
+        assert len(set(seen)) == many
+        for one in seen:
+            dismissed = await subject.engine.dismiss_person_suggestion(
+                OWNER_PERSON_ID, suggestion_id=one
+            )
+            assert _write(dismissed) == (_WRITTEN, None)
+        assert (await _read(subject)).suggestions_total == 0
 
     # --- the fields (§3) ---------------------------------------------------------
 
@@ -852,6 +915,25 @@ class PersonModelContract:
 
         assert _write(accepted) == (_REFUSED, PersonModelRefusal.UNKNOWN_RECORD)
         assert _write(dismissed) == (_REFUSED, PersonModelRefusal.UNKNOWN_RECORD)
+
+    async def test_accepting_an_id_not_pending_writes_nothing(
+        self, person_model_subject: PersonModelSubject
+    ) -> None:
+        """No pin is made but through the checked pin: an unknown or decided id writes nothing."""
+        subject = person_model_subject
+        await _held(subject, fact("m:long", "x" * (PERSON_BUDGET - 5)), fact("m:more", "y" * 10))
+        await subject.engine.pin_memory(OWNER_PERSON_ID, memory_id="m:long")
+        recorded = await subject.people.record_suggestion(OWNER_PERSON_ID, pin_suggestion("m:more"))
+        assert recorded.record_id is not None
+        await subject.people.dismiss_suggestion(OWNER_PERSON_ID, recorded.record_id)
+        before = await subject.people.export()
+
+        decided = await subject.engine.accept_person_suggestion(
+            OWNER_PERSON_ID, suggestion_id=recorded.record_id
+        )
+
+        assert _write(decided) == (_REFUSED, PersonModelRefusal.ALREADY_DECIDED)
+        assert await subject.people.export() == before
 
     async def test_setting_a_field_to_a_suggestions_value_accepts_it(
         self, person_model_subject: PersonModelSubject
