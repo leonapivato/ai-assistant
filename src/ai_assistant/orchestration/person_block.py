@@ -46,6 +46,7 @@ field's value or a memory's words (ADR-0275 §8).
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
@@ -240,6 +241,7 @@ class PersonBlocks:
         self._memory = memory
         self._budget = budget_chars
         self._suggestions = suggestions
+        self._pinning: dict[str, asyncio.Lock] = {}
 
     @property
     def store(self) -> PersonModelStore:
@@ -255,6 +257,23 @@ class PersonBlocks:
     def budget_chars(self) -> int:
         """The kept-in-mind slot's budget, which a pin is checked against (ADR-0338 §6:3)."""
         return self._budget
+
+    def pinning(self, person_id: str) -> asyncio.Lock:
+        """The lock a person's pins are changed under, by every caller through this assembly.
+
+        A pin is refused where it would take the pins' wordings past the budget, and the
+        store leaves that check to its caller (ADR-0338 §6:3), so a caller holds this
+        lock from its read of the person's pins to its write: two pins checked at once
+        cannot both pass a budget only one of them fits. The hub is one process per data
+        directory, so one lock per person here serializes every such caller.
+
+        Args:
+            person_id: Whose pins.
+
+        Returns:
+            That person's lock.
+        """
+        return self._pinning.setdefault(person_id, asyncio.Lock())
 
     async def current_ends(self, memory_ids: Iterable[str]) -> dict[str, Memory]:
         """Each memory's chain's current end, where it has one (ADR-0338 §4:8).

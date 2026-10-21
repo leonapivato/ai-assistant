@@ -372,9 +372,11 @@ class PersonModelCalls:
         if capability == SET_PROFILE_CAPABILITY:
             return await self._set(person, parameters, act)
         if capability == PIN_CAPABILITY:
-            return await self._pin(person, _memory_id(parameters), act)
+            async with self._blocks.pinning(person):
+                return await self._pin(person, _memory_id(parameters), act)
         if capability == UNPIN_CAPABILITY:
-            return await self._unpin(person, _memory_id(parameters))
+            async with self._blocks.pinning(person):
+                return await self._unpin(person, _memory_id(parameters))
         return _not_done(_MALFORMED, "not_a_person_model_call")
 
     async def _set(
@@ -400,7 +402,8 @@ class PersonModelCalls:
         the caller: the memory is read live and pinned only where it is current, and the
         wordings of the memories the person's standing pins show, each once, together
         with the new one's where it is not among them already, must stay within the
-        slot's budget.
+        slot's budget. The caller holds the person's pinning lock from the read to the
+        write, so no other pin is checked against the same pins meanwhile.
         """
         live = await self._blocks.memory.get_many([memory_id])
         record = live.get(memory_id)
@@ -425,7 +428,10 @@ class PersonModelCalls:
         """Remove every standing pin that shows the memory, erasing nothing (§4:7).
 
         Planning is shown a pin's chain's current end (§4:8), so the memory it names is
-        the one a pin was made on or the current successor a pin's chain reached.
+        the one a pin was made on or the current successor a pin's chain reached. Where
+        more than one pin shows it and one cannot be removed after another was, the call
+        is not done, since a pin still shows the memory, and its reason says that some
+        were removed; an unpin is safe to repeat, so asking again finishes it.
         """
         model = await self._blocks.store.read(person)
         if model is None:
@@ -440,11 +446,27 @@ class PersonModelCalls:
         ]
         if not showing:
             return _done(_NOT_PINNED)
-        for pin in showing:
-            written = await self._blocks.store.remove_pin(person, pin.id)
+        for removed, pin in enumerate(showing):
+            try:
+                written = await self._blocks.store.remove_pin(person, pin.id)
+            except PersonModelStoreError:
+                if not removed:
+                    raise
+                return _partly(removed, len(showing))
             if written.kind is PersonModelWriteKind.REFUSED:
-                return _refused(written)
+                return _partly(removed, len(showing)) if removed else _refused(written)
         return _done(_UNPINNED)
+
+
+def _partly(removed: int, showing: int) -> NotDone:
+    """An unpin that removed some of the pins showing its memory, and not the rest."""
+    _log.warning("person_model_call_not_done", stage="acting", reason="partly_unpinned")
+    return NotDone(
+        reason=(
+            f"{removed} of the {showing} pins showing it were removed and the rest could "
+            "not be, so it is still pinned; unpinning it again finishes it"
+        )
+    )
 
 
 def _approved_act(call: ToolCall, asked: AskedCall) -> tuple[str, PersonModelAct] | NotDone:
