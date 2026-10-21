@@ -2241,13 +2241,16 @@ def _window_records(given: PhasePass) -> tuple[MemoryRecord, ...]:
     return () if fetched is None or fetched.episodes is None else fetched.episodes
 
 
-def _hold_given(given: PhasePass, working: PhaseWorking) -> None:
+def _hold_given(given: PhasePass, working: PhaseWorking, state: ActivationState | None) -> None:
     """Hold what the stages before planning gave the activation (ADR-0309 §5:10).
 
     The windows' records; the first recall run's kept records as the understanding phase
-    fetched them; and the episodes of the candidate stories it was shown (ADR-0300
-    §6:1). Held again on each call, which holds each record once.
+    fetched them; the episodes of the candidate stories it was shown (ADR-0300 §6:1);
+    and every memory of the person block a stage was shown (ADR-0338 §7:1), as the
+    activation's state holds them. Held again on each call, which holds each record once.
     """
+    if state is not None:
+        working.supplied.obtained(state.person_given)
     working.supplied.windows(_window_records(given))
     fetched = given.understanding_fetch
     if fetched is not None:
@@ -2899,7 +2902,7 @@ class PhasePath:
                 state.response = working.outcome()
                 # ADR-0309 §5:10: taken once, here, over every round. The windows are
                 # held again in case no round was planned to hold them.
-                _hold_given(given, working)
+                _hold_given(given, working, state)
                 state.facts = CaptureFacts(
                     modality=Modality.TEXT,
                     supplied_withheld=working.supplied.withheld(given.supply),
@@ -2996,7 +2999,7 @@ class PhasePath:
         working.fetched_resting_on_outside(outside)
         if stories is not None:
             working.notes.update((one.note_id, one) for one in _shown_notes(stories))
-        _hold_given(given, working)
+        _hold_given(given, working, active_state())
         if (state := active_state()) is not None:
             # ADR-0217 §3:12: a belief this round remembers is produced over what
             # planning has been given so far, so it is placed by that supply.
@@ -3048,16 +3051,17 @@ class PhasePath:
         activation runs reaches no later request. ``None`` where the activation has no
         block.
 
-        Every memory the block held before the drop was given to the activation —
-        understanding was shown its pins, and an earlier round the rest — so each is
-        held among what the activation was given, and the episode inherits its
-        placement (ADR-0309 §5:10, ADR-0217 §3) whether or not it is dropped later.
+        What this round is shown of the block is held on the state beside what
+        understanding was shown, and both among what the activation was given, so the
+        episode inherits their placement (ADR-0309 §5:10, ADR-0217 §3) whatever is
+        dropped later.
         """
         state = active_state()
         if state is None or state.person_block is None:
             return None
-        working.supplied.obtained(state.person_block.memories)
         state.person_block = await still_held(state.person_block, self._memory)
+        state.gave_person_memories(state.person_block.memories)
+        working.supplied.obtained(state.person_given)
         return state.person_block
 
     async def _pending(

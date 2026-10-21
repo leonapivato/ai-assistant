@@ -53,6 +53,7 @@ if TYPE_CHECKING:
         ActivationUnderstanding,
         ChannelInput,
         EpisodicMemory,
+        Memory,
         Modality,
         PlanningLabel,
         PlanningRound,
@@ -237,6 +238,11 @@ class ActivationState:
     person_block: PersonBlock | None = field(default=None, init=False)
     #: Whether the block's assembly was made, whatever it gave: it is made once.
     person_block_assembled: bool = field(default=False, init=False)
+    #: Every memory of the person block the activation was given, to understanding or to
+    #: a planning round, kept whatever is dropped from the block later (§7:10): what
+    #: capture's placement inherits from (ADR-0309 §5:10, ADR-0217 §3), even where no
+    #: round is planned.
+    person_given: tuple[Memory, ...] = field(default=(), init=False)
     #: The finalization reading was taken (ADR-0280 §6:2): an activation the
     #: controller never ended gains its end entry there, so for a stop it has ended
     #: from that reading on, whether or not the record carries the entry yet.
@@ -245,6 +251,15 @@ class ActivationState:
     #: How many inputs each recorded understanding version covers: those the activation
     #: held when the stage that recorded it began (ADR-0332 §3:9, §3:10).
     _covered: dict[int, int] = field(default_factory=dict, init=False, repr=False)
+
+    def gave_person_memories(self, memories: Sequence[Memory]) -> None:
+        """Hold memories of the person block the activation was given (ADR-0338 §7:1).
+
+        Args:
+            memories: What a stage was shown of the block, each held once.
+        """
+        held = {id(one) for one in self.person_given}
+        self.person_given = (*self.person_given, *(one for one in memories if id(one) not in held))
 
     @property
     def ended(self) -> bool:

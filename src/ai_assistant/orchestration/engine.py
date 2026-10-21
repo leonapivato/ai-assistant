@@ -6755,6 +6755,10 @@ class Engine:
             # §7:10, for an understanding run again on joined input as for a planning
             # round: a memory forgotten since the block was assembled reaches no request.
             state.person_block = await still_held(state.person_block, self._memory)
+        if state.person_block is not None:
+            # ADR-0309 §5:10: what understanding is shown of the block is supply the
+            # episode's placement inherits from, whether or not a round is planned.
+            state.gave_person_memories(state.person_block.pinned)
         return state.person_block
 
     def _recorded_understanding(
