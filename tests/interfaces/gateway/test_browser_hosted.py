@@ -69,6 +69,11 @@ pytestmark = [
 _STREAMED = ("/deliveries", "/chat/follow")
 
 
+def _path(route: Route) -> str:
+    """The door path a routed request asks for, without its query."""
+    return route.request.url.removeprefix(DOOR_ORIGIN).split("?")[0]
+
+
 @dataclass
 class Door:
     """The fake edge in front of one gateway's hosted listener, and the page behind it.
@@ -92,6 +97,8 @@ class Door:
         hold_exchange: Set, an exchange waits on it before it is forwarded, so a case
             can make a second refusal arrive while one is out.
         held: The stream requests held open.
+        stream_held: Set each time a stream request is held, so a case can wait for one
+            that is not yet.
         forwards: Every forward's task, so a case can wait out one that its door was
             closed under.
     """
@@ -110,6 +117,7 @@ class Door:
     swap_cookie: str | None = None
     hold_exchange: asyncio.Event | None = None
     held: list[Route] = field(default_factory=list)
+    stream_held: asyncio.Event = field(default_factory=asyncio.Event)
     forwards: list[asyncio.Task[Any]] = field(default_factory=list)
 
     async def forward(self, route: Route) -> None:
@@ -120,9 +128,10 @@ class Door:
         assert task is not None
         self.forwards.append(task)
         request = route.request
-        path = request.url.removeprefix(DOOR_ORIGIN).split("?")[0]
+        path = _path(route)
         if path in _STREAMED:
             self.held.append(route)
+            self.stream_held.set()
             return
         headers = dict(request.headers)
         headers["host"] = DOOR
@@ -830,6 +839,34 @@ async def test_a_forward_still_out_when_the_door_closes_fails_no_later_case(
 
     after = await gateway_browser.new_context()
     await after.close()
+
+
+async def test_a_stream_held_when_the_door_closes_is_answered_by_its_teardown(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Issue #3175: a stream the door was still holding when its case ended leaves no
+    handling of it pending once the door is gone.
+
+    A held stream's callback returns without answering, so Playwright's handling of
+    its request waits on an answer. Left unanswered, that handling is cancelled only
+    when the run's loop closes — after every case — where, with the door's route
+    already gone, Playwright's clean-up of it raises into the connection's kept error.
+    No case can reach that moment — cancelling the handling from inside a case keeps no
+    error — so this one asserts what prevents it: each stream held at the close has been
+    answered. **Answering a route a second time is refused**
+    ("Route is already handled!"), and Playwright refuses it exactly when the handling
+    has been given its answer, so the refusal is that check made through the public API.
+    """
+    async with through_the_door(gateway_browser, tmp_path) as door:
+        await _chat_loaded(door)
+        # Both streams, the page's requests for them having reached the forward.
+        while {_path(route) for route in door.held} != set(_STREAMED):
+            door.stream_held.clear()
+            await door.stream_held.wait()
+
+    for route in door.held:
+        with pytest.raises(PlaywrightError, match="Route is already handled"):
+            await route.abort()
 
 
 async def test_the_page_never_holds_an_assertion(gateway_browser: Browser, tmp_path: Path) -> None:
