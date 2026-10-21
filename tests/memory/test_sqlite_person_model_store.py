@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import sqlite3
 import stat
 import threading
@@ -429,11 +430,52 @@ async def test_a_corrupt_row_is_the_seams_error(tmp_path: Path, statement: str) 
         store.close()
 
 
-@pytest.mark.parametrize("zone", ["é" * 200, "a" * 200], ids=["non-ascii", "ascii"])
-async def test_a_zone_name_the_file_system_refuses_is_an_invalid_value(
-    tmp_path: Path, zone: str
+async def test_a_zone_lookup_that_raises_oserror_is_an_invalid_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§3:2: a name too long for a path is refused as a value, never raised as OSError."""
+    """§3:2, #3367: a lookup the file system refuses (ENAMETOOLONG) is no zone.
+
+    The `OSError` is injected, since whether a given name raises it is the file
+    system's to decide (its ``NAME_MAX``); the case below holds real names.
+    """
+
+    def refused_by_the_file_system(key: str) -> None:
+        raise OSError(errno.ENAMETOOLONG, "File name too long", key)
+
+    store = _open(tmp_path / "person_model.db")
+    try:
+        before = await store.export()
+        monkeypatch.setattr(
+            "ai_assistant.memory.person_model_store.ZoneInfo", refused_by_the_file_system
+        )
+
+        written = await store.set_field(
+            OWNER_PERSON_ID, ProfileField.TIME_ZONE, "Europe/Lisbon", act=PANEL
+        )
+        suggested = await store.record_suggestion(
+            OWNER_PERSON_ID, field_suggestion(ProfileField.TIME_ZONE, "Europe/Lisbon")
+        )
+
+        assert written.refusal is PersonModelRefusal.INVALID_VALUE
+        assert suggested.refusal is PersonModelRefusal.INVALID_VALUE
+        assert await store.export() == before
+    finally:
+        store.close()
+    with pytest.raises(ValueError, match="seed"):
+        _open(tmp_path / "seeded.db", seed_time_zone="Europe/Lisbon")
+
+
+@pytest.mark.parametrize(
+    "zone", ["é" * 200, "a" * 200], ids=["400-bytes-over-255", "200-bytes-under-255"]
+)
+async def test_a_long_zone_name_is_an_invalid_value(tmp_path: Path, zone: str) -> None:
+    """§3:2: refused as a value whichever exception the platform's lookup raises for it.
+
+    Both names are within the binding's 200-character bound, so both reach the lookup.
+    Under a 255-byte ``NAME_MAX`` the 400-byte name is refused there as ENAMETOOLONG
+    and the 200-byte one as an unknown zone; the `OSError` branch itself is held,
+    on any file system, by the injected case above.
+    """
     store = _open(tmp_path / "person_model.db")
     try:
         before = await store.export()
