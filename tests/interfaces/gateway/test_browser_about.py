@@ -609,7 +609,8 @@ async def test_a_save_keeps_what_was_typed_in_other_fields_and_while_it_was_sent
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
     """Every write reads the panel again; a draft never sent survives it (adversarial
-    review, round 1), and so does one typed while the write was in flight."""
+    review, round 1), and so does one typed while the write was in flight, whose box
+    keeps the keyboard and its caret through the rebuild (round 10)."""
     loop = asyncio.get_running_loop()
     release: asyncio.Future[None] = loop.create_future()
 
@@ -636,6 +637,11 @@ async def test_a_save_keeps_what_was_typed_in_other_fields_and_while_it_was_sent
         await expect(page.locator("#field-name")).to_have_value("Robin")
         await expect(page.locator("#field-language")).to_have_value("Português")
         await expect(page.locator("#field-address")).to_have_value("Rob")
+        await expect(page.locator("#change-list > .about-row")).to_have_count(1)
+        await expect(page.locator("#field-address")).to_be_focused()
+        await page.keyboard.type("by")
+        await expect(page.locator("#field-address")).to_have_value("Robby")
+        await expect(page.locator("#field-name")).to_have_value("Robin")
         held = await people.read(OWNER_PERSON_ID)
         assert held is not None
         assert (held.profile.name, held.profile.language, held.profile.address) == (

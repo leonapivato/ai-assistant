@@ -5247,10 +5247,31 @@ function renderProfile(profile) {
     }
   });
   const fields = el("profile-fields");
+  // **The box the person is in when the forms are built again keeps the keyboard, and
+  // its caret** (adversarial review, rounds 9 and 10): the box is replaced, by id, at the
+  // instant it is rebuilt, so the focus goes neither to the top of the page, losing what
+  // is typed meanwhile, nor back to a box saved earlier, while another is being typed in.
+  const active = document.activeElement;
+  const kept =
+    active !== null && active.id !== "" && fields.contains(active)
+      ? {
+          id: active.id,
+          start: active.selectionStart,
+          end: active.selectionEnd,
+          direction: active.selectionDirection,
+        }
+      : null;
   clearNode(fields);
   PROFILE_FIELDS.forEach((spec) =>
     renderField(fields, spec, profile[spec.field], drafts[spec.field])
   );
+  const again = kept === null ? null : el(kept.id);
+  if (again !== null) {
+    again.focus();
+    if (typeof kept.start === "number" && typeof kept.end === "number") {
+      again.setSelectionRange(kept.start, kept.end, kept.direction || "none");
+    }
+  }
 }
 
 // One field's form: its box holds the draft where there is one, and otherwise the value
@@ -5451,10 +5472,6 @@ async function aboutEdit(path, payload, act, landed) {
     return;
   }
   const era = sessionEra;
-  // The panel is built again after the write, so the control the person acted from is
-  // replaced; the focus goes back to its successor, by id, so a keyboard is not sent
-  // back to the top of the page.
-  const focused = document.activeElement === null ? "" : document.activeElement.id;
   const lock = takeWriteLock(half, era, true);
   try {
     const asked = Object.assign({ person_id: OWNER_PERSON_ID }, payload);
@@ -5479,18 +5496,9 @@ async function aboutEdit(path, payload, act, landed) {
     if (body.off !== true && editLanded(body.edit) && landed !== undefined) {
       landed();
     }
-    // The read is started, and its run counted, before it is waited on.
-    const reading = openAbout(true);
-    const run = aboutRuns.current;
-    await reading;
-    // **Only the latest read, in its own session, with nothing focused since, puts the
-    // focus back** (adversarial review, round 9): a read overtaken by a later edit's
-    // would otherwise move the keyboard out of the box the person is now typing in.
-    const unfocused = document.activeElement === null || document.activeElement === document.body;
-    const again = focused === "" ? null : el(focused);
-    if (again !== null && run === aboutRuns.current && sameSession(half, era) && unfocused) {
-      again.focus();
-    }
+    // The panel is built again, and the box the person is in keeps the keyboard
+    // (`renderProfile`).
+    await openAbout(true);
   } catch (_) {
     // Not this session's condition to report (#2404).
     if (!sameSession(half, era)) {
