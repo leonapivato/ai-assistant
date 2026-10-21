@@ -1655,6 +1655,30 @@ async def test_a_configured_hub_that_may_not_open_its_agent_socket_stays_down(
     assert code == EXIT_DEPLOYMENT
 
 
+async def test_a_configured_hub_its_agent_refuses_by_policy_stays_down(
+    settings: Settings,
+    wired: dict[str, list[Any]],
+    engine: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent socket that answered with a refusal no restart changes — the local API
+    declining the hub's user, or a peer ADR-0131 §7 cannot trust, or a platform with
+    no peer-credential call — keeps ADR-0083 §5's ``78`` (#3171)."""
+    from ai_assistant.service import overlay as overlay_module  # noqa: PLC0415 - one call site
+
+    async def _refused(self: overlay_module.TailscaleAgent, path: str) -> bytes:
+        del self, path
+        msg = "this platform exposes no peer-credential call CPython surfaces"
+        raise overlay_module.OverlayAgentRefusedError(msg)
+
+    monkeypatch.setattr(overlay_module.TailscaleAgent, "_request", _refused)
+    configured = settings.model_copy(update={"hub_remote_address": "100.64.0.9"})
+
+    code = await hub.serve(configured)
+
+    assert code == EXIT_DEPLOYMENT
+
+
 async def test_a_configured_hub_whose_agent_holds_another_address_stays_down(
     settings: Settings,
     wired: dict[str, list[Any]],
