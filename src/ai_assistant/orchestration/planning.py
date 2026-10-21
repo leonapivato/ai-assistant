@@ -2256,6 +2256,13 @@ def _filled(capabilities: Sequence[ToolDefinition], call: AskedCall) -> frozense
     Those its offered declaration names, the first by id as :func:`offered_tools`
     describes the capability, and those the selected declaration itself names. Never
     more: an argument left out of an exact line is one the user is not shown.
+
+    **Every argument, where the capability is not offered on this pass** — fail closed.
+    Which arguments the hub filled is known only from the offered copy, so where there
+    is none the hub cannot say, and a saved call's line shows its capability alone: a
+    forecast read approved before its forecaster was unconfigured renders no coordinate
+    to the model (ADR-0260 §3:2, ADR-0324 §3), and a search's no origin. Such a call
+    runs nowhere either, since authorizing finds no tool for a capability not offered.
     """
     capability = str(call.tool.capability)
     offered = next(
@@ -2266,10 +2273,9 @@ def _filled(capabilities: Sequence[ToolDefinition], call: AskedCall) -> frozense
         ),
         None,
     )
-    supplied = set(call.tool.system_supplied)
-    if offered is not None:
-        supplied.update(offered.system_supplied)
-    return frozenset(supplied)
+    if offered is None:
+        return frozenset(call.values)
+    return frozenset({*call.tool.system_supplied, *offered.system_supplied})
 
 
 def _same_call(asked: AskedCall, request: ActionRequest) -> bool:

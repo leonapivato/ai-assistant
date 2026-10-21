@@ -19,6 +19,7 @@ from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
     ActivationDigest,
     ActivationUnderstanding,
+    AskedCall,
     Attestation,
     BeliefBand,
     CapabilityEffect,
@@ -49,6 +50,7 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     ProposedCall,
     Provenance,
+    QuestionPart,
     RecordedChannelTrigger,
     RecordedTextInput,
     Reversibility,
@@ -76,6 +78,7 @@ from ai_assistant.orchestration.planning import (
     DELIBERATE_REPEAT,
     LOOKING_FOR,
     PLANNING_PROMPT,
+    ApprovedAction,
     CallOutcome,
     CallOutcomeKind,
     DigestedEvidence,
@@ -97,6 +100,12 @@ from ai_assistant.testing import (
     default_prompt,
     prompt_from,
 )
+from ai_assistant.testing.forecasting import (
+    DEFAULT_FORECAST_LATITUDE,
+    DEFAULT_FORECAST_LONGITUDE,
+    DEFAULT_FORECAST_ORIGIN,
+    FAKE_FORECAST_READ,
+)
 from ai_assistant.testing.memories import (
     confirmed_support,
     memory,
@@ -105,6 +114,7 @@ from ai_assistant.testing.memories import (
     said_support,
     sourced_support,
 )
+from ai_assistant.testing.searching import DEFAULT_SEARCH_ORIGIN, FAKE_WEB_SEARCH
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -1846,3 +1856,57 @@ async def test_a_referent_with_a_blank_id_is_still_labelled() -> None:
     planned = await stage.plan(_inputs(understanding=understanding))
     assert _sent(completer)["understanding"]["rests_on"] == ["E1"]
     assert planned.labels == (PlanningLabel(label="E1", kind=LabelKind.EPISODE, id=""),)
+
+
+# --- a saved call whose capability is not offered on this pass (ADR-0260 §3:2) -------
+
+
+@pytest.mark.parametrize(
+    ("tool", "values", "hidden"),
+    [
+        pytest.param(
+            FAKE_FORECAST_READ,
+            {
+                "origin": DEFAULT_FORECAST_ORIGIN,
+                "latitude": DEFAULT_FORECAST_LATITUDE,
+                "longitude": DEFAULT_FORECAST_LONGITUDE,
+            },
+            (
+                DEFAULT_FORECAST_ORIGIN,
+                str(DEFAULT_FORECAST_LATITUDE),
+                str(DEFAULT_FORECAST_LONGITUDE),
+            ),
+            id="a-forecast-read-whose-forecaster-was-unconfigured",
+        ),
+        pytest.param(
+            FAKE_WEB_SEARCH,
+            {"origin": DEFAULT_SEARCH_ORIGIN, "query": "hotels in rome"},
+            (DEFAULT_SEARCH_ORIGIN,),
+            id="a-search-whose-account-was-disconnected",
+        ),
+    ],
+)
+async def test_an_approved_call_no_longer_offered_shows_planning_none_of_its_arguments(
+    tool: ToolDefinition, values: dict[str, Any], hidden: tuple[str, ...]
+) -> None:
+    """Fail closed: the hub cannot say which arguments it filled, so it shows none.
+
+    A forecast read asked, its forecaster was then unconfigured, and the yes came: no
+    forecast read is offered on this pass, so no offered copy says the coordinate is the
+    hub's. The approved action's line shows the capability alone, and planning's prompt
+    carries no coordinate (ADR-0260 §3:2, ADR-0324 §3); a search's carries no origin.
+    """
+    approved = ApprovedAction(
+        part=QuestionPart(round="round:asking", part=1),
+        call=AskedCall(part=1, tool=tool, values=values),
+    )
+    stage, completer, _ = _stage(RoundResponse(text="That can't be done now."))
+    offered = tuple(one for one in _TOOLS if str(one.capability) != str(tool.capability))
+
+    await stage.plan(_inputs(capabilities=offered, approved=(approved,)))
+
+    (shown,) = _sent(completer)["approved_actions"]
+    assert shown["details"] == str(tool.capability)
+    prompt = completer.last_call.messages[1].content
+    for value in hidden:
+        assert value not in prompt
