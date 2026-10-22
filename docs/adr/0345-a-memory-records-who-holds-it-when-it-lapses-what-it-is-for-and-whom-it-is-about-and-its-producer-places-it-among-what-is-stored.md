@@ -215,22 +215,25 @@ derivable, costs one field and spares an upgrade that would have to guess.
 ### 3. A memory changes only in its holder's beliefs
 
 > **Normative.** In the write a placed proposal yields (§5), a retiring relation changes a
-> stored memory only through the supports whose holder is the holder of the proposal's
-> backing support: each such counted support stops counting, by one stop counting each,
-> citing that backing support, added to the stored memory as `against`.
+> stored memory only through the supports whose holder is a holder of one of the
+> proposal's backing supports: each such counted support stops counting, by one stop
+> counting each, citing that holder's backing support, added to the stored memory as
+> `against`.
 
-> **Normative.** The proposal's backing support, in the clause above and throughout §5, is
-> the first of its counted `for` supports that backs it as worded.
+> **Normative.** The proposal's backing supports, in the clause above and throughout §5,
+> are its counted `for` supports that back it as worded, and its first backing support is
+> the first of them.
 
 > **Normative.** A stored memory whose supports the clause above stopped is retired in the
 > same atomic write, by the operation the relation names (§5), exactly where no counted
 > `for` support backing it as worded remains on it. A memory some other holder still
 > holds stays current.
 
-> **Normative.** A retiring relation from a holder that holds none of the stored memory's
-> counted supports stops nothing and retires nothing. The writer installs the proposal
-> beside the stored memory and adds the proposal's backing support to the stored memory as
-> `against`.
+> **Normative.** A retiring relation from holders none of whom holds a counted support of
+> the stored memory stops nothing and retires nothing. The writer installs the proposal
+> beside the stored memory, adds the proposal's backing supports to the stored memory as
+> `against`, and adds the stored memory's backing supports to the proposal as `against`,
+> so the dispute is recorded on both.
 
 > **Normative.** Until a decision on the assistant's standards of belief decides otherwise,
 > supports whose holder is the assistant's statement never keep a memory current on their
@@ -309,11 +312,11 @@ producer writes a memory today.
 | Relation to a stored memory | What the writer does to that memory |
 | --- | --- |
 | `restates` | Adds the proposal's supports to it, where §5:2 allows; otherwise nothing, and the proposal is installed beside it |
-| `contained` | Where the holder of the proposal's backing support already holds it, adds the proposal's supports to it as `for`, none backing it as worded; otherwise adds the backing support to it as `for`, not backing it as worded, and the proposal is installed beside it |
-| `supports` | Adds the proposal's backing support to it as `for`, not backing it as worded |
-| `weakens` | Adds the proposal's backing support to it as `against` |
-| `recheck` | Raises a `recheck` question on it, resting on the proposal's backing support |
-| `no_longer_true` | §3: within the holder's own beliefs, stops their supports, and where it retires, an end, closed at the backing support's about-when where it carries one and at the write's instant otherwise; from another holder, an `against` support and the proposal beside it |
+| `contained` | Where every holder of the proposal's backing supports already holds it, adds the proposal's supports to it as `for`, none backing it as worded; otherwise adds the backing supports to it as `for`, none backing it as worded, and the proposal is installed beside it |
+| `supports` | Adds the proposal's backing supports to it as `for`, none backing it as worded |
+| `weakens` | Adds the proposal's backing supports to it as `against` |
+| `recheck` | Raises a `recheck` question on it, resting on the proposal's first backing support |
+| `no_longer_true` | §3: within its holders' own beliefs, stops their supports, and where it retires, an end, closed at the about-when of the backing support whose stopping left it unbacked where that support carries one, and at the write's instant otherwise; from holders who hold none of it, `against` supports both ways and the proposal beside it |
 | `never_true` | §3, as above; where it retires, a mark wrong |
 | `claimed_too_much` | §3, as above; where it retires, a replace naming the proposed memory |
 | `independent` | Nothing |
@@ -327,16 +330,16 @@ producer writes a memory today.
 > installed beside it.
 
 > **Normative.** The writer installs the proposed memory exactly where no `restates` added
-> its supports to a stored memory and no `contained` added them to one its holder already
-> holds, or where any retiring relation is present.
+> its supports to a stored memory and no `contained` added them to one its holders already
+> hold, or where any retiring relation is present.
 
 > **Normative.** Where the proposed memory is installed, each memory a retiring relation
 > retired names it as successor, and it names each as a memory it replaces (ADR-0328
 > §5:6).
 
 > **Normative.** An answered question named by the placement is resolved by a resolve
-> question citing the proposal's backing support, whether or not the proposed memory is
-> installed.
+> question citing the proposal's first backing support, whether or not the proposed memory
+> is installed.
 
 > **Normative.** Everything one placed proposal yields is written in one atomic write,
 > conditional on the revision of every memory it changes (ADR-0219 §2).
@@ -545,7 +548,10 @@ and store maintenance would merge one.
 > **Normative.** That lane's tests include, each failing on a writer that implements only
 > the others: Sam's `no_longer_true` against the owner's memory installs beside, stops
 > nothing and adds an `against` support; the owner's against the owner's memory retires
-> it; one of two holders withdrawing leaves the memory current; a claimed author is never
+> it; one of two holders withdrawing leaves the memory current; two holders backing one
+> proposal each withdraw their own supports, and the memory both held is retired; a
+> contradiction from another holder records `against` supports on both memories; a claimed
+> author is never
 > the same holder as an established one with the same identifier; a part saying what
 > another person believes is held by its sender; two parts under one identifier are one
 > holder; a partial supporter is not a holder; a `contained` from another holder installs
