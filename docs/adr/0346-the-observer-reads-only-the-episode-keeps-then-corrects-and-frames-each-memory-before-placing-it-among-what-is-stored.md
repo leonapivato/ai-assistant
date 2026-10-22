@@ -217,13 +217,8 @@ words alone (ADR-0329 §10) are refused there. Importance is not judged twice.
 > questions. It names one ADR-0345 §4 relation for each retrieved memory, and at most one
 > open question the new memory answers.
 
-> **Normative.** For each retrieved memory the assistant holds that the new memory
-> contradicts, the placement call also judges whether the new memory convinces the
-> assistant, weighing who holds its backing and what else the assistant holds. Code
-> records it convinced only where ADR-0345 §3:5 allows.
-
 > **Normative.** The placement call does not change the framed memory. It states relations
-> and that judgement only.
+> only.
 
 > **Normative.** The memory is proposed to `MemoryWriter.ingest` through the write stage as
 > a placed proposal (ADR-0345 §4), with the revision each retrieved memory was read at.
