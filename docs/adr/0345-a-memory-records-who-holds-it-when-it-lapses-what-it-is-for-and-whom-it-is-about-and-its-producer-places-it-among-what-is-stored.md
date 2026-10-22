@@ -110,7 +110,7 @@ producer's statement of how a proposed memory stands to each stored memory it
 retrieved (§4); a proposal carrying one is **placed**. A **situation label** is a
 free-text descriptor of when or for what a memory matters (§7). A **mark** is a member
 of a closed set describing the memory itself (§8). A memory's **holders** are the
-holders of its counted `for` supports that back it as worded (§2:8). **Standing**,
+holders of its counted `for` supports that back it as worded (§2:10). **Standing**,
 **support**, **origin**,
 **operation** and **counted** are ADR-0328's.
 
@@ -162,6 +162,10 @@ labels, marks and whom it is about, and stops carrying `topics`.
 > said something, where and when, and never that it believes it. The assistant holds no
 > belief, and nothing in this decision changes, retires or keeps a memory on the ground
 > that the assistant believes anything.
+
+> **Normative.** Until a decision on the assistant's standards of belief decides otherwise,
+> a support whose holder is the assistant's statement never backs a memory as worded. It
+> is cited, as `for` or `against`, and never makes the assistant a memory's holder.
 
 > **Normative.** Until a decision on identified people adds others, the one person a
 > holder names is the owner, and the identifier that names the owner is a
@@ -234,12 +238,6 @@ derivable, costs one field and spares an upgrade that would have to guess.
 > beside the stored memory, adds the proposal's backing supports to the stored memory as
 > `against`, and adds the stored memory's backing supports to the proposal as `against`,
 > so the dispute is recorded on both.
-
-> **Normative.** Until a decision on the assistant's standards of belief decides otherwise,
-> supports whose holder is the assistant's statement never keep a memory current on their
-> own. A write that leaves every counted `for` support backing a memory as worded the
-> assistant's statement retires it in the same atomic write, by an end citing the support
-> whose stopping left it so.
 
 > **Normative.** ADR-0328 §6:5's refusal by standing does not bind the write a placed
 > proposal yields. The clauses above are its guard.
@@ -449,7 +447,9 @@ filter, where a label matched by meaning could miss one.
 
 **Why `assistant_statement` is a mark and not computed.** A memory a person keeps from
 what the assistant said is the person's: their "remember that" takes on the words shown,
-so it backs the memory as worded and makes them its holder, which §3:5's guard needs. Code
+so it backs the memory as worded and makes them its holder; the assistant's message is
+cited and never backs it (§2:4), so when the person later withdraws, nothing backs the
+memory and it ends by §3:3. Code
 then cannot tell from the supports alone that the assistant's words were all that stood
 behind it, because the person's support looks like any statement of theirs. The producer,
 which saw the parts, says so; code checks that the assistant's message is among the
@@ -555,8 +555,9 @@ and store maintenance would merge one.
 > the same holder as an established one with the same identifier; a part saying what
 > another person believes is held by its sender; two parts under one identifier are one
 > holder; a partial supporter is not a holder; a `contained` from another holder installs
-> beside; a memory left with only the assistant's statements backing it is retired; an `assistant_statement` memory without the assistant's message is
-> refused, and one with it is shown citing that message;
+> beside; a support held by the assistant's statement never backs a memory, so a kept
+> statement ends when the person who kept it withdraws; an `assistant_statement` memory
+> without the assistant's message is refused, and one with it is shown citing that message;
 > a `restates` that would raise standing installs beside; a `restates` at equal standing
 > folds with no new memory; a `contained` adds supports without raising standing; a stale
 > revision refuses the whole proposal; a create with a future validity end drops out of
