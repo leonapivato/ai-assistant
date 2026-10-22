@@ -163,8 +163,10 @@ labels, marks and whom it is about, and stops carrying `topics`.
 > holders whose identifiers link to the same person are the same holder in every write
 > made after the link.
 
-> **Normative.** A memory's holders are the holders of its counted `for` supports. They
-> are a value ADR-0328 §7 computes from the stored record, never stored as a judgment.
+> **Normative.** A memory's holders are the holders of its counted `for` supports that back
+> it as worded, and its partial supporters are the holders of its other counted `for`
+> supports. Both are values ADR-0328 §7 computes from the stored record, never stored as a
+> judgment, and a partial supporter is never shown as holding the memory.
 
 > **Normative.** A memory's standing stays as ADR-0328 §6 computes it. It says how the
 > memory's backing reached the assistant, and in a placed proposal's write (§5) it ranks
@@ -212,8 +214,9 @@ derivable, costs one field and spares an upgrade that would have to guess.
 
 > **Normative.** Until a decision on the assistant's standards of belief decides otherwise,
 > supports whose holder is the assistant never keep a memory current on their own. A write
-> that leaves a memory's counted `for` supports all the assistant's retires it in the same
-> atomic write, by an end citing the support whose stopping left it so.
+> that leaves every counted `for` support backing a memory as worded the assistant's
+> retires it in the same atomic write, by an end citing the support whose stopping left
+> it so.
 
 > **Normative.** ADR-0328 §6:5's refusal by standing does not bind the write a placed
 > proposal yields. The clauses above are its guard.
@@ -289,7 +292,7 @@ producer writes a memory today.
 | Relation to a stored memory | What the writer does to that memory |
 | --- | --- |
 | `restates` | Adds the proposal's supports to it, where §5:2 allows; otherwise nothing, and the proposal is installed beside it |
-| `contained` | Adds the proposal's supports to it as `for`, none backing it as worded |
+| `contained` | Where the holder of the proposal's backing support already holds it, adds the proposal's supports to it as `for`, none backing it as worded; otherwise adds the backing support to it as `for`, not backing it as worded, and the proposal is installed beside it |
 | `supports` | Adds the proposal's backing support to it as `for`, not backing it as worded |
 | `weakens` | Adds the proposal's backing support to it as `against` |
 | `recheck` | Raises a `recheck` question on it, resting on the proposal's backing support |
@@ -307,8 +310,8 @@ producer writes a memory today.
 > installed beside it.
 
 > **Normative.** The writer installs the proposed memory exactly where no `restates` added
-> its supports to a stored memory and no `contained` named one, or where any retiring
-> relation is present.
+> its supports to a stored memory and no `contained` added them to one its holder already
+> holds, or where any retiring relation is present.
 
 > **Normative.** Where the proposed memory is installed, each memory a retiring relation
 > retired names it as successor, and it names each as a memory it replaces (ADR-0328
@@ -335,11 +338,21 @@ already said, the fold only dates the memory again, and a repeat makes no duplic
 Where it would, the new memory stands at its own standing beside the old one, and store
 maintenance may merge them later.
 
-**Why `contained` writes no new memory.** The stored memory already states the claim,
-and its own backing is untouched: the new supports count as evidence for it without
-backing its whole wording, so its standing does not move (ADR-0328 §6:2). A retiring
-relation in the same placement still installs the proposal, so a retired memory always
-has its successor.
+**Why `contained` writes no new memory for the same holder, and one for another.** Where
+the owner says again part of what the owner said, the stored memory already states it,
+and the new supports count as evidence for it without backing its whole wording, so its
+standing does not move (ADR-0328 §6:2). Where Sam says "Ana lives in Lisbon" against the
+owner's "Ana lives in Lisbon and teaches piano", Sam's belief is his own memory: folded
+in, it would end with the owner's if the owner corrected the piano half, and Sam would
+never have held the rest. Sam's support still counts as evidence for the owner's memory,
+as a partial supporter, never as its holder. A retiring relation in the same placement
+installs the proposal, so a retired memory always has its successor.
+
+A compound memory is where `contained` is weakest: one held only inside "lives in Lisbon
+and teaches piano" ends with it when half of it is corrected
+([#3259](https://github.com/leonapivato/ai-assistant/issues/3259)). The observer's
+decision frames one claim per memory, so the store holds few compounds. Splitting the
+ones it holds is store maintenance's.
 
 ### 6. A memory that lapses
 
@@ -448,7 +461,8 @@ and store maintenance would merge one.
 ### 12. What a reading surface shows
 
 > **Normative.** Every projection of a memory ADR-0328 §15:1 names also carries its
-> holders, its labels, its marks, and its validity end where it lies in the future.
+> holders and partial supporters, its labels, its marks, and its validity end where it lies
+> in the future.
 
 > **Normative.** The single-memory projection ADR-0328 §15:2 names also carries each
 > support's holder.
