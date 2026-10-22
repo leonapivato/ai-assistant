@@ -562,10 +562,11 @@ Superseded in part; every clause the middle column does not name stands:
   retire that path.
 - **Labels are written before they are searched.** A label search is a later decision, of
   the store's search contract and recall.
-- **Forgetting keys on labels and `about_person`, not `topics`.** ADR-0213 came from the
-  owner's direction that "the topic thing needs to exist for forgetting anyway". The
-  forgetting design inherits that need, served by a search over labels and an exact
-  `about_person` filter in place of exact topic tags.
+- **Forgetting loses `topics`.** ADR-0213 came from the owner's direction that "the topic
+  thing needs to exist for forgetting anyway". Forgetting stays undesigned and deferred,
+  to be approached with care. It will likely draw on situation labels and the exact
+  `about_person` filter in place of exact topic tags, and this decision rules nothing about
+  it.
 - **Person holders other than the owner** wait on a decision on identified people.
   Until then the person column of §2 names the owner alone.
 
