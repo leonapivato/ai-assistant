@@ -52,9 +52,11 @@ important", and worked outward.
   decides only what the parts bear out (owner: "Yes, I agree").
 - **The assistant keeps no belief of its own, for now.** Planning reasons in the moment;
   a memory rests on what the assistant relayed, not on its relay; and where a person
-  keeps something the assistant said with nothing behind it, "we just say there's no
-  source." Keeping is not agreeing: "I don't agree, but remember that" keeps the
-  disagreement, not the claim.
+  keeps something the assistant said with nothing behind it, the memory cites what it can,
+  the assistant's message: "make it not that there's no source. Instead, it should cite
+  what it can." This still prevents the assistant from holding any belief of its own.
+  Keeping is not agreeing: "I don't agree, but remember that" keeps the disagreement, with
+  the claim word for word, never the claim as the person's.
 - **Two things wait.** Preferences on what to keep: "Let's just not think of it now."
   The bar for which single occasions are worth a memory "goes into how to prompt Scout,
   which we won't deal with here today."
@@ -261,21 +263,23 @@ words alone (ADR-0329 §10) are refused there. Importance is not judged twice.
 
 > **Normative.** A memory a person keeps or adopts from a round's message rests on the
 > person's request, agreement or confirmation, which backs it as worded, so it is held by
-> that person. It carries the message as a support, and framing marks it `unsourced`
-> where no recorded part behind the message was found (ADR-0345 §8).
+> that person. It carries the message as a support, so it cites where and when the
+> assistant said it, and framing marks it `assistant_statement` where no recorded part
+> behind the message was found (ADR-0345 §8).
 
 > **Normative.** Where the person asks to keep what the assistant said but says they
 > disagree with it, the observer keeps one memory, marked `one_occasion`, worded as the
-> person's disagreement with what the assistant said, resting on the person's reply read
-> with the message it answers, and held by the person. It never keeps the claim the person
+> person's disagreement with the assistant's claim, carrying that claim word for word and
+> when the assistant made it, resting on the person's reply read with the message it
+> answers and on that message, and held by the person. It never keeps the claim the person
 > disagreed with as the person's belief.
 
 **No beliefs of the assistant's own, for now.** Planning reasons in the moment, and a
 matter's working conclusions live on its story's page. Long-term memory holds what
 people and sources believe. Where the assistant's words end up in a memory, it is because
-a person took them on, and the memory says when nothing stood behind them. Whatever
-else was in that round's context stays one pointer away, in the episode the support
-points at.
+a person took them on, and the memory cites the assistant's message, where and when it
+was said, and marks that nothing else stood behind it. Whatever else was in that round's
+context stays one pointer away, in the episode the support points at.
 
 ### 8. The track record
 
