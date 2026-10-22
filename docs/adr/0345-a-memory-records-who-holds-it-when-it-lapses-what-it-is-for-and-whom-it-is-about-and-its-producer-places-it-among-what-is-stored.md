@@ -261,8 +261,9 @@ anyone's, is authority to act.
 ### 4. A placed proposal
 
 > **Normative.** `MemoryUpdateProposal` gains an optional placement: for each stored memory
-> its producer retrieved, the memory's id, the revision the producer read it at, and one
-> relation; and, optionally, one open question on one of those memories that the proposal
+> its producer retrieved, the memory's id, the revision the producer read it at, one
+> relation, and, for every relation but `independent`, a note in words on how the two
+> relate; and, optionally, one open question on one of those memories that the proposal
 > answers.
 
 | Relation | The proposed memory, against the stored one |
@@ -276,9 +277,13 @@ anyone's, is authority to act.
 | `never_true` | Shows the stored one was never true |
 | `claimed_too_much` | Is the narrower truth of a stored one that claimed more than holds |
 | `independent` | Neither restates, supports, weakens nor changes it |
+| `unclear` | No other relation fits, or the producer cannot tell how the two relate |
 
-> **Normative.** The relation is one of the table's nine values, a closed set added to and
+> **Normative.** The relation is one of the table's ten values, a closed set added to and
 > never renamed. It is not `ConflictRelation`, and neither is read as the other.
+
+> **Normative.** A producer that cannot place a pair says `unclear` rather than choosing
+> another value, and its note says why.
 
 > **Normative.** A placed proposal may name only memories its producer read, each at the
 > revision it read. How the producer retrieves them is its own decision's.
@@ -317,6 +322,7 @@ producer writes a memory today.
 | `never_true` | §3; where it retires, a mark wrong |
 | `claimed_too_much` | §3; where it retires, a replace naming the proposed memory |
 | `independent` | Nothing |
+| `unclear` | Nothing; the proposal is installed beside it |
 
 > **Normative.** The writer applies, to each memory a placement names, what the table's
 > row for its relation says.
@@ -341,10 +347,22 @@ producer writes a memory today.
 > **Normative.** Everything one placed proposal yields is written in one atomic write,
 > conditional on the revision of every memory it changes (ADR-0219 §2).
 
+> **Normative.** Every support a relation adds, and every operation it causes, carries that
+> relation's note as its note.
+
 > **Normative.** Every write the table names is an operation ADR-0328 §5 already defines,
 > and every rule of ADR-0328 §4 binds the supports it adds: a support whose part the
 > memory already carries changes nothing, and a confirmation support is added to no
 > memory but the one it backs or one its own ingest retires (ADR-0328 §4:6).
+
+**Why a fixed set, a note and `unclear`.** The relation holds only the distinctions that
+change what is written: fold or beside, evidence for or against, a question, an end, a
+mark wrong, a replace, or nothing. What a reader needs beyond that, "implies Lisbon
+through the Tagus", "says she moved last month", is the note, kept on what the relation
+wrote. `unclear` is the way out for a pair the set does not fit: a forced choice is where
+a wrong fold or a wrong end comes from, so a doubt writes nothing to the stored memory and
+loses nothing, the new memory standing beside it. Where `unclear` recurs in one shape, the
+set gains a value.
 
 **Why `restates` can install beside.** A restatement judged by a model and folded onto a
 stored wording would add the new support as backing that wording, and the stored
@@ -605,7 +623,9 @@ and store maintenance would merge one.
 > statement ends when the person who kept it withdraws; an `assistant_statement` memory
 > without the assistant's message is refused, and one with it is shown citing that message;
 > a `restates` that would raise standing installs beside; a `restates` at equal standing
-> folds with no new memory; a `contained` adds supports without raising standing; a stale
+> folds with no new memory; an `unclear` writes nothing to the stored memory and installs
+> the proposal; a relation's note is on what it wrote; a `contained` adds supports without
+> raising standing; a stale
 > revision refuses the whole proposal; a create with a future validity end drops out of
 > live reads after it; a near-duplicate label is refused; the `about_person` filter binds
 > before the cut; the upgrade assigns holders by §2's table; and each step of §5's worked
@@ -703,6 +723,10 @@ Superseded in part; every clause the middle column does not name stands:
 - **Computing that a memory rests on the assistant's statement alone, from the supports.**
   Not chosen: a person's "remember that" backs the memory as worded, so the supports cannot
   show that nothing else stood behind it. The producer marks it (§8).
+- **A set with no way out**, the producer always choosing one of nine. Not chosen: a
+  forced choice is where a wrong fold or end comes from. `unclear` writes nothing.
+- **Escalating an `unclear` pair to a stronger model.** Not now: the record shows how often
+  it happens, and store maintenance, with a wider view, is the next level.
 - **Links between related memories**, from the reconciler's `ADDS`. Withdrawn: stripped
   down it says "similar and not in conflict", which the search recomputes from
   embeddings with no model call.
