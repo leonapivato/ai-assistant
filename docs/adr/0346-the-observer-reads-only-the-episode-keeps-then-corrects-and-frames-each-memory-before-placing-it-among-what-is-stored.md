@@ -214,11 +214,16 @@ words alone (ADR-0329 §10) are refused there. Importance is not judged twice.
 
 > **Normative.** Each memory is placed by one model call, given the memory as framed and
 > the retrieved memories with their supports, holders, standing, status and open
-> questions. It names one ADR-0345 §4 relation for each retrieved memory, and at most one
-> open question the new memory answers.
+> questions. It names one ADR-0345 §4 relation for each retrieved memory, with the note
+> ADR-0345 §4:1 asks for, and at most one open question the new memory answers.
 
 > **Normative.** The placement call does not change the framed memory. It states relations
 > only.
+
+> **Normative.** Every `unclear` the placement call names is recorded on the finding's
+> outcome in the observation record (ADR-0329 §16:1), with its note and the memory it
+> named, and in the diagnostic record where that record is on, so where the set of
+> relations does not fit can be seen.
 
 > **Normative.** The memory is proposed to `MemoryWriter.ingest` through the write stage as
 > a placed proposal (ADR-0345 §4), with the revision each retrieved memory was read at.
