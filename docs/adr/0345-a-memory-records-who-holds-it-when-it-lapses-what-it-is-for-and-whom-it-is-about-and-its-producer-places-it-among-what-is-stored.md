@@ -210,6 +210,11 @@ derivable, costs one field and spares an upgrade that would have to guess.
 > nothing. The writer installs the proposal beside the stored memory and adds the
 > proposal's backing support to the stored memory as `against`.
 
+> **Normative.** Until a decision on the assistant's standards of belief decides otherwise,
+> supports whose holder is the assistant never keep a memory current on their own. A write
+> that leaves a memory's counted `for` supports all the assistant's retires it in the same
+> atomic write, by an end citing the support whose stopping left it so.
+
 > **Normative.** ADR-0328 §6:5's refusal by standing does not bind the write a placed
 > proposal yields. The clauses above are its guard.
 
@@ -450,6 +455,14 @@ and store maintenance would merge one.
 
 > **Normative.** Planning's label for a memory conveys its holders wherever they are not the
 > owner alone, and its validity end where it lies in the future. The text is planning's.
+
+> **Normative.** A memory is **unsourced** where none of its counted `for` supports that back
+> it as worded is held by a person or a source. Unsourced is a value ADR-0328 §7 computes,
+> never stored as a judgment.
+
+> **Normative.** Every projection and planning's label convey an unsourced memory as the
+> assistant's statement with no source, and never as "from a source", whatever standing
+> ADR-0328 §6 computes for it.
 
 > **Normative.** A change to a shape the wire carries advances `PROTOCOL_VERSION` in that
 > change (ADR-0124 §9).
