@@ -2,7 +2,7 @@
 
 - Status: Proposed
 - Date: 2026-10-21
-- Scope: the memory record and the write path a placed proposal takes. Who holds each support, and the rule that a memory is changed only in its own holder's beliefs; a proposal that names how it stands to each stored memory its producer retrieved, and the write that follows from it; a validity end set at creation; situation labels; marks; a producer for `about_person` and a search filter on it; the retirement of `topics` from the memory; and the upgrade. The observer's use of all of it, what it reads, its steps and its calls, is the second decision of this walk.
+- Scope: the memory record and the write path a placed proposal takes. Who holds each support, and the rule that a memory is changed only in its own holder's beliefs, the assistant's only where it is convinced, and never kept current by the assistant alone; a proposal that names how it stands to each stored memory its producer retrieved, and the write that follows from it; a validity end set at creation; situation labels; marks; a producer for `about_person` and a search filter on it; the retirement of `topics` from the memory; and the upgrade. The observer's use of all of it, what it reads, its steps and its calls, is the second decision of this walk.
 - Dependency: ADR-0328, ADR-0329, ADR-0336, ADR-0217, ADR-0219, ADR-0045, ADR-0100, ADR-0213, ADR-0326 and ADR-0338, as their status lines leave them.
 - Authorization: the owner ruled this design in the observer walk of 2026-10-21, in the observer-and-learning fork, and directed it be written ("I think we get started"). This decision writes those rulings down and settles only what they leave open, each such point named where it is settled. The number is provisional until the owner assigns it (`CONTRIBUTING.md` → "ADR numbers are assigned at dispatch"). The owner reads it before it is ratified (§1:1).
 - **Contract-surface decision.** It changes `core/types.py` (`MemorySupport` gains its holder; the memory gains labels and marks and loses `topics`; `MemoryUpdateProposal` gains a placement; the projections gain holders, labels, marks and a future validity end) and `core/protocols.py` (`MemoryStore.search` gains an `about_person` filter; `MemoryWriter.ingest` writes a placed proposal by §5; `MemoryWriter` gains a label write). It is a breaking change under golden rule 5.
@@ -12,7 +12,7 @@
 
 ### What the owner ruled
 
-The walk started from the observer and reached the record it writes. Five rulings
+The walk started from the observer and reached the record it writes. These rulings
 shape the record.
 
 - **Capture is not usage.** On a home device that knows who is talking, the owner
@@ -28,6 +28,19 @@ shape the record.
   only their own backing, and asked to keep the existing ranking as usage's default:
   recall that prefers what the owner said ("maybe a recall does a filtering for
   statements made by the owner first").
+- **A holder is a connection, and never a claim.** "It's not the identification that
+  matters here, it's the connection": two parts under one stable identifier are one
+  holder, and the person behind it can be linked later. A forwarded "message from the
+  user", a screenshot, or Sam saying "the user agrees with me" stays Sam's: only an
+  identity the channel establishes holds a person's belief.
+- **Saying something versus convincing the assistant.** "Aren't inferences just normal
+  beliefs?" The assistant is a holder like any other, so nobody's word removes its belief
+  by rule; "it's about saying something versus convincing the assistant". A contradiction
+  is kept beside, as evidence against.
+- **No beliefs of the assistant's own, for now.** After the owner's worry that an
+  advertisement could convince the assistant and, through it, the user, long-term memory
+  holds only what people and sources believe. Where a person keeps something the assistant
+  said with nothing behind it: "If there's no source, we just say there's no source."
 - **The commit step frames, then places.** The new memory's wording and metadata come
   from what it rests on alone, without the stored memories: "I don't see why
   information about what's already in the store should affect how it frames the
@@ -90,7 +103,8 @@ producer's statement of how a proposed memory stands to each stored memory it
 retrieved (§4); a proposal carrying one is **placed**. A **situation label** is a
 free-text descriptor of when or for what a memory matters (§7). A **mark** is a member
 of a closed set describing the memory itself (§8). A memory's **holders** are the
-holders of its counted `for` supports. **Standing**, **support**, **origin**,
+holders of its counted `for` supports that back it as worded (§2:8). **Standing**,
+**support**, **origin**,
 **operation** and **counted** are ADR-0328's.
 
 ## Decision
@@ -405,11 +419,16 @@ than serving two purposes.
 ### 8. Marks
 
 > **Normative.** A memory carries marks: a set of members of one closed enumeration, added
-> to and never renamed. This decision adds one member, `one_occasion`: the memory states a
-> single occasion, such as one choice made once on a date.
+> to and never renamed. This decision adds two members. `one_occasion`: the memory states a
+> single occasion, such as one choice made once on a date. `unsourced`: what the memory
+> states traces to nothing recorded but the assistant's own words, which a person kept or
+> took on.
 
 > **Normative.** A mark is set by the memory's producer at its create, and changes later
 > only by a decision that names how.
+
+> **Normative.** The writer refuses a memory marked `unsourced` that carries no support
+> pointing at a round's message.
 
 > **Normative.** A memory marked `one_occasion` carries no validity end set at its create.
 
@@ -420,6 +439,14 @@ than serving two purposes.
 A one-occasion memory is an ordinary memory: its wording dates it, and it stays true
 that it happened. The mark lets recall and store maintenance find occasions by an exact
 filter, where a label matched by meaning could miss one.
+
+**Why `unsourced` is a mark and not computed.** A memory a person keeps from what the
+assistant said is the person's: their "remember that" takes on the words shown, so it
+backs the memory as worded and makes them its holder, which §3:7's guard needs. Code then
+cannot tell from the supports alone that nothing stood behind the words, because the
+person's support looks like any statement of theirs. The producer, which saw the parts,
+says so; code checks that the assistant's message is among the supports. In the owner's
+words: "If there's no source, we just say there's no source."
 
 ### 9. Whom a memory is about
 
@@ -470,13 +497,10 @@ and store maintenance would merge one.
 > **Normative.** Planning's label for a memory conveys its holders wherever they are not the
 > owner alone, and its validity end where it lies in the future. The text is planning's.
 
-> **Normative.** A memory is **unsourced** where none of its counted `for` supports that back
-> it as worded is held by a person or a source. Unsourced is a value ADR-0328 §7 computes,
-> never stored as a judgment.
-
-> **Normative.** Every projection and planning's label convey an unsourced memory as the
-> assistant's statement with no source, and never as "from a source", whatever standing
-> ADR-0328 §6 computes for it.
+> **Normative.** Every projection and planning's label convey a memory marked `unsourced`
+> as the assistant's statement, kept by the person who holds it, with no source, and never
+> as "from a source" or as what the person said, whatever standing ADR-0328 §6 computes
+> for it.
 
 > **Normative.** A change to a shape the wire carries advances `PROTOCOL_VERSION` in that
 > change (ADR-0124 §9).
@@ -518,7 +542,12 @@ and store maintenance would merge one.
 > it; one of two holders withdrawing leaves the memory current; a placement recording the
 > assistant convinced stops the assistant's supports, and one that does not adds an
 > `against` support only; an unknown holder's placement never records the assistant
-> convinced;
+> convinced; a claimed author is never the same holder as an established one with the
+> same identifier; a part saying what another person believes is held by its sender; two
+> parts under one identifier are one holder; a partial supporter is not a holder; a
+> `contained` from another holder installs beside; a memory left with only the assistant's
+> backing is retired; an `unsourced` memory without the assistant's message is refused, and
+> one with it is shown with no source;
 > a `restates` that would raise standing installs beside; a `restates` at equal standing
 > folds with no new memory; a `contained` adds supports without raising standing; a stale
 > revision refuses the whole proposal; a create with a future validity end drops out of
@@ -532,7 +561,7 @@ Superseded in part; every clause the middle column does not name stands:
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
 | ADR-0213 | Every clause, as it applies to a memory | §7, §10 |
-| ADR-0328 | §3:1's field table, in the additions of labels and marks and the removal of `topics`; §3:6, as to `about_person`'s producer and `topics`; §4:1's support fields, in the addition of the holder; §5:10, for a create; §6:5, §11:5, §11:6 and §11:7, for a placed proposal; §11:9, as to the union of topics; §15:1, §15:2 and §15:5, in the additions alone | §2–§10, §12 |
+| ADR-0328 | §3:1's field table, in the additions of labels and marks and the removal of `topics`; §3:6, as to `about_person`'s producer and `topics`; §4:1's support fields, in the addition of the holder; §5:10, for a create; §6:5, §11:5, §11:6 and §11:7, for a placed proposal; §11:9, as to the union of topics; §15:1, §15:2 and §15:5, in the additions alone; §15:4 and §15:5, for a memory marked `unsourced` | §2–§10, §12 |
 | ADR-0336 | §2:1, §3:1–§3:3, §4:1, §5:1 and §7:1, for a placed proposal | §4, §5 |
 
 ## Consequences
@@ -541,6 +570,8 @@ Superseded in part; every clause the middle column does not name stands:
 - A false claim from someone else can add only a belief they hold. It can never end,
   mark wrong or outrank what the owner said, because a holder changes only their own
   beliefs (§3).
+- A forged forward, a screenshot or "the user agrees with me" never becomes the user's
+  belief, because only an identity the channel establishes holds a person's belief (§2).
 - The relation is judged once, by the producer that framed the memory, and the writer
   derives the write by rule. The reconciler's second model call goes for placed
   proposals.
@@ -569,6 +600,11 @@ Superseded in part; every clause the middle column does not name stands:
   it.
 - **Person holders other than the owner** wait on a decision on identified people.
   Until then the person column of §2 names the owner alone.
+- **The assistant keeps no memory of its own** until a decision on its standards of
+  belief: independence, interest (a source never vouches for itself), directness, track
+  record, proportion, recency, coherence, the person first on themselves, and humility.
+  That decision, with store maintenance, is where earned opinions and credibility per
+  source begin.
 
 ## Alternatives considered
 
@@ -592,6 +628,14 @@ Superseded in part; every clause the middle column does not name stands:
   the support carries it, agreement across holders then reinforces one memory, and one
   holder changing their mind withdraws only their own backing. A source's report keeps
   ADR-0329 §9:8's wording until the outside-content rework.
+- **The model as the holder of an untraced statement.** Withdrawn: a model's output
+  depends on its whole context, the system prompt, the person's message and whatever it
+  read, mixed with what it already knew, so no claim can be pinned on the model alone. The
+  statement is the assistant's, and what was in its context stays one pointer away, in the
+  episode its support points at.
+- **Computing "no source" from the supports.** Not chosen: a person's "remember that"
+  backs the memory as worded, so the supports cannot show that nothing stood behind it.
+  The producer marks it (§8).
 - **Links between related memories**, from the reconciler's `ADDS`. Withdrawn: stripped
   down it says "similar and not in conflict", which the search recomputes from
   embeddings with no model call.
