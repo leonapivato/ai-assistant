@@ -45,6 +45,16 @@ important", and worked outward.
 - **Sensitivity is the scout's.** "The commit step doesn't know the user. The whole idea
   is a scout user knows the user." The observer's part is two things: propose a
   narrowing, and carry it onto what it writes.
+- **One claim per memory.** "It's just important to try and have memories be as single
+  united as possible … if a belief has the word and … it's a clear union of two beliefs
+  that should be separated."
+- **Framing judges evidence, not importance.** The scout decides what matters; framing
+  decides only what the parts bear out (owner: "Yes, I agree").
+- **The assistant keeps no belief of its own, for now.** Planning reasons in the moment;
+  a memory rests on what the assistant relayed, not on its relay; and where a person
+  keeps something the assistant said with nothing behind it, "we just say there's no
+  source." Keeping is not agreeing: "I don't agree, but remember that" keeps the
+  disagreement, not the claim.
 - **Two things wait.** Preferences on what to keep: "Let's just not think of it now."
   The bar for which single occasions are worth a memory "goes into how to prompt Scout,
   which we won't deal with here today."
@@ -249,15 +259,16 @@ words alone (ADR-0329 §10) are refused there. Importance is not judged twice.
 > assistant's words are never evidence about the user extends to every memory, about
 > anything.
 
-> **Normative.** A memory a person keeps or adopts from a round's message is held by that
-> person, carries the message as a support, and is unsourced where no recorded part behind
-> it was found (ADR-0345 §12:4).
+> **Normative.** A memory a person keeps or adopts from a round's message rests on the
+> person's request, agreement or confirmation, which backs it as worded, so it is held by
+> that person. It carries the message as a support, and framing marks it `unsourced`
+> where no recorded part behind the message was found (ADR-0345 §8).
 
 > **Normative.** Where the person asks to keep what the assistant said but says they
-> disagree with it, the observer keeps a memory of the exchange, marked `one_occasion`,
-> saying what the assistant said and that the person disagreed, and never keeps the claim
-> as the person's belief. The person's disagreement is kept as theirs where it is worth
-> keeping.
+> disagree with it, the observer keeps one memory, marked `one_occasion`, worded as the
+> person's disagreement with what the assistant said, resting on the person's reply read
+> with the message it answers, and held by the person. It never keeps the claim the person
+> disagreed with as the person's belief.
 
 **No beliefs of the assistant's own, for now.** Planning reasons in the moment, and a
 matter's working conclusions live on its story's page. Long-term memory holds what
@@ -274,9 +285,12 @@ points at.
 
 > **Normative.** A reliance is recorded in the track record when the episode in which the
 > user reacted to what it shaped is due: the scout proposes a reliance finding for each
-> earlier exchange's reliance that episode shows, resting on the leaving episode's parts,
-> and the framing call decides held up, let down or neither, as ADR-0329 §14:2 decides it
-> from those parts.
+> earlier exchange's reliance that episode shows, resting on the leaving episode's parts.
+
+> **Normative.** A reliance finding is not framed, retrieved or placed as a new memory. One
+> call on the placement step's prompt, given the reliance, the memory it named and the
+> parts the finding rests on, decides held up, let down or neither, as ADR-0329 §14:2
+> decides it from those parts.
 
 > **Normative.** A reliance whose outcome the leaving episode itself shows, an action it
 > ran, is recorded when that episode is due.
@@ -289,11 +303,11 @@ points at.
 > the fact matters, in words. Its candidate carries it, and the scout is shown it as part
 > of the candidate.
 
-> **Normative.** Where a reliance is recorded as held up, the framing call may add what the
-> reliance shaped to the memory's labels, through ADR-0345 §7:6.
+> **Normative.** Where a reliance is recorded as held up, the call that recorded it may add
+> what the reliance shaped to the memory's labels, through ADR-0345 §7:6.
 
-> **Normative.** The commit step decides each memory's final labels. Planning's and the
-> scout's are suggestions it may keep, change or drop.
+> **Normative.** Framing decides each new memory's labels. Planning's and the scout's are
+> suggestions it may keep, change or drop.
 
 ### 10. Prompts and models
 
@@ -313,8 +327,9 @@ points at.
 
 > **Normative.** This decision decides no preference of the person about what is kept, no
 > bar for which single occasions are worth a memory beyond ADR-0329 §11, no search over
-> labels, and no rule of usage among holders. Each is a later decision's, and no lane
-> builds one under this decision.
+> labels, no rule of usage among holders, and no standard by which the assistant comes to
+> hold a belief of its own. Each is a later decision's, and no lane builds one under this
+> decision.
 
 ### 12. What the person sees
 
@@ -359,6 +374,9 @@ Superseded in part; every clause the middle column does not name stands:
 **What gets harder, and what this leaves.**
 - **More calls per finding:** a framing call, and a placement call per memory. The
   reconciler's call goes, and the daily bound still caps the total.
+- **The assistant remembers nothing of its own.** What it concluded in one activation is
+  re-concluded in the next, from what it is shown. Earned opinions wait for a decision on
+  its standards of belief.
 - **No inferences until store maintenance exists.** #3154's scenario "an inference and its
   bar" moves to that decision's milestone.
 - **What the scout knows is what the episode recorded.** Understanding's windows are not
@@ -384,3 +402,7 @@ Superseded in part; every clause the middle column does not name stands:
   only what the parts bear out.
 - **The commit step proposing sensitivity.** Withdrawn by the owner: it does not know the
   person.
+- **Keeping the assistant's own conclusions as its memories,** resting on the evidence
+  they drew on. Not chosen for now: an advertisement read in one activation would become
+  a lasting opinion the assistant keeps raising. It waits for a decision on the
+  assistant's standards of belief.
