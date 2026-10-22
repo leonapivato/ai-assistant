@@ -234,6 +234,33 @@ words alone (ADR-0329 §10) are refused there. Importance is not judged twice.
 > **Normative.** The observer reads every origin and holder from the record as code sets
 > them, and computes neither from a model's output or from the task-level outside mark.
 
+> **Normative.** Where a round's message relays what a recorded part of the episode says, a
+> finding rests on that part and not on the message: the dentist's email the assistant
+> read, not the assistant's sentence repeating it.
+
+> **Normative.** Until a decision on the assistant's standards of belief decides otherwise,
+> no memory rests on a round's message unless a person, in the leaving episode, asked to
+> keep what it said, agreed with it, or confirmed it. The ADR-0329 §10 rule that the
+> assistant's words are never evidence about the user extends to every memory, about
+> anything.
+
+> **Normative.** A memory a person keeps or adopts from a round's message is held by that
+> person, carries the message as a support, and is unsourced where no recorded part behind
+> it was found (ADR-0345 §12:4).
+
+> **Normative.** Where the person asks to keep what the assistant said but says they
+> disagree with it, the observer keeps a memory of the exchange, marked `one_occasion`,
+> saying what the assistant said and that the person disagreed, and never keeps the claim
+> as the person's belief. The person's disagreement is kept as theirs where it is worth
+> keeping.
+
+**No beliefs of the assistant's own, for now.** Planning reasons in the moment, and a
+matter's working conclusions live on its story's page. Long-term memory holds what
+people and sources believe. Where the assistant's words end up in a memory, it is because
+a person took them on, and the memory says when nothing stood behind them. Whatever
+else was in that round's context stays one pointer away, in the episode the support
+points at.
+
 ### 8. The track record
 
 > **Normative.** `EpisodeProjection` gains, for an episode whose rounds called the
@@ -310,7 +337,7 @@ Superseded in part; every clause the middle column does not name stands:
 | --- | --- | --- |
 | ADR-0217 | §4:2, in the addition alone: the observer of ADR-0329 also proposes, on its framing pass | §5:7 |
 | ADR-0284 | §8:1's projection, in the addition alone: an episode's reliance | §8:1 |
-| ADR-0329 | §8:1, §8:2, §8:3 and §8:6; §9:3 and §9:4; §9:7, for the observer's own writes; §11:4, §11:5 and §11:6; §12:4; §14:1 and §14:2; and §3:1 and §9:1, in the additions alone | §2–§10 |
+| ADR-0329 | §8:1, §8:2, §8:3 and §8:6; §9:3 and §9:4; §9:7, for the observer's own writes; §10:1 and §10:2, in their reach, which extends to every memory; §11:4, §11:5 and §11:6; §12:4; §14:1 and §14:2; and §3:1 and §9:1, in the additions alone | §2–§10 |
 
 ## Consequences
 
