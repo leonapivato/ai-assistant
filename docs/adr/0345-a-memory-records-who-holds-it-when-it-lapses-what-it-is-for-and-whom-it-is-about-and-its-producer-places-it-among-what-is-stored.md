@@ -2,7 +2,7 @@
 
 - Status: Proposed
 - Date: 2026-10-21
-- Scope: the memory record and the write path a placed proposal takes. Who holds each support, and the rule that a memory is changed only in its own holder's beliefs, the assistant's only where it is convinced, and never kept current by the assistant alone; a proposal that names how it stands to each stored memory its producer retrieved, and the write that follows from it; a validity end set at creation; situation labels; marks; a producer for `about_person` and a search filter on it; the retirement of `topics` from the memory; and the upgrade. The observer's use of all of it, what it reads, its steps and its calls, is the second decision of this walk.
+- Scope: the memory record and the write path a placed proposal takes. Who holds each support, the assistant's messages as statements it made and never as its beliefs, and the rule that a memory is changed only in its own holder's beliefs and never kept current by the assistant's statements alone; a proposal that names how it stands to each stored memory its producer retrieved, and the write that follows from it; a validity end set at creation; situation labels; marks; a producer for `about_person` and a search filter on it; the retirement of `topics` from the memory; and the upgrade. The observer's use of all of it, what it reads, its steps and its calls, is the second decision of this walk.
 - Dependency: ADR-0328, ADR-0329, ADR-0336, ADR-0217, ADR-0219, ADR-0045, ADR-0100, ADR-0213, ADR-0326 and ADR-0338, as their status lines leave them.
 - Authorization: the owner ruled this design in the observer walk of 2026-10-21, in the observer-and-learning fork, and directed it be written ("I think we get started"). This decision writes those rulings down and settles only what they leave open, each such point named where it is settled. The number is provisional until the owner assigns it (`CONTRIBUTING.md` → "ADR numbers are assigned at dispatch"). The owner reads it before it is ratified (§1:1).
 - **Contract-surface decision.** It changes `core/types.py` (`MemorySupport` gains its holder; the memory gains labels and marks and loses `topics`; `MemoryUpdateProposal` gains a placement; the projections gain holders, labels, marks and a future validity end) and `core/protocols.py` (`MemoryStore.search` gains an `about_person` filter; `MemoryWriter.ingest` writes a placed proposal by §5; `MemoryWriter` gains a label write). It is a breaking change under golden rule 5.
@@ -33,15 +33,21 @@ shape the record.
   holder, and the person behind it can be linked later. A forwarded "message from the
   user", a screenshot, or Sam saying "the user agrees with me" stays Sam's: only an
   identity the channel establishes holds a person's belief.
-- **Saying something versus convincing the assistant.** "Aren't inferences just normal
-  beliefs?" The assistant is a holder like any other, so nobody's word removes its belief
-  by rule; "it's about saying something versus convincing the assistant". A contradiction
-  is kept beside, as evidence against.
+- **A contradiction is kept beside, as evidence against.** Nobody's word removes another
+  holder's belief by rule. A claim against a memory from someone who does not hold it is
+  installed beside it and recorded on it as evidence against.
 - **No beliefs of the assistant's own, for now.** After the owner's worry that an
   advertisement could convince the assistant and, through it, the user, long-term memory
-  holds only what people and sources believe. Where a person keeps something the assistant
-  said with nothing behind it, the memory cites what it can, the assistant's message:
-  "make it not that there's no source. Instead, it should cite what it can."
+  holds only what people and sources believe. The assistant's message is a statement it
+  made, "the source of I stated this at this time in this chat, not that I believe this",
+  and never a
+  belief it holds. Where a person keeps something the assistant said with nothing behind
+  it, the memory cites what it can, the assistant's message: "make it not that there's no
+  source. Instead, it should cite what it can." With the assistant holding nothing, there
+  is nothing to convince it of; convincing waits for a decision on its standards of
+  belief.
+- **A person is a kind of source.** "Person is a type of source, no?" One holder, of
+  several kinds, under one set of capture rules.
 - **The commit step frames, then places.** The new memory's wording and metadata come
   from what it rests on alone, without the stored memories: "I don't see why
   information about what's already in the store should affect how it frames the
@@ -139,16 +145,23 @@ labels, marks and whom it is about, and stops carrying `topics`.
 | A pin (ADR-0338 §4:4) | The person who made the pin |
 | A message carrying `forwarded_from`, or an input whose `InputOrigin` is `OUTSIDE` | A claimed source: the forward's claimed original sender where the trigger records one (`ClaimedAuthor`), held as claimed, and otherwise unknown |
 | An evidence item | The source the record names: its digest's `Attestation.reported_by` where the record states one, and otherwise unknown |
-| A round's message, a remember call, or an observer's inference | The assistant |
+| A round's message, a remember call, or an observer's inference | The assistant's statement: what it said, where and when |
 | A legacy record | Unknown |
 
 > **Normative.** Every support records its holder, set by code from the part it points at
 > and the episode's record, as the table rules. No model's output sets or changes a
 > holder.
 
-> **Normative.** A holder is one of four kinds, a closed set added to and never renamed:
-> a person, named by an identifier; a source, named by an identifier and marked
-> established or claimed; the assistant; and unknown.
+> **Normative.** A holder is the source of the claim a support records, and is one of four
+> kinds, a closed set added to and never renamed: a person, named by an identifier; an
+> outside source, named by an identifier and marked established or claimed; the
+> assistant's statement, naming the message it made; and unknown. Every kind is held
+> under the same capture rules.
+
+> **Normative.** A holder of the kind the assistant's statement records that the assistant
+> said something, where and when, and never that it believes it. The assistant holds no
+> belief, and nothing in this decision changes, retires or keeps a memory on the ground
+> that the assistant believes anything.
 
 > **Normative.** Until a decision on identified people adds others, the one person a
 > holder names is the owner, and the identifier that names the owner is a
@@ -214,24 +227,16 @@ derivable, costs one field and spares an upgrade that would have to guess.
 > `for` support backing it as worded remains on it. A memory some other holder still
 > holds stays current.
 
-> **Normative.** Supports whose holder is the assistant are the assistant's own beliefs, and
-> they change only by the assistant's own judgement. They stop counting under §3:1 where
-> the proposal's backing support's holder is the assistant, or where the placement records
-> the assistant convinced (§4:1).
-
-> **Normative.** A placement records the assistant convinced only for a stored memory the
-> assistant holds, and never where the proposal's backing support's holder is unknown.
-
 > **Normative.** A retiring relation from a holder that holds none of the stored memory's
-> counted supports, and that does not convince the assistant, stops nothing and retires
-> nothing. The writer installs the proposal beside the stored memory and adds the
-> proposal's backing support to the stored memory as `against`.
+> counted supports stops nothing and retires nothing. The writer installs the proposal
+> beside the stored memory and adds the proposal's backing support to the stored memory as
+> `against`.
 
 > **Normative.** Until a decision on the assistant's standards of belief decides otherwise,
-> supports whose holder is the assistant never keep a memory current on their own. A write
-> that leaves every counted `for` support backing a memory as worded the assistant's
-> retires it in the same atomic write, by an end citing the support whose stopping left
-> it so.
+> supports whose holder is the assistant's statement never keep a memory current on their
+> own. A write that leaves every counted `for` support backing a memory as worded the
+> assistant's statement retires it in the same atomic write, by an end citing the support
+> whose stopping left it so.
 
 > **Normative.** ADR-0328 §6:5's refusal by standing does not bind the write a placed
 > proposal yields. The clauses above are its guard.
@@ -245,23 +250,20 @@ holder's beliefs a change is real: the owner's "I eat meat again" ends the owner
 A memory held by several people, Sam's and Tom's "blue", outlives one of them changing
 their mind: Sam's support stops counting, Tom's keeps it current.
 
-**Saying something versus convincing the assistant.** The assistant is a holder like any
-other, so nobody's word removes its belief by rule: saying something records the
-speaker's belief, and adds it to what it contradicts as evidence against, so the dispute
-is visible from either memory. The assistant drops a belief of its own only when it is
-convinced, a judgement its producer makes weighing who is speaking. Anyone with an
-identifier can convince it, as anyone can convince a person with a good reason. The
-worst a manipulator can do is make the assistant drop one of its own guesses, which
-stays in the history with its evidence. Convincing never touches another holder's
-belief, and no belief, convinced or not, is authority to act.
+**Saying something, and what the assistant said.** Nobody's word removes another holder's
+belief by rule: saying something records the speaker's belief, and adds it to what it
+contradicts as evidence against, so the dispute is visible from either memory. The
+assistant's messages are statements it made, not beliefs it holds, so there is nothing of
+the assistant's to convince or overrule. Whether the assistant should ever hold beliefs,
+and by what standard it would be convinced of one, is a later decision's. No belief, of
+anyone's, is authority to act.
 
 ### 4. A placed proposal
 
 > **Normative.** `MemoryUpdateProposal` gains an optional placement: for each stored memory
-> its producer retrieved, the memory's id, the revision the producer read it at, one
-> relation, and, for a memory the assistant holds, whether the proposal convinces the
-> assistant; and, optionally, one open question on one of those memories that the
-> proposal answers.
+> its producer retrieved, the memory's id, the revision the producer read it at, and one
+> relation; and, optionally, one open question on one of those memories that the proposal
+> answers.
 
 | Relation | The proposed memory, against the stored one |
 | --- | --- |
@@ -311,7 +313,7 @@ producer writes a memory today.
 | `supports` | Adds the proposal's backing support to it as `for`, not backing it as worded |
 | `weakens` | Adds the proposal's backing support to it as `against` |
 | `recheck` | Raises a `recheck` question on it, resting on the proposal's backing support |
-| `no_longer_true` | §3: within the holder's own beliefs, or the assistant's where it is convinced, stops their supports, and where it retires, an end, closed at the backing support's about-when where it carries one and at the write's instant otherwise; from another holder, an `against` support and the proposal beside it |
+| `no_longer_true` | §3: within the holder's own beliefs, stops their supports, and where it retires, an end, closed at the backing support's about-when where it carries one and at the write's instant otherwise; from another holder, an `against` support and the proposal beside it |
 | `never_true` | §3, as above; where it retires, a mark wrong |
 | `claimed_too_much` | §3, as above; where it retires, a replace naming the proposed memory |
 | `independent` | Nothing |
@@ -444,7 +446,7 @@ filter, where a label matched by meaning could miss one.
 
 **Why `assistant_statement` is a mark and not computed.** A memory a person keeps from
 what the assistant said is the person's: their "remember that" takes on the words shown,
-so it backs the memory as worded and makes them its holder, which §3:7's guard needs. Code
+so it backs the memory as worded and makes them its holder, which §3:5's guard needs. Code
 then cannot tell from the supports alone that the assistant's words were all that stood
 behind it, because the person's support looks like any statement of theirs. The producer,
 which saw the parts, says so; code checks that the assistant's message is among the
@@ -543,14 +545,11 @@ and store maintenance would merge one.
 > **Normative.** That lane's tests include, each failing on a writer that implements only
 > the others: Sam's `no_longer_true` against the owner's memory installs beside, stops
 > nothing and adds an `against` support; the owner's against the owner's memory retires
-> it; one of two holders withdrawing leaves the memory current; a placement recording the
-> assistant convinced stops the assistant's supports, and one that does not adds an
-> `against` support only; an unknown holder's placement never records the assistant
-> convinced; a claimed author is never the same holder as an established one with the
-> same identifier; a part saying what another person believes is held by its sender; two
-> parts under one identifier are one holder; a partial supporter is not a holder; a
-> `contained` from another holder installs beside; a memory left with only the assistant's
-> backing is retired; an `assistant_statement` memory without the assistant's message is
+> it; one of two holders withdrawing leaves the memory current; a claimed author is never
+> the same holder as an established one with the same identifier; a part saying what
+> another person believes is held by its sender; two parts under one identifier are one
+> holder; a partial supporter is not a holder; a `contained` from another holder installs
+> beside; a memory left with only the assistant's statements backing it is retired; an `assistant_statement` memory without the assistant's message is
 > refused, and one with it is shown citing that message;
 > a `restates` that would raise standing installs beside; a `restates` at equal standing
 > folds with no new memory; a `contained` adds supports without raising standing; a stale
@@ -623,8 +622,15 @@ Superseded in part; every clause the middle column does not name stands:
   it was kept for, a write never ending a fact on resemblance alone, is §3 and §5's.
 - **A person's word withdrawing the assistant's belief by rule**, by anyone or by the
   subject and the owner alone. Withdrawn: an inference is a belief like any other, so it
-  changes only by its holder's own judgement, and an `against` support keeps the dispute
-  visible either way.
+  would change only by its holder's own judgement, and an `against` support keeps the
+  dispute visible either way.
+- **The assistant as a holder of beliefs, convinced by judgement.** Adopted during the walk
+  and then withdrawn: once the assistant holds no beliefs, its messages are statements it
+  made, and there is nothing of its own to convince. It returns, if ever, with the
+  decision on the assistant's standards of belief.
+- **A person as a kind apart from a source.** Not chosen: "Person is a type of source,
+  no?" Every holder is the source of a claim; the kinds matter to usage, not to capture's
+  rules.
 - **A ranking across holders for retirement**, the owner above sources above inference.
   Withdrawn: that is usage's choice, and capture that applies it destroys a belief usage
   might need.
