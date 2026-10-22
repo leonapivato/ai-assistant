@@ -40,7 +40,8 @@ shape the record.
 - **No beliefs of the assistant's own, for now.** After the owner's worry that an
   advertisement could convince the assistant and, through it, the user, long-term memory
   holds only what people and sources believe. Where a person keeps something the assistant
-  said with nothing behind it: "If there's no source, we just say there's no source."
+  said with nothing behind it, the memory cites what it can, the assistant's message:
+  "make it not that there's no source. Instead, it should cite what it can."
 - **The commit step frames, then places.** The new memory's wording and metadata come
   from what it rests on alone, without the stored memories: "I don't see why
   information about what's already in the store should affect how it frames the
@@ -420,15 +421,16 @@ than serving two purposes.
 
 > **Normative.** A memory carries marks: a set of members of one closed enumeration, added
 > to and never renamed. This decision adds two members. `one_occasion`: the memory states a
-> single occasion, such as one choice made once on a date. `unsourced`: what the memory
-> states traces to nothing recorded but the assistant's own words, which a person kept or
+> single occasion, such as one choice made once on a date. `assistant_statement`: what the
+> memory states traces to the assistant's own words in a round's message, with nothing
+> recorded behind them, which a person kept or
 > took on.
 
 > **Normative.** A mark is set by the memory's producer at its create, and changes later
 > only by a decision that names how.
 
-> **Normative.** The writer refuses a memory marked `unsourced` that carries no support
-> pointing at a round's message.
+> **Normative.** The writer refuses a memory marked `assistant_statement` that carries no
+> support pointing at a round's message.
 
 > **Normative.** A memory marked `one_occasion` carries no validity end set at its create.
 
@@ -440,13 +442,14 @@ A one-occasion memory is an ordinary memory: its wording dates it, and it stays 
 that it happened. The mark lets recall and store maintenance find occasions by an exact
 filter, where a label matched by meaning could miss one.
 
-**Why `unsourced` is a mark and not computed.** A memory a person keeps from what the
-assistant said is the person's: their "remember that" takes on the words shown, so it
-backs the memory as worded and makes them its holder, which §3:7's guard needs. Code then
-cannot tell from the supports alone that nothing stood behind the words, because the
-person's support looks like any statement of theirs. The producer, which saw the parts,
-says so; code checks that the assistant's message is among the supports. In the owner's
-words: "If there's no source, we just say there's no source."
+**Why `assistant_statement` is a mark and not computed.** A memory a person keeps from
+what the assistant said is the person's: their "remember that" takes on the words shown,
+so it backs the memory as worded and makes them its holder, which §3:7's guard needs. Code
+then cannot tell from the supports alone that the assistant's words were all that stood
+behind it, because the person's support looks like any statement of theirs. The producer,
+which saw the parts, says so; code checks that the assistant's message is among the
+supports. The memory still cites what it can: the message, where and when the assistant
+said it. Every claim has a source, and here the source is that statement.
 
 ### 9. Whom a memory is about
 
@@ -497,9 +500,10 @@ and store maintenance would merge one.
 > **Normative.** Planning's label for a memory conveys its holders wherever they are not the
 > owner alone, and its validity end where it lies in the future. The text is planning's.
 
-> **Normative.** Every projection and planning's label convey a memory marked `unsourced`
-> as the assistant's statement, kept by the person who holds it, with no source, and never
-> as "from a source" or as what the person said, whatever standing ADR-0328 §6 computes
+> **Normative.** Every projection and planning's label convey a memory marked
+> `assistant_statement` as what the assistant said, citing that message, where and when it
+> was said, and the person who kept it, and never as "from a source" or as what the person
+> said, whatever standing ADR-0328 §6 computes
 > for it.
 
 > **Normative.** A change to a shape the wire carries advances `PROTOCOL_VERSION` in that
@@ -546,8 +550,8 @@ and store maintenance would merge one.
 > same identifier; a part saying what another person believes is held by its sender; two
 > parts under one identifier are one holder; a partial supporter is not a holder; a
 > `contained` from another holder installs beside; a memory left with only the assistant's
-> backing is retired; an `unsourced` memory without the assistant's message is refused, and
-> one with it is shown with no source;
+> backing is retired; an `assistant_statement` memory without the assistant's message is
+> refused, and one with it is shown citing that message;
 > a `restates` that would raise standing installs beside; a `restates` at equal standing
 > folds with no new memory; a `contained` adds supports without raising standing; a stale
 > revision refuses the whole proposal; a create with a future validity end drops out of
@@ -561,7 +565,7 @@ Superseded in part; every clause the middle column does not name stands:
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
 | ADR-0213 | Every clause, as it applies to a memory | §7, §10 |
-| ADR-0328 | §3:1's field table, in the additions of labels and marks and the removal of `topics`; §3:6, as to `about_person`'s producer and `topics`; §4:1's support fields, in the addition of the holder; §5:10, for a create; §6:5, §11:5, §11:6 and §11:7, for a placed proposal; §11:9, as to the union of topics; §15:1, §15:2 and §15:5, in the additions alone; §15:4 and §15:5, for a memory marked `unsourced` | §2–§10, §12 |
+| ADR-0328 | §3:1's field table, in the additions of labels and marks and the removal of `topics`; §3:6, as to `about_person`'s producer and `topics`; §4:1's support fields, in the addition of the holder; §5:10, for a create; §6:5, §11:5, §11:6 and §11:7, for a placed proposal; §11:9, as to the union of topics; §15:1, §15:2 and §15:5, in the additions alone; §15:4 and §15:5, for a memory marked `assistant_statement` | §2–§10, §12 |
 | ADR-0336 | §2:1, §3:1–§3:3, §4:1, §5:1 and §7:1, for a placed proposal | §4, §5 |
 
 ## Consequences
@@ -633,9 +637,12 @@ Superseded in part; every clause the middle column does not name stands:
   read, mixed with what it already knew, so no claim can be pinned on the model alone. The
   statement is the assistant's, and what was in its context stays one pointer away, in the
   episode its support points at.
-- **Computing "no source" from the supports.** Not chosen: a person's "remember that"
-  backs the memory as worded, so the supports cannot show that nothing stood behind it.
-  The producer marks it (§8).
+- **Saying "no source".** Withdrawn by the owner: "make it not that there's no source.
+  Instead, it should cite what it can." A kept statement of the assistant's cites the
+  assistant's message.
+- **Computing that a memory rests on the assistant's statement alone, from the supports.**
+  Not chosen: a person's "remember that" backs the memory as worded, so the supports cannot
+  show that nothing else stood behind it. The producer marks it (§8).
 - **Links between related memories**, from the reconciler's `ADDS`. Withdrawn: stripped
   down it says "similar and not in conflict", which the search recomputes from
   embeddings with no model call.
