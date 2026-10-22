@@ -218,26 +218,25 @@ derivable, costs one field and spares an upgrade that would have to guess.
 
 ### 3. A memory changes only in its holder's beliefs
 
-> **Normative.** In the write a placed proposal yields (§5), a retiring relation changes a
-> stored memory only through the supports whose holder is a holder of one of the
-> proposal's backing supports: each such counted support stops counting, by one stop
-> counting each, citing that holder's backing support, added to the stored memory as
-> `against`.
+> **Normative.** In the write a placed proposal yields (§5), a retiring relation adds the
+> proposal's backing supports to the stored memory it names as `against`.
 
 > **Normative.** The proposal's backing supports, in the clause above and throughout §5,
 > are its counted `for` supports that back it as worded, and its first backing support is
 > the first of them.
 
-> **Normative.** A stored memory whose supports the clause above stopped is retired in the
-> same atomic write, by the operation the relation names (§5), exactly where no counted
-> `for` support backing it as worded remains on it. A memory some other holder still
-> holds stays current.
+> **Normative.** A retiring relation changes the stored memory only through the counted
+> supports on it whose holder is a holder of one of the proposal's backing supports: each
+> such support stops counting, by one stop counting each, citing that holder's backing
+> support. No other holder's support on it changes.
 
-> **Normative.** A retiring relation from holders none of whom holds a counted support of
-> the stored memory stops nothing and retires nothing. The writer installs the proposal
-> beside the stored memory, adds the proposal's backing supports to the stored memory as
-> `against`, and adds the stored memory's backing supports to the proposal as `against`,
-> so the dispute is recorded on both.
+> **Normative.** The stored memory is retired in the same atomic write, by the operation the
+> relation names (§5), exactly where no counted `for` support backing it as worded remains
+> on it. A memory some other holder still holds stays current.
+
+> **Normative.** A stored memory a retiring relation leaves current has its remaining
+> counted backing supports added to the proposal as `against` in the same write, so the
+> dispute is recorded on both memories.
 
 > **Normative.** ADR-0328 §6:5's refusal by standing does not bind the write a placed
 > proposal yields. The clauses above are its guard.
@@ -314,9 +313,9 @@ producer writes a memory today.
 | `supports` | Adds the proposal's backing supports to it as `for`, none backing it as worded |
 | `weakens` | Adds the proposal's backing supports to it as `against` |
 | `recheck` | Raises a `recheck` question on it, resting on the proposal's first backing support |
-| `no_longer_true` | §3: within its holders' own beliefs, stops their supports, and where it retires, an end, closed at the about-when of the backing support whose stopping left it unbacked where that support carries one, and at the write's instant otherwise; from holders who hold none of it, `against` supports both ways and the proposal beside it |
-| `never_true` | §3, as above; where it retires, a mark wrong |
-| `claimed_too_much` | §3, as above; where it retires, a replace naming the proposed memory |
+| `no_longer_true` | §3; where it retires, an end, closed at the about-when of the backing support whose stopping left it unbacked where that support carries one, and at the write's instant otherwise |
+| `never_true` | §3; where it retires, a mark wrong |
+| `claimed_too_much` | §3; where it retires, a replace naming the proposed memory |
 | `independent` | Nothing |
 
 > **Normative.** The writer applies, to each memory a placement names, what the table's
@@ -371,6 +370,53 @@ and teaches piano" ends with it when half of it is corrected
 ([#3259](https://github.com/leonapivato/ai-assistant/issues/3259)). The observer's
 decision frames one claim per memory, so the store holds few compounds. Splitting the
 ones it holds is store maintenance's.
+
+**A worked example.** Five holders: the owner; Sam and Tom, speaking to a home device that
+knows who is talking; a hospital staff page the assistant read; and the assistant's
+statements, which are cited and never back a memory. Each step is placed against what
+the earlier steps stored.
+
+1. The owner: "My sister Ana moved to Lisbon last year and works as a nurse." Framed as
+   three memories, each backed by the owner: M1 "Ana is the user's sister", M2 "Ana lives
+   in Lisbon", M3 "Ana works as a nurse".
+2. Sam: "Ana's flat overlooks the Tagus." M4, held by Sam. Against M2 it `supports`, so
+   Sam's support joins M2 as `for`, not backing it: Sam is M2's partial supporter.
+3. The assistant reads the staff page ("Ana K., nurse, Santa Maria Hospital"), says so,
+   and the owner says "remember that". M5 "Ana works at Santa Maria Hospital" rests on the
+   page's evidence item, not the assistant's sentence, and on the owner's request: held by
+   the page and the owner. Against M3 and M2 it `supports`.
+4. Tom: "Ana's in Porto now, she moved last month." M6 "Ana lives in Porto", held by Tom.
+   Against M2 it is `no_longer_true`, but Tom holds nothing on M2: his backing joins M2 as
+   `against`, nothing stops, M2 stays the owner's, and the owner's backing joins M6 as
+   `against`. Against M4 it `weakens`; against M5 it is `recheck`.
+5. Sam: "Oh right, she moved to Porto, and her flat isn't by the Tagus any more." Two
+   claims. "Ana lives in Porto" `restates` M6 at equal standing, so it folds: M6 is held by
+   Tom and Sam. Against M2 it is `no_longer_true`: Sam's partial support on M2 stops, the
+   owner's backing keeps M2 current, and the dispute is recorded both ways (§3:5). "Ana's
+   flat no longer overlooks the Tagus" is `no_longer_true` against Sam's own M4: his
+   backing stops, nothing backs M4, and it ends.
+6. The owner: "Yeah, Ana moved to Porto last month." It folds into M6, now held by Tom, Sam
+   and the owner. Against M2, the owner's own, it is `no_longer_true`: the owner's supports
+   stop, nothing backs M2, and it ends, closed at last month, with M6 its successor.
+7. The assistant: "So she's probably not at Santa Maria any more." Nobody keeps it, so
+   nothing is written. The owner: "Right, she's at São João now." M7 "Ana works at São João
+   Hospital", held by the owner. Against M5 it is `no_longer_true`: the owner's supports on
+   M5 stop, the page's backing keeps M5 current as what the page says, the dispute is
+   recorded both ways, and the owner's answer resolves M5's open question. When the page
+   updates, the same source withdraws its own backing, and M5 ends.
+
+| Memory | Held by | Status at the end |
+| --- | --- | --- |
+| M1 Ana is the user's sister | the owner | current |
+| M2 Ana lives in Lisbon | nobody | ended at last month; succeeded by M6 |
+| M3 Ana works as a nurse | the owner (the page in part) | current |
+| M4 Ana's flat overlooks the Tagus | nobody | ended |
+| M5 Ana works at Santa Maria Hospital | the page | current; the owner against |
+| M6 Ana lives in Porto | Tom, Sam, the owner | current |
+| M7 Ana works at São João Hospital | the owner | current; the page against |
+
+Usage that prefers the owner, and a person on themselves, answers "Porto, São João",
+and still knows the page is out of date and that Lisbon held until last month.
 
 ### 6. A memory that lapses
 
@@ -449,7 +495,7 @@ filter, where a label matched by meaning could miss one.
 what the assistant said is the person's: their "remember that" takes on the words shown,
 so it backs the memory as worded and makes them its holder; the assistant's message is
 cited and never backs it (§2:4), so when the person later withdraws, nothing backs the
-memory and it ends by §3:3. Code
+memory and it ends by §3:4. Code
 then cannot tell from the supports alone that the assistant's words were all that stood
 behind it, because the person's support looks like any statement of theirs. The producer,
 which saw the parts, says so; code checks that the assistant's message is among the
@@ -562,7 +608,8 @@ and store maintenance would merge one.
 > folds with no new memory; a `contained` adds supports without raising standing; a stale
 > revision refuses the whole proposal; a create with a future validity end drops out of
 > live reads after it; a near-duplicate label is refused; the `about_person` filter binds
-> before the cut; and the upgrade assigns holders by §2's table.
+> before the cut; the upgrade assigns holders by §2's table; and each step of §5's worked
+> example, from the same placements, ends in that example's table.
 
 ### 16. Relationship to earlier decisions
 
