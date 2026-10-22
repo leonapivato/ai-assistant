@@ -166,6 +166,11 @@ While it is, the correcting episode is still in the window, where understanding 
 > situation labels; its marks; a validity end where its supports name one (ADR-0345 §6);
 > and, under the person model, the style and pin judgements ADR-0338 §9:4 and §9:5 name.
 
+> **Normative.** Each memory a framing proposes states one claim. Claims that could each be
+> true without the other are framed as separate memories, as "Ana lives in Lisbon" and "Ana
+> teaches piano" are; a claim that holds only as a whole, as a relation ("Ana and Tom are
+> married"), a range or a name does, stays one.
+
 > **Normative.** Every memory a framing proposes rests only on the finding's parts, and
 > code checks each as ADR-0329 §9:5 checks a decision. A memory that fails a check is not
 > written, and the others stand.
@@ -335,7 +340,7 @@ Superseded in part; every clause the middle column does not name stands:
 
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
-| ADR-0217 | §4:2, in the addition alone: the observer of ADR-0329 also proposes, on its framing pass | §5:7 |
+| ADR-0217 | §4:2, in the addition alone: the observer of ADR-0329 also proposes, on its framing pass | §5:8 |
 | ADR-0284 | §8:1's projection, in the addition alone: an episode's reliance | §8:1 |
 | ADR-0329 | §8:1, §8:2, §8:3 and §8:6; §9:3 and §9:4; §9:7, for the observer's own writes; §10:1 and §10:2, in their reach, which extends to every memory; §11:4, §11:5 and §11:6; §12:4; §14:1 and §14:2; and §3:1 and §9:1, in the additions alone | §2–§10 |
 
