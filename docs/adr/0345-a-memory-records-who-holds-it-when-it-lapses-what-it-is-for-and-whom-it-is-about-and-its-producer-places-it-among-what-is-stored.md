@@ -587,7 +587,7 @@ names are one person (§9:3).
 
 > **Normative.** This decision adds no lock, queue or second writer. A placed proposal is
 > made safe by the guards already in force: one observer run at a time (ADR-0329 §16:6),
-> the conditional write (ADR-0219 §2), the refusal of a stale placement (§4:6), one atomic
+> the conditional write (ADR-0219 §2), the refusal of a stale placement (§4:7), one atomic
 > write per proposal (§5:6), and a support keyed by its part so a retry adds nothing
 > twice (ADR-0328 §4:8).
 
