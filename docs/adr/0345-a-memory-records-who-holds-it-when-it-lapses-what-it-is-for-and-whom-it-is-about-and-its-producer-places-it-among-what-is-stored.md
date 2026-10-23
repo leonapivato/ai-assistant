@@ -102,6 +102,9 @@ Surveyed at `15e62f08`.
   kind and band.
 - **Style marks and pin suggestions** live in the person-model store (ADR-0338 §9:4,
   §9:5).
+- **A digest records no source identity.** No part the observer reads carries an
+  `Attestation`, so evidence from a search or a page names no source (the observer sets
+  none, `orchestration/observer/commit.py`).
 
 ### Words
 
@@ -421,7 +424,8 @@ the earlier steps stored.
    Hospital", held by the owner. Against M5 it is `no_longer_true`: the owner's supports on
    M5 stop, the page's backing keeps M5 current as what the page says, the dispute is
    recorded both ways, and the owner's answer resolves M5's open question. When the page
-   updates, the same source withdraws its own backing, and M5 ends.
+   updates, the same source withdraws its own backing, and M5 ends. That last step needs the
+   digest to record the page's identity, which it does not yet (see Consequences).
 
 | Memory | Held by | Status at the end |
 | --- | --- | --- |
@@ -723,6 +727,12 @@ Superseded in part; every clause the middle column does not name stands:
   to be approached with care. It will likely draw on situation labels and the exact
   person filter in place of exact topic tags, and this decision rules nothing about
   it.
+- **Outside sources depend on the digest recording who said it.** An outside source is
+  named by the identifier its digest records (§2:6), and no digest records one today, so
+  until the digest stage does (ADR-0308, the planning side), every source's evidence has an
+  unknown holder: a page that updates cannot withdraw its own claim, and credibility per
+  source has nothing to attach to. That change is the digest's own decision, expected soon,
+  and nothing here needs to change when it lands.
 - **Person holders other than the owner** wait on a decision on identified people.
   Until then the person column of §2 names the owner alone.
 - **The assistant keeps no memory of its own** until a decision on its standards of
