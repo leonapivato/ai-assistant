@@ -137,6 +137,13 @@ record by a decision on how recall ranks.
 > dated supports and operation log (ADR-0328 §4, §5), and a story with the summary version
 > it had then. Nothing that happened after the episode is shown.
 
+> **Normative.** Where the store no longer holds a thing as it stood then, the scout is shown
+> only what the leaving episode itself recorded of it, marked as no longer held: a memory
+> forgotten or cleared since, by the recall item a recall run kept for it (ADR-0281 §6), or
+> by its identity alone where none did; and a story whose summary a later version replaced,
+> by its identity alone, since a replaced summary's text is not kept (ADR-0300 §3:6).
+> Nothing later stands in for it.
+
 > **Normative.** The observer reads no episode, story, memory or note that the leaving
 > episode's record does not point at, and runs no search to find one. ADR-0329 §8:1's
 > later episodes, story reads and relevance searches are not read.
@@ -450,7 +457,8 @@ decision; the observer's half is the skip.
 > **Normative.** On the owner's hub, that deploy, after the hub's backup, clears the memory
 > store's memories and the plan store's observation records, so every episode since
 > ADR-0329 §7:5's instant is due again and is processed under this decision, oldest first,
-> as ADR-0329 §17's catch-up processes them. Before the clear it lists for the owner the
+> as ADR-0329 §17's catch-up processes them, each memory it points at shown as §2:3 has
+> it. Before the clear it lists for the owner the
 > wording of each memory a pin is on, since a pin whose memory the store no longer holds is
 > shown nowhere (ADR-0338 §4:9), so the owner can pin again what they want kept in mind.
 
