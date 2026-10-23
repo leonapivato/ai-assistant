@@ -607,7 +607,9 @@ and store maintenance would merge one.
 > support's holder.
 
 > **Normative.** Planning's label for a memory conveys its holders wherever they are not the
-> owner alone, and its validity end where it lies in the future. The text is planning's.
+> owner alone, the holders of its counted `against` supports where it has any, so a
+> disputed memory reads as disputed, and its validity end where it lies in the future. The
+> text is planning's.
 
 > **Normative.** Every projection and planning's label convey a memory marked
 > `assistant_statement` as what the assistant said, citing that message, where and when it
