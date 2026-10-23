@@ -1,6 +1,6 @@
 # 100. A belief states whom it is about when that is not the owner, and the label resolves to nothing
 
-- Status: Partially superseded by ADR-0285 (§5:1–§5:4)
+- Status: Partially superseded by ADR-0285 (§5:1–§5:4) and ADR-0345 (§1, §3 and §4:1, as they apply to a memory)
 - Date: 2026-08-04
 - **Note (2026-08-04): ratified.** `Proposed` → `Accepted`, in the separate lane
   #633 requires, after **both** required reviews came back green on the content
@@ -111,6 +111,7 @@
   replacements take effect on ratification of ADR-0285. This reciprocal header record
   accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and
   the ratified body below are preserved.
+- Partially superseded: 2026-10-21 by ADR-0345 — §1, §3 and §4:1, as they apply to a memory: a memory's one `about_person` is replaced by `subjects` and `involved`, each `None` or a set of names carried as a part gives them; the owner is named by an identifier where a memory is about the owner, and no unstated subject is read as the owner's; and the observer proposes the people a memory is about from what the episode shows (ADR-0345 §9). What §4 guarded stays guarded: a name is carried as given, and no model decides that two names are one person (ADR-0345 §9:3). Every other clause stands. This replacement takes effect on ratification of ADR-0345. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; prior supersessions and the ratified body below are preserved.
 
 ## Context
 

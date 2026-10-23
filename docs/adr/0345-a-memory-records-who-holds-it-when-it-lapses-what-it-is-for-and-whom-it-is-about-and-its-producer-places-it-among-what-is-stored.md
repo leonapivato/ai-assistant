@@ -5,8 +5,8 @@
 - Scope: the memory record and the write path a placed proposal takes. Who holds each support, the assistant's messages as statements it made and never as its beliefs, and the rule that a memory is changed only in its own holder's beliefs and never kept current by the assistant's statements alone; a proposal that names how it stands to each stored memory its producer retrieved, and the write that follows from it; a validity end set at creation; situation labels; marks; a producer for `about_person` and a search filter on it; the retirement of `topics` from the memory; and the upgrade. The observer's use of all of it, what it reads, its steps and its calls, is the second decision of this walk.
 - Dependency: ADR-0328, ADR-0329, ADR-0336, ADR-0217, ADR-0219, ADR-0045, ADR-0100, ADR-0213, ADR-0326 and ADR-0338, as their status lines leave them.
 - Authorization: the owner ruled this design in the observer walk of 2026-10-21, in the observer-and-learning fork, and directed it be written ("I think we get started"). This decision writes those rulings down and settles only what they leave open, each such point named where it is settled. The number is provisional until the owner assigns it (`CONTRIBUTING.md` → "ADR numbers are assigned at dispatch"). The owner reads it before it is ratified (§1:1).
-- **Contract-surface decision.** It changes `core/types.py` (`MemorySupport` gains its holder; the memory gains labels and marks and loses `topics`; `MemoryUpdateProposal` gains a placement; the projections gain holders, labels, marks and a future validity end) and `core/protocols.py` (`MemoryStore.search` gains an `about_person` filter; `MemoryWriter.ingest` writes a placed proposal by §5; `MemoryWriter` gains a label write). It is a breaking change under golden rule 5.
-- **Partially supersedes**, in the clauses §16's table names: ADR-0213, ADR-0328 and ADR-0336.
+- **Contract-surface decision.** It changes `core/types.py` (`MemorySupport` gains its holder; the memory gains labels, marks, `subjects` and `involved`, and loses `topics` and `about_person`; `MemoryUpdateProposal` gains a placement; the projections gain holders, labels, marks, the people a memory is about and a future validity end) and `core/protocols.py` (`MemoryStore.search` gains a person filter; `MemoryWriter.ingest` writes a placed proposal by §5; `MemoryWriter` gains a label write). It is a breaking change under golden rule 5.
+- **Partially supersedes**, in the clauses §16's table names: ADR-0100, ADR-0213, ADR-0328 and ADR-0336.
 
 ## Context
 
@@ -528,19 +528,52 @@ said it. Every claim has a source, and here the source is that statement.
 
 ### 9. Whom a memory is about
 
-> **Normative.** `about_person` keeps ADR-0100's meaning, a label as given, and gains a
-> producer: the observer, as its decision says.
+> **Normative.** A memory's `about_person` is replaced by two fields: `subjects`, the people
+> the claim is a fact about, and `involved`, the people it concerns without being about
+> them. Each is `None`, never determined, or a set of names, which may be empty, meaning
+> determined to be none.
 
-> **Normative.** `MemoryStore.search` gains an optional `about_person` filter that returns
-> only memories whose `about_person` equals the given label, bound before the ranking cut
-> as every eligibility predicate is (ADR-0128 §1).
+> **Normative.** A person appears in at most one of the two fields of a memory, and in
+> `subjects` where both would fit.
 
-> **Normative.** A memory whose `about_person` is `None` is read as the owner's, as
-> ADR-0100 has it.
+> **Normative.** A name is carried exactly as a part the memory rests on gives it, and
+> resolves to no identity. Which names are one person is a link held outside the memory by
+> a later decision on identified people, as §2:9 has it for holders, and no model decides
+> it.
+
+> **Normative.** Where a memory is about the owner, `subjects` names the owner by the
+> identifier §2:5 names. An empty `subjects` means the memory is about no person, and
+> neither field's `None` is read as meaning the owner or anyone else.
+
+> **Normative.** The observer sets both fields on every memory it writes, as its decision
+> says. A memory no producer set them on carries `None` in each.
+
+> **Normative.** `MemoryStore.search` gains an optional person filter that returns only
+> memories naming a given name in `subjects` or `involved`, or in `subjects` alone where the
+> caller asks, bound before the ranking cut as every eligibility predicate is (ADR-0128 §1).
 
 > **Normative.** A memory's placement may be narrowed by its producer's proposal at its
 > create (ADR-0217 §4), and the observer's decision names the observer as such a
 > producer. Nothing here widens what a proposal may do.
+
+**What the fields are for, and what they are not.** They find and weigh: placement
+retrieves every memory sharing a person with the new one; usage prefers a person's own
+word on facts they are the subject of; recall answers "what do I know about Ana?";
+forgetting, later, finds "everything about Ana". They are not privacy: who may hear a
+memory is its placement. The roles matter because they read differently: in "Ana is
+pregnant" Ana is a subject, and her own word on it counts most; in "I'm planning a
+surprise party for Ana" she is involved, the plan is the owner's, and she is exactly who
+must not hear it, which placement decides. The lists are a model's judgement and may be
+incomplete, so retrieval and forgetting also search by content, and nothing treats a
+missing name as proof that a memory is not about someone.
+
+**Why ADR-0100's rules give way here, and what of them stays.** ADR-0100 named no subject
+for the owner, because no user identity existed, and barred any model from inferring a
+subject from content, so that a model would not decide who counts as a person or when two
+mentions are one. The owner now has an identifier (§2:5), and the owner ruled that the
+observer, which knows the person, extracts whom a memory is about. What ADR-0100 guarded
+against stays guarded: a name is carried as a part gives it, and no model decides that two
+names are one person (§9:3).
 
 ### 10. `topics` retires from the memory
 
@@ -566,7 +599,8 @@ and store maintenance would merge one.
 ### 12. What a reading surface shows
 
 > **Normative.** Every projection of a memory ADR-0328 §15:1 names also carries its
-> holders and partial supporters, its labels, its marks, and its validity end where it lies
+> holders and partial supporters, its `subjects` and `involved`, its labels, its marks, and
+> its validity end where it lies
 > in the future.
 
 > **Normative.** The single-memory projection ADR-0328 §15:2 names also carries each
@@ -589,7 +623,9 @@ and store maintenance would merge one.
 > **Normative.** On open, the memory store upgrades every memory in place, with no model and
 > nothing dropped (ADR-0326 §4:1): each support gains its holder by §2's table, from the
 > record it points at as the store holds it, with a legacy support's holder unknown; each
-> memory gains no labels but those §10:2 carries over, and no marks.
+> memory gains no labels but those §10:2 carries over, and no marks; and a memory's
+> `about_person` becomes `subjects` holding that one name, or `subjects` `None` where it
+> named none, with `involved` `None` either way.
 
 > **Normative.** A support whose episode no longer resolves gains the holder its origin
 > alone determines where the table maps that origin to one holder, and unknown otherwise.
@@ -633,7 +669,9 @@ and store maintenance would merge one.
 > the proposal; a relation's note is on what it wrote; a `contained` adds supports without
 > raising standing; a stale
 > revision refuses the whole proposal; a create with a future validity end drops out of
-> live reads after it; a near-duplicate label is refused; the `about_person` filter binds
+> live reads after it; a near-duplicate label is refused; a person is in one of `subjects`
+> and `involved` at most, a name not given by a part is refused, and an unset field stays
+> `None`; the person filter binds
 > before the cut; a label records the episode that suggested it, and the owner's label
 > write names the writer `owner`; the upgrade assigns holders by §2's table; and each step of §5's worked
 > example, from the same placements, ends in that example's table.
@@ -644,6 +682,7 @@ Superseded in part; every clause the middle column does not name stands:
 
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
+| ADR-0100 | §1, §3 and §4:1, as they apply to a memory: its one `about_person`, the unstated subject read as the owner's, the owner never named, and no model inferring a subject | §9 |
 | ADR-0213 | Every clause, as it applies to a memory | §7, §10 |
 | ADR-0328 | §3:1's field table, in the additions of labels and marks and the removal of `topics`; §3:6, as to `about_person`'s producer and `topics`; §4:1's support fields, in the addition of the holder; §5:10, for a create; §6:5, §11:5, §11:6 and §11:7, for a placed proposal; §11:9, as to the union of topics; §15:1, §15:2 and §15:5, in the additions alone; §15:4 and §15:5, for a memory marked `assistant_statement`; §5:9, in the addition of the writer `owner`, for label writes | §2–§10, §12 |
 | ADR-0336 | §2:1, §3:1–§3:3, §4:1, §5:1 and §7:1, for a placed proposal | §4, §5 |
@@ -680,7 +719,7 @@ Superseded in part; every clause the middle column does not name stands:
 - **Forgetting loses `topics`.** ADR-0213 came from the owner's direction that "the topic
   thing needs to exist for forgetting anyway". Forgetting stays undesigned and deferred,
   to be approached with care. It will likely draw on situation labels and the exact
-  `about_person` filter in place of exact topic tags, and this decision rules nothing about
+  person filter in place of exact topic tags, and this decision rules nothing about
   it.
 - **Person holders other than the owner** wait on a decision on identified people.
   Until then the person column of §2 names the owner alone.
