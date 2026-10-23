@@ -395,8 +395,9 @@ producer writes a memory today.
 > `against`, one a dispute names (§3:8).
 
 > **Normative.** A `recheck` question rests on the stored memory's own counted supports
-> that back it as worded, asks in the words of the relation's note, and adds no support to
-> it, so a memory worth checking is not shown as disputed. A question the placement names
+> that back it as worded, or, where none does, on every support it carries, changing none
+> of them; it asks in the words of the relation's note and adds no support, so a memory
+> worth checking is not shown as disputed. A question the placement names
 > as answered is resolved citing a backing support of the proposal that the placement's
 > relation to that memory adds there, and stays open where that relation adds none.
 
@@ -750,7 +751,8 @@ suggested it on the 20th, but nothing else backs it", not with the suggestion as
 > support on a memory a retiring relation leaves current is added to the proposal as
 > `against`; a `contained` fold keeps an `against` support's direction; a `contained`
 > fold stops none of the holder's `against` supports; a `recheck` adds no support and
-> leaves its memory undisputed; an answer whose relation adds no support leaves the
+> leaves its memory undisputed, and on a memory with no counted backing rests on the
+> supports it carries; an answer whose relation adds no support leaves the
 > question open; a placed proposal carrying an `observer_inference` or `pinned` support is
 > refused; an upgraded memory that an
 > `observer_inference` support backs as worded keeps that backing, over a file the previous
