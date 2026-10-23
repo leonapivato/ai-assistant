@@ -30,7 +30,7 @@ important", and worked outward.
   Scout". Created-then-ended memories are "not a noisier store, it's a more accurate
   store", and the gap between two consecutive episodes' processing is one activation.
 - **Inferences belong to store maintenance**, "a better responsibility of that", and a
-  single occasion is an ordinary memory with a mark (ADR-0345 §8).
+  occasion is an ordinary memory with a mark (ADR-0345 §8).
 - **What the scout knows, the commit step should not have to rebuild.** Whom a memory is
   about, how they relate to the user, why it matters and who may hear it need "a deep
   understanding of the big user", so they are "given to it earlier on", by the scout.
@@ -57,6 +57,13 @@ important", and worked outward.
   what it can." This still prevents the assistant from holding any belief of its own.
   Keeping is not agreeing: "I don't agree, but remember that" keeps the disagreement, with
   the claim word for word, never the claim as the person's.
+- **The assistant's word is evidence of the saying.** "If it's a conversation about what
+  the assistant said in the past, then it's evidence, right?" It is, of what was said and
+  when, never that it is true. "The solution isn't to prevent the citation from existing,
+  but doing usage, to not allow that citation to hold any real weight": "the assistants
+  words can still be a source, its just one with low credit in many cases." The scout
+  "shouldn't now remember everything the assistant says … that should be mostly left to
+  episodic memory retrieval. But that seems like a prompting thing."
 - **Two things wait.** Preferences on what to keep: "Let's just not think of it now."
   The bar for which single occasions are worth a memory "goes into how to prompt Scout,
   which we won't deal with here today."
@@ -299,11 +306,23 @@ The prompt suite measures how well the judgement holds.
 > finding rests on that part and not on the message: the dentist's email the assistant
 > read, not the assistant's sentence repeating it.
 
-> **Normative.** Until a decision on the assistant's standards of belief decides otherwise,
-> no memory rests on a round's message unless a person, in the leaving episode, asked to
-> keep what it said, agreed with it, or confirmed it. The ADR-0329 §10 rule that the
-> assistant's words are never evidence about the user extends to every memory, about
-> anything.
+> **Normative.** A round's message is evidence of what the assistant said, where and when,
+> and never that what it said is true. Until a decision on the assistant's standards of
+> belief decides otherwise, a memory states what a round's message claims only where a
+> person, in the leaving episode, asked to keep it, agreed with what it said rather than
+> only acknowledging it, or confirmed it. The ADR-0329 §10 rule that the assistant's words
+> are never evidence about the user extends to every memory, about anything.
+
+> **Normative.** Any memory may carry a round's message as a support where what the
+> assistant said bears on it: a correction of the assistant, a disagreement with it, or a
+> claim a person took on from it (ADR-0345 §2:4). A correction or a disagreement is kept as
+> the person's own claim, carrying what the assistant said word for word, and the claim
+> the person disputed is never kept as theirs.
+
+> **Normative.** Where the scout proposes what the assistant said as worth keeping in
+> itself, framing words it as a record of the saying, "On Oct 20 the assistant suggested
+> …", resting on that message and marked `assistant_statement` and `occasion` (ADR-0345
+> §2:4, §8).
 
 > **Normative.** A memory a person keeps or adopts from a round's message rests on the
 > person's request, agreement or confirmation, which backs it as worded, so it is held by
@@ -311,19 +330,15 @@ The prompt suite measures how well the judgement holds.
 > assistant said it, and framing marks it `assistant_statement` where no recorded part
 > behind the message was found (ADR-0345 §8).
 
-> **Normative.** Where the person asks to keep what the assistant said but says they
-> disagree with it, the observer keeps one memory, marked `occasion`, worded as the
-> person's disagreement with the assistant's claim, carrying that claim word for word and
-> when the assistant made it, resting on the person's reply read with the message it
-> answers and on that message, and held by the person. It never keeps the claim the person
-> disagreed with as the person's belief.
-
-**No beliefs of the assistant's own, for now.** Planning reasons in the moment, and a
-matter's working conclusions live on its story's page. Long-term memory holds what
-people and sources believe. Where the assistant's words end up in a memory, it is because
-a person took them on, and the memory cites the assistant's message, where and when it
-was said, and marks that nothing else stood behind it. Whatever else was in that round's
-context stays one pointer away, in the episode the support points at.
+**The assistant's words are a source, and say that they were said.** Planning reasons in
+the moment, and a matter's working conclusions live on its story's page. Long-term memory
+holds what people and sources believe, and what the assistant said where that is worth
+keeping, as a record of the saying. The assistant's word is a source like any other, its
+weight usage's (ADR-0345 §12:4); the record backs only that it was said, so recalling and
+repeating it adds no weight. Most of what the assistant says is not worth a record: how
+much the scout keeps is its prompt's, and episode search holds the rest once it is built
+(ADR-0287). Whatever else was in a round's context stays one pointer away, in the episode
+the support points at.
 
 ### 8. The track record
 
@@ -422,7 +437,7 @@ Superseded in part; every clause the middle column does not name stands:
 | --- | --- | --- |
 | ADR-0217 | §4:2, in the addition alone: the observer of ADR-0329 also proposes, on its framing pass | §5:8 |
 | ADR-0284 | §8:1's projection, in the addition alone: an episode's reliance | §8:1 |
-| ADR-0329 | §8:1, §8:2, §8:3 and §8:6; §9:3 and §9:4; §9:7, for the observer's own writes; §10:1 and §10:2, in their reach, which extends to every memory; §11:1, in its "always kept"; §11:4, §11:5 and §11:6; §12:4; §14:1 and §14:2; §9:1, in the additions, in its one claim per finding, and in a candidate giving no finding unaccounted; and §3:1, in the additions alone | §2–§10 |
+| ADR-0329 | §8:1, §8:2, §8:3 and §8:6; §9:3 and §9:4; §9:7, for the observer's own writes; §10:1 and §10:2, in their reach, which extends to every memory, and in what a round's message may support, which any memory may cite and which backs a record of the saying; §11:1, in its "always kept"; §11:4, §11:5 and §11:6; §12:4; §14:1 and §14:2; §9:1, in the additions, in its one claim per finding, and in a candidate giving no finding unaccounted; and §3:1, in the additions alone | §2–§10 |
 
 ## Consequences
 
