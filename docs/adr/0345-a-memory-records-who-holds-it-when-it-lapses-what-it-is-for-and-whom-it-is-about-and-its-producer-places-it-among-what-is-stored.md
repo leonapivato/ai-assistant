@@ -6,7 +6,7 @@
 - Dependency: ADR-0328, ADR-0329, ADR-0336, ADR-0217, ADR-0219, ADR-0045, ADR-0100, ADR-0213, ADR-0326 and ADR-0338, as their status lines leave them.
 - Authorization: the owner ruled this design in the observer walk of 2026-10-21, in the observer-and-learning fork, and directed it be written ("I think we get started"). This decision writes those rulings down and settles only what they leave open, each such point named where it is settled. The number is provisional until the owner assigns it (`CONTRIBUTING.md` → "ADR numbers are assigned at dispatch"). The owner reads it before it is ratified (§1:1).
 - **Contract-surface decision.** It changes `core/types.py` (`MemorySupport` gains its holder; the memory gains labels, marks, `subjects` and `involved`, and loses `topics` and `about_person`; `MemoryUpdateProposal` gains a placement; the projections gain holders, labels, marks, the people a memory is about and a future validity end) and `core/protocols.py` (`MemoryStore.search` gains a person filter; `MemoryWriter.ingest` writes a placed proposal by §5; `MemoryWriter` gains a label write). It is a breaking change under golden rule 5.
-- **Partially supersedes**, in the clauses §16's table names: ADR-0100, ADR-0213, ADR-0328 and ADR-0336.
+- **Partially supersedes**, in the clauses §16's table names: ADR-0100, ADR-0213, ADR-0328, ADR-0336 and ADR-0338.
 
 ## Context
 
@@ -154,7 +154,7 @@ labels, marks and whom it is about, and stops carrying `topics`.
 | A pin (ADR-0338 §4:4) | The person who made the pin |
 | A message carrying `forwarded_from`, or an input whose `InputOrigin` is `OUTSIDE` | A claimed source: the forward's claimed original sender where the trigger records one (`ClaimedAuthor`), held as claimed, and otherwise unknown |
 | An evidence item | The source the record names: its digest's `Attestation.reported_by` where the record states one, and otherwise unknown |
-| A round's message, a remember call, or an observer's inference | The assistant's statement: what it said, where and when |
+| A round's message, a remember call, or an observer's inference | The assistant's statement: what it said or inferred, where and when |
 | A legacy record | Unknown |
 
 > **Normative.** Every support records its holder, set by code from the part it points at
@@ -164,7 +164,8 @@ labels, marks and whom it is about, and stops carrying `topics`.
 > **Normative.** A holder is the source of the claim a support records, and is one of four
 > kinds, a closed set added to and never renamed: a person, named by an identifier; an
 > outside source, named by an identifier and marked established or claimed; the
-> assistant's statement, naming the message it made; and unknown. Every kind is held
+> assistant's statement, naming the part it made, a round's message, a remember call or an
+> observer's inference; and unknown. Every kind is held
 > under the same capture rules.
 
 > **Normative.** A holder of the kind the assistant's statement records that the assistant
@@ -175,9 +176,10 @@ labels, marks and whom it is about, and stops carrying `topics`.
 > **Normative.** Until a decision on the assistant's standards of belief decides otherwise,
 > a support whose holder is the assistant's statement backs one memory alone as worded: a
 > record of the saying, which states what the assistant said, where and when, and is
-> marked `assistant_statement` and `occasion` (§8). On any other memory it is cited, as
-> `for` or `against`, never backs it, and never makes the assistant a holder of what it
-> said.
+> marked `assistant_statement` and `occasion` (§8). While ADR-0329 §9:7 stands for the
+> observer's own writes, the inference it has the observer create, backed as worded by an
+> `observer_inference` support, is the one other. On any other memory it is cited, as `for`
+> or `against`, never backs it, and never makes the assistant a holder of what it said.
 
 > **Normative.** Until a decision on identified people adds others, the one person a
 > holder names is the owner, and the identifier that names the owner is a
@@ -256,11 +258,21 @@ it, since it stays true that it was said (§3).
 > on it. A memory some other holder still holds stays current.
 
 > **Normative.** A stored memory a retiring relation leaves current has its remaining
-> counted backing supports added to the proposal as `against` in the same write, so the
+> counted backing supports added as `against` in the same write to the proposed memory
+> where it is installed, and otherwise to each memory it is folded into (§5:3), so the
 > dispute is recorded on both memories.
 
 > **Normative.** ADR-0328 §6:5's refusal by standing does not bind the write a placed
 > proposal yields. The clauses above are its guard.
+
+> **Normative.** Where a proposal is folded into a stored memory (§5:3), each counted
+> `against` support on that memory whose holder is a holder of one of the proposal's
+> backing supports stops counting, citing that holder's backing support: a holder's new
+> word ends their own dispute with it.
+
+> **Normative.** A confirmation support and a `pinned` support are also added where §3:1 or
+> §3:5 records a dispute, as `against` and backing nothing, besides where ADR-0328 §4:6 and
+> ADR-0338 §4:5 allow them.
 
 **Why per holder.** A stored "the wall is red" held by the owner and a new "the wall is
 blue" held by Sam are both true as beliefs. Retiring either would destroy a fact about
@@ -334,32 +346,36 @@ producer writes a memory today.
 
 | Relation to a stored memory | What the writer does to that memory |
 | --- | --- |
-| `restates` | Adds the proposal's supports to it, where §5:2 allows; otherwise nothing, and the proposal is installed beside it |
-| `contained` | Where every holder of the proposal's backing supports already holds it, adds the proposal's supports to it as `for`, none backing it as worded; otherwise adds the backing supports to it as `for`, none backing it as worded, and the proposal is installed beside it |
+| `restates` | Adds the proposal's supports to it, where §5:2 and §5:3 allow; otherwise nothing |
+| `contained` | Where §5:3 allows, adds to it as `for`, none backing it as worded, the proposal's supports where every holder of its backing supports already holds it, and its backing supports otherwise |
 | `supports` | Adds the proposal's backing supports to it as `for`, none backing it as worded |
 | `weakens` | Adds the proposal's backing supports to it as `against` |
 | `recheck` | Raises a `recheck` question on it, resting on the proposal's first backing support |
-| `no_longer_true` | §3; where it retires, an end, closed at the about-when of the backing support whose stopping left it unbacked where that support carries one, and at the write's instant otherwise |
+| `no_longer_true` | §3; where it retires, an end citing the proposal's backing support that its last stop cites (§3:3), closed at that support's about-when where it carries one, and at the write's instant otherwise (ADR-0328 §5:10) |
 | `never_true` | §3; where it retires, a mark wrong |
 | `claimed_too_much` | §3; where it retires, a replace naming the proposed memory |
 | `independent` | Nothing |
-| `unclear` | Nothing; the proposal is installed beside it |
+| `unclear` | Nothing |
 
 > **Normative.** The writer applies, to each memory a placement names, what the table's
 > row for its relation says.
 
 > **Normative.** A `restates` adds the proposal's supports to the stored memory only where
 > adding them would not raise the stored memory's standing and the proposal carries no
-> confirmation support. Otherwise the stored memory is left as it is and the proposal is
-> installed beside it.
+> confirmation support. Otherwise the stored memory is left as it is.
 
-> **Normative.** The writer installs the proposed memory exactly where no `restates` added
-> its supports to a stored memory and no `contained` added them to one its holders already
-> hold, or where any retiring relation is present.
+> **Normative.** A placement has one disposition, for the whole proposal. Where it names
+> `claimed_too_much`, the proposed memory is installed, and no `restates` or `contained` in
+> it adds supports. Otherwise, where a `restates` adds its supports to a stored memory under
+> §5:2, or a `contained` names a stored memory every holder of the proposal's backing
+> supports already holds, the proposal is folded into each such memory and not installed.
+> Otherwise the proposed memory is installed.
 
 > **Normative.** Where the proposed memory is installed, each memory a retiring relation
 > retired names it as successor, and it names each as a memory it replaces (ADR-0328
-> §5:6).
+> §5:6). Where the proposal is folded, a memory a retiring relation ends or marks wrong
+> names no successor: ADR-0328 §5:6 names one only at its create, and the memory folded
+> into already states what holds instead.
 
 > **Normative.** An answered question named by the placement is resolved by a resolve
 > question citing the proposal's first backing support, whether or not the proposed memory
@@ -374,7 +390,8 @@ producer writes a memory today.
 > **Normative.** Every write the table names is an operation ADR-0328 §5 already defines,
 > and every rule of ADR-0328 §4 binds the supports it adds: a support whose part the
 > memory already carries changes nothing, and a confirmation support is added to no
-> memory but the one it backs or one its own ingest retires (ADR-0328 §4:6).
+> memory but the one it backs, one its own ingest retires (ADR-0328 §4:6), or, as
+> `against`, one a dispute names (§3:8).
 
 **Why a fixed set, a note and `unclear`.** The relation holds only the distinctions that
 change what is written: fold or beside, evidence for or against, a question, an end, a
@@ -401,8 +418,8 @@ standing does not move (ADR-0328 §6:2). Where Sam says "Ana lives in Lisbon" ag
 owner's "Ana lives in Lisbon and teaches piano", Sam's belief is his own memory: folded
 in, it would end with the owner's if the owner corrected the piano half, and Sam would
 never have held the rest. Sam's support still counts as evidence for the owner's memory,
-as a partial supporter, never as its holder. A retiring relation in the same placement
-installs the proposal, so a retired memory always has its successor.
+as a partial supporter, never as its holder. A `claimed_too_much` in the same placement
+always installs the proposal, since a replace names the narrower memory it creates.
 
 A compound memory is where `contained` is weakest: one held only inside "lives in Lisbon
 and teaches piano" ends with it when half of it is corrected
@@ -435,8 +452,10 @@ the earlier steps stored.
    flat no longer overlooks the Tagus" is `no_longer_true` against Sam's own M4: his
    backing stops, nothing backs M4, and it ends.
 6. The owner: "Yeah, Ana moved to Porto last month." It folds into M6, now held by Tom, Sam
-   and the owner. Against M2, the owner's own, it is `no_longer_true`: the owner's supports
-   stop, nothing backs M2, and it ends, closed at last month, with M6 its successor.
+   and the owner, and the owner's Lisbon support that step 4 added to M6 as `against` stops
+   counting (§3:7). Against M2, the owner's own, it is `no_longer_true`: the owner's supports
+   stop, nothing backs M2, and it ends, closed at last month. It names no successor, since
+   the proposal folded into M6, which already says where Ana lives (§5:4).
 7. The assistant: "So she's probably not at Santa Maria any more." Nobody keeps it, and a
    passing guess is not worth a record of the saying, so nothing is written. The owner: "Right, she's at São João now." M7 "Ana works at São João
    Hospital", held by the owner. Against M5 it is `no_longer_true`: the owner's supports on
@@ -448,7 +467,7 @@ the earlier steps stored.
 | Memory | Held by | Status at the end |
 | --- | --- | --- |
 | M1 Ana is the user's sister | the owner | current |
-| M2 Ana lives in Lisbon | nobody | ended at last month; succeeded by M6 |
+| M2 Ana lives in Lisbon | nobody | ended at last month |
 | M3 Ana works as a nurse | the owner (the page in part) | current |
 | M4 Ana's flat overlooks the Tagus | nobody | ended |
 | M5 Ana works at Santa Maria Hospital | the page | current; the owner against |
@@ -525,10 +544,10 @@ than serving two purposes.
 > **Normative.** A mark is set by the memory's producer at its create, and changes later
 > only by a decision that names how.
 
-> **Normative.** The writer refuses a memory marked `assistant_statement` that carries no
-> support pointing at a round's message, and a memory that a support held by the
-> assistant's statement backs as worded unless it is marked both `assistant_statement` and
-> `occasion`.
+> **Normative.** The writer refuses a memory a write creates that is marked
+> `assistant_statement` and carries no support pointing at a round's message, and one that
+> a support held by the assistant's statement backs as worded unless it is marked both
+> `assistant_statement` and `occasion` or is the inference §2:4 excepts.
 
 > **Normative.** A memory marked `occasion` carries no validity end set at its create.
 
@@ -671,6 +690,13 @@ suggested it on the 20th, but nothing else backs it", not with the suggestion as
 > file the previous release wrote and raises the memory store's `Store.shape` in
 > `scripts/upgrade_stores.py` with a carry from the shape it replaces (ADR-0326 §7).
 
+> **Normative.** The upgrade keeps each support's direction and whether it backs the claim
+> as worded, so a support it gives the assistant's statement as its holder keeps backing
+> what it backed, and the memory it is on keeps its wording and gains no mark. §2:4's limit
+> and §8:3's refusal bind what a write adds after the upgrade, never what the upgrade
+> carries, and such a memory is shown with the assistant's statement among its holders
+> (§12:3).
+
 ### 14. What the observer's decision decides
 
 > **Normative.** This decision does not decide what the observer reads, how it retrieves
@@ -698,13 +724,20 @@ suggested it on the 20th, but nothing else backs it", not with the suggestion as
 > another person believes is held by its sender; two parts under one identifier are one
 > holder; a partial supporter is not a holder; a `contained` from another holder installs
 > beside; a support held by the assistant's statement backs only a record of the saying,
-> so a kept statement ends when the person who kept it withdraws, and a memory it backs
-> without both marks is refused; a record of the saying stays current under another
-> holder's contradiction; an `assistant_statement` memory without the assistant's message
-> is refused, and one with it is shown citing that message;
+> or the inference §2:4 excepts, so a kept statement ends when the person who kept it
+> withdraws, and a memory it backs without both marks is refused; a record of the saying
+> stays current under another holder's contradiction; an `assistant_statement` memory
+> without the assistant's message is refused, and one with it is shown citing that message;
 > a `restates` that would raise standing installs beside; a `restates` at equal standing
 > folds with no new memory; an `unclear` writes nothing to the stored memory and installs
-> the proposal; a relation's note is on what it wrote; a `contained` adds supports without
+> the proposal where nothing folds it; a `restates` that folds beside an `unclear` installs
+> nothing; a fold beside a `no_longer_true` ends the retired memory naming no successor; a
+> `claimed_too_much` installs the proposal beside a `restates` that would fold; a holder's
+> fold stops their own `against` support on that memory; a confirmation support on a
+> memory a retiring relation leaves current is added to the proposal as `against`; a
+> backdated correction closes the end at its own about-when; an upgraded memory that an
+> `observer_inference` support backs as worded keeps that backing, over a file the previous
+> release wrote; a relation's note is on what it wrote; a `contained` adds supports without
 > raising standing; a stale
 > revision refuses the whole proposal; a create with a future validity end drops out of
 > live reads after it; a near-duplicate label is refused; a person is in one of `subjects`
@@ -722,7 +755,8 @@ Superseded in part; every clause the middle column does not name stands:
 | --- | --- | --- |
 | ADR-0100 | §1, §3 and §4:1, as they apply to a memory: its one `about_person`, the unstated subject read as the owner's, the owner never named, and no model inferring a subject | §9 |
 | ADR-0213 | Every clause, as it applies to a memory | §7, §10 |
-| ADR-0328 | §3:1's field table, in the additions of labels and marks and the removal of `topics`; §3:6, as to `about_person`'s producer and `topics`; §4:1's support fields, in the addition of the holder; §5:10, for a create; §6:5, §11:5, §11:6 and §11:7, for a placed proposal; §11:9, as to the union of topics; §15:1, §15:2 and §15:5, in the additions alone; §15:4 and §15:5, for a memory marked `assistant_statement`; §5:9, in the addition of the writer `owner`, for label writes | §2–§10, §12 |
+| ADR-0328 | §3:1's field table, in the additions of labels and marks and the removal of `topics`; §3:6, as to `about_person`'s producer and `topics`; §4:1's support fields, in the addition of the holder; §5:10, for a create; §6:5, §11:5, §11:6 and §11:7, for a placed proposal; §11:9, as to the union of topics; §15:1, §15:2 and §15:5, in the additions alone; §15:4 and §15:5, for a memory marked `assistant_statement`; §5:9, in the addition of the writer `owner`, for label writes; §4:6, in the addition alone: a confirmation support is also added as `against` where a dispute is recorded | §2–§10, §12 |
+| ADR-0338 | §4:5, in the addition alone: a `pinned` support is also added as `against` where a dispute is recorded | §3:8 |
 | ADR-0336 | §2:1, §3:1–§3:3, §4:1, §5:1 and §7:1, for a placed proposal | §4, §5 |
 
 ## Consequences
