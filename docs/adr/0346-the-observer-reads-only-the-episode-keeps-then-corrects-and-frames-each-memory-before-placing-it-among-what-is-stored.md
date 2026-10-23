@@ -186,6 +186,11 @@ which sees the parts exactly (§5:3).
 > **Normative.** The observation record keeps each finding's annotations beside its claim
 > (ADR-0329 §16:1), so a retry commits what the scout proposed.
 
+> **Normative.** The scout's reply accounts for every candidate the leaving episode
+> records: each is named by a finding, or declined with a reason. Code refuses a reply
+> that leaves a candidate unaccounted, as it refuses a reply that does not parse, and the
+> observation record keeps each decline and its reason.
+
 ### 5. Framing
 
 > **Normative.** Each finding is framed by one model call, given only: the claim; the parts
@@ -266,16 +271,26 @@ words alone (ADR-0329 §10) are refused there. Importance is not judged twice.
 
 ### 7. What the observer keeps, and what it no longer makes
 
-> **Normative.** A single occasion that the scout proposes and framing bears out is kept as
-> a memory marked `one_occasion` (ADR-0345 §8). ADR-0329 §11:4 no longer holds.
+> **Normative.** An occasion that the scout proposes and framing bears out is kept as a
+> memory marked `occasion` (ADR-0345 §8). ADR-0329 §11:4 no longer holds.
 
 > **Normative.** The observer creates no memory whose standing would be inference alone,
 > and adds no support pointing at an observer's inference. Drawing inferences across
 > memories is store maintenance's, under its own decision.
 
-> **Normative.** ADR-0329 §11:1–§11:3, §11:7 and §11:8 stand: an explicit request or a
-> correction is always kept, a passing fact and a report are kept where worth keeping, a
-> confirmed memory needs no bar, and a sensitive topic is kept under the same rules.
+> **Normative.** An explicit request to remember, or a correction, in the person's own words
+> is kept unless the person has said not to keep it, as "don't remember the next thing I
+> say" does. ADR-0329 §11:1's "always kept" gives way to that.
+
+> **Normative.** ADR-0329 §11:2, §11:3, §11:7 and §11:8 stand: a passing fact and a report
+> are kept where worth keeping, a confirmed memory needs no bar, and a sensitive topic is
+> kept under the same rules.
+
+**What can be enforced, and what is judgement.** Whether a request or a correction is
+kept is the observer's judgement, read from the episode with the person's wishes in it,
+and no rule can make a model keep anything "always". What code can enforce is that
+nothing disappears unexplained: every candidate planning recorded is accounted for (§4:6).
+The prompt suite measures how well the judgement holds.
 
 > **Normative.** The observer reads every origin and holder from the record as code sets
 > them, and computes neither from a model's output or from the task-level outside mark.
@@ -297,7 +312,7 @@ words alone (ADR-0329 §10) are refused there. Importance is not judged twice.
 > behind the message was found (ADR-0345 §8).
 
 > **Normative.** Where the person asks to keep what the assistant said but says they
-> disagree with it, the observer keeps one memory, marked `one_occasion`, worded as the
+> disagree with it, the observer keeps one memory, marked `occasion`, worded as the
 > person's disagreement with the assistant's claim, carrying that claim word for word and
 > when the assistant made it, resting on the person's reply read with the message it
 > answers and on that message, and held by the person. It never keeps the claim the person
@@ -370,10 +385,16 @@ restaurant, teaches the allergy to surface when booking restaurants.
 ### 11. What stays open
 
 > **Normative.** This decision decides no preference of the person about what is kept, no
-> bar for which single occasions are worth a memory beyond ADR-0329 §11, no search over
-> labels, no rule of usage among holders, and no standard by which the assistant comes to
-> hold a belief of its own. Each is a later decision's, and no lane builds one under this
-> decision.
+> bar for which occasions are worth a memory beyond ADR-0329 §11, no search over labels, no
+> rule of usage among holders, no standard by which the assistant comes to hold a belief of
+> its own, and no conversation or place that is not to be learned from. Each is a later
+> decision's, and no lane builds one under this decision.
+
+**An incognito place, when it comes, is code's, not judgement's.** A conversation or place
+marked not to be learned from is a promise, and a promise is kept mechanically: its
+episodes are skipped by rule, as an episode with nothing to read is (ADR-0329 §16:7), with
+no scout call and nothing written. The marker is the controller's and the interfaces'
+decision; the observer's half is the skip.
 
 ### 12. What the person sees
 
@@ -401,7 +422,7 @@ Superseded in part; every clause the middle column does not name stands:
 | --- | --- | --- |
 | ADR-0217 | §4:2, in the addition alone: the observer of ADR-0329 also proposes, on its framing pass | §5:8 |
 | ADR-0284 | §8:1's projection, in the addition alone: an episode's reliance | §8:1 |
-| ADR-0329 | §8:1, §8:2, §8:3 and §8:6; §9:3 and §9:4; §9:7, for the observer's own writes; §10:1 and §10:2, in their reach, which extends to every memory; §11:4, §11:5 and §11:6; §12:4; §14:1 and §14:2; §9:1, in the additions and in its one claim per finding; and §3:1, in the additions alone | §2–§10 |
+| ADR-0329 | §8:1, §8:2, §8:3 and §8:6; §9:3 and §9:4; §9:7, for the observer's own writes; §10:1 and §10:2, in their reach, which extends to every memory; §11:1, in its "always kept"; §11:4, §11:5 and §11:6; §12:4; §14:1 and §14:2; §9:1, in the additions, in its one claim per finding, and in a candidate giving no finding unaccounted; and §3:1, in the additions alone | §2–§10 |
 
 ## Consequences
 
