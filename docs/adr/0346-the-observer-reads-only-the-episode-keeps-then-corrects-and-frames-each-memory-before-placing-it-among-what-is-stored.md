@@ -313,6 +313,17 @@ context stays one pointer away, in the episode the support points at.
 > **Normative.** Framing decides each new memory's labels. Planning's and the scout's are
 > suggestions it may keep, change or drop.
 
+> **Normative.** Where a `restates` folds a finding into a stored memory that neither of the
+> leaving episode's recall runs returned and no planning label named, the observer adds the
+> finding's situations (§4:2) to that memory's labels, through ADR-0345 §7:6, each citing
+> the leaving episode. Code decides the miss from the episode's record.
+
+**Labels learn from successes and from misses.** A reliance that held up adds the
+situation it helped in. A person having to say again something already kept, in a
+situation where the memory did not come up, shows recall missed it there, so that
+situation becomes a label: "I'm allergic to peanuts", said again while booking a
+restaurant, teaches the allergy to surface when booking restaurants.
+
 ### 10. Prompts and models
 
 > **Normative.** The framing call and the placement call each render a prompt of their own,
