@@ -2,11 +2,11 @@
 
 - Status: Proposed
 - Date: 2026-10-21
-- Scope: what the observer reads and when, the scout's findings and what it says about each, the commit step cut into framing, retrieval and placement, the memories the observer keeps and the ones it no longer makes, the track record's source, planning's suggestion of when a memory matters, and the observer's place against outside content. The record these write is ADR-0345's.
+- Scope: what the observer reads and when, the scout's findings and what it says about each, the commit step cut into framing, retrieval and placement, the memories the observer keeps and the ones it no longer makes, the track record, which waits for a decision on how recall ranks, planning's suggestion of when a memory matters, and the observer's place against outside content. The record these write is ADR-0345's.
 - Dependency: ADR-0345, which this decision builds on; ADR-0329, which it changes where §14 names a clause; ADR-0217, ADR-0284, ADR-0307, ADR-0328, ADR-0334 and ADR-0338, as their status lines leave them.
 - Authorization: the owner ruled this design in the observer walk of 2026-10-21, in the observer-and-learning fork, and directed it be written ("I think we get started"). This decision writes those rulings down and settles only what they leave open, each such point named where it is settled. The number is provisional until the owner assigns it (`CONTRIBUTING.md` → "ADR numbers are assigned at dispatch"). The owner reads it before it is ratified (§1:1).
-- **Contract-surface decision.** It changes `core/types.py` (`EpisodeProjection` carries an earlier exchange's reliance; the observation record's finding carries the scout's annotations; `remember`'s candidate may carry a situation) and adds two prompts to the declared set. It is a breaking change under golden rule 5.
-- **Partially supersedes**, in the clauses §14's table names: ADR-0217, ADR-0284 and ADR-0329.
+- **Contract-surface decision.** It changes `core/types.py` (the observation record's finding carries the scout's annotations; `remember`'s candidate may carry a situation) and adds two prompts to the declared set. It is a breaking change under golden rule 5.
+- **Partially supersedes**, in the clauses §14's table names: ADR-0217 and ADR-0329.
 
 ## Context
 
@@ -64,6 +64,10 @@ important", and worked outward.
   words can still be a source, its just one with low credit in many cases." The scout
   "shouldn't now remember everything the assistant says … that should be mostly left to
   episodic memory retrieval. But that seems like a prompting thing."
+- **The track record waits for its use.** "Do humans have this mechanism? … it can almost
+  help retrieval, because this memory has served me well … maybe this is a whole different
+  ADR," and then, "do you think we should just leave it out of this ADR?" It waits for the
+  decision on how recall ranks; planning still notes reliance, and every episode keeps it.
 - **Two things wait.** Preferences on what to keep: "Let's just not think of it now."
   The bar for which single occasions are worth a memory "goes into how to prompt Scout,
   which we won't deal with here today."
@@ -96,8 +100,8 @@ propose findings with what it knows of the person: whom each is about, why it ma
 when it matters and who may hear it. Each finding is framed into memories from its parts
 alone, the stored memories like each are retrieved by code, each memory's relation to
 them is labelled by a model, and the writer writes by ADR-0345. Corrections are handled
-when the correcting episode is processed, the track record when the reaction is, and
-inferences by store maintenance.
+when the correcting episode is processed, inferences by store maintenance, and the track
+record by a decision on how recall ranks.
 
 ### 1. Status, scope and delivery
 
@@ -342,32 +346,28 @@ the support points at.
 
 ### 8. The track record
 
-> **Normative.** `EpisodeProjection` gains, for an episode whose rounds called the
-> reliance capability (ADR-0329 §6:7), the memories each call named and what it said each
-> shaped.
+> **Normative.** The observer records no track-record entry (ADR-0328 §8) until a decision
+> on how recall ranks ([#1840](https://github.com/leonapivato/ai-assistant/issues/1840))
+> decides what counts as a memory serving well and how that is judged. ADR-0329 §14 waits
+> for that decision.
 
-> **Normative.** A reliance is recorded in the track record when the episode in which the
-> user reacted to what it shaped is due: the scout proposes a reliance finding for each
-> earlier exchange's reliance that episode shows, resting on the leaving episode's parts.
+> **Normative.** Planning still notes reliance (ADR-0329 §6:7), and every episode keeps what
+> it noted, so that decision can judge what earlier episodes show.
 
-> **Normative.** A reliance finding is not framed, retrieved or placed as a new memory. One
-> call on the placement step's prompt, given the reliance, the memory it named and the
-> parts the finding rests on, decides held up, let down or neither, as ADR-0329 §14:2
-> decides it from those parts.
-
-> **Normative.** A reliance whose outcome the leaving episode itself shows, an action it
-> ran, is recorded when that episode is due.
-
-> **Normative.** ADR-0329 §14:3 and §14:4 stand.
+**Why it waits.** The track record is a memory's credit earned by use, and its use is
+ranking: what has served well comes up more readily, as it does for people. What "served
+well" means is that decision's to settle, and the owner's sense of it, a memory that
+"helps put together a motive for an idea or a purpose or a method", is wider than a use
+the user acted on. Noting reliance now and judging it later keeps the one part that could
+not be rebuilt, what planning leaned on in the moment, and fixes no judgement before its
+use is designed. ADR-0329 §14 judged by reading later episodes, which this decision no
+longer does, so it could not stand as written.
 
 ### 9. Where a memory matters
 
 > **Normative.** `remember` takes one further optional argument, the situations in which
 > the fact matters, in words. Its candidate carries it, and the scout is shown it as part
 > of the candidate.
-
-> **Normative.** Where a reliance is recorded as held up, the call that recorded it may add
-> what the reliance shaped to the memory's labels, through ADR-0345 §7:6.
 
 > **Normative.** Framing decides each new memory's labels. Planning's and the scout's are
 > suggestions it may keep, change or drop.
@@ -377,11 +377,11 @@ the support points at.
 > finding's situations (§4:2) to that memory's labels, through ADR-0345 §7:6, each citing
 > the leaving episode. Code decides the miss from the episode's record.
 
-**Labels learn from successes and from misses.** A reliance that held up adds the
-situation it helped in. A person having to say again something already kept, in a
+**Labels learn from misses.** A person having to say again something already kept, in a
 situation where the memory did not come up, shows recall missed it there, so that
 situation becomes a label: "I'm allergic to peanuts", said again while booking a
-restaurant, teaches the allergy to surface when booking restaurants.
+restaurant, teaches the allergy to surface when booking restaurants. Learning from successes waits
+with the track record (§8).
 
 ### 10. Prompts and models
 
@@ -420,8 +420,8 @@ decision; the observer's half is the skip.
 
 | Lane | What it lands | Where |
 | --- | --- | --- |
-| 1 | The projection's reliance (§8:1) and `remember`'s situations (§9:1) | `core`, `orchestration` |
-| 2 | The observer: §2's reading, the scout's annotations, framing, retrieval and placement, the two prompts, and the writes as placed proposals | `orchestration/observer`, `app`, `core` |
+| 1 | `remember`'s situations (§9:1) | `core`, `orchestration` |
+| 2 | The observer: §2's reading, the scout's annotations, framing, retrieval and placement, the two prompts, the writes as placed proposals, and no track-record entry (§8) | `orchestration/observer`, `app`, `core` |
 
 > **Normative.** Lane 1 merges after ADR-0345's lane, and lane 2 after lane 1.
 
@@ -436,8 +436,7 @@ Superseded in part; every clause the middle column does not name stands:
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
 | ADR-0217 | §4:2, in the addition alone: the observer of ADR-0329 also proposes, on its framing pass | §5:8 |
-| ADR-0284 | §8:1's projection, in the addition alone: an episode's reliance | §8:1 |
-| ADR-0329 | §8:1, §8:2, §8:3 and §8:6; §9:3 and §9:4; §9:7, for the observer's own writes; §10:1 and §10:2, in their reach, which extends to every memory, and in what a round's message may support, which any memory may cite and which backs a record of the saying; §11:1, in its "always kept"; §11:4, §11:5 and §11:6; §12:4; §14:1 and §14:2; §9:1, in the additions, in its one claim per finding, and in a candidate giving no finding unaccounted; and §3:1, in the additions alone | §2–§10 |
+| ADR-0329 | §8:1, §8:2, §8:3 and §8:6; §9:3 and §9:4; §9:7, for the observer's own writes; §10:1 and §10:2, in their reach, which extends to every memory, and in what a round's message may support, which any memory may cite and which backs a record of the saying; §11:1, in its "always kept"; §11:4, §11:5 and §11:6; §12:4; §14, until a decision on how recall ranks; §9:1, in the additions, in its one claim per finding, and in a candidate giving no finding unaccounted; and §3:1, in the additions alone | §2–§10 |
 
 ## Consequences
 
@@ -454,17 +453,21 @@ Superseded in part; every clause the middle column does not name stands:
 **What gets harder, and what this leaves.**
 - **More calls per finding:** a framing call, and a placement call per memory. The
   reconciler's call goes, and the daily bound still caps the total.
-- **The assistant remembers nothing of its own.** What it concluded in one activation is
-  re-concluded in the next, from what it is shown. Earned opinions wait for a decision on
+- **The assistant keeps no belief of its own.** What it concluded in one activation is
+  re-concluded in the next, from what it is shown, and only a record of what it said may
+  be kept. Earned opinions wait for a decision on
   its standards of belief.
 - **No inferences until store maintenance exists.** #3154's scenario "an inference and its
   bar" moves to that decision's milestone.
+- **No track record until the decision on how recall ranks.** Planning cannot yet tell a
+  memory that has served well from one never tried, and the track record stays on the
+  memory with nothing writing it.
 - **What the scout knows is what the episode recorded.** Understanding's windows are not
   yet recorded whole.
 - **The owner's `observer_commit` override retires.** The two new prompts need drafts,
   which is the prompts front's.
-- **#3154's scenarios change:** a correction now lands one activation later, the track
-  record comes from the reaction, and a single occasion becomes a memory. The acceptance
+- **#3154's scenarios change:** a correction now lands one activation later, no track
+  record is kept for now, and an occasion becomes a memory. The acceptance
   is reworked for this decision.
 
 ## Alternatives considered
@@ -476,6 +479,10 @@ Superseded in part; every clause the middle column does not name stands:
 - **Hindsight read ahead.** ADR-0329's design. Withdrawn: it showed unrelated later
   exchanges by count across every channel, and the correcting episode is processed one
   activation later anyway.
+- **The track record judged from the reaction.** Drafted in the walk: the reacting
+  episode's scout proposed a reliance finding, and a call on the placement prompt judged
+  it held up, let down or neither. Withdrawn: it fixed what serving well means before its
+  use, ranking, is designed.
 - **Inferences in the observer, from one episode's recall.** Not chosen: whether the
   occasions came together would depend on what each activation happened to recall.
 - **Importance judged twice.** Not chosen: the scout judges importance, and framing judges
