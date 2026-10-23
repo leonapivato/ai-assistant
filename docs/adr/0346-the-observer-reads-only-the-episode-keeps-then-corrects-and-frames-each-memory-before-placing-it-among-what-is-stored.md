@@ -108,10 +108,15 @@ inferences by store maintenance.
 ### 2. What the observer reads
 
 > **Normative.** For a leaving episode, the observer reads the episode's whole record and
-> what that record points at, read from the stores as they stand: the memories and
-> episodes its recall runs returned, the stories, episodes, notes, memories and results
-> its planning labels name, what its understanding's referents name, the question its
-> input answers, and the asking activation of an approval its rounds ran under.
+> what that record points at: the memories and episodes its recall runs returned, the
+> stories, episodes, notes, memories and results its planning labels name, what its
+> understanding's referents name, the question its input answers, and the asking
+> activation of an approval its rounds ran under.
+
+> **Normative.** What the record points at is shown to the scout as it stood at the
+> episode's time: a memory with the supports, operations and status it had then, from its
+> dated supports and operation log (ADR-0328 §4, §5), and a story with the summary version
+> it had then. Nothing that happened after the episode is shown.
 
 > **Normative.** The observer reads no episode, story, memory or note that the leaving
 > episode's record does not point at, and runs no search to find one. ADR-0329 §8:1's
@@ -127,6 +132,12 @@ inferences by store maintenance.
 
 > **Normative.** The scout is given the leaving episode's person's profile fields, as
 > ADR-0338 §9:1 has it.
+
+**The past for reading, the present for writing.** The scout learns from the experience
+as it was lived, so it sees what the assistant knew then. A memory recalled as current
+and ended since is shown current, because that is what the assistant saw; anything
+learned later reaches the store through its own episode. Retrieval and placement (§6)
+read the store as it stands now, so what is written is filed against what is true today.
 
 **What the record does not yet hold.** The windows understanding was shown are recorded
 only as far as its referents cite them. The owner's ruling is that the episode grows to
@@ -209,8 +220,9 @@ words alone (ADR-0329 §10) are refused there. Importance is not judged twice.
 
 ### 6. Retrieval and placement
 
-> **Normative.** For each memory a framing proposes, code retrieves the stored memories
-> similar enough to it: by relevance to its wording above a composition-root threshold,
+> **Normative.** For each memory a framing proposes, code retrieves the stored memories, as
+> they stand when it retrieves them, similar enough to it: by relevance to its wording
+> above a composition-root threshold,
 > and every memory naming a person it names, in either field (ADR-0345 §9:6), up to a
 > composition-root bound.
 
