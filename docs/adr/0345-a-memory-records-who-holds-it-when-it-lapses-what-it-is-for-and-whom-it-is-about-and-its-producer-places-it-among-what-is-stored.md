@@ -351,7 +351,7 @@ producer writes a memory today.
 | `contained` | Where §5:3 allows, adds to it, none backing it as worded, the proposal's supports, each in its own direction, where every holder of its backing supports already holds it, and its backing supports, as `for`, otherwise |
 | `supports` | Adds the proposal's backing supports to it as `for`, none backing it as worded |
 | `weakens` | Adds the proposal's backing supports to it as `against` |
-| `recheck` | Raises a `recheck` question on it, resting on the proposal's question support (§5:9) |
+| `recheck` | Raises a `recheck` question on it, resting on its own backing supports and adding none (§5:9) |
 | `no_longer_true` | §3; where it retires, an end citing the proposal's backing support that its last stop cites (§3:3), closed at that support's about-when where it carries one, and at the write's instant otherwise (ADR-0328 §5:10) |
 | `never_true` | §3; where it retires, a mark wrong |
 | `claimed_too_much` | §3; where it retires, a replace naming the proposed memory |
@@ -379,9 +379,8 @@ producer writes a memory today.
 > names no successor: ADR-0328 §5:6 names one only at its create, and the memory folded
 > into already states what holds instead.
 
-> **Normative.** An answered question named by the placement is resolved by a resolve
-> question citing the proposal's question support (§5:9), whether or not the proposed
-> memory is installed.
+> **Normative.** An answered question named by the placement is resolved as §5:9 says,
+> whether or not the proposed memory is installed.
 
 > **Normative.** Everything one placed proposal yields is written in one atomic write,
 > conditional on the revision of every memory it changes (ADR-0219 §2).
@@ -395,12 +394,15 @@ producer writes a memory today.
 > memory but the one it backs, one its own ingest retires (ADR-0328 §4:6), or, as
 > `against`, one a dispute names (§3:8).
 
-> **Normative.** A proposal's question support is its first backing support, or, where that
-> is a confirmation support, the yes's input in its place, as ADR-0329 §13:2 has it. A
-> `recheck` question rests on it, added to its memory as `against` where no relation adds
-> it there. A question the placement names as answered is resolved citing it only where
-> the placement's relation to that memory adds it there, in that relation's direction,
-> and stays open otherwise.
+> **Normative.** A `recheck` question rests on the stored memory's own counted supports
+> that back it as worded, asks in the words of the relation's note, and adds no support to
+> it, so a memory worth checking is not shown as disputed. A question the placement names
+> as answered is resolved citing a backing support of the proposal that the placement's
+> relation to that memory adds there, and stays open where that relation adds none.
+
+> **Normative.** A placed proposal carries no `observer_inference` support and no `pinned`
+> support, and the writer refuses one that does: an inference is ADR-0329's observer's
+> alone (§2:4), and a `pinned` support is added only by ADR-0338 §9:6's pass.
 
 **Why a fixed set, a note and `unclear`.** The relation holds only the distinctions that
 change what is written: fold or beside, evidence for or against, a question, an end, a
@@ -747,8 +749,10 @@ suggested it on the 20th, but nothing else backs it", not with the suggestion as
 > backdated correction closes the end at its own about-when; an `observer_inference`
 > support on a memory a retiring relation leaves current is added to the proposal as
 > `against`; a `contained` fold keeps an `against` support's direction; a `contained`
-> fold stops none of the holder's `against` supports; a `recheck` from a proposal backed
-> first by a confirmation rests on the yes's input; an upgraded memory that an
+> fold stops none of the holder's `against` supports; a `recheck` adds no support and
+> leaves its memory undisputed; an answer whose relation adds no support leaves the
+> question open; a placed proposal carrying an `observer_inference` or `pinned` support is
+> refused; an upgraded memory that an
 > `observer_inference` support backs as worded keeps that backing, over a file the previous
 > release wrote; a relation's note is on what it wrote; a `contained` adds supports without
 > raising standing; a stale
@@ -769,7 +773,7 @@ Superseded in part; every clause the middle column does not name stands:
 | ADR-0100 | §1, §3 and §4:1, as they apply to a memory: its one `about_person`, the unstated subject read as the owner's, the owner never named, and no model inferring a subject | §9 |
 | ADR-0213 | Every clause, as it applies to a memory | §7, §10 |
 | ADR-0328 | §3:1's field table, in the additions of labels and marks and the removal of `topics`; §3:6, as to `about_person`'s producer and `topics`; §4:1's support fields, in the addition of the holder; §5:10, for a create; §6:5, §11:5, §11:6 and §11:7, for a placed proposal; §11:9, as to the union of topics; §15:1, §15:2 and §15:5, in the additions alone; §15:4 and §15:5, for a memory marked `assistant_statement`; §5:9, in the addition of the writer `owner`, for label writes; §4:6, in the addition alone: a confirmation support is also added as `against` where a dispute is recorded | §2–§10, §12 |
-| ADR-0329 | §9:7, in the addition alone: an `observer_inference` support is also added as `against` where a dispute is recorded | §3:8 |
+| ADR-0329 | §9:7, in the addition alone: an `observer_inference` support is also added as `against` where a dispute is recorded; §13:2, for a `recheck` a placed write raises: it rests on the memory's own backing supports and adds none | §3:8, §5:9 |
 | ADR-0338 | §4:5, in the addition alone: a `pinned` support is also added as `against` where a dispute is recorded | §3:8 |
 | ADR-0336 | §2:1, §3:1–§3:3, §4:1, §5:1 and §7:1, for a placed proposal | §4, §5 |
 
