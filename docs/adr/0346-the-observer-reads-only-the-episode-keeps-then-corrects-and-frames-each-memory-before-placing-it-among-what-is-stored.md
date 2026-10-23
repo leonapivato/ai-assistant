@@ -1,6 +1,6 @@
 # 346. The observer reads only the episode, keeps then corrects, and frames each memory before placing it among what is stored
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-21
 - Scope: what the observer reads and when, the scout's findings and what it says about each, the commit step cut into framing, retrieval and placement, the memories the observer keeps and the ones it no longer makes, the track record, which waits for a decision on how recall ranks, the labels a new memory gets, the observer's place against outside content, and how it goes live on the owner's hub. The record these write is ADR-0345's.
 - Dependency: ADR-0345, which this decision builds on; ADR-0329, which it changes where §14 names a clause; ADR-0217, ADR-0284, ADR-0307, ADR-0328, ADR-0334 and ADR-0338, as their status lines leave them.
