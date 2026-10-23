@@ -152,9 +152,9 @@ While it is, the correcting episode is still in the window, where understanding 
 > §8:3's several-episodes call is not made.
 
 > **Normative.** Each finding states one claim and names the parts of the leaving episode
-> it rests on, as ADR-0329 §9:1 has it, and also gives: whom the claim is about, as a
-> label naming the person as the record names them, or none where it is about the user;
-> why it matters to the person, in words; any situations in which it matters, in words;
+> it rests on, as ADR-0329 §9:1 has it, and also gives: the people the claim is about and
+> the people it involves (ADR-0345 §9:1), each named as the record names them, the owner
+> included where it is about them; why it matters to the person, in words; any situations in which it matters, in words;
 > and, where it should reach fewer people than its default, a proposed narrowing with a
 > note on why.
 
@@ -174,7 +174,8 @@ While it is, the correcting episode is still in the window, where understanding 
 > annotations; and the person's profile fields. No stored memory is shown to it.
 
 > **Normative.** The framing call proposes one or more memories, each with: its wording;
-> its supports and, for each, the fields ADR-0329 §9:4 names; whom it is about; its
+> its supports and, for each, the fields ADR-0329 §9:4 names; its `subjects` and
+> `involved`, each a set, possibly empty, never left unset; its
 > situation labels; its marks; a validity end where its supports name one (ADR-0345 §6);
 > and, under the person model, the style and pin judgements ADR-0338 §9:4 and §9:5 name.
 
@@ -187,12 +188,13 @@ While it is, the correcting episode is still in the window, where understanding 
 > code checks each as ADR-0329 §9:5 checks a decision. A memory that fails a check is not
 > written, and the others stand.
 
-> **Normative.** The framing call may keep, change or drop the scout's whom-it-is-about,
-> and keeps it only where a part the memory rests on names that person.
+> **Normative.** The framing call may keep, change, add or drop each person the scout named,
+> and keeps a name only where a part the memory rests on gives that name, as ADR-0345 §9:3
+> has it.
 
 > **Normative.** A relationship between the user and another person is framed as a memory
-> of its own about that person, such as "Ana is the user's younger sister", and other
-> memories about that person name the same label in whom it is about.
+> of its own with that person as a subject, such as "Ana is the user's younger sister", and
+> other memories about that person use the same name for them.
 
 > **Normative.** A framing call may also decide that nothing in the finding is worth
 > keeping, with a reason, where the parts do not bear the claim out.
@@ -209,7 +211,7 @@ words alone (ADR-0329 §10) are refused there. Importance is not judged twice.
 
 > **Normative.** For each memory a framing proposes, code retrieves the stored memories
 > similar enough to it: by relevance to its wording above a composition-root threshold,
-> and every memory whose `about_person` equals its own (ADR-0345 §9:2), up to a
+> and every memory naming a person it names, in either field (ADR-0345 §9:6), up to a
 > composition-root bound.
 
 > **Normative.** Each memory is placed by one model call, given the memory as framed and
