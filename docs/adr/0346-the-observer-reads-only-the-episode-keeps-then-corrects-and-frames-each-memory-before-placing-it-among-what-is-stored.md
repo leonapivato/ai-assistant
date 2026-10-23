@@ -234,9 +234,10 @@ which sees the parts exactly (§5:3).
 > **Normative.** Each memory a framing proposes states one claim. Claims that could each be
 > true without the other are framed as separate memories, as "Ana lives in Lisbon" and "Ana
 > teaches piano" are; a claim that holds only as a whole, as a relation ("Ana and Tom are
-> married"), a range or a name does, stays one. A finding resting on a confirmation is
-> framed as one memory in exactly the wording the person approved, whatever claims it
-> holds, backed by that confirmation (ADR-0329 §5:5); framing neither splits nor rewords it.
+> married"), a range or a name does, stays one. Each wording a person approved that a
+> finding rests on is framed as a memory of its own, in exactly that wording, whatever
+> claims it holds, backed by its own confirmation (ADR-0329 §5:5); framing neither splits,
+> rewords nor merges it. Any other claim in the finding is framed as this clause has it.
 
 > **Normative.** Every memory a framing proposes rests only on the finding's parts, and
 > code checks each as ADR-0329 §9:5 checks a decision. A memory that fails a check is not
