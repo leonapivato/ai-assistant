@@ -305,8 +305,10 @@ words alone (ADR-0329 §10) are refused there. Importance is not judged twice.
 > memory marked `occasion` (ADR-0345 §8). ADR-0329 §11:4 no longer holds.
 
 > **Normative.** The observer creates no memory whose standing would be inference alone,
-> and adds no support pointing at an observer's inference. Drawing inferences across
-> memories is store maintenance's, under its own decision.
+> draws no new inference, and proposes no support pointing at an observer's inference
+> (ADR-0345 §5:10). A placed write may still carry an inference a stored memory already
+> holds into the dispute it records, as `against` (ADR-0345 §3:8). Drawing inferences
+> across memories is store maintenance's, under its own decision.
 
 > **Normative.** An explicit request to remember, or a correction, in the person's own words
 > is kept unless the person has said not to keep it, as "don't remember the next thing I
