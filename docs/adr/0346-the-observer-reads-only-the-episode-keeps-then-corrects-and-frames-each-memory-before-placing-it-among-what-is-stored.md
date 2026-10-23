@@ -172,8 +172,10 @@ decision here needs to change.
 
 ### 3. Keep, then correct
 
-> **Normative.** The observer commits only findings that rest on the leaving episode's own
-> parts, and shows the scout nothing that occurred after the leaving episode.
+> **Normative.** The observer commits only findings that rest on at least one of the leaving
+> episode's own parts. A finding may also rest on a part of an earlier episode the leaving
+> episode's record points at (§2:1), as "remember that" rests on the message it answers.
+> The scout is shown nothing that occurred after the leaving episode.
 
 > **Normative.** A correction, a retraction or a joke revealed in a later activation is a
 > finding of that activation's episode when it is due, and its write changes the earlier
@@ -189,8 +191,8 @@ While it is, the correcting episode is still in the window, where understanding 
 > §8:3's several-episodes call is not made.
 
 > **Normative.** Each finding states one thing worth keeping, which may hold several claims
-> that share its annotations, and names the parts of the leaving episode it rests on, as
-> ADR-0329 §9:1 has it. It also gives: the people it is about and the people it involves
+> that share its annotations, and names the parts it rests on, as §3:1 and ADR-0329 §9:1
+> have it. It also gives: the people it is about and the people it involves
 > (ADR-0345 §9:1), each named as the record names them, the owner included where it is
 > about them; why it matters to the person, in words; any situations in which it matters,
 > in words; and, where it should reach fewer people than its default, a proposed narrowing
@@ -232,7 +234,9 @@ which sees the parts exactly (§5:3).
 > **Normative.** Each memory a framing proposes states one claim. Claims that could each be
 > true without the other are framed as separate memories, as "Ana lives in Lisbon" and "Ana
 > teaches piano" are; a claim that holds only as a whole, as a relation ("Ana and Tom are
-> married"), a range or a name does, stays one.
+> married"), a range or a name does, stays one. A finding resting on a confirmation is
+> framed as one memory in exactly the wording the person approved, whatever claims it
+> holds, backed by that confirmation (ADR-0329 §5:5); framing neither splits nor rewords it.
 
 > **Normative.** Every memory a framing proposes rests only on the finding's parts, and
 > code checks each as ADR-0329 §9:5 checks a decision. A memory that fails a check is not
@@ -481,7 +485,7 @@ Superseded in part; every clause the middle column does not name stands:
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
 | ADR-0217 | §4:2, in the addition alone: the observer of ADR-0329 also proposes, on its framing pass | §5:8 |
-| ADR-0329 | §8:1, §8:2, §8:3 and §8:6; §9:3 and §9:4; §9:7, for the observer's own writes; §10:1 and §10:2, in their reach, which extends to every memory, and in what a round's message may support, which any memory may cite and which backs a record of the saying; §11:1, in its "always kept"; §11:4, §11:5 and §11:6; §12:4; §14, until a decision on how recall ranks; §9:1, in the additions, in its one claim per finding, and in a candidate giving no finding unaccounted | §2–§10 |
+| ADR-0329 | §8:1, §8:2, §8:3 and §8:6; §9:3 and §9:4; §9:7, for the observer's own writes; §10:1 and §10:2, in their reach, which extends to every memory, and in what a round's message may support, which any memory may cite and which backs a record of the saying; §11:1, in its "always kept"; §11:4, §11:5 and §11:6; §12:3 and §12:4, for a framed memory: every write, a restatement, a question and a retirement included, is the placed proposal's (ADR-0345 §5); §14, until a decision on how recall ranks; §9:1, in the additions, in its one claim per finding, and in a candidate giving no finding unaccounted | §2–§10 |
 | ADR-0334 | §2:1 and §2's table: `observer_commit` leaves the declared set, and `observer_framing` and `observer_placement` join it | §10:1 |
 
 ## Consequences
