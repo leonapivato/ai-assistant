@@ -255,7 +255,9 @@ it, since it stays true that it was said (§3).
 
 > **Normative.** The stored memory is retired in the same atomic write, by the operation the
 > relation names (§5), exactly where no counted `for` support backing it as worded remains
-> on it. A memory some other holder still holds stays current.
+> on it. The operation cites the proposal's backing support that the last stop cites, or,
+> where the write stops none because nothing backed the memory already, the proposal's
+> first backing support. A memory some other holder still holds stays current.
 
 > **Normative.** A stored memory a retiring relation leaves current has its remaining
 > counted backing supports added as `against` in the same write to the proposed memory
@@ -352,7 +354,7 @@ producer writes a memory today.
 | `supports` | Adds the proposal's backing supports to it as `for`, none backing it as worded |
 | `weakens` | Adds the proposal's backing supports to it as `against` |
 | `recheck` | Raises a `recheck` question on it, resting on its own backing supports and adding none (§5:9) |
-| `no_longer_true` | §3; where it retires, an end citing the proposal's backing support that its last stop cites (§3:3), closed at that support's about-when where it carries one, and at the write's instant otherwise (ADR-0328 §5:10) |
+| `no_longer_true` | §3; where it retires, an end citing the support §3:4 names, closed at that support's about-when where it carries one, and at the write's instant otherwise (ADR-0328 §5:10) |
 | `never_true` | §3; where it retires, a mark wrong |
 | `claimed_too_much` | §3; where it retires, a replace naming the proposed memory |
 | `independent` | Nothing |
@@ -752,7 +754,8 @@ suggested it on the 20th, but nothing else backs it", not with the suggestion as
 > `against`; a `contained` fold keeps an `against` support's direction; a `contained`
 > fold stops none of the holder's `against` supports; a `recheck` adds no support and
 > leaves its memory undisputed, and on a memory with no counted backing rests on the
-> supports it carries; an answer whose relation adds no support leaves the
+> supports it carries; a retiring relation against a memory with no counted backing
+> retires it citing the proposal's first backing support; an answer whose relation adds no support leaves the
 > question open; a placed proposal carrying an `observer_inference` or `pinned` support is
 > refused; an upgraded memory that an
 > `observer_inference` support backs as worded keeps that backing, over a file the previous
