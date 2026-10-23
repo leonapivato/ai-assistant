@@ -1,6 +1,6 @@
 # 345. A memory records who holds it, when it lapses, what it is for and whom it is about, and its producer places it among what is stored
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-21
 - Scope: the memory record and the write path a placed proposal takes. Who holds each support, the assistant's messages as statements it made and never as its beliefs, backing only a record of what it said, and the rule that a memory is changed only in its own holder's beliefs; a proposal that names how it stands to each stored memory its producer retrieved, and the write that follows from it; a validity end set at creation; situation labels; marks; a producer for `about_person` and a search filter on it; the retirement of `topics` from the memory; and the upgrade. The observer's use of all of it, what it reads, its steps and its calls, is the second decision of this walk.
 - Dependency: ADR-0328, ADR-0329, ADR-0336, ADR-0217, ADR-0219, ADR-0045, ADR-0100, ADR-0213, ADR-0326 and ADR-0338, as their status lines leave them.
