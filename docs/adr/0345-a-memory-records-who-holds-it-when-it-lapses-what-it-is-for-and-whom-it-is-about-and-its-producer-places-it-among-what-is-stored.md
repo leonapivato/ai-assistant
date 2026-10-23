@@ -2,7 +2,7 @@
 
 - Status: Proposed
 - Date: 2026-10-21
-- Scope: the memory record and the write path a placed proposal takes. Who holds each support, the assistant's messages as statements it made and never as its beliefs, and the rule that a memory is changed only in its own holder's beliefs and never kept current by the assistant's statements alone; a proposal that names how it stands to each stored memory its producer retrieved, and the write that follows from it; a validity end set at creation; situation labels; marks; a producer for `about_person` and a search filter on it; the retirement of `topics` from the memory; and the upgrade. The observer's use of all of it, what it reads, its steps and its calls, is the second decision of this walk.
+- Scope: the memory record and the write path a placed proposal takes. Who holds each support, the assistant's messages as statements it made and never as its beliefs, backing only a record of what it said, and the rule that a memory is changed only in its own holder's beliefs; a proposal that names how it stands to each stored memory its producer retrieved, and the write that follows from it; a validity end set at creation; situation labels; marks; a producer for `about_person` and a search filter on it; the retirement of `topics` from the memory; and the upgrade. The observer's use of all of it, what it reads, its steps and its calls, is the second decision of this walk.
 - Dependency: ADR-0328, ADR-0329, ADR-0336, ADR-0217, ADR-0219, ADR-0045, ADR-0100, ADR-0213, ADR-0326 and ADR-0338, as their status lines leave them.
 - Authorization: the owner ruled this design in the observer walk of 2026-10-21, in the observer-and-learning fork, and directed it be written ("I think we get started"). This decision writes those rulings down and settles only what they leave open, each such point named where it is settled. The number is provisional until the owner assigns it (`CONTRIBUTING.md` → "ADR numbers are assigned at dispatch"). The owner reads it before it is ratified (§1:1).
 - **Contract-surface decision.** It changes `core/types.py` (`MemorySupport` gains its holder; the memory gains labels, marks, `subjects` and `involved`, and loses `topics` and `about_person`; `MemoryUpdateProposal` gains a placement; the projections gain holders, labels, marks, the people a memory is about and a future validity end) and `core/protocols.py` (`MemoryStore.search` gains a person filter; `MemoryWriter.ingest` writes a placed proposal by §5; `MemoryWriter` gains a label write). It is a breaking change under golden rule 5.
@@ -46,6 +46,12 @@ shape the record.
   source. Instead, it should cite what it can." With the assistant holding nothing, there
   is nothing to convince it of; convincing waits for a decision on its standards of
   belief.
+- **The assistant's word is a source; its weight is usage's.** The danger is a loop: "it
+  might say something like the best car is x, and then if I ask why it thinks that, it
+  might say because I said it in this chat." The owner put the answer in usage, not
+  capture: "the assistants words can still be a source, its just one with low credit in
+  many cases. As other sources can be too." What the assistant said may be kept as a record
+  of the saying, true as worded and backing nothing beyond it.
 - **A person is a kind of source.** "Person is a type of source, no?" One holder, of
   several kinds, under one set of capture rules.
 - **The commit step frames, then places.** The new memory's wording and metadata come
@@ -167,8 +173,11 @@ labels, marks and whom it is about, and stops carrying `topics`.
 > that the assistant believes anything.
 
 > **Normative.** Until a decision on the assistant's standards of belief decides otherwise,
-> a support whose holder is the assistant's statement never backs a memory as worded. It
-> is cited, as `for` or `against`, and never makes the assistant a memory's holder.
+> a support whose holder is the assistant's statement backs one memory alone as worded: a
+> record of the saying, which states what the assistant said, where and when, and is
+> marked `assistant_statement` and `occasion` (§8). On any other memory it is cited, as
+> `for` or `against`, never backs it, and never makes the assistant a holder of what it
+> said.
 
 > **Normative.** Until a decision on identified people adds others, the one person a
 > holder names is the owner, and the identifier that names the owner is a
@@ -218,6 +227,15 @@ and the table maps every origin to one holder. They part once a device knows who
 talking: Sam's message to a home speaker is a person's direct word, with an origin like
 the owner's and a different holder. Recording the holder now, while it is always
 derivable, costs one field and spares an upgrade that would have to guess.
+
+**Why the assistant's word backs only a record of the saying.** The assistant's message is
+a source like any other, and how much it counts for is usage's. What sets it apart is that
+the assistant is the one source that reads memory. Kept as its claim, "X is the best car"
+would be recalled, said again and kept again, until the answer to "why?" is "because I
+said so". Kept as a record of the saying, "On Oct 20 the assistant said X is the best car
+for the user's commute", it is true as worded and says nothing of whether X is right;
+saying it again makes a second record, never more weight. No other holder's word ends
+it, since it stays true that it was said (§3).
 
 ### 3. A memory changes only in its holder's beliefs
 
@@ -419,8 +437,8 @@ the earlier steps stored.
 6. The owner: "Yeah, Ana moved to Porto last month." It folds into M6, now held by Tom, Sam
    and the owner. Against M2, the owner's own, it is `no_longer_true`: the owner's supports
    stop, nothing backs M2, and it ends, closed at last month, with M6 its successor.
-7. The assistant: "So she's probably not at Santa Maria any more." Nobody keeps it, so
-   nothing is written. The owner: "Right, she's at São João now." M7 "Ana works at São João
+7. The assistant: "So she's probably not at Santa Maria any more." Nobody keeps it, and a
+   passing guess is not worth a record of the saying, so nothing is written. The owner: "Right, she's at São João now." M7 "Ana works at São João
    Hospital", held by the owner. Against M5 it is `no_longer_true`: the owner's supports on
    M5 stop, the page's backing keeps M5 current as what the page says, the dispute is
    recorded both ways, and the owner's answer resolves M5's open question. When the page
@@ -500,15 +518,17 @@ than serving two purposes.
 > to and never renamed. This decision adds two members. `occasion`: the memory states
 > something that happened at a time, such as a choice made on a date; it says nothing about
 > whether it happened once or often. `assistant_statement`: what the
-> memory states traces to the assistant's own words in a round's message, with nothing
-> recorded behind them, which a person kept or
-> took on.
+> memory states traces to the assistant's own words in a round's message, either as a
+> record of the saying (§2:4) or as what a person kept or took on from them with nothing
+> recorded behind them.
 
 > **Normative.** A mark is set by the memory's producer at its create, and changes later
 > only by a decision that names how.
 
 > **Normative.** The writer refuses a memory marked `assistant_statement` that carries no
-> support pointing at a round's message.
+> support pointing at a round's message, and a memory that a support held by the
+> assistant's statement backs as worded unless it is marked both `assistant_statement` and
+> `occasion`.
 
 > **Normative.** A memory marked `occasion` carries no validity end set at its create.
 
@@ -531,7 +551,10 @@ then cannot tell from the supports alone that the assistant's words were all tha
 behind it, because the person's support looks like any statement of theirs. The producer,
 which saw the parts, says so; code checks that the assistant's message is among the
 supports. The memory still cites what it can: the message, where and when the assistant
-said it. Every claim has a source, and here the source is that statement.
+said it. Every claim has a source, and here the source is that statement. One mark covers
+the record of the saying too, so one filter finds everything that came from the
+assistant's words, and the holder tells which it is: the assistant's statement for a
+record, the person for what they kept.
 
 ### 9. Whom a memory is about
 
@@ -620,9 +643,13 @@ and store maintenance would merge one.
 
 > **Normative.** Every projection and planning's label convey a memory marked
 > `assistant_statement` as what the assistant said, citing that message, where and when it
-> was said, and the person who kept it, and never as "from a source" or as what the person
-> said, whatever standing ADR-0328 §6 computes
-> for it.
+> was said, and the person who kept it where one did, and never as from an outside source
+> or as what the person said, whatever standing ADR-0328 §6 computes for it.
+
+How much such a memory counts for is planning's to weigh, as for any source, and the label
+gives it what it needs. Planning's instruction, whose wording is the prompts', treats the
+assistant's own past words as never a reason in themselves: "why X?" is answered "I
+suggested it on the 20th, but nothing else backs it", not with the suggestion as proof.
 
 > **Normative.** A change to a shape the wire carries advances `PROTOCOL_VERSION` in that
 > change (ADR-0124 §9).
@@ -670,9 +697,11 @@ and store maintenance would merge one.
 > the same holder as an established one with the same identifier; a part saying what
 > another person believes is held by its sender; two parts under one identifier are one
 > holder; a partial supporter is not a holder; a `contained` from another holder installs
-> beside; a support held by the assistant's statement never backs a memory, so a kept
-> statement ends when the person who kept it withdraws; an `assistant_statement` memory
-> without the assistant's message is refused, and one with it is shown citing that message;
+> beside; a support held by the assistant's statement backs only a record of the saying,
+> so a kept statement ends when the person who kept it withdraws, and a memory it backs
+> without both marks is refused; a record of the saying stays current under another
+> holder's contradiction; an `assistant_statement` memory without the assistant's message
+> is refused, and one with it is shown citing that message;
 > a `restates` that would raise standing installs beside; a `restates` at equal standing
 > folds with no new memory; an `unclear` writes nothing to the stored memory and installs
 > the proposal; a relation's note is on what it wrote; a `contained` adds supports without
@@ -738,8 +767,8 @@ Superseded in part; every clause the middle column does not name stands:
   and nothing here needs to change when it lands.
 - **Person holders other than the owner** wait on a decision on identified people.
   Until then the person column of §2 names the owner alone.
-- **The assistant keeps no memory of its own** until a decision on its standards of
-  belief: independence, interest (a source never vouches for itself), directness, track
+- **The assistant keeps no belief of its own**, only records of what it said, until a
+  decision on its standards of belief: independence, interest (a source never vouches for itself), directness, track
   record, proportion, recency, coherence, the person first on themselves, and humility.
   That decision, with store maintenance, is where earned opinions and credibility per
   source begin.
@@ -763,6 +792,15 @@ Superseded in part; every clause the middle column does not name stands:
   and then withdrawn: once the assistant holds no beliefs, its messages are statements it
   made, and there is nothing of its own to convince. It returns, if ever, with the
   decision on the assistant's standards of belief.
+- **The assistant's claim kept as worded, held by its statement and weighed low.** Not
+  chosen: "X is the best car", held by the assistant's message, reads as a fact wherever
+  its label is lost, and a later message saying otherwise would end it as though the
+  assistant had changed its mind, a belief under another name. A record of the saying
+  carries its source in its wording and is true as it stands.
+- **No memory of what the assistant said, left to episode search.** Proposed in the walk
+  and withdrawn: the owner put the limit in usage, not capture. How much of it the
+  producer keeps is its prompt's, and episode search holds the rest once it is built
+  (ADR-0287).
 - **A person as a kind apart from a source.** Not chosen: "Person is a type of source,
   no?" Every holder is the source of a claim; the kinds matter to usage, not to capture's
   rules.
