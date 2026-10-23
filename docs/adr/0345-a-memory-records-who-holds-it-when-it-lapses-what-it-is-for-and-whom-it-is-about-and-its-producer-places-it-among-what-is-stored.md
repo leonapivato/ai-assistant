@@ -455,7 +455,8 @@ true from now on carries no end.
 ### 7. Situation labels
 
 > **Normative.** A memory carries situation labels: a tuple of entries, each a free-text
-> label, the instant it was added and the writer that added it.
+> label, the instant it was added, the writer that added it, and the episode that suggested
+> it where one did.
 
 > **Normative.** A label says when or for what the memory matters, or what kind of
 > statement the memory is. Its wording is its producer's.
@@ -473,6 +474,11 @@ true from now on carries no end.
 > label write is not an operation and changes nothing but the labels.
 
 > **Normative.** A create may carry labels, written with it under §7:3 and §7:5.
+
+> **Normative.** The owner may add or remove a memory's labels by an act of their own,
+> through the member §7:6 names, and such a label names the writer `owner`. ADR-0328 §5:9's
+> closed set of writers gains `owner`, for label writes alone. The surface that makes the
+> act is a later interfaces decision's.
 
 > **Normative.** Labels change no standing, status, validity, support or operation, and
 > nothing this decision adds ranks a search by them. A search over labels is a later
@@ -628,7 +634,8 @@ and store maintenance would merge one.
 > raising standing; a stale
 > revision refuses the whole proposal; a create with a future validity end drops out of
 > live reads after it; a near-duplicate label is refused; the `about_person` filter binds
-> before the cut; the upgrade assigns holders by §2's table; and each step of §5's worked
+> before the cut; a label records the episode that suggested it, and the owner's label
+> write names the writer `owner`; the upgrade assigns holders by §2's table; and each step of §5's worked
 > example, from the same placements, ends in that example's table.
 
 ### 16. Relationship to earlier decisions
@@ -638,7 +645,7 @@ Superseded in part; every clause the middle column does not name stands:
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
 | ADR-0213 | Every clause, as it applies to a memory | §7, §10 |
-| ADR-0328 | §3:1's field table, in the additions of labels and marks and the removal of `topics`; §3:6, as to `about_person`'s producer and `topics`; §4:1's support fields, in the addition of the holder; §5:10, for a create; §6:5, §11:5, §11:6 and §11:7, for a placed proposal; §11:9, as to the union of topics; §15:1, §15:2 and §15:5, in the additions alone; §15:4 and §15:5, for a memory marked `assistant_statement` | §2–§10, §12 |
+| ADR-0328 | §3:1's field table, in the additions of labels and marks and the removal of `topics`; §3:6, as to `about_person`'s producer and `topics`; §4:1's support fields, in the addition of the holder; §5:10, for a create; §6:5, §11:5, §11:6 and §11:7, for a placed proposal; §11:9, as to the union of topics; §15:1, §15:2 and §15:5, in the additions alone; §15:4 and §15:5, for a memory marked `assistant_statement`; §5:9, in the addition of the writer `owner`, for label writes | §2–§10, §12 |
 | ADR-0336 | §2:1, §3:1–§3:3, §4:1, §5:1 and §7:1, for a placed proposal | §4, §5 |
 
 ## Consequences
