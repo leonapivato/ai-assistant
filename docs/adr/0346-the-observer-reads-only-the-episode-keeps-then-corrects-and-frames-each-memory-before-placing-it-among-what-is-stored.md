@@ -162,15 +162,23 @@ While it is, the correcting episode is still in the window, where understanding 
 > **Normative.** The scout is one model call per due episode, over what §2 reads. ADR-0329
 > §8:3's several-episodes call is not made.
 
-> **Normative.** Each finding states one claim and names the parts of the leaving episode
-> it rests on, as ADR-0329 §9:1 has it, and also gives: the people the claim is about and
-> the people it involves (ADR-0345 §9:1), each named as the record names them, the owner
-> included where it is about them; why it matters to the person, in words; any situations in which it matters, in words;
-> and, where it should reach fewer people than its default, a proposed narrowing with a
-> note on why.
+> **Normative.** Each finding states one thing worth keeping, which may hold several claims
+> that share its annotations, and names the parts of the leaving episode it rests on, as
+> ADR-0329 §9:1 has it. It also gives: the people it is about and the people it involves
+> (ADR-0345 §9:1), each named as the record names them, the owner included where it is
+> about them; why it matters to the person, in words; any situations in which it matters,
+> in words; and, where it should reach fewer people than its default, a proposed narrowing
+> with a note on why.
 
 > **Normative.** Where parts the scout would propose together call for different
-> narrowings, it proposes them as separate findings.
+> annotations, different people, a different reason it matters, different situations or a
+> different narrowing, it proposes them as separate findings.
+
+**The scout splits by handling, framing by claim.** Every memory framed from a finding
+takes that finding's annotations, so what must be treated differently, "Ana is my
+sister" beside "Ana is pregnant, don't tell anyone", has to part at the scout. Turning a
+finding into single claims, "Ana lives in Lisbon" and "Ana teaches piano", is framing's,
+which sees the parts exactly (§5:3).
 
 > **Normative.** The scout's annotations are hints. None sets an origin, a holder or a
 > standing, and none is evidence.
@@ -386,7 +394,7 @@ Superseded in part; every clause the middle column does not name stands:
 | --- | --- | --- |
 | ADR-0217 | §4:2, in the addition alone: the observer of ADR-0329 also proposes, on its framing pass | §5:8 |
 | ADR-0284 | §8:1's projection, in the addition alone: an episode's reliance | §8:1 |
-| ADR-0329 | §8:1, §8:2, §8:3 and §8:6; §9:3 and §9:4; §9:7, for the observer's own writes; §10:1 and §10:2, in their reach, which extends to every memory; §11:4, §11:5 and §11:6; §12:4; §14:1 and §14:2; and §3:1 and §9:1, in the additions alone | §2–§10 |
+| ADR-0329 | §8:1, §8:2, §8:3 and §8:6; §9:3 and §9:4; §9:7, for the observer's own writes; §10:1 and §10:2, in their reach, which extends to every memory; §11:4, §11:5 and §11:6; §12:4; §14:1 and §14:2; §9:1, in the additions and in its one claim per finding; and §3:1, in the additions alone | §2–§10 |
 
 ## Consequences
 
