@@ -2,11 +2,11 @@
 
 - Status: Proposed
 - Date: 2026-10-21
-- Scope: what the observer reads and when, the scout's findings and what it says about each, the commit step cut into framing, retrieval and placement, the memories the observer keeps and the ones it no longer makes, the track record, which waits for a decision on how recall ranks, the labels a new memory gets, and the observer's place against outside content. The record these write is ADR-0345's.
+- Scope: what the observer reads and when, the scout's findings and what it says about each, the commit step cut into framing, retrieval and placement, the memories the observer keeps and the ones it no longer makes, the track record, which waits for a decision on how recall ranks, the labels a new memory gets, the observer's place against outside content, and how it goes live on the owner's hub. The record these write is ADR-0345's.
 - Dependency: ADR-0345, which this decision builds on; ADR-0329, which it changes where §14 names a clause; ADR-0217, ADR-0284, ADR-0307, ADR-0328, ADR-0334 and ADR-0338, as their status lines leave them.
 - Authorization: the owner ruled this design in the observer walk of 2026-10-21, in the observer-and-learning fork, and directed it be written ("I think we get started"). This decision writes those rulings down and settles only what they leave open, each such point named where it is settled. The number is provisional until the owner assigns it (`CONTRIBUTING.md` → "ADR numbers are assigned at dispatch"). The owner reads it before it is ratified (§1:1).
 - **Contract-surface decision.** It changes `core/types.py` (the observation record's finding carries the scout's annotations) and adds two prompts to the declared set. It is a breaking change under golden rule 5.
-- **Partially supersedes**, in the clauses §14's table names: ADR-0217 and ADR-0329.
+- **Partially supersedes**, in the clauses §14's table names: ADR-0217, ADR-0329 and ADR-0334.
 
 ## Context
 
@@ -71,9 +71,14 @@ important", and worked outward.
   help retrieval, because this memory has served me well … maybe this is a whole different
   ADR," and then, "do you think we should just leave it out of this ADR?" It waits for the
   decision on how recall ranks; planning still notes reliance, and every episode keeps it.
+- **The first prompts are drafted with the code.** "Do whatever fixes that need to be
+  done in order to support the new design. For now, you can do the prompt too … in the
+  prompting fork, I'm gonna go through it and optimize it."
+- **The owner's hub starts over from its episodes.** "Don't worry about an old compound
+  memory … it can be wiped."
 - **Two things wait.** Preferences on what to keep: "Let's just not think of it now."
-  The bar for which single occasions are worth a memory "goes into how to prompt Scout,
-  which we won't deal with here today."
+  The bar for which occasions are worth a memory "goes into how to prompt Scout, which we
+  won't deal with here today."
 
 ### What is there today
 
@@ -386,16 +391,27 @@ ranking can learn from it.
 ### 10. Prompts and models
 
 > **Normative.** The framing call and the placement call each render a prompt of their own,
-> declared under ADR-0334 with the scout's. `observer_commit` is retired, and its
-> override, where a hub holds one, is not loaded.
+> `observer_framing` and `observer_placement`, declared under ADR-0334 beside
+> `observer_scout` in `orchestration/observer/prompts.py`, each with no flag and with the
+> values its lane declares for the code-owned text it names. `observer_commit` is retired. A hub whose
+> override directory still holds a file for it refuses to start (ADR-0334 §5:1), so the
+> deploy that retires it removes that file, keeping a copy beside the deploy's rollback.
 
 > **Normative.** The framing and placement calls ride the commit step's model route
 > (ADR-0329 §9:9), and the daily bound counts every call the observer makes (ADR-0329
 > §16:9).
 
-> **Normative.** The prompts' wording is the owner's, through ADR-0334's review. The
-> decision fixes what each call is given and what its reply carries, and no prompt
-> wording.
+> **Normative.** The lane writes the first wording of the framing and placement prompts'
+> defaults, and gives the scout's default what §4 asks of its reply. The owner reworks
+> them afterwards through ADR-0334's review. The decision fixes what each call is given and
+> what its reply carries, and no prompt wording.
+
+> **Normative.** The suite cases of `observer_commit` (ADR-0337 §3) move to the prompt whose
+> call now makes the judgement each guards, their inputs rewritten to that call's request,
+> so every failure class ADR-0337 §3:7 names stays covered: a compound claim backed by one
+> clause, a detail no part states and an approval learned as a habit go to
+> `observer_framing`, and a narrower write that loses a broader fact to
+> `observer_placement`. The scout's cases are rewritten to its new request.
 
 ### 11. What stays open
 
@@ -424,9 +440,29 @@ decision; the observer's half is the skip.
 
 > **Normative.** The lane merges after ADR-0345's lane.
 
-> **Normative.** It goes live in one deploy, with the owner's prompt drafts for the two
-> new prompts placed by the owner's direction (ADR-0334 §6). Episodes already processed are
-> not processed again.
+> **Normative.** It goes live in one deploy. On the owner's hub, by the owner's direction
+> (ADR-0334 §6:1), that deploy carries into the owner's scout override, where one is
+> placed, what §4 asks of the scout's reply, as the scout's default words it, changing
+> nothing else of the override; and it removes the `observer_commit` override (§10:1).
+
+> **Normative.** On the owner's hub, that deploy, after the hub's backup, clears the memory
+> store's memories and the plan store's observation records, so every episode since
+> ADR-0329 §7:5's instant is due again and is processed under this decision, oldest first,
+> as ADR-0329 §17's catch-up processes them. Before the clear it lists for the owner the
+> wording of each memory a pin is on, since a pin whose memory the store no longer holds is
+> shown nowhere (ADR-0338 §4:9), so the owner can pin again what they want kept in mind.
+
+> **Normative.** A hub hosted for another person is cleared only at that person's request
+> ([#879](https://github.com/leonapivato/ai-assistant/issues/879)), and any other hub only
+> by the owner's direction for it. Where a hub is not cleared, its episodes already
+> processed are not processed again.
+
+**Why the override is carried and the store cleared.** Code refuses a scout reply that
+leaves a candidate unaccounted (§4:6), and nothing checks an override's wording (ADR-0334
+§7:1), so a scout override written for the old reply would fail every episode with a
+candidate. Memories written under ADR-0329's rules, compound claims, reconciler folds and
+evidence-only occasions among them, would otherwise sit beside the new ones for good; the
+owner's hub holds few enough episodes to relearn them all under one set of rules.
 
 ### 14. Relationship to earlier decisions
 
@@ -436,6 +472,7 @@ Superseded in part; every clause the middle column does not name stands:
 | --- | --- | --- |
 | ADR-0217 | §4:2, in the addition alone: the observer of ADR-0329 also proposes, on its framing pass | §5:8 |
 | ADR-0329 | §8:1, §8:2, §8:3 and §8:6; §9:3 and §9:4; §9:7, for the observer's own writes; §10:1 and §10:2, in their reach, which extends to every memory, and in what a round's message may support, which any memory may cite and which backs a record of the saying; §11:1, in its "always kept"; §11:4, §11:5 and §11:6; §12:4; §14, until a decision on how recall ranks; §9:1, in the additions, in its one claim per finding, and in a candidate giving no finding unaccounted | §2–§10 |
+| ADR-0334 | §2:1 and §2's table: `observer_commit` leaves the declared set, and `observer_framing` and `observer_placement` join it | §10:1 |
 
 ## Consequences
 
@@ -465,8 +502,11 @@ Superseded in part; every clause the middle column does not name stands:
   gains no label there until the decision on how recall ranks.
 - **What the scout knows is what the episode recorded.** Understanding's windows are not
   yet recorded whole.
-- **The owner's `observer_commit` override retires.** The two new prompts need drafts,
-  which is the prompts front's.
+- **The owner's `observer_commit` override retires**, kept as a copy beside the rollback.
+  The first prompts are the lane's drafts, and the prompts front reworks them.
+- **The owner's hub relearns from its episodes.** The clear drops every memory, so each
+  pin must be made again from the list the deploy gives, and style marks are learned
+  again by the catch-up.
 - **#3154's scenarios change:** a correction now lands one activation later, no track
   record is kept for now, and an occasion becomes a memory. The acceptance
   is reworked for this decision.
