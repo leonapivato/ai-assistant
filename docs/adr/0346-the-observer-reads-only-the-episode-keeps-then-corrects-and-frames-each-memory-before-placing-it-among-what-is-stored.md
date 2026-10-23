@@ -235,9 +235,16 @@ words alone (ADR-0329 §10) are refused there. Importance is not judged twice.
 > composition-root bound.
 
 > **Normative.** Each memory is placed by one model call, given the memory as framed and
-> the retrieved memories with their supports, holders, standing, status and open
-> questions. It names one ADR-0345 §4 relation for each retrieved memory, with the note
-> ADR-0345 §4:1 asks for, and at most one open question the new memory answers.
+> each retrieved memory in a compact form code builds from the stored record: its wording,
+> holders and partial supporters, standing, status, the counts of its counted `for` and
+> `against` supports and the distinct episodes they point at, its open questions, and its
+> most recent supports in full, up to a composition-root number. It names one ADR-0345 §4
+> relation for each retrieved memory, with the note ADR-0345 §4:1 asks for, and at most
+> one open question the new memory answers.
+
+> **Normative.** The compact form is computed, never written by a model, and the placement
+> call makes no further read. Where it cannot place a pair from what it is shown, it says
+> `unclear`, and its note says what it would have needed.
 
 > **Normative.** The placement call does not change the framed memory. It states relations
 > only.
