@@ -418,7 +418,9 @@ ranking can learn from it.
 > **Normative.** This decision decides no preference of the person about what is kept, no
 > bar for which occasions are worth a memory beyond ADR-0329 §11, no search over labels, no
 > rule of usage among holders, no standard by which the assistant comes to hold a belief of
-> its own, and no conversation or place that is not to be learned from. Each is a later
+> its own, no conversation or place that is not to be learned from, and no ranking of
+> recall by use, the track record included
+> ([#1840](https://github.com/leonapivato/ai-assistant/issues/1840)). Each is a later
 > decision's, and no lane builds one under this decision.
 
 **An incognito place, when it comes, is code's, not judgement's.** A conversation or place
