@@ -497,8 +497,9 @@ than serving two purposes.
 ### 8. Marks
 
 > **Normative.** A memory carries marks: a set of members of one closed enumeration, added
-> to and never renamed. This decision adds two members. `one_occasion`: the memory states a
-> single occasion, such as one choice made once on a date. `assistant_statement`: what the
+> to and never renamed. This decision adds two members. `occasion`: the memory states
+> something that happened at a time, such as a choice made on a date; it says nothing about
+> whether it happened once or often. `assistant_statement`: what the
 > memory states traces to the assistant's own words in a round's message, with nothing
 > recorded behind them, which a person kept or
 > took on.
@@ -509,15 +510,17 @@ than serving two purposes.
 > **Normative.** The writer refuses a memory marked `assistant_statement` that carries no
 > support pointing at a round's message.
 
-> **Normative.** A memory marked `one_occasion` carries no validity end set at its create.
+> **Normative.** A memory marked `occasion` carries no validity end set at its create.
 
 > **Normative.** Marks about how a person wants to be treated stay in the person-model
 > store: ADR-0338's style marks and pin suggestions are unchanged, and this field holds
 > marks about the memory itself.
 
-A one-occasion memory is an ordinary memory: its wording dates it, and it stays true
-that it happened. The mark lets recall and store maintenance find occasions by an exact
-filter, where a label matched by meaning could miss one.
+An occasion memory is an ordinary memory: its wording dates it, and it stays true that it
+happened. A second time is a second occasion memory, independent of the first, and the
+two together are what store maintenance draws a pattern from. The mark lets recall and
+store maintenance find occasions by an exact filter, where a label matched by meaning
+could miss one.
 
 **Why `assistant_statement` is a mark and not computed.** A memory a person keeps from
 what the assistant said is the person's: their "remember that" takes on the words shown,
