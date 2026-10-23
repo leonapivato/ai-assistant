@@ -2,10 +2,10 @@
 
 - Status: Proposed
 - Date: 2026-10-21
-- Scope: what the observer reads and when, the scout's findings and what it says about each, the commit step cut into framing, retrieval and placement, the memories the observer keeps and the ones it no longer makes, the track record, which waits for a decision on how recall ranks, planning's suggestion of when a memory matters, and the observer's place against outside content. The record these write is ADR-0345's.
+- Scope: what the observer reads and when, the scout's findings and what it says about each, the commit step cut into framing, retrieval and placement, the memories the observer keeps and the ones it no longer makes, the track record, which waits for a decision on how recall ranks, the labels a new memory gets, and the observer's place against outside content. The record these write is ADR-0345's.
 - Dependency: ADR-0345, which this decision builds on; ADR-0329, which it changes where §14 names a clause; ADR-0217, ADR-0284, ADR-0307, ADR-0328, ADR-0334 and ADR-0338, as their status lines leave them.
 - Authorization: the owner ruled this design in the observer walk of 2026-10-21, in the observer-and-learning fork, and directed it be written ("I think we get started"). This decision writes those rulings down and settles only what they leave open, each such point named where it is settled. The number is provisional until the owner assigns it (`CONTRIBUTING.md` → "ADR numbers are assigned at dispatch"). The owner reads it before it is ratified (§1:1).
-- **Contract-surface decision.** It changes `core/types.py` (the observation record's finding carries the scout's annotations; `remember`'s candidate may carry a situation) and adds two prompts to the declared set. It is a breaking change under golden rule 5.
+- **Contract-surface decision.** It changes `core/types.py` (the observation record's finding carries the scout's annotations) and adds two prompts to the declared set. It is a breaking change under golden rule 5.
 - **Partially supersedes**, in the clauses §14's table names: ADR-0217 and ADR-0329.
 
 ## Context
@@ -38,10 +38,13 @@ important", and worked outward.
   on alone; code retrieves what is stored; the model labels each relation; code writes
   (ADR-0345 §4–§5). "Several memories should be committed in order to fully capture what
   the scout flagged as important" is "possible if deemed necessary."
-- **Labels ride the hint chain.** Planning, the scout and the commit step may each
-  suggest when a memory matters; the commit step decides (owner: "I'm not against the
-  commit step writing labels. What about the scout step also writing labels? And … maybe
-  planning").
+- **Labels ride the hint chain, kept simple.** The scout suggests when a memory matters
+  and the commit step decides (owner: "I'm not against the commit step writing labels.
+  What about the scout step also writing labels? And … maybe planning"). Planning says it
+  in its `remember` call's why, which the scout reads, rather than in an argument of its
+  own: "I wonder if for now we should make this a little bit more simple"; "Scout should
+  be able to work that out? Yeah, I can see that." Learning labels from use waits with
+  the track record.
 - **Sensitivity is the scout's.** "The commit step doesn't know the user. The whole idea
   is a scout user knows the user." The observer's part is two things: propose a
   narrowing, and carry it onto what it writes.
@@ -365,23 +368,20 @@ longer does, so it could not stand as written.
 
 ### 9. Where a memory matters
 
-> **Normative.** `remember` takes one further optional argument, the situations in which
-> the fact matters, in words. Its candidate carries it, and the scout is shown it as part
-> of the candidate.
+> **Normative.** Framing decides each new memory's labels, taking the scout's situations
+> (§4:2) as suggestions it may keep, change or drop.
 
-> **Normative.** Framing decides each new memory's labels. Planning's and the scout's are
-> suggestions it may keep, change or drop.
+> **Normative.** The observer writes no label to a memory already stored. Learning where a
+> memory matters from how it is used, where recall missed it or where it served well,
+> waits with the track record for the decision on how recall ranks (§8).
 
-> **Normative.** Where a `restates` folds a finding into a stored memory that neither of the
-> leaving episode's recall runs returned and no planning label named, the observer adds the
-> finding's situations (§4:2) to that memory's labels, through ADR-0345 §7:6, each citing
-> the leaving episode. Code decides the miss from the episode's record.
-
-**Labels learn from misses.** A person having to say again something already kept, in a
-situation where the memory did not come up, shows recall missed it there, so that
-situation becomes a label: "I'm allergic to peanuts", said again while booking a
-restaurant, teaches the allergy to surface when booking restaurants. Learning from successes waits
-with the track record (§8).
+**Why so little.** A new memory's labels come from what the scout understood in the
+moment, which cannot be rebuilt, and framing writes them in a call already made. Planning
+says when a fact matters in its `remember` call's why (ADR-0329 §3:1), which the scout is
+shown with the candidate. Learning from use is ranking's: "I'm allergic to peanuts", said
+again while booking a restaurant, shows recall missed the allergy there, and each episode
+keeps what recall found and each write the finding it came from, so the decision on
+ranking can learn from it.
 
 ### 10. Prompts and models
 
@@ -420,12 +420,11 @@ decision; the observer's half is the skip.
 
 | Lane | What it lands | Where |
 | --- | --- | --- |
-| 1 | `remember`'s situations (§9:1) | `core`, `orchestration` |
-| 2 | The observer: §2's reading, the scout's annotations, framing, retrieval and placement, the two prompts, the writes as placed proposals, and no track-record entry (§8) | `orchestration/observer`, `app`, `core` |
+| 1 | The observer: §2's reading, the scout's annotations, framing, retrieval and placement, the two prompts, the writes as placed proposals, and no track-record entry (§8) | `orchestration/observer`, `app`, `core` |
 
-> **Normative.** Lane 1 merges after ADR-0345's lane, and lane 2 after lane 1.
+> **Normative.** The lane merges after ADR-0345's lane.
 
-> **Normative.** Lane 2 goes live in one deploy, with the owner's prompt drafts for the two
+> **Normative.** It goes live in one deploy, with the owner's prompt drafts for the two
 > new prompts placed by the owner's direction (ADR-0334 §6). Episodes already processed are
 > not processed again.
 
@@ -436,7 +435,7 @@ Superseded in part; every clause the middle column does not name stands:
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
 | ADR-0217 | §4:2, in the addition alone: the observer of ADR-0329 also proposes, on its framing pass | §5:8 |
-| ADR-0329 | §8:1, §8:2, §8:3 and §8:6; §9:3 and §9:4; §9:7, for the observer's own writes; §10:1 and §10:2, in their reach, which extends to every memory, and in what a round's message may support, which any memory may cite and which backs a record of the saying; §11:1, in its "always kept"; §11:4, §11:5 and §11:6; §12:4; §14, until a decision on how recall ranks; §9:1, in the additions, in its one claim per finding, and in a candidate giving no finding unaccounted; and §3:1, in the additions alone | §2–§10 |
+| ADR-0329 | §8:1, §8:2, §8:3 and §8:6; §9:3 and §9:4; §9:7, for the observer's own writes; §10:1 and §10:2, in their reach, which extends to every memory, and in what a round's message may support, which any memory may cite and which backs a record of the saying; §11:1, in its "always kept"; §11:4, §11:5 and §11:6; §12:4; §14, until a decision on how recall ranks; §9:1, in the additions, in its one claim per finding, and in a candidate giving no finding unaccounted | §2–§10 |
 
 ## Consequences
 
@@ -462,6 +461,8 @@ Superseded in part; every clause the middle column does not name stands:
 - **No track record until the decision on how recall ranks.** Planning cannot yet tell a
   memory that has served well from one never tried, and the track record stays on the
   memory with nothing writing it.
+- **Labels are not learned from use yet.** A memory recall keeps missing in some situation
+  gains no label there until the decision on how recall ranks.
 - **What the scout knows is what the episode recorded.** Understanding's windows are not
   yet recorded whole.
 - **The owner's `observer_commit` override retires.** The two new prompts need drafts,
@@ -483,6 +484,10 @@ Superseded in part; every clause the middle column does not name stands:
   episode's scout proposed a reliance finding, and a call on the placement prompt judged
   it held up, let down or neither. Withdrawn: it fixed what serving well means before its
   use, ranking, is designed.
+- **Labels learned from misses, and a situations argument on `remember`.** Drafted in the
+  walk and withdrawn for a simpler first step: learning from use is ranking's, like the
+  track record, and planning says when a fact matters in its call's why, which the scout
+  reads.
 - **Inferences in the observer, from one episode's recall.** Not chosen: whether the
   occasions came together would depend on what each activation happened to recall.
 - **Importance judged twice.** Not chosen: the scout judges importance, and framing judges
