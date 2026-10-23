@@ -230,7 +230,7 @@ words alone (ADR-0329 §10) are refused there. Importance is not judged twice.
 > **Normative.** The memory is proposed to `MemoryWriter.ingest` through the write stage as
 > a placed proposal (ADR-0345 §4), with the revision each retrieved memory was read at.
 
-> **Normative.** A placed proposal the writer refuses as stale (ADR-0345 §4:6) is retrieved
+> **Normative.** A placed proposal the writer refuses as stale (ADR-0345 §4:7) is retrieved
 > and placed again within the same attempt, up to a composition-root count, and is
 > otherwise the attempt's failure under ADR-0329 §16:4.
 
