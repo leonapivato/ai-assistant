@@ -9459,12 +9459,22 @@ SETTLED_OBSERVATION_STATES: Final[frozenset[ObservationState]] = frozenset(
 
 
 class ObserverStep(StrEnum):
-    """Which of the observer's two steps made a model call (ADR-0329 §9)."""
+    """Which of the observer's steps made a model call (ADR-0329 §9, ADR-0346 §4-§6).
+
+    Closed, **added to and never renamed**: the value is stored on every call an
+    attempt records. ``commit`` stays for the calls recorded before ADR-0346 cut the
+    commit step into framing and placement, and no call is made under it after.
+    """
 
     SCOUT = "scout"
-    """The one call over what §8 names, proposing findings (§9:1)."""
+    """The one call per due episode, proposing findings (ADR-0346 §4:1)."""
     COMMIT = "commit"
-    """One call per finding, deciding what is written (§9:3)."""
+    """ADR-0329 §9:3's one call per finding, retired by ADR-0346 §5-§6: recorded calls
+    keep it, and nothing makes one now."""
+    FRAMING = "framing"
+    """One call per finding, framing the memories it bears out (ADR-0346 §5:1)."""
+    PLACEMENT = "placement"
+    """One call per framed memory, naming its relation to each retrieved one (§6:2)."""
 
 
 class ObserverCall(BaseModel):
@@ -9571,6 +9581,25 @@ class FindingUnwritten(StrEnum):
     raised and the candidate waits on its episode (§13:3)."""
 
 
+class UnclearPlacement(BaseModel):
+    """One ``unclear`` a placement call named, kept on the finding's outcome (ADR-0346 §6:5).
+
+    So where ADR-0345 §4's set of relations does not fit can be seen: the stored memory
+    the call could not place the framed one against, and its note on what it would have
+    needed (§6:3).
+
+    Attributes:
+        memory: The stored memory's id, exactly as the memory store holds it.
+        wording: The wording of the framed memory that was placed against it.
+        note: The placement call's note, in words.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    memory: NonBlankEncodableText
+    wording: NonBlankEncodableText
+    note: NonBlankEncodableText
+
+
 class FindingOutcome(BaseModel):
     """What a finding's commit did: what was written, or why nothing was (§16:1).
 
@@ -9579,12 +9608,22 @@ class FindingOutcome(BaseModel):
     write; a ruling of ``ASK_USER`` that named stored memories raised a question on
     each of them (§13:1), and one that named none wrote nothing (§13:3).
 
+    Under ADR-0346 a finding is framed into one or more memories, each placed and
+    proposed on its own (§5-§6), so the outcome is the whole finding's: every memory
+    any of them wrote on, each once. :attr:`unclear` keeps every ``unclear`` a
+    placement call named (§6:5), and :attr:`asked` the wording of each framed memory
+    the policy's admissibility floor asked about, which raises nothing (§6:8); where
+    nothing was written and some memory was asked about, the outcome is ``asked``
+    under a ruling of ``ask_user``.
+
     Attributes:
         at: When the outcome was decided.
         ruling: ``MemoryPolicy``'s ruling on the finding's proposal, where one was
             made (§12:2); ``None`` where no proposal reached the policy.
         writes: Each memory the commit wrote on, each once.
         unwritten: Why nothing was written, exactly where :attr:`writes` is empty.
+        unclear: Each ``unclear`` the placement calls named (ADR-0346 §6:5).
+        asked: The wording of each framed memory the floor asked about (§6:8).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -9592,6 +9631,8 @@ class FindingOutcome(BaseModel):
     ruling: MemoryDecisionKind | None = None
     writes: tuple[ObservationWrite, ...] = ()
     unwritten: FindingUnwritten | None = None
+    unclear: tuple[UnclearPlacement, ...] = ()
+    asked: tuple[NonBlankEncodableText, ...] = ()
 
     @model_validator(mode="after")
     def _written_or_why_not(self) -> Self:
@@ -9609,6 +9650,89 @@ class FindingOutcome(BaseModel):
             msg = "an outcome records an ask only under a ruling of ask_user (ADR-0329 §13:3)"
             raise ValueError(msg)
         return self
+
+
+class ProposedNarrowing(BaseModel):
+    """A narrowing the scout proposes for a finding's memories (ADR-0346 §4:2, §5:7).
+
+    Where what the finding states should reach fewer people than its default, the
+    reach it proposes and a note on why. A hint like the rest of the annotations: the
+    framed memories carry it as a proposal at their create, within ADR-0217 §4's bounds,
+    so it only ever narrows a placement no one has narrowed (§4:4, §5:7).
+
+    Attributes:
+        reach: The narrower reach proposed, never ``anyone``.
+        note: Why, in words.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    reach: PlacementReach
+    note: NonBlankEncodableText
+
+    @model_validator(mode="after")
+    def _narrows(self) -> Self:
+        if self.reach is PlacementReach.ANYONE:
+            msg = "a proposed narrowing names a reach narrower than anyone (ADR-0217 §4)"
+            raise ValueError(msg)
+        return self
+
+
+class FindingAnnotations(BaseModel):
+    """What the scout says of a finding beside its claim (ADR-0346 §4:2, §4:5).
+
+    Every memory framed from the finding takes these, as hints (§4:4): none sets an
+    origin, a holder or a standing, and none is evidence. Framing may keep, change, add
+    or drop each person, and keep, change or drop each situation (§5:5, §9:1), and
+    carries the narrowing onto what it frames (§5:7). The observation record keeps them
+    beside the claim, so a retry frames what the scout proposed (§4:5).
+
+    Attributes:
+        subjects: The people the finding is about, each named as the record names
+            them, the owner by :data:`OWNER_PERSON_ID` (ADR-0345 §9:1, §9:4).
+        involved: The people it concerns without being about them.
+        why: Why it matters to the person, in words.
+        situations: The situations in which it matters, each in words.
+        narrowing: A proposed narrowing and why, where it should reach fewer people
+            than its default.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    subjects: tuple[NonBlankEncodableText, ...] = ()
+    involved: tuple[NonBlankEncodableText, ...] = ()
+    why: EncodableText = Field(default="", validate_default=True)
+    situations: tuple[NonBlankEncodableText, ...] = ()
+    narrowing: ProposedNarrowing | None = None
+
+    @model_validator(mode="after")
+    def _each_person_once(self) -> Self:
+        if len(set(self.subjects)) != len(self.subjects) or len(set(self.involved)) != len(
+            self.involved
+        ):
+            msg = "an annotation names each person once in each field"
+            raise ValueError(msg)
+        if set(self.subjects) & set(self.involved):
+            msg = "a person is in at most one of subjects and involved (ADR-0345 §9:2)"
+            raise ValueError(msg)
+        return self
+
+
+class CandidateDecline(BaseModel):
+    """A candidate the scout declined, and why (ADR-0346 §4:6).
+
+    The scout's reply accounts for every candidate the leaving episode records, each
+    named by a finding or declined with a reason; the observation record keeps each
+    decline, so nothing planning recorded disappears unexplained (§7, "What can be
+    enforced").
+
+    Attributes:
+        candidate: The id of the effect record the candidate's ``remember`` call is
+            joined to (ADR-0329 §3:3), as :attr:`ObservationFinding.candidate` names one.
+        reason: Why it gives no finding, in words.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    candidate: Identifier
+    reason: NonBlankEncodableText
 
 
 #: §9:6: the parts a finding may rest on. A candidate is a hint and never a part
@@ -9656,6 +9780,8 @@ class ObservationFinding(BaseModel):
             applied. The commit that records the outcome merges these into it, so a
             finding with an outcome carries none here.
         outcome: What its commit did, or ``None`` while it has not been committed.
+        annotations: What the scout said of it beside its claim (ADR-0346 §4:2,
+            §4:5); ``None`` on a finding recorded before ADR-0346, which said none.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -9668,6 +9794,7 @@ class ObservationFinding(BaseModel):
     supply: Placement | None = None
     written: tuple[ObservationWrite, ...] = ()
     outcome: FindingOutcome | None = None
+    annotations: FindingAnnotations | None = None
 
     @model_validator(mode="after")
     def _rests_on_episode_parts(self) -> Self:
@@ -9722,6 +9849,10 @@ def _observation_fault(record: ObservationRecord) -> str | None:
         ),
         (len(set(ids)) != len(ids), "a record names each finding once"),
         (
+            len({one.candidate for one in record.declines}) != len(record.declines),
+            "a record declines each candidate once (ADR-0346 §4:6)",
+        ),
+        (
             any(later < earlier for earlier, later in pairwise(starts)),
             "a record's attempts are in the order they started",
         ),
@@ -9770,6 +9901,9 @@ class ObservationRecord(BaseModel):
             every episode that is not waiting.
         findings: The scout's findings about it, each with its outcome once
             committed (§9:2).
+        declines: The candidates the scout declined, each with its reason
+            (ADR-0346 §4:6), each candidate once; none on a record written before
+            ADR-0346.
         revision: The store's concurrency token for the record: the stamp issued for
             the write that stored it, never reissued within a store, and ``0`` on a
             record no store has stored. Store-authored: a submitted value is
@@ -9782,6 +9916,7 @@ class ObservationRecord(BaseModel):
     attempts: tuple[ObservationAttempt, ...] = ()
     next_attempt_at: UtcInstant | None = None
     findings: tuple[ObservationFinding, ...] = ()
+    declines: tuple[CandidateDecline, ...] = ()
     revision: int = Field(default=0, strict=True, ge=0, lt=2**63)
 
     @model_validator(mode="after")
@@ -9838,7 +9973,15 @@ class ObservationRecord(BaseModel):
 class PlanExport(BaseModel):
     """A portable snapshot of planning state (see ADR-0014 §5, ADR-0004 §6).
 
-    **``schema_version`` is 22 because an observation record's findings gained
+    **``schema_version`` is 23 because the observation record gained what ADR-0346 has
+    the observer keep**: each finding's ``annotations`` (§4:5), the record's ``declines``
+    (§4:6), and on an outcome the ``unclear`` its placement calls named (§6:5) and the
+    wordings the floor ``asked`` about (§6:8). A reader of 22 refuses the fields as
+    extra. The closure rule is extended by nothing: a decline names an effect record's
+    id, as a finding's ``candidate`` already does, and neither is checked against the
+    document's effect records.
+
+    **It was 22 because an observation record's findings gained
     ``supply`` and ``written``** (ADR-0329 §12:6, §16:1, §16:4): the placement meet of
     what the runs over a finding were supplied, and what a commit of it wrote before it
     failed, so the observer carries both across a restart. A reader of 21 refuses the
@@ -9892,12 +10035,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[22] = Field(
-        default=22,
+    schema_version: Literal[23] = Field(
+        default=23,
         description=(
-            "Shape of this export, pinned to exactly 22 (ADR-0039 §10, ADR-0329 §16:1): an "
+            "Shape of this export, pinned to exactly 23 (ADR-0039 §10, ADR-0346 §4:5): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[22]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[23]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."

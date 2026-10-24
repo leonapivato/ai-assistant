@@ -9,7 +9,7 @@ at its position, one never finished and the *couldn't finish* message, which nam
 round; and a ``remember`` call run under an approval, spending its question part.
 
 The head opens a copy and must upgrade it in place (ADR-0326 §4:1, §5:1): carry every
-record whole (§4:4), move the label through 13 to the head's 14 (§4:5), add the empty
+record whole (§4:4), move the label through 13 and 14 to the head's 15 (§4:5), add the empty
 observation table, and leave the file exactly as it found it where the open fails (§4:3).
 """
 
@@ -102,7 +102,7 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     finally:
         store.close()
 
-    assert _label(legacy) == "14"
+    assert _label(legacy) == "15"
     assert export.stopped_activations == ("act-legacy-stopped", "act-legacy-stopped-2")
     assert {one.id: one for one in export.activation_effects} == held_effects
     # Claim order is the order the previous release claimed them in.
@@ -170,7 +170,7 @@ async def test_the_upgraded_file_takes_observation_records_and_keeps_them(
         assert len((await reopened.export()).activation_effects) == 8
     finally:
         reopened.close()
-    assert _label(legacy) == "14"
+    assert _label(legacy) == "15"
 
 
 @pytest.mark.parametrize(
