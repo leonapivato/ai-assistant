@@ -325,6 +325,7 @@ def _finding(finding: ObservationFinding) -> dict[str, object]:
         "claim": finding.claim,
         "rests_on": [one.model_dump(mode="json") for one in finding.rests_on],
         "candidate": finding.candidate,
+        "further_candidates": list(finding.further_candidates),
         "annotations": None
         if finding.annotations is None
         else finding.annotations.model_dump(mode="json"),

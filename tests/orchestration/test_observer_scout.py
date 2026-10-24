@@ -314,7 +314,7 @@ def test_a_finding_naming_several_candidates_accounts_for_each() -> None:
 
     assert proposal is not None
     (finding,) = proposal.findings
-    assert finding.candidate == "effect-1"
+    assert (finding.candidate, finding.further_candidates) == ("effect-1", ("effect-2",))
     assert proposal.declines == ()
 
 

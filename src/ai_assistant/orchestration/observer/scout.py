@@ -334,6 +334,7 @@ def _kept(reply: ScoutReply, reading: Reading, *, numbered_from: int) -> tuple[_
                 claim=one.claim,
                 rests_on=parts,
                 candidate=named[0].effect if named else None,
+                further_candidates=tuple(hint.effect for hint in named[1:]),
                 annotations=_annotations(one),
             )
         except ValidationError:

@@ -119,7 +119,8 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: before them.
 #:
 #: **Version 15 is ADR-0346's** (§4:5, §4:6, §6:5, §6:8): a finding gains the scout's
-#: ``annotations``, a record the candidates the scout ``declines``, and an outcome the
+#: ``annotations`` and its ``further_candidates``, a record the candidates the scout
+#: ``declines``, and an outcome the
 #: ``unclear`` its placement calls named and the wordings the floor ``asked`` about. No
 #: column changes, since the record is the blob, and the label moves for 14's reason: a
 #: build reading 14 refuses the fields as extra (ADR-0326 §5:3). **A version 14 file is

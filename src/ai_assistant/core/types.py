@@ -9769,7 +9769,10 @@ class ObservationFinding(BaseModel):
             once. A result is rested on through the evidence items of its digests.
         candidate: Where the finding came from a candidate (§3:3), the id of the
             effect record its ``remember`` call is joined to; ``None`` where it came
-            from the record alone.
+            from the record alone. Where it came from several, the first the scout named.
+        further_candidates: The other candidates it came from, beyond ``candidate``,
+            each once, so the record shows every candidate a finding accounts for
+            (ADR-0346 §4:6); none on a finding from one candidate or none.
         relied_on: Where the finding is about a reliance (§14:1), the id of the
             memory a reliance call in the episode named; ``None`` otherwise.
         supply: The meet (ADR-0217 §3, :meth:`Placement.narrowest_of`) of the
@@ -9795,6 +9798,7 @@ class ObservationFinding(BaseModel):
     claim: NonBlankEncodableText
     rests_on: tuple[SupportPart, ...] = Field(min_length=1)
     candidate: Identifier | None = None
+    further_candidates: tuple[Identifier, ...] = ()
     relied_on: NonBlankEncodableText | None = None
     supply: Placement | None = None
     written: tuple[ObservationWrite, ...] = ()
@@ -9809,6 +9813,10 @@ class ObservationFinding(BaseModel):
             raise ValueError(msg)
         if len(set(self.rests_on)) != len(self.rests_on):
             msg = "a finding names each part it rests on once"
+            raise ValueError(msg)
+        named = [*([] if self.candidate is None else [self.candidate]), *self.further_candidates]
+        if len(set(named)) != len(named) or (self.further_candidates and self.candidate is None):
+            msg = "a finding names each candidate it comes from once, its first as candidate"
             raise ValueError(msg)
         return self
 
@@ -9979,7 +9987,8 @@ class PlanExport(BaseModel):
     """A portable snapshot of planning state (see ADR-0014 §5, ADR-0004 §6).
 
     **``schema_version`` is 23 because the observation record gained what ADR-0346 has
-    the observer keep**: each finding's ``annotations`` (§4:5), the record's ``declines``
+    the observer keep**: each finding's ``annotations`` (§4:5) and the
+    ``further_candidates`` it accounts for beside its first (§4:6), the record's ``declines``
     (§4:6), and on an outcome the ``unclear`` its placement calls named (§6:5) and the
     wordings the floor ``asked`` about (§6:8). A reader of 22 refuses the fields as
     extra. The closure rule is extended by nothing: a decline names an effect record's

@@ -1159,7 +1159,8 @@ def _plans_annotation_carry(records: Records) -> Records:
     """What a plan store read back before ADR-0346 reads back after it (§4:5, §4:6).
 
     The upgrade from label 14 rewrites no row: every record reads back as it was, with
-    no ``declines``, each finding with no ``annotations``, and each outcome with no
+    no ``declines``, each finding with no ``annotations`` and no ``further_candidates``,
+    and each outcome with no
     ``unclear`` and nothing ``asked``, since nothing was recorded of any before the
     fields existed. Said here, as the carry from 13 says its own, so the head is held
     to reading them back empty.
@@ -1191,7 +1192,7 @@ def _finding_with_no_annotations(finding: Json) -> Json:
     outcome = finding.get("outcome")
     if isinstance(outcome, dict):
         outcome = {**outcome, "unclear": [], "asked": []}
-    return {**finding, "annotations": None, "outcome": outcome}
+    return {**finding, "annotations": None, "further_candidates": [], "outcome": outcome}
 
 
 # --- conversations.db -----------------------------------------------------------------
