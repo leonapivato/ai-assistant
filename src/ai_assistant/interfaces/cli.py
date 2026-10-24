@@ -7000,11 +7000,8 @@ def _said_why(belief: Belief | BeliefSummary) -> str:
     """
     when = ", ".join(_when_or_unknown(one.when) for one in belief.statements) or "unknown"
     kept = [one for one in belief.holders if one.kind is HolderKind.PERSON]
-    keeper = (
-        f" {', '.join(_holder_words(one) for one in kept)} kept it."
-        if kept
-        else " Nobody but me said it."
-    )
+    keepers = ", ".join(_holder_words(one) for one in kept)
+    keeper = f" {keepers[:1].upper()}{keepers[1:]} kept it." if kept else " Nobody but me said it."
     return f"I said this, in my message of {when}; it is a record of what I said.{keeper}"
 
 

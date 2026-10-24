@@ -4696,9 +4696,10 @@ function saidWhy(belief) {
     .map((one) => (one.when === null ? "unknown" : localTime(one.when)))
     .join(", ");
   const kept = (belief.holders || []).filter((one) => one.kind === "person");
+  const keepers = kept.map(holderWords).join(", ");
   const keeper =
     kept.length > 0
-      ? ` ${kept.map(holderWords).join(", ")} kept it.`
+      ? ` ${keepers.charAt(0).toUpperCase()}${keepers.slice(1)} kept it.`
       : " Nobody but me said it.";
   return `I said this, in my message of ${when || "unknown"}; it is a record of what I said.${keeper}`;
 }
@@ -4798,9 +4799,13 @@ function beliefLines(belief) {
 // The attested band holds the one standing "from a source" (§6:4), so where the two
 // say the same words they are said once.
 function beliefHeading(belief) {
+  // ADR-0345 §12:4: a memory marked as my statement is said to be what I said, and its
+  // band's words ("You told me", "From a source") are not said of it at all.
+  if (saidByMe(belief)) {
+    return "What I said";
+  }
   const band = bandWords(belief.band);
-  // ADR-0345 §12:4: a memory marked as my statement is said to be what I said.
-  const standing = saidByMe(belief) ? "what I said" : standingWords(belief.standing);
+  const standing = standingWords(belief.standing);
   return band.toLowerCase() === standing.toLowerCase() ? band : `${band} · ${standing}`;
 }
 
