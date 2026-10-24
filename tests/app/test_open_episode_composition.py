@@ -201,3 +201,31 @@ async def test_an_informational_events_episode_is_stored_open_before_its_first_s
     assert processing.stages == ()
     assert processing.trigger.channel == _SENSOR
     _frozen(await composed.stored(_address(result)))
+
+
+# --- the story store's position at admission (ADR-0347 §4:1) -------------------------
+
+
+async def test_the_root_hands_the_admission_write_the_story_store_every_stage_writes(
+    composed: Composed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§4:1 through the root: the open episode records the store's position, and keeps it.
+
+    The writer reads the one story store the root built for every story stage, so the
+    recorded position lies on that store's sequence, not a second store's.
+    """
+    stories = composed.engine._stories
+    assert stories is not None
+    assert composed.writer._stories is stories
+    position = await stories.position()
+    seen = _before_first_stage(monkeypatch, composed, "_windows_stage")
+
+    result = await composed.engine.receive(
+        ChannelInput(target=_SENSOR, payload=TextChannelPayload(text="eco mode")),
+        reply=None,
+        timeout=_BUDGET,
+    )
+
+    (opened,) = seen
+    assert _open(opened).stories_position == position
+    assert _frozen(await composed.stored(_address(result))).stories_position == position
