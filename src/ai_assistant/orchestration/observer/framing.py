@@ -48,9 +48,16 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, JsonValue, ValidationError
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    JsonValue,
+    ValidationError,
+    model_validator,
+)
 
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -150,11 +157,23 @@ class _FramedMemory(BaseModel):
 
 
 class FramingReply(BaseModel):
-    """The framing call's whole reply: memories, or nothing with a reason (§5:2, §5:6)."""
+    """The framing call's whole reply: memories, or nothing with a reason (§5:2, §5:6).
+
+    A reply giving neither is not one the stage reads: it is refused as a reply that
+    does not parse is, and the attempt is retried (ADR-0329 §16:4), never taken as a
+    decision that nothing is worth keeping.
+    """
 
     model_config = ConfigDict(frozen=True, extra="ignore")
     memories: tuple[_FramedMemory, ...] = ()
     nothing: str | None = None
+
+    @model_validator(mode="after")
+    def _memories_or_why_not(self) -> Self:
+        if not self.memories and not (self.nothing or "").strip():
+            msg = "a framing proposes memories, or says why nothing is kept (ADR-0346 §5:6)"
+            raise ValueError(msg)
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,7 +402,7 @@ def _checked(proposed: _FramedMemory, context: _Context) -> Framed:
     if MemoryMark.OCCASION in marks and proposed.valid_until is not None:
         msg = "an occasion carries no validity end (ADR-0345 §8:4)"
         raise _Refused(msg)
-    ordered = _ordered(list(supports.values()), proposed.valid_until, context.now)
+    ordered = _ordered(list(supports.values()), proposed.valid_until)
     subjects, involved = _people(proposed, supports, view)
     try:
         memory = Memory(
@@ -511,23 +530,19 @@ def _backs(support: MemorySupport) -> bool:
     return support.direction is SupportDirection.FOR and support.backs_as_worded
 
 
-def _ordered(
-    supports: list[MemorySupport], valid_until: datetime | None, now: datetime
-) -> list[MemorySupport]:
+def _ordered(supports: list[MemorySupport], valid_until: datetime | None) -> list[MemorySupport]:
     """Supports with the one the create cites first (ADR-0328 §3:3, ADR-0345 §6:1).
 
     The strongest backing support leads, the rest keep the call's order. Where the memory
-    carries a validity end, the end lies in the future and the create cites a backing
-    support whose about-when names it.
+    carries a validity end, the create cites a backing support whose about-when names it
+    (ADR-0346 §5:2). An end already past when the memory is framed is kept: the memory
+    is history, kept and not live (ADR-0345 §6:2).
     """
     ordered = sorted(
         supports, key=lambda one: (not _backs(one), -standing_rank(origin_standing(one.origin)))
     )
     if valid_until is None:
         return ordered
-    if valid_until <= now:
-        msg = "a validity end set at a create lies after it (ADR-0345 §6:1)"
-        raise _Refused(msg)
     naming = next((one for one in ordered if _backs(one) and one.about_when == valid_until), None)
     if naming is None:
         msg = "a validity end is the about-when of a support backing the memory (§6:1)"

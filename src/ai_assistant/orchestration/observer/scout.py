@@ -327,14 +327,16 @@ def _kept(reply: ScoutReply, reading: Reading, *, numbered_from: int) -> tuple[_
         if leaving.isdisjoint(parts):
             dropped += 1
             continue
+        # Two labels may name one candidate's effect, which the record names once.
+        effects = list(dict.fromkeys(hint.effect for hint in named))
         try:
             finding = ObservationFinding(
                 id=f"f{numbered_from + len(kept)}",
                 episode=episode,
                 claim=one.claim,
                 rests_on=parts,
-                candidate=named[0].effect if named else None,
-                further_candidates=tuple(hint.effect for hint in named[1:]),
+                candidate=effects[0] if effects else None,
+                further_candidates=tuple(effects[1:]),
                 annotations=_annotations(one),
             )
         except ValidationError:

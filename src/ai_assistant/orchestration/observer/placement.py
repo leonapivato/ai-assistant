@@ -28,9 +28,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from ai_assistant.core.types import (
     EpisodicMemory,
@@ -83,10 +83,20 @@ __all__ = [
 
 
 class _Relation(BaseModel):
+    """One relation as the placement call names it: of ADR-0345 §4's set, with its note."""
+
     model_config = ConfigDict(frozen=True, extra="ignore")
     memory: str
     relation: str
     note: str = ""
+
+    @model_validator(mode="after")
+    def _of_the_set_with_its_note(self) -> Self:
+        relation = PlacedRelation(self.relation.strip())
+        if relation is not PlacedRelation.INDEPENDENT and not self.note.strip():
+            msg = f"a {relation} relation says in words how the two relate (ADR-0345 §4:1)"
+            raise ValueError(msg)
+        return self
 
 
 class _Answer(BaseModel):

@@ -298,6 +298,48 @@ def test_a_validity_end_is_the_about_when_of_the_support_the_create_cites() -> N
     assert _framed(_view(flying), past).memories == ()
 
 
+def test_an_end_already_past_when_framed_is_kept_as_history() -> None:
+    """ADR-0345 §6:1-§6:2: an end its support names is kept though it has passed.
+
+    The episode said the stay ends on a day that has passed by the time it leaves the
+    window. The memory keeps that end, and is not live; it is never refused for it.
+    """
+    end = AT - timedelta(days=1)
+    staying = _part("P1", "I'm staying in Lisbon until the 23rd")
+    reply = framing(
+        {
+            "wording": "The user is staying in Lisbon until Oct 23.",
+            "supports": [
+                {
+                    "part": "P1",
+                    "direction": "for",
+                    "backs_as_worded": True,
+                    "how_sure": "sure",
+                    "about_when": end.isoformat(),
+                }
+            ],
+            "subjects": ["the user"],
+            "involved": [],
+            "valid_until": end.isoformat(),
+        }
+    )
+
+    (kept,) = _framed(_view(staying), reply).memories
+
+    assert kept.memory.validity.valid_until == end
+    assert kept.memory.operations[0].cites == staying.part
+
+
+def test_a_reply_neither_framing_nor_saying_why_not_does_not_parse() -> None:
+    """ADR-0346 §5:6: nothing is kept only with a reason; anything else is retried."""
+    assert parsed("{}", FramingReply) is None
+    assert parsed('{"error": "could not frame"}', FramingReply) is None
+    assert parsed('{"memories": [], "nothing": "  "}', FramingReply) is None
+    reason = parsed('{"memories": [], "nothing": "One choice is no habit."}', FramingReply)
+    assert reason is not None
+    assert reason.nothing == "One choice is no habit."
+
+
 def test_labels_are_kept_within_the_bounds_and_suggested_by_the_episode() -> None:
     """ADR-0345 §7:1, §7:3, ADR-0346 §9:1: a label past a bound is left out."""
     long = "x" * (LABELS.max_chars + 1)
