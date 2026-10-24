@@ -878,3 +878,41 @@ async def test_with_no_story_store_no_position_is_recorded() -> None:
     await wiring.admit(state)
 
     assert await _recorded_position(wiring) is None
+
+
+async def test_a_conversation_forgotten_while_the_position_is_read_leaves_no_episode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0293 §2:6, ADR-0286 §8:2: the read awaits, so the capture is tracked first.
+
+    A forget of the activation's conversation landing while the admission write reads the
+    position marks the capture, and the insert, its next write, writes nothing; the
+    freeze then records nothing either.
+    """
+    stories = FakeStoryStore(now=lambda: _AT)
+    reading = asyncio.Event()
+    release = asyncio.Event()
+    read = stories.position
+
+    async def suspended() -> int:
+        reading.set()
+        await release.wait()
+        return await read()
+
+    monkeypatch.setattr(stories, "position", suspended)
+    wiring = Wiring(stories=stories)
+    state = await wiring.state()
+
+    admitting = asyncio.create_task(wiring.admit(state))
+    await reading.wait()
+    wiring.writer.forgetting_conversation(str(state.conversation_id))
+    release.set()
+    await admitting
+
+    assert await wiring.memory.get(_ADDRESS) is None
+    state.stages.end(ControllerRule.NOTHING_DUE, _AT)
+    report = await _freeze(wiring, state)
+    assert report.state == "degraded"
+    assert await wiring.memory.get(_ADDRESS) is None
+    assert await wiring.on_channel(state) == []
+    assert wiring.writer._in_flight == {}

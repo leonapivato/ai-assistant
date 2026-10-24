@@ -168,6 +168,10 @@ class ActivationWriter:
         summary the observer shows of a story, and an episode with none shows its stories
         by identity alone (§4:3), as one written before the field does.
 
+        **A capture forgotten while the read is out writes nothing** (§8:2): the capture is
+        tracked before the read, so ``forgetting`` and ``forgetting_conversation`` reach
+        it, and the insert is the next write after the mark.
+
         **A collision writes nothing and deletes nothing** (§2:4): the record at the
         address is not this activation's, so capture ends without touching it. Any
         other failure is indeterminate, and the next write's read settles it (§3:4).
@@ -176,7 +180,6 @@ class ActivationWriter:
         address = state.episode_address
         if state.capture is not None or address is None or state.started_at is None:
             return
-        state.stories_position = await self._stories_position()
         try:
             captured_at = self._now()
         except Exception:
@@ -187,6 +190,14 @@ class ActivationWriter:
         )
         state.capture = progress
         self._in_flight.setdefault(address, []).append(progress)
+        # Tracked before the read awaits, so a forget landing while it is out marks this
+        # capture (ADR-0293 §2:6), and the insert, the capture's next write, makes none.
+        state.stories_position = await self._stories_position()
+        if progress.forgotten:
+            # ADR-0286 §8:2: the next write after the mark writes nothing.
+            capture_loss("admission", "forgotten")
+            progress.ended = True
+            return
         try:
             episode = self._open(state, progress, payload_limit)
         except Exception:
