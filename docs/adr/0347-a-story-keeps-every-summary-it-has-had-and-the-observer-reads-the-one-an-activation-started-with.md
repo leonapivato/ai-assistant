@@ -1,6 +1,6 @@
 # 347. A story keeps every summary it has had, and the observer reads the one an activation started with
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-23
 - Scope: what the story store keeps of a summary a later version replaces, the read that returns it, what forgetting does to it, the story store's position an episode records when its activation starts, which version the observer shows the scout for a story an episode points at, and the upgrade. Issue [#3387](https://github.com/leonapivato/ai-assistant/issues/3387), a separate decision after ADR-0346, as the owner directed.
 - Dependency: ADR-0275, ADR-0286, ADR-0289, ADR-0300, ADR-0303, ADR-0304, ADR-0326, ADR-0332 and ADR-0346, as their status lines leave them.
