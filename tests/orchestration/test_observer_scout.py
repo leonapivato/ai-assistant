@@ -318,6 +318,18 @@ def test_a_finding_naming_several_candidates_accounts_for_each() -> None:
     assert proposal.declines == ()
 
 
+def test_two_labels_naming_one_candidates_effect_name_it_once() -> None:
+    """ADR-0346 §4:6: two calls answered by one effect are one candidate on the record."""
+    reading = _reading(hints=(_hint("C1", "effect-1"), _hint("C2", "effect-1")))
+
+    proposal = _proposal(reading, found(_CLAIM, "P1", candidates=["C1", "C2"]))
+
+    assert proposal is not None
+    (finding,) = proposal.findings
+    assert (finding.candidate, finding.further_candidates) == ("effect-1", ())
+    assert (proposal.declines, proposal.dropped) == ((), 0)
+
+
 def test_a_candidate_label_naming_nothing_shown_drops_the_finding() -> None:
     proposal = _proposal(_reading(), found(_CLAIM, "P1", candidates=["C7"]))
 

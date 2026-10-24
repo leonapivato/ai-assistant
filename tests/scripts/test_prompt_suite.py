@@ -462,8 +462,23 @@ def test_no_label_reads_the_named_fields_anywhere_in_the_reply() -> None:
         ("observer_scout", json.dumps({"findings": [{"rests_on": ["P1"]}]})),
         ("observer_framing", json.dumps({"memories": [{"supports": []}]})),
         ("observer_framing", json.dumps({"memories": "none"})),
+        ("observer_framing", "{}"),
+        ("observer_framing", json.dumps({"error": "could not frame"})),
+        ("observer_framing", json.dumps({"memories": [], "nothing": " "})),
         ("observer_placement", json.dumps({"relations": "M1"})),
         ("observer_placement", json.dumps({"relations": [{"relation": "restates"}]})),
+        (
+            "observer_placement",
+            json.dumps({"relations": [{"memory": "M1", "relation": "contained"}]}),
+        ),
+        (
+            "observer_placement",
+            json.dumps({"relations": [{"memory": "M1", "relation": "contained", "note": " "}]}),
+        ),
+        (
+            "observer_placement",
+            json.dumps({"relations": [{"memory": "M1", "relation": "alike", "note": "n"}]}),
+        ),
     ],
 )
 def test_a_reply_its_stage_would_refuse_passes_no_check(prompt: str, text: str) -> None:
@@ -546,11 +561,9 @@ def test_asks_about_needs_a_message_and_every_call_named() -> None:
 
 def test_the_framing_check_reads_whether_any_memory_is_kept() -> None:
     nothing = json.dumps({"memories": [], "nothing": "One choice is no habit."})
-    empty = "{}"
     kept = json.dumps({"memories": [{"wording": "The user books ahead."}]})
 
     assert _judge("frames_nothing", {}, "observer_framing", nothing) is None
-    assert _judge("frames_nothing", {}, "observer_framing", empty) is None
     assert _judge("frames_nothing", {}, "observer_framing", kept) == "the reply frames a memory"
 
 

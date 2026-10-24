@@ -827,6 +827,57 @@ async def test_after_a_restart_the_pending_findings_are_committed_over_their_sup
     assert finding.outcome.writes
 
 
+async def test_after_a_restart_a_private_supply_survives_losing_its_source() -> None:
+    """§12:6, §16:4: what a held finding's scout read narrows its memory after a restart.
+
+    The leaving episode's record points at an owner-only episode, which the finding's
+    supply takes in; the budget holds the finding before framing, and that episode is
+    gone before a new process commits it. The memory is placed for the owner alone, and
+    nothing is scouted again.
+    """
+    harness = Harness()
+    owner_only = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
+    await harness.hold(
+        episode("zero", at=AT - timedelta(minutes=4), text="ok").model_copy(
+            update={"placement": owner_only}
+        ),
+        episode(
+            "one",
+            at=AT - timedelta(minutes=3),
+            labels=(PlanningLabel(label="E1", kind=LabelKind.EPISODE, id=address("zero")),),
+        ),
+        episode("two", at=AT - timedelta(minutes=2), text="ok"),
+        episode("three", at=AT - timedelta(minutes=1), text="ok"),
+    )
+    first = harness.observer(
+        scout=FakeModelProvider.scripted(scouted(), _scout("P1")), daily_calls=2, per_run=1
+    )
+    await first.run()
+    assert (await first.run()).held
+    (held,) = await harness.plans.observations(["activation:one"])
+    (pending,) = held.findings
+    assert pending.supply is not None
+    assert pending.supply.reach is PlacementReach.OWNER
+    await harness.memory.delete(address("zero"))
+    harness.clock.advance(timedelta(hours=25))
+    scout = FakeModelProvider(reply=scouted())
+    restarted = harness.observer(
+        scout=scout, commit=FakeModelProvider.scripted(_frame("P1")), per_run=1
+    )
+
+    await restarted.run()
+
+    assert scout.calls == []
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.state is ObservationState.PROCESSED
+    outcome = record.findings[0].outcome
+    assert outcome is not None
+    (write,) = outcome.writes
+    kept = await harness.memory.get(write.memory)
+    assert isinstance(kept, Memory)
+    assert kept.placement.reach is PlacementReach.OWNER
+
+
 async def test_a_pending_finding_whose_supply_was_not_recorded_is_proposed_again() -> None:
     """§12:6: a finding the store held before the field has no supply to start from."""
     harness = Harness()
