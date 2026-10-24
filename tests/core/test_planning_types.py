@@ -280,26 +280,26 @@ def test_a_scalar_output_with_a_lone_surrogate_is_rejected() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 22
+    assert export.schema_version == 23
     assert export.activation_effects == ()
     assert export.observations == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_twenty_two() -> None:
+def test_export_pins_the_schema_version_to_exactly_twenty_three() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[22]`` refuses an explicit ``21`` — a document whose findings carry no
-    supply and no writes before an outcome (ADR-0329 §16:1, #3205) — and any other
+    ``Literal[23]`` refuses an explicit ``22`` — a document whose findings carry no
+    annotations and whose records no declines (ADR-0346 §4:5, §4:6) — and any other
     value, so the advertised version cannot be mislabelled. The positive default is what
     a producer gets for free; only the rejections pin it.
 
-    **The neighbour on each side is asserted and not only the far ones**: ``21`` is
-    the shape this contract had one decision ago and ``23`` is the shape nobody has
+    **The neighbour on each side is asserted and not only the far ones**: ``22`` is
+    the shape this contract had one decision ago and ``24`` is the shape nobody has
     decided, and a ``Literal`` that admitted either would be a document announcing a
     shape it does not have.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=22).schema_version == 22
-    for stale in (*range(1, 22), 23):
+    assert PlanExport(exported_at=_WHEN, schema_version=23).schema_version == 23
+    for stale in (*range(1, 23), 24):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)
 

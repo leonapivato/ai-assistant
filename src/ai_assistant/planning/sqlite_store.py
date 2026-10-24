@@ -117,13 +117,21 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: version 13 file is upgraded in place** (ADR-0326 §4:1), and every finding it holds
 #: reads back with both fields empty, which is what they are on a finding recorded
 #: before them.
-_SCHEMA_VERSION = 14
+#:
+#: **Version 15 is ADR-0346's** (§4:5, §4:6, §6:5, §6:8): a finding gains the scout's
+#: ``annotations``, a record the candidates the scout ``declines``, and an outcome the
+#: ``unclear`` its placement calls named and the wordings the floor ``asked`` about. No
+#: column changes, since the record is the blob, and the label moves for 14's reason: a
+#: build reading 14 refuses the fields as extra (ADR-0326 §5:3). **A version 14 file is
+#: upgraded in place** (§4:1), and every record it holds reads back with the new fields
+#: empty, which is what they are on a record written before them.
+_SCHEMA_VERSION = 15
 
 #: The labels :meth:`SqlitePlanStore._verify_or_init_meta` upgrades from, each to the
 #: next, in order (ADR-0326 §4:5). Every label from ADR-0309 §6:1's deploy to the one
 #: before :data:`_SCHEMA_VERSION` is here, and none is removed without the owner's
 #: ruling (§4:6).
-_UPGRADABLE: tuple[int, ...] = (12, 13)
+_UPGRADABLE: tuple[int, ...] = (12, 13, 14)
 
 #: The ``meta`` key holding the last observation revision issued (ADR-0329 §16:9). It
 #: lives beside the records rather than being derived from them, because a revision is
@@ -539,6 +547,11 @@ class SqlitePlanStore:
         each with an empty default, and the record is its blob, so every record the file
         holds reads back as it was with both empty. No row is rewritten, and the step is
         the label alone again.
+
+        **14 → 15** (ADR-0346 §4:5, §4:6, §6:5, §6:8): a finding gains ``annotations``,
+        a record ``declines`` and an outcome ``unclear`` and ``asked``, each with an
+        empty default, so every record reads back as it was with them empty, and the
+        step is the label alone once more.
         """
         for step in range(held, _SCHEMA_VERSION):
             conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(step + 1),))

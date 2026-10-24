@@ -60,6 +60,7 @@ from ai_assistant.core.types import (
     ActivationEffect,
     ActivationUnderstanding,
     Attestation,
+    CandidateDecline,
     ChannelContext,
     ChannelIdentity,
     ChatDevice,
@@ -72,6 +73,7 @@ from ai_assistant.core.types import (
     EpisodeProcessingRecord,
     EpisodicMemory,
     EvaluationTrace,
+    FindingAnnotations,
     GrantScope,
     Idempotency,
     InputOrigin,
@@ -107,6 +109,7 @@ from ai_assistant.core.types import (
     ProcessingReason,
     ProcessingStatus,
     ProfileField,
+    ProposedNarrowing,
     ProposedSuggestion,
     Provenance,
     ProvisioningState,
@@ -1071,6 +1074,27 @@ async def _write_plans(directory: Path, moment: Moment) -> None:
                             ),
                         ),
                     ),
+                    # ADR-0346 §4:5: a finding carrying the scout's annotations.
+                    ObservationFinding(
+                        id="finding-upgrade-3",
+                        episode="activation:act-upgrade-1",
+                        claim="Ada is the user's younger sister.",
+                        rests_on=(InputPart(episode="activation:act-upgrade-1", message=0),),
+                        annotations=FindingAnnotations(
+                            subjects=("Ada", OWNER_PERSON_ID),
+                            why="The user mentions Ada often.",
+                            situations=("planning a family visit",),
+                            narrowing=ProposedNarrowing(
+                                reach=PlacementReach.OWNER, note="Family matters."
+                            ),
+                        ),
+                    ),
+                ),
+                # ADR-0346 §4:6: a candidate the scout declined, with its reason.
+                declines=(
+                    CandidateDecline(
+                        candidate="effect-upgrade-1", reason="A booking detail, not worth keeping."
+                    ),
                 ),
             ),
             expected_revision=0,
@@ -1129,6 +1153,45 @@ def _with_empty_carry(record: Json) -> Json:
             for one in findings
         ],
     }
+
+
+def _plans_annotation_carry(records: Records) -> Records:
+    """What a plan store read back before ADR-0346 reads back after it (§4:5, §4:6).
+
+    The upgrade from label 14 rewrites no row: every record reads back as it was, with
+    no ``declines``, each finding with no ``annotations``, and each outcome with no
+    ``unclear`` and nothing ``asked``, since nothing was recorded of any before the
+    fields existed. Said here, as the carry from 13 says its own, so the head is held
+    to reading them back empty.
+    """
+    observations = records.get("observations")
+    if not isinstance(observations, list):
+        return records
+    return {**records, "observations": [_with_no_annotations(one) for one in observations]}
+
+
+def _with_no_annotations(record: Json) -> Json:
+    """One observation record's read-back, given ADR-0346's fields empty."""
+    if not isinstance(record, dict):
+        return record
+    findings = record.get("findings")
+    return {
+        **record,
+        "declines": [],
+        "findings": [_finding_with_no_annotations(one) for one in findings]
+        if isinstance(findings, list)
+        else findings,
+    }
+
+
+def _finding_with_no_annotations(finding: Json) -> Json:
+    """One finding's read-back, with no annotations and its outcome's new fields empty."""
+    if not isinstance(finding, dict):
+        return finding
+    outcome = finding.get("outcome")
+    if isinstance(outcome, dict):
+        outcome = {**outcome, "unclear": [], "asked": []}
+    return {**finding, "annotations": None, "outcome": outcome}
 
 
 # --- conversations.db -----------------------------------------------------------------
@@ -1680,8 +1743,12 @@ STORES: Final[tuple[Store, ...]] = (
         ("plans.db",),
         _write_plans,
         _read_plans,
-        shape=3,
-        carries={1: _plans_observations_carry, 2: _plans_finding_carry},
+        shape=4,
+        carries={
+            1: _plans_observations_carry,
+            2: _plans_finding_carry,
+            3: _plans_annotation_carry,
+        },
     ),
     Store("conversations", ("conversations.db",), _write_conversations, _read_conversations),
     Store("grants", ("grants.db",), _write_grants, _read_grants),
