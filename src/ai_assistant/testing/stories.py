@@ -6,8 +6,9 @@ verified against this one is verified against the contract rather than against a
 convenience: the clean view and the change log, the five membership reads, merge,
 split and move with their exceptions and the notes they carry, logged on both stories
 by a split or a move (ADR-0304 §9), a move of notes alone, the loop refusal,
-each story's notes and summary — its summary with its mark, its version log and
-what is pending on it — and the decisions on flags, written as ``decided`` lines
+each story's notes and summary — its summary with its mark, its version log, every
+summary a later write replaced, kept and read by its version (ADR-0347 §2), and what
+is pending on it — and the decisions on flags, written as ``decided`` lines
 with the change they record (ADR-0302 §§2-4), ``left`` or ``not_applied`` where none
 changed (ADR-0303 §8), and a summary write refused over what its story does not hold
 (ADR-0302 §7).
@@ -20,7 +21,8 @@ leaves nothing behind.
 
 **One counter for the notes' and the summary's records**, as the durable store keeps: a note's
 identity, a version's, and the moment a note or an activation member became pending
-on a story are drawn from it, and a summary read reports it as its ``as_of``.
+on a story are drawn from it, and a summary read reports it as its ``as_of``, as
+:meth:`FakeStoryStore.position` does without naming a story (ADR-0347 §2:5).
 """
 
 from __future__ import annotations
@@ -71,6 +73,7 @@ from ai_assistant.core.types import (
     StoryViewPage,
     check_story_as_of,
     check_story_page,
+    check_story_version,
     story_members,
     story_note_ids,
 )
@@ -258,6 +261,9 @@ class _State:
     log: list[StoryLogLine] = field(default_factory=list)
     notes: dict[int, _Held] = field(default_factory=dict)
     summaries: dict[str, StorySummary] = field(default_factory=dict)
+    #: Every summary written, the current ones included, by the version that wrote it,
+    #: with its story (ADR-0347 §2): never changed and never removed.
+    kept: dict[int, tuple[str, StorySummary]] = field(default_factory=dict)
     versions: list[tuple[str, StorySummaryVersion]] = field(default_factory=list)
 
 
@@ -960,9 +966,11 @@ class FakeStoryStore:
             outside=draft.outside,
         )
         state.versions.append((story_id, version))
-        state.summaries[story_id] = StorySummary(
+        summary = StorySummary(
             version=version.version, written_at=at, lines=draft.lines, outside=draft.outside
         )
+        state.summaries[story_id] = summary
+        state.kept[version.version] = (story_id, summary)
         return version
 
     # --- reads ---------------------------------------------------------------
@@ -1137,3 +1145,16 @@ class FakeStoryStore:
             versions=tuple(page),
             next_cursor=page[-1].version if len(rest) > limit else None,
         )
+
+    async def summary_at(self, story_id: Identifier, version: int) -> StorySummary | None:
+        """Read the summary a version of a story wrote, as it was written (ADR-0347 §2:4)."""
+        target = _checked_id(story_id)
+        wanted = check_story_version(version)
+        kept = self._state.kept.get(wanted)
+        if kept is None or kept[0] != target:
+            return None
+        return kept[1]
+
+    async def position(self) -> int:
+        """Read where the store's one sequence stands (ADR-0347 §2:5)."""
+        return self._state.tick

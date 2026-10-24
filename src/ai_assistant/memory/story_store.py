@@ -3,7 +3,8 @@
 The story store holds which experiences belong to the same matter: stories, their
 members, and an append-only log of every change, on its own file, ``stories.db``,
 in the data directory. Beside each story it keeps the story's notes and summary
-(ADR-0300 §3, ADR-0303 §§2-4, ADR-0304 §2) and the summary's append-only version log.
+(ADR-0300 §3, ADR-0303 §§2-4, ADR-0304 §2), the summary's append-only version log, and
+every summary a write has made, kept by its version (ADR-0347 §2).
 
 **Why this module lives in ``memory/`` while its contract does not.** ADR-0289 §1
 puts the store in ``memory/`` and makes ``StoryStore`` its own Protocol, not a
@@ -32,10 +33,11 @@ version newer than it exists and takes in only what was pending at it (ADR-0300
 set when the note or the member comes to a story, cleared when a version takes it
 in. A note's own fields cannot be rewritten nor the note removed, by trigger; only
 which story holds it and whether it is pending there change. The version log is
-append-only by trigger, and the summary is the one record of the two kept as
-text, its lines and its mark, replaced whole by each write under ``secure_delete``,
-so the replaced summary's text is overwritten rather than left in a freed page of the
-file. No rule here reads the activation a note was written during (ADR-0303 §2:4):
+append-only by trigger, and holds no text. **Every summary a write makes is kept**,
+its lines and its mark, in ``summaries`` beside the log and not in it (ADR-0347 §2:2),
+one row per version, append-only by trigger as the log is: a later write adds the
+story's next summary and replaces nothing, so the current summary is the story's row
+of the highest version. No rule here reads the activation a note was written during (ADR-0303 §2:4):
 a split and a move carry exactly the notes they name (§6), and log each on both
 stories, ``note_moved_out`` and ``note_moved_in`` in the log's ``note`` column
 (ADR-0304 §9:6); a merge carries every note and logs none of them.
@@ -107,6 +109,7 @@ from ai_assistant.core.types import (
     StoryViewPage,
     check_story_as_of,
     check_story_page,
+    check_story_version,
     describe_untrusted,
     story_members,
     story_note_ids,
@@ -127,12 +130,28 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 
 #: The schema this module writes, held in ``PRAGMA user_version``. A file carrying
 #: another version is refused at open rather than read under the wrong layout, except
-#: version 1, ADR-0289's layout, version 2, ADR-0300's, version 3, ADR-0302's, and
-#: version 4, ADR-0303's, which are migrated in place (see :data:`_MIGRATE_1`,
-#: :data:`_MIGRATE_2`, :func:`_migrate_3` and :data:`_MIGRATE_4`).
-_SCHEMA_VERSION: Final = 5
+#: version 1, ADR-0289's layout, version 2, ADR-0300's, version 3, ADR-0302's, version 4,
+#: ADR-0303's, and version 5, ADR-0304's, which are migrated in place (see
+#: :data:`_MIGRATE_1`, :data:`_MIGRATE_2`, :func:`_migrate_3`, :data:`_MIGRATE_4` and
+#: :data:`_MIGRATE_5`).
+_SCHEMA_VERSION: Final = 6
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+#: Every summary a write makes, one row per version, kept beside the version log and not
+#: in it (ADR-0347 §2:1-§2:3): its story, its instant, its lines and its mark. Append-only
+#: by trigger, as the log is, so a kept summary never changes and is never removed. A
+#: story's current summary is its row of the highest version.
+_SUMMARIES: Final = (
+    "CREATE TABLE IF NOT EXISTS summaries("
+    "version INTEGER PRIMARY KEY, story_id TEXT NOT NULL, written_at INTEGER NOT NULL, "
+    "lines TEXT NOT NULL, outside INTEGER NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS summaries_story ON summaries(story_id, version)",
+    "CREATE TRIGGER IF NOT EXISTS summaries_never_rewritten BEFORE UPDATE ON summaries "
+    "BEGIN SELECT RAISE(ABORT, 'a kept summary is never rewritten'); END",
+    "CREATE TRIGGER IF NOT EXISTS summaries_never_removed BEFORE DELETE ON summaries "
+    "BEGIN SELECT RAISE(ABORT, 'a kept summary is never removed'); END",
+)
 
 _IDENTIFIER: TypeAdapter[str] = TypeAdapter(Identifier)
 
@@ -160,7 +179,7 @@ _SCHEMA: Final = (
     "BEGIN SELECT RAISE(ABORT, 'the story change log is append-only'); END",
     "CREATE TRIGGER IF NOT EXISTS log_never_removed BEFORE DELETE ON log "
     "BEGIN SELECT RAISE(ABORT, 'the story change log is append-only'); END",
-    # --- the notes and the summary (ADR-0300 §3); the stored schema keeps ``pages`` ---
+    # --- the notes and the summaries (ADR-0300 §3, ADR-0347 §2) ---
     "CREATE TABLE IF NOT EXISTS ticks(only INTEGER PRIMARY KEY CHECK (only = 0), "
     "value INTEGER NOT NULL)",
     "INSERT OR IGNORE INTO ticks(only, value) VALUES(0, 0)",
@@ -174,9 +193,7 @@ _SCHEMA: Final = (
     "BEGIN SELECT RAISE(ABORT, 'a story note is never rewritten'); END",
     "CREATE TRIGGER IF NOT EXISTS notes_never_removed BEFORE DELETE ON notes "
     "BEGIN SELECT RAISE(ABORT, 'a story note is never removed'); END",
-    "CREATE TABLE IF NOT EXISTS pages("
-    "story_id TEXT PRIMARY KEY, version INTEGER NOT NULL, written_at INTEGER NOT NULL, "
-    "lines TEXT NOT NULL, outside INTEGER NOT NULL)",
+    *_SUMMARIES,
     "CREATE TABLE IF NOT EXISTS versions("
     "version INTEGER PRIMARY KEY, story_id TEXT NOT NULL, written_at INTEGER NOT NULL, "
     "record TEXT NOT NULL)",
@@ -229,12 +246,25 @@ _MIGRATE_3: Final = (
 #: other line does, so none is rewritten.
 _MIGRATE_4: Final = ("ALTER TABLE log ADD COLUMN note INTEGER",)
 
+#: ADR-0304's layout, version 5, to this one (ADR-0347 §5:1), and versions 2 to 4 once
+#: their own steps have run: each story's one summary row, keyed by the story, becomes
+#: the kept summary of the version that wrote it, exactly as it stands, and the table it
+#: stood in goes. No earlier version gains text, since the file holds none for it.
+#: Version 1 held no summary, so its kept summaries' table is made by :data:`_SCHEMA`.
+_MIGRATE_5: Final = (
+    *_SUMMARIES,
+    "INSERT INTO summaries(version, story_id, written_at, lines, outside) "
+    "SELECT version, story_id, written_at, lines, outside FROM pages",
+    "DROP TABLE pages",
+)
+
 
 def _migrate(conn: sqlite3.Connection, version: int) -> None:
     """Bring a file at an earlier layout ``version`` to this one, in the caller's transaction.
 
     Version 1 holds no summary, so its summary tables are created by :data:`_SCHEMA` like any
-    other missing table; versions 2 and 3 hold one, which :func:`_migrate_3` rewrites.
+    other missing table; versions 2 and 3 hold one, which :func:`_migrate_3` rewrites, and
+    versions 2 to 5 hold it in a table :data:`_MIGRATE_5` carries into the kept summaries.
 
     Raises:
         StoryStoreError: If a stored record is not one the earlier layout wrote, of
@@ -242,11 +272,9 @@ def _migrate(conn: sqlite3.Connection, version: int) -> None:
             escapes as another error past the caller's cleanup.
     """
     if version == 1:
-        for statement in _MIGRATE_1:
-            conn.execute(statement)
+        _run(conn, _MIGRATE_1)
     if version in {1, 2}:
-        for statement in _MIGRATE_2:
-            conn.execute(statement)
+        _run(conn, _MIGRATE_2)
     if version in {2, 3}:
         try:
             _migrate_3(conn)
@@ -254,8 +282,15 @@ def _migrate(conn: sqlite3.Connection, version: int) -> None:
             msg = f"a stored summary record is not one the earlier layout wrote: {exc}"
             raise StoryStoreError(msg) from exc
     if version in {1, 2, 3, 4}:
-        for statement in _MIGRATE_4:
-            conn.execute(statement)
+        _run(conn, _MIGRATE_4)
+    if version in {2, 3, 4, 5}:
+        _run(conn, _MIGRATE_5)
+
+
+def _run(conn: sqlite3.Connection, statements: Sequence[str]) -> None:
+    """Run one migration step's statements, in order, in the caller's transaction."""
+    for statement in statements:
+        conn.execute(statement)
 
 
 def _migrate_3(conn: sqlite3.Connection) -> None:
@@ -696,16 +731,19 @@ class SqliteStoryStore:
             msg = f"failed to open story store at {self._path!r}: {exc}"
             raise StoryStoreError(msg) from exc
         try:
-            # Writing a new summary discards the old one's text (ADR-0300 §3:6),
-            # so the pages a replaced row frees are zeroed rather than left holding
-            # it. Outside the transaction: a pragma issued inside one is ignored.
+            # A freed page is zeroed rather than left holding what it held. No write
+            # replaces a summary's text any more (ADR-0347 §2), but an upgrade still
+            # drops the table a summary stood in, a removed member's row is freed, and
+            # the forgetting decision for stories is to reach every summary, kept ones
+            # included (§3): what it erases must leave the file, not a freed page of it.
+            # Outside the transaction: a pragma issued inside one is ignored.
             conn.execute("PRAGMA secure_delete = ON")
             # Restricted before the first write, so no journal is ever written with
             # the process umask (ADR-0004 §4).
             self._restrict_permissions()
             with transaction(conn, "prepare the story store", error=StoryStoreError):
                 version = conn.execute("PRAGMA user_version").fetchone()[0]
-                if version not in {0, 1, 2, 3, 4, _SCHEMA_VERSION}:
+                if version not in {0, 1, 2, 3, 4, 5, _SCHEMA_VERSION}:
                     msg = (
                         f"the story store at {self._path!r} carries schema version "
                         f"{version}, and this build writes {_SCHEMA_VERSION}"
@@ -1639,7 +1677,11 @@ class SqliteStoryStore:
         as_of: int,
         at: datetime,
     ) -> StorySummaryVersion:
-        """Take in, replace the summary and append the version, writing no note (ADR-0303 §4)."""
+        """Take in, keep the new summary and append its version, writing no note (ADR-0303 §4).
+
+        The new summary is a row of its own beside every summary before it (ADR-0347 §2),
+        so the summary it succeeds stays as it was written.
+        """
         took_notes = [
             note_id
             for note_id in _unique(draft.took_in_notes)
@@ -1673,14 +1715,11 @@ class SqliteStoryStore:
             (version.version, story_id, _to_micros(at), json.dumps(record)),
         )
         conn.execute(
-            "INSERT INTO pages(story_id, version, written_at, lines, outside) "
-            "VALUES(?, ?, ?, ?, ?) "
-            "ON CONFLICT(story_id) DO UPDATE SET version = excluded.version, "
-            "written_at = excluded.written_at, lines = excluded.lines, "
-            "outside = excluded.outside",
+            "INSERT INTO summaries(version, story_id, written_at, lines, outside) "
+            "VALUES(?, ?, ?, ?, ?)",
             (
-                story_id,
                 version.version,
+                story_id,
                 _to_micros(at),
                 json.dumps([line.model_dump(mode="json") for line in draft.lines]),
                 int(draft.outside),
@@ -1828,7 +1867,8 @@ class SqliteStoryStore:
                 return None
             as_of = self._ticks(conn)
             summary_row = conn.execute(
-                "SELECT version, written_at, lines, outside FROM pages WHERE story_id = ?",
+                "SELECT version, written_at, lines, outside FROM summaries "
+                "WHERE story_id = ? ORDER BY version DESC LIMIT 1",
                 (story_id,),
             ).fetchone()
             note_rows = conn.execute(
@@ -1919,6 +1959,29 @@ class SqliteStoryStore:
                 next_cursor=versions[-1].version if more else None,
             )
         )
+
+    async def summary_at(self, story_id: Identifier, version: int) -> StorySummary | None:
+        """Read the summary a version of a story wrote, as it was written (ADR-0347 §2:4)."""
+        target = _checked_id(story_id)
+        wanted = check_story_version(version)
+        return await self._locked(self._summary_at_sync, target, wanted)
+
+    def _summary_at_sync(self, story_id: str, version: int) -> StorySummary | None:
+        with self._transaction("read a kept summary", immediate=False) as conn:
+            row = conn.execute(
+                "SELECT version, written_at, lines, outside FROM summaries "
+                "WHERE version = ? AND story_id = ?",
+                (version, story_id),
+            ).fetchone()
+        return None if row is None else _decoded(_summary_from, row)
+
+    async def position(self) -> int:
+        """Read where the store's one sequence stands (ADR-0347 §2:5)."""
+        return await self._locked(self._position_sync)
+
+    def _position_sync(self) -> int:
+        with self._transaction("read the story store's position", immediate=False) as conn:
+            return self._ticks(conn)
 
 
 def _line_from(row: Sequence[Any]) -> StoryLogLine:

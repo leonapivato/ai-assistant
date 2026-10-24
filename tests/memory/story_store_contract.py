@@ -41,6 +41,13 @@ And ADR-0307 §5:4: a split or a move whose actor is ``planning``, naming a note
 story moved from does not hold when it runs, refused whole with ``note_not_held``,
 a note moved away meanwhile included, where every other actor's passes it over.
 
+And ADR-0347 §2: every summary a write makes kept after a later write replaces it,
+read by its version through ``summary_at`` exactly as written — a merged story's by its
+own id — and ``None`` for a version that is not the story's; and ``position``, the
+sequence versions and reads' ``as_of`` lie on, at or above every version written
+before it and below every version written after. A refused write moves neither, since
+the whole observable state the refusals compare holds both.
+
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 ``Test``-prefixed subclass, never the abstract base directly.
 """
@@ -150,7 +157,11 @@ def refused(outcome: StoryOutcome, reason: StoryRefusalReason) -> None:
 
 
 async def everything(store: StoryStore) -> tuple[Any, ...]:
-    """Every story's header, view, log and summary: the whole observable state."""
+    """Every story's header, view, log and summaries, and the store's position.
+
+    The whole observable state: each story's kept summaries are read by every version
+    its log holds (ADR-0347 §2:4), and the position is read last (§2:5).
+    """
     page = await store.stories(limit=MAX_STORY_PAGE)
     assert page.next_cursor is None
     state: list[Any] = []
@@ -160,7 +171,12 @@ async def everything(store: StoryStore) -> tuple[Any, ...]:
         state.append(await store.log(header.story_id, limit=MAX_STORY_PAGE))
         state.append(await store.current_summary(header.story_id))
         state.append(await store.notes(header.story_id, limit=MAX_STORY_PAGE))
-        state.append(await store.summary_versions(header.story_id, limit=MAX_STORY_PAGE))
+        versions = await store.summary_versions(header.story_id, limit=MAX_STORY_PAGE)
+        state.append(versions)
+        assert versions is not None
+        for one in versions.versions:
+            state.append(await store.summary_at(header.story_id, one.version))
+    state.append(await store.position())
     return tuple(state)
 
 
@@ -2392,3 +2408,122 @@ class StoryStoreContract:
         )
         assert version.took_in_notes == ()
         assert version.took_in_episodes == ("a1",)
+
+    # --- every summary is kept, and the store's position (ADR-0347 §2) ----------
+
+    async def test_every_summary_is_kept_and_read_by_its_version_as_written(
+        self, store: StoryStore
+    ) -> None:
+        story_id = await made(store, act("a1"))
+        await noted(store, story_id, "Note.")
+        first = await written(
+            store,
+            story_id,
+            draft(line("Old line."), outside=True),
+            as_of=(await state_of(store, story_id)).as_of,
+        )
+        empty = await written(
+            store, story_id, draft(), as_of=(await state_of(store, story_id)).as_of
+        )
+        third = await written(
+            store,
+            story_id,
+            draft(line("New line."), line("Another.")),
+            as_of=(await state_of(store, story_id)).as_of,
+        )
+        kept = await store.summary_at(story_id, first.version)
+        assert kept is not None
+        assert (kept.version, kept.written_at, kept.lines, kept.outside) == (
+            first.version,
+            STORY_AT,
+            (line("Old line."),),
+            True,
+        )
+        nothing = await store.summary_at(story_id, empty.version)
+        assert nothing is not None
+        assert (nothing.lines, nothing.outside) == ((), False)
+        current = (await state_of(store, story_id)).summary
+        assert current is not None
+        assert current.version == third.version
+        assert await store.summary_at(story_id, third.version) == current
+        # A kept summary never changes, whatever is written after it.
+        assert await store.summary_at(story_id, first.version) == kept
+
+    async def test_a_version_not_the_storys_reads_no_summary(self, store: StoryStore) -> None:
+        one = await made(store, act("a1"))
+        other = await made(store, act("b1"))
+        note = await noted(store, one, "Note.")
+        version = await written(
+            store, one, draft(line("One.")), as_of=(await state_of(store, one)).as_of
+        )
+        assert await store.summary_at(other, version.version) is None
+        assert await store.summary_at("story:nowhere", version.version) is None
+        assert await store.summary_at(one, note.note_id) is None
+        assert await store.summary_at(one, version.version + 1) is None
+        assert await store.summary_at(other, 1) is None
+
+    async def test_a_merged_storys_summaries_are_read_by_its_own_id(
+        self, store: StoryStore
+    ) -> None:
+        absorbed = await made(store, act("a"))
+        target = await made(store, act("b"))
+        await noted(store, absorbed, "Note.", on="a")
+        version = await written(
+            store, absorbed, draft(line("Before.")), as_of=(await state_of(store, absorbed)).as_of
+        )
+        await store.merge(absorbed, target, actor=_OWNER)
+        kept = await store.summary_at(absorbed, version.version)
+        assert kept is not None
+        assert kept.lines == (line("Before."),)
+        assert await store.summary_at(target, version.version) is None
+
+    @pytest.mark.parametrize("version", [0, -1, 2**63, True, 1.0, "1", None])
+    async def test_a_malformed_version_or_id_is_a_value_error(
+        self, store: StoryStore, version: object
+    ) -> None:
+        story_id = await made(store, act("a"))
+        with pytest.raises(ValueError, match="version"):
+            await store.summary_at(story_id, version)  # type: ignore[arg-type]
+        with pytest.raises(ValueError):  # noqa: PT011 — any validation message will do
+            await store.summary_at("  ", 1)
+
+    async def test_the_position_starts_at_nothing_written(self, store: StoryStore) -> None:
+        assert await store.position() == 0
+
+    async def test_the_position_divides_the_versions_written_before_from_those_after(
+        self, store: StoryStore
+    ) -> None:
+        story_id = await made(store, act("a1"))
+        await noted(store, story_id, "Note.")
+        before = await written(
+            store, story_id, draft(line("Before.")), as_of=(await state_of(store, story_id)).as_of
+        )
+        position = await store.position()
+        assert position >= before.version
+        assert (await state_of(store, story_id)).as_of == position
+        assert await store.position() == position
+        after = await written(
+            store, story_id, draft(line("After.")), as_of=(await state_of(store, story_id)).as_of
+        )
+        assert after.version > position
+        assert await store.position() >= after.version
+        # The latest version at or below the position read is the summary it stood at.
+        versions = await versions_of(store, story_id)
+        then = max(one.version for one in versions if one.version <= position)
+        kept = await store.summary_at(story_id, then)
+        assert kept is not None
+        assert kept.lines == (line("Before."),)
+
+    async def test_a_refused_summary_write_keeps_nothing_and_moves_no_position(
+        self, store: StoryStore
+    ) -> None:
+        story_id = await made(store, act("a1"))
+        await noted(store, story_id, "Note.")
+        stale = await state_of(store, story_id)
+        await written(store, story_id, draft(line("First.")), as_of=stale.as_of)
+        before = await everything(store)
+        refused_write = await store.write_summary(
+            story_id, draft(line("Built on a stale read.")), as_of=stale.as_of
+        )
+        summary_refused(refused_write, StorySummaryRefusalReason.SUMMARY_MOVED_ON)
+        assert await everything(store) == before

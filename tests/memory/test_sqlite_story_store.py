@@ -10,7 +10,10 @@ safety-net notes a version added and its supersession marks — and a store faul
 surfacing as ``StoryStoreError`` with nothing written — a decision's line included,
 which lands with the change it records or not at all (ADR-0302 §3:4). And ADR-0304
 §9:7's migration, which gives the log the note a carried note's line names and
-rewrites no line written before it.
+rewrites no line written before it. And ADR-0347 §2: every summary kept in the file,
+across a reopen, never rewritten or removed by the database itself, and a corrupt kept
+summary a store error; its upgrade over a file the previous release wrote is
+``test_story_store_upgrade.py``.
 """
 
 from __future__ import annotations
@@ -267,7 +270,7 @@ async def test_a_schema_one_file_is_migrated_with_every_activation_member_pendin
         store.close()
     check = sqlite3.connect(path)
     try:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 6
     finally:
         check.close()
 
@@ -346,18 +349,22 @@ async def test_the_version_log_refuses_a_rewrite_or_a_removal(tmp_path: Path) ->
         conn.close()
 
 
-async def test_a_replaced_summary_leaves_no_text_in_the_file(tmp_path: Path) -> None:
-    """Only the summary is kept as text (ADR-0300 §3:6), in the file as well."""
+async def test_a_replaced_summary_is_kept_in_the_file_as_it_was_written(tmp_path: Path) -> None:
+    """Every summary is kept (ADR-0347 §2:1), in the file and across a reopen.
+
+    It replaces the test that pinned a replaced summary's text leaving the file, which
+    ADR-0300 §3:6's last sentence asked for and ADR-0347 §2 withdraws (§6:1).
+    """
     path = tmp_path / "stories.db"
     store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
     old = "the-old-line-" + "q" * 64
     try:
         story_id = await made(store, act("a1"))
         await noted(store, story_id, "Note.")
-        await written(
+        first = await written(
             store,
             story_id,
-            draft(line(old)),
+            draft(line(old), outside=True),
             as_of=(await state_of(store, story_id)).as_of,
         )
         await written(
@@ -368,7 +375,47 @@ async def test_a_replaced_summary_leaves_no_text_in_the_file(tmp_path: Path) -> 
         )
     finally:
         store.close()
-    assert old.encode() not in path.read_bytes()
+    assert old.encode() in path.read_bytes()
+    reopened = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    try:
+        kept = await reopened.summary_at(story_id, first.version)
+        assert kept is not None
+        assert (kept.version, kept.lines, kept.outside) == (first.version, (line(old),), True)
+        current = (await state_of(reopened, story_id)).summary
+        assert current is not None
+        assert current.lines == (line("A new line."),)
+    finally:
+        reopened.close()
+
+
+async def test_a_kept_summary_is_never_rewritten_or_removed_by_the_database(
+    tmp_path: Path,
+) -> None:
+    """A kept summary never changes and nothing removes one (ADR-0347 §2:3)."""
+    path = tmp_path / "stories.db"
+    store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
+    story_id = await made(store, act("a1"))
+    await noted(store, story_id, "Note.")
+    await written(
+        store,
+        story_id,
+        draft(line("Line.")),
+        as_of=(await state_of(store, story_id)).as_of,
+    )
+    store.close()
+    conn = sqlite3.connect(path)
+    try:
+        for statement in (
+            "UPDATE summaries SET lines = '[]'",
+            "UPDATE summaries SET outside = 1",
+            "UPDATE summaries SET story_id = 'story:elsewhere'",
+        ):
+            with pytest.raises(sqlite3.DatabaseError, match="never rewritten"):
+                conn.execute(statement)
+        with pytest.raises(sqlite3.DatabaseError, match="never removed"):
+            conn.execute("DELETE FROM summaries")
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize("operation", ["merge", "split", "move"])
@@ -447,10 +494,13 @@ async def test_a_backend_failure_mid_summary_write_writes_nothing(tmp_path: Path
 @pytest.mark.parametrize(
     ("statement", "read"),
     [
-        ("UPDATE pages SET lines = 'not json'", "summary"),
-        ("""UPDATE pages SET lines = '[{"text": "Line.", "cites": [2]}]'""", "summary"),
-        ("UPDATE pages SET lines = 7", "summary"),
-        ("UPDATE pages SET outside = 2", "summary"),
+        ("UPDATE summaries SET lines = 'not json'", "summary"),
+        ("""UPDATE summaries SET lines = '[{"text": "Line.", "cites": [2]}]'""", "summary"),
+        ("UPDATE summaries SET lines = 7", "summary"),
+        ("UPDATE summaries SET outside = 2", "summary"),
+        ("UPDATE summaries SET lines = 'not json'", "kept"),
+        ("UPDATE summaries SET written_at = 'noon'", "kept"),
+        ("UPDATE summaries SET outside = 2", "kept"),
         ("UPDATE notes SET outside = 2", "notes"),
         ("UPDATE versions SET record = '[1]'", "versions"),
     ],
@@ -462,7 +512,7 @@ async def test_a_corrupt_summary_record_is_a_story_store_error(
     store = SqliteStoryStore(path=path, now=lambda: STORY_AT)
     story_id = await made(store, act("a1"))
     await noted(store, story_id, "Note.")
-    await written(
+    version = await written(
         store,
         story_id,
         draft(line("Line.")),
@@ -472,12 +522,14 @@ async def test_a_corrupt_summary_record_is_a_story_store_error(
     conn = sqlite3.connect(path)
     conn.execute("DROP TRIGGER notes_never_rewritten")
     conn.execute("DROP TRIGGER versions_never_rewritten")
+    conn.execute("DROP TRIGGER summaries_never_rewritten")
     conn.execute(statement)
     conn.commit()
     conn.close()
     reopened = SqliteStoryStore(path=path, now=lambda: STORY_AT)
     reads: dict[str, Callable[[], Awaitable[object]]] = {
         "summary": lambda: reopened.current_summary(story_id),
+        "kept": lambda: reopened.summary_at(story_id, version.version),
         "notes": lambda: reopened.notes(story_id),
         "versions": lambda: reopened.summary_versions(story_id),
     }
@@ -561,7 +613,7 @@ async def test_a_schema_two_file_is_migrated_and_its_lines_stand_unchanged(
         store.close()
     check = sqlite3.connect(path)
     try:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 6
     finally:
         check.close()
 
@@ -688,6 +740,8 @@ async def test_a_schema_three_file_keeps_every_note_and_summary_and_drops_what_a
             StorySummaryLine(text="Camping."),
             StorySummaryLine(text="Booked Sunday."),
         )
+        assert await store.summary_at("story:old", 8) == summary
+        assert await store.summary_at("story:old", 5) is None
         quiet = (await state_of(store, "story:quiet")).summary
         assert quiet is not None
         assert (quiet.lines, quiet.outside) == ((StorySummaryLine(text="Quiet."),), False)
@@ -709,9 +763,9 @@ async def test_a_schema_three_file_keeps_every_note_and_summary_and_drops_what_a
         store.close()
     check = sqlite3.connect(path)
     try:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 6
         indexes = {row[0] for row in check.execute("SELECT name FROM sqlite_master")}
-        assert {"notes_resting", "log_member"}.isdisjoint(indexes)
+        assert {"notes_resting", "log_member", "pages"}.isdisjoint(indexes)
         with pytest.raises(sqlite3.DatabaseError, match="never rewritten"):
             check.execute("UPDATE notes SET written_during = 'a2'")
         with pytest.raises(sqlite3.DatabaseError, match="append-only"):
@@ -927,7 +981,7 @@ async def test_a_schema_four_file_is_migrated_and_carries_a_note_logged(
         reopened.close()
     check = sqlite3.connect(path)
     try:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 6
         with pytest.raises(sqlite3.DatabaseError, match="append-only"):
             check.execute("UPDATE log SET note = 9")
     finally:

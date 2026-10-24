@@ -92,7 +92,8 @@ def _with_later_defaults(stored: dict[str, Any]) -> dict[str, Any]:
     record = stored.get("processing_record")
     if record is None:
         return stored
-    return {**stored, "processing_record": {**record, "joined": record.get("joined", [])}}
+    added: dict[str, Any] = {"joined": [], "stories_position": None}
+    return {**stored, "processing_record": added | record}
 
 
 def _label(path: Path) -> int:
@@ -160,7 +161,8 @@ async def test_no_episode_is_rewritten(legacy: Path) -> None:
         episode = exported[record_id]
         assert isinstance(episode, EpisodicMemory)
         # A field a later decision adds at its default is the one difference: ADR-0332
-        # §7:2's ``joined`` on the processing record.
+        # §7:2's ``joined`` and ADR-0347 §4:1's ``stories_position`` on the processing
+        # record.
         assert episode.model_dump(mode="json", exclude={"revision"}) == _with_later_defaults(
             before[record_id][1]
         )

@@ -554,6 +554,61 @@ def test_the_plan_stores_finding_carry_is_what_its_upgrade_does(tmp_path: Path) 
     assert upgrade_check.compare_records("plans", carried, invented) != []
 
 
+@pytest.mark.integration
+def test_the_story_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> None:
+    """ADR-0347 §5: the carry from shape 1 says what the head's upgrade reads back.
+
+    Taken over the file the previous release wrote (``tests/memory/legacy``), with what
+    that release's own reader read back from it beside it, so both halves are the
+    previous release's code. Carried to shape 2, each story's current summary is kept
+    at the version that wrote it and no earlier version gains text, which is what this
+    build reads back after the upgrade, and nothing more.
+    """
+    import shutil  # noqa: PLC0415
+
+    legacy = Path(__file__).resolve().parents[1] / "memory" / "legacy"
+    shutil.copyfile(legacy / "stories-before-adr-0347.db", tmp_path / "stories.db")
+    base = upgrade_stores.cast_records(
+        json.loads((legacy / "stories-before-adr-0347.json").read_text())
+    )
+    (stories,) = [one for one in STORES if one.name == "stories"]
+
+    carried = stories.carries[1](base)
+    head = asyncio.run(stories.read(tmp_path))
+
+    assert stories.shape == 2
+    assert carried["position"] == 17
+    trip = carried["kept/story:legacy-1"]
+    assert isinstance(trip, list)
+    assert [one["summary"] is None for one in trip if isinstance(one, dict)] == [
+        True,
+        True,
+        False,
+    ]
+    assert upgrade_check.compare_records("stories", carried, head) == []
+    # And the carry holds the head to no text for an earlier version: a head inventing
+    # one differs from the carried read-back.
+    invented = json.loads(json.dumps(head))
+    invented["kept/story:legacy-1"][0]["summary"] = invented["kept/story:legacy-1"][2]["summary"]
+    assert upgrade_check.compare_records("stories", carried, invented) != []
+
+
+def test_the_story_writer_leaves_a_replaced_summary_kept(written: tuple[Path, Path]) -> None:
+    """ADR-0347 §2: the writer replaces a summary, so a later build reads a kept one back.
+
+    A story whose log holds two versions with text has a summary a later write replaced.
+    """
+    _, snapshot = written
+    records = _records(_snapshot(snapshot), "stories")
+    with_text = [
+        sum(1 for one in value if isinstance(one, dict) and one["summary"] is not None)
+        for key, value in records.items()
+        if key.startswith("kept/") and isinstance(value, list)
+    ]
+    assert max(with_text) >= 2
+    assert isinstance(records["position"], int)
+
+
 def test_a_snapshot_format_the_head_does_not_know_fails_the_check() -> None:
     assert compare({"format": 99, "stores": {}}, {}, STORES) == [
         "the snapshot is format 99; this build reads 1"
