@@ -13,7 +13,7 @@ outcome lists the operations each memory's log gained, never one the store did n
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, Final, NoReturn
 
 import pytest
 from observer_support import AT, Harness, Minter, address, episode
@@ -403,6 +403,7 @@ async def test_another_findings_write_between_attempts_is_not_taken_for_this_one
     assert isinstance(seat, Memory)
     named = NamedRevision(
         memory="m-seat",
+        revision=seat.revision,
         relation=PlacedRelation.RESTATES,
         operations=len(seat.operations),
         note=_RELATE,
@@ -626,6 +627,7 @@ async def _proposing_on(harness: Harness, framed: FramedMemory) -> FramedMemory:
     assert isinstance(seat, Memory)
     named = NamedRevision(
         memory="m-seat",
+        revision=seat.revision,
         relation=PlacedRelation.RESTATES,
         operations=len(seat.operations),
         note=_RELATE,
@@ -779,12 +781,14 @@ async def test_another_findings_recheck_is_not_taken_for_this_ones_fold(note: st
             "named": (
                 NamedRevision(
                     memory="m-seat",
+                    revision=held["m-seat"].revision,
                     relation=PlacedRelation.RESTATES,
                     operations=len(held["m-seat"].operations),
                     note="The same claim.",
                 ),
                 NamedRevision(
                     memory="m-window",
+                    revision=held["m-window"].revision,
                     relation=PlacedRelation.RECHECK,
                     operations=len(held["m-window"].operations),
                     note="Still the window?",
@@ -951,8 +955,13 @@ def _pin_only(record_id: str) -> Memory:
     return memory(record_id, _SEAT, pin)
 
 
-@pytest.mark.parametrize("lost", [False, True], ids=["read-back", "recovered"])
-async def test_a_dispute_copying_a_pin_onto_the_fold_is_the_writes_own(*, lost: bool) -> None:
+_FOLD_AND_RETIRE: Final = {
+    "m-seat": (PlacedRelation.RESTATES, "The same claim."),
+    "m-pinned": (PlacedRelation.NO_LONGER_TRUE, "Changed."),
+}
+
+
+async def test_a_dispute_copying_a_pin_onto_the_fold_is_the_writes_own() -> None:
     """ADR-0345 §3:5, §3:8, ADR-0329 §16:1: only the pin pass's own support is not counted.
 
     This memory folds into one stored memory and retires another, which its pin keeps
@@ -961,23 +970,8 @@ async def test_a_dispute_copying_a_pin_onto_the_fold_is_the_writes_own(*, lost: 
     harness = Harness()
     await _held_seat(harness)
     await harness.hold(_pin_only("m-pinned"))
-    place = _placing_each(
-        {
-            "m-seat": (PlacedRelation.RESTATES, "The same claim."),
-            "m-pinned": (PlacedRelation.NO_LONGER_TRUE, "Changed."),
-        }
-    )
-    framed = _framed(_SEAT)
-    if lost:
-        restore = _losing(harness)
-        record = _Record()
-        with pytest.raises(MemoryStoreError):
-            await _write(harness, framed, place=place, record=record)
-        framed, _ = record.steps[-1]
-        restore()
-        place = _never
 
-    written = await _write(harness, framed, place=place)
+    written = await _write(harness, _framed(_SEAT), place=_placing_each(_FOLD_AND_RETIRE))
 
     seat = (await harness.memory.get_history(["m-seat"]))["m-seat"]
     disputed = seat.support_at(PinPart(pin="pin-1"))
@@ -990,6 +984,44 @@ async def test_a_dispute_copying_a_pin_onto_the_fold_is_the_writes_own(*, lost: 
     )
     (done,) = written.framed
     assert (done.state, done.kept) == (FramedState.DONE, ("m-seat",))
+
+
+async def test_a_fold_whose_reply_was_lost_is_placed_again_and_writes_nothing_twice() -> None:
+    """ADR-0329 §16:4, ADR-0328 §4:8: a landed fold is never taken as landed, and is placed again.
+
+    Its write folded into one stored memory and disputed another; the reply was lost. The
+    proposal sent again is stale, since what it names moved, so it is placed again: that
+    write finds every support it would add already carried and adds none. The outcome
+    lists what the placing again wrote, which is nothing (#3394).
+    """
+    harness = Harness()
+    await _held_seat(harness)
+    await harness.hold(_pin_only("m-pinned"))
+    place = _placing_each(_FOLD_AND_RETIRE)
+    restore = _losing(harness)
+    record = _Record()
+    with pytest.raises(MemoryStoreError):
+        await _write(harness, _framed(_SEAT), place=place, record=record)
+    framed, _ = record.steps[-1]
+    restore()
+    landed = await harness.memory.get_history(["m-seat", "m-pinned"])
+    calls = 0
+
+    async def counted(view: PlacementView) -> MemoryPlacement:
+        nonlocal calls
+        calls += 1
+        return await place(view)
+
+    written = await _write(harness, framed, place=counted)
+
+    assert calls == 1, "the stale proposal is placed again"
+    again = await harness.memory.get_history(["m-seat", "m-pinned"])
+    for key in ("m-seat", "m-pinned"):
+        assert again[key].operations == landed[key].operations, "nothing is written twice"
+    assert written.writes == ()
+    (done,) = written.framed
+    assert (done.state, done.kept) == (FramedState.DONE, ("m-seat",))
+    assert _outcome(written).unwritten is FindingUnwritten.ALREADY_HELD
 
 
 async def _owner_only_seat(harness: Harness) -> None:
@@ -1058,6 +1090,251 @@ async def test_a_resumed_attempt_keeps_what_the_earlier_placement_was_shown() ->
     assert stored.placement.reach is PlacementReach.OWNER
 
 
+def _down(harness: Harness) -> Callable[[], None]:
+    """Make the store fail before the write lands; returns what brings it back."""
+    ingest = harness.writer.ingest
+
+    async def failing(proposal: Any) -> Any:
+        msg = "the store failed before the write"
+        raise MemoryStoreError(msg)
+
+    harness.writer.ingest = failing  # type: ignore[method-assign]  # the store is down
+
+    def restore() -> None:
+        harness.writer.ingest = ingest  # type: ignore[method-assign]  # the store is back
+
+    return restore
+
+
+async def test_a_failed_placement_call_keeps_what_it_was_shown() -> None:
+    """ADR-0329 §12:6, §16:4: where the call's records place it for is kept before the call.
+
+    The placement call is shown an owner-only memory and fails before it returns. The
+    shown memory is gone before the retry, which retrieves nothing, and the memory it
+    installs is still placed for the owner alone.
+    """
+    harness = Harness()
+    await _owner_only_seat(harness)
+    record = _Record()
+    shown: list[str] = []
+
+    async def failing(view: PlacementView) -> NoReturn:
+        shown.extend(one.memory.id for one in view.retrieved)
+        msg = "the placement reply did not parse"
+        raise ValueError(msg)
+
+    with pytest.raises(ValueError, match="did not parse"):
+        await _write(harness, _framed(_SEAT), place=failing, record=record)
+    assert shown == ["m-seat"]
+    (framed,), _ = record.steps[-1]
+    assert framed.state is FramedState.FRAMED
+    assert framed.memory.placement.reach is PlacementReach.OWNER
+    await harness.memory.delete("m-seat")
+
+    written = await _write(harness, (framed,), place=_never)
+
+    (created,) = written.writes
+    stored = await harness.memory.get(created.memory)
+    assert isinstance(stored, Memory)
+    assert stored.placement.reach is PlacementReach.OWNER
+
+
+async def test_a_proposal_the_store_never_wrote_is_sent_again_as_it_was() -> None:
+    """ADR-0329 §16:4, ADR-0345 §4:7: nothing it names moved, so no placement call is made.
+
+    The same proposal is sent again at the revisions it was read at, and what it wrote is
+    read back exactly.
+    """
+    harness = Harness()
+    await _held_seat(harness)
+    restore = _down(harness)
+    record = _Record()
+    with pytest.raises(MemoryStoreError):
+        await _write(
+            harness, _framed(_SEAT), place=_placing(PlacedRelation.RESTATES), record=record
+        )
+    (proposing,), _ = record.steps[-1]
+    assert proposing.state is FramedState.PROPOSING
+    restore()
+
+    written = await _write(harness, (proposing,), place=_never)
+
+    assert [(one.memory, one.operations) for one in written.writes] == [
+        ("m-seat", (MemoryOperationKind.ADD_SUPPORT,))
+    ]
+    seat = (await harness.memory.get_history(["m-seat"]))["m-seat"]
+    assert seat.support_at(proposing.memory.supports[0].points_at) is not None
+    (done,) = written.framed
+    assert (done.state, done.kept) == (FramedState.DONE, ("m-seat",))
+
+
+async def test_a_proposal_sent_for_more_people_than_the_supply_now_allows_is_placed_again() -> None:
+    """ADR-0329 §12:6, ADR-0217 §3: a narrower supply is never widened by a proposal sent again.
+
+    The proposal was placed against a memory anyone may reach. The finding's supply is
+    narrowed to the owner before the retry, so that memory is no longer one it may be
+    placed against: the memory is placed again, beside it, for the owner alone.
+    """
+    harness = Harness()
+    await _held_seat(harness)
+    restore = _down(harness)
+    record = _Record()
+    with pytest.raises(MemoryStoreError):
+        await _write(
+            harness, _framed(_SEAT), place=_placing(PlacedRelation.RESTATES), record=record
+        )
+    (proposing,), _ = record.steps[-1]
+    restore()
+
+    written = await _write(harness, (proposing,), place=_never, supply=_OWNER_ONLY)
+
+    (created,) = written.writes
+    assert created.memory == proposing.memory.id
+    stored = await harness.memory.get(created.memory)
+    assert isinstance(stored, Memory)
+    assert stored.placement.reach is PlacementReach.OWNER
+    seat = (await harness.memory.get_history(["m-seat"]))["m-seat"]
+    assert seat.support_at(proposing.memory.supports[0].points_at) is None
+
+
+async def test_a_proposal_whose_shown_episode_narrowed_since_is_placed_again() -> None:
+    """ADR-0329 §12:6, ADR-0217 §3: sent again only within what its run is supplied now.
+
+    The proposal was placed against a memory whose shown support was read from an
+    episode anyone may reach. That episode is placed for the owner alone before the
+    retry, so the memory it names may no longer be written onto: the memory is placed
+    again, and installed beside it, which is never written onto.
+    """
+    harness = Harness()
+    await _held_seat(harness)
+    restore = _down(harness)
+    record = _Record()
+    with pytest.raises(MemoryStoreError):
+        await _write(
+            harness, _framed(_SEAT), place=_placing(PlacedRelation.RESTATES), record=record
+        )
+    (proposing,), _ = record.steps[-1]
+    restore()
+    past = await harness.memory.get(address("past"))
+    assert past is not None
+    await harness.memory.write_atomic(
+        [
+            MemoryWrite(
+                record=past.model_copy(update={"placement": _OWNER_ONLY}),
+                mode=MemoryWriteMode.IF_UNCHANGED,
+                expected_revision=past.revision,
+            )
+        ]
+    )
+
+    written = await _write(harness, (proposing,), place=_never)
+
+    assert [(one.memory, one.operations) for one in written.writes] == [
+        (proposing.memory.id, (MemoryOperationKind.CREATE,))
+    ]
+    seat = (await harness.memory.get_history(["m-seat"]))["m-seat"]
+    assert seat.support_at(proposing.memory.supports[0].points_at) is None
+
+
+async def test_an_unwritten_retirement_is_written_however_its_targets_look() -> None:
+    """ADR-0329 §16:4, ADR-0345 §3:1-§3:4: a write is never taken as landed from the store.
+
+    This memory restates a window-seat memory and ends an aisle-seat one, its part on both
+    already, backing the first and opposing the second; its proposal did not land.
+    Another finding then raises a question on the first in this placement's words. The
+    proposal sent again is stale, so the memory is placed again, and the aisle-seat memory
+    is ended, the other's question never listed as this one's.
+    """
+    harness = Harness()
+    (framed,) = _framed(_SEAT)
+    owner = SupportHolder.person(OWNER_PERSON_ID)
+    past = said_support(address("past"), added_at=AT - timedelta(days=1)).model_copy(
+        update={"holder": owner}
+    )
+    aisle = said_support(address("aisle"), added_at=AT - timedelta(days=1)).model_copy(
+        update={"holder": owner}
+    )
+    own = framed.memory.supports[0].model_copy(update={"holder": owner})
+    opposing = own.model_copy(
+        update={"direction": SupportDirection.AGAINST, "backs_as_worded": False}
+    )
+    await harness.hold(
+        episode("past", at=AT - timedelta(days=1), text="Window seats."),
+        episode("aisle", at=AT - timedelta(days=1), text="Aisle seats."),
+        episode("one", at=AT - timedelta(minutes=3), text="Window seats, please."),
+        memory("m-seat", _SEAT, past, own, subjects=(OWNER_PERSON_ID,)),
+        memory("m-aisle", "The user prefers aisle seats.", aisle, opposing),
+    )
+    same = "The same claim."
+    relations = {
+        "m-seat": (PlacedRelation.RESTATES, same),
+        "m-aisle": (PlacedRelation.NO_LONGER_TRUE, "Changed."),
+    }
+    restore = _down(harness)
+    record = _Record()
+    with pytest.raises(MemoryStoreError):
+        await _write(harness, (framed,), place=_placing_each(relations), record=record)
+    (proposing,), _ = record.steps[-1]
+    assert {one.memory for one in proposing.named} == {"m-seat", "m-aisle"}
+    restore()
+    mint = Minter()
+    mint.minted = 50
+    await _write(
+        harness,
+        _framed(_SEAT, mint=mint),
+        place=_placing_each({"m-seat": (PlacedRelation.RECHECK, same)}),
+    )
+
+    written = await _write(harness, (proposing,), place=_placing_each(relations))
+
+    ended = (await harness.memory.get_history(["m-aisle"]))["m-aisle"]
+    assert ended.status is not MemoryStatus.CURRENT
+    operations = {one.memory: one.operations for one in written.writes}
+    assert "m-seat" not in operations, "the other finding's question is not this one's"
+    assert MemoryOperationKind.END in operations["m-aisle"]
+
+
+async def test_an_unwritten_restatement_stops_the_holders_own_dispute() -> None:
+    """ADR-0329 §16:4, ADR-0345 §3:7: a holder's restatement ends their dispute, once written.
+
+    The stored memory carries this memory's part and an ``against`` of the same holder,
+    still counted; this memory restates it and its proposal did not land. Another finding
+    then raises a recheck on it in this placement's words. The memory is placed again, and
+    the holder's ``against`` stops counting.
+    """
+    harness = Harness()
+    (framed,) = _framed(_SEAT)
+    owner = SupportHolder.person(OWNER_PERSON_ID)
+    own = framed.memory.supports[0].model_copy(update={"holder": owner})
+    doubt = said_support(
+        address("doubt"), added_at=AT - timedelta(days=1), direction=SupportDirection.AGAINST
+    ).model_copy(update={"holder": owner})
+    await harness.hold(
+        episode("doubt", at=AT - timedelta(days=1), text="Not the window, maybe."),
+        episode("one", at=AT - timedelta(minutes=3), text="Window seats, please."),
+        memory("m-seat", _SEAT, own, doubt, subjects=(OWNER_PERSON_ID,)),
+    )
+    same = "The same claim."
+    restore = _down(harness)
+    record = _Record()
+    with pytest.raises(MemoryStoreError):
+        await _write(
+            harness, (framed,), place=_placing(PlacedRelation.RESTATES, same), record=record
+        )
+    (proposing,), _ = record.steps[-1]
+    restore()
+    mint = Minter()
+    mint.minted = 50
+    await _write(harness, _framed(_SEAT, mint=mint), place=_placing(PlacedRelation.RECHECK, same))
+
+    written = await _write(harness, (proposing,), place=_placing(PlacedRelation.RESTATES, same))
+
+    seat = (await harness.memory.get_history(["m-seat"]))["m-seat"]
+    assert doubt.points_at not in {one.points_at for one in seat.counted_supports}
+    operations = {one.memory: one.operations for one in written.writes}
+    assert operations["m-seat"] == (MemoryOperationKind.STOP_COUNTING,)
+
+
 async def test_a_restatement_left_unwritten_is_not_taken_as_landed() -> None:
     """ADR-0345 §5:1-§5:3, ADR-0329 §16:4: every memory it restates must carry its parts.
 
@@ -1087,6 +1364,7 @@ async def test_a_restatement_left_unwritten_is_not_taken_as_landed() -> None:
             "named": tuple(
                 NamedRevision(
                     memory=key,
+                    revision=held[key].revision,
                     relation=PlacedRelation.RESTATES,
                     operations=len(held[key].operations),
                     note=same,

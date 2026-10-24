@@ -9615,27 +9615,33 @@ class FramedState(StrEnum):
     """Framing kept it, and it has not yet been proposed."""
     PROPOSING = "proposing"
     """Its placed proposal is about to be, or has been, sent to the writer, at the
-    revisions :attr:`FramedMemory.named` records; whether it landed is read off the
-    store on a retry, never assumed."""
+    revisions :attr:`FramedMemory.named` records. A retry never assumes it landed: it
+    finds the memory installed, or sends the same proposal again at those revisions, and
+    places it again where the writer refuses that as stale."""
     DONE = "done"
     """Its proposal was ruled on and what it wrote is on the finding's record."""
 
 
 class NamedRevision(BaseModel):
-    """A stored memory a placement named, how it was placed, and how long its log was.
+    """A stored memory a placement named, how it was placed, and the revision it was read at.
+
+    Together, a framed memory's pairs and :attr:`FramedMemory.answers` are the placement
+    its proposal was sent with, so a later attempt sends exactly that proposal again.
 
     Attributes:
         memory: The stored memory's id, exactly as the memory store holds it.
+        revision: The revision the placement read it at, which the writer refuses the
+            proposal against where the stored one differs (ADR-0345 §4:7).
         relation: The relation the placement named for it (ADR-0345 §4).
         operations: How many operations its log held when the placement was made, so
             what a write appended is read off it after (ADR-0329 §16:1).
         note: The placement's note on the pair, which every operation the write makes
-            for the pair carries (ADR-0345 §5), so a write is told from another's on a
-            later attempt by the notes its operations carry.
+            for the pair carries (ADR-0345 §5:7).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     memory: NonBlankEncodableText
+    revision: int = Field(strict=True, ge=1)
     relation: PlacedRelation
     operations: int = Field(strict=True, ge=1, lt=2**31)
     note: EncodableText
@@ -9646,8 +9652,8 @@ class FramedMemory(BaseModel):
 
     Kept on the finding while it has no outcome, so an attempt held by the budget or one
     that failed resumes where the last one stopped: framing is not asked again, a memory
-    whose write landed is not proposed again, and what each placement named ``unclear`` is
-    kept from the moment the call returns (§6:5).
+    whose write is done is not proposed again, and what each placement named ``unclear``
+    is kept from the moment the call returns (§6:5).
 
     Attributes:
         memory: The memory as framing kept it, after code's checks: its placement
@@ -9658,8 +9664,10 @@ class FramedMemory(BaseModel):
             (ADR-0338 §9:4).
         pin: Whether framing said it matters in every conversation (§9:5).
         state: How far its write has got.
-        named: Each stored memory its last placement named, with the length of its log
-            then; set when its proposal is sent.
+        named: Each stored memory its last placement named, at the revision read and
+            with the length of its log then; set when its proposal is sent.
+        answers: The open question its last placement said it answers, if any; set
+            with :attr:`named` (ADR-0345 §4:1).
         unclear: Each ``unclear`` a placement call named for it (ADR-0346 §6:5).
         ruling: The policy's ruling on its proposal, once one is known.
         kept: Where it is now held, the memory installed or those it was folded into,
@@ -9674,6 +9682,7 @@ class FramedMemory(BaseModel):
     pin: bool = False
     state: FramedState = FramedState.FRAMED
     named: tuple[NamedRevision, ...] = ()
+    answers: PlacedAnswer | None = None
     unclear: tuple[UnclearPlacement, ...] = ()
     ruling: MemoryDecisionKind | None = None
     kept: tuple[NonBlankEncodableText, ...] = ()

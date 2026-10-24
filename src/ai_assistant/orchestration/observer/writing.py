@@ -25,14 +25,24 @@ and the new memory stands beside it.
 
 **Resumable, one memory at a time** (ADR-0329 §16:1, §16:4). What framing kept is on the
 finding (:class:`~ai_assistant.core.types.FramedMemory`), each memory with how far its
-write has got, and every step is put on the record through the caller as it is taken: each
-``unclear`` as soon as its placement call returns (ADR-0346 §6:5); the revisions and log
-lengths of what a proposal names before it is sent; and, once the write is read back, the
-operations each memory's log gained, with the memory marked done in the same record. So an
-attempt held by the budget or one that failed resumes where the last stopped: a memory
-already done is not proposed again, and one whose proposal may have landed is read off the
-store, never proposed blind. Its outcome lists the operations each memory's log gained from
-the write, never one the store did not make.
+write has got, and every step is put on the record through the caller as it is taken:
+where the memory is placed for, before a placement call is shown anything (ADR-0329
+§12:6); each ``unclear`` as soon as its placement call returns (ADR-0346 §6:5); the
+placement, with the revisions and log lengths of what it names, before the proposal is
+sent; and, once the write is read back, the operations each memory's log gained, with the
+memory marked done in the same record. So an attempt held by the budget or one that failed
+resumes where the last stopped: a memory already done is not proposed again.
+
+**A write is never taken as landed from what the store holds** (ADR-0329 §16:4). The
+store keeps no write identity (ADR-0219 §1, ADR-0328 §5:1; #3394), so a memory whose
+proposal may have been sent is found by the one identity it has, its own id installed, and
+otherwise its proposal is sent again exactly as it was, at the revisions it was read at.
+Where nothing it names has moved since, that write is the one the last attempt would have
+made, and its read-back is exact; where anything has, the writer refuses it as stale
+(ADR-0345 §4:7) and the memory is placed again, which writes what the store does not yet
+hold of it. Placing again what had landed adds no support twice and stops none twice
+(ADR-0328 §4:8); it may ask a ``recheck`` again, and the outcome then lists what the
+placing again wrote, not what the lost write did.
 
 **A stale placement is placed again** (§6:7), up to a composition-root count within the
 same attempt; past it the attempt fails and is retried with its backoff. The pin pass runs,
@@ -73,6 +83,7 @@ from ai_assistant.core.types import (
     NamedRevision,
     ObservationWrite,
     PinPart,
+    PlacedPair,
     PlacedRelation,
     Placement,
     PlacementReach,
@@ -80,7 +91,12 @@ from ai_assistant.core.types import (
     UnclearPlacement,
 )
 from ai_assistant.orchestration.observer.person import PIN_NOTE
-from ai_assistant.orchestration.observer.placement import PlacementView, narrows, retrieved
+from ai_assistant.orchestration.observer.placement import (
+    PlacementView,
+    compacted,
+    narrows,
+    retrieved,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -111,23 +127,8 @@ type Progress = Callable[[tuple[FramedMemory, ...], tuple[ObservationWrite, ...]
 #: Why the observer proposes a memory, on every proposal it makes: code-owned words.
 _RATIONALE: Final = "the observer kept this from an episode that left the episode window"
 
-#: The relations under which a placed proposal is folded into the stored memory (§5:3).
-_FOLDING: Final = frozenset({PlacedRelation.RESTATES, PlacedRelation.CONTAINED})
-
 #: The relations that write nothing on the stored memory they name (ADR-0345 §5).
 _WRITES_NOTHING: Final = frozenset({PlacedRelation.INDEPENDENT, PlacedRelation.UNCLEAR})
-
-#: The relations after whose write the stored memory carries every part backing the
-#: proposal, added by the write or carried already (ADR-0345 §5, §3:1, ADR-0328 §4:8).
-_CARRIES_BACKING: Final = frozenset(
-    {
-        PlacedRelation.SUPPORTS,
-        PlacedRelation.WEAKENS,
-        PlacedRelation.CONTAINED,
-        PlacedRelation.NO_LONGER_TRUE,
-        PlacedRelation.NEVER_TRUE,
-    }
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,9 +248,7 @@ class FindingWriter:
         for index in range(len(records)):
             record = records[index]
             if record.state is FramedState.PROPOSING:
-                record = await self._resolved(record, ledger)
-                if record.state is FramedState.DONE:
-                    await keep(index, record)
+                record = await self._resolved(index, record, supply, narrowing, keep, ledger)
             if record.state is not FramedState.DONE:
                 record = await self._one(
                     index, record, texts, supply, narrowing, place, keep, ledger
@@ -291,6 +290,11 @@ class FindingWriter:
             # it is never narrowed.
             stored, placed_for = _placeable(base, found)
             memory = record.memory.model_copy(update={"placement": placed_for})
+            if stored and memory != record.memory:
+                # §12:6: where the call's records place it for reaches the record before
+                # the call is made, so a call that fails narrows every later attempt.
+                record = record.model_copy(update={"memory": memory})
+                await keep(index, record)
             view = PlacementView(framed=memory, texts=texts, retrieved=stored)
             placement = await place(view) if stored else MemoryPlacement()
             before = {one.memory.id: one.memory for one in stored}
@@ -301,32 +305,50 @@ class FindingWriter:
                     "named": tuple(
                         NamedRevision(
                             memory=pair.memory,
+                            revision=pair.revision,
                             relation=pair.relation,
                             operations=len(before[pair.memory].operations),
                             note=pair.note,
                         )
                         for pair in placement.pairs
                     ),
+                    "answers": placement.answers,
                     "unclear": (*record.unclear, *_unclear(placement, memory.content)),
                 }
             )
-            # The unclear and what the proposal names reach the record before it is sent.
+            # The unclear and the placement reach the record before the proposal is sent.
             await keep(index, record)
-            proposal = MemoryUpdateProposal(
-                proposed=memory, rationale=_RATIONALE, placement=placement
-            )
-            try:
-                result = (await self._writes.write(proposal)).result
-            except UnresolvedEvidenceError:
-                return await self._done(index, record, keep, refused=FindingUnwritten.CHECK_FAILED)
-            except SelfConsumingWriteError:
-                return await self._done(index, record, keep, refused=FindingUnwritten.REFUSED)
-            if result.stale:
-                record = record.model_copy(update={"state": FramedState.FRAMED, "named": ()})
-                continue
-            return await self._ruled(index, record, result, keep, ledger)
+            sent = await self._send(index, record, keep, ledger)
+            if sent is not None:
+                return sent
+            record = _unsent(record)
         msg = "the observer's placement stayed stale past its count (ADR-0346 §6:7)"
         raise MemoryStoreStaleError(msg)
+
+    async def _send(
+        self,
+        index: int,
+        record: FramedMemory,
+        keep: Callable[[int, FramedMemory], Awaitable[None]],
+        ledger: _Ledger,
+    ) -> FramedMemory | None:
+        """Send the proposal the record holds, and the memory done; ``None`` where stale.
+
+        The proposal is built from the record alone, so the one a later attempt sends
+        again is exactly the one this attempt sent.
+        """
+        proposal = MemoryUpdateProposal(
+            proposed=record.memory, rationale=_RATIONALE, placement=_sent(record)
+        )
+        try:
+            result = (await self._writes.write(proposal)).result
+        except UnresolvedEvidenceError:
+            return await self._done(index, record, keep, refused=FindingUnwritten.CHECK_FAILED)
+        except SelfConsumingWriteError:
+            return await self._done(index, record, keep, refused=FindingUnwritten.REFUSED)
+        if result.stale:
+            return None
+        return await self._ruled(index, record, result, keep, ledger)
 
     def _base(self, supply: Placement, narrowing: ProposedNarrowing | None) -> Placement:
         """The finding's supply, narrowed by the scout's proposal where nothing narrowed it."""
@@ -360,22 +382,58 @@ class FindingWriter:
             index, record, keep, ruling=kind, kept=result.folded or (result.record_id,)
         )
 
-    async def _resolved(self, record: FramedMemory, ledger: _Ledger) -> FramedMemory:
-        """A memory whose proposal may have landed before the last attempt stopped.
+    async def _resolved(  # noqa: PLR0913 — the memory, what it is made within, two seams
+        self,
+        index: int,
+        record: FramedMemory,
+        supply: Placement,
+        narrowing: ProposedNarrowing | None,
+        keep: Callable[[int, FramedMemory], Awaitable[None]],
+        ledger: _Ledger,
+    ) -> FramedMemory:
+        """A memory whose proposal may have been sent before the last attempt stopped.
 
-        Read off the store, never assumed (:func:`_its_write`): where it landed, its
-        operations are recovered and it is done; where nothing shows it did, it is placed
-        again, which a fold that changed nothing repeats harmlessly (ADR-0328 §4:8).
+        Never taken as landed from what the store holds (ADR-0329 §16:4). Its own id
+        installed is the one identity a write leaves, so where it is held the write landed
+        and its operations are recovered (:func:`_its_install`). Otherwise the same
+        proposal is sent again at the revisions it was read at: the writer writes it where
+        nothing it names has moved, and refuses it as stale where anything has (ADR-0345
+        §4:7), and then it is placed again. It is sent again only within what its run is
+        supplied now (ADR-0329 §12:6, ADR-0217 §3): the finding's supply, the memories it
+        names and the episodes read to show them, each as it stands now. Where that meet
+        places it for fewer people than the proposal was made for, or a memory it names
+        would now reach more than the meet, it is placed again instead.
+
+        Returns:
+            The memory done, or back to framed, to be placed again.
         """
         wanted = [record.memory.id, *(one.memory for one in record.named)]
         held = await self._memory.get_history(list(dict.fromkeys(wanted)))
-        landed = _its_write(record, held)
-        if landed is None:
-            return record.model_copy(update={"state": FramedState.FRAMED, "named": ()})
-        kept, operations = landed
-        for memory_id, run in operations.items():
-            ledger.wrote(memory_id, [one.kind for one in run])
-        return _finished(record, ruling=MemoryDecisionKind.ACCEPT, kept=kept)
+        installed = held.get(record.memory.id)
+        if installed is not None:
+            for memory_id, run in _its_install(record, installed, held).items():
+                ledger.wrote(memory_id, [one.kind for one in run])
+            return await self._done(
+                index, record, keep, ruling=MemoryDecisionKind.ACCEPT, kept=(installed.id,)
+            )
+        named = [held[one.memory] for one in record.named if one.memory in held]
+        if len(named) != len(record.named):
+            return _unsent(record)
+        shown = await compacted(
+            named, memory=self._memory, plans=self._plans, recent=self._limits.recent
+        )
+        sent_for = record.memory.placement
+        base = self._base(_carried(supply, sent_for), narrowing)
+        placeable, now = _placeable(base, shown)
+        if len(placeable) != len(shown) or (now.reach, now.set_by) != (
+            sent_for.reach,
+            sent_for.set_by,
+        ):
+            return _unsent(record)
+        if self._pins is not None:
+            await self._pins.confirm(strict=True)
+        sent = await self._send(index, record, keep, ledger)
+        return _unsent(record) if sent is None else sent
 
     async def _read_back(
         self, record: FramedMemory, installed: str | None, ledger: _Ledger
@@ -443,91 +501,63 @@ def _finished(
     )
 
 
-def _its_write(
-    record: FramedMemory, held: Mapping[str, Memory]
-) -> tuple[tuple[str, ...], dict[str, list[MemoryOperation]]] | None:
-    """What a proposal wrote, read off the store on a later attempt, or ``None``.
+def _unsent(record: FramedMemory) -> FramedMemory:
+    """``record`` back to framed, its last placement dropped, to be placed again."""
+    return record.model_copy(update={"state": FramedState.FRAMED, "named": (), "answers": None})
 
-    Told from other writes by what the write stamps on each operation it makes: every one
-    carries the note of the relation that caused it (ADR-0345 §5:7), is the observer's,
-    and shares the one atomic write's instant (§5:6). So on each memory the placement
-    names, the write's operations are the first past the log length recorded when the
-    proposal was sent, since it is written only at the revisions it read (§5:6, ADR-0219
-    §2), each carrying that memory's own relation's note or a retiring relation's, whose
-    dispute lands on the memory folded into or installed (§3:5); on the memory it
-    installed, the first past its create, each carrying a retiring relation's note.
 
-    A note is the placement call's prose and need not be unique, so where the proposal
-    installed nothing, its having landed is also checked against what it must have left:
-    one instant across every memory, each memory it restates carrying every part it
-    counts, each memory it asks to be rechecked holding the question, and each it
-    supports, weakens, is contained in or retires carrying every part backing it. Where any of that
-    is missing, the proposal is placed again: either it did not land, or it landed only a
-    fold that changed nothing, which placing again repeats harmlessly (ADR-0328 §4:8). The
-    proposal's own id, installed, is the one identity the store keeps for a write; where
-    it is held the proposal landed.
+def _sent(record: FramedMemory) -> MemoryPlacement:
+    """The placement the record's proposal is sent with, as its last placement made it."""
+    return MemoryPlacement(
+        pairs=tuple(
+            PlacedPair(
+                memory=one.memory, revision=one.revision, relation=one.relation, note=one.note
+            )
+            for one in record.named
+        ),
+        answers=record.answers,
+    )
+
+
+def _its_install(
+    record: FramedMemory, installed: Memory, held: Mapping[str, Memory]
+) -> dict[str, list[MemoryOperation]]:
+    """What a proposal found installed wrote, by memory, read off the store.
+
+    Its own id installed shows the one atomic write landed (ADR-0345 §5:6), so the store
+    holds every effect of it, and what is read here is only which operations to list.
+    On the installed memory, its create and the leading operations past it carrying a
+    retiring relation's note, whose dispute lands there (§3:5). On each memory the
+    placement names, the leading operations past the log length recorded when the
+    proposal was sent, each the observer's, at the write's one instant, and carrying that
+    memory's own relation's note or a retiring relation's (§5:7): the write was made at
+    the revisions it read (ADR-0219 §2), so its operations are the first past that length.
+    Telling them from a later write that left the same stamps needs a write identity the
+    store does not keep (#3394).
 
     Args:
         record: The memory, its proposal sent with the pairs ``named`` records.
-        held: Its own id and every memory it named, as the history read returns them.
+        installed: The memory as installed, with its whole log.
+        held: Every memory the placement named, as the history read returns them.
 
     Returns:
-        Where it is held and the operations it wrote, by memory; ``None`` where nothing
-        shows it landed.
+        The operations the write made, by memory.
     """
     retiring = frozenset(
         one.note for one in record.named if one.relation in RETIRING_RELATIONS and one.note
     )
-    installed = held.get(record.memory.id)
     runs: dict[str, list[MemoryOperation]] = {}
     for named in record.named:
         stored = held.get(named.memory)
         if stored is not None and named.relation not in _WRITES_NOTHING:
             notes = retiring | {named.note}
             runs[named.memory] = _its_run(stored.operations[named.operations :], notes)
-    if installed is not None:
-        own = _its_run(installed.operations[1:], retiring)
-        instants = [own[0].at] if own else sorted({run[0].at for run in runs.values() if run})
-        at = instants[0] if instants else None
-        operations = {key: run for key, run in runs.items() if run and run[0].at == at}
-        operations[installed.id] = [installed.operations[0], *own]
-        return (installed.id,), operations
-    if len({run[0].at for run in runs.values() if run}) != 1:
-        return None
-    operations = {key: run for key, run in runs.items() if run}
-    counted = {one.points_at for one in record.memory.counted_supports}
-    folded = tuple(
-        one.memory
-        for one in record.named
-        if one.relation in _FOLDING
-        and (stored := held.get(one.memory)) is not None
-        and counted <= {support.points_at for support in stored.supports}
-    )
-    if not folded or not _effects_held(record, held, operations):
-        return None
-    return folded, operations
-
-
-def _effects_held(
-    record: FramedMemory,
-    held: Mapping[str, Memory],
-    operations: Mapping[str, Sequence[MemoryOperation]],
-) -> bool:
-    """Whether every memory the placement names holds what the write must have left it."""
-    backing = {one.points_at for one in record.memory.backing_supports}
-    counted = {one.points_at for one in record.memory.counted_supports}
-    for named in record.named:
-        stored = held.get(named.memory)
-        carried = set() if stored is None else {one.points_at for one in stored.supports}
-        if named.relation is PlacedRelation.RECHECK:
-            raised = operations.get(named.memory, ())
-            if not any(one.kind is MemoryOperationKind.RAISE_QUESTION for one in raised):
-                return False
-        elif (named.relation in _CARRIES_BACKING and not backing <= carried) or (
-            named.relation is PlacedRelation.RESTATES and not counted <= carried
-        ):
-            return False
-    return True
+    own = _its_run(installed.operations[1:], retiring)
+    instants = [own[0].at] if own else sorted({run[0].at for run in runs.values() if run})
+    at = instants[0] if instants else None
+    operations = {key: run for key, run in runs.items() if run and run[0].at == at}
+    operations[installed.id] = [installed.operations[0], *own]
+    return operations
 
 
 def _its_run(operations: Sequence[MemoryOperation], notes: frozenset[str]) -> list[MemoryOperation]:
