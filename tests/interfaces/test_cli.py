@@ -985,7 +985,7 @@ def test_an_assistant_statement_is_said_to_be_what_i_said(output: StringIO) -> N
     assert "what I said" in rendered
     assert "you said it" not in rendered
     assert "I said this, in my message of 2026-07-20 18:00 UTC" in rendered
-    assert "you kept it" in rendered
+    assert "You kept it" in rendered
 
 
 def test_render_belief_shows_a_window_end_only_when_one_is_set(output: StringIO) -> None:
