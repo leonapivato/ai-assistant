@@ -1,0 +1,16 @@
+# The user restates one half of an allergy a current memory already holds whole. Placing
+# the narrower memory as ending, disproving or replacing the stored one would lose the
+# other allergy from current memory, so it is placed as part of it, or as evidence for it.
+prompt = "observer_placement"
+guards = "narrower_write_loses_fact"
+came_from = "2026-10-21"
+set = "development"
+samples = 3
+
+[property]
+check = "relation_in"
+memory = "M1"
+relations = ["contained", "restates", "supports", "weakens", "recheck", "independent", "unclear"]
+
+[input]
+file = "narrower-write-keeps-broader.json"

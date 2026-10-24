@@ -3,46 +3,48 @@
 Driven over the canonical fakes, the person-model store's among them, with scripted
 model routes: no test makes a model call or contacts a hub. Where no store is wired the
 observer is as it was (§11:2); where one is, the leaving episode's person's five fields
-reach both steps (§9:1), the scout's suggestions and restating findings are recorded and
-kept off memory (§9:2-§9:3), the commit step's style mark and pin suggestion are
-recorded (§9:4-§9:5), every run confirms the pins first (§9:6), and a retirement is ruled
-against the standing its memory's pins give it (§9:9-§9:10). No test asserts a
+reach the scout and framing (§9:1), the scout's suggestions and restating findings are
+recorded and kept off memory (§9:2-§9:3), framing's style mark and pin suggestion are
+recorded on the memory each framed memory is held at (§9:4-§9:5), every run confirms the
+pins first (§9:6), and the writer confirms them again before each retrieval, so a placed
+write is made against the supports a memory's pins give it (§9:9-§9:10). No test asserts a
 template's wording (ADR-0334 §9:1): the flags each instruction was rendered under, and
 the steps' data, are tested instead.
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, cast
 
-import pytest
-from observer_support import AT, Harness, address, episode, reply, said
-
-from ai_assistant.core.errors import (
-    MemoryStoreError,
-    MemoryStoreStaleError,
-    PersonModelStoreError,
+from observer_support import (
+    AT,
+    SINCE,
+    Harness,
+    address,
+    episode,
+    framed,
+    framing,
+    placing,
+    reply,
+    said,
 )
+
+from ai_assistant.core.errors import PersonModelStoreError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
-    BeliefBand,
     ChannelIdentity,
     FindingUnwritten,
     InputPart,
     Memory,
     MemoryChange,
-    MemoryDecisionKind,
     MemoryOperation,
     MemoryOperationKind,
-    MemoryRetirement,
     MemoryStanding,
     MemoryStatus,
     MemoryWriterName,
     ObservationState,
-    OpenQuestionKind,
     PersonActHow,
     PersonModelAct,
     PersonModelWrite,
@@ -53,18 +55,12 @@ from ai_assistant.core.types import (
     SupportDirection,
     SupportOrigin,
 )
-from ai_assistant.orchestration.observer.commit import Checked, Create, RaiseQuestion
-from ai_assistant.orchestration.observer.person import PinConfirmations
 from ai_assistant.orchestration.observer.prompts import (
-    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_FRAMING_PROMPT,
     OBSERVER_SCOUT_PROMPT,
 )
-from ai_assistant.orchestration.observer.writing import FindingWriter
-from ai_assistant.orchestration.writes import MemoryWriteStage
 from ai_assistant.testing import FakeModelProvider, default_prompt
 from ai_assistant.testing.memories import (
-    confirmed_support,
-    legacy_support,
     memory,
     said_support,
 )
@@ -102,12 +98,13 @@ def _store(harness: Harness) -> FakePersonModelStore:
 
 
 def _create(**extra: Any) -> str:
-    return reply(
-        action="create",
-        wording=_CLAIM,
-        supports=[{"part": "P1", "direction": "for", "backs_as_worded": True, "how_sure": "sure"}],
-        **extra,
-    )
+    return framing(framed(_CLAIM, "P1", **extra))
+
+
+def _rendered(declaration: Any, *, person: bool) -> str:
+    """The instruction as the step renders it: framing declares no flag (ADR-0346 §10:1)."""
+    flags = {"person": person} if declaration.flags else {}
+    return str(default_prompt(declaration).render(flags=flags))
 
 
 def _payload(messages: Sequence[Message]) -> dict[str, Any]:
@@ -146,10 +143,12 @@ async def test_without_a_store_each_step_is_as_it_was_and_reads_no_new_output() 
     outcome = await observer.run()
 
     assert (outcome.processed, outcome.pinned) == (1, 0)
-    for provider, declaration in ((scout, OBSERVER_SCOUT_PROMPT), (commit, OBSERVER_COMMIT_PROMPT)):
+    for provider, declaration in (
+        (scout, OBSERVER_SCOUT_PROMPT),
+        (commit, OBSERVER_FRAMING_PROMPT),
+    ):
         (call,) = provider.calls
-        unflagged = default_prompt(declaration).render(flags={"person": False})
-        assert call.messages[0].content == unflagged
+        assert call.messages[0].content == _rendered(declaration, person=False)
         assert "person" not in _payload(call.messages)
     # The restating marker was not read: the finding was committed as any other.
     (record,) = await harness.plans.observations([address("one")])
@@ -174,11 +173,12 @@ async def test_an_episode_that_is_no_persons_is_given_no_fields() -> None:
 
     await observer.run()
 
-    for provider, declaration in ((scout, OBSERVER_SCOUT_PROMPT), (commit, OBSERVER_COMMIT_PROMPT)):
+    for provider, declaration in (
+        (scout, OBSERVER_SCOUT_PROMPT),
+        (commit, OBSERVER_FRAMING_PROMPT),
+    ):
         (call,) = provider.calls
-        assert call.messages[0].content == default_prompt(declaration).render(
-            flags={"person": False}
-        )
+        assert call.messages[0].content == _rendered(declaration, person=False)
         assert "person" not in _payload(call.messages)
     model = await _model(store)
     assert (model.suggestions, model.style_marks) == ((), ())
@@ -206,11 +206,12 @@ async def test_both_steps_are_given_the_persons_five_fields_first() -> None:
         "time_zone": None,
         "language": None,
     }
-    for provider, declaration in ((scout, OBSERVER_SCOUT_PROMPT), (commit, OBSERVER_COMMIT_PROMPT)):
+    for provider, declaration in (
+        (scout, OBSERVER_SCOUT_PROMPT),
+        (commit, OBSERVER_FRAMING_PROMPT),
+    ):
         (call,) = provider.calls
-        assert call.messages[0].content == default_prompt(declaration).render(
-            flags={"person": True}
-        )
+        assert call.messages[0].content == _rendered(declaration, person=True)
         payload = _payload(call.messages)
         assert next(iter(payload)) == "person", "ahead of what changes from call to call"
         assert payload["person"] == fields
@@ -383,7 +384,7 @@ async def test_a_malformed_restating_marker_leaves_the_finding_to_be_committed()
 # --- style marks and pin suggestions (§9:4-§9:5) --------------------------------------
 
 
-async def test_the_commit_steps_style_and_pin_are_recorded_on_the_memory_it_created() -> None:
+async def test_framings_style_and_pin_are_recorded_on_the_memory_it_created() -> None:
     """§9:4, §9:5: a style mark and a pending pin suggestion, on the new memory alone."""
     harness = Harness()
     store = _store(harness)
@@ -431,14 +432,7 @@ async def test_a_mark_the_person_removed_is_not_made_again() -> None:
     await _three(harness)
     scout = FakeModelProvider.scripted(reply(findings=[{"claim": _CLAIM, "rests_on": ["P1"]}]))
     commit = FakeModelProvider.scripted(
-        reply(
-            action="add",
-            memory="M1",
-            supports=[
-                {"part": "P1", "direction": "for", "backs_as_worded": True, "how_sure": "sure"}
-            ],
-            style=True,
-        )
+        _create(style=True), placing(("M1", "restates", "The same claim."))
     )
     observer = harness.observer(scout=scout, commit=commit, person_model=store)
 
@@ -580,165 +574,55 @@ async def test_a_pass_that_cannot_read_the_pins_is_tried_again_on_the_next_run()
     assert (first.pinned, second.pinned) == (0, 1)
 
 
-# --- the retirement guard (§9:9) ------------------------------------------------------
+# --- the pins before each placed write (§9:9) -----------------------------------------
 
 
-def _writer(harness: Harness, store: FakePersonModelStore) -> FindingWriter:
-    pins = PinConfirmations(
-        people=store, memory=harness.memory, writes=harness.writes, now=harness.clock
-    )
-    return FindingWriter(
-        writes=harness.writes,
-        memory=harness.memory,
-        now=harness.clock,
-        mint=harness.mint,
-        pins=pins,
-    )
-
-
-def _ending(target: Memory, cited_episode: str) -> Create:
-    """A replacement retiring ``target``, citing the user's later message (§12:4)."""
-    newer = said_support(cited_episode, when=AT)
-    replacement = memory("observed:new", "The user eats fish now.", newer)
-    against = said_support(cited_episode, when=AT, direction=SupportDirection.AGAINST)
-    return Create(
-        memory=replacement,
-        retiring=MemoryRetirement(
-            memory=target, kind=MemoryOperationKind.END, cites=newer.points_at
-        ),
-        conflict=RaiseQuestion(
-            target=target,
-            kind=OpenQuestionKind.CONFLICT,
-            asks="Newer evidence says: The user eats fish now.",
-            support=against,
-        ),
-    )
-
-
-async def test_a_retirement_its_memorys_pins_outrank_raises_its_conflict_instead() -> None:
-    """§9:9, ADR-0328 §6:5, ADR-0329 §13:1: the pin first, then a question, no retirement."""
+async def test_a_pin_made_since_the_runs_pass_is_confirmed_before_its_memory_is_placed() -> None:
+    """§9:9: the writer runs the pass strictly before each retrieval, so no placement is
+    stale on a pin's support, and the write is made against the standing the pin gives."""
     harness = Harness()
     store = _store(harness)
-    await harness.hold(episode("later", text="I eat fish now."))
-    pin = await _pinned(
-        harness, store, memory("m-veg", "The user is vegetarian.", said_support(address("held")))
+    await _three(harness)
+    held = memory("m-seat", _CLAIM, said_support(address("past")))
+    await harness.hold(episode("past", at=SINCE - timedelta(days=1), text="Window seats."), held)
+    scout = FakeModelProvider.scripted(reply(findings=[{"claim": _CLAIM, "rests_on": ["P1"]}]))
+    shown: list[dict[str, Any]] = []
+
+    def answer(messages: Sequence[Message]) -> str:
+        payload = _payload(messages)
+        if "claim" in payload:
+            return _create()
+        shown.append(payload)
+        return placing(("M1", "restates", "The same claim."))
+
+    observer = harness.observer(
+        scout=scout, commit=FakeModelProvider(reply=answer), person_model=store
     )
-    shown = await _held(harness, "m-veg")
-    assert shown.standing is MemoryStanding.SAID
+    pin = None
 
-    outcome = await _writer(harness, store).write(Checked(primary=_ending(shown, address("later"))))
+    async def pin_between() -> None:
+        nonlocal pin
+        written = await store.add_pin(OWNER_PERSON_ID, "m-seat", act=_PANEL)
+        pin = written.record_id
 
-    after = await _held(harness, "m-veg")
-    assert after.support_at(PinPart(pin=pin)) is not None
-    assert after.status is MemoryStatus.CURRENT
-    (question,) = after.open_questions
-    assert question.kind is OpenQuestionKind.CONFLICT
-    assert [(one.memory, one.operations) for one in outcome.writes] == [
-        ("m-veg", (MemoryOperationKind.RAISE_QUESTION,))
-    ]
-    assert await harness.memory.get("observed:new") is None
+    # The run's own pass finds nothing; the pin is made after it, before the episode.
+    run_pass = observer._pins.run_pass  # type: ignore[union-attr]  # a store is wired
 
+    async def passing_then_pinning() -> int:
+        added = await run_pass()
+        await pin_between()
+        return added
 
-async def test_a_retirement_with_no_pin_lacking_its_support_is_proposed_as_decided() -> None:
-    """§9:9: with nothing to confirm, the guard changes nothing and the end is written."""
-    harness = Harness()
-    store = _store(harness)
-    await harness.hold(
-        episode("later", text="I eat fish now."),
-        memory("m-veg", "The user is vegetarian.", said_support(address("held"))),
-    )
-    shown = await _held(harness, "m-veg")
+    observer._pins.run_pass = passing_then_pinning  # type: ignore[union-attr,method-assign]
 
-    outcome = await _writer(harness, store).write(Checked(primary=_ending(shown, address("later"))))
+    outcome = await observer.run()
 
-    assert (await _held(harness, "m-veg")).status is MemoryStatus.ENDED
-    assert {one.memory for one in outcome.writes} == {"m-veg", "observed:new"}
-
-
-async def test_a_confirmation_cited_over_a_memory_its_pins_made_an_assertion_is_stale() -> None:
-    """ADR-0329 §12:4: only a commit shown the memory as it now stands rules on that."""
-    harness = Harness()
-    store = _store(harness)
-    inferred = memory(
-        "m-veg",
-        "The user is vegetarian.",
-        legacy_support({"id": "old", "content": "Vegetarian."}),
-    )
-    await _pinned(harness, store, inferred)
-    shown = await _held(harness, "m-veg")
-    assert shown.band is not BeliefBand.ASSERTED
-    yes = confirmed_support(address("later"))
-    replacement = memory("observed:new", "The user eats fish now.", yes)
-    create = Create(
-        memory=replacement,
-        retiring=MemoryRetirement(memory=shown, kind=MemoryOperationKind.END, cites=yes.points_at),
-    )
-
-    with pytest.raises(MemoryStoreStaleError):
-        await _writer(harness, store).write(Checked(primary=create))
-
-    assert (await _held(harness, "m-veg")).status is MemoryStatus.CURRENT
-
-
-class _FailingPinWrites(MemoryWriteStage):
-    """The write stage, whose add support citing a pin fails as a store fault would."""
-
-    async def apply(self, change: MemoryChange) -> None:
-        if isinstance(change.operation.cites, PinPart):
-            msg = "the store failed the write"
-            raise MemoryStoreError(msg)
-        await super().apply(change)
-
-
-async def test_a_pin_support_the_guard_cannot_write_fails_the_retirement() -> None:
-    """§9:9: a retirement is never proposed past a pin whose support did not land."""
-    harness = Harness()
-    store = _store(harness)
-    await harness.hold(episode("later", text="I eat fish now."))
-    await _pinned(
-        harness, store, memory("m-veg", "The user is vegetarian.", said_support(address("held")))
-    )
-    shown = await _held(harness, "m-veg")
-    pins = PinConfirmations(
-        people=store,
-        memory=harness.memory,
-        writes=_FailingPinWrites(writer=harness.writer),
-        now=harness.clock,
-    )
-    writer = FindingWriter(
-        writes=harness.writes,
-        memory=harness.memory,
-        now=harness.clock,
-        mint=harness.mint,
-        pins=pins,
-    )
-
-    with pytest.raises(MemoryStoreError):
-        await writer.write(Checked(primary=_ending(shown, address("later"))))
-
-    assert (await _held(harness, "m-veg")).status is MemoryStatus.CURRENT
-    assert await harness.memory.get("observed:new") is None
-
-
-async def test_a_create_the_policy_may_supersede_with_confirms_every_pin_first() -> None:
-    """§9:9, ADR-0328 §11:7: a supersession is ruled against the standing the pins give."""
-    harness = Harness(ruling=MemoryDecisionKind.SUPERSEDE)
-    store = _store(harness)
-    await harness.hold(episode("later", text="I am vegetarian, mostly."))
-    pin = await _pinned(
-        harness, store, memory("m-veg", "The user is vegetarian.", said_support(address("held")))
-    )
-    newer = memory("observed:new", "The user is vegetarian.", said_support(address("later")))
-
-    # The writer refuses an end the pinned standing outranks (ADR-0328 §6:5).
-    with contextlib.suppress(MemoryStoreError):
-        await _writer(harness, store).write(Checked(primary=Create(memory=newer)))
-
-    (call,) = harness.policy.calls
-    assert [one.id for one in call.conflicts] == ["m-veg"], "a supersession was in reach"
-    held = await _held(harness, "m-veg")
-    assert held.support_at(PinPart(pin=pin)) is not None, "confirmed before the ingest"
-    assert held.status is MemoryStatus.CURRENT
+    assert outcome.processed == 1
+    assert pin is not None
+    seat = await _held(harness, "m-seat")
+    assert seat.support_at(PinPart(pin=pin)) is not None
+    (stored,) = shown[0]["stored"]
+    assert stored["stands"] == "you confirmed this wording", "placed against the pin's support"
 
 
 class _FailingMarksOnce:
@@ -762,10 +646,9 @@ class _FailingMarksOnce:
 async def test_a_mark_the_store_failed_is_made_when_the_retry_adds_to_the_memory() -> None:
     """§9:4-§9:5, ADR-0329 §16:4: the attempt fails, and the episode stays to be retried.
 
-    The memory the first attempt created is found again by the retry's search, by an
-    observer built afresh over the same stores, and the commit step adds to it, as its
-    instruction has it for a memory that already states the claim: that memory, as the
-    step judged it, is marked.
+    The memory the first attempt created is retrieved again by the retry, by an observer
+    built afresh over the same stores, and placed as restated, so the framed memory is
+    held at it: that memory, as framing judged it, is marked.
     """
     harness = Harness()
     store = _store(harness)
@@ -784,15 +667,7 @@ async def test_a_mark_the_store_failed_is_made_when_the_retry_adds_to_the_memory
     harness.clock.advance(timedelta(minutes=2))  # past the first backoff
     restarted = harness.observer(
         commit=FakeModelProvider.scripted(
-            reply(
-                action="add",
-                memory="M1",
-                supports=[
-                    {"part": "P1", "direction": "for", "backs_as_worded": True, "how_sure": "sure"}
-                ],
-                style=True,
-                pin=True,
-            )
+            _create(style=True, pin=True), placing(("M1", "restates", "The same claim."))
         ),
         person_model=store,
     )

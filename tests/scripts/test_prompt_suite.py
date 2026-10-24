@@ -334,7 +334,12 @@ def test_a_malformed_case_is_a_defect_naming_its_file(
             _planning(property={"check": "no_label", "fields": ["meaning"], "labels": ["S"]}),
             "a planning round's text fields",
         ),
-        (_planning(property={"check": "memory_kept", "memory": "M1"}), "reads no reply"),
+        (
+            _planning(
+                property={"check": "relation_in", "memory": "M1", "relations": ["contained"]}
+            ),
+            "reads no reply",
+        ),
         (
             _planning(
                 input={
@@ -455,16 +460,18 @@ def test_no_label_reads_the_named_fields_anywhere_in_the_reply() -> None:
         ("understanding", json.dumps({"meaning": None})),
         ("understanding", json.dumps({"meaning": "x", "meaning_ground": "guessed"})),
         ("observer_scout", json.dumps({"findings": [{"rests_on": ["P1"]}]})),
-        ("observer_commit", json.dumps({"action": "bogus"})),
-        ("observer_commit", json.dumps({"action": [], "memory": "M1"})),
+        ("observer_framing", json.dumps({"memories": [{"supports": []}]})),
+        ("observer_framing", json.dumps({"memories": "none"})),
+        ("observer_placement", json.dumps({"relations": "M1"})),
+        ("observer_placement", json.dumps({"relations": [{"relation": "restates"}]})),
     ],
 )
 def test_a_reply_its_stage_would_refuse_passes_no_check(prompt: str, text: str) -> None:
     checks = [one for one in replay_tool.CODE_CHECKS.values() if prompt in one.prompts]
     params: dict[str, dict[str, object]] = {
         "no_label": {"fields": ["meaning", "claim", "wording"], "labels": ["H"]},
-        "action_in": {"actions": ["nothing"]},
-        "memory_kept": {"memory": "M1"},
+        "frames_nothing": {},
+        "relation_in": {"memory": "M1", "relations": ["contained"]},
     }
 
     for check in checks:
@@ -487,10 +494,12 @@ def test_no_label_may_name_a_nested_field_of_the_reply_shape() -> None:
         "understanding"
     )
     assert "claim" in declared("observer_scout")
-    assert {"wording", "note", "asks"} <= declared("observer_commit")
+    assert {"claim", "why", "reason"} <= declared("observer_scout")
+    assert {"wording", "note", "nothing"} <= declared("observer_framing")
+    assert {"note", "relation"} <= declared("observer_placement")
     assert "findings" not in declared("observer_scout")
     assert {"references", "unresolved", "meaning_labels"}.isdisjoint(declared("understanding"))
-    assert {"supports", "resolves"}.isdisjoint(declared("observer_commit"))
+    assert {"supports", "memories"}.isdisjoint(declared("observer_framing"))
 
 
 def test_no_label_takes_a_label_as_a_whole_word_alone() -> None:
@@ -535,22 +544,34 @@ def test_asks_about_needs_a_message_and_every_call_named() -> None:
     assert _round("asks_about", params, None) == "the response reads as no round"
 
 
-def test_the_commit_checks_read_the_action_and_its_memory() -> None:
-    nothing = json.dumps({"action": "nothing"})
+def test_the_framing_check_reads_whether_any_memory_is_kept() -> None:
+    nothing = json.dumps({"memories": [], "nothing": "One choice is no habit."})
     empty = "{}"
-    replaced = json.dumps({"action": "replace", "memory": "M1", "wording": "narrower"})
-    replaced_other = json.dumps({"action": "replace", "memory": "M2"})
+    kept = json.dumps({"memories": [{"wording": "The user books ahead."}]})
 
-    assert _judge("action_in", {"actions": ["nothing"]}, "observer_commit", nothing) is None
-    assert _judge("action_in", {"actions": ["nothing"]}, "observer_commit", empty) is None
-    assert _judge("action_in", {"actions": ["nothing"]}, "observer_commit", replaced) == (
-        "the reply takes another action"
+    assert _judge("frames_nothing", {}, "observer_framing", nothing) is None
+    assert _judge("frames_nothing", {}, "observer_framing", empty) is None
+    assert _judge("frames_nothing", {}, "observer_framing", kept) == "the reply frames a memory"
+
+
+def test_the_placement_check_reads_the_relation_named_for_the_memory() -> None:
+    params: dict[str, object] = {"memory": "M1", "relations": ["contained", "supports"]}
+
+    def placed(*relations: tuple[str, str]) -> str:
+        return json.dumps(
+            {"relations": [{"memory": one, "relation": two, "note": "n"} for one, two in relations]}
+        )
+
+    assert _judge("relation_in", params, "observer_placement", placed(("M1", "contained"))) is None
+    assert _judge(
+        "relation_in", params, "observer_placement", placed(("M1", "no_longer_true"))
+    ) == ("the reply names another relation")
+    assert _judge("relation_in", params, "observer_placement", placed(("M2", "contained"))) == (
+        "the reply does not name the memory once"
     )
-    assert _judge("memory_kept", {"memory": "M1"}, "observer_commit", nothing) is None
-    assert _judge("memory_kept", {"memory": "M1"}, "observer_commit", replaced) == (
-        "the reply retires the memory"
-    )
-    assert _judge("memory_kept", {"memory": "M1"}, "observer_commit", replaced_other) is None
+    assert _judge(
+        "relation_in", params, "observer_placement", placed(("M1", "contained"), ("M1", "supports"))
+    ) == ("the reply does not name the memory once")
 
 
 # --- §4, §5: running the suite ------------------------------------------------------------------
@@ -798,18 +819,18 @@ def test_a_reply_a_check_cannot_read_fails_its_sample_and_the_run_goes_on(
     tmp_path: Path,
 ) -> None:
     case = _understanding(
-        prompt="observer_commit",
+        prompt="observer_placement",
         guards="narrower_write_loses_fact",
         samples=3,
-        flags={"person": False},
-        property={"check": "memory_kept", "memory": "M1"},
+        flags={},
+        property={"check": "relation_in", "memory": "M1", "relations": ["contained"]},
     )
-    directory = _cases(tmp_path, ("observer_commit/one.toml", case))
+    directory = _cases(tmp_path, ("observer_placement/one.toml", case))
     replies = iter(
         [
-            {"action": [], "memory": "M1"},
-            {"action": "bogus", "memory": "M1"},
-            {"action": "add", "memory": "M1"},
+            {"relations": "M1"},
+            {"relations": [{"memory": "M1"}]},
+            {"relations": [{"memory": "M1", "relation": "contained", "note": "Part of it."}]},
         ]
     )
     model = Model(reply=lambda system: ModelResponse(parts=[TextPart(json.dumps(next(replies)))]))
@@ -821,7 +842,7 @@ def test_a_reply_a_check_cannot_read_fails_its_sample_and_the_run_goes_on(
     lines = _lines(tmp_path / "results")
     assert [one["passed"] for one in lines] == [False, False, True]
     assert lines[0]["reason"] == "the reply is not one its stage reads"
-    assert any("memory_kept passed: default 1 of 3" in one for one in reports)
+    assert any("relation_in passed: default 1 of 3" in one for one in reports)
 
 
 def test_a_check_that_raises_fails_its_sample_alone(

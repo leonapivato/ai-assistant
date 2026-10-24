@@ -26,7 +26,7 @@ directory and takes no lock there, and it writes a marker into the copy last, so
 that did not finish carries none (§3:3).
 
 ``replay`` re-sends given entries of understanding, of each planning round, of each digest
-part and of the observer's scout and commit calls (§4:1), each with a candidate's
+part and of the observer's scout, framing and placement calls (§4:1), each with a candidate's
 instruction in place of its system message and everything else as recorded, through the
 package's own model layer, to the one model the run names (§4:7). A candidate is a
 template file, ``<prompt>.txt``, checked as the hub checks an override (§4:3), or
@@ -126,8 +126,10 @@ from ai_assistant.models import (
 )
 from ai_assistant.models.follow_up import FOLLOW_UP_PROMPT, follow_up_round
 from ai_assistant.models.tool_calling import ROUND_TOOL
-from ai_assistant.orchestration.observer.commit import CommitReply
-from ai_assistant.orchestration.observer.scout import ScoutReply, parsed
+from ai_assistant.orchestration.observer.framing import FramingReply
+from ai_assistant.orchestration.observer.placement import PlacementReply
+from ai_assistant.orchestration.observer.replies import parsed
+from ai_assistant.orchestration.observer.scout import ScoutReply
 
 # Understanding's own reading of its reply, so the suite reads a reply as the hub does
 # rather than as a copy of that reading that could drift from it.
@@ -175,8 +177,10 @@ RECORDED: Final = "recorded"
 #: The sources whose given entries are replayed (§4:1).
 SOURCES: Final = ("understanding", "planning", "digesting", "observer")
 
-#: The observer's steps that make a model call (ADR-0333 §2:2).
-OBSERVER_CALLS: Final = frozenset({"scout", "commit"})
+#: The observer's steps that make a model call (ADR-0333 §2:2, ADR-0346 §10:1). The
+#: retired commit step's calls are still read from an older record, and replay only where
+#: the package declares a prompt for them, which it no longer does.
+OBSERVER_CALLS: Final = frozenset({"scout", "commit", "framing", "placement"})
 
 #: What the copy step never copies by name: the instance lock and the hub's sockets.
 _SKIPPED_NAMES: Final = frozenset({LOCK_FILENAME, SOCKET_FILENAME, ADMIN_SOCKET_FILENAME})
@@ -610,7 +614,7 @@ def _given_of(
     """The line as a model call's given entry, or ``None`` where it is not one.
 
     An activation's own file holds understanding's, planning's and digesting's; its
-    observer file the scout's and the commit step's (ADR-0333 §3:1).
+    observer file the scout's, framing's and placement's (ADR-0333 §3:1, ADR-0346 §10:1).
     """
     source, body, recorded_at = line.get("source"), line.get("body"), line.get("recorded_at")
     if line.get("kind") != "given" or not isinstance(body, dict) or not isinstance(source, str):
@@ -1942,9 +1946,6 @@ PLANNING: Final = "planning"
 #: What a planning round's text fields are called in a code check.
 _ROUND_FIELDS: Final = frozenset({"message", "notes"})
 
-#: The commit step's actions that retire the memory they name (ADR-0328 §5:7).
-_RETIRING: Final = frozenset({"end", "mark_wrong", "replace"})
-
 
 @dataclass(frozen=True, slots=True)
 class Reply:
@@ -1993,7 +1994,8 @@ class CodeCheck:
 REPLY_READERS: Final[dict[str, Callable[[str], BaseModel | None]]] = {
     "understanding": understanding_parsed,
     "observer_scout": lambda content: parsed(content, ScoutReply),
-    "observer_commit": lambda content: parsed(content, CommitReply),
+    "observer_framing": lambda content: parsed(content, FramingReply),
+    "observer_placement": lambda content: parsed(content, PlacementReply),
 }
 
 #: The shape each reader reads a reply as, whose text fields a case's ``no_label`` may
@@ -2002,7 +2004,8 @@ REPLY_READERS: Final[dict[str, Callable[[str], BaseModel | None]]] = {
 REPLY_SHAPES: Final[dict[str, type[BaseModel]]] = {
     "understanding": ProposedActivationUnderstanding,
     "observer_scout": ScoutReply,
-    "observer_commit": CommitReply,
+    "observer_framing": FramingReply,
+    "observer_placement": PlacementReply,
 }
 
 
@@ -2103,25 +2106,38 @@ def _asks_about(reply: Reply, params: Mapping[str, object]) -> Judgement:
     return None
 
 
-def _action_in(reply: Reply, params: Mapping[str, object]) -> Judgement:
-    """The commit step's reply takes one of the named actions."""
+def _frames_nothing(reply: Reply, params: Mapping[str, object]) -> Judgement:  # noqa: ARG001 — every check takes its parameters
+    """The framing call keeps no memory (ADR-0346 §5:6)."""
     if reply.reading is None:
         return _UNREAD
-    if reply.reading.get("action") not in cast("list[str]", params["actions"]):
-        return "the reply takes another action"
+    if reply.reading.get("memories"):
+        return "the reply frames a memory"
     return None
 
 
-def _memory_kept(reply: Reply, params: Mapping[str, object]) -> Judgement:
-    """The commit step's reply does not end, mark wrong or replace the named memory."""
+def _relation_in(reply: Reply, params: Mapping[str, object]) -> Judgement:
+    """The placement call names one of the named relations for the named memory."""
     if reply.reading is None:
         return _UNREAD
-    if reply.reading.get("action") in _RETIRING and reply.reading.get("memory") == params["memory"]:
-        return "the reply retires the memory"
+    relations = reply.reading.get("relations")
+    named = (
+        [
+            one.get("relation")
+            for one in relations
+            if isinstance(one, dict) and one.get("memory") == params["memory"]
+        ]
+        if isinstance(relations, list)
+        else []
+    )
+    if len(named) != 1:
+        return "the reply does not name the memory once"
+    if named[0] not in cast("list[str]", params["relations"]):
+        return "the reply names another relation"
     return None
 
 
-_COMMIT: Final = frozenset({"observer_commit"})
+_FRAMING: Final = frozenset({"observer_framing"})
+_PLACEMENT: Final = frozenset({"observer_placement"})
 
 #: The code checks a case may name (§3:5). A check is added here, never named by a case
 #: before it is.
@@ -2143,18 +2159,18 @@ CODE_CHECKS: Final[dict[str, CodeCheck]] = {
             _asks_about,
         ),
         CodeCheck(
-            "action_in",
-            "the commit step takes one of the named actions",
-            _COMMIT,
-            {"actions": "strings"},
-            _action_in,
+            "frames_nothing",
+            "the framing call keeps no memory",
+            _FRAMING,
+            {},
+            _frames_nothing,
         ),
         CodeCheck(
-            "memory_kept",
-            "the commit step does not end, mark wrong or replace the named memory",
-            _COMMIT,
-            {"memory": "string"},
-            _memory_kept,
+            "relation_in",
+            "the placement call names one of the named relations for the named memory",
+            _PLACEMENT,
+            {"memory": "string", "relations": "strings"},
+            _relation_in,
         ),
     )
 }

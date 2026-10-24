@@ -1,0 +1,16 @@
+# The part says where the user's sister is moving and roughly when, and nothing more. A
+# wording that adds a city, a reason, a job, a name or an exact day states what no part does.
+prompt = "observer_framing"
+guards = "unstated_detail"
+came_from = "2026-10-21"
+set = "held_out"
+samples = 1
+
+[property]
+check = "read"
+read = """Every wording, and every support's note, states nothing P1 does not: no city, no \
+reason for the move, no name, no exact day. Saying the month that "next month" meant, from \
+when P1 was said, is not an added detail."""
+
+[input]
+file = "unstated-detail.json"

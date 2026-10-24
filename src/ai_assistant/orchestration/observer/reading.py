@@ -1,36 +1,52 @@
-"""What the observer reads around a leaving episode, and how it renders it (ADR-0329 §8).
+"""What the observer reads of a leaving episode, and how it renders it (ADR-0346 §2).
 
-For a leaving episode the observer reads (§8:1): the episode's whole record; the
-episodes still in the window that occurred after it; for each story the episode's
-activation belongs to, its summary and its most recent episodes, up to a bound; and past
-episodes, their candidates and memories related to the episode, found by relevance
-search over the memory store, up to a bound. This module gathers them
-(:class:`EpisodeReader`) and renders them for the scout (:meth:`Reading.payload`).
+For a leaving episode the observer reads the episode's whole record and what that record
+points at (§2:1): the memories and episodes its recall runs returned; the stories,
+episodes, notes and memories its planning labels name; what its understanding's
+referents name; and the asking activation of the question its input answers, which an
+approval its rounds ran under names. It reads nothing else and runs no search (§2:4): no
+later episode, no story read beyond what a label or a referent names, and no relevance
+search. This module gathers it (:class:`EpisodeReader`) and renders it for the scout
+(:meth:`Reading.payload`).
 
-**Parts, not fields** (§8:6). An episode is rendered by the parts a support may point
-at (ADR-0328 §4's part table, §9:6): the input or each message it took in, each round's
+**As it stood then** (§2:2, ADR-0347 §4). What the record points at is shown as it stood
+when the episode's activation started: a memory with the supports, operations, status
+and open questions it had then, from its dated supports and operation log, and a story
+with the summary of its latest version at or below the episode's ``stories_position``,
+read through :meth:`~ai_assistant.core.protocols.StoryStore.summary_at`. Nothing that
+happened after is shown. The activation's start is the instant, as the story store's
+position is, since it is the one every read of the activation began from.
+
+**No longer held** (§2:3, ADR-0347 §4:3). Where the store no longer holds a thing as it
+stood then, the scout is shown only what the leaving episode itself recorded of it,
+marked as no longer held: a memory or an episode by the recall item a recall run kept for
+it, or by its identity alone where none did; and a story by its identity alone, where
+the episode records no position, no version lies at or below it, or no text is held for
+that version. Nothing later stands in for it.
+
+**Parts, not fields** (ADR-0329 §8:6). An episode is rendered by the parts a support may
+point at (ADR-0328 §4's part table): the input or each message it took in, each round's
 message, each evidence item of its digests, and, for a candidate recorded under an
-approval, the user's yes to the wording it showed. Outside input and digested evidence
-are rendered, each marked outside where it is; an episode's ``content``, its notes, its
-understanding and every other field are not. Each part carries a label (``P1``, ``P2``,
-...) the scout names it by, and code maps the label back to the part: no model writes
-a part's address.
+approval, the user's yes to the wording it showed. Each carries a label (``P1``, ``P2``,
+...) the steps name it by, and code maps the label back to the part: no model writes a
+part's address. The leaving episode's understanding, its latest version, is rendered
+beside its parts (§2:5); every other field of an episode is not.
 
-**Code-owned facts** (§9:5). Each part is read with what code sets on a support that
-points at it: its origin, from the part and the episode's record (ADR-0328 §4:2-§4:4),
-and its ``when`` (§4:12). A round's message takes its outside origin where the
+**Code-owned facts** (ADR-0329 §9:5). Each part is read with what code sets on a support
+that points at it: its origin, from the part and the episode's record (ADR-0328
+§4:2-§4:4), and its ``when`` (§4:12). A round's message takes its outside origin where the
 activation's record says it had read outside content (§4:3), as authorizing decides it
-(:func:`~ai_assistant.orchestration.authorizer.read_outside_content`), over the stored
-record alone. Every span reaches the model as quoted source data, attributed from the
-record — whose message, which round, which digest, outside or not — and never from the
-text (§8:5, ADR-0098 §2).
+(:func:`~ai_assistant.orchestration.authorizer.read_outside_content`). Every span reaches
+the model as quoted source data, attributed from the record, never from the text
+(ADR-0329 §8:5, ADR-0098 §2).
 
-**What is not read** (§8:4). No held result, no model's hidden thinking, no diagnostic
-record: this module imports none of them, and an import-linter contract forbids the
-observer's modules importing ``orchestration.held_results`` (§15:4). An episode without
-a processing record carries no recorded trigger to set an origin from (ADR-0328 §4:2),
-so it is read as no part, and a leaving one is skipped by the stage. An open episode is
-read as an id with no record (ADR-0286 §6:4).
+**What is not read** (ADR-0329 §8:4, as ADR-0346 §2:6 keeps it). No held result, no
+model's hidden thinking, no diagnostic record: this module imports none of them, and an
+import-linter contract forbids the observer's modules importing
+``orchestration.held_results``. An episode without a processing record carries no
+recorded trigger to set an origin from (ADR-0328 §4:2), so it is read as no part, and a
+leaving one is skipped by the stage. An open episode is read as an id with no record
+(ADR-0286 §6:4), shown by its identity alone.
 """
 
 from __future__ import annotations
@@ -41,16 +57,18 @@ from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.types import (
     MAX_STORY_PAGE,
+    OWNER_PERSON_ID,
     ConfirmationPart,
     EpisodicMemory,
     EvidenceItemPart,
-    FindingUnwritten,
     InputOrigin,
     InputPart,
     LabelKind,
     Memory,
     MemoryKind,
+    MemoryOperationKind,
     MemoryStanding,
+    MemoryStatus,
     Placement,
     PlacementReach,
     PlacementSetter,
@@ -62,7 +80,6 @@ from ai_assistant.core.types import (
     SupportOrigin,
     ToolOutcome,
     origin_is_outside,
-    part_episode,
 )
 from ai_assistant.orchestration.authorizer import (
     WorkingRecord,
@@ -71,11 +88,6 @@ from ai_assistant.orchestration.authorizer import (
 )
 from ai_assistant.orchestration.candidates import done_candidates
 from ai_assistant.orchestration.episode_reads import without_open_episodes
-from ai_assistant.orchestration.reliance import (
-    MEMORIES_ARGUMENT,
-    NOTE_RELIANCE_CAPABILITY,
-    SHAPED_ARGUMENT,
-)
 from ai_assistant.orchestration.remembering import (
     FACT_ARGUMENT,
     REMEMBER_CAPABILITY,
@@ -83,7 +95,6 @@ from ai_assistant.orchestration.remembering import (
     candidate_of,
 )
 from ai_assistant.orchestration.stories import episode_address
-from ai_assistant.orchestration.support_parts import part_content
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Mapping, Sequence, Set
@@ -92,15 +103,21 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import MemoryStore, PlanStore, StoryStore
     from ai_assistant.core.types import (
         ActivationEffect,
+        ActivationUnderstanding,
         EpisodeProcessingRecord,
         FrozenJson,
+        OpenQuestion,
+        RecalledItem,
         StoryNote,
+        SupportHolder,
         SupportPart,
+        UnderstandingReferent,
     )
 
 __all__ = [
     "ORIGIN_WORDS",
     "STANDING_WORDS",
+    "USER_NAME",
     "EpisodeReader",
     "Hint",
     "ReadEpisode",
@@ -108,14 +125,23 @@ __all__ = [
     "ReadPart",
     "ReadStory",
     "Reading",
-    "Rehydrated",
-    "Reliance",
     "approval_instant",
     "episode_text",
+    "holder_words",
     "input_origin",
+    "memory_then",
+    "name_shown",
+    "name_stored",
 ]
 
-#: Whose words a part is, as the record says (§8:5): the attribution a rendering
+#: The placement a story's summary or a note supplies: the owner alone (ADR-0304 §4:1).
+_OWNER_ONLY: Final = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
+
+#: How the owner is named in what a model is shown and answers (ADR-0345 §9:4): the
+#: record names them by :data:`OWNER_PERSON_ID`, which code puts in place of this.
+USER_NAME: Final = "the user"
+
+#: Whose words a part is, as the record says (ADR-0329 §8:5): the attribution a rendering
 #: carries beside each span, never read from the span's own text.
 ORIGIN_WORDS: Final[Mapping[SupportOrigin, str]] = {
     SupportOrigin.USER_MESSAGE: "the user",
@@ -145,6 +171,31 @@ STANDING_WORDS: Final[Mapping[MemoryStanding, str]] = {
 }
 
 
+def name_shown(name: str) -> str:
+    """A name as a model is shown it: the owner as :data:`USER_NAME` (ADR-0345 §9:4)."""
+    return USER_NAME if name == OWNER_PERSON_ID else name
+
+
+def name_stored(name: str) -> str:
+    """A name a model gave, as the record keeps it: :data:`USER_NAME` as the owner's id."""
+    stripped = name.strip()
+    return OWNER_PERSON_ID if stripped.casefold() in {USER_NAME, "user"} else stripped
+
+
+def holder_words(holder: SupportHolder) -> str:
+    """A holder as a model is shown it, from the record (ADR-0345 §2:3, §12:1)."""
+    match holder.kind.value:
+        case "person":
+            return USER_NAME if holder.identifier == OWNER_PERSON_ID else f"{holder.identifier}"
+        case "outside_source":
+            kind = "a source claimed by a forward" if holder.claimed else "a source"
+            return f"{kind}: {holder.identifier}"
+        case "assistant_statement":
+            return "the assistant's statement"
+        case _:
+            return "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class ReadPart:
     """One part of one episode, as the observer read it (ADR-0328 §4's part table).
@@ -157,7 +208,7 @@ class ReadPart:
         text: Its content.
         origin: The origin code sets on a support pointing at it (ADR-0328 §4:2).
         when: The ``when`` code sets on such a support (§4:12), or ``None``.
-        answers: The message it replies to, where it is a reply (§9:3).
+        answers: The message it replies to, where it is a reply (ADR-0346 §5:1).
         question: For an evidence item, the question its digest answered.
     """
 
@@ -177,11 +228,11 @@ class ReadPart:
         """The part as the steps are shown it, attributed from the record (§8:5).
 
         Args:
-            answers: Whether to carry the message it replies to (§9:3).
+            answers: Whether to carry the message it replies to (ADR-0346 §5:1).
             exchange: The label of the exchange it belongs to, where the step is shown
-                parts apart from their exchanges (the commit step); the part then names
-                that exchange and when it occurred. The scout is shown each part inside
-                its exchange instead, and passes none.
+                parts apart from their exchanges (framing and placement); the part then
+                names that exchange and when it occurred. The scout is shown each part
+                inside its exchange instead, and passes none.
 
         Returns:
             One JSON object.
@@ -205,20 +256,26 @@ class ReadPart:
 
 @dataclass(frozen=True, slots=True)
 class ReadEpisode:
-    """One episode the observer read, with its parts.
+    """One episode the observer read, with its parts, or by its identity alone.
 
     Attributes:
         handle: The label it is shown under (``E1``, ``E2``, ...).
-        record: The episode, as stored.
-        parts: Its parts, in record order.
+        episode: Its id, exactly as held.
+        record: The episode, as stored; ``None`` where it is no longer held (§2:3).
+        parts: Its parts, in record order; none where it is not held.
+        excerpt: Where it is not held, what a recall run kept of it, or ``None``.
     """
 
     handle: str
-    record: EpisodicMemory
-    parts: tuple[ReadPart, ...]
+    episode: str
+    record: EpisodicMemory | None
+    parts: tuple[ReadPart, ...] = ()
+    excerpt: str | None = None
 
     def rendered(self) -> dict[str, FrozenJson]:
         """The episode as the scout is shown it: when it happened, and its parts."""
+        if self.record is None:
+            return {"exchange": self.handle, "held": False, "recalled_as": self.excerpt}
         return {
             "exchange": self.handle,
             "occurred_at": self.record.occurred_at.isoformat(),
@@ -228,20 +285,82 @@ class ReadEpisode:
 
 @dataclass(frozen=True, slots=True)
 class ReadMemory:
-    """One stored memory the observer read, and the label it is shown under (``M1``...)."""
+    """One memory the record points at, as it stood then (§2:2), or not held (§2:3).
+
+    Attributes:
+        handle: Its label (``M1``, ``M2``, ...).
+        memory_id: Its id, exactly as held.
+        then: The memory as it stood when the activation started; ``None`` where the
+            store no longer holds it as it stood then.
+        excerpt: Where it is not held, what a recall run kept of it, or ``None``.
+    """
 
     handle: str
-    memory: Memory
+    memory_id: str
+    then: Memory | None
+    excerpt: str | None = None
 
     def rendered(self) -> dict[str, FrozenJson]:
         """The memory as the scout is shown it: its claim, standing and open questions."""
+        memory = self.then
+        if memory is None:
+            return {"memory": self.handle, "held": False, "recalled_as": self.excerpt}
         return {
             "memory": self.handle,
-            "claim": self.memory.content,
-            "stands": STANDING_WORDS[self.memory.standing],
-            "status": self.memory.status.value,
-            "open_questions": [one.asks for one in self.memory.open_questions if not one.resolved],
+            "claim": memory.content,
+            "stands": STANDING_WORDS[memory.standing],
+            "status": memory.status.value,
+            "held_by": [holder_words(one) for one in memory.holders],
+            "open_questions": [one.asks for one in memory.open_questions if not one.resolved],
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ReadStory:
+    """One story the record points at, with the summary it had then (ADR-0347 §4).
+
+    Attributes:
+        handle: Its label (``S1``, ``S2``, ...).
+        story_id: Its id, exactly as held.
+        summary: The lines of the summary it had then; ``None`` where none is held (§4:3).
+        outside: That summary's mark (ADR-0303 §3:4).
+    """
+
+    handle: str
+    story_id: str
+    summary: tuple[str, ...] | None
+    outside: bool = False
+
+    def rendered(self) -> dict[str, FrozenJson]:
+        """The story as the scout is shown it."""
+        if self.summary is None:
+            return {"story": self.handle, "held": False}
+        return {
+            "story": self.handle,
+            "summary": list(self.summary),
+            "summary_outside": self.outside,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReadNote:
+    """One story note planning was shown (ADR-0346 §2:1), never a part.
+
+    Attributes:
+        handle: Its label (``N1``, ``N2``, ...).
+        text: What it says; ``None`` where the story store no longer shows it.
+        outside: Its mark (ADR-0303 §3:1).
+    """
+
+    handle: str
+    text: str | None
+    outside: bool = True
+
+    def rendered(self) -> dict[str, FrozenJson]:
+        """The note as the scout is shown it."""
+        if self.text is None:
+            return {"note": self.handle, "held": False}
+        return {"note": self.handle, "text": self.text, "outside": self.outside}
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,79 +401,51 @@ class Hint:
 
 
 @dataclass(frozen=True, slots=True)
-class Reliance:
-    """One memory a reliance call in the leaving episode named (ADR-0329 §6:7, §14:1).
-
-    Attributes:
-        handle: The memory's label.
-        memory: The memory, as read.
-        shaped: What the reliance shaped, as planning said it.
-        relied_at: When the round that noted it was recorded.
-    """
-
-    handle: str
-    memory: Memory
-    shaped: str
-    relied_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class ReadStory:
-    """One story the leaving episode's activation belongs to (§8:1).
-
-    Attributes:
-        summary: Its summary's lines, none where none was written.
-        outside: Its summary's mark (ADR-0303 §3:4).
-        recent: Its most recent episodes not shown in an earlier section.
-    """
-
-    summary: tuple[str, ...]
-    outside: bool
-    recent: tuple[ReadEpisode, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class Reading:
-    """Everything the observer read for one leaving episode (§8:1).
+    """Everything the observer read for one leaving episode (ADR-0346 §2).
 
     Attributes:
         leaving: The leaving episode.
-        later: The episodes still in the window that occurred after it, oldest first.
-        stories: The stories its activation belongs to.
-        past: Related past episodes, each with its candidates' facts and the claims of
-            the single observations recorded on it (§11:4).
-        memories: Related stored memories, and the memories its hints and reliance
-            calls name.
+        understood: Its understanding's latest version, rendered (§2:5), or ``None``.
+        recalled: The labels of what its recall runs returned, in the order returned.
+        earlier: The episodes its record points at, oldest first, each with its parts,
+            or by its identity alone where it is not held.
+        memories: The memories its record points at, each as it stood then.
+        stories: The stories its record points at, each with the summary it had then.
+        notes: The story notes its planning labels name.
         hints: Its candidates.
-        reliances: The memories its reliance calls named.
         supplied: The placement of every record read, for the meet a write takes
             (ADR-0329 §12:6).
     """
 
     leaving: ReadEpisode
-    later: tuple[ReadEpisode, ...] = ()
-    stories: tuple[ReadStory, ...] = ()
-    past: tuple[tuple[ReadEpisode, tuple[str, ...]], ...] = ()
+    understood: dict[str, FrozenJson] | None = None
+    recalled: tuple[str, ...] = ()
+    earlier: tuple[ReadEpisode, ...] = ()
     memories: tuple[ReadMemory, ...] = ()
+    stories: tuple[ReadStory, ...] = ()
+    notes: tuple[ReadNote, ...] = ()
     hints: tuple[Hint, ...] = ()
-    reliances: tuple[Reliance, ...] = ()
     supplied: tuple[Placement, ...] = ()
     _parts: dict[str, ReadPart] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Index every part by its label, once."""
-        episodes = [
-            self.leaving,
-            *self.later,
-            *(one for story in self.stories for one in story.recent),
-            *(one for one, _ in self.past),
-        ]
-        for one in episodes:
+        for one in (self.leaving, *self.earlier):
             for part in one.parts:
                 self._parts[part.handle] = part
         for hint in self.hints:
             if hint.confirmation is not None:
                 self._parts[hint.confirmation.handle] = hint.confirmation
+
+    @property
+    def record(self) -> EpisodicMemory:
+        """The leaving episode, as stored."""
+        record = self.leaving.record
+        if record is None:  # pragma: no cover - the reader reads a held episode
+            msg = "the leaving episode is held"
+            raise ValueError(msg)
+        return record
 
     def part(self, handle: str) -> ReadPart | None:
         """The part a label names, or ``None``."""
@@ -366,21 +457,10 @@ class Reading:
 
     @property
     def leaving_parts(self) -> frozenset[SupportPart]:
-        """The leaving episode's parts, its confirmations included (§8:2)."""
+        """The leaving episode's parts, its confirmations included (ADR-0346 §3:1)."""
         own = {one.part for one in self.leaving.parts}
         own.update(hint.confirmation.part for hint in self.hints if hint.confirmation)
         return frozenset(own)
-
-    def memory(self, handle: str) -> Memory | None:
-        """The memory a label names, or ``None``."""
-        held = next((one.memory for one in self.memories if one.handle == handle), None)
-        if held is not None:
-            return held
-        return next((one.memory for one in self.reliances if one.handle == handle), None)
-
-    def reliance(self, memory_id: str) -> Reliance | None:
-        """The reliance call naming the memory ``memory_id``, or ``None``."""
-        return next((one for one in self.reliances if one.memory.id == memory_id), None)
 
     def payload(self) -> dict[str, FrozenJson]:
         """What the scout is shown: one JSON object of quoted source data (§8:5).
@@ -389,41 +469,19 @@ class Reading:
             The object.
         """
         leaving = self.leaving.rendered()
+        leaving["understood"] = self.understood
+        leaving["recalled"] = list(self.recalled)
         leaving["candidates"] = [hint.rendered() for hint in self.hints]
         leaving["confirmations"] = [
             hint.confirmation.rendered() for hint in self.hints if hint.confirmation is not None
         ]
-        leaving["reliance"] = [
-            {"memory": one.handle, "claim": one.memory.content, "shaped": one.shaped}
-            for one in self.reliances
-        ]
         return {
-            "leaving": leaving,
-            "later": [one.rendered() for one in self.later],
-            "stories": [
-                {
-                    "summary": list(story.summary),
-                    "summary_outside": story.outside,
-                    "recent": [one.rendered() for one in story.recent],
-                }
-                for story in self.stories
-            ],
-            "past": [{**one.rendered(), "candidates": list(facts)} for one, facts in self.past],
+            "exchange": leaving,
+            "earlier": [one.rendered() for one in self.earlier],
             "memories": [one.rendered() for one in self.memories],
+            "stories": [one.rendered() for one in self.stories],
+            "notes": [one.rendered() for one in self.notes],
         }
-
-
-@dataclass(frozen=True, slots=True)
-class Rehydrated:
-    """Parts read again from the store by their addresses, and what that read supplied.
-
-    Attributes:
-        parts: Each part that still resolves in a stored episode, by its address.
-        supplied: The placement of every episode the read was supplied (§12:6).
-    """
-
-    parts: dict[SupportPart, ReadPart]
-    supplied: tuple[Placement, ...]
 
 
 def episode_text(record: EpisodicMemory) -> str:
@@ -489,12 +547,54 @@ def approval_instant(record: EpisodicMemory) -> datetime:
     return max((one.sent_at for one in messages), default=record.occurred_at)
 
 
-#: The largest page of a channel's episodes read to find what an input answers.
-_PAGE: Final = 100
+def memory_then(memory: Memory, at: datetime) -> Memory | None:
+    """``memory`` as it stood at ``at``, from its dated supports and log (ADR-0346 §2:2).
 
-#: How many episodes back on a channel the observer looks for what an input answers,
-#: passing over those in which the assistant said nothing (§9:3).
-_REPLY_HORIZON: Final = 50
+    The supports added at or before ``at``, the operations written at or before it, the
+    status they leave, and the open questions raised by then, each open where it was
+    resolved after. Its track record and labels are left out, since the scout is shown
+    neither. A view, never written: it is built without validation, as a record the
+    store held then.
+
+    Args:
+        memory: The memory, as the history read returns it now.
+        at: The instant asked about.
+
+    Returns:
+        The memory as it stood, or ``None`` where it was not yet created at ``at``.
+    """
+    operations = tuple(one for one in memory.operations if one.at <= at)
+    if not operations or operations[0].kind is not MemoryOperationKind.CREATE:
+        return None
+    supports = tuple(one for one in memory.supports if one.added_at <= at)
+    questions = tuple(
+        _question_then(one, at) for one in memory.open_questions if one.raised_at <= at
+    )
+    status = MemoryStatus.CURRENT
+    for one in operations[1:]:
+        if one.kind in {MemoryOperationKind.END, MemoryOperationKind.REPLACE}:
+            status = MemoryStatus.ENDED
+        elif one.kind is MemoryOperationKind.MARK_WRONG:
+            status = MemoryStatus.WRONG
+    return memory.model_copy(
+        update={
+            "supports": supports,
+            "operations": operations,
+            "open_questions": questions,
+            "status": status,
+            "track_record": (),
+            "labels": (),
+        }
+    )
+
+
+def _question_then(question: OpenQuestion, at: datetime) -> OpenQuestion:
+    """An open question as it stood at ``at``: open where it was resolved after."""
+    if question.resolved_at is None or question.resolved_at <= at:
+        return question
+    return question.model_copy(
+        update={"resolved_at": None, "resolved_by": None, "resolution": None}
+    )
 
 
 class _Labels:
@@ -509,58 +609,96 @@ class _Labels:
         return f"{prefix}{number}"
 
 
-@dataclass(frozen=True, slots=True)
-class _Gathered:
-    """The records one reading is built from, before any label is handed out."""
+@dataclass(slots=True)
+class _Pointed:
+    """The ids the leaving episode's record points at, each once, in the order met."""
 
-    later: tuple[EpisodicMemory, ...]
-    stories: tuple[tuple[tuple[str, ...], bool, tuple[EpisodicMemory, ...]], ...]
-    summaries: tuple[Placement, ...]
-    past: tuple[EpisodicMemory, ...]
-    memories: tuple[Memory, ...]
-    effects: tuple[ActivationEffect, ...]
+    episodes: dict[str, None] = field(default_factory=dict)
+    memories: dict[str, None] = field(default_factory=dict)
+    stories: dict[str, None] = field(default_factory=dict)
+    notes: dict[str, None] = field(default_factory=dict)
+    recalled: dict[str, RecalledItem] = field(default_factory=dict)
+    order: list[tuple[str, str]] = field(default_factory=list)
+
+    def add(self, kind: str, record_id: str | None) -> None:
+        if not record_id:
+            return
+        held = {
+            "episode": self.episodes,
+            "memory": self.memories,
+            "story": self.stories,
+            "note": self.notes,
+        }[kind]
+        if record_id not in held:
+            held[record_id] = None
+            self.order.append((kind, record_id))
+
+
+def _pointed_at(leaving: EpisodicMemory, processing: EpisodeProcessingRecord) -> _Pointed:  # noqa: C901 — one arm per pointer ADR-0346 §2:1 names
+    """What the leaving episode's record points at (ADR-0346 §2:1), its own id left out."""
+    pointed = _Pointed()
+    for run in (processing.recall, processing.recall_second_run):
+        for item in () if run is None else run.items:
+            kind = "episode" if item.kind is MemoryKind.EPISODIC else "memory"
+            pointed.recalled.setdefault(item.id, item)
+            pointed.add(kind, item.id)
+            for story in item.stories:
+                pointed.add("story", story)
+    by_label = {
+        LabelKind.STORY: "story",
+        LabelKind.EPISODE: "episode",
+        LabelKind.NOTE: "note",
+        LabelKind.MEMORY: "memory",
+    }
+    for label in processing.labels:
+        named = by_label.get(label.kind)
+        if named is not None:
+            pointed.add(named, label.id)
+    for understood in processing.understanding:
+        for referent in _referents(understood):
+            if referent.kind in {"episode", "memory", "story"}:
+                pointed.add(referent.kind, referent.id)
+        for link in understood.story_links:
+            if link.kind is StoryMemberKind.STORY:
+                pointed.add("story", link.id)
+            else:
+                pointed.add("episode", episode_address(link.id))
+        for answer in understood.answers:
+            pointed.add("episode", episode_address(answer.activation_id))
+    pointed.episodes.pop(leaving.id, None)
+    pointed.order = [(kind, one) for kind, one in pointed.order if one != leaving.id]
+    return pointed
+
+
+def _referents(understood: ActivationUnderstanding) -> tuple[UnderstandingReferent, ...]:
+    """Every referent an understanding version resolved, its meaning's first."""
+    return (
+        *understood.meaning_referents,
+        *(one for reference in understood.references for one in reference.referents),
+        *(one for relationship in understood.relationships for one in relationship.referents),
+    )
 
 
 class EpisodeReader:
-    """Reads what §8:1 names around one leaving episode, from the stores it holds."""
+    """Reads what ADR-0346 §2:1 names of one leaving episode, from the stores it holds."""
 
-    def __init__(
-        self,
-        *,
-        memory: MemoryStore,
-        plans: PlanStore,
-        stories: StoryStore,
-        story_episodes: int,
-        related: int,
-    ) -> None:
-        """Wire the reader to its stores and its two bounds.
+    def __init__(self, *, memory: MemoryStore, plans: PlanStore, stories: StoryStore) -> None:
+        """Wire the reader to its stores.
 
         Args:
             memory: The memory store episodes and memories are read from.
             plans: The plan store effect records are read from.
-            stories: The story store a story's summary and members are read from.
-            story_episodes: The most recent episodes read per story (§8:1).
-            related: The most past episodes, and the most memories, a relevance search
-                reads (§8:1).
-
-        Raises:
-            ValueError: If a bound is negative.
+            stories: The story store a story's summaries and notes are read from.
         """
-        if story_episodes < 0 or related < 0:
-            msg = "the observer's reading bounds are not negative (ADR-0329 §8:1)"
-            raise ValueError(msg)
         self._memory = memory
         self._plans = plans
         self._stories = stories
-        self._story_episodes = story_episodes
-        self._related = related
 
-    async def read(self, leaving: EpisodicMemory, window: Sequence[EpisodicMemory]) -> Reading:
-        """Read around ``leaving``, with what came after it in ``window`` (§8:1).
+    async def read(self, leaving: EpisodicMemory) -> Reading:
+        """Read the leaving episode's record and what it points at (ADR-0346 §2).
 
         Args:
             leaving: The leaving episode, frozen, with a processing record.
-            window: The episodes the selector returns now.
 
         Returns:
             The reading.
@@ -574,308 +712,146 @@ class EpisodeReader:
         if processing is None:  # pragma: no cover - the stage skips such an episode first
             msg = "the observer reads an episode with a processing record"
             raise ValueError(msg)
-        gathered = await self._gather(leaving, processing, window)
-        labels = _Labels()
-        shown = _Shown(labels, await self._outsides(leaving, gathered))
-        everything = (leaving, *gathered.later, *(r for s in gathered.stories for r in s[2]))
-        answers: dict[str, str] = {}
-        replied: list[Placement] = []
-        for record in (*everything, *gathered.past):
-            text, placement = await self._reply_to(record)
-            if text is not None:
-                answers[record.id] = text
-            if placement is not None:
-                replied.append(placement)
-        read_leaving = shown.episode(leaving, answers)
-        later = tuple(shown.episode(one, answers) for one in gathered.later)
-        stories = tuple(
-            ReadStory(
-                summary=summary,
-                outside=outside,
-                recent=tuple(shown.episode(one, answers) for one in fresh),
-            )
-            for summary, outside, fresh in gathered.stories
-        )
-        past_effects = await self._effects(gathered.past)
-        observed = await self._single_observations(gathered.past)
-        past = tuple(
+        then = processing.started_at
+        pointed = _pointed_at(leaving, processing)
+        found = without_open_episodes(await self._memory.get_many(list(pointed.episodes)))
+        held = sorted(
             (
-                shown.episode(one, answers),
-                tuple(dict.fromkeys((*_facts(one, past_effects), *observed.get(one.id, ())))),
+                record
+                for one in pointed.episodes
+                if isinstance(record := found.get(one), EpisodicMemory) and _readable(record)
+            ),
+            key=lambda record: (record.occurred_at, record.id),
+        )
+        # §2:2: nothing after the episode is shown, so an episode that occurred after
+        # it is left out whole, never shown in its place.
+        earlier_records = [one for one in held if one.occurred_at <= leaving.occurred_at]
+        later = {one.id for one in held if one.occurred_at > leaving.occurred_at}
+        history = await self._memory.get_history(list(pointed.memories))
+        labels = _Labels()
+        shown = _Shown(labels, await self._outsides_of([leaving, *earlier_records]))
+        answers = _answers([*earlier_records, leaving])
+        read_leaving = shown.episode(leaving, answers)
+        earlier = [shown.episode(one, answers) for one in earlier_records]
+        handles = {one.episode: one.handle for one in earlier}
+        handles[leaving.id] = read_leaving.handle
+        for episode_id in pointed.episodes:
+            if episode_id not in handles and episode_id not in later:
+                item = pointed.recalled.get(episode_id)
+                gone = ReadEpisode(
+                    handle=labels("E"),
+                    episode=episode_id,
+                    record=None,
+                    excerpt=None if item is None else item.excerpt,
+                )
+                earlier.append(gone)
+                handles[episode_id] = gone.handle
+        memories: list[ReadMemory] = []
+        for memory_id in pointed.memories:
+            stored = history.get(memory_id)
+            as_then = None if stored is None else memory_then(stored, then)
+            item = pointed.recalled.get(memory_id)
+            memories.append(
+                ReadMemory(
+                    handle=labels("M"),
+                    memory_id=memory_id,
+                    then=as_then,
+                    excerpt=None if as_then is not None or item is None else item.excerpt,
+                )
             )
-            for one in gathered.past
-        )
-        memories = [ReadMemory(handle=labels("M"), memory=one) for one in gathered.memories]
-        reliances = await self._reliances(processing, memories, labels)
-        asking_supply: list[Placement] = []
-        hints = await self._hints(
-            leaving, processing, gathered.effects, shown, memories, labels, asking_supply
-        )
-        stories_read = tuple(one for _, _, fresh in gathered.stories for one in fresh)
-        supplied = [
-            one.placement for one in (leaving, *gathered.later, *gathered.past, *stories_read)
+        stories = [
+            await self._story(labels("S"), story_id, processing.stories_position)
+            for story_id in pointed.stories
         ]
-        supplied.extend(gathered.summaries)
-        supplied.extend(one.memory.placement for one in memories)
-        supplied.extend(one.memory.placement for one in reliances)
-        supplied.extend(asking_supply)
-        supplied.extend(replied)
+        notes = await self._notes(pointed.notes, processing, labels)
+        effects = await self._plans.activation_effects([processing.activation_id])
+        memory_handles = {one.memory_id: one.handle for one in memories}
+        hints = await self._hints(leaving, processing, effects, shown, memory_handles, labels)
+        handles.update(memory_handles)
+        handles.update((one.story_id, one.handle) for one in stories)
+        supplied = [leaving.placement, *(one.placement for one in earlier_records)]
+        supplied.extend(one.then.placement for one in memories if one.then is not None)
+        # A story's summary or note supplies a record placed for the owner alone,
+        # whoever wrote it (ADR-0304 §4:1), so what is written over it inherits that reach.
+        supplied.extend(_OWNER_ONLY for one in stories if one.summary is not None)
+        supplied.extend(_OWNER_ONLY for one in notes if one.text is not None)
         return Reading(
             leaving=read_leaving,
-            later=later,
-            stories=stories,
-            past=past,
+            understood=_understood(processing, handles, read_leaving),
+            recalled=tuple(
+                handles[item] for item in pointed.recalled if item in handles and item != leaving.id
+            ),
+            earlier=tuple(earlier),
             memories=tuple(memories),
+            stories=tuple(stories),
+            notes=notes,
             hints=hints,
-            reliances=reliances,
             supplied=tuple(supplied),
         )
 
-    async def parts_at(self, parts: Sequence[SupportPart]) -> Rehydrated:
-        """Read ``parts`` again from the store, by their addresses (§9:5, §16:4).
+    async def _story(self, handle: str, story_id: str, position: int | None) -> ReadStory:
+        """A story with the summary of its latest version at or below ``position``.
 
-        A finding recorded in an earlier attempt names parts by address, and the episodes
-        they are parts of may have left this attempt's reading since, as the window
-        moved: they are read again here, each with the facts code sets on a support
-        pointing at it, so a retry commits what the finding rests on rather than losing
-        it. A part that no longer resolves in a stored episode is left out.
-
-        Args:
-            parts: The parts' addresses.
-
-        Returns:
-            The parts that resolve, and the placements of the episodes read.
-
-        Raises:
-            MemoryStoreError: If the memory store cannot be read.
+        ADR-0347 §4:2-§4:3: read through ``summary_at``; by its identity alone where the
+        episode records no position, no version lies at or below it, or no text is held.
         """
-        wanted = list(dict.fromkeys(parts))
-        addresses: dict[str, None] = {}
-        for part in wanted:
-            if (episode := part_episode(part)) is not None:
-                addresses[episode] = None
-            if isinstance(part, ConfirmationPart):
-                addresses[episode_address(part.asking_activation)] = None
-        if not addresses:
-            return Rehydrated(parts={}, supplied=())
-        found = without_open_episodes(await self._memory.get_many(list(addresses)))
-        episodes = {key: one for key, one in found.items() if isinstance(one, EpisodicMemory)}
-        read: dict[SupportPart, ReadPart] = {}
-        said = {part.episode for part in wanted if isinstance(part, RoundMessagePart)}
-        outsides = await self._outsides_of([one for key, one in episodes.items() if key in said])
-        supplied: list[Placement] = []
-        for index, part in enumerate(wanted, start=1):
-            record = episodes.get(part_episode(part) or "")
-            text = part_content(part, episodes=episodes, effects={}, carried=None)
-            if record is None or record.processing_record is None or not text:
-                continue
-            facts = _facts_at(part, record, outsides)
-            if facts is None:
-                continue
-            answers, answered = await self._answered(part, record)
-            if answered is not None:
-                supplied.append(answered)
-            read[part] = ReadPart(
-                handle=f"P{index}",
-                part=part,
-                episode=record.id,
-                occurred_at=record.occurred_at,
-                text=text,
-                origin=facts[0],
-                when=facts[1],
-                answers=answers,
-            )
-        supplied.extend(one.placement for one in episodes.values())
-        return Rehydrated(parts=read, supplied=tuple(supplied))
-
-    async def _answered(
-        self, part: SupportPart, record: EpisodicMemory
-    ) -> tuple[str | None, Placement | None]:
-        """What a part read again replies to, and the placement of what was read for it (§9:3).
-
-        A round's message answers its own episode's input; an input answers what the
-        assistant last said on its channel before it (:meth:`_reply_to`).
-        """
-        if isinstance(part, RoundMessagePart):
-            return episode_text(record) or None, None
-        if not isinstance(part, InputPart):
-            return None, None
-        return await self._reply_to(record)
-
-    async def _reply_to(self, record: EpisodicMemory) -> tuple[str | None, Placement | None]:
-        """What the assistant last said on ``record``'s channel before it, and where (§9:3).
-
-        The text, and the placement of the episode it came from, which joins the supply
-        (§12:6). Read from the channel's own history, never from what a reading happens to hold:
-        an episode the reading left out still stands between a question and its answer.
-        An episode in which the assistant said nothing is passed over, up to
-        :data:`_REPLY_HORIZON` episodes back.
-        """
-        processing = record.processing_record
-        channel = None if processing is None else processing.trigger.channel
-        if channel is None:
-            return None, None
-        key = (record.occurred_at, record.id)
-        cursor: str | None = None
-        seen = 0
-        while seen < _REPLY_HORIZON:
-            page = await self._memory.episodes(channel=channel, cursor=cursor, limit=_PAGE)
-            earlier = [
-                row.position.episode_id
-                for row in page.items
-                if (row.position.occurred_at, row.position.episode_id) < key
-            ][: _REPLY_HORIZON - seen]
-            seen += len(earlier)
-            found = without_open_episodes(await self._memory.get_many(earlier)) if earlier else {}
-            for episode_id in earlier:
-                before = found.get(episode_id)
-                rounds = (
-                    before.processing_record.rounds
-                    if isinstance(before, EpisodicMemory) and before.processing_record is not None
-                    else ()
-                )
-                said = [one.text for one in rounds if one.text]
-                if said and isinstance(before, EpisodicMemory):
-                    return said[-1], before.placement
-            if page.next_cursor is None or page.next_cursor == cursor:
-                break
-            cursor = page.next_cursor
-        return None, None
-
-    async def _gather(
-        self,
-        leaving: EpisodicMemory,
-        processing: EpisodeProcessingRecord,
-        window: Sequence[EpisodicMemory],
-    ) -> _Gathered:
-        """Every record the reading is built from (§8:1)."""
-        key = (leaving.occurred_at, leaving.id)
-        later = tuple(
-            sorted(
-                (
-                    one
-                    for one in window
-                    if (one.occurred_at, one.id) > key and _readable(one) and one.id != leaving.id
-                ),
-                key=lambda one: (one.occurred_at, one.id),
-            )
-        )
-        held = {leaving.id, *(one.id for one in later)}
-        stories, summaries = await self._story_reads(processing.activation_id, held)
-        held.update(one.id for _, _, fresh in stories for one in fresh)
-        effects = await self._plans.activation_effects([processing.activation_id])
-        query = " ".join(
-            filter(
-                None,
-                (
-                    episode_text(leaving),
-                    *(one.fact for one in done_candidates(leaving.id, processing, effects)),
-                ),
-            )
-        )
-        past, memories = await self._related_reads(query, leaving, held)
-        return _Gathered(
-            later=later,
-            stories=stories,
-            summaries=summaries,
-            past=past,
-            memories=memories,
-            effects=tuple(effects),
-        )
-
-    async def _story_reads(
-        self, activation_id: str, held: set[str]
-    ) -> tuple[
-        tuple[tuple[tuple[str, ...], bool, tuple[EpisodicMemory, ...]], ...],
-        tuple[Placement, ...],
-    ]:
-        """For each story the activation belongs to: its summary and recent episodes.
-
-        Each summary read supplies a record placed for the owner alone, whoever wrote it
-        (ADR-0304 §4:1), so what is written over it inherits that reach (§12:6).
-        """
-        member = StoryMember(kind=StoryMemberKind.ACTIVATION, id=activation_id)
-        headers = await self._stories.stories_of(member)
-        read: list[tuple[tuple[str, ...], bool, tuple[EpisodicMemory, ...]]] = []
-        summaries: list[Placement] = []
-        for header in headers:
-            state = await self._stories.current_summary(header.story_id)
-            summary = None if state is None else state.summary
-            if summary is not None:
-                summaries.append(
-                    Placement(
-                        reach=PlacementReach.OWNER,
-                        set_by=PlacementSetter.DERIVED,
-                        set_at=summary.written_at,
-                    )
-                )
-            lines = () if summary is None else tuple(line.text for line in summary.lines)
-            outside = summary is not None and summary.outside
-            recent = await self._recent(header.story_id, activation_id)
-            addresses = [episode_address(one) for one in recent]
-            found = without_open_episodes(await self._memory.get_many(addresses))
-            fresh = tuple(
-                record
-                for address in addresses
-                if isinstance(record := found.get(address), EpisodicMemory)
-                and _readable(record)
-                and record.id not in held
-            )
-            held.update(one.id for one in fresh)
-            read.append((lines, outside, fresh))
-        return tuple(read), tuple(summaries)
-
-    async def _recent(self, story_id: str, activation_id: str) -> tuple[str, ...]:
-        """A story's most recent activation members but ``activation_id``, newest last."""
-        if self._story_episodes == 0:
-            return ()
-        members: list[str] = []
+        if position is None:
+            return ReadStory(handle=handle, story_id=story_id, summary=None)
+        latest: int | None = None
         cursor: int | None = None
         while True:
-            page = await self._stories.view(story_id, cursor=cursor, limit=MAX_STORY_PAGE)
+            try:
+                page = await self._stories.summary_versions(
+                    story_id, cursor=cursor, limit=MAX_STORY_PAGE
+                )
+            except ValueError:
+                page = None  # an id as a referent kept it, which names no story
             if page is None:
                 break
-            members.extend(
-                entry.member.id
-                for entry in page.entries
-                if entry.member.kind is StoryMemberKind.ACTIVATION
-                and entry.member.id != activation_id
-            )
+            for one in page.versions:
+                if one.version <= position and (latest is None or one.version > latest):
+                    latest = one.version
             if page.next_cursor is None or page.next_cursor == cursor:
                 break
             cursor = page.next_cursor
-        return tuple(members[-self._story_episodes :])
-
-    async def _related_reads(
-        self, query: str, leaving: EpisodicMemory, held: set[str]
-    ) -> tuple[tuple[EpisodicMemory, ...], tuple[Memory, ...]]:
-        """Past episodes and memories a relevance search finds related (§8:1)."""
-        if not query.strip() or self._related == 0:
-            return (), ()
-        episodes = await self._memory.search(
-            query, limit=self._related, kinds=(MemoryKind.EPISODIC,)
+        summary = None if latest is None else await self._stories.summary_at(story_id, latest)
+        if summary is None:
+            return ReadStory(handle=handle, story_id=story_id, summary=None)
+        return ReadStory(
+            handle=handle,
+            story_id=story_id,
+            summary=tuple(line.text for line in summary.lines),
+            outside=summary.outside,
         )
-        past = tuple(
-            sorted(
-                (
-                    one
-                    for one in episodes.records
-                    if isinstance(one, EpisodicMemory)
-                    and _readable(one)
-                    and one.id not in held
-                    and (one.occurred_at, one.id) < (leaving.occurred_at, leaving.id)
-                ),
-                key=lambda one: (one.occurred_at, one.id),
+
+    async def _notes(
+        self,
+        wanted: Mapping[str, None],
+        processing: EpisodeProcessingRecord,
+        labels: _Labels,
+    ) -> tuple[ReadNote, ...]:
+        """The notes planning was shown, each as the story store holds it (§2:1).
+
+        A note is never edited and its mark never changes (ADR-0303 §3:1), so it is as it
+        stood then; one the store no longer shows is shown by its identity alone.
+        """
+        if not wanted:
+            return ()
+        held = {
+            str(one.note_id): one
+            for one in await _shown_notes(self._stories, set(wanted), [processing.activation_id])
+        }
+        notes: list[ReadNote] = []
+        for note_id in wanted:
+            note = held.get(note_id)
+            notes.append(
+                ReadNote(
+                    handle=labels("N"),
+                    text=None if note is None else note.text,
+                    outside=True if note is None else note.outside,
+                )
             )
-        )
-        memories = await self._memory.search(query, limit=self._related, kinds=(MemoryKind.MEMORY,))
-        return past, tuple(one for one in memories.records if isinstance(one, Memory))
-
-    async def _outsides(self, leaving: EpisodicMemory, gathered: _Gathered) -> dict[str, bool]:
-        """Whether each read activation had read outside content (ADR-0328 §4:3)."""
-        records = (leaving, *gathered.later, *gathered.past)
-        records += tuple(one for _, _, fresh in gathered.stories for one in fresh)
-        return await self._outsides_of(records)
+        return tuple(notes)
 
     async def _outsides_of(self, records: Sequence[EpisodicMemory]) -> dict[str, bool]:
         """Whether each record's activation had read outside content, by the record's id.
@@ -909,92 +885,16 @@ class EpisodeReader:
             for record_id, processing in held
         }
 
-    async def _single_observations(
-        self, episodes: Sequence[EpisodicMemory]
-    ) -> dict[str, tuple[str, ...]]:
-        """The single observations recorded on each episode, by its id (§11:4).
-
-        A single observation is evidence only: it is kept as no memory, and waits as a
-        candidate on its episode, where a later run's search finds it. So a past episode
-        is shown with the claim of every finding its observation record holds whose
-        outcome was a single observation, beside planning's candidates.
-
-        Raises:
-            PlanningError: If the plan store cannot be read.
-        """
-        if not episodes:
-            return {}
-        records = await self._plans.observations([one.id for one in episodes])
-        return {
-            record.episode: tuple(
-                finding.claim
-                for finding in record.findings
-                if finding.outcome is not None
-                and finding.outcome.unwritten is FindingUnwritten.SINGLE_OBSERVATION
-            )
-            for record in records
-        }
-
-    async def _effects(self, episodes: Sequence[EpisodicMemory]) -> tuple[ActivationEffect, ...]:
-        activations = [
-            one.processing_record.activation_id for one in episodes if one.processing_record
-        ]
-        if not activations:
-            return ()
-        return tuple(await self._plans.activation_effects(activations))
-
-    async def _reliances(
-        self,
-        processing: EpisodeProcessingRecord,
-        memories: list[ReadMemory],
-        labels: _Labels,
-    ) -> tuple[Reliance, ...]:
-        """The memories the leaving episode's reliance calls named (§14:1)."""
-        named = {one.label: one.id for one in processing.labels if one.kind is LabelKind.MEMORY}
-        wanted: list[tuple[str, str, datetime]] = []
-        for one in processing.rounds:
-            for call in one.calls:
-                if call.name != NOTE_RELIANCE_CAPABILITY:
-                    continue
-                shaped = call.arguments.get(SHAPED_ARGUMENT)
-                relied = call.arguments.get(MEMORIES_ARGUMENT)
-                if not isinstance(shaped, str) or not isinstance(relied, list | tuple):
-                    continue
-                wanted.extend(
-                    (named[label], shaped, one.recorded_at)
-                    for label in relied
-                    if isinstance(label, str) and label in named
-                )
-        if not wanted:
-            return ()
-        found = await self._memory.get_many(list(dict.fromkeys(memory for memory, _, _ in wanted)))
-        handles = {one.memory.id: one.handle for one in memories}
-        reliances: dict[str, Reliance] = {}
-        for memory_id, shaped, relied_at in wanted:
-            record = found.get(memory_id)
-            if not isinstance(record, Memory) or memory_id in reliances:
-                continue
-            handle = handles.get(memory_id) or labels("M")
-            reliances[memory_id] = Reliance(
-                handle=handle, memory=record, shaped=shaped, relied_at=relied_at
-            )
-        return tuple(reliances.values())
-
     async def _hints(  # noqa: PLR0913 — what the hints are mapped against, each read once already
         self,
         leaving: EpisodicMemory,
         processing: EpisodeProcessingRecord,
         effects: Sequence[ActivationEffect],
         shown: _Shown,
-        memories: list[ReadMemory],
+        memories: Mapping[str, str],
         labels: _Labels,
-        asking_supply: list[Placement],
     ) -> tuple[Hint, ...]:
-        """The leaving episode's candidates, as hints (§3:3, §9:1).
-
-        ``asking_supply`` collects the placement of every asking episode read for a candidate
-        recorded under an approval, whose wording the hint carries (§12:6).
-        """
+        """The leaving episode's candidates, as hints (ADR-0329 §3:3, §9:1)."""
         hints: list[Hint] = []
         for done in done_candidates(leaving.id, processing, effects):
             try:
@@ -1002,7 +902,6 @@ class EpisodeReader:
             except ValueError:
                 hints.append(Hint(handle=labels("C"), effect=done.effect, fact=done.fact))
                 continue
-            memory = await self._memory_handle(candidate.memory, memories, labels)
             hints.append(
                 Hint(
                     handle=labels("C"),
@@ -1010,46 +909,28 @@ class EpisodeReader:
                     fact=candidate.fact,
                     why=candidate.why,
                     rests_on=shown.resting_on(candidate, leaving),
-                    memory=memory,
+                    memory=None if candidate.memory is None else memories.get(candidate.memory),
                     note=candidate.note,
                 )
             )
-        hints.extend(
-            await self._approved(leaving, processing, effects, shown, labels, asking_supply)
-        )
+        hints.extend(await self._approved(leaving, processing, effects, shown, labels))
         return tuple(hints)
 
-    async def _memory_handle(
-        self, memory_id: str | None, memories: list[ReadMemory], labels: _Labels
-    ) -> str | None:
-        """The label of the memory a candidate names, reading it where it is not yet read."""
-        if memory_id is None:
-            return None
-        held = next((one for one in memories if one.memory.id == memory_id), None)
-        if held is not None:
-            return held.handle
-        record = await self._memory.get(memory_id)
-        if not isinstance(record, Memory):
-            return None
-        read = ReadMemory(handle=labels("M"), memory=record)
-        memories.append(read)
-        return read.handle
-
-    async def _approved(  # noqa: PLR0913 — what an approval is read against, each read already
+    async def _approved(
         self,
         leaving: EpisodicMemory,
         processing: EpisodeProcessingRecord,
         effects: Sequence[ActivationEffect],
         shown: _Shown,
         labels: _Labels,
-        asking_supply: list[Placement],
     ) -> list[Hint]:
         """The candidates recorded under an approval in the leaving episode (§3:3, §5:5).
 
         A ``remember`` run under an approval is proposed by its approved-action label, so
         its candidate is the asked call the effect record's question part names, as the
         asking round records it. The asking activation is the one the input's recorded
-        answer pointers name whose round is that part's round.
+        answer pointers name whose round is that part's round: the question the input
+        answers, which ADR-0346 §2:1 names among what the record points at.
         """
         approved = [
             one
@@ -1070,9 +951,6 @@ class EpisodeReader:
         )
         found = without_open_episodes(
             await self._memory.get_many([episode_address(one) for one in askers])
-        )
-        asking_supply.extend(
-            one.placement for one in found.values() if isinstance(one, EpisodicMemory)
         )
         hints: list[Hint] = []
         for effect in approved:
@@ -1099,6 +977,81 @@ class EpisodeReader:
                 )
             )
         return hints
+
+
+def _answers(records: Sequence[EpisodicMemory]) -> dict[str, str]:
+    """What each read episode's input replies to, among the episodes read (ADR-0346 §5:1).
+
+    The assistant's last message in the latest earlier episode read on the same channel
+    that holds one: read from what the record points at alone, never by a search of the
+    channel's history (§2:4).
+    """
+    ordered = sorted(records, key=lambda one: (one.occurred_at, one.id))
+    answers: dict[str, str] = {}
+    for index, record in enumerate(ordered):
+        channel = _channel(record)
+        if channel is None:
+            continue
+        for before in reversed(ordered[:index]):
+            if _channel(before) != channel:
+                continue
+            processing = before.processing_record
+            said = [] if processing is None else [one.text for one in processing.rounds if one.text]
+            if said:
+                answers[record.id] = said[-1]
+                break
+    return answers
+
+
+def _channel(record: EpisodicMemory) -> object | None:
+    processing = record.processing_record
+    return None if processing is None else processing.trigger.channel
+
+
+def _understood(
+    processing: EpisodeProcessingRecord, handles: Mapping[str, str], leaving: ReadEpisode
+) -> dict[str, FrozenJson] | None:
+    """The understanding's latest version, rendered (ADR-0346 §2:5).
+
+    Its meaning and ground, its references with what each resolved to, its
+    relationships, what it left unresolved, and the questions its input answers. A
+    referent the reading holds is named by its label; any other by its kind and the
+    excerpt the record kept.
+    """
+    if not processing.understanding:
+        return None
+    latest = max(processing.understanding, key=lambda one: one.version)
+
+    def referent(one: UnderstandingReferent) -> dict[str, FrozenJson]:
+        label = None
+        if one.kind == "input":
+            label = leaving.handle
+        elif one.id is not None:
+            label = handles.get(one.id)
+        return {"kind": one.kind, "label": label, "excerpt": one.excerpt}
+
+    return {
+        "meaning": latest.meaning,
+        "ground": latest.meaning_ground.value,
+        "meaning_rests_on": [referent(one) for one in latest.meaning_referents],
+        "references": [
+            {"phrase": one.phrase, "resolved_to": [referent(r) for r in one.referents]}
+            for one in latest.references
+        ],
+        "relationships": [
+            {
+                "statement": one.statement,
+                "ground": one.ground.value,
+                "rests_on": [referent(r) for r in one.referents],
+            }
+            for one in latest.relationships
+        ],
+        "unresolved": [
+            {"matter": one.matter, "why_it_matters": one.why_it_matters}
+            for one in latest.unresolved
+        ],
+        "answers": [handles.get(episode_address(one.activation_id)) for one in latest.answers],
+    }
 
 
 def _asked(
@@ -1202,52 +1155,10 @@ async def _story_notes(stories: StoryStore, story_id: str) -> list[StoryNote]:
         cursor = page.next_cursor
 
 
-def _facts_at(  # noqa: PLR0911 — one arm per part a finding may rest on (§9:6)
-    part: SupportPart, record: EpisodicMemory, outsides: Mapping[str, bool]
-) -> tuple[SupportOrigin, datetime | None] | None:
-    """The origin and ``when`` code sets on a support pointing at ``part`` (§9:5).
-
-    A round's message takes its outside origin from ``outsides``, and where that holds
-    no answer for its episode, it is read as outside, failing closed.
-    """
-    processing = record.processing_record
-    if processing is None:  # pragma: no cover - checked by the caller
-        return None
-    match part:
-        case InputPart(message=None):
-            return input_origin(processing.trigger, None), record.occurred_at
-        case InputPart(message=int() as message) if message < len(processing.trigger.messages):
-            sent = processing.trigger.messages[message].sent_at
-            return input_origin(processing.trigger, message), sent
-        case RoundMessagePart():
-            round_ = next((one for one in processing.rounds if one.id == part.round), None)
-            if round_ is None:
-                return None
-            origin = (
-                SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE
-                if outsides.get(record.id, True)
-                else SupportOrigin.ASSISTANT_MESSAGE
-            )
-            return origin, round_.recorded_at
-        case EvidenceItemPart() if part.digest < len(processing.digests):
-            return SupportOrigin.EVIDENCE, processing.digests[part.digest].recorded_at
-        case ConfirmationPart():
-            return SupportOrigin.CONFIRMATION, approval_instant(record)
-        case _:
-            return None
-
-
 def _readable(record: EpisodicMemory) -> bool:
     """Whether an episode is read as parts: frozen, with a processing record."""
     processing = record.processing_record
     return processing is not None and not processing.is_open
-
-
-def _facts(record: EpisodicMemory, effects: Sequence[ActivationEffect]) -> tuple[str, ...]:
-    processing = record.processing_record
-    if processing is None:  # pragma: no cover - only readable episodes are read
-        return ()
-    return tuple(one.fact for one in done_candidates(record.id, processing, effects))
 
 
 class _Shown:
@@ -1284,7 +1195,7 @@ class _Shown:
         return read
 
     def episode(self, record: EpisodicMemory, answers: Mapping[str, str]) -> ReadEpisode:
-        """One episode and its parts, each labelled (§8:6)."""
+        """One episode and its parts, each labelled (ADR-0329 §8:6)."""
         handle = self._labels("E")
         processing = record.processing_record
         parts: list[ReadPart] = []
@@ -1321,7 +1232,7 @@ class _Shown:
                     )
                     for position, item in enumerate(digest.evidence)
                 )
-        return ReadEpisode(handle=handle, record=record, parts=tuple(parts))
+        return ReadEpisode(handle=handle, episode=record.id, record=record, parts=tuple(parts))
 
     def _inputs(
         self, record: EpisodicMemory, processing: EpisodeProcessingRecord, answers: str | None
@@ -1368,8 +1279,8 @@ class _Shown:
 
         Its input is the leaving episode's input parts; an earlier exchange's user's or
         assistant's message is that episode's input or round message parts; a result is
-        the evidence items of the digests of that result (§9:6). A part the reading did
-        not read is not named.
+        the evidence items of the digests of that result (ADR-0329 §9:6). A part the
+        reading did not read is not named.
         """
         wanted: set[tuple[str, str]] = set()
         if candidate.rests_on_input:

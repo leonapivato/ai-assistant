@@ -1,18 +1,14 @@
 # A finding read the user's yes to two questions the system's approval policy asked as a
 # habit of the user's. Each yes answered a question the policy needed before a booking, so
-# nothing here is the user's preference, and nothing is kept, not even as an observation.
-prompt = "observer_commit"
+# the parts bear out nothing about the user's preference, and framing keeps no memory.
+prompt = "observer_framing"
 guards = "approval_as_habit"
 came_from = "2026-10-21"
 set = "development"
 samples = 3
 
-[flags]
-person = false
-
 [property]
-check = "action_in"
-actions = ["nothing"]
+check = "frames_nothing"
 
 [input]
 file = "policy-ask-not-habit.json"

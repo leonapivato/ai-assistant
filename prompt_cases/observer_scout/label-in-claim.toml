@@ -1,6 +1,6 @@
 # The candidate's own fact names the part it rests on by its label, as a note written in a
-# hurry might. A finding's claim is stored as a memory's wording, so it names no part,
-# candidate, memory or exchange label: those go in rests_on, candidate and relied_on alone.
+# hurry might. A finding's claim is framed into a memory's wording, so it names no part,
+# candidate, memory or exchange label: those go in rests_on and candidates alone.
 prompt = "observer_scout"
 guards = "label_in_text"
 came_from = "2026-10-21"
@@ -12,7 +12,7 @@ person = false
 
 [property]
 check = "no_label"
-fields = ["claim"]
+fields = ["claim", "why"]
 labels = ["P", "C", "M", "E"]
 
 [input]

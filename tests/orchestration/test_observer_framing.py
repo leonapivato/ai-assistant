@@ -1,0 +1,343 @@
+"""Framing: what the call proposes, and every check code makes of it (ADR-0346 §5, §7, §9).
+
+Driven on values: a view of a finding's parts, a reply, and what :func:`framed` keeps. Each
+memory is checked on its own, and one that fails a check is not written while the others
+stand (§5:4). Code sets origins and ``when`` from the parts (ADR-0329 §9:5), keeps an
+approved wording exactly (§5:3), names a person only as a part gives them (§5:5), lets a
+round's message back only a record of the saying (§7:6-§7:9), and keeps labels within the
+root's bounds (ADR-0345 §7:3).
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+
+from observer_support import AT, LABELS, Minter, address, episode, framed, framing
+
+from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
+    ConfirmationPart,
+    InputPart,
+    MemoryMark,
+    MemoryStanding,
+    ObservationFinding,
+    QuestionPart,
+    ReadingCertainty,
+    RoundMessagePart,
+    SupportOrigin,
+)
+from ai_assistant.orchestration.observer.framing import (
+    Framing,
+    FramingReply,
+    FramingView,
+)
+from ai_assistant.orchestration.observer.framing import (
+    framed as framed_by_code,
+)
+from ai_assistant.orchestration.observer.reading import ReadPart
+from ai_assistant.orchestration.observer.replies import parsed
+
+_SWIM = "can't do Friday evening, that's my swim"
+_RUN = "out for my Tuesday morning run, back by 8"
+_SAID = "Saltmarsh takes bookings for up to six."
+
+
+def _part(  # noqa: PLR0913 — one keyword per fact of a part a case varies
+    handle: str,
+    text: str,
+    *,
+    episode_name: str = "one",
+    origin: SupportOrigin = SupportOrigin.USER_MESSAGE,
+    part: object | None = None,
+    minutes: int = 0,
+) -> ReadPart:
+    occurred = AT - timedelta(minutes=minutes)
+    return ReadPart(
+        handle=handle,
+        part=part or InputPart(episode=address(episode_name)),  # type: ignore[arg-type]  # a part
+        episode=address(episode_name),
+        occurred_at=occurred,
+        text=text,
+        origin=origin,
+        when=occurred,
+    )
+
+
+_P1 = _part("P1", _SWIM)
+_P2 = _part("P2", _RUN, episode_name="earlier", minutes=60)
+_P3 = _part(
+    "P3",
+    _SAID,
+    origin=SupportOrigin.ASSISTANT_MESSAGE,
+    part=RoundMessagePart(episode=address("one"), round="r1"),
+)
+_YES = _part(
+    "P4",
+    "The user prefers window seats.",
+    origin=SupportOrigin.CONFIRMATION,
+    part=ConfirmationPart(
+        episode=address("one"),
+        asking_activation="asking",
+        question=QuestionPart(round="r-ask", part=1),
+    ),
+)
+
+
+def _view(*parts: ReadPart) -> FramingView:
+    finding = ObservationFinding(
+        id="f1",
+        episode=address("one"),
+        claim="The user swims on Fridays and runs on Tuesdays.",
+        rests_on=tuple(one.part for one in parts),
+    )
+    return FramingView(finding=finding, leaving=episode("one"), parts=tuple(parts))
+
+
+def _framed(view: FramingView, reply: str, *, person: bool = False) -> Framing:
+    read = parsed(reply, FramingReply)
+    assert read is not None
+    return framed_by_code(read, view, now=AT, mint=Minter(), labels=LABELS, person=person)
+
+
+def test_claims_that_could_each_be_true_are_kept_as_memories_of_their_own() -> None:
+    """ADR-0346 §5:3: one claim per memory, each backed by the part stating it."""
+    view = _view(_P1, _P2)
+
+    result = _framed(
+        view,
+        framing(
+            framed("The user swims on Friday evenings.", "P1"),
+            framed("The user runs on Tuesday mornings.", "P1", "P2"),
+        ),
+    )
+
+    swim, run = (one.memory for one in result.memories)
+    assert swim.content == "The user swims on Friday evenings."
+    (support,) = swim.supports
+    assert support.points_at == _P1.part
+    assert (support.origin, support.when) == (SupportOrigin.USER_MESSAGE, _P1.when)
+    assert support.holder is None, "the writer sets the holder (ADR-0345 §2:2)"
+    assert run.supports[0].points_at == _P1.part
+    assert result.failed == 0
+
+
+def test_a_memory_failing_a_check_is_not_written_and_the_others_stand() -> None:
+    """ADR-0346 §5:4: a part the finding does not rest on fails that memory alone."""
+    result = _framed(
+        _view(_P1),
+        framing(framed("The user swims on Friday evenings.", "P1"), framed("Made up.", "P9")),
+    )
+
+    (kept,) = result.memories
+    assert kept.memory.content == "The user swims on Friday evenings."
+    assert result.failed == 1
+    assert [note["refused"] is None for note in result.notes] == [True, False]
+
+
+def test_a_memory_resting_on_no_part_of_the_leaving_episode_fails() -> None:
+    """ADR-0346 §3:1: a ``for`` support on the exchange under review, at least."""
+    result = _framed(_view(_P1, _P2), framing(framed("The user runs on Tuesdays.", "P2")))
+
+    assert result.memories == ()
+    assert result.failed == 1
+
+
+def test_a_memory_no_support_backs_as_worded_fails() -> None:
+    result = _framed(_view(_P1), framing(framed("The user swims.", "P1", backs=False)))
+
+    assert (result.memories, result.failed) == ((), 1)
+
+
+def test_an_approved_wording_is_kept_exactly_and_never_reworded() -> None:
+    """ADR-0346 §5:3, ADR-0329 §5:5: a reworded memory fails, and code frames the yes."""
+    view = _view(_P1, _YES)
+
+    reworded = _framed(view, framing(framed("User likes windows", "P4")))
+    exact = _framed(view, framing(framed("anything at all", "P4")))
+
+    (kept,) = reworded.memories
+    assert kept.memory.content == _YES.text, "framed by code, in exactly the words approved"
+    (support,) = kept.memory.supports
+    assert (support.origin, support.how_sure) == (SupportOrigin.CONFIRMATION, ReadingCertainty.SURE)
+    assert kept.memory.standing is MemoryStanding.CONFIRMED
+    (approved,) = exact.memories
+    assert approved.memory.content == _YES.text, "the approved wording is the memory's wording"
+
+
+def test_an_approved_wording_framing_left_out_is_framed_by_code() -> None:
+    """ADR-0346 §5:3: every approved wording the finding rests on is a memory of its own."""
+    result = _framed(_view(_P1, _YES), framing(framed("The user swims on Fridays.", "P1")))
+
+    contents = [one.memory.content for one in result.memories]
+    assert contents == ["The user swims on Fridays.", _YES.text]
+
+
+def test_a_name_is_carried_only_as_a_part_gives_it() -> None:
+    """ADR-0346 §5:5, ADR-0345 §9:3-§9:4: the owner by the owner's identifier."""
+    ana = _part("P1", "my sister Ana teaches piano")
+    view = _view(ana)
+
+    given = _framed(
+        view,
+        framing(framed("Ana teaches piano.", "P1", subjects=["Ana"], involved=["the user"])),
+    )
+    ungiven = _framed(view, framing(framed("Ana teaches piano.", "P1", subjects=["Anabel"])))
+    both = _framed(
+        view, framing(framed("Ana teaches piano.", "P1", subjects=["Ana"], involved=["Ana"]))
+    )
+    unset = _framed(view, framing(framed("Ana teaches piano.", "P1", subjects=None)))
+
+    (kept,) = given.memories
+    assert kept.memory.subjects == ("Ana",)
+    assert kept.memory.involved == (OWNER_PERSON_ID,)
+    assert ungiven.memories == ()
+    (once,) = both.memories
+    assert (once.memory.subjects, once.memory.involved) == (("Ana",), ())
+    assert unset.memories == (), "subjects and involved are never left unset"
+
+
+def test_a_round_message_backs_only_a_record_of_the_saying() -> None:
+    """ADR-0346 §7:8, ADR-0345 §2:4, §8:3: marked ``assistant_statement`` and ``occasion``."""
+    view = _view(_P1, _P3)
+
+    bare = _framed(view, framing(framed(_SAID, "P3")))
+    record = _framed(
+        view,
+        framing(
+            framed(
+                "On Oct 18 the assistant said Saltmarsh takes bookings for up to six.",
+                "P3",
+                marks=["assistant_statement", "occasion"],
+            )
+        ),
+    )
+    marked_alone = _framed(
+        _view(_P1), framing(framed("The user swims.", "P1", marks=["assistant_statement"]))
+    )
+
+    assert bare.memories == ()
+    (kept,) = record.memories
+    assert set(kept.memory.marks) == {MemoryMark.ASSISTANT_STATEMENT, MemoryMark.OCCASION}
+    assert marked_alone.memories == (), "assistant_statement cites a round's message"
+
+
+def test_what_a_round_message_claims_is_kept_on_a_persons_backing_in_the_exchange() -> None:
+    """ADR-0346 §7:6, §7:9: the person's part backs it, the message cited beside."""
+    keep = _part("P1", "yes, remember that")
+    view = _view(keep, _P3)
+    with_keep = framing(
+        {
+            "wording": _SAID,
+            "supports": [
+                {"part": "P1", "direction": "for", "backs_as_worded": True, "how_sure": "sure"},
+                {"part": "P3", "direction": "for", "backs_as_worded": False, "how_sure": "sure"},
+            ],
+            "subjects": [],
+            "involved": [],
+            "marks": ["assistant_statement"],
+        }
+    )
+    without_keep = framing(
+        {
+            "wording": _SAID,
+            "supports": [
+                {"part": "P1", "direction": "for", "backs_as_worded": False, "how_sure": "sure"},
+                {"part": "P3", "direction": "for", "backs_as_worded": False, "how_sure": "sure"},
+            ],
+            "subjects": [],
+            "involved": [],
+        }
+    )
+
+    (kept,) = _framed(view, with_keep).memories
+    assert kept.memory.supports[0].points_at == keep.part, "the person's backing is cited"
+    assert _framed(view, without_keep).memories == ()
+
+
+def test_an_occasion_carries_no_validity_end() -> None:
+    """ADR-0345 §8:4."""
+    end = (AT + timedelta(days=3)).isoformat()
+
+    result = _framed(
+        _view(_P1), framing(framed("The user swam.", "P1", marks=["occasion"], valid_until=end))
+    )
+
+    assert result.memories == ()
+
+
+def test_a_validity_end_is_the_about_when_of_the_support_the_create_cites() -> None:
+    """ADR-0345 §6:1: a future end, named by a backing support's about-when."""
+    end = AT + timedelta(days=3)
+    flying = _part("P1", "I'm flying to Lisbon on the 21st")
+    other = _part("P2", "flight's booked", episode_name="earlier", minutes=60)
+    named = framing(
+        {
+            "wording": "The user is flying to Lisbon on Oct 21.",
+            "supports": [
+                {"part": "P2", "direction": "for", "backs_as_worded": True, "how_sure": "sure"},
+                {
+                    "part": "P1",
+                    "direction": "for",
+                    "backs_as_worded": True,
+                    "how_sure": "sure",
+                    "about_when": end.isoformat(),
+                },
+            ],
+            "subjects": ["the user"],
+            "involved": [],
+            "valid_until": end.isoformat(),
+        }
+    )
+    unnamed = framing(framed("The user is flying to Lisbon.", "P1", valid_until=end.isoformat()))
+    past = framing(framed("The user flew.", "P1", valid_until=(AT - timedelta(days=1)).isoformat()))
+
+    (kept,) = _framed(_view(flying, other), named).memories
+    assert kept.memory.validity.valid_until == end
+    assert kept.memory.operations[0].cites == flying.part
+    assert _framed(_view(flying), unnamed).memories == ()
+    assert _framed(_view(flying), past).memories == ()
+
+
+def test_labels_are_kept_within_the_bounds_and_suggested_by_the_episode() -> None:
+    """ADR-0345 §7:1, §7:3, ADR-0346 §9:1: a label past a bound is left out."""
+    long = "x" * (LABELS.max_chars + 1)
+
+    result = _framed(
+        _view(_P1),
+        framing(
+            framed(
+                "The user swims on Friday evenings.",
+                "P1",
+                labels=["planning the week", long, "exercise", "evenings", "more"],
+            )
+        ),
+    )
+
+    (kept,) = result.memories
+    labels = kept.memory.labels
+    assert [one.text for one in labels] == ["planning the week", "exercise", "evenings"]
+    assert {(one.added_by.value, one.episode) for one in labels} == {("observer", address("one"))}
+
+
+def test_an_unknown_mark_fails_the_memory() -> None:
+    result = _framed(_view(_P1), framing(framed("The user swims.", "P1", marks=["habit"])))
+
+    assert result.memories == ()
+
+
+def test_nothing_kept_says_why() -> None:
+    """ADR-0346 §5:6: where the parts do not bear the claim out."""
+    result = _framed(_view(_P1), framing(nothing="One choice is no habit."))
+
+    assert (result.memories, result.failed, result.nothing) == ((), 0, "One choice is no habit.")
+
+
+def test_style_and_pin_are_read_only_where_the_call_was_given_a_person() -> None:
+    """ADR-0338 §9:4-§9:5: read only under the person model, and only where ``true``."""
+    reply = framing(framed("The user prefers short replies.", "P1", style=True, pin="yes"))
+
+    (with_person,) = _framed(_view(_P1), reply, person=True).memories
+    (without,) = _framed(_view(_P1), reply).memories
+
+    assert (with_person.style, with_person.pin) == (True, False)
+    assert (without.style, without.pin) == (False, False)
