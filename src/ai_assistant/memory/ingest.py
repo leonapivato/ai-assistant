@@ -86,7 +86,7 @@ from ai_assistant.memory._observer_writes import (
     retirement_fault,
 )
 from ai_assistant.memory._operations import applied_operation
-from ai_assistant.memory._placed import placed_write
+from ai_assistant.memory._placed import created_fault, placed_write
 from ai_assistant.memory._reconciler import ReconcilerOutcome
 
 # `memory`'s own policy module, for its floor predicate alone (ADR-0159 §2, §10). The
@@ -787,6 +787,42 @@ def _stamped(memory: Memory, held: Mapping[str, MemoryRecord]) -> Memory:
     return Memory.model_validate(memory.model_dump() | {"supports": supports})
 
 
+def _refuse_creating(decision: MemoryDecision, proposal: MemoryUpdateProposal) -> None:
+    """Refuse a ruling that would create a memory ADR-0345 §6:1, §8:3 or §8:4 refuses.
+
+    An ``ACCEPT`` creates the proposed memory as it is, and a ``SUPERSEDE`` creates it
+    afresh with an open window (ADR-0045 §4); a fold creates nothing, so no rule on a
+    create binds it.
+
+    Raises:
+        MemoryStoreError: If the memory the ruling creates breaks one of them.
+    """
+    match decision.kind:
+        case MemoryDecisionKind.ACCEPT:
+            created = proposal.proposed
+        case MemoryDecisionKind.SUPERSEDE:
+            created = proposal.proposed.model_copy(update={"validity": Validity()})
+        case _:
+            return
+    fault = created_fault(created)
+    if fault is not None:
+        msg = f"refusing to write {created.id!r}: {fault}"
+        raise MemoryStoreError(msg)
+
+
+def _refuse_created(memory: Memory, held: Mapping[str, MemoryRecord]) -> None:
+    """Refuse a memory a write creates that ADR-0345 §6:1, §8:3, §8:4 or §9:3 refuses.
+
+    Raises:
+        MemoryStoreError: If it breaks one of them.
+    """
+    fault = created_fault(memory)
+    if fault is not None:
+        msg = f"refusing to write {memory.id!r}: {fault}"
+        raise MemoryStoreError(msg)
+    _refuse_ungiven_names(memory, held)
+
+
 def _refuse_ungiven_names(memory: Memory, held: Mapping[str, MemoryRecord]) -> None:
     """ADR-0345 §9:3: every name a created memory carries is given by a part it rests on.
 
@@ -1389,16 +1425,18 @@ class MemoryIngestor:
                 if text in kept or text in accepted
             )
             after = Memory.model_validate(memory.model_dump() | {"labels": labels})
-            if after != memory:
-                await self._store.write_atomic(
-                    [
-                        MemoryWrite(
-                            record=after,
-                            mode=MemoryWriteMode.IF_UNCHANGED,
-                            expected_revision=memory.revision,
-                        )
-                    ]
-                )
+            # Written even where the labels are those read: the write is conditional on
+            # the revision read, so a memory another writer moved is refused rather than
+            # reported as carrying labels it no longer carries (§7:6, ADR-0219 §2).
+            await self._store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=after,
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=memory.revision,
+                    )
+                ]
+            )
             return MemoryLabelResult(labels=labels, refused=tuple(refused))
 
     async def _admit_labels(
@@ -1459,6 +1497,25 @@ class MemoryIngestor:
             raise MemoryStoreError(msg)
         return accepted, refused
 
+    async def _refuse_unadmitted_labels(self, memory: Memory) -> None:
+        """A successor's labels, admitted whole or refused (ADR-0345 §7:3, §7:5, §7:7).
+
+        :meth:`apply` returns nothing that could say a label was not added, so a
+        successor carrying a near-duplicate is refused rather than written without it.
+
+        Raises:
+            MemoryStoreError: If its labels break the bounds, none were wired, or one is
+                a near-duplicate.
+        """
+        texts = [label.text for label in memory.labels]
+        _, refused = await self._admit_labels([], texts)
+        if refused:
+            msg = (
+                f"refusing to create {memory.id!r}: its label {refused[0]!r} is a "
+                f"near-duplicate of another it carries (ADR-0345 §7:5)"
+            )
+            raise MemoryStoreError(msg)
+
     async def _labelled(self, memory: Memory) -> tuple[Memory, tuple[str, ...]]:
         """A created memory with its near-duplicate labels left out (ADR-0345 §7:5, §7:7).
 
@@ -1497,7 +1554,8 @@ class MemoryIngestor:
             change = change.model_copy(update={"support": stamped})
         if change.successor is not None:
             created = _stamped(change.successor, held)
-            _refuse_ungiven_names(created, held)
+            _refuse_created(created, held)
+            await self._refuse_unadmitted_labels(created)
             change = change.model_copy(update={"successor": created})
         memory = change.memory
         added = _newly_added(memory, change.support)
@@ -1583,6 +1641,7 @@ class MemoryIngestor:
         _refuse_secret_write(decision, observed)
         _refuse_tentative_store(decision)
         _refuse_self_consuming_write(decision, observed, resolved=resolved)
+        _refuse_creating(decision, observed)
         applied = await self._apply(
             decision,
             observed,
@@ -1640,6 +1699,19 @@ class MemoryIngestor:
                 reconciliation=nothing,
             )
         _refuse_self_consuming_write(decision, observed, resolved=resolved)
+        # §4:7: a placement read at a revision the store no longer holds is refused
+        # whole, before any ruling writes, a confirmed one's included.
+        stale = tuple(
+            pair.memory
+            for pair in placement.pairs
+            if pair.memory not in read or read[pair.memory].revision != pair.revision
+        )
+        if stale:
+            return _Ingested(
+                result=MemoryIngestResult(decision=decision, conflicts=resolved, stale=stale),
+                superseded=(),
+                reconciliation=nothing,
+            )
         if decision.kind is MemoryDecisionKind.SUPERSEDE and observed.confirmation is not None:
             # §4:6: the confirmation rule's ruling is final, and applied as on any proposal.
             applied = await self._apply_fold(
@@ -1659,17 +1731,6 @@ class MemoryIngestor:
                 f"(ADR-0345 §4:5)"
             )
             raise MemoryStoreError(msg)
-        stale = tuple(
-            pair.memory
-            for pair in placement.pairs
-            if pair.memory not in read or read[pair.memory].revision != pair.revision
-        )
-        if stale:
-            return _Ingested(
-                result=MemoryIngestResult(decision=decision, conflicts=resolved, stale=stale),
-                superseded=(),
-                reconciliation=nothing,
-            )
         try:
             placed = placed_write(observed, read, at=self._now_utc())
         except ValueError as exc:

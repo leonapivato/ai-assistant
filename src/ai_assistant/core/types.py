@@ -6239,27 +6239,31 @@ def _input_texts(episode: EpisodicMemory, message: int | None) -> tuple[str, ...
     return (said, *(one.text for one in trigger.messages))
 
 
-def _round_texts(episode: EpisodicMemory, round_id: str | None) -> tuple[str, ...]:
-    """A round's message and the words its calls carry, or every round's where ``None``.
+def _round_texts(episode: EpisodicMemory, round_id: str) -> tuple[str, ...]:
+    """The text one round's message gives, and nothing its calls carry."""
+    processing = episode.processing_record
+    if processing is None:
+        return ()
+    return tuple(one.text for one in processing.rounds if one.id == round_id)
 
-    A remember call's statement is among a round's calls' arguments, so a part pointing
-    at one gives the text of the calls its episode's rounds made.
+
+def _call_texts(episode: EpisodicMemory) -> tuple[str, ...]:
+    """The words the episode's rounds' calls carry, a remember call's statement among them.
+
+    The effect record that names which call a remember call is lives in the plan store,
+    out of the memory store's reach, so a part pointing at one gives the text of every
+    call its episode's rounds made, and no round's message.
     """
     processing = episode.processing_record
     if processing is None:
         return ()
-    texts: list[str] = []
-    for one in processing.rounds:
-        if round_id is not None and one.id != round_id:
-            continue
-        texts.append(one.text)
-        texts.extend(
-            value
-            for call in one.calls
-            for value in call.arguments.values()
-            if isinstance(value, str)
-        )
-    return tuple(texts)
+    return tuple(
+        value
+        for one in processing.rounds
+        for call in one.calls
+        for value in call.arguments.values()
+        if isinstance(value, str)
+    )
 
 
 def _part_texts(  # noqa: PLR0911 — one arm per part that gives text
@@ -6291,7 +6295,7 @@ def _part_texts(  # noqa: PLR0911 — one arm per part that gives text
         case ConfirmationPart():
             return _input_texts(episode, None)
         case RememberCallPart():
-            return _round_texts(episode, None)
+            return _call_texts(episode)
         case _:
             return ()
 

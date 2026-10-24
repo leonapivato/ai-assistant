@@ -57,7 +57,7 @@ if TYPE_CHECKING:
         SupportPart,
     )
 
-__all__ = ["PlacedWrite", "placed_fault", "placed_write"]
+__all__ = ["PlacedWrite", "backing_fault", "created_fault", "placed_fault", "placed_write"]
 
 #: §5:10: the supports a placed proposal never carries.
 _NEVER_PLACED: Final = frozenset({SupportOrigin.OBSERVER_INFERENCE, SupportOrigin.PINNED})
@@ -94,12 +94,71 @@ def _assistant_backed(supports: Sequence[MemorySupport]) -> bool:
     )
 
 
-def placed_fault(proposal: MemoryUpdateProposal) -> str | None:  # noqa: PLR0911 — one arm per refusal
+def created_fault(memory: Memory) -> str | None:
+    """Which of ADR-0345's rules on a memory any write creates it breaks, if any.
+
+    §8:3's first refusal, a memory marked ``assistant_statement`` with no support
+    pointing at a round's message; §8:4's occasion with an end set at its create; and
+    §6:1's future end, which a create sets only where the support it cites carries an
+    about-when naming it. Bound on every create, by every path, and on no memory the
+    upgrade carries (§13:4).
+
+    §2:4's limit on what the assistant's statement backs, §8:3's second refusal, is
+    :func:`backing_fault`'s, which a placed proposal is held to (:func:`placed_fault`).
+
+    Args:
+        memory: The memory a write creates.
+
+    Returns:
+        The refusal, or ``None``.
+    """
+    marks = set(memory.marks)
+    if MemoryMark.ASSISTANT_STATEMENT in marks and not any(
+        isinstance(one.points_at, RoundMessagePart) for one in memory.supports
+    ):
+        return (
+            "a memory marked assistant_statement carries a support pointing at the round's "
+            "message (ADR-0345 §8:3)"
+        )
+    end = memory.validity.valid_until
+    if end is None:
+        return None
+    if MemoryMark.OCCASION in marks:
+        return "a memory marked occasion carries no validity end set at its create (§8:4)"
+    create = memory.operations[0]
+    cited = memory.support_at(create.cites)
+    if end > create.at and (cited is None or cited.about_when != end):
+        return (
+            "a create sets a validity end after its instant only where the support it "
+            "cites carries an about-when naming that end (ADR-0345 §6:1)"
+        )
+    return None
+
+
+def backing_fault(memory: Memory, supports: Sequence[MemorySupport]) -> str | None:
+    """§2:4, §8:3: a support the assistant's statement holds backs only a record of the saying.
+
+    Args:
+        memory: The memory ``supports`` back as worded, as it is marked.
+        supports: The backing supports a write adds to it, or creates it with.
+
+    Returns:
+        The refusal, or ``None`` where none of them is the assistant's or the memory is
+        marked ``assistant_statement`` and ``occasion``.
+    """
+    if _assistant_backed(supports) and not _marked_saying(memory):
+        return (
+            "a support the assistant's statement holds backs only a record of the saying, "
+            "marked assistant_statement and occasion (ADR-0345 §2:4, §8:3)"
+        )
+    return None
+
+
+def placed_fault(proposal: MemoryUpdateProposal) -> str | None:
     """Which refusal a placed proposal meets before anything is read, if any.
 
-    §5:10's supports; §8:3's two marks rules and §2:4's limit on what the assistant's
-    statement backs; §8:4's occasion with an end; and §6:1's future end, which a create
-    sets only where the support it cites carries an about-when naming it.
+    §5:10's supports, which no placed proposal carries, and an observer's inference
+    among them, beside every rule :func:`created_fault` holds a create to.
 
     Args:
         proposal: The placed proposal, its supports carrying their holders.
@@ -112,32 +171,7 @@ def placed_fault(proposal: MemoryUpdateProposal) -> str | None:  # noqa: PLR0911
         return (
             "a placed proposal carries no observer_inference and no pinned support (ADR-0345 §5:10)"
         )
-    marks = set(proposed.marks)
-    if MemoryMark.ASSISTANT_STATEMENT in marks and not any(
-        isinstance(one.points_at, RoundMessagePart) for one in proposed.supports
-    ):
-        return (
-            "a memory marked assistant_statement carries a support pointing at the round's "
-            "message (ADR-0345 §8:3)"
-        )
-    if _assistant_backed(proposed.backing_supports) and not _marked_saying(proposed):
-        return (
-            "a support the assistant's statement holds backs only a record of the saying, "
-            "marked assistant_statement and occasion (ADR-0345 §2:4, §8:3)"
-        )
-    end = proposed.validity.valid_until
-    if end is None:
-        return None
-    if MemoryMark.OCCASION in marks:
-        return "a memory marked occasion carries no validity end set at its create (§8:4)"
-    create = proposed.operations[0]
-    cited = proposed.support_at(create.cites)
-    if end > create.at and (cited is None or cited.about_when != end):
-        return (
-            "a create sets a validity end after its instant only where the support it "
-            "cites carries an about-when naming that end (ADR-0345 §6:1)"
-        )
-    return None
+    return created_fault(proposed) or backing_fault(proposed, proposed.backing_supports)
 
 
 def _as(  # noqa: PLR0913 — the support, and each field a relation sets on it
@@ -432,12 +466,23 @@ def _refuse_assistant_backing(original: Mapping[str, Memory], write: _Write) -> 
     for memory_id, after in write.records.items():
         added = set(write.added.get(memory_id, ()))
         newly = [one for one in after.backing_supports if one.points_at in added]
-        if _assistant_backed(newly) and not _marked_saying(original.get(memory_id, after)):
-            msg = (
-                f"{memory_id!r} would be backed by a support the assistant's statement holds "
-                f"without being a record of the saying (ADR-0345 §2:4, §8:3)"
-            )
+        fault = backing_fault(original.get(memory_id, after), newly)
+        if fault is not None:
+            msg = f"{memory_id!r}: {fault}"
             raise ValueError(msg)
+
+
+def _narrowed(write: _Write, folds: Sequence[str], proposed: Memory) -> None:
+    """Each memory the proposal folds into takes the placements' meet (ADR-0217 §3).
+
+    ADR-0328 §11:9 keeps the ratchet on every fold, so a proposal narrower than the
+    memory it folds into narrows that memory, and none widens it.
+    """
+    for memory_id in folds:
+        folded = write.records[memory_id]
+        write.records[memory_id] = folded.model_copy(
+            update={"placement": folded.placement.folded_with(proposed.placement)}
+        )
 
 
 def placed_write(
@@ -466,6 +511,9 @@ def placed_write(
         raise ValueError(fault)
     proposed = proposal.proposed
     backing = proposed.backing_supports
+    if not backing:
+        msg = "a placed proposal rests on a counted support backing it as worded (§3:2)"
+        raise ValueError(msg)
     by = proposed.operations[0].by
     replacing = any(pair.relation is PlacedRelation.CLAIMED_TOO_MUCH for pair in placement.pairs)
     folds = _folds(placement, named, proposed)
@@ -496,6 +544,7 @@ def placed_write(
         else:
             for memory_id in folds:
                 write.records[memory_id] = write.add(write.records[memory_id], disputed)
+    _narrowed(write, () if install else folds, proposed)
     _resolved(write, placement, backing)
     _refuse_assistant_backing(named, write)
     changed = {
