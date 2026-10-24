@@ -22,6 +22,7 @@ from ai_assistant.core.types import (
     DataTier,
     Memory,
     MemoryDecisionKind,
+    MemoryPlacement,
     MemoryStanding,
     MemoryUpdateProposal,
     QuestionPart,
@@ -245,3 +246,21 @@ async def test_decision_carries_a_non_blank_reason() -> None:
     decision = await FakeMemoryPolicy().decide(_proposal(), conflicts=[])
 
     assert decision.reason.strip()
+
+
+@pytest.mark.parametrize("kind", [MemoryDecisionKind.REINFORCE, MemoryDecisionKind.SUPERSEDE])
+async def test_a_configured_fold_on_a_placed_proposal_is_answered_accept(
+    kind: MemoryDecisionKind,
+) -> None:
+    """ADR-0345 §4:5: a placed proposal is folded by no ruling, so its writer places it."""
+    stored = memory("stored", "prefers tea", remembered_support("episode-1"))
+    proposal = MemoryUpdateProposal(
+        proposed=memory("new", "prefers green tea", remembered_support("episode-2")),
+        rationale="because",
+        placement=MemoryPlacement(),
+    )
+
+    ruling = await FakeMemoryPolicy(kind).decide(proposal, conflicts=[stored])
+
+    assert ruling.kind is MemoryDecisionKind.ACCEPT
+    assert "ADR-0345" in ruling.reason

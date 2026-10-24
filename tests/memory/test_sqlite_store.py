@@ -62,10 +62,12 @@ from ai_assistant.core.types import (
     MemorySupport,
     MemoryWrite,
     MemoryWriteMode,
+    MemoryWriterName,
     Placement,
     PlacementReach,
     PlacementSetter,
     Provenance,
+    SituationLabel,
     Validity,
     band_of,
 )
@@ -3386,3 +3388,63 @@ def test_a_stored_record_that_does_not_decode_renders_none_of_its_values() -> No
         SqliteMemoryStore._decode(json.dumps(stored))
 
     assert "kept@secret.example" not in str(caught.value)
+
+
+# --- ADR-0345 §7:4: the store embeds each label as it embeds a memory's wording ----------
+
+
+def _labelled(record_id: str, *texts: str) -> Memory:
+    labels = tuple(
+        SituationLabel(text=text, added_at=_WHEN, added_by=MemoryWriterName.OBSERVER)
+        for text in texts
+    )
+    return memory(record_id, f"a fact {record_id}", said_support(), labels=labels)
+
+
+def _label_rows(store: SqliteMemoryStore, record_id: str) -> list[tuple[str, int]]:
+    """Each label row the store keeps for ``record_id``, and how many vectors it has."""
+    return [
+        (str(text), int(vectors))
+        for text, vectors in store._conn.execute(
+            "SELECT l.text, (SELECT COUNT(*) FROM vec_situation_labels v "
+            "WHERE v.rowid = l.label_rowid) FROM situation_labels l "
+            "JOIN records r ON r.rowid = l.record_rowid WHERE r.id = ? ORDER BY l.label_rowid",
+            (record_id,),
+        )
+    ]
+
+
+async def test_each_label_is_embedded_and_replaced_with_its_memory(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """§7:4: one row and one vector per label, rewritten with every write of the memory."""
+    store = make_store()
+    await store.add(_labelled("m", "when travelling", "at the dentist"))
+    assert _label_rows(store, "m") == [("when travelling", 1), ("at the dentist", 1)]
+
+    await store.add(_labelled("m", "at the dentist"))
+
+    assert _label_rows(store, "m") == [("at the dentist", 1)]
+    assert store._conn.execute("SELECT COUNT(*) FROM vec_situation_labels").fetchone()[0] == 1
+
+
+async def test_a_removed_memory_takes_its_labels_with_it(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """§7:4: a delete, a purge and a clear leave no label row and no label vector behind."""
+    store = make_store()
+    await store.add(_labelled("deleted", "a"))
+    await store.add(
+        _labelled("expired", "b").model_copy(update={"expires_at": _WHEN - timedelta(days=1)})
+    )
+    await store.add(_labelled("kept", "c"))
+
+    assert await store.delete("deleted")
+    assert await store.purge_expired() == 1
+    assert _label_rows(store, "kept") == [("c", 1)]
+    assert store._conn.execute("SELECT COUNT(*) FROM situation_labels").fetchone()[0] == 1
+
+    await store.clear()
+
+    assert store._conn.execute("SELECT COUNT(*) FROM situation_labels").fetchone()[0] == 0
+    assert store._conn.execute("SELECT COUNT(*) FROM vec_situation_labels").fetchone()[0] == 0

@@ -40,6 +40,7 @@ from ai_assistant.core.errors import (
     UngrantableSourceError,
 )
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     Attestation,
     Belief,
     BeliefBand,
@@ -51,6 +52,7 @@ from ai_assistant.core.types import (
     HeldNotification,
     Memory,
     MemoryKind,
+    MemoryMark,
     MemorySource,
     MemoryWrite,
     MemoryWriteMode,
@@ -62,7 +64,9 @@ from ai_assistant.core.types import (
     Provenance,
     QuietWindow,
     ReadingCertainty,
+    StatementCitation,
     SupportDirection,
+    SupportHolder,
     SupportPart,
     TrackRecordSummary,
     Validity,
@@ -947,6 +951,41 @@ def test_an_age_nothing_dates_is_said_as_unknown(output: StringIO) -> None:
     rendered = _flat(output.getvalue())
     assert "Learned: unknown" in rendered
     assert "As of: unknown" in rendered
+
+
+def test_a_memory_held_by_someone_else_says_whose_it_is(output: StringIO) -> None:
+    """ADR-0345 §12:1: its holders, wherever they are not the owner alone."""
+    cli._render_belief(_belief())
+    assert "Held by" not in output.getvalue()
+
+    tom = SupportHolder.person("tom")
+    cli._render_belief(_belief().model_copy(update={"holders": (tom,)}))
+    assert "Held by: another person (tom)" in _flat(output.getvalue())
+
+
+def test_an_assistant_statement_is_said_to_be_what_i_said(output: StringIO) -> None:
+    """ADR-0345 §12:4: never as the user's word, citing the message, and who kept it."""
+    said = _belief().model_copy(
+        update={
+            "marks": (MemoryMark.ASSISTANT_STATEMENT,),
+            "holders": (SupportHolder.person(OWNER_PERSON_ID),),
+            "statements": (
+                StatementCitation(
+                    episode="activation:said",
+                    round="round-1",
+                    when=datetime(2026, 7, 20, 18, tzinfo=UTC),
+                ),
+            ),
+        }
+    )
+
+    cli._render_belief(said)
+
+    rendered = _flat(output.getvalue())
+    assert "what I said" in rendered
+    assert "you said it" not in rendered
+    assert "I said this, in my message of 2026-07-20 18:00 UTC" in rendered
+    assert "you kept it" in rendered
 
 
 def test_render_belief_shows_a_window_end_only_when_one_is_set(output: StringIO) -> None:

@@ -415,6 +415,55 @@ def test_the_memory_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> Non
 
 
 @pytest.mark.integration
+def test_the_memory_stores_carry_from_shape_2_is_what_its_upgrade_does(tmp_path: Path) -> None:
+    """ADR-0345 §13:3: the carry from shape 2 says what the head's upgrade writes.
+
+    Taken over the file the release before ADR-0345 wrote (``tests/memory/legacy``):
+    every record that release read back, carried to shape 3, is read back by this build
+    after opening the file, a memory's ``about_person`` as ``subjects`` and its topics
+    as labels added by ``migration``, and every support with its holder beside.
+    """
+    import shutil  # noqa: PLC0415
+
+    from ai_assistant.memory import SqliteMemoryStore  # noqa: PLC0415
+    from ai_assistant.models import HashingEmbedder  # noqa: PLC0415
+    from ai_assistant.testing import FakeTraceSink  # noqa: PLC0415
+
+    legacy = Path(__file__).resolve().parents[1] / "memory" / "legacy"
+    path = tmp_path / "memory.db"
+    shutil.copyfile(legacy / "memory-before-adr-0345.db", path)
+    with sqlite3.connect(path) as conn:
+        base: Records = {
+            f"record/{record_id}": json.loads(data) | {"revision": revision}
+            for record_id, data, revision in conn.execute("SELECT id, data, revision FROM records")
+        }
+    store = SqliteMemoryStore(
+        traces_sink=FakeTraceSink(),
+        path=path,
+        embedder=HashingEmbedder(dimensions=8),
+        now=lambda: datetime(2026, 10, 23, 12, tzinfo=UTC),
+    )
+    try:
+        head: Records = {
+            f"record/{record.id}": upgrade_stores.to_json(record)
+            for record in asyncio.run(store.export())
+        }
+    finally:
+        store.close()
+    (memory,) = [one for one in STORES if one.name == "memory"]
+
+    carried = memory.carries[2](base)
+
+    assert set(carried) == set(head)
+    assert {
+        key: first_difference(value, head[key]) for key, value in carried.items()
+    } == dict.fromkeys(carried)
+    said = head["record/mem-said"]
+    assert isinstance(said, dict)
+    assert said["subjects"] == ["Ada"]
+
+
+@pytest.mark.integration
 def test_the_plan_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> None:
     """ADR-0329 §16:10: the carry from shape 1 says what the head's upgrade reads back.
 

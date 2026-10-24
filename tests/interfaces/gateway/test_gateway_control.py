@@ -25,6 +25,7 @@ from test_gateway_streams import _harness
 
 from ai_assistant.core.errors import GrantError, UngrantableSourceError
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     Attestation,
     Belief,
     BeliefBand,
@@ -472,6 +473,11 @@ async def test_the_single_view_carries_the_listings_fields_and_every_support() -
             "holder",
         }
         assert belief["supports"][0]["origin"] == "user_message"
+        # The page says "you" without knowing the identifier that names the owner.
+        owner = {"kind": "person", "identifier": OWNER_PERSON_ID, "claimed": None, "owner": True}
+        assert belief["supports"][0]["holder"] == owner
+        assert belief["holders"] == [owner]
+        assert (belief["subjects"], belief["marks"], belief["statements"]) == (None, [], [])
 
 
 async def test_a_sourced_supports_details_cross_whole_on_the_single_view() -> None:
