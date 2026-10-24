@@ -74,6 +74,7 @@ __all__ = [
     "PlacementReply",
     "PlacementView",
     "Retrieved",
+    "compacted",
     "narrows",
     "placement_messages",
     "placement_of",
@@ -252,13 +253,28 @@ async def retrieved(  # noqa: PLR0913 — the memory, the stores, and the root's
             if isinstance(one, Memory):
                 found.setdefault(one.id, one)
     memories = [one for one in found.values() if one.id != framed.id][:bound]
-    return await _compact(memories, memory=memory, plans=plans, recent=recent)
+    return await compacted(memories, memory=memory, plans=plans, recent=recent)
 
 
-async def _compact(
+async def compacted(
     memories: Sequence[Memory], *, memory: MemoryStore, plans: PlanStore, recent: int
 ) -> tuple[Retrieved, ...]:
-    """Each memory with its open questions labelled and its recent supports resolved."""
+    """Each memory with its open questions labelled and its recent supports resolved.
+
+    Args:
+        memories: The stored memories, as read.
+        memory: The memory store the episodes their supports point into are read from.
+        plans: The plan store a remember call's effect record is read from.
+        recent: The most recent supports each is shown with in full.
+
+    Returns:
+        The memories, labelled ``M1`` onward, each with the placement of every episode
+        read to show it.
+
+    Raises:
+        MemoryStoreError: If the memory store cannot be read.
+        PlanningError: If the plan store cannot be read.
+    """
     if not memories:
         return ()
     newest = {
