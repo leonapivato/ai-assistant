@@ -9629,12 +9629,16 @@ class NamedRevision(BaseModel):
         relation: The relation the placement named for it (ADR-0345 §4).
         operations: How many operations its log held when the placement was made, so
             what a write appended is read off it after (ADR-0329 §16:1).
+        note: The placement's note on the pair, which every operation the write makes
+            for the pair carries (ADR-0345 §5), so a write is told from another's on a
+            later attempt by the notes its operations carry.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     memory: NonBlankEncodableText
     relation: PlacedRelation
     operations: int = Field(strict=True, ge=1, lt=2**31)
+    note: EncodableText
 
 
 class FramedMemory(BaseModel):
