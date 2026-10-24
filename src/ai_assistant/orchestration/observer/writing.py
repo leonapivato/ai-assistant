@@ -551,14 +551,16 @@ def _its_install(
     those whose being this write's the store establishes (ADR-0329 §16:1, as the reading
     ruled on this PR has it). The write was made at the revisions it read (ADR-0219 §2), so
     on each memory the placement names its operations are the first past the log length
-    recorded when the proposal was sent, at the write's one instant. Two operations
+    recorded when the proposal was sent, at the write's one instant. Three operations
     establish that instant:
 
     - a support the write's relation adds, citing one of the parts it adds there: a part a
       memory carries is never added to it again (ADR-0328 §4:8), so whichever write added
       it past that length, it was this one, which would have;
     - on a memory it asks to be rechecked, the first operation past that length, the
-      question every such write raises (ADR-0345 §5:9).
+      question every such write raises (ADR-0345 §5:9);
+    - a retirement naming the installed memory as its successor, which the installed
+      memory's create names among what it replaces (§5:4).
 
     At that instant, each memory's leading operations of a kind its relation makes in a
     write that installs, in its note (§5:7) and citing one of the proposal's parts, and
@@ -613,7 +615,8 @@ def _its_install(
         instants.update(
             one.at
             for one in run
-            if one.kind is MemoryOperationKind.ADD_SUPPORT and one.cites in adds
+            if (one.kind is MemoryOperationKind.ADD_SUPPORT and one.cites in adds)
+            or (retiring and _retired_for(one, named, installed))
         )
         runs[named.memory] = run
     create = installed.operations[0]
@@ -632,6 +635,20 @@ def _its_install(
     operations = {key: run for key, run in runs.items() if run and run[0].at == at}
     operations[installed.id] = [create, *(own if own and own[0].at == at else ())]
     return operations
+
+
+def _retired_for(operation: MemoryOperation, named: NamedRevision, installed: Memory) -> bool:
+    """Whether ``operation`` is the retirement the install's write made of ``named``'s memory.
+
+    A retirement in a write that installs names the installed memory as its successor, and
+    the installed memory's create names the retired one among what it replaces (ADR-0345
+    §5:4): two ids no other write could set, so the pair establishes the write.
+    """
+    return (
+        operation.kind is RETIRING_RELATIONS[named.relation]
+        and operation.successor == installed.id
+        and named.memory in installed.operations[0].replaces
+    )
 
 
 def _made_by(
