@@ -268,9 +268,14 @@ class FindingWriter:
         keep: Callable[[int, FramedMemory], Awaitable[None]],
         ledger: _Ledger,
     ) -> FramedMemory:
-        """Retrieve, place and propose one framed memory, again while its placement is stale."""
-        base = self._base(supply, narrowing)
+        """Retrieve, place and propose one framed memory, again while its placement is stale.
+
+        Every attempt's supply takes in where an earlier one placed the memory for, kept on
+        its record, so what an earlier placement call was shown narrows every later one,
+        within the attempt and after a restart (ADR-0329 §12:6, ADR-0217 §3).
+        """
         for _ in range(self._limits.stale_retries + 1):
+            base = self._base(_carried(supply, record.memory.placement), narrowing)
             if self._pins is not None:
                 await self._pins.confirm(strict=True)
             found = await retrieved(
@@ -291,6 +296,7 @@ class FindingWriter:
             before = {one.memory.id: one.memory for one in stored}
             record = record.model_copy(
                 update={
+                    "memory": memory,
                     "state": FramedState.PROPOSING,
                     "named": tuple(
                         NamedRevision(
@@ -453,9 +459,9 @@ def _its_write(
 
     A note is the placement call's prose and need not be unique, so where the proposal
     installed nothing, its having landed is also checked against what it must have left:
-    one instant across every memory, a memory it folds into carrying every part it counts,
-    each memory it asks to be rechecked holding the question, and each it supports,
-    weakens, is contained in or retires carrying every part backing it. Where any of that
+    one instant across every memory, each memory it restates carrying every part it
+    counts, each memory it asks to be rechecked holding the question, and each it
+    supports, weakens, is contained in or retires carrying every part backing it. Where any of that
     is missing, the proposal is placed again: either it did not land, or it landed only a
     fold that changed nothing, which placing again repeats harmlessly (ADR-0328 §4:8). The
     proposal's own id, installed, is the one identity the store keeps for a write; where
@@ -509,14 +515,16 @@ def _effects_held(
 ) -> bool:
     """Whether every memory the placement names holds what the write must have left it."""
     backing = {one.points_at for one in record.memory.backing_supports}
+    counted = {one.points_at for one in record.memory.counted_supports}
     for named in record.named:
         stored = held.get(named.memory)
+        carried = set() if stored is None else {one.points_at for one in stored.supports}
         if named.relation is PlacedRelation.RECHECK:
             raised = operations.get(named.memory, ())
             if not any(one.kind is MemoryOperationKind.RAISE_QUESTION for one in raised):
                 return False
-        elif named.relation in _CARRIES_BACKING and (
-            stored is None or not backing <= {one.points_at for one in stored.supports}
+        elif (named.relation in _CARRIES_BACKING and not backing <= carried) or (
+            named.relation is PlacedRelation.RESTATES and not counted <= carried
         ):
             return False
     return True
@@ -549,6 +557,13 @@ def _pin_pass(operation: MemoryOperation) -> bool:
         and isinstance(operation.cites, PinPart)
         and operation.note == PIN_NOTE
     )
+
+
+def _carried(supply: Placement, earlier: Placement) -> Placement:
+    """The finding's supply, narrowed by where an earlier attempt placed the memory for."""
+    if earlier == Placement():
+        return supply
+    return Placement.narrowest_of([supply, earlier])
 
 
 def _placement(base: Placement, stored: Sequence[Retrieved]) -> Placement:
