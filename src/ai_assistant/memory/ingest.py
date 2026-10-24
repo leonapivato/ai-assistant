@@ -86,7 +86,7 @@ from ai_assistant.memory._observer_writes import (
     retirement_fault,
 )
 from ai_assistant.memory._operations import applied_operation
-from ai_assistant.memory._placed import created_fault, placed_write
+from ai_assistant.memory._placed import created_fault, placed_fault, placed_write
 from ai_assistant.memory._reconciler import ReconcilerOutcome
 
 # `memory`'s own policy module, for its floor predicate alone (ADR-0159 §2, §10). The
@@ -1461,9 +1461,12 @@ class MemoryIngestor:
             MemoryStoreError: If this writer was wired with no bounds, a label breaks
                 them, or the embedder fails.
         """
-        if not new:
-            return [], []
         bounds = self._label_bounds
+        if not new:
+            if bounds is not None and len(carried) > bounds.max_labels:
+                msg = f"refusing to write more than {bounds.max_labels} labels (ADR-0345 §7:3)"
+                raise MemoryStoreError(msg)
+            return [], []
         embedder = self._label_embedder
         if bounds is None or embedder is None:
             msg = "refusing to write a label: this writer was wired with no label bounds (§7:3)"
@@ -1681,6 +1684,12 @@ class MemoryIngestor:
         placement = observed.placement
         if placement is None:  # pragma: no cover - routed here only when placed
             msg = "only a placed proposal is written by its placement"
+            raise MemoryStoreError(msg)
+        # §5:10, §2:4, §6:1, §8: refused before any ruling, so no ruling's write, the
+        # confirmation rule's included, creates what a placed proposal may not.
+        fault = placed_fault(observed)
+        if fault is not None:
+            msg = f"refusing to write {observed.proposed.id!r}: {fault}"
             raise MemoryStoreError(msg)
         named = [pair.memory for pair in placement.pairs]
         found = await self._store.get_many(named) if named else {}

@@ -256,7 +256,11 @@ def _holder_cite(
 
 
 def _restates_folds(stored: Memory, proposed: Memory) -> bool:
-    """§5:2: adding the proposal's supports would not raise the stored memory's standing."""
+    """§5:2: adding the proposal's supports would not raise the stored memory's standing.
+
+    A fold adds the proposal's counted supports alone, so a support the proposal stopped
+    counting is neither added nor weighed.
+    """
     rank = standing_rank(stored.standing)
     return all(
         standing_rank(origin_standing(one.origin)) <= rank
@@ -409,7 +413,7 @@ def _relate(  # noqa: C901, PLR0911, PLR0913 — one arm per row of §5's table
             # §3:7: a holder's new word on the whole claim ends their own dispute with
             # it, so their `against` supports it carried before this write stop.
             carried = {one.points_at for one in stored.supports}
-            stored = each(proposed.supports, None, backs=True)
+            stored = each(proposed.counted_supports, None, backs=True)
             for one in stored.counted_supports:
                 if one.direction is not SupportDirection.AGAINST or one.points_at not in carried:
                     continue
@@ -419,7 +423,7 @@ def _relate(  # noqa: C901, PLR0911, PLR0913 — one arm per row of §5's table
             return stored
         case PlacedRelation.CONTAINED if not replacing:
             if pair.memory in folds:
-                return each(proposed.supports, None, backs=False)
+                return each(proposed.counted_supports, None, backs=False)
             return each(backing, SupportDirection.FOR, backs=False)
         case _:
             return stored

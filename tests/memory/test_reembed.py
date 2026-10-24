@@ -1442,8 +1442,12 @@ async def test_a_memorys_labels_are_re_embedded_beside_its_wording(tmp_path: Pat
 
     rows = _read(
         store,
-        "SELECT l.text, length(v.embedding) FROM situation_labels l "
+        "SELECT l.text, v.embedding FROM situation_labels l "
         "JOIN vec_situation_labels v ON v.rowid = l.label_rowid ORDER BY l.label_rowid",
     )
-    # A float32 vector is four bytes a dimension, so each is in the target space.
-    assert rows == [("when travelling", _NEW * 4), ("at the dentist", _NEW * 4)]
+    # Each label's own embedding in the target space, never its memory's wording's.
+    target = await HashingEmbedder(dimensions=_NEW).embed(["when travelling", "at the dentist"])
+    assert rows == [
+        ("when travelling", sqlite_vec.serialize_float32(list(target[0]))),
+        ("at the dentist", sqlite_vec.serialize_float32(list(target[1]))),
+    ]

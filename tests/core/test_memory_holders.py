@@ -391,3 +391,15 @@ def test_label_bounds_are_positive_and_the_distance_a_cosine_one() -> None:
         LabelBounds(max_labels=0, max_chars=1, min_distance=0.1)
     with pytest.raises(ValidationError):
         LabelBounds(max_labels=1, max_chars=1, min_distance=2.5)
+
+
+def test_a_remember_call_gives_no_name() -> None:
+    """§9:3: which call a remember call is lives on its effect record, so none is read."""
+    episode = EpisodicMemory(
+        id="activation:held",
+        content="",
+        occurred_at=AT,
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
+    )
+    named = memory("m", "Ada likes tea", remembered_support(), subjects=("Ada",))
+    assert names_not_given(named, {episode.id: episode}) == ("Ada",)
