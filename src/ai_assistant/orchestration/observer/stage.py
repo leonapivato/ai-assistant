@@ -38,15 +38,18 @@ nothing the selector reads (§7:4).
 **What a later attempt needs is on the record, never only in the process** (§12:6,
 §16:1, §16:4), so a hub that stops between attempts loses nothing:
 
-- each pending finding carries its ``supply``, the meet of every record the scout's
-  reading was supplied, set when the scout proposes it;
-- each write a commit lands is put in the finding's ``written`` as soon as it lands; the
-  commit that decides the finding's outcome merges them into it and clears ``written``
-  in the same write.
+- each pending finding carries its ``supply``, the meet of every record the readings
+  over it were supplied: set when the scout proposes it, and narrowed by every later
+  attempt's reading before anything is written;
+- what framing kept is put on the finding as ``framed`` before any placement call, and
+  each memory's progress with it as the writer takes each step (``writing``);
+- each write that lands is put in the finding's ``written`` with the memory marked done;
+  the commit that decides the finding's outcome merges them into it and clears both in
+  the same write.
 
-A retry frames the finding again over the same reading: a memory an earlier attempt
-already wrote is retrieved, and its placement restates it, so the write adds nothing
-twice (ADR-0328 §4:8). A pending finding whose ``supply`` is not recorded — one the plan
+So a retry, after a failure or a held budget, resumes: framing is not asked again, a
+memory already done is not proposed again, and one whose proposal may have landed is
+read off the store. A pending finding whose ``supply`` is not recorded — one the plan
 store held before the field — is proposed again by a new scout, since its supply is
 unknown and nothing may stand in for it.
 
@@ -105,6 +108,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     FindingOutcome,
     FindingUnwritten,
+    FramedMemory,
     LabelBounds,
     MemoryOperationKind,
     ObservationAttempt,
@@ -147,7 +151,11 @@ from ai_assistant.orchestration.observer.scout import (
     proposed,
     scout_messages,
 )
-from ai_assistant.orchestration.observer.writing import FindingWriter, WriteLimits
+from ai_assistant.orchestration.observer.writing import (
+    FindingWriter,
+    WriteLimits,
+    outcome_of,
+)
 from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY
 
 if TYPE_CHECKING:
@@ -592,7 +600,7 @@ class Observer:
         for one in stored.findings:
             unsaved = self._unsaved.get((episode_id, one.id))
             if one.outcome is None and unsaved is not None:
-                _set(attempt, unsaved)
+                _set(attempt, _restored(unsaved, one))
         return attempt
 
     async def _processed(self, episode: EpisodicMemory, attempt: _Attempt) -> None:
@@ -612,6 +620,10 @@ class Observer:
             kept = tuple(one for one in findings if one.outcome is not None)
             self._forget(episode.id)
             await self._scouted(reading, attempt, kept, person)
+        else:
+            # §12:6: a record read again may have been narrowed since, so every pending
+            # finding takes the meet of this attempt's reading too, never wider.
+            _narrow(attempt, reading.supplied)
         for finding_id in [one.id for one in attempt.record.findings if one.outcome is None]:
             key = (episode.id, finding_id)
             current = _finding(attempt, finding_id)
@@ -739,18 +751,14 @@ class Observer:
     ) -> tuple[ObservationFinding, _Decided]:
         """One finding's framing, placements and writes (ADR-0346 §5-§6).
 
-        What an earlier commit of the finding wrote — its ``written`` — joins the
-        outcome, whatever this one decides, and the outcome clears ``written`` in the
-        write that records it (ADR-0329 §16:1). Returns the finding with its outcome, and
-        what its calls decided, which the outcome's diagnostic entry gives once the
-        record holds it (ADR-0333 §2:5).
+        What an earlier attempt wrote — the finding's ``written`` — joins the outcome,
+        and the outcome clears ``written`` and ``framed`` in the write that records it
+        (ADR-0329 §16:1). Returns the finding with its outcome, and what its calls
+        decided, which the outcome's diagnostic entry gives once the record holds it
+        (ADR-0333 §2:5).
         """
-        finding = _finding(attempt, finding_id)
-        earlier = finding.written
-        decided = await self._decision(finding_id, reading, attempt, earlier, person)
+        decided = await self._decision(finding_id, reading, attempt, person)
         outcome = decided.outcome
-        if earlier:
-            outcome = _with_writes(outcome, earlier)
         _log.info(
             "observer_commit",
             stage="commit",
@@ -760,47 +768,62 @@ class Observer:
             unclear=len(outcome.unclear),
             asked=len(outcome.asked),
         )
-        return _updated(_finding(attempt, finding_id), written=(), outcome=outcome), decided
+        finding = _updated(_finding(attempt, finding_id), written=(), framed=(), outcome=outcome)
+        return finding, decided
 
     async def _decision(
         self,
         finding_id: str,
         reading: Reading,
         attempt: _Attempt,
-        earlier: tuple[ObservationWrite, ...],
         person: PersonFields | None,
     ) -> _Decided:
         """This commit's calls, checks and writes: what it wrote, or why nothing was.
 
-        Every write that lands is put in the finding's ``written`` beside ``earlier``
-        and saved before the next is made (ADR-0329 §16:1). Given a person, the style
-        and pin framing judged of each memory are recorded on the memory it is held at
-        before the outcome is (ADR-0338 §9:4-§9:5).
+        Framing is asked once: what it keeps is put on the finding before any placement,
+        so a later attempt resumes from it (ADR-0329 §16:1, §16:4). Every step of every
+        memory's write is put on the record as the writer takes it, beside what earlier
+        attempts wrote. Given a person, the style and pin framing judged of each memory
+        are recorded on the memory it is held at before the outcome is (ADR-0338
+        §9:4-§9:5), every memory's, the earlier attempts' included.
         """
         finding = _finding(attempt, finding_id)
-        view = framing_view(finding, reading)
-        if view is None:
-            return _Decided(outcome=_unwritten(self._now(), FindingUnwritten.CHECK_FAILED))
-        rendered = None if person is None else person.rendered()
-        reply = await self._call(
-            attempt,
-            ObserverStep.FRAMING,
-            self._commit,
-            lambda instruction: framing_messages(view, instruction, person=rendered),
-            finding=finding,
-            person=person is not None,
-        )
-        reply_read = parsed(reply, FramingReply)
-        if reply_read is None:
-            raise _Unparsed(ObserverStep.FRAMING)
-        framing = framed(
-            reply_read,
-            view,
-            now=self._now(),
-            mint=self._mint,
-            labels=self._limits.labels,
-            person=person is not None,
-        )
+        earlier = finding.written
+        framing: Framing | None = None
+        records = finding.framed
+        if not records:
+            framing = await self._framing(finding, reading, attempt, person)
+            if framing is None:
+                return _Decided(outcome=_unwritten(self._now(), FindingUnwritten.CHECK_FAILED))
+            if not framing.memories:
+                reason = (
+                    FindingUnwritten.CHECK_FAILED if framing.failed else FindingUnwritten.NOT_KEPT
+                )
+                outcome = _unwritten(self._now(), reason)
+                if earlier:
+                    outcome = FindingOutcome(at=outcome.at, writes=earlier)
+                return _Decided(outcome=outcome, decided=_decided(framing, None))
+            records = tuple(
+                FramedMemory(memory=one.memory, style=one.style, pin=one.pin)
+                for one in framing.memories
+            )
+
+        async def progress(
+            now: tuple[FramedMemory, ...], writes: tuple[ObservationWrite, ...]
+        ) -> None:
+            key = (attempt.record.episode, finding_id)
+            updated = _updated(
+                _finding(attempt, finding_id), framed=now, written=_joined(earlier, writes)
+            )
+            _set(attempt, updated)
+            # Kept until the record carrying it is written, so a failing write of the
+            # record loses no step to the next attempt in this process (§16:1).
+            self._unsaved[key] = updated
+            await self._save(attempt, findings=attempt.record.findings)
+
+        if framing is not None:
+            # What framing kept reaches the record before any placement call is made.
+            await progress(records, ())
 
         async def place(shown: PlacementView) -> MemoryPlacement:
             text = await self._call(
@@ -816,32 +839,62 @@ class Observer:
                 raise _Unparsed(ObserverStep.PLACEMENT)
             return placement
 
-        async def landed(writes: tuple[ObservationWrite, ...]) -> None:
-            key = (attempt.record.episode, finding_id)
-            updated = _updated(_finding(attempt, finding_id), written=_joined(earlier, writes))
-            _set(attempt, updated)
-            # Kept until the record carrying it is written, so a failing write of the
-            # record loses no landed write to the next attempt in this process (§16:1).
-            self._unsaved[key] = updated
-            await self._save(attempt, findings=attempt.record.findings)
-
-        supply = finding.supply or Placement()
         annotations = finding.annotations
         written = await self._writer.write(
-            framing,
-            supply=supply,
+            records,
+            texts={one: read.text for one in finding.rests_on if (read := reading.at(one))},
+            supply=finding.supply or Placement(),
             narrowing=None if annotations is None else annotations.narrowing,
             place=place,
-            landed=landed,
+            progress=progress,
         )
         if person is not None:
             # On the memory each write left, before the outcome is recorded: a store that
-            # fails fails the attempt, and the retry frames the finding again, the memory
-            # already kept retrieved and restated.
-            await self._marked(person, written, episode=attempt.record.episode)
-        return _Decided(outcome=written.outcome, decided=_decided(framing, written))
+            # fails fails the attempt, and the retry resumes from the record, every
+            # memory done, and marks again, which the store keeps once.
+            await self._marked(person, written.framed, episode=attempt.record.episode)
+        outcome = outcome_of(written.framed, _joined(earlier, written.writes), at=self._now())
+        return _Decided(outcome=outcome, decided=_decided(framing, written))
 
-    async def _marked(self, person: PersonFields, written: Written, *, episode: str) -> None:
+    async def _framing(
+        self,
+        finding: ObservationFinding,
+        reading: Reading,
+        attempt: _Attempt,
+        person: PersonFields | None,
+    ) -> Framing | None:
+        """The finding's one framing call and code's checks of it (ADR-0346 §5).
+
+        Returns ``None`` where a part it rests on is no longer read, which fails its
+        check before any call (ADR-0329 §9:5).
+        """
+        view = framing_view(finding, reading)
+        if view is None:
+            return None
+        rendered = None if person is None else person.rendered()
+        reply = await self._call(
+            attempt,
+            ObserverStep.FRAMING,
+            self._commit,
+            lambda instruction: framing_messages(view, instruction, person=rendered),
+            finding=finding,
+            person=person is not None,
+        )
+        reply_read = parsed(reply, FramingReply)
+        if reply_read is None:
+            raise _Unparsed(ObserverStep.FRAMING)
+        return framed(
+            reply_read,
+            view,
+            now=self._now(),
+            mint=self._mint,
+            labels=self._limits.labels,
+            person=person is not None,
+        )
+
+    async def _marked(
+        self, person: PersonFields, framed_memories: Sequence[FramedMemory], *, episode: str
+    ) -> None:
         """The style marks and pin suggestions framing asked for (ADR-0338 §9:4-§9:5).
 
         Each on the memory the framed memory is held at after its write, the one
@@ -851,20 +904,19 @@ class Observer:
 
         Raises:
             PersonModelStoreError: If the store cannot be written: the attempt fails, and
-                the finding, its outcome not recorded, is decided again on the retry.
+                the retry, resuming from the record, marks again.
         """
         people = self._people
         if people is None:  # pragma: no cover - called only with a person
             return
-        for placed in written.placed:
-            framed_ = placed.framed
-            if framed_ is None or not (framed_.style or framed_.pin):
+        for one in framed_memories:
+            if not (one.style or one.pin):
                 continue
-            for memory_id in placed.kept:
-                if framed_.style:
+            for memory_id in one.kept:
+                if one.style:
                     marked = await people.add_style_mark(person.person_id, memory_id)
                     _refusal_logged(marked, stage="mark")
-                if framed_.pin:
+                if one.pin:
                     suggestion = ProposedSuggestion(
                         kind=SuggestionKind.PIN, memory_id=memory_id, episode_id=episode
                     )
@@ -993,19 +1045,26 @@ class Observer:
         return state
 
 
-def _decided(framing: Framing, written: Written) -> dict[str, object]:
+def _decided(framing: Framing | None, written: Written | None) -> dict[str, object]:
     """What a finding's framing and placements decided, for its outcome entry (§2:5).
 
     Each memory framing proposed, with why code refused it where it did, and each kept
-    one as framed; framing's reason where it kept nothing; and each kept memory's
-    placement, with its ruling and where it is now held.
+    one as framed, where this attempt's framing call decided them; framing's reason
+    where it kept nothing; and each kept memory's placement, with its ruling and where
+    it is now held.
     """
-    kept = {one.memory.content: _framed_memory(one.memory) for one in framing.memories}
+    kept = (
+        {}
+        if framing is None
+        else {one.memory.content: _framed_memory(one.memory) for one in framing.memories}
+    )
     return {
-        "framed": [{**note, "framed": kept.get(str(note["wording"]))} for note in framing.notes],
-        "failed": framing.failed,
-        "nothing": framing.nothing,
-        "placed": [one.rendered() for one in written.placed],
+        "framed": None
+        if framing is None
+        else [{**note, "framed": kept.get(str(note["wording"]))} for note in framing.notes],
+        "failed": None if framing is None else framing.failed,
+        "nothing": None if framing is None else framing.nothing,
+        "placed": [] if written is None else list(written.placed),
     }
 
 
@@ -1049,6 +1108,17 @@ def _updated(finding: ObservationFinding, **fields: object) -> ObservationFindin
     return type(finding).model_validate({**dict(finding), **fields})
 
 
+def _restored(unsaved: ObservationFinding, recorded: ObservationFinding) -> ObservationFinding:
+    """The finding this process kept unsaved, never wider than the record's (§12:6).
+
+    It was built after the recorded one and carries every step it does; the supply is
+    the meet of the two all the same, so a restore can only narrow a placement.
+    """
+    if unsaved.supply is None or recorded.supply is None:
+        return unsaved
+    return _updated(unsaved, supply=Placement.narrowest_of([unsaved.supply, recorded.supply]))
+
+
 def _finding(attempt: _Attempt, finding_id: str) -> ObservationFinding:
     """The finding ``finding_id`` as the attempt's record now holds it."""
     return next(one for one in attempt.record.findings if one.id == finding_id)
@@ -1062,6 +1132,19 @@ def _set(attempt: _Attempt, finding: ObservationFinding) -> None:
     """
     findings = tuple(finding if one.id == finding.id else one for one in attempt.record.findings)
     attempt.record = attempt.record.model_copy(update={"findings": findings})
+
+
+def _narrow(attempt: _Attempt, supplied: Sequence[Placement]) -> None:
+    """Narrow every pending finding's supply by ``supplied`` (§12:6), unsaved.
+
+    The next write of the record carries it, before any call or write is made on it; a
+    finding whose supply is unknown stays unknown.
+    """
+    if not supplied:
+        return
+    for one in attempt.record.findings:
+        if one.outcome is None and one.supply is not None:
+            _set(attempt, _updated(one, supply=Placement.narrowest_of([one.supply, *supplied])))
 
 
 def _declines(
@@ -1111,17 +1194,6 @@ def _joined(
     return tuple(
         ObservationWrite(memory=memory, operations=tuple(kinds), track_record=entries[memory])
         for memory, kinds in operations.items()
-    )
-
-
-def _with_writes(outcome: FindingOutcome, earlier: Sequence[ObservationWrite]) -> FindingOutcome:
-    """``outcome`` with what an earlier, failed commit of the same finding wrote (§16:1)."""
-    return FindingOutcome(
-        at=outcome.at,
-        ruling=outcome.ruling,
-        writes=_joined(earlier, outcome.writes),
-        unclear=outcome.unclear,
-        asked=outcome.asked,
     )
 
 

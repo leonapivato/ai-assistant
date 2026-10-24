@@ -108,6 +108,7 @@ def _with_empty_carry(blob: dict[str, Any]) -> dict[str, Any]:
                 "written": [],
                 "annotations": None,
                 "further_candidates": [],
+                "framed": [],
                 "outcome": None
                 if one.get("outcome") is None
                 else one["outcome"] | {"unclear": [], "asked": []},

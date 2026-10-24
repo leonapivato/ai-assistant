@@ -9605,6 +9605,76 @@ class UnclearPlacement(BaseModel):
     note: NonBlankEncodableText
 
 
+class FramedState(StrEnum):
+    """How far one framed memory has got toward its write (ADR-0346 §5-§6, ADR-0329 §16:1).
+
+    Closed, **added to and never renamed**: the value is stored.
+    """
+
+    FRAMED = "framed"
+    """Framing kept it, and it has not yet been proposed."""
+    PROPOSING = "proposing"
+    """Its placed proposal is about to be, or has been, sent to the writer, at the
+    revisions :attr:`FramedMemory.named` records; whether it landed is read off the
+    store on a retry, never assumed."""
+    DONE = "done"
+    """Its proposal was ruled on and what it wrote is on the finding's record."""
+
+
+class NamedRevision(BaseModel):
+    """A stored memory a placement named, how it was placed, and how long its log was.
+
+    Attributes:
+        memory: The stored memory's id, exactly as the memory store holds it.
+        relation: The relation the placement named for it (ADR-0345 §4).
+        operations: How many operations its log held when the placement was made, so
+            what a write appended is read off it after (ADR-0329 §16:1).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    memory: NonBlankEncodableText
+    relation: PlacedRelation
+    operations: int = Field(strict=True, ge=1, lt=2**31)
+
+
+class FramedMemory(BaseModel):
+    """One memory framing kept of a finding, and how far its write has got (ADR-0346 §5-§6).
+
+    Kept on the finding while it has no outcome, so an attempt held by the budget or one
+    that failed resumes where the last one stopped: framing is not asked again, a memory
+    whose write landed is not proposed again, and what each placement named ``unclear`` is
+    kept from the moment the call returns (§6:5).
+
+    Attributes:
+        memory: The memory as framing kept it, after code's checks, its placement not
+            yet set (§5:7).
+        style: Whether framing said it states how the person wants to be spoken to
+            (ADR-0338 §9:4).
+        pin: Whether framing said it matters in every conversation (§9:5).
+        state: How far its write has got.
+        named: Each stored memory its last placement named, with the length of its log
+            then; set when its proposal is sent.
+        unclear: Each ``unclear`` a placement call named for it (ADR-0346 §6:5).
+        ruling: The policy's ruling on its proposal, once one is known.
+        kept: Where it is now held, the memory installed or those it was folded into,
+            once its write is known.
+        asked: Whether the policy's floor asked about it, raising nothing (§6:8).
+        refused: Why its proposal wrote nothing before any ruling, where it did.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    memory: Memory
+    style: bool = False
+    pin: bool = False
+    state: FramedState = FramedState.FRAMED
+    named: tuple[NamedRevision, ...] = ()
+    unclear: tuple[UnclearPlacement, ...] = ()
+    ruling: MemoryDecisionKind | None = None
+    kept: tuple[NonBlankEncodableText, ...] = ()
+    asked: bool = False
+    refused: FindingUnwritten | None = None
+
+
 class FindingOutcome(BaseModel):
     """What a finding's commit did: what was written, or why nothing was (§16:1).
 
@@ -9790,6 +9860,10 @@ class ObservationFinding(BaseModel):
         outcome: What its commit did, or ``None`` while it has not been committed.
         annotations: What the scout said of it beside its claim (ADR-0346 §4:2,
             §4:5); ``None`` on a finding recorded before ADR-0346, which said none.
+        framed: The memories framing kept of it, each with how far its write has got,
+            while it has no outcome (ADR-0346 §5-§6, ADR-0329 §16:1): set once framing
+            decides, so a later attempt resumes rather than framing it again. The
+            outcome that records the finding clears it, as it clears ``written``.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -9804,6 +9878,7 @@ class ObservationFinding(BaseModel):
     written: tuple[ObservationWrite, ...] = ()
     outcome: FindingOutcome | None = None
     annotations: FindingAnnotations | None = None
+    framed: tuple[FramedMemory, ...] = ()
 
     @model_validator(mode="after")
     def _rests_on_episode_parts(self) -> Self:
@@ -9831,6 +9906,9 @@ class ObservationFinding(BaseModel):
         memories = [write.memory for write in self.written]
         if len(set(memories)) != len(memories):
             msg = "a finding names each memory a failed commit wrote on once"
+            raise ValueError(msg)
+        if self.framed and self.outcome is not None:
+            msg = "a finding keeps what framing kept only until its outcome is recorded"
             raise ValueError(msg)
         return self
 
@@ -9987,8 +10065,9 @@ class PlanExport(BaseModel):
     """A portable snapshot of planning state (see ADR-0014 §5, ADR-0004 §6).
 
     **``schema_version`` is 23 because the observation record gained what ADR-0346 has
-    the observer keep**: each finding's ``annotations`` (§4:5) and the
-    ``further_candidates`` it accounts for beside its first (§4:6), the record's ``declines``
+    the observer keep**: each finding's ``annotations`` (§4:5), the
+    ``further_candidates`` it accounts for beside its first (§4:6) and the memories
+    framing kept of it while it is pending (``framed``, §5-§6), the record's ``declines``
     (§4:6), and on an outcome the ``unclear`` its placement calls named (§6:5) and the
     wordings the floor ``asked`` about (§6:8). A reader of 22 refuses the fields as
     extra. The closure rule is extended by nothing: a decline names an effect record's
