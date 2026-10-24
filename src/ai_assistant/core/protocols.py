@@ -225,6 +225,7 @@ if TYPE_CHECKING:
         StoryOutcome,
         StoryPage,
         StoryStanding,
+        StorySummary,
         StorySummaryDraft,
         StorySummaryOutcome,
         StorySummaryState,
@@ -6771,9 +6772,20 @@ class StoryStore(Protocol):
     the activation it was written during (nothing, for a note ``owner`` wrote), its
     mark, and the store's clock reading; none of it changes once written, no note is
     removed, and no rule of the store reads the activation it was written during. The
-    summary is zero or more lines, each its text alone, and the summary's mark. Only
-    the summary is kept as text, and the version log is append-only and holds
-    identities, instants and enumerations only.
+    summary is zero or more lines, each its text alone, and the summary's mark. The
+    version log is append-only and holds identities, instants and enumerations only.
+
+    **Every summary is kept** (ADR-0347 §2). A summary a later write replaces is kept,
+    with the version that wrote it, its ``written_at``, its lines and its mark, exactly
+    as written, beside the version log and not in it: :meth:`summary_at` reads it by its
+    version. A kept summary never changes, and nothing removes one, as nothing removes a
+    note or a version. Forgetting reaches no summary, current or kept (ADR-0304 §5:1, as
+    ADR-0347 §3 keeps it).
+
+    **One sequence orders the store's writes** (ADR-0347 §2:5). A version's number, a
+    note's identity and a summary read's ``as_of`` are all drawn from it, and
+    :meth:`position` reads where it stands, so a caller can name the versions written
+    before a moment by number where a clock reading, which may run backwards, could not.
 
     **Pending.** A note or an activation member is pending on a story from when it
     comes to the story — written to it, linked into it, or brought by a merge, a
@@ -7246,8 +7258,9 @@ class StoryStore(Protocol):
     ) -> StorySummaryOutcome:
         """Write a new summary and its version, and no note (ADR-0303 §4).
 
-        One transaction: the new summary, its lines and its mark, replaces the
-        old one, whose text is discarded; and the version is appended, recording what
+        One transaction: the new summary, its lines and its mark, becomes the
+        current one, and the one it replaces is kept, readable by its version through
+        :meth:`summary_at` (ADR-0347 §2); and the version is appended, recording what
         it took in, the other stories' summary versions its run read, its flags and its
         mark. It takes in exactly the notes and episodes the draft names that were
         pending on the story at ``as_of``; a name the story holds that was not is not
@@ -7341,6 +7354,51 @@ class StoryStore(Protocol):
 
         Raises:
             ValueError: If an argument is malformed.
+            StoryStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def summary_at(self, story_id: Identifier, version: int) -> StorySummary | None:
+        """Read the summary a version of a story wrote, as it was written (ADR-0347 §2:4).
+
+        The current summary and every summary a later write replaced alike, each with
+        the version that wrote it, its ``written_at``, its lines and its mark. A merged
+        story's summaries are read by its own id, as it was left. The read names one
+        version: which version a caller wants, such as the latest at or below a
+        :meth:`position` it recorded, is the caller's to work out from
+        :meth:`summary_versions`.
+
+        Args:
+            story_id: The story whose summary is read.
+            version: The version that wrote it.
+
+        Returns:
+            The summary, or ``None`` where the store holds no text for that version —
+            a version written before the store kept every summary, which an upgrade
+            gives no text (ADR-0347 §5:1) — or the version is not that story's, the
+            store holding no such story or no such version included.
+
+        Raises:
+            ValueError: If the id is malformed or ``version`` is not an exact ``int``
+                in ``[1, 2**63)``.
+            StoryStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def position(self) -> int:
+        """Read where the store's one sequence stands (ADR-0347 §2:5).
+
+        The sequence a version's number and a summary read's ``as_of`` lie on: every
+        version written before the call has a number at or below the value returned,
+        and every version written after it a number above it. It is what
+        :meth:`current_summary` reports as ``as_of`` at the same moment, read without
+        naming a story.
+
+        Returns:
+            The position, an ``int`` in ``[0, 2**63)``; ``0`` for a store that has
+            written nothing on the sequence.
+
+        Raises:
             StoryStoreError: If the store cannot be read.
         """
         ...

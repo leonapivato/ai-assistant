@@ -4362,6 +4362,17 @@ class EpisodeProcessingRecord(BaseModel):
     activation itself, and none names one activation twice: a taken-over activation is
     stopped, so it is taken over once.
 
+    ``stories_position`` is the story store's position when the activation was admitted
+    (:meth:`~ai_assistant.core.protocols.StoryStore.position`), recorded by the admission
+    write beside ``started_at`` (ADR-0347 §4:1, as it adds to ADR-0286 §2:1). Every
+    version of a story written before that read has a number at or below it, and every
+    one written after a number above it, so it names the summary each story had when the
+    activation started, whatever the clock did (§4:2). It is ``None`` where none was
+    recorded: a record written before the field, or an admission that read no position.
+    ``None`` by default, so a record written before the field validates unchanged and
+    ``schema_version`` does not move, as ``joined`` was added. Once written it keeps its
+    value, as every field the admission write sets does (ADR-0286 §3).
+
     ``schema_version`` is 11 because the record loses the old path's links, resume
     trigger and compose-stage degradation, and its stages their verdicts (ADR-0318
     §4, §5:3, §7:1; ADR-0309 §3:7): a version-10 record carries them and does not
@@ -4391,6 +4402,7 @@ class EpisodeProcessingRecord(BaseModel):
     digests: tuple[ActivationDigest, ...] = ()
     recall_second_run: ActivationRecall | None = None
     joined: tuple[JoinedInput, ...] = ()
+    stories_position: int | None = Field(default=None, strict=True, ge=0, lt=2**63)
 
     @property
     def is_open(self) -> bool:
@@ -20089,9 +20101,10 @@ class StorySummaryLine(BaseModel):
 class StorySummary(BaseModel):
     """A story's summary: zero or more lines, the first saying what the matter is.
 
-    Only the summary is kept as text: writing a new one discards the old one's
-    (ADR-0300 §3:6). ``version`` is the version that wrote it, and ``written_at`` when,
-    which is when the summary was last tidied. ``lines`` may be empty: a tidy-up may write
+    Every summary a write makes is kept, exactly as written, after a later write replaces
+    it (ADR-0347 §2, superseding ADR-0300 §3:6's last sentence). ``version`` is the
+    version that wrote it, and ``written_at`` when, which for the current summary is when
+    the story was last tidied. ``lines`` may be empty: a tidy-up may write
     no line (ADR-0303 §5:3). ``outside`` is the summary's mark, as the version that wrote
     it records it (§3:4).
     """
@@ -20456,6 +20469,25 @@ def check_story_as_of(as_of: object) -> int:
         msg = "a summary's as_of must be an integer in [0, 2**63)"
         raise ValueError(msg)
     return as_of
+
+
+def check_story_version(version: object) -> int:
+    """Refuse a summary version no version log could hold (ADR-0347 §2:4).
+
+    Args:
+        version: The version :meth:`~ai_assistant.core.protocols.StoryStore.summary_at`
+            is asked for.
+
+    Returns:
+        It, checked.
+
+    Raises:
+        ValueError: If it is not an exact ``int`` in ``[1, 2**63)``.
+    """
+    if type(version) is not int or not 1 <= version < _STORY_POSITION_BOUND:
+        msg = "a summary version must be an integer in [1, 2**63)"
+        raise ValueError(msg)
+    return version
 
 
 def story_note_ids(notes: object) -> tuple[int, ...]:

@@ -828,16 +828,21 @@ async def _write_stories(directory: Path, moment: Moment) -> None:
             written_during="act-upgrade-2",
         )
         await store.append_note(story, "Ask about the bill.", author=StoryNoteAuthor.OWNER)
-        state = await store.current_summary(story)
-        assert state is not None  # noqa: S101  # the story was just made
-        await store.write_summary(
-            story,
-            StorySummaryDraft(
-                lines=(StorySummaryLine(text="The dentist appointment, now Thursday."),),
-                outside=False,
-            ),
-            as_of=state.as_of,
-        )
+        # Two summaries, so the first is one a later write replaced, which this build
+        # keeps (ADR-0347 §2) and a later build's upgrade check reads back.
+        for lines, outside in (
+            (("The dentist appointment.",), True),
+            (("The dentist appointment, now Thursday.",), False),
+        ):
+            state = await store.current_summary(story)
+            assert state is not None  # noqa: S101  # the story was just made
+            await store.write_summary(
+                story,
+                StorySummaryDraft(
+                    lines=tuple(StorySummaryLine(text=text) for text in lines), outside=outside
+                ),
+                as_of=state.as_of,
+            )
         second = await store.create(
             (StoryMember(kind=StoryMemberKind.ACTIVATION, id="act-upgrade-3"),),
             actor=StoryActor.UNDERSTANDING,
@@ -849,6 +854,13 @@ async def _write_stories(directory: Path, moment: Moment) -> None:
 
 
 async def _read_stories(directory: Path) -> Records:
+    """Every story's records, each version's kept summary, and the store's position.
+
+    ``kept/<story>`` is the summary each version of the story's log wrote, as
+    :meth:`~ai_assistant.core.protocols.StoryStore.summary_at` reads it, ``None`` where
+    the store holds no text for it (ADR-0347 §2:4); ``position`` is where the store's
+    one sequence stands (§2:5). Both are read from shape 2.
+    """
     store = _stories(directory)
     try:
         records: Records = {}
@@ -859,13 +871,64 @@ async def _read_stories(directory: Path) -> Records:
             records[f"view/{story}"] = to_json(await store.view(story, limit=MAX_STORY_PAGE))
             records[f"log/{story}"] = to_json(await store.log(story, limit=MAX_STORY_PAGE))
             records[f"notes/{story}"] = to_json(await store.notes(story, limit=MAX_STORY_PAGE))
-            records[f"summaries/{story}"] = to_json(
-                await store.summary_versions(story, limit=MAX_STORY_PAGE)
-            )
+            versions = await store.summary_versions(story, limit=MAX_STORY_PAGE)
+            records[f"summaries/{story}"] = to_json(versions)
             records[f"summary/{story}"] = to_json(await store.current_summary(story))
+            records[f"kept/{story}"] = [
+                {
+                    "version": one.version,
+                    "summary": to_json(await store.summary_at(story, one.version)),
+                }
+                for one in (() if versions is None else versions.versions)
+            ]
+        records["position"] = await store.position()
         return records
     finally:
         store.close()
+
+
+def _stories_kept_carry(records: Records) -> Records:
+    """ADR-0347 §5:1: what the head's upgrade of a shape-1 story store reads back.
+
+    The base kept each story's current summary alone, and the head's upgrade keeps it
+    as the text of the version that wrote it, no earlier version gaining any: so each
+    story's ``kept`` names every version its log holds, with the story's current
+    summary at the version that wrote it and ``None`` at every other. The position is
+    the counter the base's summary reads reported as their ``as_of``, which the upgrade
+    leaves where it stood; with no story, nothing was ever written on it.
+
+    Raises:
+        TypeError: If a story's summary or version records are not what a shape-1
+            read-back holds.
+    """
+    carried = dict(records)
+    position: Json = 0
+    for key, value in records.items():
+        if not key.startswith("summary/"):
+            continue
+        story = key.removeprefix("summary/")
+        versions = records.get(f"summaries/{story}")
+        if not isinstance(value, dict) or not isinstance(versions, dict):
+            msg = f"a shape-1 story read-back holds no summary and version log for {story}"
+            raise TypeError(msg)
+        current = value.get("summary")
+        logged = versions.get("versions")
+        if not isinstance(logged, list) or not (current is None or isinstance(current, dict)):
+            msg = f"a shape-1 story read-back's summary records for {story} are not records"
+            raise TypeError(msg)
+        numbers = [one.get("version") if isinstance(one, dict) else None for one in logged]
+        carried[f"kept/{story}"] = [
+            {
+                "version": number,
+                "summary": (
+                    current if current is not None and number == current.get("version") else None
+                ),
+            }
+            for number in numbers
+        ]
+        position = value.get("as_of")
+    carried["position"] = position
+    return carried
 
 
 # --- audit.db -------------------------------------------------------------------------
@@ -1603,7 +1666,14 @@ STORES: Final[tuple[Store, ...]] = (
         shape=3,
         carries={1: _memory_record_carry, 2: _memory_placed_carry},
     ),
-    Store("stories", ("stories.db",), _write_stories, _read_stories),
+    Store(
+        "stories",
+        ("stories.db",),
+        _write_stories,
+        _read_stories,
+        shape=2,
+        carries={1: _stories_kept_carry},
+    ),
     Store("audit", ("audit.db",), _write_audit, _read_audit),
     Store(
         "plans",
