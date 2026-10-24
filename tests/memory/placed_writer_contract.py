@@ -1850,14 +1850,15 @@ class PlacedWriterContract:
     ) -> None:
         """An embedder's malformed vectors are the writer's error, and nothing is written."""
         store = await self._world("owner")
-        writer = make_placed_writer(store, FakeMemoryPolicy(), labels=(_BOUNDS, _Ragged()))
         await store.add(memory("m", "The user is allergic", _said("owner"), labels=(_label("a"),)))
         held = (await _all(store))["m"]
 
-        with pytest.raises(MemoryStoreError):
-            await writer.write_labels(
-                MemoryLabelChange(memory=held, labels=("a", "b"), by=MemoryWriterName.OBSERVER)
-            )
+        for embedder in (_Ragged(), _Unsized()):
+            writer = make_placed_writer(store, FakeMemoryPolicy(), labels=(_BOUNDS, embedder))
+            with pytest.raises(MemoryStoreError):
+                await writer.write_labels(
+                    MemoryLabelChange(memory=held, labels=("a", "b"), by=MemoryWriterName.OBSERVER)
+                )
 
         assert (await _all(store))["m"] == held
 
@@ -2042,6 +2043,13 @@ class _Ragged(_Embedded):
 
     async def embed(self, texts: Sequence[str]) -> list[Sequence[float]]:
         return [[1.0, 0.0] if index == 0 else [1.0] for index, _ in enumerate(texts)]
+
+
+class _Unsized(_Embedded):
+    """An embedder answering a vector that is no vector at all."""
+
+    async def embed(self, texts: Sequence[str]) -> list[Sequence[float]]:
+        return [[1.0, 0.0] if index == 0 else None for index, _ in enumerate(texts)]  # type: ignore[misc]  # malformed on purpose
 
 
 class _MovingStore(FakeMemoryStore):
