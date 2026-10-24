@@ -292,6 +292,21 @@ async def test_an_input_answers_the_question_its_understanding_recorded() -> Non
     assert (window.text, window.answers) == ("Window.", "Window or aisle?")
     (yes,) = unanswered.leaving.parts
     assert yes.answers is None
+    # An earlier reply the record points at keeps what it answered, by its own pointer.
+    await harness.hold(
+        episode(
+            "later",
+            at=AT - timedelta(minutes=1),
+            text="Still the window.",
+            labels=(
+                _label("E1", LabelKind.EPISODE, address("asked")),
+                _label("E2", LabelKind.EPISODE, address("one")),
+            ),
+        )
+    )
+    later = await _read(harness, "later")
+    earlier = {part.text: part.answers for one in later.earlier for part in one.parts}
+    assert earlier["Window."] == "Window or aisle?"
 
 
 def _recall(*items: RecalledItem) -> ActivationRecall:

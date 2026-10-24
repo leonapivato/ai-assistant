@@ -794,14 +794,14 @@ class Observer:
         if not records:
             framing = await self._framing(finding, reading, attempt, person)
             if framing is None:
-                return _Decided(outcome=_unwritten(self._now(), FindingUnwritten.CHECK_FAILED))
+                return _Decided(
+                    outcome=_unwritten(self._now(), FindingUnwritten.CHECK_FAILED, earlier)
+                )
             if not framing.memories:
                 reason = (
                     FindingUnwritten.CHECK_FAILED if framing.failed else FindingUnwritten.NOT_KEPT
                 )
-                outcome = _unwritten(self._now(), reason)
-                if earlier:
-                    outcome = FindingOutcome(at=outcome.at, writes=earlier)
+                outcome = _unwritten(self._now(), reason, earlier)
                 return _Decided(outcome=outcome, decided=_decided(framing, None))
             records = tuple(
                 FramedMemory(memory=one.memory, style=one.style, pin=one.pin)
@@ -1228,7 +1228,16 @@ def _with_attempt(
     )
 
 
-def _unwritten(at: datetime, reason: FindingUnwritten) -> FindingOutcome:
+def _unwritten(
+    at: datetime, reason: FindingUnwritten, earlier: Sequence[ObservationWrite] = ()
+) -> FindingOutcome:
+    """Nothing written by this commit, with what an earlier attempt wrote (§16:1).
+
+    A finding the plan store held before ``framed`` may carry writes an earlier commit
+    landed; they are its outcome whatever this commit decides, and are never dropped.
+    """
+    if earlier:
+        return FindingOutcome(at=at, writes=tuple(earlier))
     return FindingOutcome(at=at, unwritten=reason)
 
 

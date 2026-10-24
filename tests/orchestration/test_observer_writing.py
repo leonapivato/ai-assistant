@@ -30,13 +30,16 @@ from ai_assistant.core.types import (
     FramedState,
     InputPart,
     Memory,
+    MemoryChange,
     MemoryDecisionKind,
+    MemoryOperation,
     MemoryOperationKind,
     MemoryPlacement,
     MemoryStatus,
     MemoryWrite,
     MemoryWriteMode,
     MemoryWriterName,
+    NamedRevision,
     ObservationWrite,
     PlacedPair,
     PlacedRelation,
@@ -299,10 +302,13 @@ async def test_a_memory_wider_than_the_finding_may_reach_is_not_placed_against()
     assert len(seat.supports) == 1, "the wider memory gains nothing"
 
 
-async def test_a_narrower_memory_placed_against_narrows_the_new_one_and_its_support_episodes() -> (
-    None
-):
-    """ADR-0329 §12:6: the stored memory and the episodes its supports were read from."""
+async def test_a_memory_whose_shown_supports_are_private_is_not_placed_against() -> None:
+    """ADR-0329 §12:6, ADR-0217 §3: a recheck could carry the private text onto it.
+
+    The stored memory reaches anyone, but a support it is shown with was read from an
+    owner-only episode, so the meet over what the placement would be supplied is the
+    owner's: the memory would be narrowed, and is left out, the new one beside it.
+    """
     harness = Harness()
     support = said_support(address("past"), added_at=AT - timedelta(days=1))
     await harness.hold(
@@ -313,12 +319,74 @@ async def test_a_narrower_memory_placed_against_narrows_the_new_one_and_its_supp
         Memory.model_validate(memory("m-seat", _SEAT, support).model_dump()),
     )
 
+    written = await _write(harness, _framed(_SEAT), place=_never)
+
+    (write,) = written.writes
+    assert write.memory != "m-seat"
+    seat = await harness.memory.get("m-seat")
+    assert isinstance(seat, Memory)
+    assert (seat.open_questions, len(seat.supports)) == ((), 1)
+
+
+async def test_a_narrower_memory_placed_against_narrows_the_new_one() -> None:
+    """ADR-0329 §12:6: the stored memory, and the episodes its supports were read from."""
+    harness = Harness()
+    support = said_support(address("past"), added_at=AT - timedelta(days=1))
+    held = memory("m-seat", _SEAT, support).model_copy(update={"placement": _OWNER_ONLY})
+    await harness.hold(
+        episode("past", at=AT - timedelta(days=1), text="Window seats.").model_copy(
+            update={"placement": _OWNER_ONLY}
+        ),
+        episode("one", at=AT - timedelta(minutes=3), text="Window seats, please."),
+        Memory.model_validate(held.model_dump()),
+    )
+
     written = await _write(harness, _framed(_SEAT), place=_placing(PlacedRelation.UNCLEAR, "?"))
 
     (created,) = [one for one in written.writes if one.memory != "m-seat"]
     stored = await harness.memory.get(created.memory)
     assert isinstance(stored, Memory)
     assert stored.placement.reach is PlacementReach.OWNER
+
+
+async def test_another_findings_write_between_attempts_is_not_taken_for_this_ones() -> None:
+    """ADR-0329 §16:1, §16:4: only operations citing the memory's own parts are its own."""
+    harness = Harness()
+    await _held_seat(harness)
+    (framed,) = _framed(_SEAT)
+    seat = await harness.memory.get("m-seat")
+    assert isinstance(seat, Memory)
+    named = NamedRevision(
+        memory="m-seat", relation=PlacedRelation.RESTATES, operations=len(seat.operations)
+    )
+    proposing = framed.model_copy(update={"state": FramedState.PROPOSING, "named": (named,)})
+    # Another episode adds its own support to the same memory meanwhile.
+    other = said_support(address("other"), added_at=AT).model_copy(
+        update={"holder": SupportHolder.person(OWNER_PERSON_ID)}
+    )
+    await harness.hold(episode("other", at=AT - timedelta(minutes=1), text="Window, yes."))
+    await harness.writer.apply(
+        MemoryChange(
+            memory=seat,
+            operation=MemoryOperation(
+                kind=MemoryOperationKind.ADD_SUPPORT,
+                cites=other.points_at,
+                at=AT,
+                by=MemoryWriterName.OBSERVER,
+            ),
+            support=other,
+        )
+    )
+
+    written = await _write(harness, (proposing,), place=_placing(PlacedRelation.RESTATES))
+
+    (write,) = written.writes
+    assert (write.memory, write.operations) == ("m-seat", (MemoryOperationKind.ADD_SUPPORT,))
+    after = await harness.memory.get("m-seat")
+    assert isinstance(after, Memory)
+    assert after.support_at(framed.memory.supports[0].points_at) is not None, (
+        "this finding's support was added, not taken as added"
+    )
 
 
 async def test_a_stale_placement_is_placed_again_within_the_attempt() -> None:

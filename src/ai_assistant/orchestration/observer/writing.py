@@ -260,10 +260,11 @@ class FindingWriter:
                 bound=self._limits.bound,
                 recent=self._limits.recent,
             )
-            # ADR-0217 §3: a memory reaching more people than this one may is never
-            # placed against, since what a relation writes onto it is never narrowed.
-            stored = _relabelled([one for one in found if not narrows(base, one.memory)])
-            memory = record.memory.model_copy(update={"placement": _placement(base, stored)})
+            # ADR-0217 §3: a memory reaching more people than everything this one is
+            # supplied may is never placed against, since what a relation writes onto
+            # it is never narrowed.
+            stored, placed_for = _placeable(base, found)
+            memory = record.memory.model_copy(update={"placement": placed_for})
             view = PlacementView(framed=memory, texts=texts, retrieved=stored)
             placement = await place(view) if stored else MemoryPlacement()
             before = {one.memory.id: one.memory for one in stored}
@@ -335,13 +336,16 @@ class FindingWriter:
         """A memory whose proposal may have landed before the last attempt stopped.
 
         Read off the store, never assumed: installed where the store holds the memory's
-        own id, folded where a memory its placement folded into gained operations. Where
-        neither shows, nothing landed that changed anything, and it is placed again,
-        which a fold that changed nothing repeats harmlessly (ADR-0328 §4:8).
+        own id; folded where a memory its placement folded into gained an operation
+        citing one of its own parts, which no other finding's write cites. Where neither
+        shows, nothing landed that changed anything, and it is placed again, which a fold
+        that changed nothing repeats harmlessly (ADR-0328 §4:8). Only operations citing
+        its own parts are counted as its writes, so another episode's write on the same
+        memory in between is never taken for this one's.
         """
         held = await self._memory.get_history([record.memory.id])
         installed = record.memory.id if record.memory.id in held else None
-        gained = await self._read_back(record, installed, ledger)
+        gained = await self._read_back(record, installed, ledger, own_only=True)
         if installed is not None:
             return _finished(record, ruling=MemoryDecisionKind.ACCEPT, kept=(installed,))
         folded = tuple(
@@ -352,18 +356,26 @@ class FindingWriter:
         return record.model_copy(update={"state": FramedState.FRAMED, "named": ()})
 
     async def _read_back(
-        self, record: FramedMemory, installed: str | None, ledger: _Ledger
+        self,
+        record: FramedMemory,
+        installed: str | None,
+        ledger: _Ledger,
+        *,
+        own_only: bool = False,
     ) -> set[str]:
         """The operations each memory's log gained from the write, put in the ledger.
 
         Each memory the placement named, past the log length it had when named, and the
         memory installed, whole. A pin's support added by the pin pass is the pass's
-        write, never the finding's, so it is not counted. The observer is the one writer
-        and runs one run at a time (ADR-0345 §11:1), so nothing else appends between.
+        write, never the finding's, so it is not counted. Read right after the write,
+        nothing else appends between, since the observer is the one writer and runs one
+        run at a time (ADR-0345 §11:1); read on a later attempt, ``own_only`` counts only
+        the operations citing one of the memory's own parts, its write's alone.
 
         Returns:
             The memories that gained an operation.
         """
+        own = {one.points_at for one in record.memory.supports}
         wanted = [
             *(one.memory for one in record.named),
             *([] if installed is None else [installed]),
@@ -381,7 +393,9 @@ class FindingWriter:
             if now is None:
                 continue
             kinds = [
-                one.kind for one in now.operations[count:] if not isinstance(one.cites, PinPart)
+                one.kind
+                for one in now.operations[count:]
+                if not isinstance(one.cites, PinPart) and (not own_only or one.cites in own)
             ]
             if kinds:
                 ledger.wrote(memory_id, kinds)
@@ -433,6 +447,28 @@ def _placement(base: Placement, stored: Sequence[Retrieved]) -> Placement:
             *(supplied for one in stored for supplied in one.supplied),
         ]
     )
+
+
+def _placeable(
+    base: Placement, found: Sequence[Retrieved]
+) -> tuple[tuple[Retrieved, ...], Placement]:
+    """The stored memories a memory may be placed against, and where it is placed for.
+
+    The meet over everything the placement would be supplied — the finding's supply, the
+    memories retrieved and the episodes their shown supports were read from — and only
+    the memories that meet would not narrow, since a relation writes onto them and no
+    operation narrows a placement (ADR-0217 §3, ADR-0328 §5:2). A memory left out
+    supplies nothing, so the meet is taken again over those kept, until nothing more is
+    left out: a meet over fewer records is never narrower, so every memory kept stays
+    one it may write onto.
+    """
+    kept = list(found)
+    while True:
+        meet = _placement(base, kept)
+        placeable = [one for one in kept if not narrows(meet, one.memory)]
+        if len(placeable) == len(kept):
+            return _relabelled(placeable), meet
+        kept = placeable
 
 
 def _relabelled(stored: Sequence[Retrieved]) -> tuple[Retrieved, ...]:

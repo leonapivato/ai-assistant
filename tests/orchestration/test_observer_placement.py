@@ -25,6 +25,9 @@ from ai_assistant.core.types import (
     OpenQuestionKind,
     PlacedAnswer,
     PlacedRelation,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
     SupportHolder,
 )
 from ai_assistant.orchestration.observer.placement import (
@@ -35,7 +38,7 @@ from ai_assistant.orchestration.observer.placement import (
     retrieved,
 )
 from ai_assistant.orchestration.observer.replies import parsed
-from ai_assistant.testing.memories import memory, said_support
+from ai_assistant.testing.memories import confirmed_support, memory, said_support
 
 _SEAT = "The user prefers window seats."
 
@@ -243,3 +246,23 @@ def test_the_placement_call_is_shown_the_framed_memory_and_the_compact_forms() -
     rendered = json.loads(json.dumps(payload))
     assert rendered["memory"]["wording"] == _SEAT
     assert [one["memory"] for one in rendered["stored"]] == ["M1"]
+
+
+async def test_a_confirmations_asking_episode_is_supplied_with_its_shown_wording() -> None:
+    """ADR-0329 §12:6: the approved wording is read from the asking episode, so it joins."""
+    harness = Harness()
+    owner_only = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
+    yes = confirmed_support(address("yes"), asking_activation="asking")
+    await harness.hold(
+        episode("yes", at=AT - timedelta(days=1), text="yes"),
+        episode("asking", at=AT - timedelta(days=1, minutes=1), text="").model_copy(
+            update={"placement": owner_only}
+        ),
+        _held("m-seat", _SEAT, yes),
+    )
+
+    (shown,) = await retrieved(
+        _framed(), memory=harness.memory, plans=harness.plans, threshold=0.8, bound=5, recent=3
+    )
+
+    assert owner_only in shown.supplied
