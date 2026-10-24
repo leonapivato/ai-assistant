@@ -158,7 +158,7 @@ def _semantic(  # noqa: PLR0913 — one keyword per record axis a case may need 
     validity: Validity | None = None,
     source: MemorySource = MemorySource.OBSERVED,
     last_updated: datetime = _WHEN,
-    about_person: str | None = None,
+    subjects: tuple[str, ...] | None = None,
 ) -> MemoryRecord:
     """A memory in the band ``source`` names, resting on one support (ADR-0328 §3)."""
     return memory(
@@ -167,14 +167,18 @@ def _semantic(  # noqa: PLR0913 — one keyword per record axis a case may need 
         _support(source, last_updated),
         expires_at=expires_at,
         validity=validity or Validity(),
-        about_person=about_person,
+        subjects=subjects,
     )
 
 
-def _episode(record_id: str, content: str) -> MemoryRecord:
-    """An episode, the store's other kind (ADR-0328 §2:1)."""
+def _episode(record_id: str, content: str, *, about_person: str | None = None) -> MemoryRecord:
+    """An episode, the store's other kind (ADR-0328 §2:1), stating a subject or none."""
     return EpisodicMemory(
-        id=record_id, content=content, provenance=_provenance(), occurred_at=_WHEN
+        id=record_id,
+        content=content,
+        provenance=_provenance(),
+        occurred_at=_WHEN,
+        about_person=about_person,
     )
 
 
@@ -1878,21 +1882,25 @@ def _write_pre_subject_db(path: Path, records: list[MemoryRecord]) -> None:
 async def test_a_stated_subject_round_trips_and_reaches_its_column(
     make_store: Callable[..., SqliteMemoryStore],
 ) -> None:
-    """The record carries the subject, and so does the column beside it.
+    """An episode carries the subject, and so does the column beside it.
 
     The blob is the truth — every read decodes from it — and the column is the
     derived index ADR-0101 will query, exactly the arrangement ``expires_at`` and
-    ``valid_until`` already have.
+    ``valid_until`` already have. A memory states no ``about_person`` (ADR-0345 §9:1):
+    its people are its ``subjects`` and ``involved``, read off the record, and the
+    column stays ``NULL`` for it.
     """
     store = make_store()
-    stored = _semantic("1", "prefers a window seat", about_person="Marta")
+    stored = _episode("1", "prefers a window seat", about_person="Marta")
 
     await store.add(stored)
+    await store.add(_semantic("2", "a fact about Marta", subjects=("Marta",)))
 
     got = await store.get("1")
-    assert got is not None
+    assert isinstance(got, EpisodicMemory)
     assert got.about_person == "Marta"
     assert _subject_column(store, "1") == "Marta"
+    assert _subject_column(store, "2") is None
 
 
 async def test_the_subject_column_keeps_the_label_verbatim(
@@ -1900,7 +1908,7 @@ async def test_the_subject_column_keeps_the_label_verbatim(
 ) -> None:
     """Nothing between the user and the column normalises a label (ADR-0100 §6)."""
     store = make_store()
-    await store.add(_semantic("1", "c", about_person="  marta  "))
+    await store.add(_episode("1", "c", about_person="  marta  "))
 
     assert _subject_column(store, "1") == "  marta  "
 
@@ -1925,13 +1933,13 @@ async def test_an_overwrite_rewrites_the_subject_column(
     subject the record no longer states.
     """
     store = make_store()
-    await store.add(_semantic("1", "c", about_person="Marta"))
+    await store.add(_episode("1", "c", about_person="Marta"))
 
-    await store.add(_semantic("1", "c"))
+    await store.add(_episode("1", "c"))
 
     assert _subject_column(store, "1") is None
     got = await store.get("1")
-    assert got is not None
+    assert isinstance(got, EpisodicMemory)
     assert got.about_person is None
 
 
@@ -2609,7 +2617,9 @@ async def test_cancelling_a_write_does_not_release_the_connection(tmp_path: Path
     release = threading.Event()
     original_add = store._add_sync
 
-    def blocking_add(record: MemoryRecord, vector: Embedding | None) -> None:
+    def blocking_add(
+        record: MemoryRecord, vector: Embedding | None, labels: Sequence[Embedding]
+    ) -> None:
         # Block only the first worker (record "a"): it enters, signals, and waits
         # inside the connection's turn until the test lets it finish.
         if not entered.is_set():
@@ -2617,7 +2627,7 @@ async def test_cancelling_a_write_does_not_release_the_connection(tmp_path: Path
             if not release.wait(timeout=5):  # pragma: no cover - only on a hang
                 msg = "the blocked worker was never released"
                 raise AssertionError(msg)
-        original_add(record, vector)
+        original_add(record, vector, labels)
 
     store._add_sync = blocking_add  # type: ignore[method-assign]
     try:
@@ -2670,7 +2680,10 @@ async def test_cancellation_takes_precedence_over_a_worker_error(tmp_path: Path)
     entered = threading.Event()
     release = threading.Event()
 
-    def failing_add(record: MemoryRecord, vector: Embedding | None) -> None:
+    def failing_add(
+        record: MemoryRecord, vector: Embedding | None, labels: Sequence[Embedding]
+    ) -> None:
+        del labels
         entered.set()
         if not release.wait(timeout=5):  # pragma: no cover - only on a hang
             msg = "the blocked worker was never released"
@@ -3146,7 +3159,7 @@ async def test_pre_m36_stores_are_refused_without_modification(tmp_path: Path, s
     assert db.stat().st_mode == mode
 
 
-@pytest.mark.parametrize("marker", [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 0])
+@pytest.mark.parametrize("marker", [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 0])
 def test_current_shape_with_missing_or_unsupported_marker_is_refused(
     tmp_path: Path, marker: int | None
 ) -> None:

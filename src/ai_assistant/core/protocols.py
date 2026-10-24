@@ -163,6 +163,8 @@ if TYPE_CHECKING:
         MemoryDecision,
         MemoryIngestResult,
         MemoryKind,
+        MemoryLabelChange,
+        MemoryLabelResult,
         MemoryRecord,
         MemorySearchResult,
         MemoryUpdateProposal,
@@ -1227,13 +1229,15 @@ class MemoryStore(Protocol):
         """
         ...
 
-    async def search(
+    async def search(  # noqa: PLR0913 — one argument per eligibility axis
         self,
         query: str,
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        person: NonBlankEncodableText | None = None,
+        as_subject: bool = False,
     ) -> MemorySearchResult:
         """Return the records most relevant to ``query``, best first.
 
@@ -1374,6 +1378,14 @@ class MemoryStore(Protocol):
                 semantics and change nothing. ``bands`` and ``kinds`` compose by
                 **conjunction**: a record is eligible when its band is selected *and*
                 its kind is.
+            person: If given, restrict results to memories naming this name in
+                ``subjects`` or ``involved`` (ADR-0345 §9:6), compared exactly as
+                carried: a name resolves to no identity (§9:3), so no case folding or
+                aliasing applies. An episode names nobody there and is never
+                returned. An eligibility predicate like the others, bound **before**
+                the ranking cut (ADR-0128 §1), and composed with them by conjunction.
+            as_subject: With ``person``, restrict to memories naming it in
+                ``subjects`` alone. Without ``person`` it selects nothing more.
 
         Every frozen episode the axes select is returned, failed, interrupted and
         outside episodes included (ADR-0284 §6:2): a reader that should pass over a
@@ -1998,6 +2010,16 @@ class MemoryPolicy(Protocol):
         refuses it. A proposal that does not meet an evidence bar is not committed;
         the bar is the observer's decision's.
 
+        **A placed proposal is ruled by the floor and the confirmation rule alone**
+        (ADR-0345 §4:5, §4:6). Its ``conflicts`` are the stored memories its placement
+        names, as the writer read them, and ``relations`` is ``None``. A policy rules
+        ``REJECT`` or ``ASK_USER`` where its admissibility floor does, may rule on a
+        proposal carrying a :class:`~ai_assistant.core.types.UserConfirmation` as its
+        rule on a confirmed proposal does, and otherwise rules ``ACCEPT``, which the
+        writer reads as "apply the placement": no other rule of a policy reads a placed
+        proposal. ``DefaultMemoryPolicy``'s rules 1 to 4 are those two; its rules 5 to
+        12 read no placed proposal.
+
         Args:
             proposal: The candidate memory and why it was proposed.
             conflicts: Existing records the proposal contradicts, already resolved
@@ -2022,12 +2044,30 @@ class MemoryWriter(Protocol):
     writes to must be the one its caller retrieves from** — a composition-root
     obligation, unenforceable here because no store is on this seam (ADR-0028 §4).
 
-    Three members: :meth:`ingest` creates a memory under the policy (ADR-0328 §11:4),
-    retiring at most one stored memory with it (ADR-0329 §12:4); :meth:`apply` applies
-    one operation to one stored memory (§11:3); and :meth:`record_use` records one
-    track-record entry (ADR-0329 §14:4). Every change to a memory's supports, status,
-    validity or open questions is an operation citing the support that caused it
-    (§5:1), and no write changes a memory's wording (§3:2).
+    Four members: :meth:`ingest` creates a memory under the policy (ADR-0328 §11:4),
+    retiring at most one stored memory with it (ADR-0329 §12:4), or writes a placed
+    proposal by its placement (ADR-0345 §4, §5); :meth:`apply` applies one operation to
+    one stored memory (§11:3); :meth:`record_use` records one track-record entry
+    (ADR-0329 §14:4); and :meth:`write_labels` replaces a memory's labels (ADR-0345
+    §7:6). Every change to a memory's supports, status, validity or open questions is
+    an operation citing the support that caused it (§5:1), and no write changes a
+    memory's wording (§3:2).
+
+    **Every support a writer adds records its holder** (ADR-0345 §2:2), set by code
+    from the part and the episode's record
+    (:func:`~ai_assistant.core.types.stamped_support`): a support a producer built
+    with none gains the one §2's table gives it, and one carrying a holder the table
+    does not give its part is refused with nothing written. No write rewrites a
+    holder a stored support carries (§2:9).
+
+    **A created memory's people and labels** (ADR-0345 §7, §9). A name in ``subjects``
+    or ``involved`` that no part the memory rests on gives is refused (§9:3,
+    :func:`~ai_assistant.core.types.names_not_given`). A memory carrying labels is
+    written only by a writer wired with the composition root's
+    :class:`~ai_assistant.core.types.LabelBounds` and an embedder: more labels, or a
+    longer one, than the bounds admit is refused, and a label within their distance
+    of a label it already carries is not added and is named in the result's
+    ``refused_labels`` (§7:3, §7:5).
 
     **An observer's inference** (ADR-0329 §9:7) is admitted only as that clause has
     it: ``for`` and backing the claim as worded only on a memory whose other supports
@@ -2119,6 +2159,38 @@ class MemoryWriter(Protocol):
         A retirement whose close is unrepresentable is refused with every memory left
         unchanged (ADR-0080 §3, ADR-0328 §5:11).
 
+        **A placed proposal** (``proposal.placement``, ADR-0345 §4, §5) is written by
+        its placement and the holder rule, with no reconciler and no conflict search:
+
+        - **The policy is handed the memories the placement names**, as the writer
+          read them, with ``relations`` ``None``, and its floor or its confirmation
+          rule is final (§4:5, §4:6): a ``REJECT`` or ``ASK_USER`` writes nothing, and a
+          confirmed proposal's ``SUPERSEDE`` is applied as above. An ``ACCEPT`` applies
+          the placement; any other ruling on a placed proposal is refused.
+        - **A stale placement is refused whole** (§4:7): where a named memory's stored
+          revision differs from the one the placement records, or it is no longer held,
+          nothing is written and the result's ``stale`` names each.
+        - **Each relation writes what §5's table says**, in one atomic write conditional
+          on every revision it changes (§5:6). A retiring relation adds the proposal's
+          backing supports to the stored memory as ``against`` and stops the counted
+          supports on it of the proposal's own holders, each citing that holder's
+          backing support; the memory is retired by the relation's operation exactly
+          where nothing then backs it as worded, and otherwise its remaining backing is
+          added as ``against`` where the proposal lands (§3). ADR-0328 §6:5 does not
+          bind (§3:6).
+        - **One disposition** (§5:3): a ``claimed_too_much`` installs the proposal;
+          otherwise a ``restates`` that would not raise the stored memory's standing,
+          or a ``contained`` every proposal holder already holds, folds it, with no
+          confirmation support among its supports; and otherwise it is installed.
+        - **Refused whole**, with nothing written: a placed proposal carrying an
+          ``observer_inference`` or ``pinned`` support (§5:10); one marked
+          ``assistant_statement`` with no support pointing at a round's message, or
+          backed as worded by a support the assistant's statement holds without being
+          marked both ``assistant_statement`` and ``occasion`` (§2:4, §8:3); one marked
+          ``occasion`` that sets a validity end (§8:4); and one whose validity end lies
+          after its create's instant where the support its create cites names no
+          about-when at that end (§6:1).
+
         Args:
             proposal: The candidate memory and why it was proposed. Its ``conflicts``
                 are resolved here, not supplied by the caller.
@@ -2195,7 +2267,7 @@ class MemoryWriter(Protocol):
 
         An entry is not an operation and not a support (ADR-0328 §5:2, §8:4): nothing
         but the track record changes — no support, operation, status, validity, open
-        question, placement or topic — so the memory's standing is what it was.
+        question, placement or label — so the memory's standing is what it was.
 
         Args:
             memory: The stored memory, as read, revision and all.
@@ -2207,6 +2279,30 @@ class MemoryWriter(Protocol):
                 re-decide.
             MemoryStoreError: If ``memory`` is not one a store returned (it carries
                 no revision), or a store failure. Nothing is written.
+        """
+        ...
+
+    async def write_labels(self, change: MemoryLabelChange) -> MemoryLabelResult:
+        """Replace one stored memory's labels whole (ADR-0345 §7:6).
+
+        Writes ``change.memory`` carrying ``change.labels``, conditionally on the
+        revision it was read at (ADR-0219 §2). A label the memory already carries keeps
+        its instant, writer and episode; each new one is recorded at the write's
+        instant, by ``change.by``, suggested by ``change.episode``. A new label whose
+        embedding lies within the composition root's distance of a label the result
+        already carries is not added, and the result names it (§7:5). A label write is
+        not an operation and changes nothing but the labels (§7:6, §7:9).
+
+        Args:
+            change: The memory as read, its new labels, and who writes them.
+
+        Returns:
+            The labels the memory now carries, and those refused as near-duplicates.
+
+        Raises:
+            MemoryStoreStaleError: If the stored memory is not the one read.
+            MemoryStoreError: If the labels break the composition root's bounds, the
+                writer was wired with none, or a store failure. Nothing is written.
         """
         ...
 

@@ -748,14 +748,14 @@ def _reinforced(before: Memory, after: Memory, proposed: Memory) -> bool:
     """The proposal's supports added by one add support each, and the fold's meet alone.
 
     A ``REINFORCE`` adds each support the target did not carry by one add support, takes
-    the placement's fold (ADR-0217 §3:3) and the union of topics (ADR-0213 §8), and
-    changes nothing else (ADR-0328 §11:6, §11:9).
+    the placement's fold (ADR-0217 §3:3), and changes nothing else (ADR-0328 §11:6,
+    §11:9): a memory carries no topics (ADR-0345 §10:1), and a fold writes no label.
     """
     added = sum(1 for one in proposed.supports if before.support_at(one.points_at) is None)
     return (
         _extends(before, after, added, placement=before.placement.folded_with(proposed.placement))
         and all(after.support_at(one.points_at) is not None for one in proposed.supports)
-        and set(after.topics) == set(before.topics) | set(proposed.topics)
+        and after.labels == before.labels
     )
 
 

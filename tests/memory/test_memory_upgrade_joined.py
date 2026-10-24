@@ -33,7 +33,9 @@ from ai_assistant.core.types import (
     EpisodeProcessingRecord,
     EpisodicMemory,
     JoinedInput,
+    Memory,
     MemoryRecord,
+    MemoryWriterName,
     ProcessingReason,
     ProcessingStatus,
     RecordedInputMessage,
@@ -154,8 +156,16 @@ async def test_the_file_is_upgraded_in_place_by_its_label_alone(legacy: Path) ->
     exported = await _exported(legacy)
 
     assert _label(legacy) == MEMORY_RECORD_FORMAT
-    assert _raw_rows(legacy) == before
+    after = _raw_rows(legacy)
     assert set(exported) == _IDS
+    # The chain goes on to ADR-0345 §13's upgrade, which rewrites each memory and no
+    # episode: an episode's row is byte for byte what it was, and a memory's keeps its
+    # kind, its revision and its band.
+    for record_id, row in before.items():
+        if row[0] == "memory":
+            assert (after[record_id][0], *after[record_id][2:]) == (row[0], *row[2:])
+        else:
+            assert after[record_id] == row
 
 
 async def test_every_record_reads_back_as_it_was_written(legacy: Path) -> None:
@@ -169,6 +179,15 @@ async def test_every_record_reads_back_as_it_was_written(legacy: Path) -> None:
         assert record.revision == revision
         stored: dict[str, Any] = json.loads(data)
         stored.pop("revision", None)
+        # ADR-0345 §13:1, §10:2: a memory's subject is carried as ``subjects`` and its
+        # topics as labels added by ``migration``.
+        if isinstance(record, Memory):
+            about = stored.pop("about_person", None)
+            topics = stored.pop("topics", None) or []
+            assert record.subjects == (None if about is None else (about,))
+            assert [(one.text, one.added_by) for one in record.labels] == [
+                (topic, MemoryWriterName.MIGRATION) for topic in topics
+            ]
         _holds(record.model_dump(mode="json", exclude={"revision"}), stored)
         if isinstance(record, EpisodicMemory) and record.processing_record is not None:
             assert record.processing_record.joined == ()

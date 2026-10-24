@@ -27,6 +27,8 @@ from ai_assistant.core.types import (
     MemoryDecision,
     MemoryDecisionKind,
     MemoryIngestResult,
+    MemoryLabelChange,
+    MemoryLabelResult,
     MemoryOperationKind,
     MemoryRecord,
     MemorySource,
@@ -347,6 +349,11 @@ class _FailingWriter:
 
     async def record_use(self, memory: Memory, entry: TrackRecordEntry) -> None:
         del memory, entry
+        msg = "the store is gone"
+        raise MemoryStoreError(msg)
+
+    async def write_labels(self, change: MemoryLabelChange) -> MemoryLabelResult:
+        del change
         msg = "the store is gone"
         raise MemoryStoreError(msg)
 

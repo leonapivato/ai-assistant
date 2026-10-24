@@ -910,40 +910,44 @@ def test_proposal_defaults_to_personal_sensitivity() -> None:
 
 
 def _believed(subject: str | None = None) -> Memory:
-    """One well-formed memory, varying only its stated subject."""
-    return memory("r1", "prefers a window seat", about_person=subject)
+    """One well-formed memory, varying only the one person it is about."""
+    return memory("r1", "prefers a window seat", subjects=None if subject is None else (subject,))
 
 
-def test_a_record_states_no_subject_by_default() -> None:
-    """``None`` is "no subject stated", which ADR-0100 §3 reads as the owner's.
+def test_a_memory_determines_no_subject_by_default() -> None:
+    """``None`` is "never determined", never read as the owner or anyone (ADR-0345 §9:4).
 
-    Not "unknown", and not a spelling of the owner: there is no user identity in
-    this system to name them by (ADR-0036 §3, ADR-0097 §1), so the absence is the
-    owner's only spelling and a second one could never be reconciled with it.
+    A memory no producer set ``subjects`` and ``involved`` on carries ``None`` in each
+    (§9:5), and ``None`` is not the empty set, which is "determined to be none".
     """
-    assert _believed().about_person is None
+    believed = _believed()
+    assert (believed.subjects, believed.involved) == (None, None)
+    assert memory("r2", "a fact", subjects=()).subjects == ()
 
 
 def test_a_stated_subject_is_kept_byte_for_byte() -> None:
-    """A label is stored exactly as given (ADR-0100 §6).
+    """A name is carried exactly as a part gives it (ADR-0345 §9:3).
 
     Surrounding whitespace is the case that matters, because it is the one a
     validator is most tempted to tidy: :data:`Identifier` strips, and this field
-    must not. Verbatim storage is what leaves every later matching rule available
-    — none can be recovered from labels normalised on the way in.
+    must not.
     """
-    assert _believed("  Marta  ").about_person == "  Marta  "
+    assert _believed("  Marta  ").subjects == ("  Marta  ",)
 
 
 def test_two_spellings_of_one_name_are_two_subjects() -> None:
-    """Nothing in this type resolves a label to a person (ADR-0100 §6).
+    """Nothing in this type resolves a name to a person (ADR-0345 §9:3).
 
-    ``"Marta"`` and ``"marta"`` are two subjects to every piece of code in the
-    system until ADR-0101's matching rule is implemented — a cost paid
-    deliberately, in the one place it can be paid off later without rewriting
-    stored data.
+    Which names are one person is a link held outside the memory by a later decision
+    on identified people, and no model decides it.
     """
-    assert _believed("Marta").about_person != _believed("marta").about_person
+    assert _believed("Marta").subjects != _believed("marta").subjects
+
+
+def test_a_person_is_in_one_of_subjects_and_involved_at_most() -> None:
+    """ADR-0345 §9:2: a person appears in at most one of the two fields."""
+    with pytest.raises(ValidationError, match="at most one of subjects and involved"):
+        memory("r1", "a fact", subjects=("Ana",), involved=("Ana", "Tom"))
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
@@ -959,12 +963,12 @@ def test_a_record_refuses_a_blank_subject(blank: str) -> None:
 
 
 def test_the_subject_enters_a_proposal_fingerprint() -> None:
-    """A belief about Marta is not the same offer as one about the owner.
+    """A memory about Marta is not the same offer as one about nobody determined.
 
-    ``proposal_fingerprint`` projects the whole record minus three bookkeeping
-    fields, so the subject enters it with no change to that projection —
-    deliberately (ADR-0100 §1): the two are different things to be asked to
-    accept, exactly as ADR-0078 §7 argues of ``validity``.
+    ``proposal_fingerprint`` projects the whole record minus its bookkeeping fields,
+    so ``subjects`` enters it with no change to that projection: the two are
+    different things to be asked to accept, exactly as ADR-0078 §7 argues of
+    ``validity``.
     """
     owners = MemoryUpdateProposal(proposed=_believed(), rationale="because")
     martas = MemoryUpdateProposal(proposed=_believed("Marta"), rationale="because")

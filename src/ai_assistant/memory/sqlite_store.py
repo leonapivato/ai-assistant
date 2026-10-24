@@ -88,11 +88,13 @@ from ai_assistant.memory._episode_format import (
     MEMORIES_RECORD_FORMAT,
     MEMORY_RECORD_FORMAT,
     MEMORY_RECORD_FORMATS,
+    PINNED_RECORD_FORMAT,
     inspect_existing,
     stored_format,
 )
 from ai_assistant.memory._episode_guard import is_open, refuse_episode_change
 from ai_assistant.memory._legacy import LEGACY_KINDS, memory_from_legacy
+from ai_assistant.memory._placed_upgrade import placed_memory
 from ai_assistant.memory._transactions import transaction
 from ai_assistant.memory._walk import (
     check_walk_limit,
@@ -348,8 +350,19 @@ def _to_micros(instant: datetime) -> int:
 #: One element of a batch, ready to write: the snapshotted record, its mode, the
 #: revision an ``IF_UNCHANGED`` element was computed against (``None`` in every
 #: other mode, which :class:`~ai_assistant.core.types.MemoryWrite`'s validator
-#: guarantees), and the vector embedded for it before the lock was taken.
-type _PreparedWrite = tuple[MemoryRecord, MemoryWriteMode, int | None, Embedding | None]
+#: guarantees), the vector embedded for it before the lock was taken, and one vector
+#: per label it carries (ADR-0345 §7:4).
+type _PreparedWrite = tuple[
+    MemoryRecord, MemoryWriteMode, int | None, Embedding | None, tuple[Embedding, ...]
+]
+
+#: ``search``'s person filter (ADR-0345 §9:6), one predicate per field a memory names
+#: people in, ``subjects`` first: each is true of a row whose stored record names the
+#: bound name there, exactly as carried (§9:3).
+_NAMED_IN: Final[tuple[str, ...]] = (
+    "EXISTS (SELECT 1 FROM json_each(data, '$.subjects') WHERE value = ?)",
+    "EXISTS (SELECT 1 FROM json_each(data, '$.involved') WHERE value = ?)",
+)
 
 
 def _selects_nothing(*axes: frozenset[object] | None) -> bool:
@@ -568,12 +581,14 @@ class SqliteMemoryStore:
             self._upgrade_to_memories(conn, existing_format)
             self._upgrade_to_joined(conn, existing_format)
             self._upgrade_to_pinned(conn, existing_format)
+            self._upgrade_to_placed(conn, existing_format)
             self._index_channels(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS vec_records "
                 f"USING vec0(embedding float[{self._embedder.dimensions}] distance_metric=cosine)"
             )
+            self._create_label_tables(conn)
             conn.execute("COMMIT")
         except MemoryStoreError, IncompatibleStateError:
             # Never leak the connection when opening fails; closing it also discards
@@ -589,6 +604,42 @@ class SqliteMemoryStore:
             msg = f"failed to open memory store at {self._path!r}: {exc}"
             raise MemoryStoreError(msg) from exc
         return conn
+
+    def _create_label_tables(self, conn: sqlite3.Connection) -> None:
+        """Create the tables a memory's labels are embedded into (ADR-0345 §7:4).
+
+        The store embeds each label as it embeds a memory's wording: one row per label
+        in ``situation_labels``, keyed to the record's ``rowid`` as ``vec_records`` is,
+        and its vector in ``vec_situation_labels`` at that row's key, in the embedding
+        space of every wording. A label search is a later decision's (§7:9), so nothing
+        reads them yet; every write of a memory replaces its rows, and every removal of
+        the record removes them. Not ``record_labels``: a store written while ADR-0237's
+        retired label index was kept may still hold a table of that name.
+        """
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS situation_labels("
+            "label_rowid INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "record_rowid INTEGER NOT NULL, text TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS situation_labels_by_record "
+            "ON situation_labels(record_rowid)"
+        )
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_situation_labels "
+            f"USING vec0(embedding float[{self._embedder.dimensions}] distance_metric=cosine)"
+        )
+
+    @staticmethod
+    def _drop_labels(conn: sqlite3.Connection, rowids: Sequence[int]) -> None:
+        """Remove the label rows and vectors of the records at ``rowids`` (ADR-0345 §7:4)."""
+        for rowid in rowids:
+            conn.execute(
+                "DELETE FROM vec_situation_labels WHERE rowid IN "
+                "(SELECT label_rowid FROM situation_labels WHERE record_rowid = ?)",
+                (rowid,),
+            )
+            conn.execute("DELETE FROM situation_labels WHERE record_rowid = ?", (rowid,))
 
     @staticmethod
     def _init_revision_issuer(conn: sqlite3.Connection) -> None:
@@ -1094,8 +1145,75 @@ class SqliteMemoryStore:
             found: The label the file held when it was opened; ``None`` for a fresh
                 store, which is already written at the new label.
         """
-        if found is None or found == MEMORY_RECORD_FORMAT:
+        if found is None or found >= PINNED_RECORD_FORMAT:
             return
+        conn.execute("UPDATE episode_record_format SET version = ?", (PINNED_RECORD_FORMAT,))
+
+    def _upgrade_to_placed(self, conn: sqlite3.Connection, found: int | None) -> None:
+        """Upgrade a file at an earlier label to ADR-0345 §13's, in place.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, after
+        :meth:`_upgrade_to_pinned` has carried a file to 15, so the upgrades chain
+        (ADR-0326 §4:5), and it completes or rolls back with the transaction (§4:3).
+
+        **Every memory is rewritten** by
+        :func:`~ai_assistant.memory._placed_upgrade.placed_memory`, with no model and
+        nothing dropped (§13:1): each support gains its holder from the record it
+        points at as this file holds it, or from its origin alone where that episode is
+        gone (§13:2); ``about_person`` becomes ``subjects``; each topic becomes a label
+        added by ``migration`` (§10:2). Its ``revision`` and its vector are kept: the
+        upgrade is no caller's write, and its wording is unchanged. **A carried label is
+        not embedded here**, as ADR-0328 §16's upgrade embedded nothing: the store embeds
+        a memory's labels as it embeds its wording, at a write, and the next write of
+        the memory embeds them. No episode is rewritten.
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+
+        Raises:
+            MemoryStoreError: If a stored memory cannot be upgraded. Nothing is
+                written, and the file is left as it was found.
+        """
+        if found is None or found >= MEMORY_RECORD_FORMAT:
+            return
+        now = self._now()
+
+        def episode(episode_id: str) -> EpisodicMemory | None:
+            held = conn.execute(
+                "SELECT data FROM records WHERE id = ? AND kind = ?",
+                (episode_id, MemoryKind.EPISODIC.value),
+            ).fetchone()
+            if held is None:
+                return None
+            decoded = self._decode(str(held[0]))
+            return decoded if isinstance(decoded, EpisodicMemory) else None
+
+        chunk = conn.execute(
+            "SELECT rowid, data FROM records WHERE kind = ? ORDER BY rowid LIMIT ?",
+            (MemoryKind.MEMORY.value, _BACKFILL_CHUNK),
+        ).fetchall()
+        while chunk:
+            for rowid, data in chunk:
+                try:
+                    memory = placed_memory(json.loads(data), episode=episode, now=now)
+                except (ValueError, TypeError, KeyError) as exc:
+                    msg = f"a memory stored before ADR-0345 could not be upgraded: {exc}"
+                    raise MemoryStoreError(msg) from exc
+                conn.execute(
+                    "UPDATE records SET data = ?, band = ? WHERE rowid = ?",
+                    (
+                        memory.model_dump_json(exclude={"revision"}),
+                        str(record_band(memory)),
+                        int(rowid),
+                    ),
+                )
+            chunk = conn.execute(
+                "SELECT rowid, data FROM records WHERE kind = ? AND rowid > ? "
+                "ORDER BY rowid LIMIT ?",
+                (MemoryKind.MEMORY.value, chunk[-1][0], _BACKFILL_CHUNK),
+            ).fetchall()
         conn.execute("UPDATE episode_record_format SET version = ?", (MEMORY_RECORD_FORMAT,))
 
     def _upgrade_row(
@@ -1319,6 +1437,18 @@ class SqliteMemoryStore:
             raise MemoryStoreError(msg) from exc
         return vector
 
+    async def _embed_labels(self, record: MemoryRecord) -> tuple[Embedding, ...]:
+        """Embed a memory's labels, each as its wording is embedded (ADR-0345 §7:4).
+
+        One vector per label, in the label's order; none for a record carrying none.
+
+        Raises:
+            MemoryStoreError: As :meth:`_embed_one` does, for any label.
+        """
+        if not isinstance(record, Memory):
+            return ()
+        return tuple([await self._embed_one(label.text) for label in record.labels])
+
     async def add(self, record: MemoryRecord) -> str:
         """Embed the record's content and persist it, returning its id.
 
@@ -1346,17 +1476,22 @@ class SqliteMemoryStore:
         # The store embeds no open episode (ADR-0286 §12:5); the write that freezes it
         # embeds its content.
         vector = None if is_open(snapshot) else await self._embed_one(snapshot.content)
+        labels = await self._embed_labels(snapshot)
         async with self._lock:
-            await _run_to_completion(self._add_sync, snapshot, vector)
+            await _run_to_completion(self._add_sync, snapshot, vector, labels)
         return snapshot.id
 
-    def _add_sync(self, record: MemoryRecord, vector: Embedding | None) -> None:
+    def _add_sync(
+        self, record: MemoryRecord, vector: Embedding | None, labels: Sequence[Embedding]
+    ) -> None:
         # The transaction rolls the partial multi-table write back on any failure,
         # so a later commit cannot persist an inconsistent record/vector pair.
         with self._transaction(f"store memory {record.id!r}"):
-            self._persist_record(record, vector)
+            self._persist_record(record, vector, labels)
 
-    def _persist_record(self, record: MemoryRecord, vector: Embedding | None) -> None:
+    def _persist_record(
+        self, record: MemoryRecord, vector: Embedding | None, labels: Sequence[Embedding] = ()
+    ) -> None:
         """Write one record and its vector into the *open* transaction, no commit.
 
         Shared by :meth:`add` and :meth:`write_atomic`: an overwrite rewrites every
@@ -1454,6 +1589,9 @@ class SqliteMemoryStore:
         # ``search`` binds the band before its cut and cannot compute a memory's band
         # in SQL, so the band is that derivation.
         band = str(record_band(record))
+        # ADR-0100 §8's subject column, an episode's alone: a memory carries no
+        # ``about_person`` (ADR-0345 §9:1), and its people are read off the record.
+        subject = record.about_person if isinstance(record, EpisodicMemory) else None
         row = conn.execute(
             "SELECT rowid, kind, data FROM records WHERE id = ?", (record.id,)
         ).fetchone()
@@ -1483,7 +1621,7 @@ class SqliteMemoryStore:
                     expires,
                     valid_until,
                     valid_from,
-                    record.about_person,
+                    subject,
                     revision,
                     occurred_at,
                     channel_type,
@@ -1505,7 +1643,7 @@ class SqliteMemoryStore:
                     expires,
                     valid_until,
                     valid_from,
-                    record.about_person,
+                    subject,
                     revision,
                     occurred_at,
                     channel_type,
@@ -1526,6 +1664,35 @@ class SqliteMemoryStore:
             conn.execute(
                 "INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)",
                 (rowid, sqlite_vec.serialize_float32(list(vector))),
+            )
+        self._persist_labels(conn, rowid, record, labels)
+
+    @classmethod
+    def _persist_labels(
+        cls,
+        conn: sqlite3.Connection,
+        rowid: int,
+        record: MemoryRecord,
+        labels: Sequence[Embedding],
+    ) -> None:
+        """Replace a record's label rows with one per label it carries (ADR-0345 §7:4).
+
+        Raises:
+            MemoryStoreError: If the vectors handed in are not one per label.
+        """
+        carried = record.labels if isinstance(record, Memory) else ()
+        if len(carried) != len(labels):
+            msg = "a memory's labels are written with one vector each (ADR-0345 §7:4)"
+            raise MemoryStoreError(msg)
+        cls._drop_labels(conn, (rowid,))
+        for label, embedding in zip(carried, labels, strict=True):
+            cursor = conn.execute(
+                "INSERT INTO situation_labels(record_rowid, text) VALUES (?, ?)",
+                (rowid, label.text),
+            )
+            conn.execute(
+                "INSERT INTO vec_situation_labels(rowid, embedding) VALUES (?, ?)",
+                (cursor.lastrowid, sqlite_vec.serialize_float32(list(embedding))),
             )
 
     async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
@@ -1584,7 +1751,7 @@ class SqliteMemoryStore:
         for record, mode, expected in snapshot:
             # No embedding for an open episode (ADR-0286 §12:5).
             vector = None if is_open(record) else await self._embed_one(record.content)
-            prepared.append((record, mode, expected, vector))
+            prepared.append((record, mode, expected, vector, await self._embed_labels(record)))
         async with self._lock:
             await _run_to_completion(self._write_atomic_sync, prepared)
         return ids
@@ -1592,7 +1759,7 @@ class SqliteMemoryStore:
     def _write_atomic_sync(self, prepared: Sequence[_PreparedWrite]) -> None:
         try:
             with self._transaction("commit an atomic memory batch") as conn:
-                for record, mode, expected, vector in prepared:
+                for record, mode, expected, vector, labels in prepared:
                     if mode is MemoryWriteMode.INSERT_IF_ABSENT:
                         row = conn.execute(
                             "SELECT rowid FROM records WHERE id = ?", (record.id,)
@@ -1605,7 +1772,7 @@ class SqliteMemoryStore:
                             raise MemoryStoreConflictError(msg)
                     if mode is MemoryWriteMode.IF_UNCHANGED:
                         self._refuse_stale(conn, record.id, expected)
-                    self._persist_record(record, vector)
+                    self._persist_record(record, vector, labels)
         except MemoryStoreError:
             # `MemoryStoreStaleError` arrives through this arm too, as the
             # `MemoryStoreError` it is (ADR-0219 §3): the transaction has rolled
@@ -1900,13 +2067,15 @@ class SqliteMemoryStore:
             what="read memories by id whatever their status",
         )
 
-    async def search(
+    async def search(  # noqa: PLR0913 — one argument per eligibility axis
         self,
         query: str,
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        person: str | None = None,
+        as_subject: bool = False,
     ) -> MemorySearchResult:
         """Return the records most relevant to ``query`` by vector similarity.
 
@@ -1931,6 +2100,10 @@ class SqliteMemoryStore:
                 *before* the vector search, like every other eligibility axis.
             bands: If given, restrict results to these belief bands; ``None`` is
                 every band and ``()`` none, conjunctive with ``kinds``.
+            person: If given, only memories naming it in ``subjects`` or
+                ``involved`` (ADR-0345 §9:6), read from the stored record inside the
+                restriction the KNN is bound by, so it binds before the cut.
+            as_subject: With ``person``, read ``subjects`` alone.
 
         **One ``RETRIEVAL`` trace per call, emitted here because nowhere else can
         see the numbers** (ADR-0119 §8). The per-predicate exclusion counts exist
@@ -1993,7 +2166,7 @@ class SqliteMemoryStore:
             entry[traces.BANDS] = selected_bands
         retrieved = await self._traces.observing(
             traces.SEAM_SEARCH,
-            self._searched(query, limit, wanted, wanted_bands),
+            self._searched(query, limit, wanted, wanted_bands, (person, as_subject)),
             _retrieval_reading,
             entry=entry,
         )
@@ -2005,6 +2178,7 @@ class SqliteMemoryStore:
         limit: int,
         wanted: frozenset[str] | None,
         wanted_bands: frozenset[str] | None,
+        named: tuple[str | None, bool] = (None, False),
     ) -> _Retrieved:
         """The read itself, returning its records **and** what only it can count.
 
@@ -2019,6 +2193,7 @@ class SqliteMemoryStore:
             wanted: The kind restriction, already materialised.
             wanted_bands: The band restriction as stored band values, already
                 materialised; ``None`` for every band.
+            named: The person filter and whether it reads ``subjects`` alone.
 
         Returns:
             The records, whether the ceiling bound them, and the counts ADR-0119 §8
@@ -2042,6 +2217,7 @@ class SqliteMemoryStore:
                 wanted,
                 wanted_bands,
                 self._now_micros(),
+                named,
             )
         return _Retrieved(
             records=[
@@ -2052,13 +2228,14 @@ class SqliteMemoryStore:
             observed=observed,
         )
 
-    def _search_sync(
+    def _search_sync(  # noqa: PLR0913 — one argument per eligibility axis
         self,
         vector: Embedding,
         limit: int,
         wanted: frozenset[str] | None,
         wanted_bands: frozenset[str] | None,
         now: int,
+        named: tuple[str | None, bool] = (None, False),
     ) -> tuple[list[tuple[str, int, float]], bool, dict[str, int]]:
         """Run the KNN with every eligibility predicate bound into it.
 
@@ -2158,6 +2335,15 @@ class SqliteMemoryStore:
             # the embedder is paid for it.
             eligible.append(f"band IN ({', '.join('?' * len(wanted_bands))})")
             restriction.extend(sorted(wanted_bands))
+        person, as_subject = named
+        if person is not None:
+            # ADR-0345 §9:6: a memory naming the person, compared exactly as carried
+            # (§9:3), read off the stored record inside the restriction so it binds
+            # before the cut like every other axis (ADR-0128 §1). An episode carries
+            # neither field, so none passes.
+            fields = _NAMED_IN[:1] if as_subject else _NAMED_IN
+            eligible.append(f"({' OR '.join(fields)})")
+            restriction.extend(person for _ in fields)
         sql = (
             "SELECT r.data, r.revision, v.distance FROM vec_records v "  # noqa: S608 — bound above
             "JOIN records r ON r.rowid = v.rowid "
@@ -2778,6 +2964,7 @@ class SqliteMemoryStore:
                 return False
             rowid = row[0]
             conn.execute("DELETE FROM vec_records WHERE rowid = ?", (rowid,))
+            self._drop_labels(conn, (rowid,))
             conn.execute("DELETE FROM records WHERE rowid = ?", (rowid,))
         return True
 
@@ -2797,6 +2984,8 @@ class SqliteMemoryStore:
         with self._transaction("clear the memory store") as conn:
             (count,) = conn.execute("SELECT COUNT(*) FROM records").fetchone()
             conn.execute("DELETE FROM vec_records")
+            conn.execute("DELETE FROM vec_situation_labels")
+            conn.execute("DELETE FROM situation_labels")
             conn.execute("DELETE FROM records")
             # Discarded with the records rather than left to be detected later: a
             # position naming rows this call removed is exactly the cursor-disagrees
@@ -2859,6 +3048,7 @@ class SqliteMemoryStore:
                 # transaction rather than abandoning it on the shared connection.
                 return 0
             conn.executemany("DELETE FROM vec_records WHERE rowid = ?", [(r,) for r in rowids])
+            self._drop_labels(conn, rowids)
             conn.executemany("DELETE FROM records WHERE rowid = ?", [(r,) for r in rowids])
         return len(rowids)
 

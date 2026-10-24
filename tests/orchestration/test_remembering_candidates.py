@@ -296,7 +296,7 @@ async def test_the_lookup_reads_under_the_rounds_audience() -> None:
     """ADR-0282 §2:8: a fact about someone else is not kept on an unbounded audience."""
     store = await _store(
         _fact("said", "window seats please"),
-        _fact("about-sam", "window seats for Sam", about_person="Sam"),
+        _fact("about-sam", "window seats for Sam", subjects=("Sam",)),
     )
     look_ups = LookUps(memory=store, views=None, search_limit=5)
 

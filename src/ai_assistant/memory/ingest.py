@@ -33,7 +33,7 @@ import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from math import isfinite
+from math import isfinite, sqrt
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, assert_never
 
@@ -49,27 +49,31 @@ from ai_assistant.core.errors import (
     UnresolvedEvidenceError,
 )
 from ai_assistant.core.types import (
-    MAX_TOPICS_PER_RECORD,
     BeliefBand,
     ConflictRelation,
     DataTier,
+    EpisodicMemory,
     Memory,
     MemoryDecisionKind,
     MemoryIngestResult,
     MemoryKind,
+    MemoryLabelResult,
     MemoryOperation,
     MemoryOperationKind,
     MemoryRetirement,
     MemorySupport,
     MemoryWrite,
     MemoryWriteMode,
+    SituationLabel,
     SupportDirection,
     SupportOrigin,
     TraceKind,
     TraceRecordSet,
     Validity,
+    names_not_given,
     part_episode,
     record_band,
+    stamped_support,
 )
 from ai_assistant.memory import traces
 from ai_assistant.memory._agreement import agrees
@@ -82,6 +86,7 @@ from ai_assistant.memory._observer_writes import (
     retirement_fault,
 )
 from ai_assistant.memory._operations import applied_operation
+from ai_assistant.memory._placed import placed_write
 from ai_assistant.memory._reconciler import ReconcilerOutcome
 
 # `memory`'s own policy module, for its floor predicate alone (ADR-0159 §2, §10). The
@@ -94,10 +99,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, TraceSink
+    from ai_assistant.core.protocols import Embedder, MemoryPolicy, MemoryStore, TraceSink
     from ai_assistant.core.types import (
+        Embedding,
+        LabelBounds,
         MemoryChange,
         MemoryDecision,
+        MemoryLabelChange,
         MemoryRecord,
         MemoryUpdateProposal,
         MemoryWriterName,
@@ -752,77 +760,54 @@ def _ended(target: MemoryRecord, successor: Memory, now: datetime) -> Memory:
         raise MemoryStoreError(msg) from exc
 
 
-def _bounded_topics(admitted: Sequence[str]) -> tuple[str, ...]:
-    """ADR-0213 §8's retained subset, stored in §1's canonical order.
+def _episode_of(support: MemorySupport, held: Mapping[str, MemoryRecord]) -> EpisodicMemory | None:
+    """The episode ``support``'s part points into, as the store holds it, or ``None``."""
+    address = part_episode(support.points_at)
+    found = None if address is None else held.get(address)
+    return found if isinstance(found, EpisodicMemory) else None
 
-    ``admitted`` is the install's **admission order** — which labels survive — and
-    the two orders are deliberately different things. §8 fixes admission per arm
-    (:func:`_topics_of_fold` for a fold, the record's own canonical order for every
-    other install), takes the first :data:`MAX_TOPICS_PER_RECORD` of it, and then §1
-    fixes how the survivors are **stored**: strictly increasing by code point,
-    whatever order they were admitted in. Sorting after the cut rather than before
-    is the whole of the distinction — sorting first would let a code-point-lesser
-    incoming label displace a target's label, which is exactly the ratchet §8 exists
-    to hold.
 
-    Deduplicating in admission order rather than through ``sorted(set(...))``,
-    because the cut happens on that order and a duplicate must not spend a slot.
+def _stamped(memory: Memory, held: Mapping[str, MemoryRecord]) -> Memory:
+    """``memory`` with every support carrying its holder (ADR-0345 §2:2).
+
+    Set by code from each part and the episode's record
+    (:func:`~ai_assistant.core.types.stamped_support`), so a producer that built a
+    support with none is given the holder §2's table gives it.
+
+    Raises:
+        MemoryStoreError: If a support carries a holder its part's record does not give.
     """
-    admitted_once = tuple(dict.fromkeys(admitted))
-    return tuple(sorted(admitted_once[:MAX_TOPICS_PER_RECORD]))
-
-
-def _topics_of_fold(target: MemoryRecord, incoming: MemoryRecord) -> tuple[str, ...]:
-    """The survivor's topics: ADR-0213 §8's bounded union, on both arms.
-
-    **The union is ADR-0204 §5's disjunction with a wider carrier**, taken on
-    ADR-0106 §4's ratchet: a record the owner filed under ``"health"`` must not
-    quietly stop being reachable by a health-scoped act the first time an unlabelled
-    proposal reinforces it, and nothing about the survivor would look wrong
-    afterwards. So no fold drops a label the target carried and no arm writes one
-    side's tuple over the other's — which is why this is computed **once, before the
-    arms**, exactly as ``derived_from_external`` and ``placement`` are and for the
-    same reason: the rule is stated over the fold, so neither arm may read one side
-    alone.
-
-    **The admission order keeps that ratchet whole under §1's bound**: the target's
-    own labels first, then the labels of the incoming record the target does not
-    already carry. A target conforming to the bound — every record this deployment
-    installs — therefore has all of its labels fit ahead of any incoming one, so the
-    failure the union exists to stop is unreachable by construction. What the bound
-    declines is always a label of the *incoming* record, a suggestion of the same
-    standing as any other topics entry, which §4 already rules may be ignored in
-    whole without anything being counted. A target that itself exceeds the bound —
-    reachable only by import, or under a constant a later ADR raised — converges
-    downward on this same install rather than raising, keeping the first
-    :data:`MAX_TOPICS_PER_RECORD` of its own labels ahead of any incoming one.
-
-    **Code-point order among the incoming labels is the only order available**: §1
-    fixes this tuple's order by code point precisely so that order carries *no*
-    meaning. Deterministic, implementation-independent and identical on every store.
-
-    **Nothing is counted** (§1): a topic set is never a claim to completeness (§7).
-    """
-    carried = set(target.topics)
-    return _bounded_topics(
-        [
-            *sorted(target.topics),
-            *sorted(label for label in incoming.topics if label not in carried),
-        ]
-    )
-
-
-def _installed(memory: Memory) -> Memory:
-    """``memory`` with its topics brought under :data:`MAX_TOPICS_PER_RECORD` (ADR-0213 §1).
-
-    Applied at every install and at no retirement. A no-op — the same object — for a
-    memory already under the bound. A memory carries no citation bound (ADR-0328
-    §10:4): every support is kept (§4:9).
-    """
-    topics = _bounded_topics(sorted(memory.topics))
-    if topics == memory.topics:
+    try:
+        supports = tuple(stamped_support(one, _episode_of(one, held)) for one in memory.supports)
+    except ValueError as exc:
+        msg = f"refusing to write {memory.id!r}: {exc}"
+        raise MemoryStoreError(msg) from exc
+    if supports == memory.supports:
         return memory
-    return memory.model_copy(update={"topics": topics})
+    return Memory.model_validate(memory.model_dump() | {"supports": supports})
+
+
+def _refuse_ungiven_names(memory: Memory, held: Mapping[str, MemoryRecord]) -> None:
+    """ADR-0345 §9:3: every name a created memory carries is given by a part it rests on.
+
+    Raises:
+        MemoryStoreError: If ``subjects`` or ``involved`` names someone no part gives.
+    """
+    episodes = {key: one for key, one in held.items() if isinstance(one, EpisodicMemory)}
+    ungiven = names_not_given(memory, episodes)
+    if ungiven:
+        msg = (
+            f"refusing to write {memory.id!r}: {', '.join(repr(one) for one in ungiven)} is "
+            f"named by no part it rests on (ADR-0345 §9:3)"
+        )
+        raise MemoryStoreError(msg)
+
+
+def _cosine_distance(left: Embedding, right: Embedding) -> float:
+    """The cosine distance between two vectors, ``0`` to ``2``; ``1`` where either is zero."""
+    dot = sum(a * b for a, b in zip(left, right, strict=True))
+    norms = sqrt(sum(a * a for a in left)) * sqrt(sum(b * b for b in right))
+    return 1.0 if norms == 0.0 else 1.0 - dot / norms
 
 
 def _reinforced(target: MemoryRecord, incoming: Memory, *, now: datetime) -> Memory:
@@ -830,8 +815,9 @@ def _reinforced(target: MemoryRecord, incoming: Memory, *, now: datetime) -> Mem
 
     The target's wording is left as it is (§3:2); a support whose part the target
     already carries changes nothing and keeps its fields (§4:8). Placement's ratchet
-    (ADR-0217 §3, :meth:`~ai_assistant.core.types.Placement.folded_with`) and the union of
-    topics (ADR-0213 §8) apply as on any fold (§11:9); neither is an operation (§5:2).
+    (ADR-0217 §3, :meth:`~ai_assistant.core.types.Placement.folded_with`) applies as on
+    any fold (§11:9), and is not an operation (§5:2). A memory carries no topics
+    (ADR-0345 §10:1), so no union of them is taken.
     Each add support is written at ``now`` by the writer that wrote the incoming
     memory's create, and each added support is stamped as added at ``now``.
 
@@ -880,12 +866,7 @@ def _reinforced(target: MemoryRecord, incoming: Memory, *, now: datetime) -> Mem
         except ValueError as exc:
             msg = f"cannot reinforce {target.id!r}: {exc}"
             raise MemoryStoreError(msg) from exc
-    return folded.model_copy(
-        update={
-            "placement": target.placement.folded_with(incoming.placement),
-            "topics": _topics_of_fold(target, incoming),
-        }
-    )
+    return folded.model_copy(update={"placement": target.placement.folded_with(incoming.placement)})
 
 
 @dataclass(frozen=True, slots=True)
@@ -1029,6 +1010,7 @@ class _Ingested:
     result: MemoryIngestResult
     superseded: tuple[str, ...]
     reconciliation: _Reconciliation
+    folded: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1154,7 +1136,11 @@ def _reconciliation_reading(reconciled: _Reconciled) -> traces.Reading:
         counts[traces.DECISION_METRICS[kind]] += 1
         one.reconciliation.observe(counts)
         disposition = _WRITE_DISPOSITIONS[kind]
-        if disposition is not None and one.result.record_id is not None:
+        if one.folded:
+            # ADR-0345 §5:3: a placed proposal folded into stored memories reinforced
+            # them, and wrote no record of its own.
+            records[TraceRecordSet.REINFORCED].extend(one.folded)
+        elif disposition is not None and one.result.record_id is not None:
             records[disposition].append(one.result.record_id)
         records[TraceRecordSet.SUPERSEDED].extend(one.superseded)
     metrics: dict[str, int | float | bool] = dict(counts)
@@ -1197,6 +1183,8 @@ class MemoryIngestor:
         now: Clock = _utcnow,
         id_factory: Callable[[], str] = _uuid,
         reconciler: ConflictReconciler | None = None,
+        label_bounds: LabelBounds | None = None,
+        label_embedder: Embedder | None = None,
     ) -> None:
         """Initialise the ingestor.
 
@@ -1220,6 +1208,12 @@ class MemoryIngestor:
             reconciler: Determines ADR-0159 §1 relations between the probe and the
                 ruling (:func:`_may_reconcile`). Optional, with a ruled, safe absence
                 (ADR-0159 §6).
+            label_bounds: The composition root's bounds on a memory's labels (ADR-0345
+                §7:3, §7:5). A writer wired with none writes no label: a create carrying
+                one and every label write are refused.
+            label_embedder: The embedder a new label is compared by, the store's own,
+                so a near-duplicate is judged in the space the store embeds labels in
+                (§7:4, §7:5). Required with ``label_bounds``.
 
         Raises:
             TypeError: If ``conflict_limit`` is not an integer, or
@@ -1241,6 +1235,8 @@ class MemoryIngestor:
         )
         self._id_factory = id_factory
         self._reconciler = reconciler
+        self._label_bounds = label_bounds
+        self._label_embedder = label_embedder
         # Guards the read-modify-write in `ingest` and `apply` (issue #248), kept by
         # ADR-0219 §5 beside the conditional write: it serialises the injected policy's
         # `decide` within one ingestor and keeps the common case off the retry path.
@@ -1356,11 +1352,156 @@ class MemoryIngestor:
                 ]
             )
 
+    async def write_labels(self, change: MemoryLabelChange) -> MemoryLabelResult:
+        """Replace one stored memory's labels whole (ADR-0345 §7:6).
+
+        Written ``IF_UNCHANGED`` at the revision the memory was read at. A label it
+        carries keeps its entry; a new one is admitted by :meth:`_admit_labels` and
+        recorded at this write's instant, by ``change.by``, suggested by
+        ``change.episode``. Nothing but the labels changes (§7:6, §7:9).
+
+        Args:
+            change: The memory as read, its new labels, and who writes them.
+
+        Returns:
+            The labels the memory now carries, and those refused as near-duplicates.
+
+        Raises:
+            MemoryStoreStaleError: If the stored memory is not the one read.
+            MemoryStoreError: If the labels break the bounds, this writer was wired
+                with none, or a store failure. Nothing is written.
+        """
+        observed = change.model_copy(deep=True)
+        async with self._lock:
+            memory = observed.memory
+            kept = {label.text: label for label in memory.labels}
+            carried = [text for text in observed.labels if text in kept]
+            new = [text for text in observed.labels if text not in kept]
+            accepted, refused = await self._admit_labels(carried, new)
+            now = self._now_utc()
+            labels = tuple(
+                kept[text]
+                if text in kept
+                else SituationLabel(
+                    text=text, added_at=now, added_by=observed.by, episode=observed.episode
+                )
+                for text in observed.labels
+                if text in kept or text in accepted
+            )
+            after = Memory.model_validate(memory.model_dump() | {"labels": labels})
+            if after != memory:
+                await self._store.write_atomic(
+                    [
+                        MemoryWrite(
+                            record=after,
+                            mode=MemoryWriteMode.IF_UNCHANGED,
+                            expected_revision=memory.revision,
+                        )
+                    ]
+                )
+            return MemoryLabelResult(labels=labels, refused=tuple(refused))
+
+    async def _admit_labels(
+        self, carried: Sequence[str], new: Sequence[str]
+    ) -> tuple[list[str], list[str]]:
+        """Which new labels a memory takes, beside those it keeps (ADR-0345 §7:3, §7:5).
+
+        Each new label, in order, is compared by embedding with every label the memory
+        will carry so far, the kept ones and each new one already admitted; one within
+        the bounds' distance of any is a near-duplicate and not added. The memory then
+        carries at most the bounds' number of labels, and a new label is at most their
+        number of characters.
+
+        Args:
+            carried: The labels the memory keeps.
+            new: The labels offered beside them, each once.
+
+        Returns:
+            The new labels admitted, and those refused as near-duplicates, each in order.
+
+        Raises:
+            MemoryStoreError: If this writer was wired with no bounds, a label breaks
+                them, or the embedder fails.
+        """
+        if not new:
+            return [], []
+        bounds = self._label_bounds
+        embedder = self._label_embedder
+        if bounds is None or embedder is None:
+            msg = "refusing to write a label: this writer was wired with no label bounds (§7:3)"
+            raise MemoryStoreError(msg)
+        long = [text for text in new if len(text) > bounds.max_chars]
+        if long:
+            msg = (
+                f"refusing to write a label longer than {bounds.max_chars} characters "
+                f"(ADR-0345 §7:3): {long[0]!r}"
+            )
+            raise MemoryStoreError(msg)
+        try:
+            vectors = list(await embedder.embed([*carried, *new]))
+        except Exception as exc:  # any fault from the injected embedder is the writer's error
+            msg = f"refusing to write a label: the embedder failed ({exc})"
+            raise MemoryStoreError(msg) from exc
+        if len(vectors) != len(carried) + len(new):
+            msg = "refusing to write a label: the embedder returned the wrong number of vectors"
+            raise MemoryStoreError(msg)
+        held = vectors[: len(carried)]
+        accepted: list[str] = []
+        refused: list[str] = []
+        for text, vector in zip(new, vectors[len(carried) :], strict=True):
+            if any(_cosine_distance(vector, other) <= bounds.min_distance for other in held):
+                refused.append(text)
+                continue
+            accepted.append(text)
+            held.append(vector)
+        if len(carried) + len(accepted) > bounds.max_labels:
+            msg = f"refusing to write more than {bounds.max_labels} labels (ADR-0345 §7:3)"
+            raise MemoryStoreError(msg)
+        return accepted, refused
+
+    async def _labelled(self, memory: Memory) -> tuple[Memory, tuple[str, ...]]:
+        """A created memory with its near-duplicate labels left out (ADR-0345 §7:5, §7:7).
+
+        Returns:
+            The memory carrying the labels admitted, and the labels refused.
+
+        Raises:
+            MemoryStoreError: If its labels break the bounds, or none were wired.
+        """
+        if not memory.labels:
+            return memory, ()
+        texts = [label.text for label in memory.labels]
+        accepted, refused = await self._admit_labels([], texts)
+        if not refused:
+            return memory, ()
+        labels = tuple(label for label in memory.labels if label.text in accepted)
+        return memory.model_copy(update={"labels": labels}), tuple(refused)
+
     async def _apply_change(self, change: MemoryChange) -> None:
+        held = await self._require_held_episodes(
+            change.memory.id,
+            (
+                *_newly_added(change.memory, change.support),
+                *(() if change.successor is None else change.successor.supports),
+            ),
+        )
+        # ADR-0345 §2:2: the support an operation adds, and the successor it creates,
+        # carry their holders, set here by code; a support the memory carries already
+        # is not added, and keeps the holder it was recorded under (§2:9).
+        if change.support is not None and _newly_added(change.memory, change.support):
+            try:
+                stamped = stamped_support(change.support, _episode_of(change.support, held))
+            except ValueError as exc:
+                msg = f"refusing to apply a {change.operation.kind}: {exc}"
+                raise MemoryStoreError(msg) from exc
+            change = change.model_copy(update={"support": stamped})
+        if change.successor is not None:
+            created = _stamped(change.successor, held)
+            _refuse_ungiven_names(created, held)
+            change = change.model_copy(update={"successor": created})
         memory = change.memory
         added = _newly_added(memory, change.support)
         successor = () if change.successor is None else change.successor.supports
-        held = await self._require_held_episodes(memory.id, (*added, *successor))
         fault = (
             added_inference_fault(added[0] if added else None)
             or inference_fault(successor)
@@ -1387,9 +1528,7 @@ class MemoryIngestor:
         ]
         if change.successor is not None:
             batch.append(
-                MemoryWrite(
-                    record=_installed(change.successor), mode=MemoryWriteMode.INSERT_IF_ABSENT
-                )
+                MemoryWrite(record=change.successor, mode=MemoryWriteMode.INSERT_IF_ABSENT)
             )
         await self._store.write_atomic(batch)
 
@@ -1413,8 +1552,16 @@ class MemoryIngestor:
             return await self._ingest_once(observed)
 
     async def _ingest_once(self, observed: MemoryUpdateProposal) -> _Ingested:
-        proposed = observed.proposed
-        held = await self._require_held_episodes(proposed.id, proposed.supports)
+        held = await self._require_held_episodes(observed.proposed.id, observed.proposed.supports)
+        # ADR-0345 §2:2: every support carries its holder, set here by code. A holder is
+        # derived from its part, so the proposal's fingerprint and its question key are
+        # what they were (§11:11).
+        proposed = _stamped(observed.proposed, held)
+        _refuse_ungiven_names(proposed, held)
+        proposed, refused_labels = await self._labelled(proposed)
+        observed = observed.model_copy(update={"proposed": proposed})
+        if observed.placement is not None:
+            return await self._ingest_placed(observed, refused_labels)
         retiring = self._retiring(observed, held)
         conflicts = await self._detect_conflicts(
             proposed, withheld=None if retiring is None else retiring.retirement.memory.id
@@ -1450,9 +1597,110 @@ class MemoryIngestor:
                 record_id=applied.record_id,
                 conflicts=resolved,
                 contradicted=_contradicted(decision, conflicts, relations or {}),
+                refused_labels=refused_labels if applied.record_id is not None else (),
             ),
             superseded=applied.superseded,
             reconciliation=determined,
+        )
+
+    async def _ingest_placed(
+        self, observed: MemoryUpdateProposal, refused_labels: tuple[str, ...]
+    ) -> _Ingested:
+        """A placed proposal: ruled by the floor and the confirmation rule, then placed.
+
+        ADR-0345 §4:4-§4:8 and §5. No reconciler runs and no conflict search: the
+        policy is handed the memories the placement names as this writer reads them,
+        with no relations, and its floor or its confirmation rule is final. On an
+        ``ACCEPT`` a stale placement is refused whole, and otherwise every write
+        :func:`~ai_assistant.memory._placed.placed_write` derives is made in one atomic
+        batch, each stored memory ``IF_UNCHANGED`` at the revision read (§5:6).
+
+        Raises:
+            MemoryStoreError: If a ruling other than the floor's, the confirmation
+                rule's or an ``ACCEPT`` arrives, or any rule refuses the write.
+        """
+        placement = observed.placement
+        if placement is None:  # pragma: no cover - routed here only when placed
+            msg = "only a placed proposal is written by its placement"
+            raise MemoryStoreError(msg)
+        named = [pair.memory for pair in placement.pairs]
+        found = await self._store.get_many(named) if named else {}
+        read = {key: one for key, one in found.items() if isinstance(one, Memory)}
+        conflicts: list[MemoryRecord] = [read[key] for key in named if key in read]
+        resolved = tuple(one.id for one in conflicts)
+        ruled = observed.model_copy(update={"conflicts": resolved})
+        decision = await self._policy.decide(ruled, conflicts=conflicts, relations=None)
+        _refuse_secret_write(decision, observed)
+        _refuse_tentative_store(decision)
+        nothing = _Reconciliation(relations=None)
+        if decision.kind in {MemoryDecisionKind.REJECT, MemoryDecisionKind.ASK_USER}:
+            return _Ingested(
+                result=MemoryIngestResult(decision=decision, conflicts=resolved),
+                superseded=(),
+                reconciliation=nothing,
+            )
+        _refuse_self_consuming_write(decision, observed, resolved=resolved)
+        if decision.kind is MemoryDecisionKind.SUPERSEDE and observed.confirmation is not None:
+            # §4:6: the confirmation rule's ruling is final, and applied as on any proposal.
+            applied = await self._apply_fold(
+                decision, observed, conflicts, resolved=resolved, relations={}, retiring=None
+            )
+            return _Ingested(
+                result=MemoryIngestResult(
+                    decision=decision, record_id=applied.record_id, conflicts=resolved
+                ),
+                superseded=applied.superseded,
+                reconciliation=nothing,
+            )
+        if decision.kind is not MemoryDecisionKind.ACCEPT:
+            msg = (
+                f"refusing a {decision.kind} ruling on a placed proposal: a policy rules on "
+                f"one by its admissibility floor and its rule on a confirmed proposal alone "
+                f"(ADR-0345 §4:5)"
+            )
+            raise MemoryStoreError(msg)
+        stale = tuple(
+            pair.memory
+            for pair in placement.pairs
+            if pair.memory not in read or read[pair.memory].revision != pair.revision
+        )
+        if stale:
+            return _Ingested(
+                result=MemoryIngestResult(decision=decision, conflicts=resolved, stale=stale),
+                superseded=(),
+                reconciliation=nothing,
+            )
+        try:
+            placed = placed_write(observed, read, at=self._now_utc())
+        except ValueError as exc:
+            msg = f"refusing to write {observed.proposed.id!r}: {exc}"
+            raise MemoryStoreError(msg) from exc
+        batch = [
+            MemoryWrite(
+                record=after,
+                mode=MemoryWriteMode.IF_UNCHANGED,
+                expected_revision=read[key].revision,
+            )
+            for key, after in placed.changed.items()
+        ]
+        if placed.installed is not None:
+            batch.insert(
+                0, MemoryWrite(record=placed.installed, mode=MemoryWriteMode.INSERT_IF_ABSENT)
+            )
+        if batch:
+            await self._store.write_atomic(batch)
+        record_id = placed.installed.id if placed.installed is not None else placed.folded[0]
+        return _Ingested(
+            result=MemoryIngestResult(
+                decision=decision,
+                record_id=record_id,
+                conflicts=resolved,
+                folded=placed.folded,
+                refused_labels=refused_labels if placed.installed is not None else (),
+            ),
+            superseded=placed.retired,
+            reconciliation=nothing,
+            folded=placed.folded,
         )
 
     def _retiring(
@@ -1753,7 +2001,7 @@ class MemoryIngestor:
             case MemoryDecisionKind.ACCEPT:
                 if retiring is not None:
                     return await self._install_retiring(proposed, retiring)
-                return _Applied(await self._install(_installed(proposed)))
+                return _Applied(await self._install(proposed))
             case MemoryDecisionKind.REINFORCE | MemoryDecisionKind.SUPERSEDE:
                 if retiring is not None and (
                     decision.kind is MemoryDecisionKind.SUPERSEDE
@@ -1803,7 +2051,7 @@ class MemoryIngestor:
                 await self._apply_supersede(retired, proposed),
                 tuple(record.id for record in retired),
             )
-        folded = _installed(_reinforced(target, proposed, now=self._now_utc()))
+        folded = _reinforced(target, proposed, now=self._now_utc())
         if retiring is not None:
             return await self._fold_retiring(folded, target, retiring)
         return _Applied(
@@ -1830,7 +2078,7 @@ class MemoryIngestor:
             MemoryStoreError: If the operation is refused, or a store failure.
         """
         retired = retiring.retirement.memory.id
-        installed = _installed(replaces_with(proposed, retired))
+        installed = replaces_with(proposed, retired)
         written = await self._store.write_atomic(
             [
                 MemoryWrite(record=installed, mode=MemoryWriteMode.INSERT_IF_ABSENT),
@@ -1985,7 +2233,7 @@ class MemoryIngestor:
                     f"re-minting"
                 )
                 continue
-            successor = _installed(_supersede(proposed, new_id, retired_ids))
+            successor = _supersede(proposed, new_id, retired_ids)
             batch = [
                 MemoryWrite(
                     record=_ended(target, successor, now),

@@ -249,7 +249,7 @@ def test_a_source_memory_is_placed_by_the_source_its_standing_rests_on(
 
 def test_a_memory_about_somebody_else_is_withheld() -> None:
     """§3's household clause binds a memory exactly as it bound a belief."""
-    record = memory_in_band("mem-1", _WITHHELD_CONTENT, about_person="Alice")
+    record = memory_in_band("mem-1", _WITHHELD_CONTENT, subjects=("Alice",))
 
     memories, withheld = _supply(record)
 

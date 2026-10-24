@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 
     StoreFactory = Callable[[Callable[[], datetime]], MemoryStore]
 from ai_assistant.core.types import (
-    MAX_TOPICS_PER_RECORD,
+    OWNER_PERSON_ID,
     ActivationDigest,
     ActivationRecall,
     ActivationUnderstanding,
@@ -70,6 +70,7 @@ from ai_assistant.core.types import (
     LabelKind,
     Memory,
     MemoryKind,
+    MemoryMark,
     MemoryOperation,
     MemoryOperationKind,
     MemoryRecord,
@@ -78,6 +79,7 @@ from ai_assistant.core.types import (
     MemorySupport,
     MemoryWrite,
     MemoryWriteMode,
+    MemoryWriterName,
     Modality,
     NewConversation,
     Placement,
@@ -95,10 +97,12 @@ from ai_assistant.core.types import (
     RecallProvenance,
     RecordedChannelTrigger,
     RecordedTextInput,
+    SituationLabel,
     StageEntry,
     StageOutcome,
     StoryMember,
     StoryMemberKind,
+    SupportHolder,
     UnderstandingGround,
     UnderstandingOmission,
     UnderstandingProducer,
@@ -270,8 +274,8 @@ def _semantic(  # noqa: PLR0913 — one keyword per record axis a case may need 
     validity: Validity | None = None,
     source: MemorySource = MemorySource.OBSERVED,
     last_updated: datetime = _REVISED,
-    topics: tuple[str, ...] = (),
-    about_person: str | None = None,
+    subjects: tuple[str, ...] | None = None,
+    involved: tuple[str, ...] | None = None,
 ) -> MemoryRecord:
     """A memory in the band ``source`` names, resting on one support (ADR-0328 §3)."""
     return memory(
@@ -280,8 +284,8 @@ def _semantic(  # noqa: PLR0913 — one keyword per record axis a case may need 
         _support(source, last_updated),
         expires_at=expires_at,
         validity=validity or Validity(),
-        topics=topics,
-        about_person=about_person,
+        subjects=subjects,
+        involved=involved,
     )
 
 
@@ -1396,33 +1400,87 @@ class MemoryStoreContract:
         assert plain is not None
         assert plain.placement == Placement()
 
-    async def test_a_records_topics_survive_the_round_trip(self, store: MemoryStore) -> None:
-        """ADR-0213 §12.1, on the contract rather than on one store.
+    async def test_a_memorys_labels_marks_people_and_holders_survive_the_round_trip(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0345 §2, §7-§9, on the contract rather than on one store.
 
-        Every consumer this axis has is a read-and-delete or a read-and-withhold
-        predicate over a *recorded* value: §4 forbids deriving a record's topics at
-        read time, so a store that silently dropped the field would leave every such
-        act reaching nothing, with no error anywhere and no way to tell it from a
-        store of genuinely unlabelled records. That is why the round trip is an
-        obligation of the contract and not a property of whichever backend happens
-        to persist whole records today.
-
-        Both values are pinned, for the reason the disclosure stamp above pins both:
-        §7 rules that an empty tuple is "no topic recorded", so an implementation
-        inventing a label would put a record inside the reach of an act the owner
-        performed over something else — which is the more destructive of the two
-        wrong readings.
+        What a memory records of whose belief it is, what it is for and whom it is
+        about is read back as written by every read: a store that dropped a support's
+        holder would make every memory nobody's, and one that dropped ``subjects``
+        would leave the person filter reaching nothing. ``None`` and an empty set are
+        both read back as given (§9:1): never determined is not determined to be none.
         """
-        labelled = _preference("labelled", "prefers concise replies")
-        await store.add(labelled.model_copy(update={"topics": ("health", "sleep")}))
-        await store.add(_preference("unlabelled", "prefers a written summary"))
+        held = _support(MemorySource.USER_ASSERTED, _REVISED).model_copy(
+            update={"holder": SupportHolder.person(OWNER_PERSON_ID)}
+        )
+        label = SituationLabel(
+            text="when booking travel",
+            added_at=_REVISED,
+            added_by=MemoryWriterName.OBSERVER,
+            episode="ep-suggesting",
+        )
+        written = memory(
+            "described",
+            "the user flies to Lisbon on the 5th",
+            held,
+            labels=(label,),
+            marks=(MemoryMark.OCCASION,),
+            subjects=(OWNER_PERSON_ID,),
+            involved=(),
+        )
+        await store.add(written)
+        await store.add(_preference("undescribed", "prefers a written summary"))
 
-        got = await store.get("labelled")
-        assert got is not None
-        assert got.topics == ("health", "sleep")
-        plain = await store.get("unlabelled")
-        assert plain is not None
-        assert plain.topics == ()
+        for got in (
+            await store.get("described"),
+            (await store.get_many(["described"]))["described"],
+            next(one for one in await store.export() if one.id == "described"),
+        ):
+            assert isinstance(got, Memory)
+            assert got.labels == (label,)
+            assert got.marks == (MemoryMark.OCCASION,)
+            assert got.subjects == (OWNER_PERSON_ID,)
+            assert got.involved == ()
+            assert got.supports[0].holder == SupportHolder.person(OWNER_PERSON_ID)
+        plain = await store.get("undescribed")
+        assert isinstance(plain, Memory)
+        assert (plain.labels, plain.marks, plain.subjects, plain.involved) == ((), (), None, None)
+
+    async def test_the_person_filter_reads_subjects_and_involved_as_carried(
+        self, store: MemoryStore
+    ) -> None:
+        """ADR-0345 §9:6: a memory naming the person, in ``subjects`` or ``involved``.
+
+        With ``as_subject`` only ``subjects`` is read. A name is compared exactly as
+        carried (§9:3): ``ana`` is not ``Ana``. An episode names nobody there and is
+        never returned, and a memory that names no one never passes.
+        """
+        await store.add(_semantic("about-ana", "a fact about ana", subjects=("Ana",)))
+        await store.add(_semantic("involving-ana", "a fact involving ana", involved=("Ana",)))
+        await store.add(_semantic("about-tom", "a fact about tom ana", subjects=("Tom",)))
+        await store.add(_semantic("about-nobody", "a fact ana", subjects=()))
+        await store.add(_episode("an-episode", "an episode about ana"))
+
+        either = await store.search("ana", limit=10, person="Ana")
+        assert {one.id for one in either.records} == {"about-ana", "involving-ana"}
+        subject = await store.search("ana", limit=10, person="Ana", as_subject=True)
+        assert {one.id for one in subject.records} == {"about-ana"}
+        assert not (await store.search("ana", limit=10, person="ana")).records
+
+    async def test_the_person_filter_binds_before_the_cut(self, store: MemoryStore) -> None:
+        """ADR-0345 §9:6, read under ADR-0128 §1: no memory failing it spends the budget.
+
+        Many memories nearer the query than the one naming the person, none naming
+        them, must not crowd it out of a one-record read.
+        """
+        for index in range(12):
+            await store.add(_semantic(f"near-{index}", "flat lisbon tagus view"))
+        await store.add(_semantic("named", "flat lisbon", subjects=("Ana",)))
+
+        found = await store.search("flat lisbon tagus view", limit=1, person="Ana")
+
+        assert [one.id for one in found.records] == ["named"]
 
     async def test_a_processing_records_understanding_survives_the_round_trip(
         self, store: MemoryStore
@@ -2555,31 +2613,28 @@ class MemoryStoreContract:
         with pytest.raises(MemoryStoreError):
             await store.get_history(["ended", "sound"])
 
-    async def test_a_record_over_the_topic_bound_stays_readable(self, store: MemoryStore) -> None:
-        """ADR-0213 §1's residue, pinned where a ``max_length`` would break it.
+    async def test_a_memory_over_any_label_bound_stays_readable(self, store: MemoryStore) -> None:
+        """ADR-0345 §7:3's bounds are the writer's, never the store's or the type's.
 
-        ADR-0086 §2's evidence residue, one field along, retired with the evidence it
-        bounded (ADR-0328 §10); this one stands for one further reason. §1 keeps
-        :data:`MAX_TOPICS_PER_RECORD` off the type so that a later ADR *raising* it
-        changes what this deployment writes and not what an older peer can read: a
-        record written at a higher bound, or imported from a deployment holding one,
-        must decode and read here rather than being refused for a reason its owner
-        cannot see and did not cause. A store that validated the tuple's length on
-        decode would fail exactly those records, and §8's convergence — the record
-        comes under the bound on its next *install* — would never get the chance to
-        run, because the record could not be read in order to be reinstalled.
-
-        Every read is exercised, because they decode by different paths and a bound
-        on the type would break them one at a time.
+        A memory carrying more labels than a composition root admits, or longer ones,
+        written at a higher bound or imported, decodes and reads by every read: a store
+        that refused it would refuse a record for a reason its owner cannot see.
         """
-        over_bound = tuple(f"topic {index:03d}" for index in range(MAX_TOPICS_PER_RECORD + 4))
+        labels = tuple(
+            SituationLabel(
+                text=f"label {index:03d} " + "x" * 120,
+                added_at=_REVISED,
+                added_by=MemoryWriterName.MIGRATION,
+            )
+            for index in range(40)
+        )
         imported = _semantic("imported", "a belief carrying more labels than we would write")
 
-        await store.add(imported.model_copy(update={"topics": over_bound}))
+        await store.add(imported.model_copy(update={"labels": labels}))
 
         got = await store.get("imported")
-        assert got is not None
-        assert got.topics == over_bound
+        assert isinstance(got, Memory)
+        assert got.labels == labels
         assert set(await store.get_many(["imported"])) == {"imported"}
         assert set(await store.get_history(["imported"])) == {"imported"}
         assert "imported" in {record.id for record in await store.list_beliefs()}

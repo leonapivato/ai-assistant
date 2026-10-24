@@ -406,8 +406,21 @@ def _unstamped(record: MemoryRecord) -> MemoryRecord:
     that committed the wrong row — so the one store-authored field is stripped rather
     than the comparison weakened. What the writer does with the stamp is ADR-0219 §5's
     second change and is asserted there, not here.
+
+    **Each support's holder is the other writer-set field** (ADR-0345 §2:2): a producer
+    builds a support with none, and the writer records the one §2's table gives its
+    part. It is cleared here for the same reason, and the holder cases
+    (``placed_writer_contract.py``) assert what a writer records.
     """
+    if isinstance(record, Memory):
+        supports = tuple(one.model_copy(update={"holder": None}) for one in record.supports)
+        return record.model_copy(update={"revision": 0, "supports": supports})
     return record.model_copy(update={"revision": 0})
+
+
+def _holderless(supports: Sequence[MemorySupport]) -> tuple[MemorySupport, ...]:
+    """``supports`` with the holder each writer records cleared (ADR-0345 §2:2)."""
+    return tuple(one.model_copy(update={"holder": None}) for one in supports)
 
 
 def _unstamped_or_none(record: MemoryRecord | None) -> MemoryRecord | None:
@@ -1502,7 +1515,7 @@ class MemoryWriterContract:
         corrected = await store.get("corrected")
         assert isinstance(corrected, Memory)
         assert corrected.content == proposed.content
-        assert corrected.supports == proposed.supports
+        assert _holderless(corrected.supports) == _holderless(proposed.supports)
         assert corrected.operations[0].replaces == ("existing",)
         assert corrected.expires_at == proposed.expires_at
         assert await store.get("new") is None
@@ -3422,8 +3435,10 @@ class MemoryWriterContract:
         # memory it replaces (ADR-0328 §11:7).
         proposed = ruled_on.proposed
         create = proposed.operations[0].model_copy(update={"replaces": ("existing",)})
-        assert _unstamped(written) == proposed.model_copy(
-            update={"id": "corrected", "validity": Validity(), "operations": (create,)}
+        assert _unstamped(written) == _unstamped(
+            proposed.model_copy(
+                update={"id": "corrected", "validity": Validity(), "operations": (create,)}
+            )
         ), _TORN_PROPOSAL
         # The belief retired is the one that contradicted what was actually stored.
         retained = {record.id: record for record in await _memories(store)}
@@ -4232,7 +4247,9 @@ class MemoryWriterContract:
 
         written = await store.get("existing")
         assert isinstance(written, Memory)
-        assert written.support_at(support.points_at) == support
+        held = written.support_at(support.points_at)
+        assert held is not None
+        assert _holderless((held,)) == _holderless((support,))
         assert written.standing is MemoryStanding.CONFIRMED
         assert written.band is BeliefBand.ASSERTED
 
@@ -4585,7 +4602,7 @@ class MemoryWriterContract:
         installed = await store.get("new")
         assert isinstance(installed, Memory)
         assert installed.operations[0].replaces == ("old",)
-        assert installed.supports == new.supports
+        assert _holderless(installed.supports) == _holderless(new.supports)
         retired = {record.id: record for record in await _memories(store)}["old"]
         assert isinstance(retired, Memory)
         assert retired.status is status

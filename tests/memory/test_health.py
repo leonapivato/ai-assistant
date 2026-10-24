@@ -94,14 +94,14 @@ def _record(  # noqa: PLR0913 — one keyword per field a census reads, which is
     expires_at: datetime | None = None,
     validity: Validity | None = None,
     band: BeliefBand = BeliefBand.DERIVED,
-    about_person: str | None = None,
+    subject: str | None = None,
 ) -> MemoryRecord:
     """One memory, varying only the fields a census reads."""
     return memory_in_band(
         record_id,
         content,
         band,
-        about_person=about_person,
+        subjects=None if subject is None else (subject,),
         expires_at=expires_at,
         validity=validity if validity is not None else Validity(),
     )
@@ -709,7 +709,7 @@ class TestWhatTheReportCarries:
                 _record(
                     "zzsecretidzz",
                     "t0 p0 qqcontentqq",
-                    about_person="wwsubjectww",
+                    subject="wwsubjectww",
                     band=BeliefBand.ASSERTED,
                 ),
                 *_plain(5, start=1),

@@ -82,7 +82,7 @@ _WITHHELD: Final = {
         attestation=Attestation(reported_by="mail", reported_at=_AT),
     ),
     "a memory about someone else": memory_in_band(
-        "mem-sam", "Sam is allergic to nuts", about_person="Sam"
+        "mem-sam", "Sam is allergic to nuts", subjects=("Sam",)
     ),
     "placed for the owner by the owner": _record(
         placement=Placement(

@@ -78,6 +78,7 @@ from ai_assistant.core.types import (
     InputPart,
     JoinedInput,
     Memory,
+    MemoryMark,
     MemoryOperation,
     MemoryOperationKind,
     MemorySource,
@@ -120,6 +121,7 @@ from ai_assistant.core.types import (
     RiskLevel,
     SecretName,
     SecretScope,
+    SituationLabel,
     SourceGrant,
     SourceReadRecord,
     StageEntry,
@@ -143,6 +145,7 @@ from ai_assistant.core.types import (
     UnderstandingOmission,
     UnderstandingProducer,
     rests_on_recorded_external_content,
+    stamped_support,
 )
 from ai_assistant.evaluation import SqliteTraceStore
 from ai_assistant.memory import (
@@ -521,15 +524,22 @@ def _joined_episode(moment: Moment) -> EpisodicMemory:
 def _support(
     part: InputPart | RememberCallPart, origin: SupportOrigin, moment: Moment
 ) -> MemorySupport:
-    """One support for a memory the check writes, added by ``remember`` (ADR-0328 §4)."""
-    return MemorySupport(
-        points_at=part,
-        origin=origin,
-        direction=SupportDirection.FOR,
-        backs_as_worded=True,
-        when=moment.ago(minutes=20),
-        added_at=moment.ago(minutes=19),
-        added_by=MemoryWriterName.REMEMBER,
+    """One support for a memory the check writes, added by ``remember`` (ADR-0328 §4).
+
+    It carries the holder ADR-0345 §2's table gives it, as a writer records one, so a
+    later build's upgrade check reads holders back.
+    """
+    return stamped_support(
+        MemorySupport(
+            points_at=part,
+            origin=origin,
+            direction=SupportDirection.FOR,
+            backs_as_worded=True,
+            when=moment.ago(minutes=20),
+            added_at=moment.ago(minutes=19),
+            added_by=MemoryWriterName.REMEMBER,
+        ),
+        None,
     )
 
 
@@ -563,15 +573,18 @@ def _pinned_memory(episode: EpisodicMemory, moment: Moment) -> Memory:
     later build's upgrade check reads back the ``pin`` part and the ``pinned`` origin.
     """
     said = _support(InputPart(episode=episode.id), SupportOrigin.USER_MESSAGE, moment)
-    pinned = MemorySupport(
-        points_at=PinPart(pin="pin-upgrade"),
-        origin=SupportOrigin.PINNED,
-        direction=SupportDirection.FOR,
-        backs_as_worded=True,
-        how_sure=ReadingCertainty.SURE,
-        when=moment.ago(minutes=12),
-        added_at=moment.ago(minutes=11),
-        added_by=MemoryWriterName.OBSERVER,
+    pinned = stamped_support(
+        MemorySupport(
+            points_at=PinPart(pin="pin-upgrade"),
+            origin=SupportOrigin.PINNED,
+            direction=SupportDirection.FOR,
+            backs_as_worded=True,
+            how_sure=ReadingCertainty.SURE,
+            when=moment.ago(minutes=12),
+            added_at=moment.ago(minutes=11),
+            added_by=MemoryWriterName.OBSERVER,
+        ),
+        None,
     )
     created = _memory_record("mem-pinned", "The user is vegetarian.", said)
     return Memory.model_validate(
@@ -601,8 +614,19 @@ async def _write_memory(directory: Path, moment: Moment) -> None:
                 "mem-said",
                 "The user's sister is called Ada.",
                 _support(InputPart(episode=episode.id), SupportOrigin.USER_MESSAGE, moment),
-                topics=("family",),
-                about_person="Ada",
+                # ADR-0345 §7, §8, §9: a label, a mark and the people a memory is about,
+                # so a later build's upgrade check reads each back.
+                subjects=("Ada",),
+                involved=(OWNER_PERSON_ID,),
+                labels=(
+                    SituationLabel(
+                        text="family",
+                        added_at=moment.ago(minutes=18),
+                        added_by=MemoryWriterName.OBSERVER,
+                        episode=episode.id,
+                    ),
+                ),
+                marks=(MemoryMark.OCCASION,),
             )
         )
         await store.add(
@@ -711,6 +735,38 @@ def _memory_record_carry(records: Records) -> Records:
             "operations": operations,
             "status": "current" if len(operations) == 1 else "ended",
         }
+        carried[key] = memory
+    return carried
+
+
+def _memory_placed_carry(records: Records) -> Records:
+    """What a memory store read back before ADR-0345 reads back after it (§13).
+
+    Each memory's ``about_person`` becomes ``subjects`` holding that one name, or
+    ``None`` where it named none, and ``involved`` is ``None`` (§13:1); each of its
+    topics becomes a label added by ``migration`` and suggested by no episode (§10:2),
+    whose instant is the head's upgrade's, which this carry leaves to the comparison; and
+    it gains no mark. Each support gains its holder, which the head reads back beside
+    what is said here. Every episode, the walk and the nearest hits are unchanged.
+    """
+    carried: Records = {}
+    for key, value in records.items():
+        if not key.startswith("record/") or not isinstance(value, dict):
+            carried[key] = value
+            continue
+        if value.get("kind") != "memory":
+            carried[key] = value
+            continue
+        memory = dict(value)
+        about = memory.pop("about_person", None)
+        topics = memory.pop("topics", None)
+        memory["subjects"] = None if about is None else [about]
+        memory["involved"] = None
+        memory["labels"] = [
+            {"text": topic, "added_by": "migration", "episode": None}
+            for topic in (topics if isinstance(topics, list) else [])
+        ]
+        memory["marks"] = []
         carried[key] = memory
     return carried
 
@@ -1544,8 +1600,8 @@ STORES: Final[tuple[Store, ...]] = (
         ("memory.db",),
         _write_memory,
         _read_memory,
-        shape=2,
-        carries={1: _memory_record_carry},
+        shape=3,
+        carries={1: _memory_record_carry, 2: _memory_placed_carry},
     ),
     Store("stories", ("stories.db",), _write_stories, _read_stories),
     Store("audit", ("audit.db",), _write_audit, _read_audit),

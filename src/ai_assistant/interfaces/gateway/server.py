@@ -177,6 +177,7 @@ from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     CHAT_DEVICES_MAX,
     DEFAULT_PAGE_SIZE,
+    OWNER_PERSON_ID,
     TRANSCRIPT_MESSAGE_MAX_CHARS,
     Attestation,
     Belief,
@@ -200,6 +201,7 @@ from ai_assistant.core.types import (
     GrantableSource,
     GrantScope,
     HeldNotification,
+    HolderKind,
     MemoryKind,
     MessageAddedChange,
     MessageDeletedChange,
@@ -211,6 +213,7 @@ from ai_assistant.core.types import (
     ProfileField,
     QuietWindow,
     SourceGrant,
+    SupportHolder,
     SupportView,
     TranscriptMessage,
     TranscriptPage,
@@ -5373,6 +5376,34 @@ def _belief_fields(belief: Belief | BeliefSummary) -> dict[str, Any]:
         # provenance attestation, or the source details a memory's standing rests on
         # (ADR-0328 §2:6); null otherwise.
         "attestation": _attestation_view(belief.attestation),
+        # ADR-0345 §12:1: whose belief it is, whom it is about, what it is for, and the
+        # marks; and, for a memory marked as the assistant's statement, where and when
+        # it was said (§12:4).
+        "holders": [_holder_view(one) for one in belief.holders],
+        "partial_supporters": [_holder_view(one) for one in belief.partial_supporters],
+        "subjects": None if belief.subjects is None else list(belief.subjects),
+        "involved": None if belief.involved is None else list(belief.involved),
+        "labels": [label.text for label in belief.labels],
+        "marks": [mark.value for mark in belief.marks],
+        "statements": [
+            {"episode": one.episode, "when": _instant(one.when)} for one in belief.statements
+        ],
+    }
+
+
+def _holder_view(holder: SupportHolder | None) -> dict[str, Any] | None:
+    """Whose belief a support records, and whether that is the owner (ADR-0345 §12).
+
+    ``owner`` is computed here, against the identifier that names the owner (§2:5), so
+    the page says "you" without knowing that identifier.
+    """
+    if holder is None:
+        return None
+    return {
+        "kind": holder.kind.value,
+        "identifier": holder.identifier,
+        "claimed": holder.claimed,
+        "owner": holder.kind is HolderKind.PERSON and holder.identifier == OWNER_PERSON_ID,
     }
 
 
@@ -5445,6 +5476,7 @@ def _support_view(support: SupportView) -> dict[str, Any]:
         "about_when": _instant(support.about_when),
         "source_details": _attestation_view(support.source_details),
         "counts": support.counts,
+        "holder": _holder_view(support.holder),
     }
 
 

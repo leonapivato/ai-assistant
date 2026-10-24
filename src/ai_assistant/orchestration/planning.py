@@ -152,14 +152,17 @@ from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.prompts import PromptDeclaration
 from ai_assistant.core.types import (
     DEFAULT_ASSISTANT_NAME,
+    OWNER_PERSON_ID,
     AskedCall,
     BeliefBand,
     CapabilityResult,
     DiagnosticKind,
     DiagnosticSource,
     EpisodicMemory,
+    HolderKind,
     InputOrigin,
     LabelKind,
+    MemoryMark,
     MemoryStanding,
     Message,
     OfferedTool,
@@ -174,7 +177,9 @@ from ai_assistant.core.types import (
     StoryMemberKind,
     StoryNoteAuthor,
     StoryRelation,
+    SupportHolder,
     label_prefix,
+    statement_citations,
 )
 from ai_assistant.orchestration.person_block import person_zone
 from ai_assistant.orchestration.reliance import NOTE_RELIANCE_CAPABILITY
@@ -932,6 +937,10 @@ class _LabelBook:
         """What ``label`` names, or ``None`` where planning was never shown it."""
         return self._by_label.get(label)
 
+    def held(self, kind: LabelKind, thing: str) -> str | None:
+        """The label ``thing`` already holds, or ``None``; assigns nothing."""
+        return self._by_thing.get((kind, thing))
+
 
 # --- the instruction ---------------------------------------------------------------------
 
@@ -1103,6 +1112,35 @@ _STANDING_TEXT: Final = {
 
 #: A reading certainty no backing support carries (ADR-0328 §7:5).
 _NOT_JUDGED: Final = "not judged"
+
+#: ADR-0345 §12:4: a memory marked ``assistant_statement``, conveyed as what the assistant
+#: said, never as from an outside source or as what the person said, whatever its standing.
+_SAID_ITEM: Final = (
+    "a remembered fact: what the assistant itself said, never what the user said or a "
+    "source reported, and no reason in itself"
+)
+_SAID_STANDING: Final = "the assistant said it"
+
+#: Where a cited message was said, when the window holds no label for its episode.
+_SAID_ELSEWHERE: Final = "an earlier exchange"
+
+
+def _holder_text(holder: SupportHolder) -> str:
+    """Whose belief a support records, in plain words (ADR-0345 §12:3). The text is planning's."""
+    match holder.kind:
+        case HolderKind.PERSON if holder.identifier == OWNER_PERSON_ID:
+            return "the user"
+        case HolderKind.PERSON:
+            return f"another person ({holder.identifier})"
+        case HolderKind.OUTSIDE_SOURCE if holder.claimed:
+            return f"a forward claimed to come from {holder.identifier}"
+        case HolderKind.OUTSIDE_SOURCE:
+            return f"the source {holder.identifier}"
+        case HolderKind.ASSISTANT_STATEMENT:
+            return "the assistant's own words"
+        case _:
+            return "an unknown source"
+
 
 #: ADR-0329 §6:5: what a candidate's result tells planning of the candidate.
 _CANDIDATE_PENDING: Final = (
@@ -1784,7 +1822,41 @@ class _Request:
         questions = [one.asks for one in record.open_questions if not one.resolved]
         if questions:
             shown["open_questions"] = questions
+        self._held(record, shown)
         return shown
+
+    def _held(self, record: Memory, shown: dict[str, object]) -> None:
+        """ADR-0345 §12:3 and §12:4's part of a memory's label, added to ``shown``.
+
+        Its holders wherever they are not the user alone, the holders of its counted
+        ``against`` supports where it has any, and its validity end where it lies in
+        the future. A memory marked ``assistant_statement`` is said to be what the
+        assistant said, citing where and when, and who kept it, never by its standing.
+        """
+        holders = record.holders
+        if holders and holders != (SupportHolder.person(OWNER_PERSON_ID),):
+            shown["held_by"] = [_holder_text(one) for one in holders]
+        disputed = record.against_holders
+        if disputed:
+            shown["disputed_by"] = [_holder_text(one) for one in disputed]
+        end = record.validity.valid_until
+        if end is not None and end > self._now:
+            shown["holds_until"] = end.isoformat()
+        if MemoryMark.ASSISTANT_STATEMENT not in record.marks:
+            return
+        shown["item"] = _SAID_ITEM
+        shown["standing"] = _SAID_STANDING
+        shown["said"] = [
+            {
+                "in": self._book.held(LabelKind.EPISODE, one.episode) or _SAID_ELSEWHERE,
+                "at": _instant_or_unknown(one.when),
+            }
+            for one in statement_citations(record)
+        ]
+        kept = [one for one in holders if one.kind is HolderKind.PERSON]
+        if kept:
+            shown["kept_by"] = [_holder_text(one) for one in kept]
+        shown.pop("held_by", None)
 
     def _episode(
         self, label: str, projection: EpisodeProjection, record: EpisodicMemory

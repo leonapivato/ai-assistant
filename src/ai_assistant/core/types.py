@@ -2229,77 +2229,10 @@ class RecordEnvelope(BaseModel):
     (:class:`MemoryBase`), and a memory carries supports in its place (ADR-0328
     §3:1).
 
-    **``about_person`` is the subject axis** (ADR-0100): whom the belief is
-    *about*, which ADR-0099 §2 rules orthogonal to whose hub this is. It is on the
-    envelope rather than on :class:`Provenance` because ``Provenance`` answers *why
-    this should be believed* and the envelope answers *what is held, about what,
-    and for how long* — a field is placed by which question it answers, not by who
-    sets it (§2). Four rules govern it, and each is a clause rather than a
-    convention:
-
-    * **Two states, never three** (§1). It is stated, or it is ``None``. A blank
-      or whitespace-only label is refused at construction — a record saying ``""``
-      is a producer that meant to speak and said nothing — which is why the
-      annotation is :data:`NonBlankEncodableText` and not the bare
-      :data:`EncodableText` of ADR-0100 §1's illustrative snippet. The same type
-      supplies the *other* half §6 needs: it refuses a blank without stripping the
-      value it accepts.
-    * **``None`` means no subject is stated, and is read as the owner's** (§3). It
-      is not "unknown", and no reader, store or surface may exclude a ``None``
-      record from an answer about the owner on the ground that it says nothing.
-      **The owner is never named here** — there is no user identity anywhere in
-      this system (ADR-0036 §3, ADR-0097 §1), so a label naming the owner would be
-      a second spelling of a subject that already has one: the absence.
-    * **A label, resolving to nothing** (§6). Not an identifier, not a key, not a
-      reference. Nothing here treats two equal labels as one person or two unequal
-      ones as different people; whether labels may be matched at all is ADR-0101's,
-      which is the only instrument that may lift that. It is stored and returned
-      byte for byte: nothing normalises, case-folds, aliases or de-duplicates it.
-    * **Whom, not what** (§6). A belief about a company, a project, a device or a
-      topic states no subject, and a belief about two people is two beliefs.
-
-    **Stating one is not licence to propose one** (§4). A producer fills it only
-    from a subject it actually received — an explicit user act, or a structured
-    field of a source that names whom an entry is about — and never by inferring a
-    person from content. The field widens no producer's warrant, and its existence
-    may not be cited as though it did.
-
-    **``topics`` is the *about what* axis beside it** (ADR-0213 §2), placed on the
-    envelope by the same ADR-0100 §2 test and landing here for the same reason:
-    the two together are the *about* half of the envelope's question, one asking
-    *whom* and the other *what*. ADR-0100 §6 reserved this ground by name — "The
-    axis is *whom*, not *what*. A belief about a company, a project, a device or a
-    topic states no subject" — so the field occupies ground the corpus explicitly
-    left empty. **The two are never read for each other**, no validator ties them,
-    and a record may carry both, either or neither (ADR-0213 §14). Four rules
-    govern it:
-
-    * **Proposed once, at write, by the record's own producer** (§4). No consumer,
-      surface, store, retrieval path, scheduler job, migration or later ADR derives
-      a record's topics at read time, and none derives them from ``content``, from
-      a rendered facet, from a composed reply or from any other span of content
-      after the write. Exactly one producer proposed any, the consolidation
-      stage (§6, narrowed by ADR-0285 §1), and it retired (ADR-0328 §14:2), so
-      every producer now writes the empty tuple, and no producer labels a record
-      another producer wrote.
-    * **Empty means "no topic was recorded"** (§7). Not "about nothing" and not
-      "about everything". No consumer reads an empty tuple as matching a
-      topic-scoped query, and none reads it as excluded from a query naming no
-      topic: an act reaches a record if and only if the record carries the label
-      the act names. A surface performing such an act owes the owner the
-      disclosure that unlabelled records were not reached, and that the act's reach
-      is the labels recorded rather than the subject they have in mind.
-    * **Set once, revised by two routes** (§8). A fold takes the **union** of both
-      sides — a label the target carried is never dropped, which is ADR-0106 §4's
-      ratchet in this currency — and the owner's own act (§9) writes at the
-      record's id. A ``SUPERSEDE`` carries nothing across. Nothing else revises
-      them: no re-observation, retrieval, re-embedding, reconciliation, scheduler
-      job, migration or backfill.
-    * **Not a retrieval axis, not a tier, not a sensitivity, not a subject and not
-      an identifier** (§14). A label carries no posture, no permission, no band and
-      no disclosure consequence, and no read here filters on it. Each is stated as
-      a prohibition rather than left as an omission because each is a plausible next
-      step a lane could take without noticing it was a decision.
+    **``about_person`` and ``topics`` are not on this envelope** since ADR-0345 §9 and
+    §10: a memory carries ``subjects`` and ``involved`` in the first's place and no
+    ``topics`` at all, and both stay on :class:`MemoryBase`, the envelope an episode and
+    a minted record share, with their ratified meanings (ADR-0100, ADR-0213).
 
     **``revision`` is the store's concurrency token** (ADR-0219 §1), and it is the
     one field on this envelope no producer authors. A store issues it for the write
@@ -2387,26 +2320,6 @@ class RecordEnvelope(BaseModel):
             "while ``export`` still returns it; distinct from ``expires_at`` retention."
         ),
     )
-    about_person: NonBlankEncodableText | None = Field(
-        default=None,
-        description=(
-            "Whom this belief is about, when that is someone other than the owner "
-            "(ADR-0100 §2). None means no subject is stated, which is read as the "
-            "owner's. A label as given, resolving to nothing (§6)."
-        ),
-    )
-    topics: Annotated[tuple[TopicLabel, ...], AfterValidator(_strictly_increasing_topics)] = Field(
-        default=(),
-        description=(
-            "What this record is about, as canonical labels proposed at write "
-            "(ADR-0213 §4). Empty means no topic was recorded, which is neither "
-            "'no topic' nor 'every topic' (§7). Strictly increasing by code point "
-            "(§1). No record this system installs carries more than "
-            "MAX_TOPICS_PER_RECORD labels; the bound is enforced at the "
-            "MemoryWriter seam and not here, so a longer tuple is admissible and "
-            "a record stored with one stays readable (§1)."
-        ),
-    )
     revision: int = Field(
         default=0,
         ge=0,
@@ -2477,10 +2390,105 @@ class MemoryBase(RecordEnvelope):
 
     An episode keeps every field it had (ADR-0328 §2:2), and a record minted as one
     activation's supply keeps exactly what it carried (§2:4); both carry where they
-    came from as a :class:`Provenance`. A memory does not (§3:1).
+    came from as a :class:`Provenance`. A memory does not (§3:1), and carries neither
+    ``about_person`` nor ``topics`` (ADR-0345 §9:1, §10:1): the two axes below stay
+    here, on the episode and the minted record, as ADR-0100 and ADR-0213 rule them.
+
+    **``about_person`` is the subject axis** (ADR-0100): whom the belief is
+    *about*, which ADR-0099 §2 rules orthogonal to whose hub this is. It is on the
+    envelope rather than on :class:`Provenance` because ``Provenance`` answers *why
+    this should be believed* and the envelope answers *what is held, about what,
+    and for how long* — a field is placed by which question it answers, not by who
+    sets it (§2). Four rules govern it, and each is a clause rather than a
+    convention:
+
+    * **Two states, never three** (§1). It is stated, or it is ``None``. A blank
+      or whitespace-only label is refused at construction — a record saying ``""``
+      is a producer that meant to speak and said nothing — which is why the
+      annotation is :data:`NonBlankEncodableText` and not the bare
+      :data:`EncodableText` of ADR-0100 §1's illustrative snippet. The same type
+      supplies the *other* half §6 needs: it refuses a blank without stripping the
+      value it accepts.
+    * **``None`` means no subject is stated, and is read as the owner's** (§3). It
+      is not "unknown", and no reader, store or surface may exclude a ``None``
+      record from an answer about the owner on the ground that it says nothing.
+      **The owner is never named here** — there is no user identity anywhere in
+      this system (ADR-0036 §3, ADR-0097 §1), so a label naming the owner would be
+      a second spelling of a subject that already has one: the absence.
+    * **A label, resolving to nothing** (§6). Not an identifier, not a key, not a
+      reference. Nothing here treats two equal labels as one person or two unequal
+      ones as different people; whether labels may be matched at all is ADR-0101's,
+      which is the only instrument that may lift that. It is stored and returned
+      byte for byte: nothing normalises, case-folds, aliases or de-duplicates it.
+    * **Whom, not what** (§6). A belief about a company, a project, a device or a
+      topic states no subject, and a belief about two people is two beliefs.
+
+    **Stating one is not licence to propose one** (§4). A producer fills it only
+    from a subject it actually received — an explicit user act, or a structured
+    field of a source that names whom an entry is about — and never by inferring a
+    person from content. The field widens no producer's warrant, and its existence
+    may not be cited as though it did.
+
+    **``topics`` is the *about what* axis beside it** (ADR-0213 §2), placed on the
+    envelope by the same ADR-0100 §2 test and landing here for the same reason:
+    the two together are the *about* half of the envelope's question, one asking
+    *whom* and the other *what*. ADR-0100 §6 reserved this ground by name — "The
+    axis is *whom*, not *what*. A belief about a company, a project, a device or a
+    topic states no subject" — so the field occupies ground the corpus explicitly
+    left empty. **The two are never read for each other**, no validator ties them,
+    and a record may carry both, either or neither (ADR-0213 §14). Four rules
+    govern it:
+
+    * **Proposed once, at write, by the record's own producer** (§4). No consumer,
+      surface, store, retrieval path, scheduler job, migration or later ADR derives
+      a record's topics at read time, and none derives them from ``content``, from
+      a rendered facet, from a composed reply or from any other span of content
+      after the write. Exactly one producer proposed any, the consolidation
+      stage (§6, narrowed by ADR-0285 §1), and it retired (ADR-0328 §14:2), so
+      every producer now writes the empty tuple, and no producer labels a record
+      another producer wrote.
+    * **Empty means "no topic was recorded"** (§7). Not "about nothing" and not
+      "about everything". No consumer reads an empty tuple as matching a
+      topic-scoped query, and none reads it as excluded from a query naming no
+      topic: an act reaches a record if and only if the record carries the label
+      the act names. A surface performing such an act owes the owner the
+      disclosure that unlabelled records were not reached, and that the act's reach
+      is the labels recorded rather than the subject they have in mind.
+    * **Set once, revised by two routes** (§8). A fold takes the **union** of both
+      sides — a label the target carried is never dropped, which is ADR-0106 §4's
+      ratchet in this currency — and the owner's own act (§9) writes at the
+      record's id. A ``SUPERSEDE`` carries nothing across. Nothing else revises
+      them: no re-observation, retrieval, re-embedding, reconciliation, scheduler
+      job, migration or backfill.
+    * **Not a retrieval axis, not a tier, not a sensitivity, not a subject and not
+      an identifier** (§14). A label carries no posture, no permission, no band and
+      no disclosure consequence, and no read here filters on it. Each is stated as
+      a prohibition rather than left as an omission because each is a plausible next
+      step a lane could take without noticing it was a decision.
+
     """
 
     provenance: Provenance
+    about_person: NonBlankEncodableText | None = Field(
+        default=None,
+        description=(
+            "Whom this belief is about, when that is someone other than the owner "
+            "(ADR-0100 §2). None means no subject is stated, which is read as the "
+            "owner's. A label as given, resolving to nothing (§6)."
+        ),
+    )
+    topics: Annotated[tuple[TopicLabel, ...], AfterValidator(_strictly_increasing_topics)] = Field(
+        default=(),
+        description=(
+            "What this record is about, as canonical labels proposed at write "
+            "(ADR-0213 §4). Empty means no topic was recorded, which is neither "
+            "'no topic' nor 'every topic' (§7). Strictly increasing by code point "
+            "(§1). No record this system installs carries more than "
+            "MAX_TOPICS_PER_RECORD labels; the bound is enforced at the "
+            "MemoryWriter seam and not here, so a longer tuple is admissible and "
+            "a record stored with one stays readable (§1)."
+        ),
+    )
 
 
 # --- memory: how an episode's turn was captured (ADR-0221) --------------------
@@ -5032,6 +5040,32 @@ class MemoryWriterName(StrEnum):
     """§16's upgrade of a record stored before ADR-0328."""
     OBSERVER = "observer"
     """The observer, memory's one writer once ADR-0329 is implemented (§2:1, §2:2)."""
+    OWNER = "owner"
+    """The owner's own act, for a label write alone (ADR-0345 §7:8)."""
+
+
+#: ADR-0345 §7:8: the writers that write a label and nothing else.
+_LABEL_ONLY_WRITERS: Final[frozenset[MemoryWriterName]] = frozenset({MemoryWriterName.OWNER})
+
+
+def _not_label_only(writer: MemoryWriterName) -> MemoryWriterName:
+    """Refuse the owner's name on anything but a label (ADR-0345 §7:8).
+
+    Raises:
+        ValueError: If ``writer`` writes labels alone.
+    """
+    if writer in _LABEL_ONLY_WRITERS:
+        msg = f"the writer {writer} writes a memory's labels and nothing else (ADR-0345 §7:8)"
+        raise ValueError(msg)
+    return writer
+
+
+type RecordWriterName = Annotated[MemoryWriterName, AfterValidator(_not_label_only)]
+"""A writer that may add a support, write an operation, raise a question or record use.
+
+Every member of :class:`MemoryWriterName` but ``owner``, which ADR-0345 §7:8 admits for
+label writes alone.
+"""
 
 
 class MemoryStatus(StrEnum):
@@ -5198,6 +5232,167 @@ def part_episode(part: SupportPart) -> str | None:
     return None if isinstance(part, LegacyPart | PinPart) else part.episode
 
 
+class HolderKind(StrEnum):
+    """What kind of source a support's holder is (ADR-0345 §2:3).
+
+    Closed, **added to and never renamed**. Every kind is held under the same capture
+    rules: the kinds matter to usage, not to how a belief is captured.
+    """
+
+    PERSON = "person"
+    """A person, named by an identity the channel establishes for them (§2:7)."""
+    OUTSIDE_SOURCE = "outside_source"
+    """An outside source, named by an identifier and marked established or claimed."""
+    ASSISTANT_STATEMENT = "assistant_statement"
+    """The assistant's statement: that it said or inferred something, never a belief (§2:4)."""
+    UNKNOWN = "unknown"
+    """A part whose record carries no identifier for whoever said or reported it (§2:6)."""
+
+
+class StatementPart(StrEnum):
+    """Which part the assistant made, on a holder that is its statement (ADR-0345 §2:3).
+
+    Closed, **added to and never renamed**: a round's message, a remember call, or an
+    observer's inference, the three parts §2's table gives the assistant's statement.
+    """
+
+    ROUND_MESSAGE = "round_message"
+    REMEMBER_CALL = "remember_call"
+    OBSERVER_INFERENCE = "observer_inference"
+
+
+class SupportHolder(BaseModel):
+    """The source of the claim a support records: whose belief it is (ADR-0345 §2).
+
+    Set by code from the part the support points at and the episode's record, never
+    by a model (§2:2); a support keeps the identifier it was recorded under, and no
+    write rewrites it (§2:9).
+
+    **Same holder is a connection, not an identity** (§2:6). Two holders are the same
+    exactly where they are of one kind and name the same identifier, an outside source
+    marked alike, established or claimed: a claimed source is never the same holder as
+    an established one, whatever identifier either carries (§2:7). An unknown holder is
+    never the same as any other, itself included, and neither is the assistant's
+    statement, which holds no belief, so nothing changes a memory on the ground that it
+    believes anything (§2:4): :meth:`same_as` is false for both.
+
+    Attributes:
+        kind: The kind of source.
+        identifier: The stable identifier the record carries for a person or an outside
+            source; ``None`` for the other two kinds.
+        claimed: For an outside source, whether it is only claimed (a forward's
+            original sender) rather than established (a source that reported it).
+        made: For the assistant's statement, the part it made.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: HolderKind
+    identifier: NonBlankEncodableText | None = None
+    claimed: bool | None = None
+    made: StatementPart | None = None
+
+    @model_validator(mode="after")
+    def _fields_follow_the_kind(self) -> Self:
+        named = self.kind in {HolderKind.PERSON, HolderKind.OUTSIDE_SOURCE}
+        if (self.identifier is not None) != named:
+            msg = "a person or an outside source is named by an identifier, and nothing else is"
+            raise ValueError(msg)
+        if (self.claimed is not None) != (self.kind is HolderKind.OUTSIDE_SOURCE):
+            msg = "an outside source, and only it, is marked established or claimed (§2:3)"
+            raise ValueError(msg)
+        if (self.made is not None) != (self.kind is HolderKind.ASSISTANT_STATEMENT):
+            msg = "the assistant's statement, and only it, names the part it made (§2:3)"
+            raise ValueError(msg)
+        return self
+
+    @classmethod
+    def person(cls, identifier: str) -> SupportHolder:
+        """A person, named by ``identifier``."""
+        return cls(kind=HolderKind.PERSON, identifier=identifier)
+
+    @classmethod
+    def source(cls, identifier: str, *, claimed: bool) -> SupportHolder:
+        """An outside source, named by ``identifier``, established or ``claimed``."""
+        return cls(kind=HolderKind.OUTSIDE_SOURCE, identifier=identifier, claimed=claimed)
+
+    @classmethod
+    def statement(cls, made: StatementPart) -> SupportHolder:
+        """The assistant's statement, in the part it ``made``."""
+        return cls(kind=HolderKind.ASSISTANT_STATEMENT, made=made)
+
+    @classmethod
+    def unknown(cls) -> SupportHolder:
+        """A holder whose record carries no identifier."""
+        return cls(kind=HolderKind.UNKNOWN)
+
+    def same_as(self, other: SupportHolder | None) -> bool:
+        """Whether ``other`` is the same holder (ADR-0345 §2:6, §2:7).
+
+        Args:
+            other: Another holder, or ``None`` for a support recorded with none.
+
+        Returns:
+            ``True`` exactly for a person or an outside source of the same identifier,
+            an outside source marked alike.
+        """
+        if other is None or self.kind not in {HolderKind.PERSON, HolderKind.OUTSIDE_SOURCE}:
+            return False
+        return (
+            other.kind is self.kind
+            and other.identifier == self.identifier
+            and other.claimed == self.claimed
+        )
+
+
+#: ADR-0345 §2's table, joined to ADR-0328 §4's origins: the holder kinds each origin
+#: admits. A part the user wrote, a yes and a pin are a person's; an outside input or an
+#: evidence item is an outside source's, or unknown where its record names none; a part
+#: the assistant made is its statement; a legacy record's is unknown.
+_ORIGIN_HOLDERS: Final[dict[SupportOrigin, frozenset[HolderKind]]] = {
+    SupportOrigin.USER_MESSAGE: frozenset({HolderKind.PERSON}),
+    SupportOrigin.CONFIRMATION: frozenset({HolderKind.PERSON}),
+    SupportOrigin.PINNED: frozenset({HolderKind.PERSON}),
+    SupportOrigin.OUTSIDE_INPUT: frozenset({HolderKind.OUTSIDE_SOURCE, HolderKind.UNKNOWN}),
+    SupportOrigin.EVIDENCE: frozenset({HolderKind.OUTSIDE_SOURCE, HolderKind.UNKNOWN}),
+    SupportOrigin.ASSISTANT_MESSAGE: frozenset({HolderKind.ASSISTANT_STATEMENT}),
+    SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE: frozenset({HolderKind.ASSISTANT_STATEMENT}),
+    SupportOrigin.REMEMBERED: frozenset({HolderKind.ASSISTANT_STATEMENT}),
+    SupportOrigin.REMEMBERED_OVER_OUTSIDE: frozenset({HolderKind.ASSISTANT_STATEMENT}),
+    SupportOrigin.OBSERVER_INFERENCE: frozenset({HolderKind.ASSISTANT_STATEMENT}),
+    SupportOrigin.LEGACY: frozenset({HolderKind.UNKNOWN}),
+    SupportOrigin.LEGACY_OUTSIDE: frozenset({HolderKind.UNKNOWN}),
+}
+
+#: The part the assistant made, by the part a support points at (ADR-0345 §2's table).
+_STATEMENT_PARTS: Final[dict[str, StatementPart]] = {
+    "round_message": StatementPart.ROUND_MESSAGE,
+    "remember_call": StatementPart.REMEMBER_CALL,
+    "observer_inference": StatementPart.OBSERVER_INFERENCE,
+}
+
+
+def _holder_fault(support: MemorySupport) -> str | None:
+    """Which of ADR-0345 §2's rules on a support's recorded holder it breaks, if any.
+
+    A support recorded with no holder is the writer's to give one (§2:2); one recorded
+    with a holder carries the kind §2's table gives its origin, an outside source marked
+    claimed exactly for an outside input (a forward, §2:7), and the assistant's
+    statement naming the part the support points at.
+    """
+    holder = support.holder
+    if holder is None:
+        return None
+    if holder.kind not in _ORIGIN_HOLDERS[support.origin]:
+        return f"a {support.origin} support is not held by {holder.kind} (ADR-0345 §2)"
+    if holder.claimed is not None and holder.claimed != (
+        support.origin is SupportOrigin.OUTSIDE_INPUT
+    ):
+        return "a forward's sender is claimed, and a reporting source established (§2:7)"
+    if holder.made is not None and holder.made is not _STATEMENT_PARTS[support.points_at.part]:
+        return "the assistant's statement names the part the support points at (ADR-0345 §2)"
+    return None
+
+
 def _support_origin_fault(support: MemorySupport) -> str | None:
     """Which of §4's rules on the origin and the reading ``support`` breaks, if any."""
     origin = support.origin
@@ -5222,7 +5417,9 @@ def _pinned_support_fault(support: MemorySupport) -> str | None:
     the instant of the pin the part names is the observer's code's to check, against
     the person-model store, as it checks the pin is held (§4:5).
     """
-    if support.direction is not SupportDirection.FOR or not support.backs_as_worded:
+    if support.direction is SupportDirection.FOR and not support.backs_as_worded:
+        # ADR-0345 §3:8 adds the one other place a pin's support goes: as ``against``,
+        # backing nothing, where a placed write records a dispute.
         return "a pinned support is for its memory and backs it as worded (ADR-0338 §4:4)"
     if support.when is None:
         return "a pinned support's when is the instant the pin was made (ADR-0338 §4:4)"
@@ -5257,6 +5454,10 @@ class MemorySupport(BaseModel):
         added_by: Which writer added it (§5:9).
         carries: A legacy support's record, whole, as it was stored (§16:4); ``None``
             on every other support.
+        holder: Whose belief it records, set by code from the part and the episode's
+            record (ADR-0345 §2:2), or ``None`` on a support a producer built for the
+            writer to give one. Every support a writer adds or the upgrade carries is
+            recorded with one, and no write rewrites it (§2:9).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -5270,8 +5471,9 @@ class MemorySupport(BaseModel):
     about_when: UtcInstant | None = None
     source_details: Attestation | None = None
     added_at: UtcInstant
-    added_by: MemoryWriterName
+    added_by: RecordWriterName
     carries: FrozenJsonMapping | None = None
+    holder: SupportHolder | None = None
 
     @model_validator(mode="after")
     def _well_formed(self) -> Self:
@@ -5284,6 +5486,9 @@ class MemorySupport(BaseModel):
         if (self.carries is not None) != isinstance(self.points_at, LegacyPart):
             msg = "a support carries a record exactly when it is a legacy support (ADR-0328 §16:4)"
             raise ValueError(msg)
+        holder = _holder_fault(self)
+        if holder is not None:
+            raise ValueError(holder)
         return self
 
     @property
@@ -5297,6 +5502,108 @@ class MemorySupport(BaseModel):
         if self.source_details is not None:
             return self.source_details.reported_at
         return self.when
+
+
+#: ADR-0345 §2's rows the origin alone settles: the person whose part it is (the owner,
+#: today, §2:5), or the assistant's statement. The others need the record the part is in.
+_PERSON_ORIGINS: Final[frozenset[SupportOrigin]] = frozenset(
+    {SupportOrigin.USER_MESSAGE, SupportOrigin.CONFIRMATION, SupportOrigin.PINNED}
+)
+
+
+def _forward_sender(episode: EpisodicMemory, message: int | None) -> str | None:
+    """The claimed sender's identifier an outside input records, where it records one.
+
+    The sender of the forward the part is (ADR-0345 §2's fourth row), by the identifier
+    the medium gives for them (``ClaimedAuthor.account_id``): for one message, its own;
+    for the input as a whole, the one sender every forward in it names. A forward whose
+    sender carries no identifier, or an input whose forwards name several, names none.
+    """
+    processing = episode.processing_record
+    if processing is None:
+        return None
+    messages = processing.trigger.messages
+    if message is not None:
+        messages = messages[message : message + 1]
+    senders = {one.forwarded_from.account_id for one in messages if one.forwarded_from is not None}
+    if len(senders) != 1:
+        return None
+    (sender,) = senders
+    return None if sender is None else str(sender)
+
+
+def support_holder(support: MemorySupport, episode: EpisodicMemory | None) -> SupportHolder:
+    """The holder ADR-0345 §2's table gives ``support``, from the record it points at.
+
+    One rule, in ``core``, so the two writers and the upgrade set it identically
+    (ADR-0016 §2), and set by code alone (§2:2). A part the user wrote, a yes and a pin
+    are the owner's, the one person a holder names until a decision on identified people
+    (§2:5), named by :data:`OWNER_PERSON_ID`, the identity the person model and the
+    channels already give the owner (ADR-0338 §2:1); a part the assistant made is its
+    statement (§2:4); a legacy record's holder is unknown. An evidence item's is the
+    source the record names, which its support carries as source details only where the
+    record states them (ADR-0328 §4:13), and a forward's is its claimed sender (§2:7).
+    Where the part's episode no longer resolves, the origin alone decides, and an outside
+    part is unknown (§13:2).
+
+    Args:
+        support: The support.
+        episode: The episode its part points into, as the store holds it, or ``None``
+            where it points into none or the store no longer holds it.
+
+    Returns:
+        Its holder.
+    """
+    origin = support.origin
+    part = support.points_at
+    if origin in _PERSON_ORIGINS:
+        return SupportHolder.person(OWNER_PERSON_ID)
+    made = _STATEMENT_PARTS.get(part.part)
+    if made is not None:
+        return SupportHolder.statement(made)
+    if episode is None or origin in {SupportOrigin.LEGACY, SupportOrigin.LEGACY_OUTSIDE}:
+        return SupportHolder.unknown()
+    if origin is SupportOrigin.EVIDENCE:
+        details = support.source_details
+        if details is None:
+            return SupportHolder.unknown()
+        return SupportHolder.source(details.reported_by, claimed=False)
+    sender = _forward_sender(episode, part.message) if isinstance(part, InputPart) else None
+    return SupportHolder.unknown() if sender is None else SupportHolder.source(sender, claimed=True)
+
+
+def stamped_support(support: MemorySupport, episode: EpisodicMemory | None) -> MemorySupport:
+    """``support`` carrying the holder §2's table gives it (ADR-0345 §2:2).
+
+    A support recorded with no holder gains the one :func:`support_holder` computes; one
+    recorded with a holder keeps it where it is that holder, and where both are people,
+    since which person sent a part is the channel's to establish (ADR-0323 §4:2) and
+    producer code names them. Nothing else is admitted: no producer names an outside
+    source, the assistant's statement or an unknown holder other than the record does.
+
+    Args:
+        support: The support, as a producer built it.
+        episode: The episode its part points into, as the store holds it, or ``None``.
+
+    Returns:
+        The support with its holder.
+
+    Raises:
+        ValueError: If the support carries a holder §2's table does not give its part.
+    """
+    computed = support_holder(support, episode)
+    recorded = support.holder
+    if recorded is None:
+        return support.model_copy(update={"holder": computed})
+    if recorded == computed or (
+        recorded.kind is HolderKind.PERSON and computed.kind is HolderKind.PERSON
+    ):
+        return support
+    msg = (
+        f"a {support.origin} support records the holder {recorded.kind}, which its part's "
+        f"record does not give it (ADR-0345 §2:2)"
+    )
+    raise ValueError(msg)
 
 
 class MemoryOperationKind(StrEnum):
@@ -5376,7 +5683,7 @@ class MemoryOperation(BaseModel):
     cites: SupportPart
     note: EncodableText = Field(default="", validate_default=True)
     at: UtcInstant
-    by: MemoryWriterName
+    by: RecordWriterName
     replaces: tuple[EncodableText, ...] = ()
     successor: EncodableText | None = None
     stops: SupportPart | None = None
@@ -5422,7 +5729,7 @@ class OpenQuestion(BaseModel):
     asks: NonBlankEncodableText
     rests_on: tuple[SupportPart, ...] = Field(min_length=1)
     raised_at: UtcInstant
-    raised_by: MemoryWriterName
+    raised_by: RecordWriterName
     resolved_at: UtcInstant | None = None
     resolved_by: SupportPart | None = None
     resolution: EncodableText | None = None
@@ -5462,7 +5769,7 @@ class TrackRecordEntry(BaseModel):
     held_up: bool
     note: EncodableText = Field(default="", validate_default=True)
     recorded_at: UtcInstant
-    recorded_by: MemoryWriterName
+    recorded_by: RecordWriterName
 
 
 class EvidenceSummary(BaseModel):
@@ -5497,6 +5804,86 @@ class TrackRecordSummary(BaseModel):
     held_up: int = Field(strict=True, ge=0)
     let_down: int = Field(strict=True, ge=0)
     last_used: UtcInstant | None = None
+
+
+class SituationLabel(BaseModel):
+    """One situation label on a memory (ADR-0345 §7:1).
+
+    A free-text descriptor of when or for what the memory matters, or what kind of
+    statement it is, worded by its producer (§7:2). Not an operation and not a support:
+    it changes no standing, status, validity, support or operation, and nothing ranks a
+    search by it (§7:9).
+
+    Attributes:
+        text: The label.
+        added_at: When it was added.
+        added_by: The writer that added it: a memory's producer at its create, the
+            owner by an act of their own (§7:8), or the upgrade carrying a topic over
+            (§10:2).
+        episode: The episode that suggested it, where one did.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    text: NonBlankEncodableText
+    added_at: UtcInstant
+    added_by: MemoryWriterName
+    episode: EncodableText | None = None
+
+
+class MemoryMark(StrEnum):
+    """A mark describing a memory itself (ADR-0345 §8:1).
+
+    Closed, **added to and never renamed**. A memory carries a set of them, set by its
+    producer at its create (§8:2). Marks about how a person wants to be treated stay in
+    the person-model store (§8:5).
+    """
+
+    OCCASION = "occasion"
+    """It states something that happened at a time; nothing of whether once or often."""
+    ASSISTANT_STATEMENT = "assistant_statement"
+    """What it states traces to the assistant's own words in a round's message (§8:1)."""
+
+
+class LabelBounds(BaseModel):
+    """The composition-root numbers a memory's labels are written under (ADR-0345 §7).
+
+    Attributes:
+        max_labels: The most labels a memory carries (§7:3).
+        max_chars: The most characters one label is (§7:3).
+        min_distance: The embedding distance (cosine, ``0`` to ``2``) within which a new
+            label of a label the memory already carries is a near-duplicate and is not
+            added (§7:5).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    max_labels: int = Field(strict=True, ge=1)
+    max_chars: int = Field(strict=True, ge=1)
+    min_distance: float = Field(ge=0.0, le=2.0, allow_inf_nan=False)
+
+
+def _canonical_marks(marks: tuple[MemoryMark, ...]) -> tuple[MemoryMark, ...]:
+    """A memory's marks as the set they are, in one order (ADR-0345 §8:1)."""
+    return tuple(sorted(set(marks), key=str))
+
+
+def _canonical_names(names: tuple[str, ...] | None) -> tuple[str, ...] | None:
+    """A set of names, in code-point order and once each (ADR-0345 §9:1).
+
+    ``None`` stays ``None``: never determined, which no reader takes for the owner or
+    anyone else (§9:4). Each name is kept exactly as given (§9:3).
+    """
+    return None if names is None else tuple(sorted(set(names)))
+
+
+type PeopleNamed = Annotated[
+    tuple[NonBlankEncodableText, ...] | None, AfterValidator(_canonical_names)
+]
+"""``subjects`` or ``involved``: never determined (``None``), or a set of names."""
+
+
+def _distinct_holders(holders: Iterable[SupportHolder | None]) -> tuple[SupportHolder, ...]:
+    """The holders recorded, in first-seen order, each once; a ``None`` names nobody."""
+    return tuple(dict.fromkeys(one for one in holders if one is not None))
 
 
 def _status_after(log: Sequence[MemoryOperation]) -> MemoryStatus:
@@ -5538,7 +5925,17 @@ class Memory(RecordEnvelope):
     following from the log and a closed window where it is not ``current`` (§3:4,
     §5:7); a track record unique by episode (§8:3); and open questions raised and
     resolved only by operations (§9:2).
+
+    ADR-0345 adds what a memory is for and whom it is about: its situation labels
+    (§7), its marks (§8), and ``subjects`` and ``involved`` in place of
+    ``about_person`` (§9), with no ``topics`` (§10). Its holders and partial supporters
+    are computed from the holders its supports record (§2:10), never stored.
+    Unknown fields are refused rather than dropped, so a record still carrying
+    ``about_person`` or ``topics`` is upgraded (§13) and never silently read without
+    them.
     """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: Literal["memory"] = "memory"
     supports: tuple[MemorySupport, ...] = Field(min_length=1)
@@ -5546,6 +5943,21 @@ class Memory(RecordEnvelope):
     track_record: tuple[TrackRecordEntry, ...] = ()
     open_questions: tuple[OpenQuestion, ...] = ()
     status: MemoryStatus = MemoryStatus.CURRENT
+    labels: tuple[SituationLabel, ...] = ()
+    marks: Annotated[tuple[MemoryMark, ...], AfterValidator(_canonical_marks)] = ()
+    subjects: PeopleNamed = None
+    involved: PeopleNamed = None
+
+    @model_validator(mode="after")
+    def _labels_and_people_agree(self) -> Self:
+        texts = [label.text for label in self.labels]
+        if len(set(texts)) != len(texts):
+            msg = "a memory carries one label per wording (ADR-0345 §7:1)"
+            raise ValueError(msg)
+        if set(self.subjects or ()) & set(self.involved or ()):
+            msg = "a person appears in at most one of subjects and involved (ADR-0345 §9:2)"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _supports_and_log_agree(self) -> Self:
@@ -5648,6 +6060,49 @@ class Memory(RecordEnvelope):
             for support in self.counted_supports
             if support.direction is SupportDirection.FOR and support.backs_as_worded
         )
+
+    @property
+    def holders(self) -> tuple[SupportHolder, ...]:
+        """Its holders: the holders of its counted backing supports (ADR-0345 §2:10).
+
+        In the order their supports are carried, each once. A support recorded with no
+        holder names none.
+        """
+        return _distinct_holders(one.holder for one in self.backing_supports)
+
+    @property
+    def partial_supporters(self) -> tuple[SupportHolder, ...]:
+        """The holders of its other counted ``for`` supports, none a holder (§2:10).
+
+        A partial supporter is never shown as holding the memory, so a holder who also
+        carries a support backing nothing as worded is a holder and not listed here.
+        """
+        holders = self.holders
+        return _distinct_holders(
+            one.holder
+            for one in self.counted_supports
+            if one.direction is SupportDirection.FOR
+            and not one.backs_as_worded
+            and one.holder not in holders
+        )
+
+    @property
+    def against_holders(self) -> tuple[SupportHolder, ...]:
+        """The holders of its counted ``against`` supports (ADR-0345 §12:3)."""
+        return _distinct_holders(
+            one.holder for one in self.counted_supports if one.direction is SupportDirection.AGAINST
+        )
+
+    def held_by(self, holder: SupportHolder) -> bool:
+        """Whether ``holder`` holds the memory: the same holder as one of its holders (§2:6).
+
+        Args:
+            holder: A holder.
+
+        Returns:
+            Whether a counted backing support's holder is the same holder.
+        """
+        return any(holder.same_as(one.holder) for one in self.backing_supports)
 
     @property
     def standing(self) -> MemoryStanding:
@@ -5768,6 +6223,123 @@ class Memory(RecordEnvelope):
             let_down=len(self.track_record) - held,
             last_used=max((entry.relied_at for entry in self.track_record), default=None),
         )
+
+
+def _input_texts(episode: EpisodicMemory, message: int | None) -> tuple[str, ...]:
+    """The text an episode's input, or one of its messages, gives (ADR-0345 §9:3)."""
+    processing = episode.processing_record
+    if processing is None:
+        return (episode.content,) if message is None else ()
+    trigger = processing.trigger
+    if message is not None:
+        messages = trigger.messages
+        return (messages[message].text,) if message < len(messages) else ()
+    payload = trigger.payload
+    said = payload.text if isinstance(payload, RecordedTextInput) else payload.transcript or ""
+    return (said, *(one.text for one in trigger.messages))
+
+
+def _round_texts(episode: EpisodicMemory, round_id: str | None) -> tuple[str, ...]:
+    """A round's message and the words its calls carry, or every round's where ``None``.
+
+    A remember call's statement is among a round's calls' arguments, so a part pointing
+    at one gives the text of the calls its episode's rounds made.
+    """
+    processing = episode.processing_record
+    if processing is None:
+        return ()
+    texts: list[str] = []
+    for one in processing.rounds:
+        if round_id is not None and one.id != round_id:
+            continue
+        texts.append(one.text)
+        texts.extend(
+            value
+            for call in one.calls
+            for value in call.arguments.values()
+            if isinstance(value, str)
+        )
+    return tuple(texts)
+
+
+def _part_texts(  # noqa: PLR0911 — one arm per part that gives text
+    support: MemorySupport, episodes: Mapping[str, EpisodicMemory]
+) -> tuple[str, ...]:
+    """The text the part ``support`` points at gives, as the held records keep it.
+
+    An input, a round's message, an evidence item, the input of a yes, a remember call
+    and a legacy record give text; an observer's inference and a pin give none.
+    """
+    part = support.points_at
+    if isinstance(part, LegacyPart):
+        content = (support.carries or {}).get("content")
+        return (content,) if isinstance(content, str) else ()
+    episode = None if (address := part_episode(part)) is None else episodes.get(address)
+    if episode is None:
+        return ()
+    match part:
+        case InputPart():
+            return _input_texts(episode, part.message)
+        case RoundMessagePart():
+            return _round_texts(episode, part.round)
+        case EvidenceItemPart():
+            processing = episode.processing_record
+            if processing is None or part.digest >= len(processing.digests):
+                return ()
+            evidence = processing.digests[part.digest].evidence
+            return (evidence[part.item].text,) if part.item < len(evidence) else ()
+        case ConfirmationPart():
+            return _input_texts(episode, None)
+        case RememberCallPart():
+            return _round_texts(episode, None)
+        case _:
+            return ()
+
+
+def names_person(record: SuppliedRecord, person: str | None, *, as_subject: bool = False) -> bool:
+    """Whether ``record`` passes ``MemoryStore.search``'s person filter (ADR-0345 §9:6).
+
+    One rule, in ``core``, so every store filters identically (ADR-0016 §2): with no
+    ``person`` every record passes; otherwise only a memory naming it, exactly as
+    carried (§9:3), in ``subjects``, or in ``involved`` too unless ``as_subject``. An
+    episode or a minted record names nobody there.
+
+    Args:
+        record: A stored or minted record.
+        person: The name the filter asks for, or ``None`` for no filter.
+        as_subject: Whether only ``subjects`` is read.
+
+    Returns:
+        Whether it passes.
+    """
+    if person is None:
+        return True
+    if not isinstance(record, Memory):
+        return False
+    named = (*(record.subjects or ()), *(() if as_subject else (record.involved or ())))
+    return person in named
+
+
+def names_not_given(memory: Memory, episodes: Mapping[str, EpisodicMemory]) -> tuple[str, ...]:
+    """The names ``memory``'s ``subjects`` and ``involved`` carry that no part gives.
+
+    ADR-0345 §9:3: a name is carried exactly as a part the memory rests on gives it, so
+    each must occur, character for character, in the text of a part one of its supports
+    points at, as the store holds it. The owner is named by the identifier §2:5 names
+    (§9:4), which no part need give.
+
+    Args:
+        memory: The memory a write creates.
+        episodes: The episodes its supports point into, as the store holds them.
+
+    Returns:
+        Every name no part gives, once each, in code-point order.
+    """
+    named = {*(memory.subjects or ()), *(memory.involved or ())} - {OWNER_PERSON_ID}
+    if not named:
+        return ()
+    texts = [text for support in memory.supports for text in _part_texts(support, episodes)]
+    return tuple(sorted(name for name in named if not any(name in text for text in texts)))
 
 
 class SemanticMemory(MemoryBase):
@@ -6231,7 +6803,7 @@ class DataTier(StrEnum):
 #: question's identity change without the question changing. Every support's
 #: ``added_at`` and every operation's ``at`` are the rest, removed one level in.
 _FINGERPRINT_EXCLUDED_RECORD_FIELDS: frozenset[str] = frozenset(
-    {"id", "score", "topics", "revision"}
+    {"id", "score", "labels", "revision"}
 )
 
 #: The serializer the proposal fingerprint's projection is taken by, resolved once
@@ -6349,6 +6921,119 @@ class MemoryRetirement(BaseModel):
         return self
 
 
+class PlacedRelation(StrEnum):
+    """How a proposed memory stands to one stored memory its producer read (ADR-0345 §4).
+
+    A closed set, **added to and never renamed** (§4:2). It is not
+    :class:`ConflictRelation`, and neither is read as the other: that is a reconciler's
+    label for a proposal with no placement, and this is the producer's statement for a
+    placed one, from which the writer derives the write by rule (§5).
+    """
+
+    RESTATES = "restates"
+    """Makes the same claim, whatever the wording."""
+    CONTAINED = "contained"
+    """States part of what the stored one states, and nothing it does not."""
+    SUPPORTS = "supports"
+    """Makes a different claim that is evidence for the stored one."""
+    WEAKENS = "weakens"
+    """Makes a different claim that is evidence against the stored one, settling nothing."""
+    RECHECK = "recheck"
+    """Bears on the stored one without being for or against it, and makes it worth checking."""
+    NO_LONGER_TRUE = "no_longer_true"
+    """Shows the stored one held and has stopped holding."""
+    NEVER_TRUE = "never_true"
+    """Shows the stored one was never true."""
+    CLAIMED_TOO_MUCH = "claimed_too_much"
+    """Is the narrower truth of a stored one that claimed more than holds."""
+    INDEPENDENT = "independent"
+    """Neither restates, supports, weakens nor changes it."""
+    UNCLEAR = "unclear"
+    """No other relation fits, or the producer cannot tell how the two relate (§4:3)."""
+
+
+#: The relations that retire a stored memory, by the operation each names (ADR-0345 §5).
+RETIRING_RELATIONS: Final[dict[PlacedRelation, MemoryOperationKind]] = {
+    PlacedRelation.NO_LONGER_TRUE: MemoryOperationKind.END,
+    PlacedRelation.NEVER_TRUE: MemoryOperationKind.MARK_WRONG,
+    PlacedRelation.CLAIMED_TOO_MUCH: MemoryOperationKind.REPLACE,
+}
+
+
+class PlacedPair(BaseModel):
+    """One stored memory a placement names, and how the proposal stands to it (§4:1).
+
+    Attributes:
+        memory: The stored memory's id.
+        revision: The revision the producer read it at; the write refuses the whole
+            proposal where the stored revision differs (§4:7).
+        relation: How the proposed memory stands to it.
+        note: In words, how the two relate; required for every relation but
+            ``independent``, and carried by every support and operation the relation
+            writes (§5:7).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    memory: NonBlankEncodableText
+    revision: int = Field(strict=True, ge=1)
+    relation: PlacedRelation
+    note: EncodableText = Field(default="", validate_default=True)
+
+    @model_validator(mode="after")
+    def _a_note_where_it_relates(self) -> Self:
+        if self.relation is not PlacedRelation.INDEPENDENT and not self.note.strip():
+            msg = f"a {self.relation} relation says in words how the two relate (ADR-0345 §4:1)"
+            raise ValueError(msg)
+        return self
+
+
+class PlacedAnswer(BaseModel):
+    """The one open question a placed proposal answers (ADR-0345 §4:1, §5:9).
+
+    Attributes:
+        memory: The stored memory the question is on, which the placement names.
+        question: The question's id.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    memory: NonBlankEncodableText
+    question: Identifier
+
+
+class MemoryPlacement(BaseModel):
+    """A producer's statement of how a proposal stands to what it retrieved (ADR-0345 §4).
+
+    One relation for each stored memory the producer read, at the revision it read it,
+    and at most one open question the proposal answers. How the producer retrieves them
+    is its own decision's (§4:4); the writer computes every holder and standing it rules
+    on from the stored records and the proposal's supports, and reads none from here
+    (§4:8).
+
+    Attributes:
+        pairs: One per stored memory, each named once.
+        answers: The open question it answers, on a memory one pair names.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    pairs: tuple[PlacedPair, ...] = ()
+    answers: PlacedAnswer | None = None
+
+    @model_validator(mode="after")
+    def _each_named_once(self) -> Self:
+        named = [pair.memory for pair in self.pairs]
+        if len(set(named)) != len(named):
+            msg = "a placement names each stored memory once (ADR-0345 §4:1)"
+            raise ValueError(msg)
+        if self.answers is not None and self.answers.memory not in named:
+            msg = "a placement answers a question on a memory it names (ADR-0345 §4:1)"
+            raise ValueError(msg)
+        return self
+
+    def relation_to(self, memory_id: str) -> PlacedPair | None:
+        """The pair naming ``memory_id``, or ``None`` where none does."""
+        return next((pair for pair in self.pairs if pair.memory == memory_id), None)
+
+
 class MemoryUpdateProposal(BaseModel):
     """A proposed memory, awaiting a policy decision (ADR-0028, ADR-0328 §11:4).
 
@@ -6358,6 +7043,13 @@ class MemoryUpdateProposal(BaseModel):
     (ADR-0328 §11:4); the writer installs it, adds its supports to a target, or writes
     nothing, as the ruling says. It may carry one retiring operation on a stored memory
     (``retiring``, ADR-0329 §12:4), which the policy never sees as a conflict.
+
+    It may instead carry a **placement** (ADR-0345 §4): how the proposed memory stands
+    to each stored memory its producer retrieved. A placed proposal is ruled by the
+    policy's admissibility floor and its rule on a confirmed proposal alone, runs no
+    reconciler, and is written by §5's rules from its relations; one with no placement
+    is ruled as before. The two are exclusive: a placed proposal retires what its
+    relations retire, and carries no ``retiring``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -6386,6 +7078,32 @@ class MemoryUpdateProposal(BaseModel):
             "a support of the proposed memory (ADR-0329 §12:4); None otherwise."
         ),
     )
+    placement: MemoryPlacement | None = Field(
+        default=None,
+        description=(
+            "How the proposed memory stands to each stored memory its producer "
+            "retrieved (ADR-0345 §4); None for a proposal with no placement."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _placed_alone(self) -> MemoryUpdateProposal:
+        """Refuse a placement beside a retiring operation, or naming the proposed memory.
+
+        A placed proposal's relations say what it retires (ADR-0345 §5), so it carries
+        no ADR-0329 §12:4 operation besides; and a placement names stored memories, which
+        the proposed one is not yet.
+        """
+        placement = self.placement
+        if placement is None:
+            return self
+        if self.retiring is not None:
+            msg = "a placed proposal retires by its relations, and carries no retiring (§5)"
+            raise ValueError(msg)
+        if placement.relation_to(self.proposed.id) is not None:
+            msg = "a placement names stored memories other than the one proposed (§4:1)"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _retires_another_memory(self) -> MemoryUpdateProposal:
@@ -6473,7 +7191,7 @@ class MemoryUpdateProposal(BaseModel):
         for excluded in _FINGERPRINT_EXCLUDED_RECORD_FIELDS:
             record.pop(excluded, None)
         supports: list[dict[str, Any]] = [
-            {key: value for key, value in support.items() if key != "added_at"}
+            {key: value for key, value in support.items() if key not in {"added_at", "holder"}}
             for support in record.get("supports") or ()
         ]
         record["supports"] = sorted(
@@ -6708,6 +7426,29 @@ class MemoryIngestResult(BaseModel):
             "labelled contradiction."
         ),
     )
+    folded: tuple[EncodableText, ...] = Field(
+        default=(),
+        description=(
+            "For a placed proposal, the stored memories it was folded into, in the "
+            "placement's order, where it was folded rather than installed (ADR-0345 "
+            "§5:3); empty otherwise. ``record_id`` is then the first of them."
+        ),
+    )
+    stale: tuple[EncodableText, ...] = Field(
+        default=(),
+        description=(
+            "For a placed proposal refused whole with nothing written, the memories its "
+            "placement names whose stored revision differs from the one it records, or "
+            "which the store no longer holds (ADR-0345 §4:7); empty otherwise."
+        ),
+    )
+    refused_labels: tuple[EncodableText, ...] = Field(
+        default=(),
+        description=(
+            "The labels the proposed memory carried that were not added, each within the "
+            "composition-root distance of a label it already carried (ADR-0345 §7:5)."
+        ),
+    )
 
 
 # --- memory: one operation on one stored memory (ADR-0328 §5, §11:3) ----------
@@ -6763,6 +7504,53 @@ class MemoryChange(BaseModel):
             msg = "a successor's create names the memory it replaces (ADR-0328 §5:6)"
             raise ValueError(msg)
         return self
+
+
+class MemoryLabelChange(BaseModel):
+    """A memory's labels, replaced whole (ADR-0345 §7:6).
+
+    Not an operation: it changes nothing but the labels (§7:6), and is written
+    conditionally on the revision the memory was read at.
+
+    Attributes:
+        memory: The stored memory, as read, revision and all.
+        labels: Every label the memory is to carry, each once. A label it already
+            carries keeps its instant, writer and episode; a new one is recorded at the
+            write's instant, by ``by``, suggested by ``episode``.
+        by: The writer making the change: the owner by an act of their own (§7:8), or
+            a producer.
+        episode: The episode that suggested the new labels, where one did.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    memory: Memory
+    labels: tuple[NonBlankEncodableText, ...]
+    by: MemoryWriterName
+    episode: EncodableText | None = None
+
+    @model_validator(mode="after")
+    def _a_change_to_a_stored_memory(self) -> Self:
+        if self.memory.revision < 1:
+            msg = "a label write is applied to a memory a store returned, carrying its revision"
+            raise ValueError(msg)
+        if len(set(self.labels)) != len(self.labels):
+            msg = "a label write names each label once (ADR-0345 §7:1)"
+            raise ValueError(msg)
+        return self
+
+
+class MemoryLabelResult(BaseModel):
+    """What one label write wrote (ADR-0345 §7:5, §7:6).
+
+    Attributes:
+        labels: The labels the memory now carries.
+        refused: The new labels not added, each within the composition-root distance
+            of a label the memory carries (§7:5).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    labels: tuple[SituationLabel, ...]
+    refused: tuple[EncodableText, ...] = ()
 
 
 # --- context facets: a source's situational "right now" (ADR-0096) -----------
@@ -15641,6 +16429,8 @@ class SupportView(BaseModel):
         about_when: The time the part refers to, where it refers to one.
         source_details: Which source said so and when, for a source.
         counts: Whether it counts: ``False`` exactly when it was stopped (§5:8).
+        holder: Whose belief it records (ADR-0345 §12:2), or ``None`` where the
+            support was recorded with none.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -15664,11 +16454,31 @@ class SupportView(BaseModel):
     about_when: UtcInstant | None = None
     source_details: Attestation | None = None
     counts: bool = True
+    holder: SupportHolder | None = None
 
     @property
     def gone(self) -> bool:
         """Whether the part it points at no longer resolves."""
         return self.content is None
+
+
+class StatementCitation(BaseModel):
+    """A round's message a memory marked ``assistant_statement`` cites (ADR-0345 §12:4).
+
+    Where and when the assistant said what the memory traces to: the episode the round
+    belongs to, the round, and when the message was written. Never a claim that what it
+    said holds.
+
+    Attributes:
+        episode: The episode the round belongs to.
+        round: The round that wrote the message.
+        when: When it was written, or ``None`` where that is unknown.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    episode: EncodableText
+    round: Identifier
+    when: UtcInstant | None = None
 
 
 class BeliefSummary(BaseModel):
@@ -15717,6 +16527,15 @@ class BeliefSummary(BaseModel):
         supports_gone: Whether no support's episode resolves (§15:7).
         attestation: For an episode, its provenance's ``Attestation`` as stored
             (ADR-0189 §2:1); for a memory, §2:6's source details its standing rests on.
+        holders: Its holders (ADR-0345 §2:10, §12:1); none for an episode.
+        partial_supporters: Its partial supporters, never shown as holding it.
+        subjects: The people it is a fact about, or ``None`` where never determined.
+        involved: The people it concerns without being about them, or ``None``.
+        labels: Its situation labels (§7).
+        marks: Its marks (§8).
+        statements: For a memory marked ``assistant_statement``, each round's message it
+            cites, where and when the assistant said it (§12:4); empty otherwise. Its
+            validity end, where it lies in the future, is ``valid_until``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -15738,6 +16557,13 @@ class BeliefSummary(BaseModel):
     rests_on_outside_content: bool = False
     supports_gone: bool = False
     attestation: Attestation | None = None
+    holders: tuple[SupportHolder, ...] = ()
+    partial_supporters: tuple[SupportHolder, ...] = ()
+    subjects: tuple[NonBlankEncodableText, ...] | None = None
+    involved: tuple[NonBlankEncodableText, ...] | None = None
+    labels: tuple[SituationLabel, ...] = ()
+    marks: tuple[MemoryMark, ...] = ()
+    statements: tuple[StatementCitation, ...] = ()
 
     @model_validator(mode="after")
     def _kind_decides_standing(self) -> Self:
@@ -15804,7 +16630,36 @@ def _summary_fields(memory: Memory, *, now: datetime, supports_gone: bool) -> di
         "rests_on_outside_content": memory.rests_on_outside_content,
         "supports_gone": supports_gone,
         "attestation": memory.standing_attestation,
+        "holders": memory.holders,
+        "partial_supporters": memory.partial_supporters,
+        "subjects": memory.subjects,
+        "involved": memory.involved,
+        "labels": memory.labels,
+        "marks": memory.marks,
+        "statements": statement_citations(memory),
     }
+
+
+def statement_citations(memory: Memory) -> tuple[StatementCitation, ...]:
+    """The round messages a memory marked ``assistant_statement`` cites (ADR-0345 §12:4).
+
+    Every support pointing at a round's message, in the order the memory carries them,
+    on a memory carrying the mark; none on any other, which is never conveyed as what
+    the assistant said.
+
+    Args:
+        memory: The memory.
+
+    Returns:
+        Where and when each message was said.
+    """
+    if MemoryMark.ASSISTANT_STATEMENT not in memory.marks:
+        return ()
+    return tuple(
+        StatementCitation(episode=part.episode, round=part.round, when=support.when)
+        for support in memory.supports
+        if isinstance(part := support.points_at, RoundMessagePart)
+    )
 
 
 def belief_summary(memory: Memory, *, now: datetime, supports_gone: bool) -> BeliefSummary:
@@ -15863,6 +16718,7 @@ def belief_view(
             about_when=support.about_when,
             source_details=support.source_details,
             counts=support.points_at not in stopped,
+            holder=support.holder,
         )
         for support in memory.supports
     )

@@ -135,6 +135,7 @@ def applied_operation(
     *,
     support: MemorySupport | None = None,
     question: OpenQuestion | None = None,
+    guarded: bool = True,
 ) -> Memory:
     """The memory one operation yields (ADR-0328 §5), or the refusal §4, §5 or §6:5 makes.
 
@@ -156,6 +157,8 @@ def applied_operation(
         operation: The operation.
         support: The support it cites, where the memory does not carry it yet.
         question: The question a raise question raises.
+        guarded: Whether ADR-0328 §6:5's refusal by standing binds; a placed
+            proposal's write is guarded by the holder rule instead (ADR-0345 §3:6).
 
     Returns:
         The memory it yields, validated whole, its revision the one read.
@@ -178,7 +181,8 @@ def applied_operation(
     if cited is None:
         msg = "an operation cites a support the memory carries once it is applied (§5:3)"
         raise ValueError(msg)
-    _refuse_lower_standing(memory, operation, cited)
+    if guarded:
+        _refuse_lower_standing(memory, operation, cited)
     supports = memory.supports if carried is not None else (*memory.supports, cited)
     update: dict[str, object] = {
         "supports": supports,

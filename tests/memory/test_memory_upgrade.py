@@ -180,9 +180,13 @@ async def test_each_legacy_record_becomes_a_memory_at_its_id(legacy: Path) -> No
         assert after[record_id][0] == "memory"
         # §16:3: the wording.
         assert upgraded.content == wording
-        # §16:2: the envelope's fields, unchanged.
-        for field in ("validity", "expires_at", "about_person", "topics", "placement"):
+        # §16:2: the envelope's fields, unchanged; ``about_person`` and ``topics`` are
+        # carried as ADR-0345 §13:1 and §10:2 carry them.
+        for field in ("validity", "expires_at", "placement"):
             assert upgraded.model_dump(mode="json")[field] == stored[field], (record_id, field)
+        about = stored.get("about_person")
+        assert upgraded.subjects == (None if about is None else (about,)), record_id
+        assert [label.text for label in upgraded.labels] == list(stored.get("topics") or ())
         # The upgrade is no caller's write: the revision is carried, not reissued.
         assert upgraded.revision == revision
         # §16:4: one legacy support pointing at the record's own id, carrying it whole.
@@ -268,8 +272,15 @@ async def test_the_envelope_survives_as_it_was(legacy: Path) -> None:
     """§16:2's fields, on the records that set them to something other than the default."""
     exported = await _upgraded(legacy)
 
-    assert exported["semantic-asserted"].about_person == "Ada"
-    assert exported["semantic-asserted"].topics == ("family",)
+    asserted = exported["semantic-asserted"]
+    assert isinstance(asserted, Memory)
+    # ADR-0345 §13:1, §10:2: the subject is carried as ``subjects``, the topic as a label
+    # added by ``migration``.
+    assert asserted.subjects == ("Ada",)
+    assert asserted.involved is None
+    assert [(one.text, one.added_by) for one in asserted.labels] == [
+        ("family", MemoryWriterName.MIGRATION)
+    ]
     placement = exported["semantic-inferred"].placement
     assert placement.reach is PlacementReach.OWNER
     assert placement.set_by is PlacementSetter.DERIVED
