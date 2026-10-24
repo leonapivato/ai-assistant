@@ -744,14 +744,20 @@ async def test_a_recovered_install_keeps_the_recheck_it_raised() -> None:
     assert operations[proposing.memory.id] == (MemoryOperationKind.CREATE,)
 
 
-async def test_another_findings_recheck_is_not_taken_for_this_ones_fold() -> None:
-    """ADR-0329 §16:1, §16:4: only operations carrying this placement's notes are its write's.
+@pytest.mark.parametrize(
+    "note",
+    ["Is it the window now?", "Still the window?", "The same claim."],
+    ids=["its-own-note", "this-ones-recheck-note", "this-ones-restates-note"],
+)
+async def test_another_findings_recheck_is_not_taken_for_this_ones_fold(note: str) -> None:
+    """ADR-0329 §16:1, §16:4: what the write must have left is checked, not only its notes.
 
     This memory restates one stored memory, which already carries its support, and asks
     for another to be rechecked; its proposal did not land. Another finding then raises
-    a recheck on the first, citing a support the first carries. Nothing of this one's
-    write is held, so it is placed again and its own question written, and the other's
-    question is never listed as its own.
+    a recheck on the first, citing a support the first carries, in its own words or in
+    words this placement also used. Nothing of this one's write is held, so it is placed
+    again and its own question written, and the other's question is never listed as its
+    own.
     """
     harness = Harness()
     (framed,) = _framed(_SEAT)
@@ -791,7 +797,7 @@ async def test_another_findings_recheck_is_not_taken_for_this_ones_fold() -> Non
     await _write(
         harness,
         _framed(_SEAT, mint=mint),
-        place=_placing_each({"m-seat": (PlacedRelation.RECHECK, "Is it the window now?")}),
+        place=_placing_each({"m-seat": (PlacedRelation.RECHECK, note)}),
     )
     asked = (await harness.memory.get_history(["m-seat"]))["m-seat"]
     assert asked.operations[-1].kind is MemoryOperationKind.RAISE_QUESTION
@@ -906,3 +912,81 @@ async def test_a_recheck_citing_a_pin_is_the_writes_own(*, lost: bool) -> None:
     assert seat.operations[-1].cites == PinPart(pin="pin-1")
     operations = {one.memory: one.operations for one in written.writes}
     assert operations["m-seat"] == (MemoryOperationKind.RAISE_QUESTION,)
+
+
+async def test_another_findings_fold_in_the_same_words_is_not_taken_for_this_ones() -> None:
+    """ADR-0329 §16:1, §16:4: a fold landed only where the memory carries this one's parts.
+
+    This memory and another finding's restate the same stored memory, each from its own
+    part and in the same words; this one's proposal did not land, and the other's did.
+    The stored memory does not carry this one's part, so it is placed again and its part
+    added, and the other's support is never listed as its own.
+    """
+    harness = Harness()
+    await _held_seat(harness)
+    await harness.hold(episode("other", at=AT - timedelta(minutes=2), text="Window, yes."))
+    (framed,) = _framed(_SEAT)
+    proposing = await _proposing_on(harness, framed)
+    theirs = said_support(address("other"), added_at=AT).model_copy(
+        update={"added_by": MemoryWriterName.OBSERVER}
+    )
+    other = FramedMemory(memory=memory("observed:51", _SEAT, theirs, subjects=()))
+    await _write(harness, (other,), place=_placing(PlacedRelation.RESTATES))
+    seat = (await harness.memory.get_history(["m-seat"]))["m-seat"]
+    assert seat.support_at(theirs.points_at) is not None
+    assert seat.operations[-1].note == _RELATE
+
+    written = await _write(harness, (proposing,), place=_placing(PlacedRelation.RESTATES))
+
+    after = (await harness.memory.get_history(["m-seat"]))["m-seat"]
+    assert after.support_at(framed.memory.supports[0].points_at) is not None
+    ((memory_id, operations),) = [(one.memory, one.operations) for one in written.writes]
+    assert (memory_id, operations) == ("m-seat", (MemoryOperationKind.ADD_SUPPORT,))
+    assert after.operations[-1].cites == framed.memory.supports[0].points_at
+
+
+def _pin_only(record_id: str) -> Memory:
+    """A stored memory backed by a pin alone, which no holder's word stops counting."""
+    pin = _pinned_seat().supports[0]
+    return memory(record_id, _SEAT, pin)
+
+
+@pytest.mark.parametrize("lost", [False, True], ids=["read-back", "recovered"])
+async def test_a_dispute_copying_a_pin_onto_the_fold_is_the_writes_own(*, lost: bool) -> None:
+    """ADR-0345 §3:5, §3:8, ADR-0329 §16:1: only the pin pass's own support is not counted.
+
+    This memory folds into one stored memory and retires another, which its pin keeps
+    current, so the pin's support is copied onto the memory folded into as ``against``.
+    """
+    harness = Harness()
+    await _held_seat(harness)
+    await harness.hold(_pin_only("m-pinned"))
+    place = _placing_each(
+        {
+            "m-seat": (PlacedRelation.RESTATES, "The same claim."),
+            "m-pinned": (PlacedRelation.NO_LONGER_TRUE, "Changed."),
+        }
+    )
+    framed = _framed(_SEAT)
+    if lost:
+        restore = _losing(harness)
+        record = _Record()
+        with pytest.raises(MemoryStoreError):
+            await _write(harness, framed, place=place, record=record)
+        framed, _ = record.steps[-1]
+        restore()
+        place = _never
+
+    written = await _write(harness, framed, place=place)
+
+    seat = (await harness.memory.get_history(["m-seat"]))["m-seat"]
+    disputed = seat.support_at(PinPart(pin="pin-1"))
+    assert disputed is not None
+    assert disputed.direction is SupportDirection.AGAINST
+    operations = {one.memory: one.operations for one in written.writes}
+    assert operations["m-seat"] == (
+        MemoryOperationKind.ADD_SUPPORT,
+        MemoryOperationKind.ADD_SUPPORT,
+    )
+    (done,) = written.framed
+    assert (done.state, done.kept) == (FramedState.DONE, ("m-seat",))
