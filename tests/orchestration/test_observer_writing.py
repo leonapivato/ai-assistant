@@ -975,6 +975,63 @@ async def test_a_recovered_install_lists_no_later_support_on_its_part_in_its_wor
     ]
 
 
+@pytest.mark.parametrize(
+    ("relation", "kind"),
+    [
+        (PlacedRelation.NO_LONGER_TRUE, MemoryOperationKind.END),
+        (PlacedRelation.NEVER_TRUE, MemoryOperationKind.MARK_WRONG),
+        (PlacedRelation.CLAIMED_TOO_MUCH, MemoryOperationKind.REPLACE),
+    ],
+)
+async def test_a_recovered_install_lists_a_retirement_its_successor_link_establishes(
+    relation: PlacedRelation, kind: MemoryOperationKind
+) -> None:
+    """ADR-0329 §16:1, ADR-0345 §5:4: a retirement naming the install as successor is its own.
+
+    The stored memory already carries this memory's part as ``against``, so the retiring
+    relation adds no support to it: it stops the holder's backing and retires it, and the
+    reply is lost. The retirement names the installed memory as its successor and the
+    create names it among what it replaces, so the recovered install lists both.
+    """
+    harness = Harness()
+    (framed,) = _framed(_SEAT)
+    owner = SupportHolder.person(OWNER_PERSON_ID)
+    aisle = said_support(address("aisle"), added_at=AT - timedelta(days=1)).model_copy(
+        update={"holder": owner}
+    )
+    opposing = framed.memory.supports[0].model_copy(
+        update={
+            "holder": owner,
+            "direction": SupportDirection.AGAINST,
+            "backs_as_worded": False,
+        }
+    )
+    await harness.hold(
+        episode("aisle", at=AT - timedelta(days=1), text="Aisle seats."),
+        episode("one", at=AT - timedelta(minutes=3), text="Window seats, please."),
+        memory("m-aisle", "The user prefers aisle seats.", aisle, opposing),
+    )
+    restore = _losing(harness)
+    record = _Record()
+    with pytest.raises(MemoryStoreError):
+        await _write(
+            harness,
+            (framed,),
+            place=_placing_each({"m-aisle": (relation, "Changed.")}),
+            record=record,
+        )
+    (proposing,), _ = record.steps[-1]
+    restore()
+
+    written = await _write(harness, (proposing,), place=_never)
+
+    operations = {one.memory: one.operations for one in written.writes}
+    assert operations == {
+        "m-aisle": (MemoryOperationKind.STOP_COUNTING, kind),
+        framed.memory.id: (MemoryOperationKind.CREATE,),
+    }
+
+
 def _pinned_seat() -> Memory:
     """The stored seat, its first backing support a pin's, so a recheck cites the pin."""
     pin = MemorySupport(
