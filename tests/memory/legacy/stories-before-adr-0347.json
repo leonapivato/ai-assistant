@@ -1,0 +1,672 @@
+{
+ "log/story:legacy-1": {
+  "lines": [
+   {
+    "actor": "understanding",
+    "answers": null,
+    "at": "2026-10-22T12:00:00Z",
+    "change": "created",
+    "member": null,
+    "note": null,
+    "other_story": null,
+    "outcome": null,
+    "sequence": 1,
+    "story_id": "story:legacy-1",
+    "trigger": "act-1"
+   },
+   {
+    "actor": "understanding",
+    "answers": null,
+    "at": "2026-10-22T12:00:00Z",
+    "change": "added",
+    "member": {
+     "id": "act-1",
+     "kind": "activation"
+    },
+    "note": null,
+    "other_story": null,
+    "outcome": null,
+    "sequence": 2,
+    "story_id": "story:legacy-1",
+    "trigger": "act-1"
+   },
+   {
+    "actor": "planning",
+    "answers": null,
+    "at": "2026-10-22T12:00:01Z",
+    "change": "added",
+    "member": {
+     "id": "act-2",
+     "kind": "activation"
+    },
+    "note": null,
+    "other_story": null,
+    "outcome": null,
+    "sequence": 3,
+    "story_id": "story:legacy-1",
+    "trigger": "act-2"
+   },
+   {
+    "actor": "matters_pass",
+    "answers": null,
+    "at": "2026-10-22T12:00:11Z",
+    "change": "absorbed",
+    "member": null,
+    "note": null,
+    "other_story": "story:legacy-2",
+    "outcome": null,
+    "sequence": 7,
+    "story_id": "story:legacy-1",
+    "trigger": null
+   },
+   {
+    "actor": "matters_pass",
+    "answers": null,
+    "at": "2026-10-22T12:00:11Z",
+    "change": "added",
+    "member": {
+     "id": "act-3",
+     "kind": "activation"
+    },
+    "note": null,
+    "other_story": null,
+    "outcome": null,
+    "sequence": 9,
+    "story_id": "story:legacy-1",
+    "trigger": null
+   },
+   {
+    "actor": "owner",
+    "answers": null,
+    "at": "2026-10-22T12:00:13Z",
+    "change": "split_off",
+    "member": null,
+    "note": null,
+    "other_story": "story:legacy-4",
+    "outcome": null,
+    "sequence": 13,
+    "story_id": "story:legacy-1",
+    "trigger": null
+   },
+   {
+    "actor": "owner",
+    "answers": null,
+    "at": "2026-10-22T12:00:13Z",
+    "change": "removed",
+    "member": {
+     "id": "act-2",
+     "kind": "activation"
+    },
+    "note": null,
+    "other_story": null,
+    "outcome": null,
+    "sequence": 15,
+    "story_id": "story:legacy-1",
+    "trigger": null
+   },
+   {
+    "actor": "owner",
+    "answers": null,
+    "at": "2026-10-22T12:00:13Z",
+    "change": "note_moved_out",
+    "member": null,
+    "note": 5,
+    "other_story": "story:legacy-4",
+    "outcome": null,
+    "sequence": 17,
+    "story_id": "story:legacy-1",
+    "trigger": null
+   }
+  ],
+  "next_cursor": null,
+  "story": {
+   "created_at": "2026-10-22T12:00:00Z",
+   "merged_into": null,
+   "story_id": "story:legacy-1"
+  }
+ },
+ "log/story:legacy-2": {
+  "lines": [
+   {
+    "actor": "owner",
+    "answers": null,
+    "at": "2026-10-22T12:00:06Z",
+    "change": "created",
+    "member": null,
+    "note": null,
+    "other_story": null,
+    "outcome": null,
+    "sequence": 4,
+    "story_id": "story:legacy-2",
+    "trigger": null
+   },
+   {
+    "actor": "owner",
+    "answers": null,
+    "at": "2026-10-22T12:00:06Z",
+    "change": "added",
+    "member": {
+     "id": "act-3",
+     "kind": "activation"
+    },
+    "note": null,
+    "other_story": null,
+    "outcome": null,
+    "sequence": 5,
+    "story_id": "story:legacy-2",
+    "trigger": null
+   },
+   {
+    "actor": "matters_pass",
+    "answers": null,
+    "at": "2026-10-22T12:00:11Z",
+    "change": "merged_into",
+    "member": null,
+    "note": null,
+    "other_story": "story:legacy-1",
+    "outcome": null,
+    "sequence": 6,
+    "story_id": "story:legacy-2",
+    "trigger": null
+   },
+   {
+    "actor": "matters_pass",
+    "answers": null,
+    "at": "2026-10-22T12:00:11Z",
+    "change": "removed",
+    "member": {
+     "id": "act-3",
+     "kind": "activation"
+    },
+    "note": null,
+    "other_story": null,
+    "outcome": null,
+    "sequence": 8,
+    "story_id": "story:legacy-2",
+    "trigger": null
+   }
+  ],
+  "next_cursor": null,
+  "story": {
+   "created_at": "2026-10-22T12:00:06Z",
+   "merged_into": "story:legacy-1",
+   "story_id": "story:legacy-2"
+  }
+ },
+ "log/story:legacy-3": {
+  "lines": [
+   {
+    "actor": "owner",
+    "answers": null,
+    "at": "2026-10-22T12:00:12Z",
+    "change": "created",
+    "member": null,
+    "note": null,
+    "other_story": null,
+    "outcome": null,
+    "sequence": 10,
+    "story_id": "story:legacy-3",
+    "trigger": null
+   },
+   {
+    "actor": "owner",
+    "answers": null,
+    "at": "2026-10-22T12:00:12Z",
+    "change": "added",
+    "member": {
+     "id": "act-4",
+     "kind": "activation"
+    },
+    "note": null,
+    "other_story": null,
+    "outcome": null,
+    "sequence": 11,
+    "story_id": "story:legacy-3",
+    "trigger": null
+   }
+  ],
+  "next_cursor": null,
+  "story": {
+   "created_at": "2026-10-22T12:00:12Z",
+   "merged_into": null,
+   "story_id": "story:legacy-3"
+  }
+ },
+ "log/story:legacy-4": {
+  "lines": [
+   {
+    "actor": "owner",
+    "answers": null,
+    "at": "2026-10-22T12:00:13Z",
+    "change": "created",
+    "member": null,
+    "note": null,
+    "other_story": null,
+    "outcome": null,
+    "sequence": 12,
+    "story_id": "story:legacy-4",
+    "trigger": null
+   },
+   {
+    "actor": "owner",
+    "answers": null,
+    "at": "2026-10-22T12:00:13Z",
+    "change": "split_off",
+    "member": null,
+    "note": null,
+    "other_story": "story:legacy-1",
+    "outcome": null,
+    "sequence": 14,
+    "story_id": "story:legacy-4",
+    "trigger": null
+   },
+   {
+    "actor": "owner",
+    "answers": null,
+    "at": "2026-10-22T12:00:13Z",
+    "change": "added",
+    "member": {
+     "id": "act-2",
+     "kind": "activation"
+    },
+    "note": null,
+    "other_story": null,
+    "outcome": null,
+    "sequence": 16,
+    "story_id": "story:legacy-4",
+    "trigger": null
+   },
+   {
+    "actor": "owner",
+    "answers": null,
+    "at": "2026-10-22T12:00:13Z",
+    "change": "note_moved_in",
+    "member": null,
+    "note": 5,
+    "other_story": "story:legacy-1",
+    "outcome": null,
+    "sequence": 18,
+    "story_id": "story:legacy-4",
+    "trigger": null
+   }
+  ],
+  "next_cursor": null,
+  "story": {
+   "created_at": "2026-10-22T12:00:13Z",
+   "merged_into": null,
+   "story_id": "story:legacy-4"
+  }
+ },
+ "notes/story:legacy-1": {
+  "next_cursor": null,
+  "notes": [
+   {
+    "author": "planning",
+    "note_id": 3,
+    "outside": false,
+    "text": "Camping by the river.",
+    "written_at": "2026-10-22T12:00:02Z",
+    "written_during": "act-1"
+   },
+   {
+    "author": "owner",
+    "note_id": 6,
+    "outside": false,
+    "text": "Bring the blue tent.",
+    "written_at": "2026-10-22T12:00:05Z",
+    "written_during": null
+   },
+   {
+    "author": "planning",
+    "note_id": 8,
+    "outside": false,
+    "text": "Nothing planned.",
+    "written_at": "2026-10-22T12:00:07Z",
+    "written_during": "act-3"
+   }
+  ],
+  "story": {
+   "created_at": "2026-10-22T12:00:00Z",
+   "merged_into": null,
+   "story_id": "story:legacy-1"
+  }
+ },
+ "notes/story:legacy-2": {
+  "next_cursor": null,
+  "notes": [],
+  "story": {
+   "created_at": "2026-10-22T12:00:06Z",
+   "merged_into": "story:legacy-1",
+   "story_id": "story:legacy-2"
+  }
+ },
+ "notes/story:legacy-3": {
+  "next_cursor": null,
+  "notes": [],
+  "story": {
+   "created_at": "2026-10-22T12:00:12Z",
+   "merged_into": null,
+   "story_id": "story:legacy-3"
+  }
+ },
+ "notes/story:legacy-4": {
+  "next_cursor": null,
+  "notes": [
+   {
+    "author": "planning",
+    "note_id": 5,
+    "outside": true,
+    "text": "The site page says Sunday is booked.",
+    "written_at": "2026-10-22T12:00:04Z",
+    "written_during": "act-2"
+   }
+  ],
+  "story": {
+   "created_at": "2026-10-22T12:00:13Z",
+   "merged_into": null,
+   "story_id": "story:legacy-4"
+  }
+ },
+ "story/story:legacy-1": {
+  "created_at": "2026-10-22T12:00:00Z",
+  "merged_into": null,
+  "story_id": "story:legacy-1"
+ },
+ "story/story:legacy-2": {
+  "created_at": "2026-10-22T12:00:06Z",
+  "merged_into": "story:legacy-1",
+  "story_id": "story:legacy-2"
+ },
+ "story/story:legacy-3": {
+  "created_at": "2026-10-22T12:00:12Z",
+  "merged_into": null,
+  "story_id": "story:legacy-3"
+ },
+ "story/story:legacy-4": {
+  "created_at": "2026-10-22T12:00:13Z",
+  "merged_into": null,
+  "story_id": "story:legacy-4"
+ },
+ "summaries/story:legacy-1": {
+  "next_cursor": null,
+  "story": {
+   "created_at": "2026-10-22T12:00:00Z",
+   "merged_into": null,
+   "story_id": "story:legacy-1"
+  },
+  "versions": [
+   {
+    "flags": [],
+    "outside": false,
+    "read_pages": [],
+    "took_in_episodes": [
+     "act-1"
+    ],
+    "took_in_notes": [
+     3
+    ],
+    "version": 4,
+    "written_at": "2026-10-22T12:00:03Z"
+   },
+   {
+    "flags": [
+     {
+      "kind": "two_matters",
+      "story": null
+     }
+    ],
+    "outside": true,
+    "read_pages": [
+     {
+      "story": "story:legacy-2",
+      "version": 9
+     }
+    ],
+    "took_in_episodes": [
+     "act-2"
+    ],
+    "took_in_notes": [
+     5
+    ],
+    "version": 10,
+    "written_at": "2026-10-22T12:00:09Z"
+   },
+   {
+    "flags": [],
+    "outside": true,
+    "read_pages": [],
+    "took_in_episodes": [],
+    "took_in_notes": [],
+    "version": 11,
+    "written_at": "2026-10-22T12:00:10Z"
+   }
+  ]
+ },
+ "summaries/story:legacy-2": {
+  "next_cursor": null,
+  "story": {
+   "created_at": "2026-10-22T12:00:06Z",
+   "merged_into": "story:legacy-1",
+   "story_id": "story:legacy-2"
+  },
+  "versions": [
+   {
+    "flags": [],
+    "outside": false,
+    "read_pages": [],
+    "took_in_episodes": [
+     "act-3"
+    ],
+    "took_in_notes": [],
+    "version": 9,
+    "written_at": "2026-10-22T12:00:08Z"
+   }
+  ]
+ },
+ "summaries/story:legacy-3": {
+  "next_cursor": null,
+  "story": {
+   "created_at": "2026-10-22T12:00:12Z",
+   "merged_into": null,
+   "story_id": "story:legacy-3"
+  },
+  "versions": []
+ },
+ "summaries/story:legacy-4": {
+  "next_cursor": null,
+  "story": {
+   "created_at": "2026-10-22T12:00:13Z",
+   "merged_into": null,
+   "story_id": "story:legacy-4"
+  },
+  "versions": [
+   {
+    "flags": [],
+    "outside": true,
+    "read_pages": [],
+    "took_in_episodes": [],
+    "took_in_notes": [],
+    "version": 17,
+    "written_at": "2026-10-22T12:00:14Z"
+   }
+  ]
+ },
+ "summary/story:legacy-1": {
+  "as_of": 17,
+  "pending_episodes": [
+   "act-3"
+  ],
+  "pending_notes": [
+   {
+    "author": "owner",
+    "note_id": 6,
+    "outside": false,
+    "text": "Bring the blue tent.",
+    "written_at": "2026-10-22T12:00:05Z",
+    "written_during": null
+   },
+   {
+    "author": "planning",
+    "note_id": 8,
+    "outside": false,
+    "text": "Nothing planned.",
+    "written_at": "2026-10-22T12:00:07Z",
+    "written_during": "act-3"
+   }
+  ],
+  "story": {
+   "created_at": "2026-10-22T12:00:00Z",
+   "merged_into": null,
+   "story_id": "story:legacy-1"
+  },
+  "summary": {
+   "lines": [],
+   "outside": true,
+   "version": 11,
+   "written_at": "2026-10-22T12:00:10Z"
+  }
+ },
+ "summary/story:legacy-2": {
+  "as_of": 17,
+  "pending_episodes": [],
+  "pending_notes": [],
+  "story": {
+   "created_at": "2026-10-22T12:00:06Z",
+   "merged_into": "story:legacy-1",
+   "story_id": "story:legacy-2"
+  },
+  "summary": {
+   "lines": [
+    {
+     "text": "A quiet weekend."
+    }
+   ],
+   "outside": false,
+   "version": 9,
+   "written_at": "2026-10-22T12:00:08Z"
+  }
+ },
+ "summary/story:legacy-3": {
+  "as_of": 17,
+  "pending_episodes": [
+   "act-4"
+  ],
+  "pending_notes": [],
+  "story": {
+   "created_at": "2026-10-22T12:00:12Z",
+   "merged_into": null,
+   "story_id": "story:legacy-3"
+  },
+  "summary": null
+ },
+ "summary/story:legacy-4": {
+  "as_of": 17,
+  "pending_episodes": [
+   "act-2"
+  ],
+  "pending_notes": [
+   {
+    "author": "planning",
+    "note_id": 5,
+    "outside": true,
+    "text": "The site page says Sunday is booked.",
+    "written_at": "2026-10-22T12:00:04Z",
+    "written_during": "act-2"
+   }
+  ],
+  "story": {
+   "created_at": "2026-10-22T12:00:13Z",
+   "merged_into": null,
+   "story_id": "story:legacy-4"
+  },
+  "summary": {
+   "lines": [
+    {
+     "text": "The Sunday booking."
+    }
+   ],
+   "outside": true,
+   "version": 17,
+   "written_at": "2026-10-22T12:00:14Z"
+  }
+ },
+ "view/story:legacy-1": {
+  "entries": [
+   {
+    "actor": "understanding",
+    "linked_at": "2026-10-22T12:00:00Z",
+    "member": {
+     "id": "act-1",
+     "kind": "activation"
+    },
+    "position": 2
+   },
+   {
+    "actor": "matters_pass",
+    "linked_at": "2026-10-22T12:00:11Z",
+    "member": {
+     "id": "act-3",
+     "kind": "activation"
+    },
+    "position": 9
+   }
+  ],
+  "member_count": 2,
+  "next_cursor": null,
+  "story": {
+   "created_at": "2026-10-22T12:00:00Z",
+   "merged_into": null,
+   "story_id": "story:legacy-1"
+  }
+ },
+ "view/story:legacy-2": {
+  "entries": [],
+  "member_count": 0,
+  "next_cursor": null,
+  "story": {
+   "created_at": "2026-10-22T12:00:06Z",
+   "merged_into": "story:legacy-1",
+   "story_id": "story:legacy-2"
+  }
+ },
+ "view/story:legacy-3": {
+  "entries": [
+   {
+    "actor": "owner",
+    "linked_at": "2026-10-22T12:00:12Z",
+    "member": {
+     "id": "act-4",
+     "kind": "activation"
+    },
+    "position": 11
+   }
+  ],
+  "member_count": 1,
+  "next_cursor": null,
+  "story": {
+   "created_at": "2026-10-22T12:00:12Z",
+   "merged_into": null,
+   "story_id": "story:legacy-3"
+  }
+ },
+ "view/story:legacy-4": {
+  "entries": [
+   {
+    "actor": "owner",
+    "linked_at": "2026-10-22T12:00:13Z",
+    "member": {
+     "id": "act-2",
+     "kind": "activation"
+    },
+    "position": 16
+   }
+  ],
+  "member_count": 1,
+  "next_cursor": null,
+  "story": {
+   "created_at": "2026-10-22T12:00:13Z",
+   "merged_into": null,
+   "story_id": "story:legacy-4"
+  }
+ }
+}
