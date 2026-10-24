@@ -872,6 +872,56 @@ async def test_a_recovered_install_keeps_its_own_dispute_where_no_target_changed
     ]
 
 
+async def test_a_recovered_install_lists_no_later_question_in_its_targets_words() -> None:
+    """ADR-0329 §16:1, ADR-0345 §5: only an operation its relation could make is its own.
+
+    This memory supports a stored memory already carrying its part, so the write adds
+    nothing there, and installs beside it; the reply is lost. Five minutes later another
+    finding asks for the stored memory to be rechecked, in this placement's words. A
+    ``supports`` makes no question, so the recovered install lists its create alone.
+    """
+    harness = Harness()
+    (framed,) = _framed(_SEAT)
+    owner = SupportHolder.person(OWNER_PERSON_ID)
+    past = said_support(address("past"), added_at=AT - timedelta(days=1)).model_copy(
+        update={"holder": owner}
+    )
+    own = framed.memory.supports[0].model_copy(update={"holder": owner})
+    await harness.hold(
+        episode("past", at=AT - timedelta(days=1), text="Window seats."),
+        episode("one", at=AT - timedelta(minutes=3), text="Window seats, please."),
+        memory("m-seat", _SEAT, past, own, subjects=(OWNER_PERSON_ID,)),
+    )
+    same = "The same seat."
+    restore = _losing(harness)
+    record = _Record()
+    with pytest.raises(MemoryStoreError):
+        await _write(
+            harness,
+            (framed,),
+            place=_placing_each({"m-seat": (PlacedRelation.SUPPORTS, same)}),
+            record=record,
+        )
+    (proposing,), _ = record.steps[-1]
+    restore()
+    harness.clock.advance(timedelta(minutes=5))
+    mint = Minter()
+    mint.minted = 50
+    await _write(
+        harness,
+        _framed(_SEAT, mint=mint),
+        place=_placing_each({"m-seat": (PlacedRelation.RECHECK, same)}),
+    )
+    seat = (await harness.memory.get_history(["m-seat"]))["m-seat"]
+    assert seat.operations[-1].kind is MemoryOperationKind.RAISE_QUESTION
+
+    written = await _write(harness, (proposing,), place=_never)
+
+    assert [(one.memory, one.operations) for one in written.writes] == [
+        (framed.memory.id, (MemoryOperationKind.CREATE,))
+    ]
+
+
 def _pinned_seat() -> Memory:
     """The stored seat, its first backing support a pin's, so a recheck cites the pin."""
     pin = MemorySupport(
