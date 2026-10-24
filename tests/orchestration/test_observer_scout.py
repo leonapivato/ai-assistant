@@ -1,11 +1,13 @@
-"""The scout: its call, its reply, and what code keeps of it (ADR-0329 §8:2, §9:1, §5:5).
+"""The scout: its call, its reply, and what code keeps of it (ADR-0346 §4).
 
 Driven on values. A finding names parts by label and code maps each back; a label
 naming nothing read, or a finding resting on no part of the leaving episode, is dropped
-(§8:2, §9:5); a reliance finding rests on what later episodes show (§14:1); and a
-candidate recorded under an approval always gives a finding (§5:5, §11:1). Each step's
-system message is whatever its template renders (ADR-0334 §3:5), and a step refuses
-another prompt's template.
+(§3:1, ADR-0329 §9:5); each finding carries the scout's annotations, the owner named by
+the owner's identifier (§4:2, ADR-0345 §9:4); every candidate is named by a finding or
+declined with a reason, and a reply that leaves one unaccounted is refused (§4:6); and a
+finding naming a candidate recorded under an approval rests on the user's yes (ADR-0329
+§5:5). Each step's system message is whatever its template renders (ADR-0334 §3:5), and
+a step refuses another prompt's template.
 """
 
 from __future__ import annotations
@@ -15,34 +17,33 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from observer_support import AT, Harness, address, episode, limits, reply
+from observer_support import AT, Harness, address, episode, found, framed, framing, limits, reply
 
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     ConfirmationPart,
     InputPart,
     ObservationAttemptEnd,
-    ObservationFinding,
+    PlacementReach,
     QuestionPart,
     Role,
     SupportOrigin,
 )
 from ai_assistant.orchestration.observer import Observer
-from ai_assistant.orchestration.observer.commit import CommitView, commit_messages
+from ai_assistant.orchestration.observer.framing import FramingView, framing_messages
+from ai_assistant.orchestration.observer.placement import PlacementView, placement_messages
 from ai_assistant.orchestration.observer.prompts import (
-    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_FRAMING_PROMPT,
+    OBSERVER_PLACEMENT_PROMPT,
     OBSERVER_SCOUT_PROMPT,
 )
-from ai_assistant.orchestration.observer.reading import (
-    Hint,
-    ReadEpisode,
-    Reading,
-    ReadPart,
-    Reliance,
-)
+from ai_assistant.orchestration.observer.reading import Hint, ReadEpisode, Reading, ReadPart
+from ai_assistant.orchestration.observer.replies import parsed
 from ai_assistant.orchestration.observer.scout import (
+    DROPPED_REASON,
+    Proposal,
     ScoutReply,
-    parsed,
-    proposed_findings,
+    proposed,
     scout_messages,
 )
 from ai_assistant.orchestration.understanding import RecentEpisodes
@@ -64,14 +65,6 @@ async def _three(harness: Harness) -> None:
     )
 
 
-def _create() -> str:
-    return reply(
-        action="create",
-        wording=_CLAIM,
-        supports=[{"part": "P1", "direction": "for", "backs_as_worded": True, "how_sure": "sure"}],
-    )
-
-
 def _input(handle: str, name: str, *, at_minutes: int = 0) -> ReadPart:
     occurred = AT + timedelta(minutes=at_minutes)
     return ReadPart(
@@ -85,35 +78,43 @@ def _input(handle: str, name: str, *, at_minutes: int = 0) -> ReadPart:
     )
 
 
-def _reading(*, hints: tuple[Hint, ...] = (), reliances: tuple[Reliance, ...] = ()) -> Reading:
+def _reading(*, hints: tuple[Hint, ...] = ()) -> Reading:
+    """A leaving episode with one part, and an earlier one its record points at."""
     leaving = episode("leaving")
-    later = episode("later", at=AT + timedelta(minutes=1))
+    earlier = episode("earlier", at=AT - timedelta(minutes=1))
     return Reading(
-        leaving=ReadEpisode(handle="E1", record=leaving, parts=(_input("P1", "leaving"),)),
-        later=(
-            ReadEpisode(handle="E2", record=later, parts=(_input("P2", "later", at_minutes=1),)),
+        leaving=ReadEpisode(
+            handle="E1",
+            episode=leaving.id,
+            record=leaving,
+            parts=(_input("P1", "leaving"),),
+        ),
+        earlier=(
+            ReadEpisode(
+                handle="E2",
+                episode=earlier.id,
+                record=earlier,
+                parts=(_input("P2", "earlier", at_minutes=-1),),
+            ),
         ),
         hints=hints,
-        reliances=reliances,
     )
 
 
-def _scouted(reading: Reading, *findings: dict[str, object]) -> tuple[list[str], int]:
-    proposal = parsed(reply(findings=list(findings)), ScoutReply)
-    assert proposal is not None
-    kept, dropped = proposed_findings(proposal, reading)
-    return [one.claim for one in kept], dropped
+def _proposal(reading: Reading, *findings: dict[str, object], **extra: object) -> Proposal | None:
+    reply_read = parsed(reply(findings=list(findings), **extra), ScoutReply)
+    assert reply_read is not None
+    return proposed(reply_read, reading)
 
 
 #: A scout reply from a dry run on a copy of live data (2026-10-20): every required field
 #: valid, and one finding carrying a key the shape does not name.
 _DRY_RUN_REPLY = """{"findings": [
   {"claim": "The user said Zach is their roommate.", "rests_on": ["P1"],
-   "candidate": null, "relied_on": null},
+   "candidates": [], "subjects": ["the user", "Zach"]},
   {"command": null, "claim": "The user approved the drafted introduction email.",
-   "rests_on": ["P5", "P6"], "candidate": null, "relied_on": null},
-  {"claim": "The user uses more than one chat channel.", "rests_on": ["P3"],
-   "candidate": null, "relied_on": null}
+   "rests_on": ["P5", "P6"], "candidates": []},
+  {"claim": "The user uses more than one chat channel.", "rests_on": ["P3"]}
 ]}"""
 
 
@@ -125,10 +126,11 @@ def test_a_reply_parses_whole_or_not_at_all() -> None:
     assert parsed(reply(findings=[{"rests_on": ["P1"]}]), ScoutReply) is None
     assert parsed(reply(findings=[{"claim": "x", "rests_on": "P1"}]), ScoutReply) is None
     assert parsed(reply(findings=[{"claim": ["x"]}]), ScoutReply) is None
+    assert parsed(reply(findings=[], declines=[{"candidate": "C1"}]), ScoutReply) is None
 
 
 def test_a_scout_reply_with_prose_around_its_object_is_read() -> None:
-    """The scout's parser is the commit step's: an object in prose is read and validated."""
+    """An object in prose is read and validated as a bare reply is."""
     findings = reply(findings=[{"claim": _CLAIM, "rests_on": ["P1"]}])
     expected = ScoutReply.model_validate(json.loads(findings))
 
@@ -148,18 +150,18 @@ def test_a_key_the_shape_does_not_name_is_dropped_and_the_reply_kept() -> None:
         ("The user approved the drafted introduction email.", ("P5", "P6")),
         ("The user uses more than one chat channel.", ("P3",)),
     ]
-    assert all(one.candidate is None and one.relied_on is None for one in proposal.findings)
     assert parsed(reply(findings=[], note="x"), ScoutReply) == ScoutReply()
     assert "command" not in proposal.findings[1].model_dump()
 
 
 async def test_a_finding_with_a_stray_key_is_committed() -> None:
-    """The dry run's case end to end: the attempt finishes and the finding is written."""
+    """End to end: the attempt finishes and the finding is written."""
     harness = Harness()
     await _three(harness)
-    scout = reply(findings=[{"command": None, "claim": _CLAIM, "rests_on": ["P1"]}])
+    scout = reply(findings=[found(_CLAIM, "P1", command=None)])
     observer = harness.observer(
-        scout=FakeModelProvider.scripted(scout), commit=FakeModelProvider.scripted(_create())
+        scout=FakeModelProvider.scripted(scout),
+        commit=FakeModelProvider.scripted(framing(framed(_CLAIM, "P1"))),
     )
 
     outcome = await observer.run()
@@ -193,162 +195,229 @@ async def test_a_scout_reply_missing_a_required_key_still_fails_as_unparsed() ->
 
 
 def test_a_finding_names_parts_by_label_and_code_maps_them_back() -> None:
-    """§9:1, §9:5: the parts it rests on, by the addresses the reading holds."""
-    proposal = parsed(
-        reply(findings=[{"claim": "The user prefers window seats.", "rests_on": ["P1", "P2"]}]),
-        ScoutReply,
-    )
+    """ADR-0346 §3:1: the parts it rests on, an earlier one the record points at among them."""
+    proposal = _proposal(_reading(), found(_CLAIM, "P1", "P2"))
+
     assert proposal is not None
-
-    (finding,), dropped = proposed_findings(proposal, _reading())
-
-    assert dropped == 0
-    assert finding.id == "f1"
-    assert finding.episode == address("leaving")
+    (finding,) = proposal.findings
     assert finding.rests_on == (
         InputPart(episode=address("leaving")),
-        InputPart(episode=address("later")),
+        InputPart(episode=address("earlier")),
     )
-    assert finding.outcome is None
+    assert finding.id == "f1"
 
 
 def test_a_finding_naming_a_part_not_read_is_dropped() -> None:
-    claims, dropped = _scouted(_reading(), {"claim": "x", "rests_on": ["P1", "P9"]})
+    proposal = _proposal(_reading(), found(_CLAIM, "P9"))
 
-    assert (claims, dropped) == ([], 1)
-
-
-def test_a_finding_from_a_later_episode_alone_waits_for_it() -> None:
-    """§8:2: only findings that come from the leaving episode are committed."""
-    claims, dropped = _scouted(_reading(), {"claim": "x", "rests_on": ["P2"]})
-
-    assert (claims, dropped) == ([], 1)
+    assert proposal is not None
+    assert (proposal.findings, proposal.dropped) == ((), 1)
 
 
-def test_a_reliance_finding_rests_on_what_later_episodes_show() -> None:
-    """§14:1-§14:2: kept where it names a memory a reliance call named."""
-    held = memory("m-seat", "The user prefers window seats.", said_support(address("past")))
-    reading = _reading(
-        reliances=(Reliance(handle="M1", memory=held, shaped="the seat", relied_at=AT),)
-    )
-    proposal = parsed(
-        reply(
-            findings=[
-                {"claim": "The seat held up.", "rests_on": ["P2"], "relied_on": "M1"},
-                {"claim": "Another.", "rests_on": ["P2"], "relied_on": "M7"},
-                {"claim": "From the leaving one.", "rests_on": ["P1"], "relied_on": "M7"},
-            ]
+def test_a_finding_resting_on_no_part_of_the_leaving_episode_is_dropped() -> None:
+    """ADR-0346 §3:1: a finding rests on at least one of the leaving episode's parts."""
+    proposal = _proposal(_reading(), found(_CLAIM, "P2"))
+
+    assert proposal is not None
+    assert (proposal.findings, proposal.dropped) == ((), 1)
+
+
+def test_the_annotations_are_kept_beside_the_claim() -> None:
+    """ADR-0346 §4:2, §4:5: whom, why, when, and the owner named by the owner's id."""
+    proposal = _proposal(
+        _reading(),
+        found(
+            "Ana is the user's younger sister.",
+            "P1",
+            subjects=["Ana", "the user", "Ana"],
+            involved=["the user", "Tom"],
+            why="  Family.  ",
+            situations=["planning a visit", "", "planning a visit"],
         ),
-        ScoutReply,
     )
+
     assert proposal is not None
+    (finding,) = proposal.findings
+    annotations = finding.annotations
+    assert annotations is not None
+    assert annotations.subjects == ("Ana", OWNER_PERSON_ID)
+    assert annotations.involved == ("Tom",), "a person in both is kept in subjects alone"
+    assert annotations.why == "Family."
+    assert annotations.situations == ("planning a visit",)
+    assert annotations.narrowing is None
 
-    kept, dropped = proposed_findings(proposal, reading)
 
-    assert [(one.claim, one.relied_on) for one in kept] == [("The seat held up.", "m-seat")]
-    assert dropped == 2, "a label naming no reliance shown drops the finding, never widens it"
-
-
-def test_a_candidate_is_named_by_its_effect_record() -> None:
-    """§3:3: a finding names the candidate it came from by the record that shows it done."""
-    reading = _reading(hints=(Hint(handle="C1", effect="effect-1", fact="x"),))
-    proposal = parsed(
-        reply(findings=[{"claim": "x", "rests_on": ["P1"], "candidate": "C1"}]), ScoutReply
+def test_any_narrowing_proposed_is_read_as_the_narrower_reach() -> None:
+    """ADR-0217 §4, ADR-0346 §4:2: read failing closed, its note kept or code's own."""
+    proposal = _proposal(
+        _reading(),
+        found(_CLAIM, "P1", narrowing={"reach": "owner", "note": "Between us."}),
+        found("The user flies.", "P1", narrowing={"reach": "everyone"}),
     )
+
     assert proposal is not None
+    first, second = (one.annotations for one in proposal.findings)
+    assert first is not None
+    assert second is not None
+    assert first.narrowing is not None
+    assert (first.narrowing.reach, first.narrowing.note) == (PlacementReach.OWNER, "Between us.")
+    assert second.narrowing is not None
+    assert second.narrowing.reach is PlacementReach.OWNER
+    assert second.narrowing.note
 
-    (finding,), _ = proposed_findings(proposal, reading)
 
+def _hint(handle: str, effect: str, *, confirmation: ReadPart | None = None) -> Hint:
+    return Hint(handle=handle, effect=effect, fact="A fact.", confirmation=confirmation)
+
+
+def test_every_candidate_is_named_or_declined_or_the_reply_is_refused() -> None:
+    """ADR-0346 §4:6: one left unaccounted refuses the reply as one that does not parse."""
+    reading = _reading(hints=(_hint("C1", "effect-1"), _hint("C2", "effect-2")))
+
+    refused = _proposal(reading, found(_CLAIM, "P1", candidates=["C1"]))
+    kept = _proposal(
+        reading,
+        found(_CLAIM, "P1", candidates=["C1"]),
+        declines=[{"candidate": "C2", "reason": "Trivia."}],
+    )
+    blank = _proposal(
+        reading,
+        found(_CLAIM, "P1", candidates=["C1"]),
+        declines=[{"candidate": "C2", "reason": "  "}],
+    )
+
+    assert refused is None
+    assert blank is None, "a decline gives a reason"
+    assert kept is not None
+    (finding,) = kept.findings
     assert finding.candidate == "effect-1"
+    (decline,) = kept.declines
+    assert (decline.candidate, decline.reason) == ("effect-2", "Trivia.")
+
+
+def test_a_candidate_whose_finding_code_dropped_is_declined_by_code() -> None:
+    """ADR-0346 §4:6: nothing planning recorded disappears unexplained."""
+    reading = _reading(hints=(_hint("C1", "effect-1"),))
+
+    proposal = _proposal(reading, found(_CLAIM, "P2", candidates=["C1"]))
+
+    assert proposal is not None
+    assert proposal.findings == ()
+    (decline,) = proposal.declines
+    assert (decline.candidate, decline.reason) == ("effect-1", DROPPED_REASON)
+
+
+def test_a_finding_naming_several_candidates_accounts_for_each() -> None:
+    reading = _reading(hints=(_hint("C1", "effect-1"), _hint("C2", "effect-2")))
+
+    proposal = _proposal(reading, found(_CLAIM, "P1", candidates=["C1", "C2"]))
+
+    assert proposal is not None
+    (finding,) = proposal.findings
+    assert (finding.candidate, finding.further_candidates) == ("effect-1", ("effect-2",))
+    assert proposal.declines == ()
+
+
+def test_two_labels_naming_one_candidates_effect_name_it_once() -> None:
+    """ADR-0346 §4:6: two calls answered by one effect are one candidate on the record."""
+    reading = _reading(hints=(_hint("C1", "effect-1"), _hint("C2", "effect-1")))
+
+    proposal = _proposal(reading, found(_CLAIM, "P1", candidates=["C1", "C2"]))
+
+    assert proposal is not None
+    (finding,) = proposal.findings
+    assert (finding.candidate, finding.further_candidates) == ("effect-1", ())
+    assert (proposal.declines, proposal.dropped) == ((), 0)
 
 
 def test_a_candidate_label_naming_nothing_shown_drops_the_finding() -> None:
-    """A malformed label is never read as a finding from the record alone."""
-    reading = _reading(hints=(Hint(handle="C1", effect="effect-1", fact="x"),))
-    proposal = parsed(
-        reply(findings=[{"claim": "x", "rests_on": ["P1"], "candidate": "C7"}]), ScoutReply
-    )
+    proposal = _proposal(_reading(), found(_CLAIM, "P1", candidates=["C7"]))
+
     assert proposal is not None
+    assert (proposal.findings, proposal.dropped) == ((), 1)
 
-    assert proposed_findings(proposal, reading) == ((), 1)
 
-
-def test_a_candidate_the_user_confirmed_always_gives_a_finding() -> None:
-    """§5:5, §11:1: where the scout proposed none, code adds one resting on the yes."""
+def test_a_finding_naming_a_confirmed_candidate_rests_on_its_yes() -> None:
+    """ADR-0329 §5:5: framing sees the words the user approved."""
     yes = ReadPart(
         handle="P3",
         part=ConfirmationPart(
             episode=address("leaving"),
             asking_activation="asking",
-            question=QuestionPart(round="r", part=1),
+            question=QuestionPart(round="r-ask", part=1),
         ),
         episode=address("leaving"),
         occurred_at=AT,
-        text="The user prefers window seats.",
+        text=_CLAIM,
         origin=SupportOrigin.CONFIRMATION,
         when=AT,
     )
-    reading = _reading(
-        hints=(Hint(handle="C1", effect="effect-1", fact=yes.text, confirmation=yes),)
-    )
+    reading = _reading(hints=(_hint("C1", "effect-1", confirmation=yes),))
 
-    proposal = parsed(reply(findings=[]), ScoutReply)
+    proposal = _proposal(reading, found("The user likes windows.", "P1", candidates=["C1"]))
+
     assert proposal is not None
-    (finding,), _ = proposed_findings(proposal, reading)
-
-    assert (finding.claim, finding.rests_on, finding.candidate) == (
-        "The user prefers window seats.",
-        (yes.part,),
-        "effect-1",
-    )
+    (finding,) = proposal.findings
+    assert finding.rests_on == (InputPart(episode=address("leaving")), yes.part)
 
 
 def test_the_scout_is_shown_its_instruction_and_the_reading_as_data() -> None:
-    """§8:5: the reading reaches the model as one JSON object of quoted source data.
-
-    The system message is whatever the scout's template renders (ADR-0334 §3:5).
-    """
-    system, user = scout_messages(
+    messages = scout_messages(
         _reading(), prompt_from(OBSERVER_SCOUT_PROMPT, "Scout.").rendered(flags={"person": False})
     )
 
+    system, user = messages
     assert (system.role, system.content) == (Role.SYSTEM, "Scout.")
     assert user.role is Role.USER
-    assert json.loads(user.content) == _reading().payload()
+    payload = json.loads(user.content)
+    assert set(payload) == {"exchange", "earlier", "memories", "stories", "notes"}
 
 
-def test_the_commit_step_is_shown_its_instruction_and_its_view_as_data() -> None:
-    """§9:3: the view reaches the model as one JSON object; the system message is its template's."""
-    leaving, read = episode("leaving"), _input("P1", "leaving")
-    finding = ObservationFinding(
-        id="f1", episode=leaving.id, claim="The user prefers window seats.", rests_on=(read.part,)
+def test_framing_and_placement_are_shown_their_instruction_and_their_view_as_data() -> None:
+    reading = _reading()
+    leaving = reading.record
+    finding = _proposal(reading, found(_CLAIM, "P1"))
+    assert finding is not None
+    view = FramingView(finding=finding.findings[0], leaving=leaving, parts=reading.leaving.parts)
+    held = memory("m-seat", _CLAIM, said_support(address("past")))
+
+    framed_messages = framing_messages(
+        view, prompt_from(OBSERVER_FRAMING_PROMPT, "Frame.").rendered(flags={})
     )
-    view = CommitView(finding=finding, leaving=leaving, parts=(read,), similar=())
-
-    system, user = commit_messages(
-        view, prompt_from(OBSERVER_COMMIT_PROMPT, "Commit.").rendered(flags={"person": False})
+    placed_messages = placement_messages(
+        PlacementView(framed=held, texts={}, retrieved=()),
+        prompt_from(OBSERVER_PLACEMENT_PROMPT, "Place.").rendered(flags={}),
     )
 
-    assert (system.role, system.content) == (Role.SYSTEM, "Commit.")
-    assert user.role is Role.USER
-    assert json.loads(user.content) == view.payload()
+    assert framed_messages[0].content == "Frame."
+    shown = json.loads(framed_messages[1].content)
+    assert shown["claim"] == _CLAIM
+    assert shown["subjects"] == ["the user"], "the owner is named as a model is shown it"
+    assert "memories" not in shown, "no stored memory is shown to framing (§5:1)"
+    assert placed_messages[0].content == "Place."
+    assert set(json.loads(placed_messages[1].content)) == {"memory", "stored"}
 
 
 @pytest.mark.parametrize(
-    ("scout_prompt", "commit_prompt"),
-    [
-        (OBSERVER_COMMIT_PROMPT, OBSERVER_COMMIT_PROMPT),
-        (OBSERVER_SCOUT_PROMPT, OBSERVER_SCOUT_PROMPT),
-    ],
-    ids=["scout", "commit"],
+    "field",
+    ["scout_prompt", "framing_prompt", "placement_prompt"],
 )
-def test_the_observer_refuses_another_prompts_template(
-    scout_prompt: PromptDeclaration, commit_prompt: PromptDeclaration
-) -> None:
-    """ADR-0334 §2: each step renders its own prompt, never the other's."""
+def test_the_observer_refuses_another_prompts_template(field: str) -> None:
+    """ADR-0334 §2: each step renders its own prompt's template."""
     harness = Harness()
+    wrong: dict[str, PromptDeclaration] = {
+        "scout_prompt": OBSERVER_FRAMING_PROMPT,
+        "framing_prompt": OBSERVER_PLACEMENT_PROMPT,
+        "placement_prompt": OBSERVER_SCOUT_PROMPT,
+    }
+    prompts = {
+        "scout_prompt": default_prompt(OBSERVER_SCOUT_PROMPT),
+        "framing_prompt": default_prompt(OBSERVER_FRAMING_PROMPT),
+        "placement_prompt": default_prompt(OBSERVER_PLACEMENT_PROMPT),
+    }
+    prompts[field] = default_prompt(wrong[field])
 
-    with pytest.raises(ValueError, match="renders the observer_"):
+    with pytest.raises(ValueError, match="prompt"):
         Observer(
             scout=FakeModelProvider.scripted(),
             commit=FakeModelProvider.scripted(),
@@ -356,90 +425,10 @@ def test_the_observer_refuses_another_prompts_template(
             writes=harness.writes,
             plans=harness.plans,
             stories=harness.stories,
-            episodes=RecentEpisodes(memory=harness.memory, limit=1),
+            episodes=RecentEpisodes(memory=harness.memory, limit=2),
             limits=limits(),
-            scout_prompt=default_prompt(scout_prompt),
-            commit_prompt=default_prompt(commit_prompt),
             now=harness.clock,
+            scout_prompt=prompts["scout_prompt"],
+            framing_prompt=prompts["framing_prompt"],
+            placement_prompt=prompts["placement_prompt"],
         )
-
-
-def test_a_reliance_finding_resting_on_the_leaving_episode_is_dropped() -> None:
-    """§14:2: a reliance is judged on what later episodes show, never on its own episode."""
-    held = memory("m-seat", "The user prefers window seats.", said_support(address("past")))
-    reading = _reading(
-        reliances=(Reliance(handle="M1", memory=held, shaped="the seat", relied_at=AT),)
-    )
-
-    claims, dropped = _scouted(
-        reading,
-        {"claim": "Held up.", "rests_on": ["P1"], "relied_on": "M1"},
-        {"claim": "Held up too.", "rests_on": ["P1", "P2"], "relied_on": "M1"},
-    )
-
-    assert (claims, dropped) == ([], 2)
-
-
-def test_a_finding_naming_a_confirmed_candidate_rests_on_its_yes() -> None:
-    """§5:5: the commit step sees the words the user approved, whatever else was named."""
-    yes = ReadPart(
-        handle="P3",
-        part=ConfirmationPart(
-            episode=address("leaving"),
-            asking_activation="asking",
-            question=QuestionPart(round="r", part=1),
-        ),
-        episode=address("leaving"),
-        occurred_at=AT,
-        text="The user prefers window seats.",
-        origin=SupportOrigin.CONFIRMATION,
-        when=AT,
-    )
-    reading = _reading(
-        hints=(Hint(handle="C1", effect="effect-1", fact=yes.text, confirmation=yes),)
-    )
-    proposal = parsed(
-        reply(findings=[{"claim": "Window seats.", "rests_on": ["P1"], "candidate": "C1"}]),
-        ScoutReply,
-    )
-    assert proposal is not None
-
-    (finding,), _ = proposed_findings(proposal, reading)
-
-    assert finding.rests_on == (InputPart(episode=address("leaving")), yes.part)
-
-
-def test_a_reliance_finding_never_stands_in_for_a_confirmation() -> None:
-    """§5:5, §14:2: the confirmed candidate still gets its own finding resting on the yes."""
-    held = memory("m-seat", "The user prefers window seats.", said_support(address("past")))
-    yes = ReadPart(
-        handle="P3",
-        part=ConfirmationPart(
-            episode=address("leaving"),
-            asking_activation="asking",
-            question=QuestionPart(round="r", part=1),
-        ),
-        episode=address("leaving"),
-        occurred_at=AT,
-        text="The user prefers window seats.",
-        origin=SupportOrigin.CONFIRMATION,
-        when=AT,
-    )
-    reading = _reading(
-        hints=(Hint(handle="C1", effect="effect-1", fact=yes.text, confirmation=yes),),
-        reliances=(Reliance(handle="M1", memory=held, shaped="the seat", relied_at=AT),),
-    )
-    proposal = parsed(
-        reply(
-            findings=[
-                {"claim": "Held up.", "rests_on": ["P2"], "relied_on": "M1", "candidate": "C1"}
-            ]
-        ),
-        ScoutReply,
-    )
-    assert proposal is not None
-
-    relied, confirmed = proposed_findings(proposal, reading)[0]
-
-    assert (relied.relied_on, relied.rests_on) == ("m-seat", (InputPart(episode=address("later")),))
-    assert (confirmed.rests_on, confirmed.candidate) == ((yes.part,), "effect-1")

@@ -12,7 +12,8 @@ was left open by a hub that stopped; one stuck with a pending finding; and one s
 
 The head opens a copy and must upgrade it in place (ADR-0326 §4:1): carry every record
 whole (§4:4), each finding reading back with ``supply`` and ``written`` empty since
-nothing was recorded of either (ADR-0329 §12:6, §16:4), move the label to 14, and leave
+nothing was recorded of either (ADR-0329 §12:6, §16:4), and with ADR-0346's
+annotations, declines, unclear and asked empty too, move the label through 14 to 15, and leave
 the file exactly as it found it where the open fails (§4:3).
 """
 
@@ -92,10 +93,28 @@ def _blobs(path: Path) -> dict[str, dict[str, Any]]:
 
 
 def _with_empty_carry(blob: dict[str, Any]) -> dict[str, Any]:
-    """A stored record as this build must read it: each finding's carry empty."""
+    """A stored record as this build must read it: each finding's carry empty.
+
+    And ADR-0346's fields empty with it: no decline on the record, no annotations on a
+    finding, and no ``unclear`` and nothing ``asked`` on an outcome (§4:5, §4:6, §6:5).
+    """
     return {
         **blob,
-        "findings": [one | {"supply": None, "written": []} for one in blob["findings"]],
+        "declines": [],
+        "findings": [
+            one
+            | {
+                "supply": None,
+                "written": [],
+                "annotations": None,
+                "further_candidates": [],
+                "framed": [],
+                "outcome": None
+                if one.get("outcome") is None
+                else one["outcome"] | {"unclear": [], "asked": []},
+            }
+            for one in blob["findings"]
+        ],
     }
 
 
@@ -129,7 +148,7 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     finally:
         store.close()
 
-    assert _label(legacy) == "14"
+    assert _label(legacy) == "15"
     assert export.stopped_activations == ("act-legacy-stopped",)
     assert [one.id for one in export.activation_effects] == ["effect-legacy-remember"]
     assert export.observations == read
@@ -200,7 +219,7 @@ async def test_the_upgraded_file_takes_a_findings_carry_and_keeps_it(legacy: Pat
         assert len((await reopened.export()).observations) == len(_EPISODES)
     finally:
         reopened.close()
-    assert _label(legacy) == "14"
+    assert _label(legacy) == "15"
 
 
 async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> None:

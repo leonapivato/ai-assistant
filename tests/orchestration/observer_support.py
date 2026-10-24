@@ -1,4 +1,4 @@
-"""Shared material for the observer's suites (ADR-0329 §§7-17).
+"""Shared material for the observer's suites (ADR-0329 §§7-17, ADR-0346).
 
 Episodes built as activations record them, a clock a test moves, the canonical fakes
 wired as the composition root would wire them, and scripted model routes: no test makes
@@ -25,6 +25,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     EvidenceItem,
     InputOrigin,
+    LabelBounds,
     MemoryDecisionKind,
     MemorySource,
     MemoryWrite,
@@ -49,13 +50,15 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.authorizer import values_digest
 from ai_assistant.orchestration.observer import Observer, ObserverLimits
 from ai_assistant.orchestration.observer.prompts import (
-    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_FRAMING_PROMPT,
+    OBSERVER_PLACEMENT_PROMPT,
     OBSERVER_SCOUT_PROMPT,
 )
 from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.orchestration.understanding import RecentEpisodes
 from ai_assistant.orchestration.writes import MemoryWriteStage
 from ai_assistant.testing import (
+    FakeEmbedder,
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
@@ -71,6 +74,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import DiagnosticSink, PersonModelStore
     from ai_assistant.core.types import (
+        ActivationRecall,
         ActivationUnderstanding,
         MemoryRecord,
         MemoryUpdateProposal,
@@ -87,6 +91,9 @@ EVENTS: Final = ChannelIdentity(channel_type="informational_event", instance_id=
 
 #: The window the cases' selector keeps (``UNDERSTANDING_EPISODE_LIMIT``'s role).
 WINDOW: Final = 2
+
+#: The bounds the cases' labels are written under (ADR-0345 §7:3).
+LABELS: Final = LabelBounds(max_labels=3, max_chars=40, min_distance=0.05)
 
 
 def address(activation_id: str) -> str:
@@ -108,6 +115,8 @@ def episode(  # noqa: PLR0913 — one knob per part of the record a case varies
     understanding: tuple[ActivationUnderstanding, ...] = (),
     open_: bool = False,
     external: bool = False,
+    recall: ActivationRecall | None = None,
+    stories_position: int | None = None,
 ) -> EpisodicMemory:
     """One activation's episode at its own address, frozen unless ``open_``."""
     frozen = not open_
@@ -147,6 +156,8 @@ def episode(  # noqa: PLR0913 — one knob per part of the record a case varies
             rounds=tuple(rounds),
             labels=tuple(labels),
             digests=tuple(digests),
+            recall=recall,
+            stories_position=stories_position,
         ),
     )
     if not frozen:
@@ -220,9 +231,11 @@ def limits(**overrides: Any) -> ObserverLimits:
     """The bounds the cases run under, any of them overridden."""
     fields: dict[str, Any] = {
         "since": SINCE,
-        "story_episodes": 3,
-        "related": 5,
-        "similar": 5,
+        "relevance": 0.8,
+        "retrieved": 5,
+        "recent_supports": 3,
+        "stale_retries": 2,
+        "labels": LABELS,
         "retry_base": timedelta(minutes=1),
         "retry_cap": timedelta(hours=1),
         "stuck_after": 3,
@@ -236,6 +249,80 @@ def limits(**overrides: Any) -> ObserverLimits:
 def reply(**fields: Any) -> str:
     """A model's reply: one JSON object."""
     return json.dumps(fields)
+
+
+def found(  # noqa: PLR0913 — one keyword per annotation the scout gives (ADR-0346 §4:2)
+    claim: str,
+    *parts: str,
+    candidates: Sequence[str] = (),
+    subjects: Sequence[str] = ("the user",),
+    involved: Sequence[str] = (),
+    why: str = "It matters to the user.",
+    situations: Sequence[str] = (),
+    narrowing: dict[str, Any] | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """One finding as the scout writes it, with its annotations (ADR-0346 §4:2)."""
+    return {
+        "claim": claim,
+        "rests_on": list(parts),
+        "candidates": list(candidates),
+        "subjects": list(subjects),
+        "involved": list(involved),
+        "why": why,
+        "situations": list(situations),
+        "narrowing": narrowing,
+        **extra,
+    }
+
+
+def scouted(*findings: dict[str, Any], declines: Sequence[dict[str, str]] = ()) -> str:
+    """The scout's reply: its findings and declines (ADR-0346 §4:2, §4:6)."""
+    return reply(findings=list(findings), declines=list(declines))
+
+
+def framed(  # noqa: PLR0913 — one keyword per field framing gives a memory (ADR-0346 §5:2)
+    wording: str,
+    *parts: str,
+    backs: bool = True,
+    subjects: Sequence[str] | None = (),
+    involved: Sequence[str] | None = (),
+    labels: Sequence[str] = (),
+    marks: Sequence[str] = (),
+    valid_until: str | None = None,
+    how_sure: str = "sure",
+    **extra: Any,
+) -> dict[str, Any]:
+    """One memory as framing writes it, each part a ``for`` support (ADR-0346 §5:2)."""
+    return {
+        "wording": wording,
+        "supports": [
+            {"part": one, "direction": "for", "backs_as_worded": backs, "how_sure": how_sure}
+            for one in parts
+        ],
+        "subjects": None if subjects is None else list(subjects),
+        "involved": None if involved is None else list(involved),
+        "labels": list(labels),
+        "marks": list(marks),
+        "valid_until": valid_until,
+        **extra,
+    }
+
+
+def framing(*memories: dict[str, Any], nothing: str | None = None) -> str:
+    """Framing's reply: its memories, or nothing with a reason (ADR-0346 §5:2, §5:6)."""
+    return reply(memories=list(memories), nothing=nothing)
+
+
+def placing(*relations: tuple[str, str, str], answers: dict[str, str] | None = None) -> str:
+    """Placement's reply: one relation per memory shown, as ``(M, relation, note)``."""
+    return reply(
+        relations=[
+            {"memory": memory, "relation": relation, "note": note}
+            for memory, relation, note in relations
+        ],
+        answers=answers,
+    )
 
 
 class Minter:
@@ -296,6 +383,8 @@ class Harness:
             policy=self.policy,
             now=self.clock,
             reconciler=None if self.labels is None else Labelling(self.labels),
+            label_bounds=LABELS,
+            label_embedder=FakeEmbedder(),
         )
         self.writes = MemoryWriteStage(writer=self.writer)
 
@@ -330,7 +419,8 @@ class Harness:
             episodes=RecentEpisodes(memory=self.memory, limit=window),
             limits=limits(**bounds),
             scout_prompt=default_prompt(OBSERVER_SCOUT_PROMPT),
-            commit_prompt=default_prompt(OBSERVER_COMMIT_PROMPT),
+            framing_prompt=default_prompt(OBSERVER_FRAMING_PROMPT),
+            placement_prompt=default_prompt(OBSERVER_PLACEMENT_PROMPT),
             now=self.clock,
             mint=self.mint,
             diagnostics=diagnostics,

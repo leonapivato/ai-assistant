@@ -1,0 +1,18 @@
+# A finding joins two habits, each stated in a different message of the one exchange. They
+# could each be true without the other, so framing keeps them as two memories, each backed
+# as worded by the part that states it, and no memory holding both clauses is backed as
+# worded by either.
+prompt = "observer_framing"
+guards = "compound_backed_as_worded"
+came_from = "2026-10-21"
+set = "development"
+samples = 1
+
+[property]
+check = "read"
+read = """Frames the swim and the run as separate memories, each backed as worded by the \
+part that states it: P1 states only the swim and P2 only the run. No memory keeps both \
+clauses with a support that backs it as worded."""
+
+[input]
+file = "compound-claim-one-clause.json"

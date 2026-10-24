@@ -94,7 +94,7 @@ async def test_the_observer_holds_the_person_model_store_only_where_the_switch_i
 async def test_every_bound_is_the_roots_constant_and_the_budget_is_the_setting(
     tmp_path: Path,
 ) -> None:
-    """§7:5, §8:1, §9:3, §16:4-§16:9."""
+    """ADR-0329 §7:5, §16:4-§16:9, ADR-0346 §6:1-§6:7, ADR-0345 §7:3."""
     engine = build_engine(
         Settings(embedder=EmbedderKind.HASHING, observer_daily_calls=40), data_dir=tmp_path
     )
@@ -102,9 +102,11 @@ async def test_every_bound_is_the_roots_constant_and_the_budget_is_the_setting(
         limits = _observer(engine)._limits
         assert limits.since == datetime(2026, 10, 16, tzinfo=UTC)
         assert limits.since == composition.OBSERVER_SINCE
-        assert limits.story_episodes == composition.OBSERVER_STORY_EPISODES
-        assert limits.related == composition.OBSERVER_RELATED
-        assert limits.similar == composition.OBSERVER_SIMILAR
+        assert limits.relevance == composition.RECALL_THRESHOLDS[EmbedderKind.HASHING]
+        assert limits.retrieved == composition.OBSERVER_RETRIEVED
+        assert limits.recent_supports == composition.OBSERVER_RECENT_SUPPORTS
+        assert limits.stale_retries == composition.OBSERVER_STALE_RETRIES
+        assert limits.labels == composition.LABEL_BOUNDS
         assert limits.retry_base == composition.OBSERVER_RETRY_BASE
         assert limits.retry_cap == composition.OBSERVER_RETRY_CAP
         assert limits.stuck_after == composition.OBSERVER_STUCK_AFTER

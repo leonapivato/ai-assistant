@@ -199,10 +199,19 @@ def _followed(response: Mapping[str, object]) -> ModelResponse:
 # --- the asker on the owner's hub (ADR-0337 §8) -------------------------------------
 
 #: The routes a follow-up goes to, one for each kind of recorded call (§8:8): each
-#: stage's own, and the observer's two steps apart, since each step has a route of its
-#: own (ADR-0329 §9:9). The composition root names each one's model.
+#: stage's own, and each of the observer's steps apart (ADR-0329 §9:9): the scout's, and
+#: framing's and placement's, which ADR-0346 §10:1 cuts the commit step into. The
+#: composition root names each one's model, framing's and placement's the commit route
+#: both ride (§10:2).
 FOLLOW_UP_ROUTES: Final = frozenset(
-    {"understanding", "planning", "digesting", "observer.scout", "observer.commit"}
+    {
+        "understanding",
+        "planning",
+        "digesting",
+        "observer.scout",
+        "observer.framing",
+        "observer.placement",
+    }
 )
 
 #: The event a recorded call the asker did not ask about is logged under: by activation,
@@ -237,8 +246,8 @@ _CALLING: Final = frozenset(
     }
 )
 
-#: The observer's steps that make a model call (ADR-0333 §2:2).
-_OBSERVER_CALLS: Final = frozenset({"scout", "commit"})
+#: The observer's steps that make a model call (ADR-0333 §2:2, ADR-0346 §10:1).
+_OBSERVER_CALLS: Final = frozenset({"scout", "framing", "placement"})
 
 #: What tells one call's entries from another's of the same source in one activation's
 #: file, where two may be outstanding at once: a digest's parts are sent together
@@ -808,7 +817,8 @@ def _copies_key(given: DiagnosticEntry) -> str:
     """What every activation's copy of one observer call's given entry holds the same.
 
     Its body but the two fields naming the episode it was written for (ADR-0333 §2:3,
-    §2:9): the step, the request, the finding a commit decides and the prompt key.
+    §2:9): the step, the request, the finding a framing or a placement call decides and
+    the prompt key.
     """
     held = {
         name: value

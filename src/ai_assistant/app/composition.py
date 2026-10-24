@@ -96,7 +96,8 @@ from ai_assistant.orchestration.lookups import (
 from ai_assistant.orchestration.matters_pass import MATTERS_PASS_PROMPT, MattersPass
 from ai_assistant.orchestration.observer import Observer, ObserverLimits
 from ai_assistant.orchestration.observer.prompts import (
-    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_FRAMING_PROMPT,
+    OBSERVER_PLACEMENT_PROMPT,
     OBSERVER_SCOUT_PROMPT,
 )
 from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
@@ -218,7 +219,8 @@ PROMPTS: Final[tuple[PromptDeclaration, ...]] = (
     STORY_TIDY_UP_PROMPT,
     MATTERS_PASS_PROMPT,
     OBSERVER_SCOUT_PROMPT,
-    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_FRAMING_PROMPT,
+    OBSERVER_PLACEMENT_PROMPT,
     MEMORY_RECONCILER_PROMPT,
     FOLLOW_UP_PROMPT,
 )
@@ -503,21 +505,24 @@ CANDIDATE_LOOKUP_LIMIT: Final = 5
 #: value, the day the memory record of ADR-0328 went live.
 OBSERVER_SINCE: Final = datetime(2026, 10, 16, tzinfo=UTC)
 
-#: The most recent episodes read for each story the leaving episode belongs to (§8:1).
-#: Planning's own count for a story's latest episodes, so the observer reads a matter as
-#: far back as planning was shown it.
-OBSERVER_STORY_EPISODES: Final = PHASES_STORY_EPISODES
+#: The most stored memories retrieved for one framed memory (ADR-0346 §6:1): those
+#: relevant enough to its wording, then those naming a person it names. **Provisional.**
+#: Twice the lookup's count, since the owner ruled retrieval need not be capped at
+#: planning's five, and every retrieved memory costs only its compact form in the one
+#: placement call.
+OBSERVER_RETRIEVED: Final = 2 * CANDIDATE_LOOKUP_LIMIT
 
-#: The most past episodes, and the most memories, the observer's relevance search reads
-#: for a leaving episode (§8:1). The lookup's count: enough for the episodes that make an
-#: inference's three distinct occasions (§11:5) with room beside them, few enough that
-#: the scout's reading stays a page.
-OBSERVER_RELATED: Final = CANDIDATE_LOOKUP_LIMIT
+#: The most recent supports a retrieved memory is shown with in full (ADR-0346 §6:2).
+#: **Provisional.** Enough to show how a memory came to stand as it does and who said it
+#: last, few enough that ten memories keep the placement call a page.
+OBSERVER_RECENT_SUPPORTS: Final = 3
 
-#: The most similar memories the commit step is shown for one finding (§9:3). The
-#: lookup's count, so the commit step weighs a claim against as many stored memories as
-#: planning saw beside the candidate.
-OBSERVER_SIMILAR: Final = CANDIDATE_LOOKUP_LIMIT
+#: How many times a placement the writer refuses as stale is retrieved and placed again
+#: within one attempt (ADR-0346 §6:7). The observer is the one writer and runs one run at
+#: a time (ADR-0345 §11:1), so a stale placement means only a pin confirmed between its
+#: retrieval and its write; twice is ample, and past it the attempt fails and is retried
+#: with its backoff.
+OBSERVER_STALE_RETRIES: Final = 2
 
 #: The first backoff after a failed attempt, doubled each further failure (§16:4).
 #: Long enough that a passing outage of a provider is over before the retry, short
@@ -537,10 +542,11 @@ OBSERVER_RETRY_CAP: Final = timedelta(hours=12)
 OBSERVER_STUCK_AFTER: Final = 10
 
 #: The most episodes one run takes (§16:8), so a run stays bounded on the scheduler's
-#: serial loop (ADR-0083 §7). Each episode costs a scout call and one commit call per
-#: finding, so five is about fifteen calls: a few minutes at most behind the loop's other
-#: jobs. With a run on every freeze and the timer every fifteen minutes, that drains a
-#: catch-up faster than the daily budget lets it spend.
+#: serial loop (ADR-0083 §7). Each episode costs a scout call, a framing call per finding
+#: and a placement call per memory framed (ADR-0346 §10:2), so five is about twenty-five
+#: calls: a few minutes at most behind the loop's other jobs. With a run on every freeze
+#: and the timer every fifteen minutes, that drains a catch-up faster than the daily
+#: budget lets it spend.
 OBSERVER_PER_RUN: Final = 5
 
 #: The person-model store's file under the data directory (ADR-0338 §10:1), opened only
@@ -1775,8 +1781,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # window understanding is shown. Swapping the method is a change on this line.
         episode_selector = RecentEpisodes(memory=memory, limit=UNDERSTANDING_EPISODE_LIMIT)
         # ADR-0329's observer, memory's one writer (§2:1): a background stage over its two
-        # routes, the one memory store, the write stage over the writer persisting to that
-        # store (§12:1, ADR-0028 §4), the one plan store its observation records live in
+        # routes, the commit step's carrying framing and placement (ADR-0346 §10:2), the
+        # one memory store, the write stage over the writer persisting to that store
+        # (§12:1, ADR-0028 §4), the one plan store its observation records live in
         # (§16:1), the story store and the selector above (§15:1, §15:3). The engine
         # starts a run on every frozen episode and the scheduler's row runs it on a timer
         # (§7:6).
@@ -1790,18 +1797,23 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             episodes=episode_selector,
             limits=ObserverLimits(
                 since=OBSERVER_SINCE,
-                story_episodes=OBSERVER_STORY_EPISODES,
-                related=OBSERVER_RELATED,
-                similar=OBSERVER_SIMILAR,
+                # ADR-0346 §6:1: recall's threshold for the embedder wired, the
+                # measured line between a memory relevant to a wording and one not.
+                relevance=RECALL_THRESHOLDS[settings.embedder],
+                retrieved=OBSERVER_RETRIEVED,
+                recent_supports=OBSERVER_RECENT_SUPPORTS,
+                stale_retries=OBSERVER_STALE_RETRIES,
+                labels=LABEL_BOUNDS,
                 retry_base=OBSERVER_RETRY_BASE,
                 retry_cap=OBSERVER_RETRY_CAP,
                 stuck_after=OBSERVER_STUCK_AFTER,
                 per_run=OBSERVER_PER_RUN,
                 daily_calls=settings.observer_daily_calls,
             ),
-            # ADR-0334 §3:5: the two steps' instructions, as read at start.
+            # ADR-0334 §3:5: the three steps' instructions, as read at start.
             scout_prompt=prompts[OBSERVER_SCOUT_PROMPT.name],
-            commit_prompt=prompts[OBSERVER_COMMIT_PROMPT.name],
+            framing_prompt=prompts[OBSERVER_FRAMING_PROMPT.name],
+            placement_prompt=prompts[OBSERVER_PLACEMENT_PROMPT.name],
             now=_utcnow,
             # ADR-0333 §2:7: the record's write seam where it is on, ``None`` where off.
             diagnostics=diagnostics,
@@ -2805,7 +2817,9 @@ def _follow_up_asker(
             "planning": first,
             "digesting": first,
             "observer.scout": _observer_scout_spec(settings),
-            "observer.commit": _observer_commit_spec(settings),
+            # ADR-0346 §10:2: framing and placement ride the commit step's route.
+            "observer.framing": _observer_commit_spec(settings),
+            "observer.placement": _observer_commit_spec(settings),
         },
         daily_calls=settings.follow_up_daily_calls,
         timeout=settings.model_timeout_seconds,
@@ -3226,6 +3240,7 @@ def _observer_scout_spec(settings: Settings) -> str:
 def _observer_commit_spec(settings: Settings) -> str:
     """The ``"provider:model"`` spec the observer's commit step decides through (§9:9).
 
+    Framing and placement both ride it (ADR-0346 §10:2), the commit step cut in two.
     ``observer_commit_model`` when the operator named one; otherwise ``default_model``,
     for :func:`_observer_scout_spec`'s reason.
 

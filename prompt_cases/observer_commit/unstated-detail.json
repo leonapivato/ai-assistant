@@ -1,9 +1,0 @@
-{
-  "messages": [
-    {
-      "role": "user",
-      "content": "{\"claim\": \"The user's sister is moving to Portugal next month.\", \"under_review\": \"E1\", \"parts\": [{\"part\": \"P1\", \"exchange\": \"E1\", \"occurred_at\": \"2026-09-14T20:12:00+00:00\", \"from\": \"the user\", \"outside\": false, \"at\": null, \"text\": \"my sister's moving to Portugal next month, I'm going to miss her so much\"}], \"memories\": []}",
-      "name": null
-    }
-  ]
-}

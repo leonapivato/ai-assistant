@@ -1,60 +1,62 @@
-"""The observer's run: the queue, its limits, and the observation record (ADR-0329 §7, §16, §17).
+"""The observer's run: the queue, its limits, and the observation record (ADR-0329 §7, §16).
 
-**The trigger is a query** (§7:1, §16:2). An episode is due once it has left the episode
-window: once the episode selector the composition root wires into understanding, run as
-for the next activation, does not return it (§15:3). The queue is the episodes that are
-due, occurred at or after §7:5's instant, have no observation record marked processed,
-skipped or stuck, and may be attempted now; it is never a store. An episode that was
-attempted stays due whether or not it is back in the window, since it was due once, and
-the first time an episode is due is the only time it is processed automatically: a
-processed one is never queued again. An open episode, the running activation's own
-among them, is not due.
+**The trigger is a query** (ADR-0329 §7:1, §16:2). An episode is due once it has left the
+episode window: once the episode selector the composition root wires into understanding,
+run as for the next activation, does not return it (§15:3). The queue is the episodes
+that are due, occurred at or after §7:5's instant, have no observation record marked
+processed, skipped or stuck, and may be attempted now; it is never a store. An episode
+that was attempted stays due whether or not it is back in the window, since it was due
+once, and the first time an episode is due is the only time it is processed
+automatically. An open episode, the running activation's own among them, is not due.
 
-**Ordered, bounded, budgeted, never lossy** (§16:3-§16:9). Due episodes are taken
-oldest first, by ``(occurred_at, episode id)``; a run takes at most its bound of them,
-and what is left waits for the next run. Before each model call the calls recorded in
-the last 24 hours are read through ``PlanStore.observer_calls_since``, and a call that
-would exceed the daily budget is not made: the attempt is held and the episode waits,
-with nothing dropped, and the run stops. An attempt that fails — a model call, a read,
-a write, or a reply that does not parse — is retried after a backoff doubling from a
-base to a cap; an episode whose failed attempts reach the stuck count is marked stuck,
-kept, and set aside, and later episodes proceed. A held attempt is not a failed one.
+**One episode, its steps** (ADR-0346 §2-§6). Each attempt reads the leaving episode's
+record and what it points at (``reading``), makes the scout's one call (``scout``),
+then, for each finding with no outcome, one framing call (``framing``) and, for each
+memory framing keeps, retrieval and one placement call (``placement``), proposing each
+memory through the write stage as a placed proposal (``writing``). Corrections are
+handled when the correcting episode is processed (§3), so nothing later is read.
+
+**Ordered, bounded, budgeted, never lossy** (ADR-0329 §16:3-§16:9). Due episodes are
+taken oldest first, by ``(occurred_at, episode id)``; a run takes at most its bound of
+them, and what is left waits for the next run. Before each model call, the scout's,
+framing's and placement's alike (ADR-0346 §10:2), the calls recorded in the last 24 hours
+are read through ``PlanStore.observer_calls_since``, and a call that would exceed the
+daily budget is not made: the attempt is held and the episode waits, with nothing
+dropped, and the run stops. An attempt that fails — a model call, a read, a write, a
+placement stale past its count, or a reply that does not parse — is retried after a
+backoff doubling from a base to a cap; an episode whose failed attempts reach the stuck
+count is marked stuck, kept, and set aside, and later episodes proceed. A held attempt is
+not a failed one.
 
 **Recorded as it goes** (§16:1, §16:4). The observation record is written after the
-scout and after each finding's commit, conditionally on the revision read, with every
-model call the attempt made, so the budget counts every call and a retry commits only
-the findings with no outcome. A run writes nothing to the episode, links nothing to a
-story and adds nothing the selector reads (§7:4).
+scout, with its findings, their annotations and its declines (ADR-0346 §4:5, §4:6), and
+after each finding's commit, conditionally on the revision read, with every model call
+the attempt made, so the budget counts every call and a retry commits only the findings
+with no outcome. A run writes nothing to the episode, links nothing to a story and adds
+nothing the selector reads (§7:4).
 
 **What a later attempt needs is on the record, never only in the process** (§12:6,
-§16:1, §16:4), so a hub that stops between attempts — or in the middle of one — loses
-nothing:
+§16:1, §16:4), so a hub that stops between attempts loses nothing:
 
-- each pending finding carries its ``supply``, the meet of every record the runs over
-  it were supplied, the scout's included: set when the scout proposes it, narrowed by
-  every later reading and commit view of its episode before anything is written, and
-  read back as the floor a later commit's placement starts from;
-- each write a commit lands is put in the finding's ``written`` as soon as it lands,
-  before anything else is read or written, so a failure, a cancellation or a stop that
-  follows still leaves it on the record; the commit that decides the finding's outcome
-  merges them into it and clears ``written`` in the same write, a stuck episode's
-  included once an explicit re-run decides it;
-- a supersession whose replacement landed is in ``written`` as that replacement's
-  create, and a later commit reads again what every memory there was created over
-  retired, so a replacement whose retirements were not read when it landed has them
-  recorded on the retry.
+- each pending finding carries its ``supply``, the meet of every record the readings
+  over it were supplied: set when the scout proposes it, and narrowed by every later
+  attempt's reading before anything is written;
+- what framing kept is put on the finding as ``framed`` before any placement call, and
+  each memory's progress with it as the writer takes each step (``writing``);
+- each write that lands is put in the finding's ``written`` with the memory marked done;
+  the commit that decides the finding's outcome merges them into it and clears both in
+  the same write.
 
-A pending finding whose ``supply`` is not recorded — one the plan store held before
-the field — is proposed again by a new scout over the current reading, since its supply
-is unknown and nothing may stand in for it.
+So a retry, after a failure or a held budget, resumes: framing is not asked again, a
+memory already done is not proposed again, and one whose proposal may have landed is
+read off the store. A pending finding whose ``supply`` is not recorded — one the plan
+store held before the field — is proposed again by a new scout, since its supply is
+unknown and nothing may stand in for it.
 
 **One run at a time** (§16:6): a run asked for while one is running does not start and
 answers busy. The hub is one resident process per data directory, so a lock held in
 the process is the whole of it; the observation record's conditional write is the
 backstop.
-
-**The catch-up is the ordinary run** (§17:1): the first run's queue is every due
-episode since §7:5's instant, taken oldest first under the same budget and bound.
 
 **An episode with nothing to read is skipped by rule** (§16:7), with no model call: its
 input carries no message, its rounds record no candidate, and its digests hold no
@@ -66,22 +68,21 @@ the steps, never a fact, a wording, a claim or an identifier that may carry pers
 data.
 
 **The person model, where the root wires its store** (ADR-0338 §9). Each run, before
-its episodes, confirms the pins (§9:6, ``PinConfirmations``). Each attempt reads the
-five fields of the leaving episode's person (§2:5, §7:4), and both steps are given them
-under the prompts' ``person`` flag (§9:1): the scout may then propose field suggestions
-and mark a finding as only restating a field, which is not committed (§9:2-§9:3), and
-the commit step says whether the memory its action creates or adds supports to states
-how the person wants to be spoken to, and whether it matters in every conversation,
-which code records as a style mark and a pin suggestion (§9:4-§9:5). Where no store is
-wired, or the episode is no person's, the flag is false: each step's instruction renders
-as it did, its reply is read in the shape it was, and nothing is read from or written to
-the person model (§11:2).
+its episodes, confirms the pins (§9:6, ``PinConfirmations``), and the writer confirms
+them again, strictly, before each retrieval (§9:9). Each attempt reads the five fields of
+the leaving episode's person, and the scout and framing are given them under the prompts'
+``person`` flag (§9:1): the scout may then propose field suggestions and mark a finding
+as only restating a field, which is not committed (§9:2-§9:3), and framing says of each
+memory whether it states how the person wants to be spoken to and whether it matters in
+every conversation, which code records as a style mark and a pin suggestion on the
+memory it is held at (§9:4-§9:5). Where no store is wired, or the episode is no person's,
+the flag is false and nothing is read from or written to the person model (§11:2).
 
 **What it shows the owner goes to the diagnostic record** (ADR-0333 §2), where the record
-is on: each call's request and reply, the scout's findings, each finding's outcome with
-the words its commit decided, and how each attempt ended, under the leaving episode's
-activation (``entries``). A failure to write one changes nothing here (§2:11), and
-nothing here reads one back (§4:1).
+is on: each call's request and reply, the scout's findings and declines, each finding's
+outcome with what its framing and placements decided, every ``unclear`` among them
+(ADR-0346 §6:5), and how each attempt ended (``entries``). A failure to write one changes
+nothing here (§2:11), and nothing here reads one back (§4:1).
 """
 
 from __future__ import annotations
@@ -108,6 +109,8 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     FindingOutcome,
     FindingUnwritten,
+    FramedMemory,
+    LabelBounds,
     MemoryOperationKind,
     ObservationAttempt,
     ObservationAttemptEnd,
@@ -121,30 +124,39 @@ from ai_assistant.core.types import (
     ProposedSuggestion,
     SuggestionKind,
 )
-from ai_assistant.orchestration.observer.commit import (
-    CommitReply,
-    PersonCommitReply,
-    checked,
-    commit_messages,
-    commit_view,
-)
 from ai_assistant.orchestration.observer.entries import Diagnosed, ObserverEntries
+from ai_assistant.orchestration.observer.framing import (
+    FramingReply,
+    framed,
+    framing_messages,
+    framing_view,
+)
 from ai_assistant.orchestration.observer.person import PinConfirmations, person_of
+from ai_assistant.orchestration.observer.placement import (
+    PlacementReply,
+    placement_messages,
+    placement_of,
+)
 from ai_assistant.orchestration.observer.prompts import (
-    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_FRAMING_PROMPT,
+    OBSERVER_PLACEMENT_PROMPT,
     OBSERVER_SCOUT_PROMPT,
     PERSON_FLAG,
 )
 from ai_assistant.orchestration.observer.reading import EpisodeReader, episode_text
+from ai_assistant.orchestration.observer.replies import parsed
 from ai_assistant.orchestration.observer.scout import (
     PersonScoutReply,
     ScoutReply,
-    parsed,
     person_proposals,
-    proposed_findings,
+    proposed,
     scout_messages,
 )
-from ai_assistant.orchestration.observer.writing import FindingWriter, WriteBlocked
+from ai_assistant.orchestration.observer.writing import (
+    FindingWriter,
+    WriteLimits,
+    outcome_of,
+)
 from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY
 
 if TYPE_CHECKING:
@@ -159,10 +171,19 @@ if TYPE_CHECKING:
         PlanStore,
         StoryStore,
     )
-    from ai_assistant.core.types import Message, ObservationFinding, PersonModelWrite
-    from ai_assistant.orchestration.observer.commit import Checked
+    from ai_assistant.core.types import (
+        CandidateDecline,
+        Memory,
+        MemoryPlacement,
+        Message,
+        ObservationFinding,
+        PersonModelWrite,
+    )
+    from ai_assistant.orchestration.observer.framing import Framing
     from ai_assistant.orchestration.observer.person import PersonFields
+    from ai_assistant.orchestration.observer.placement import PlacementView
     from ai_assistant.orchestration.observer.reading import Reading
+    from ai_assistant.orchestration.observer.writing import Written
     from ai_assistant.orchestration.understanding import EpisodeSelector
     from ai_assistant.orchestration.writes import MemoryWriteStage
 
@@ -182,21 +203,28 @@ class ObserverLimits:
     """Every bound, budget and instant the observer works within, each the root's to set.
 
     Attributes:
-        since: §7:5's instant: an episode that occurred before it is never due.
-        story_episodes: The most recent episodes read per story (§8:1).
-        related: The most past episodes, and the most memories, a search reads (§8:1).
-        similar: The most similar memories the commit step is shown (§9:3).
-        retry_base: The first backoff after a failed attempt (§16:4).
+        since: ADR-0329 §7:5's instant: an episode that occurred before it is never due.
+        relevance: The least relevance a stored memory is retrieved at by its wording
+            alone (ADR-0346 §6:1).
+        retrieved: The most stored memories retrieved for one framed memory (§6:1).
+        recent_supports: The most recent supports a retrieved memory is shown with in
+            full (§6:2).
+        stale_retries: How many times a stale placement is placed again within one
+            attempt (§6:7).
+        labels: The bounds on a memory's situation labels (ADR-0345 §7:3).
+        retry_base: The first backoff after a failed attempt (ADR-0329 §16:4).
         retry_cap: The longest backoff (§16:4).
         stuck_after: The failed attempts after which an episode is stuck (§16:5).
         per_run: The most episodes one run takes (§16:8).
-        daily_calls: The most model calls in any 24 hours (§16:9).
+        daily_calls: The most model calls in any 24 hours, every step's (§16:9).
     """
 
     since: datetime
-    story_episodes: int
-    related: int
-    similar: int
+    relevance: float
+    retrieved: int
+    recent_supports: int
+    stale_retries: int
+    labels: LabelBounds
     retry_base: timedelta
     retry_cap: timedelta
     stuck_after: int
@@ -213,8 +241,8 @@ class ObserverLimits:
         if self.since.tzinfo is None or self.since.utcoffset() is None:
             msg = "the observer's instant is timezone-aware (ADR-0329 §7:5)"
             raise ValueError(msg)
-        if min(self.story_episodes, self.related, self.similar) < 0:
-            msg = "the observer's reading bounds are not negative (ADR-0329 §8:1)"
+        if min(self.retrieved, self.recent_supports, self.stale_retries) < 0:
+            msg = "the observer's retrieval bounds are not negative (ADR-0346 §6)"
             raise ValueError(msg)
         if min(self.stuck_after, self.per_run) < 1 or self.daily_calls < 0:
             msg = "the observer's run takes at least one episode and one attempt (§16)"
@@ -256,7 +284,7 @@ class _NotRecorded(Exception):  # noqa: N818 — a control-flow signal: the reco
 
 
 class _Unparsed(Exception):  # noqa: N818 — a control-flow signal with a code-owned name
-    """A step's reply did not parse: no proposal, never a partial one."""
+    """A step's reply did not parse, or left a candidate unaccounted: no proposal."""
 
     def __init__(self, step: ObserverStep) -> None:
         super().__init__(step.value)
@@ -279,22 +307,20 @@ class _Attempt:
 
 @dataclass(frozen=True, slots=True)
 class _Decided:
-    """A commit's outcome, and the decision and note it came from where a call made one."""
+    """A commit's outcome, and what its framing and placements decided, where calls did."""
 
     outcome: FindingOutcome
-    checked: Checked | None = None
-    note: str | None = None
-    person: PersonCommitReply | None = None
+    decided: dict[str, object] | None = None
 
 
 class Observer:
     """The observer: a background stage that commits what a leaving episode shows (§15:1).
 
-    It holds by injection its two model routes, the memory store, the write stage, the
-    plan store, the story store and the episode selector (§15:1, §15:3), the
+    It holds by injection its two model routes, the scout's and the commit step's, which
+    framing and placement both ride (ADR-0346 §10:2), the memory store, the write stage,
+    the plan store, the story store and the episode selector (ADR-0329 §15:1, §15:3), the
     person-model store where one is wired (ADR-0338 §9:8), and every bound as
-    :class:`ObserverLimits`. The composition root builds it; nothing here reads a
-    setting.
+    :class:`ObserverLimits`. The composition root builds it; nothing here reads a setting.
     """
 
     def __init__(  # noqa: PLR0913 — §15:1 names every collaborator the stage holds
@@ -309,7 +335,8 @@ class Observer:
         episodes: EpisodeSelector,
         limits: ObserverLimits,
         scout_prompt: PromptTemplate,
-        commit_prompt: PromptTemplate,
+        framing_prompt: PromptTemplate,
+        placement_prompt: PromptTemplate,
         now: Callable[[], datetime],
         mint: Callable[[], str] | None = None,
         diagnostics: DiagnosticSink | None = None,
@@ -323,21 +350,24 @@ class Observer:
         cannot express either, so both are composition-root obligations.
 
         Args:
-            scout: The scout's model route (§9:1, §9:9).
-            commit: The commit step's model route (§9:3, §9:9).
+            scout: The scout's model route (ADR-0329 §9:9).
+            commit: The commit step's model route, which framing and placement ride
+                (ADR-0346 §10:2).
             memory: The memory store episodes and memories are read from.
-            writes: The write stage every write goes through (§12:1).
+            writes: The write stage every write goes through (ADR-0329 §12:1).
             plans: The plan store observation and effect records are read from and
                 written to (§16).
-            stories: The story store a story's summary and members are read from (§8:1).
+            stories: The story store a story's summaries and notes are read from
+                (ADR-0347 §4).
             episodes: ADR-0276 §4's episode selector (§7:1, §15:3).
-            limits: Every bound, budget and instant (§§7, 8, 16).
+            limits: Every bound, budget and instant.
             scout_prompt: The template of ``OBSERVER_SCOUT_PROMPT``, default or
                 override, as the composition root read it at start (ADR-0334 §3:5).
-            commit_prompt: The template of ``OBSERVER_COMMIT_PROMPT``, likewise.
+            framing_prompt: The template of ``OBSERVER_FRAMING_PROMPT``, likewise.
+            placement_prompt: The template of ``OBSERVER_PLACEMENT_PROMPT``, likewise.
             now: The clock every record, call and write is stamped from.
-            mint: Mints the fresh part of a new memory's and question's id; a random
-                one where ``None``.
+            mint: Mints the fresh part of a new memory's id; a random one where
+                ``None``.
             diagnostics: The diagnostic record's write seam (ADR-0333 §2:7), or ``None``
                 where ``diagnostic_record`` is false and no entry is built.
             person_model: The person-model store (ADR-0338 §9:8), which must hold the
@@ -345,16 +375,21 @@ class Observer:
                 off, and then nothing of the person model is read or written.
 
         Raises:
-            ValueError: If ``scout_prompt`` or ``commit_prompt`` is not a template of
-                its step's prompt.
+            ValueError: If a prompt is not a template of its step's prompt.
         """
-        if scout_prompt.declaration != OBSERVER_SCOUT_PROMPT:
-            msg = "the scout renders the observer_scout prompt (ADR-0334 §2)"
-            raise ValueError(msg)
-        if commit_prompt.declaration != OBSERVER_COMMIT_PROMPT:
-            msg = "the commit step renders the observer_commit prompt (ADR-0334 §2)"
-            raise ValueError(msg)
-        self._prompts = {ObserverStep.SCOUT: scout_prompt, ObserverStep.COMMIT: commit_prompt}
+        for template, declaration in (
+            (scout_prompt, OBSERVER_SCOUT_PROMPT),
+            (framing_prompt, OBSERVER_FRAMING_PROMPT),
+            (placement_prompt, OBSERVER_PLACEMENT_PROMPT),
+        ):
+            if template.declaration != declaration:
+                msg = f"the observer's step renders the {declaration.name} prompt (ADR-0334 §2)"
+                raise ValueError(msg)
+        self._prompts = {
+            ObserverStep.SCOUT: scout_prompt,
+            ObserverStep.FRAMING: framing_prompt,
+            ObserverStep.PLACEMENT: placement_prompt,
+        }
         self._scout = scout
         self._commit = commit
         self._memory = memory
@@ -364,13 +399,7 @@ class Observer:
         self._now = checked_clock(now, owner="Observer")
         self._mint = mint or _random_id
         self._entries = ObserverEntries(diagnostics, now=self._now)
-        self._reader = EpisodeReader(
-            memory=memory,
-            plans=plans,
-            stories=stories,
-            story_episodes=limits.story_episodes,
-            related=limits.related,
-        )
+        self._reader = EpisodeReader(memory=memory, plans=plans, stories=stories)
         self._people = person_model
         self._pins = (
             None
@@ -378,7 +407,17 @@ class Observer:
             else PinConfirmations(people=person_model, memory=memory, writes=writes, now=self._now)
         )
         self._writer = FindingWriter(
-            writes=writes, memory=memory, now=self._now, mint=self._mint, pins=self._pins
+            writes=writes,
+            memory=memory,
+            plans=plans,
+            now=self._now,
+            limits=WriteLimits(
+                threshold=limits.relevance,
+                bound=limits.retrieved,
+                recent=limits.recent_supports,
+                stale_retries=limits.stale_retries,
+            ),
+            pins=self._pins,
         )
         self._lock = asyncio.Lock()
         # A finding as this process last built it, while the plan store has not taken
@@ -386,9 +425,7 @@ class Observer:
         # put in ``written``. A write of the record that fails ends the run (§16:6's
         # backstop), so the next attempt in this process starts from these rather than
         # from the record — never committing a decided finding again, and never losing
-        # a landed write the record missed (§16:1). Only a process that stops while the
-        # plan store is failing loses one, and then a landed write is still on its
-        # memory's own operation log.
+        # a landed write the record missed (§16:1).
         self._unsaved: dict[tuple[str, str], ObservationFinding] = {}
 
     async def run(self) -> RunOutcome:
@@ -427,7 +464,7 @@ class Observer:
         outcome = RunOutcome(pinned=pinned)
         for episode, held in queue[: self._limits.per_run]:
             try:
-                state = await self._attempted(episode, held, window)
+                state = await self._attempted(episode, held)
             except _Held:
                 return replace(outcome, waiting=outcome.waiting + 1, held=True)
             except _NotRecorded:
@@ -483,7 +520,7 @@ class Observer:
         return [(episode, held) for _, episode, held in queue]
 
     async def _attempted(
-        self, episode_id: str, held: ObservationRecord | None, window: Sequence[EpisodicMemory]
+        self, episode_id: str, held: ObservationRecord | None
     ) -> ObservationState | None:
         """One attempt at one episode, recorded as it goes; its state, or ``None`` if gone."""
         started = self._now()
@@ -517,7 +554,7 @@ class Observer:
         attempt = await self._open(episode_id, held, started)
         attempt.diagnosed = Diagnosed.of(episode, started)
         try:
-            await self._processed(episode, attempt, window)
+            await self._processed(episode, attempt)
         except _Held:
             await self._close(attempt, ObservationAttemptEnd.HELD, ObservationState.WAITING)
             await self._entries.ended(
@@ -530,7 +567,6 @@ class Observer:
             StoryStoreError,
             PlanningError,
             PersonModelStoreError,
-            WriteBlocked,
             _Unparsed,
         ) as exc:
             return await self._failed(attempt, exc)
@@ -556,6 +592,7 @@ class Observer:
             state=ObservationState.WAITING,
             attempts=(*attempts, ObservationAttempt(started_at=started)),
             findings=() if held is None else held.findings,
+            declines=() if held is None else held.declines,
         )
         stored = await self._record(record, expected_revision=0 if held is None else held.revision)
         attempt = _Attempt(record=stored, started_at=started)
@@ -567,19 +604,16 @@ class Observer:
                 _set(attempt, _restored(unsaved, one))
         return attempt
 
-    async def _processed(
-        self, episode: EpisodicMemory, attempt: _Attempt, window: Sequence[EpisodicMemory]
-    ) -> None:
+    async def _processed(self, episode: EpisodicMemory, attempt: _Attempt) -> None:
         """Read, scout where no finding is pending yet, and commit each finding left.
 
-        The findings an earlier attempt proposed are committed over the supply recorded
-        on each, narrowed by this attempt's reading (§12:6). A pending finding whose
-        supply is not recorded is proposed again over this attempt's reading, and those
-        with an outcome stay as recorded (§16:4).
+        A pending finding whose supply is not recorded is proposed again over this
+        attempt's reading, and those with an outcome stay as recorded (§16:4).
         """
-        reading = await self._reader.read(episode, window)
+        reading = await self._reader.read(episode)
         # ADR-0338 §2:5, §7:4: the leaving episode's person's fields, read once per attempt
-        # and given to both steps; none where no store is wired or it is no person's.
+        # and given to the scout and framing; none where no store is wired or it is no
+        # person's.
         person = None if self._people is None else await person_of(self._people, episode)
         findings = attempt.record.findings
         unknown = any(one.outcome is None and one.supply is None for one in findings)
@@ -588,6 +622,8 @@ class Observer:
             self._forget(episode.id)
             await self._scouted(reading, attempt, kept, person)
         else:
+            # §12:6: a record read again may have been narrowed since, so every pending
+            # finding takes the meet of this attempt's reading too, never wider.
             _narrow(attempt, reading.supplied)
         for finding_id in [one.id for one in attempt.record.findings if one.outcome is None]:
             key = (episode.id, finding_id)
@@ -608,8 +644,6 @@ class Observer:
                 # anew, so its entry is written now or never (ADR-0333 §2:5).
                 await self._outcome_entry(attempt, current, decided)
                 raise
-            # After the record holds the outcome: no cancellation reaching the entry's
-            # write can leave a decided finding to be committed again (§1:3, §2:11).
             await self._outcome_entry(attempt, current, decided)
 
     async def _outcome_entry(
@@ -619,11 +653,7 @@ class Observer:
         if decided is None or finding.outcome is None:
             return
         await self._entries.outcome(
-            attempt.diagnosed,
-            finding,
-            finding.outcome,
-            decided=decided.checked,
-            note=decided.note,
+            attempt.diagnosed, finding, finding.outcome, decided=decided.decided
         )
 
     async def _scouted(
@@ -633,16 +663,18 @@ class Observer:
         kept: tuple[ObservationFinding, ...],
         person: PersonFields | None,
     ) -> None:
-        """The scout's one call, and its findings recorded after those kept (§9:1-§9:2).
+        """The scout's one call, and its findings and declines recorded (ADR-0346 §4).
 
-        Each new finding carries the meet of what the scout was supplied (§12:6), so a
-        commit in a later attempt, by this process or after a restart, starts from it.
+        Each new finding carries the meet of what the scout was supplied (ADR-0329 §12:6),
+        so a commit in a later attempt starts from it, and the scout's annotations
+        (§4:5). A reply that leaves a candidate unaccounted is refused as one that does
+        not parse is (§4:6).
 
         Given a person (ADR-0338 §9:1-§9:3), a finding that only restates a field is
         recorded already decided, nothing kept, and is never committed; its suggestion,
         and each the scout proposed beside its findings, is recorded before the findings
         are, so a store that fails leaves no finding behind, and the retry scouts again
-        rather than losing a suggestion (§16:1, ADR-0329 §16:4).
+        rather than losing a suggestion (ADR-0329 §16:1, §16:4).
         """
         rendered = None if person is None else person.rendered()
         reply = await self._call(
@@ -652,25 +684,31 @@ class Observer:
             lambda instruction: scout_messages(reading, instruction, person=rendered),
             person=person is not None,
         )
-        shape: type[ScoutReply | PersonScoutReply] = (
-            ScoutReply if person is None else PersonScoutReply
-        )
-        proposal = parsed(reply, shape)
-        if proposal is None:
+        shape: type[ScoutReply] = ScoutReply if person is None else PersonScoutReply
+        reply_read = parsed(reply, shape)
+        if reply_read is None:
             raise _Unparsed(ObserverStep.SCOUT)
         numbered_from = _next_number(kept)
-        findings, dropped = proposed_findings(proposal, reading, numbered_from=numbered_from)
+        proposal = proposed(reply_read, reading, numbered_from=numbered_from)
+        if proposal is None:
+            raise _Unparsed(ObserverStep.SCOUT)
         supply = Placement.narrowest_of(reading.supplied)
-        _log.info("observer_scout", stage="scout", findings=len(findings), dropped=dropped)
-        proposed = tuple(_updated(one, supply=supply) for one in findings)
+        _log.info(
+            "observer_scout",
+            stage="scout",
+            findings=len(proposal.findings),
+            declines=len(proposal.declines),
+            dropped=proposal.dropped,
+        )
+        findings = tuple(_updated(one, supply=supply) for one in proposal.findings)
         restating: frozenset[str] = frozenset()
-        if person is not None and isinstance(proposal, PersonScoutReply):
-            proposals = person_proposals(proposal, reading, numbered_from=numbered_from)
+        if person is not None and isinstance(reply_read, PersonScoutReply):
+            proposals = person_proposals(reply_read, reading, numbered_from=numbered_from)
             restating = frozenset(proposals.restating)
             await self._suggested(person, proposals.to_record)
             not_kept = FindingOutcome(at=self._now(), unwritten=FindingUnwritten.NOT_KEPT)
-            proposed = tuple(
-                _updated(one, outcome=not_kept) if one.id in restating else one for one in proposed
+            findings = tuple(
+                _updated(one, outcome=not_kept) if one.id in restating else one for one in findings
             )
             _log.info(
                 "observer_scout",
@@ -679,9 +717,12 @@ class Observer:
                 suggestions=len(proposals.to_record),
                 dropped=proposals.dropped,
             )
-        await self._save(attempt, findings=(*kept, *proposed))
-        await self._entries.findings(attempt.diagnosed, proposed, dropped)
-        for one in proposed:
+        declines = _declines(attempt.record.declines, proposal.declines)
+        await self._save(attempt, findings=(*kept, *findings), declines=declines)
+        await self._entries.findings(
+            attempt.diagnosed, findings, proposal.dropped, declines=proposal.declines
+        )
+        for one in findings:
             if one.id in restating and one.outcome is not None:
                 await self._entries.outcome(attempt.diagnosed, one, one.outcome)
 
@@ -709,169 +750,222 @@ class Observer:
     async def _committed(
         self, finding_id: str, reading: Reading, attempt: _Attempt, person: PersonFields | None
     ) -> tuple[ObservationFinding, _Decided]:
-        """One finding's commit call, code's checks, and its writes (§9:3-§9:5, §12).
+        """One finding's framing, placements and writes (ADR-0346 §5-§6).
 
-        What an earlier commit of the finding wrote — its ``written``, with what any
-        replacement there retired read again — joins the outcome, whatever this one
-        decides, and the outcome clears ``written`` in the write that records it (§16:1).
-        Returns the finding with its outcome, and the decision it came from, which the
-        outcome's diagnostic entry gives once the record holds it (ADR-0333 §2:5).
+        What an earlier attempt wrote — the finding's ``written`` — joins the outcome,
+        and the outcome clears ``written`` and ``framed`` in the write that records it
+        (ADR-0329 §16:1). Returns the finding with its outcome, and what its calls
+        decided, which the outcome's diagnostic entry gives once the record holds it
+        (ADR-0333 §2:5).
         """
-        finding = _finding(attempt, finding_id)
-        earlier = await self._recovered(finding.written)
-        if earlier != finding.written:
-            _set(attempt, _updated(finding, written=earlier))
-        decided = await self._decision(finding_id, reading, attempt, earlier, person)
-        if person is not None and decided.person is not None:
-            # On the memory this commit kept, before the outcome is recorded: a store that
-            # fails fails the attempt, and the retry decides the finding again, the
-            # memory already kept shown to it as one stating the claim, to add to.
-            await self._marked(
-                person, decided.person, decided.outcome, episode=attempt.record.episode
-            )
+        decided = await self._decision(finding_id, reading, attempt, person)
         outcome = decided.outcome
-        if earlier:
-            outcome = _with_writes(outcome, earlier)
         _log.info(
             "observer_commit",
             stage="commit",
             ruling=None if outcome.ruling is None else outcome.ruling.value,
             unwritten=None if outcome.unwritten is None else outcome.unwritten.value,
             writes=len(outcome.writes),
+            unclear=len(outcome.unclear),
+            asked=len(outcome.asked),
         )
-        return _updated(_finding(attempt, finding_id), written=(), outcome=outcome), decided
-
-    async def _recovered(
-        self, written: tuple[ObservationWrite, ...]
-    ) -> tuple[ObservationWrite, ...]:
-        """``written``, with the end on each memory a replacement there retired (§16:1).
-
-        A supersession lands whole, so what it retired is on its replacement's create
-        however the replacement stands now. A memory is retired once, so one ``written``
-        already shows retired — by the retirement read when it landed, or by a
-        proposal's own retiring operation — gains nothing; any other operation on it
-        stands beside the end recovered.
-
-        Raises:
-            MemoryStoreError: Where a replacement cannot be read: the attempt fails,
-                ``written`` stays as recorded, and the retry reads it again.
-        """
-        created = [one.memory for one in written if MemoryOperationKind.CREATE in one.operations]
-        if not created:
-            return written
-        retired = {
-            one.memory for one in written if RETIRING_OPERATIONS.intersection(one.operations)
-        }
-        ends = await self._writer.retirements(created)
-        return _joined(written, [one for one in ends if one.memory not in retired])
+        finding = _updated(_finding(attempt, finding_id), written=(), framed=(), outcome=outcome)
+        return finding, decided
 
     async def _decision(
         self,
         finding_id: str,
         reading: Reading,
         attempt: _Attempt,
-        earlier: tuple[ObservationWrite, ...],
         person: PersonFields | None,
     ) -> _Decided:
-        """This commit's call, checks and writes: what it wrote, or why nothing was.
+        """This commit's calls, checks and writes: what it wrote, or why nothing was.
 
-        Every write that lands is put in the finding's ``written`` beside ``earlier``
-        and saved before the next is made (§16:1). Given a person, the step's style and
-        pin judgment is returned with the outcome, for :meth:`_committed` to record.
+        Framing is asked once: what it keeps is put on the finding before any placement,
+        so a later attempt resumes from it (ADR-0329 §16:1, §16:4). Every step of every
+        memory's write is put on the record as the writer takes it, beside what earlier
+        attempts wrote. Given a person, the style and pin framing judged of each memory
+        are recorded on the memory it is held at before the outcome is (ADR-0338
+        §9:4-§9:5), every memory's, the earlier attempts' included.
         """
-        view = await commit_view(
-            _finding(attempt, finding_id),
-            reading,
-            reader=self._reader,
-            memory=self._memory,
-            plans=self._plans,
-            similar=self._limits.similar,
-        )
-        if view is None:
-            return _Decided(outcome=_check_failed(self._now()))
-        _narrow(attempt, view.supplied)
-        supply = _finding(attempt, finding_id).supply
-        rendered = None if person is None else person.rendered()
-        reply = await self._call(
-            attempt,
-            ObserverStep.COMMIT,
-            self._commit,
-            lambda instruction: commit_messages(view, instruction, person=rendered),
-            finding=_finding(attempt, finding_id),
-            person=person is not None,
-        )
-        shape: type[CommitReply | PersonCommitReply] = (
-            CommitReply if person is None else PersonCommitReply
-        )
-        decision = parsed(reply, shape)
-        if decision is None:
-            raise _Unparsed(ObserverStep.COMMIT)
-        verdict = checked(
-            decision,
-            view,
-            now=self._now(),
-            mint=self._mint,
-            placement=Placement() if supply is None else supply,
-        )
+        finding = _finding(attempt, finding_id)
+        earlier = finding.written
+        if earlier and not finding.framed:
+            # A finding the plan store held before ``framed``: its replacement's create
+            # may be on the record without what it retired (§16:1).
+            earlier = await self._recovered(earlier)
+        framing: Framing | None = None
+        records = finding.framed
+        if not records:
+            framing = await self._framing(finding, reading, attempt, person)
+            if framing is None:
+                return _Decided(
+                    outcome=_unwritten(self._now(), FindingUnwritten.CHECK_FAILED, earlier)
+                )
+            if not framing.memories:
+                reason = (
+                    FindingUnwritten.CHECK_FAILED if framing.failed else FindingUnwritten.NOT_KEPT
+                )
+                outcome = _unwritten(self._now(), reason, earlier)
+                return _Decided(outcome=outcome, decided=_decided(framing, None))
+            records = tuple(
+                FramedMemory(memory=one.memory, style=one.style, pin=one.pin)
+                for one in framing.memories
+            )
 
-        async def landed(writes: tuple[ObservationWrite, ...]) -> None:
+        async def progress(
+            now: tuple[FramedMemory, ...], writes: tuple[ObservationWrite, ...]
+        ) -> None:
             key = (attempt.record.episode, finding_id)
-            updated = _updated(_finding(attempt, finding_id), written=_joined(earlier, writes))
+            updated = _updated(
+                _finding(attempt, finding_id), framed=now, written=_joined(earlier, writes)
+            )
             _set(attempt, updated)
             # Kept until the record carrying it is written, so a failing write of the
-            # record loses no landed write to the next attempt in this process (§16:1).
+            # record loses no step to the next attempt in this process (§16:1).
             self._unsaved[key] = updated
             await self._save(attempt, findings=attempt.record.findings)
 
-        outcome = await self._writer.write(
-            verdict, shown=[one.memory for one in view.similar], landed=landed
+        if framing is not None:
+            # What framing kept reaches the record before any placement call is made.
+            await progress(records, ())
+
+        async def place(shown: PlacementView) -> MemoryPlacement:
+            text = await self._call(
+                attempt,
+                ObserverStep.PLACEMENT,
+                self._commit,
+                lambda instruction: placement_messages(shown, instruction),
+                finding=_finding(attempt, finding_id),
+            )
+            reply_placed = parsed(text, PlacementReply)
+            placement = None if reply_placed is None else placement_of(reply_placed, shown)
+            if placement is None:
+                raise _Unparsed(ObserverStep.PLACEMENT)
+            return placement
+
+        annotations = finding.annotations
+        written = await self._writer.write(
+            records,
+            texts={one: read.text for one in finding.rests_on if (read := reading.at(one))},
+            supply=finding.supply or Placement(),
+            narrowing=None if annotations is None else annotations.narrowing,
+            place=place,
+            progress=progress,
         )
-        return _Decided(
-            outcome=outcome,
-            checked=verdict,
-            note=decision.note,
-            person=decision if isinstance(decision, PersonCommitReply) else None,
+        if person is not None:
+            # On the memory each write left, before the outcome is recorded: a store that
+            # fails fails the attempt, and the retry resumes from the record, every
+            # memory done, and marks again, which the store keeps once.
+            await self._marked(person, written.framed, episode=attempt.record.episode)
+        outcome = outcome_of(written.framed, _joined(earlier, written.writes), at=self._now())
+        return _Decided(outcome=outcome, decided=_decided(framing, written))
+
+    async def _recovered(
+        self, written: tuple[ObservationWrite, ...]
+    ) -> tuple[ObservationWrite, ...]:
+        """``written``, with what each replacement on it retired, read off the store (§16:1).
+
+        The writer before ADR-0346 put a supersession's create on the record before it
+        read what that create retired, so a finding the plan store held from then may
+        carry the create alone. A replacement's create names each memory it replaces
+        (ADR-0328 §5:6), and each names it as successor in the retiring operation, so
+        those operations are read off the store, each once, beside what is recorded.
+
+        Raises:
+            MemoryStoreError: Where they cannot be read: the attempt fails, and the
+                retry reads them again.
+        """
+        created = [one.memory for one in written if MemoryOperationKind.CREATE in one.operations]
+        if not created:
+            return written
+        held = await self._memory.get_history(created)
+        replaced = {
+            retired: memory_id
+            for memory_id, memory in held.items()
+            for retired in memory.operations[0].replaces
+        }
+        recorded = {
+            one.memory for one in written if RETIRING_OPERATIONS.intersection(one.operations)
+        }
+        wanted = [one for one in replaced if one not in recorded]
+        if not wanted:
+            return written
+        retired = await self._memory.get_history(wanted)
+        found = [
+            ObservationWrite(memory=memory_id, operations=(operation.kind,))
+            for memory_id in wanted
+            if (memory := retired.get(memory_id)) is not None
+            for operation in memory.operations
+            if operation.successor == replaced[memory_id]
+        ]
+        return _joined(written, found)
+
+    async def _framing(
+        self,
+        finding: ObservationFinding,
+        reading: Reading,
+        attempt: _Attempt,
+        person: PersonFields | None,
+    ) -> Framing | None:
+        """The finding's one framing call and code's checks of it (ADR-0346 §5).
+
+        Returns ``None`` where a part it rests on is no longer read, which fails its
+        check before any call (ADR-0329 §9:5).
+        """
+        view = framing_view(finding, reading)
+        if view is None:
+            return None
+        rendered = None if person is None else person.rendered()
+        reply = await self._call(
+            attempt,
+            ObserverStep.FRAMING,
+            self._commit,
+            lambda instruction: framing_messages(view, instruction, person=rendered),
+            finding=finding,
+            person=person is not None,
+        )
+        reply_read = parsed(reply, FramingReply)
+        if reply_read is None:
+            raise _Unparsed(ObserverStep.FRAMING)
+        return framed(
+            reply_read,
+            view,
+            now=self._now(),
+            mint=self._mint,
+            labels=self._limits.labels,
+            person=person is not None,
         )
 
     async def _marked(
-        self,
-        person: PersonFields,
-        decision: PersonCommitReply,
-        outcome: FindingOutcome,
-        *,
-        episode: str,
+        self, person: PersonFields, framed_memories: Sequence[FramedMemory], *, episode: str
     ) -> None:
-        """The style mark and the pin suggestion a commit asked for (ADR-0338 §9:4-§9:5).
+        """The style marks and pin suggestions framing asked for (ADR-0338 §9:4-§9:5).
 
-        Each on the memory this commit created or added supports to, as its outcome names
-        it, never one it only retired, questioned or recorded a use of: the step judged
-        both of that memory as worded. The store keeps a memory already marked, or whose
-        mark the person removed, unmarked again, and records no pin suggestion for a
-        memory pinned or one equal to a pending or dismissed one.
+        Each on the memory the framed memory is held at after its write, the one
+        installed or each it was folded into. The store keeps a memory already marked,
+        or whose mark the person removed, unmarked again, and records no pin suggestion
+        for a memory pinned or one equal to a pending or dismissed one.
 
         Raises:
             PersonModelStoreError: If the store cannot be written: the attempt fails, and
-                the finding, its outcome not recorded, is decided again on the retry.
+                the retry, resuming from the record, marks again.
         """
         people = self._people
-        if people is None or not (decision.marks_style or decision.suggests_pin):
+        if people is None:  # pragma: no cover - called only with a person
             return
-        kept = (MemoryOperationKind.CREATE, MemoryOperationKind.ADD_SUPPORT)
-        memories = [
-            one.memory
-            for one in outcome.writes
-            if any(kind in one.operations for kind in kept)
-            and not RETIRING_OPERATIONS.intersection(one.operations)
-        ]
-        for memory_id in memories:
-            if decision.marks_style:
-                marked = await people.add_style_mark(person.person_id, memory_id)
-                _refusal_logged(marked, stage="mark")
-            if decision.suggests_pin:
-                suggestion = ProposedSuggestion(
-                    kind=SuggestionKind.PIN, memory_id=memory_id, episode_id=episode
-                )
-                await self._suggested(person, [suggestion])
+        for one in framed_memories:
+            if not (one.style or one.pin):
+                continue
+            for memory_id in one.kept:
+                if one.style:
+                    marked = await people.add_style_mark(person.person_id, memory_id)
+                    _refusal_logged(marked, stage="mark")
+                if one.pin:
+                    suggestion = ProposedSuggestion(
+                        kind=SuggestionKind.PIN, memory_id=memory_id, episode_id=episode
+                    )
+                    await self._suggested(person, [suggestion])
 
     async def _call(  # noqa: PLR0913 — the step, its route, its request, its finding and flag
         self,
@@ -891,9 +985,11 @@ class Observer:
         instruction, rendered here under ``person`` — whether the step is given a
         person's fields (ADR-0338 §9:1) — so that the given entry records the ``prompt``
         key, flag included, of the very instruction they carry (ADR-0334 §8:2, ADR-0335
-        §9:1).
+        §9:1). The placement prompt declares no flag and is rendered with none.
         """
-        instruction = self._prompts[step].rendered(flags={PERSON_FLAG: person})
+        template = self._prompts[step]
+        flags = {PERSON_FLAG: person} if PERSON_FLAG in template.declaration.flags else {}
+        instruction = template.rendered(flags=flags)
         messages = request(instruction)
         at = self._now()
         made = await self._plans.observer_calls_since(at - _A_DAY)
@@ -914,9 +1010,21 @@ class Observer:
         await self._entries.returned(targets, step, reply=reply.content, finding=named)
         return reply.content
 
-    async def _save(self, attempt: _Attempt, *, findings: tuple[ObservationFinding, ...]) -> None:
+    async def _save(
+        self,
+        attempt: _Attempt,
+        *,
+        findings: tuple[ObservationFinding, ...],
+        declines: tuple[CandidateDecline, ...] | None = None,
+    ) -> None:
         """Write the record with the findings and the calls so far, the attempt still open."""
-        record = _with_attempt(attempt, findings=findings, end=None, state=ObservationState.WAITING)
+        record = _with_attempt(
+            attempt,
+            findings=findings,
+            declines=declines,
+            end=None,
+            state=ObservationState.WAITING,
+        )
         await self._carried(attempt, record)
 
     async def _close(
@@ -982,6 +1090,53 @@ class Observer:
         return state
 
 
+def _decided(framing: Framing | None, written: Written | None) -> dict[str, object]:
+    """What a finding's framing and placements decided, for its outcome entry (§2:5).
+
+    Each memory framing proposed, with why code refused it where it did, and each kept
+    one as framed, where this attempt's framing call decided them; framing's reason
+    where it kept nothing; and each kept memory's placement, with its ruling and where
+    it is now held.
+    """
+    kept = (
+        {}
+        if framing is None
+        else {one.memory.content: _framed_memory(one.memory) for one in framing.memories}
+    )
+    return {
+        "framed": None
+        if framing is None
+        else [{**note, "framed": kept.get(str(note["wording"]))} for note in framing.notes],
+        "failed": None if framing is None else framing.failed,
+        "nothing": None if framing is None else framing.nothing,
+        "placed": [] if written is None else list(written.placed),
+    }
+
+
+def _framed_memory(held: Memory) -> dict[str, object]:
+    """A framed memory as its framing decided it: supports, people, labels and marks."""
+    end = held.validity.valid_until
+    return {
+        "supports": [
+            {
+                "part": one.points_at.model_dump(mode="json"),
+                "origin": one.origin.value,
+                "direction": one.direction.value,
+                "backs_as_worded": one.backs_as_worded,
+                "how_sure": None if one.how_sure is None else one.how_sure.value,
+                "about_when": None if one.about_when is None else one.about_when.isoformat(),
+                "note": one.note,
+            }
+            for one in held.supports
+        ],
+        "subjects": list(held.subjects or ()),
+        "involved": list(held.involved or ()),
+        "labels": [one.text for one in held.labels],
+        "marks": [one.value for one in held.marks],
+        "valid_until": None if end is None else end.isoformat(),
+    }
+
+
 def _refusal_logged(written: PersonModelWrite, *, stage: str) -> None:
     """Log a refused person-model write by its code-owned reason, never its value."""
     if written.kind is PersonModelWriteKind.REFUSED:
@@ -1001,7 +1156,7 @@ def _updated(finding: ObservationFinding, **fields: object) -> ObservationFindin
 def _restored(unsaved: ObservationFinding, recorded: ObservationFinding) -> ObservationFinding:
     """The finding this process kept unsaved, never wider than the record's (§12:6).
 
-    It was built after the recorded one and carries every write it does; the supply is
+    It was built after the recorded one and carries every step it does; the supply is
     the meet of the two all the same, so a restore can only narrow a placement.
     """
     if unsaved.supply is None or recorded.supply is None:
@@ -1027,15 +1182,24 @@ def _set(attempt: _Attempt, finding: ObservationFinding) -> None:
 def _narrow(attempt: _Attempt, supplied: Sequence[Placement]) -> None:
     """Narrow every pending finding's supply by ``supplied`` (§12:6), unsaved.
 
-    Every record the run reads over an episode is supplied to it, so each finding still
-    to be committed takes the meet, whichever finding's commit view read it; a finding
-    whose supply is unknown stays unknown.
+    The next write of the record carries it, before any call or write is made on it; a
+    finding whose supply is unknown stays unknown.
     """
     if not supplied:
         return
     for one in attempt.record.findings:
         if one.outcome is None and one.supply is not None:
             _set(attempt, _updated(one, supply=Placement.narrowest_of([one.supply, *supplied])))
+
+
+def _declines(
+    held: Sequence[CandidateDecline], new: Sequence[CandidateDecline]
+) -> tuple[CandidateDecline, ...]:
+    """The record's declines with a scout's new ones, each candidate once (ADR-0346 §4:6)."""
+    kept = {one.candidate: one for one in held}
+    for one in new:
+        kept.setdefault(one.candidate, one)
+    return tuple(kept.values())
 
 
 def _failure_of(exc: Exception) -> dict[str, object]:
@@ -1053,8 +1217,6 @@ def _reason(exc: Exception) -> str:
     """A failed attempt's code-owned reason: never an error's message (§15:7)."""
     if isinstance(exc, _Unparsed):
         return "unparsed"
-    if isinstance(exc, WriteBlocked):
-        return "placement"
     return type(exc).__name__
 
 
@@ -1080,13 +1242,6 @@ def _joined(
     )
 
 
-def _with_writes(outcome: FindingOutcome, earlier: Sequence[ObservationWrite]) -> FindingOutcome:
-    """``outcome`` with what an earlier, failed commit of the same finding wrote (§16:1)."""
-    return FindingOutcome(
-        at=outcome.at, ruling=outcome.ruling, writes=_joined(earlier, outcome.writes)
-    )
-
-
 def _random_id() -> str:
     return uuid4().hex
 
@@ -1105,6 +1260,7 @@ def _with_attempt(
     findings: tuple[ObservationFinding, ...],
     end: ObservationAttemptEnd | None,
     state: ObservationState,
+    declines: tuple[CandidateDecline, ...] | None = None,
 ) -> ObservationRecord:
     """The record with this attempt's calls and end, the findings and the state given."""
     current = ObservationAttempt(started_at=attempt.started_at, calls=tuple(attempt.calls), end=end)
@@ -1113,11 +1269,21 @@ def _with_attempt(
         state=state,
         attempts=(*attempt.record.attempts[:-1], current),
         findings=findings,
+        declines=attempt.record.declines if declines is None else declines,
     )
 
 
-def _check_failed(at: datetime) -> FindingOutcome:
-    return FindingOutcome(at=at, unwritten=FindingUnwritten.CHECK_FAILED)
+def _unwritten(
+    at: datetime, reason: FindingUnwritten, earlier: Sequence[ObservationWrite] = ()
+) -> FindingOutcome:
+    """Nothing written by this commit, with what an earlier attempt wrote (§16:1).
+
+    A finding the plan store held before ``framed`` may carry writes an earlier commit
+    landed; they are its outcome whatever this commit decides, and are never dropped.
+    """
+    if earlier:
+        return FindingOutcome(at=at, writes=tuple(earlier))
+    return FindingOutcome(at=at, unwritten=reason)
 
 
 def _nothing_to_read(episode: EpisodicMemory) -> bool:

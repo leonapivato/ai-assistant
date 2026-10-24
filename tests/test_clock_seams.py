@@ -73,6 +73,7 @@ from ai_assistant.core.types import (
     DataTier,
     EpisodicMemory,
     Idempotency,
+    LabelBounds,
     Memory,
     MemoryDecisionKind,
     MemorySource,
@@ -134,7 +135,8 @@ from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.held_results import HeldResult, HeldResults
 from ai_assistant.orchestration.observer import Observer, ObserverLimits
 from ai_assistant.orchestration.observer.prompts import (
-    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_FRAMING_PROMPT,
+    OBSERVER_PLACEMENT_PROMPT,
     OBSERVER_SCOUT_PROMPT,
 )
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools, PhaseWorking
@@ -633,9 +635,11 @@ async def _observer(now: Clock) -> None:
         episodes=RecentEpisodes(memory=memory, limit=2),
         limits=ObserverLimits(
             since=_AWARE,
-            story_episodes=1,
-            related=1,
-            similar=1,
+            relevance=0.5,
+            retrieved=1,
+            recent_supports=1,
+            stale_retries=1,
+            labels=LabelBounds(max_labels=1, max_chars=10, min_distance=0.1),
             retry_base=timedelta(minutes=1),
             retry_cap=timedelta(hours=1),
             stuck_after=1,
@@ -644,7 +648,8 @@ async def _observer(now: Clock) -> None:
         ),
         now=now,
         scout_prompt=default_prompt(OBSERVER_SCOUT_PROMPT),
-        commit_prompt=default_prompt(OBSERVER_COMMIT_PROMPT),
+        framing_prompt=default_prompt(OBSERVER_FRAMING_PROMPT),
+        placement_prompt=default_prompt(OBSERVER_PLACEMENT_PROMPT),
     ).run()
 
 

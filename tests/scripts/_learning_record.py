@@ -7,11 +7,12 @@ tests that read it. No live model is called and no hub is contacted.
 
 The record holds four episodes the observer learned from, oldest first:
 
-- ``a-kept``: two findings, one a memory created and one the commit step kept nothing of,
-  and a third proposal the scout's labels did not resolve, dropped;
+- ``a-kept``: two findings, one a memory created and one framing kept nothing of, and a
+  third proposal the scout's labels did not resolve, dropped;
 - ``a-skipped``: nothing to read, so its attempt's end entry alone;
-- ``a-retried``: a scout call that failed, then a second attempt that kept a single
-  observation as evidence;
+- ``a-retried``: a scout call that failed, then a second attempt that framed an occasion,
+  placed against the memory ``a-kept`` created, which is about the user too
+  (ADR-0346 §6:1-§6:2);
 - ``a-alone``: a memory created, and no file of its own in the record (§5:6).
 
 The first three also have their own activation's file, as understanding writes it, so
@@ -25,7 +26,7 @@ import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
-from observer_support import AT, Harness, episode, reply
+from observer_support import AT, Harness, episode, framed, framing, placing, scouted
 
 from ai_assistant.core.types import DiagnosticEntry, DiagnosticKind, DiagnosticSource
 from ai_assistant.evaluation.diagnostic_record import FileDiagnosticRecord
@@ -51,18 +52,14 @@ NOT_KEPT_CLAIM: Final = "The user is vegetarian."
 EVIDENCE_CLAIM: Final = "The user's dentist appointments are on Thursdays."
 ALONE_CLAIM: Final = "The user's sister Imogen lives in Lisbon."
 
-#: Why the commit step kept nothing of the vegetarian finding, in its own words.
+#: Why framing kept nothing of the vegetarian finding, in its own words.
 NOT_KEPT_NOTE: Final = "Said in passing about these days; not a lasting preference yet."
 
 _BIG_FILE: Final = 8 * 1024 * 1024
 
 
-def _claim_of(messages: Sequence[Message]) -> str:
-    return str(json.loads(messages[-1].content)["claim"])
-
-
 class _Routes:
-    """The two model routes, each answering from the episode or the claim it is shown."""
+    """The two model routes, each answering from the episode, the claim or the memory shown."""
 
     def __init__(self, harness: Harness) -> None:
         self.harness = harness
@@ -70,44 +67,41 @@ class _Routes:
 
     def scout(self, messages: Sequence[Message]) -> str:
         self.harness.clock.advance(timedelta(seconds=3))
-        leaving = json.loads(messages[-1].content)["leaving"]
+        leaving = json.loads(messages[-1].content)["exchange"]
         shown = " ".join(str(one.get("text", "")) for one in leaving["parts"])
         if SAID["a-retried"] in shown and not self.failed_once:
             self.failed_once = True
             msg = "the provider timed out"
             raise RuntimeError(msg)
         if SAID["a-kept"] in shown:
-            findings = [
-                {"claim": KEPT_CLAIM, "rests_on": ["P1"]},
+            return scouted(
+                {"claim": KEPT_CLAIM, "rests_on": ["P1"], "subjects": ["the user"]},
                 {"claim": NOT_KEPT_CLAIM, "rests_on": ["P1"]},
                 {"claim": "Rests on a label nothing read.", "rests_on": ["P404"]},
-            ]
-        elif SAID["a-retried"] in shown:
-            findings = [{"claim": EVIDENCE_CLAIM, "rests_on": ["P1"]}]
-        else:
-            findings = [{"claim": ALONE_CLAIM, "rests_on": ["P1"]}]
-        return reply(findings=findings)
+            )
+        if SAID["a-retried"] in shown:
+            return scouted({"claim": EVIDENCE_CLAIM, "rests_on": ["P1"], "subjects": ["the user"]})
+        return scouted({"claim": ALONE_CLAIM, "rests_on": ["P1"], "subjects": ["Imogen"]})
 
     def commit(self, messages: Sequence[Message]) -> str:
         self.harness.clock.advance(timedelta(seconds=2))
-        claim = _claim_of(messages)
+        shown = json.loads(messages[-1].content)
+        if "claim" not in shown:
+            # A placement: the occasion has nothing to do with the seat it was placed against.
+            return placing(("M1", "independent", ""))
+        claim = shown["claim"]
         if claim == NOT_KEPT_CLAIM:
-            return reply(action="nothing", note=NOT_KEPT_NOTE)
+            return framing(nothing=NOT_KEPT_NOTE)
         if claim == EVIDENCE_CLAIM:
-            return reply(action="single_observation", note="Once so far; kept as evidence.")
-        return reply(
-            action="create",
-            wording=claim,
-            supports=[
-                {
-                    "part": "P1",
-                    "direction": "for",
-                    "backs_as_worded": True,
-                    "how_sure": "sure",
-                    "note": "The user said so in their own words.",
-                }
-            ],
-            note="A stated fact about the user.",
+            return framing(framed(claim, "P1", subjects=["the user"], marks=["occasion"]))
+        about = ["Imogen"] if claim == ALONE_CLAIM else ["the user"]
+        return framing(
+            framed(
+                claim,
+                "P1",
+                subjects=about,
+                note="A stated fact about the user.",
+            )
         )
 
 
