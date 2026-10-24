@@ -3448,3 +3448,27 @@ async def test_a_removed_memory_takes_its_labels_with_it(
 
     assert store._conn.execute("SELECT COUNT(*) FROM situation_labels").fetchone()[0] == 0
     assert store._conn.execute("SELECT COUNT(*) FROM vec_situation_labels").fetchone()[0] == 0
+
+
+async def test_each_label_vector_is_its_own_texts_embedding(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """§7:4: a label is embedded as its wording would be, never as its memory's content."""
+    embedder = HashingEmbedder(dimensions=64)
+    store = make_store(embedder=embedder)
+    await store.add(_labelled("m", "when travelling", "at the dentist"))
+    await store.add(_labelled("m", "at the dentist", "on a train"))
+
+    stored = {
+        str(text): bytes(vector)
+        for text, vector in store._conn.execute(
+            "SELECT l.text, v.embedding FROM situation_labels l "
+            "JOIN vec_situation_labels v ON v.rowid = l.label_rowid"
+        )
+    }
+
+    expected = await embedder.embed(["at the dentist", "on a train"])
+    assert stored == {
+        "at the dentist": sqlite_vec.serialize_float32(list(expected[0])),
+        "on a train": sqlite_vec.serialize_float32(list(expected[1])),
+    }

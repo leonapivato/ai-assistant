@@ -6247,32 +6247,15 @@ def _round_texts(episode: EpisodicMemory, round_id: str) -> tuple[str, ...]:
     return tuple(one.text for one in processing.rounds if one.id == round_id)
 
 
-def _call_texts(episode: EpisodicMemory) -> tuple[str, ...]:
-    """The words the episode's rounds' calls carry, a remember call's statement among them.
-
-    The effect record that names which call a remember call is lives in the plan store,
-    out of the memory store's reach, so a part pointing at one gives the text of every
-    call its episode's rounds made, and no round's message.
-    """
-    processing = episode.processing_record
-    if processing is None:
-        return ()
-    return tuple(
-        value
-        for one in processing.rounds
-        for call in one.calls
-        for value in call.arguments.values()
-        if isinstance(value, str)
-    )
-
-
 def _part_texts(  # noqa: PLR0911 — one arm per part that gives text
     support: MemorySupport, episodes: Mapping[str, EpisodicMemory]
 ) -> tuple[str, ...]:
     """The text the part ``support`` points at gives, as the held records keep it.
 
-    An input, a round's message, an evidence item, the input of a yes, a remember call
-    and a legacy record give text; an observer's inference and a pin give none.
+    An input, a round's message, an evidence item, the input of a yes and a legacy record
+    give text. An observer's inference and a pin give none, and neither does a remember
+    call: which call it is lives on its effect record, in the plan store, out of reach
+    here, so no name is taken from any call's arguments.
     """
     part = support.points_at
     if isinstance(part, LegacyPart):
@@ -6294,8 +6277,6 @@ def _part_texts(  # noqa: PLR0911 — one arm per part that gives text
             return (evidence[part.item].text,) if part.item < len(evidence) else ()
         case ConfirmationPart():
             return _input_texts(episode, None)
-        case RememberCallPart():
-            return _call_texts(episode)
         case _:
             return ()
 

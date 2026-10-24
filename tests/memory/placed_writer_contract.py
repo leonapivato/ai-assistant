@@ -1656,6 +1656,175 @@ class PlacedWriterContract:
                 )
         assert (await _all(store))["m"] == held
 
+    # --- round 2's findings ---------------------------------------------------------------
+
+    async def test_a_restates_weighs_and_adds_only_the_supports_that_count(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """§5:2: a support the proposal stopped neither lifts the target nor is revived on it."""
+        store = await self._world("page", "page-2", "owner", "doubt")
+        page = await self._hold(
+            make_placed_writer, store, memory("m-page", "Ana is a nurse", _page("page"))
+        )
+        said = _said("owner")
+        doubt = _said("doubt", direction=SupportDirection.AGAINST)
+        evidence = _page("page-2")
+        create = MemoryOperation(
+            kind=MemoryOperationKind.CREATE, cites=evidence.points_at, at=_SAID_AT, by=said.added_by
+        )
+        stop = MemoryOperation(
+            kind=MemoryOperationKind.STOP_COUNTING,
+            cites=doubt.points_at,
+            at=_SAID_AT,
+            by=said.added_by,
+            stops=said.points_at,
+        )
+        proposed = memory(
+            "m-again", "Ana works as a nurse", evidence, said, doubt, operations=(create, stop)
+        )
+
+        result = await self._write(
+            make_placed_writer, store, _placed(proposed, _pair(page, PlacedRelation.RESTATES))
+        )
+
+        after = (await _all(store))["m-page"]
+        assert result.folded == ("m-page",)
+        assert after.standing is page.standing
+        assert after.support_at(said.points_at) is None
+
+    async def test_a_confirmed_supersede_creates_nothing_a_create_may_not_carry(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """§8:3: the confirmation rule's ruling writes no memory the rules on a create refuse."""
+        store = await self._world("owner", "yes")
+        lisbon = await self._hold(
+            make_placed_writer, store, memory("m-lisbon", "Ana lives in Lisbon", _said("owner"))
+        )
+        before = await _all(store)
+        proposal = _placed(
+            memory(
+                "m-porto",
+                "Ana lives in Porto",
+                _said("yes"),
+                marks=(MemoryMark.ASSISTANT_STATEMENT,),
+            ),
+            _pair(lisbon, PlacedRelation.NO_LONGER_TRUE),
+        ).model_copy(
+            update={
+                "confirmation": UserConfirmation(
+                    question=QuestionPart(round="round-1", part=1),
+                    question_key="0" * 64,
+                    confirmed_at=_AT,
+                    retires=("m-lisbon",),
+                )
+            }
+        )
+
+        with pytest.raises(MemoryStoreError):
+            await make_placed_writer(store, _RulingPolicy(MemoryDecisionKind.SUPERSEDE)).ingest(
+                proposal
+            )
+
+        assert await _all(store) == before
+
+    async def test_a_fold_keeps_the_labels_its_target_carries(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """§7:6, §7:9: a fold writes no label, so the target's labels stay whole."""
+        store = await self._world("tom", "sam", "owner")
+        labelled = memory(
+            "m-porto",
+            "Ana lives in Porto",
+            _said("tom", _TOM),
+            labels=(_label("when visiting family"),),
+        )
+        await store.add(labelled)
+        porto = (await _all(store))["m-porto"]
+
+        await self._write(
+            make_placed_writer,
+            store,
+            _placed(
+                memory("m-again", "Ana lives in Porto", _said("sam", _SAM)),
+                _pair(porto, PlacedRelation.RESTATES),
+            ),
+        )
+        await self._write(
+            make_placed_writer,
+            store,
+            _placed(
+                memory("m-part", "Ana lives in Portugal", _said("owner")),
+                _pair((await _all(store))["m-porto"], PlacedRelation.SUPPORTS),
+            ),
+        )
+
+        assert (await _all(store))["m-porto"].labels == porto.labels
+
+    async def test_an_ordinary_reinforcement_keeps_the_labels_its_target_carries(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """§7:9, §10:1: an unplaced fold unions no topic and drops no label."""
+        store = await self._world("owner", "owner-again")
+        labelled = memory(
+            "m-tea",
+            "The user prefers green tea",
+            _said("owner"),
+            labels=(_label("when ordering drinks"),),
+        )
+        await store.add(labelled)
+        before = (await _all(store))["m-tea"]
+
+        result = await make_placed_writer(
+            store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE)
+        ).ingest(
+            MemoryUpdateProposal(
+                proposed=memory("m-again", "The user prefers green tea", _said("owner-again")),
+                rationale="the same claim, again",
+            )
+        )
+
+        assert result.record_id == "m-tea"
+        assert (await _all(store))["m-tea"].labels == before.labels
+
+    async def test_a_label_write_removing_labels_is_still_held_to_the_count(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """§7:3: a memory carries at most the bound, whatever the write adds."""
+        store = await self._world("owner")
+        writer = make_placed_writer(store, FakeMemoryPolicy(), labels=(_BOUNDS, _Embedded()))
+        texts = ("a", "far", "other", "fourth", "fifth")
+        await store.add(
+            memory(
+                "m",
+                "The user is allergic",
+                _said("owner"),
+                labels=tuple(_label(text) for text in texts),
+            )
+        )
+        held = (await _all(store))["m"]
+
+        with pytest.raises(MemoryStoreError):
+            await writer.write_labels(
+                MemoryLabelChange(memory=held, labels=texts[:4], by=MemoryWriterName.OBSERVER)
+            )
+
+        assert (await _all(store))["m"] == held
+
+    async def test_a_label_at_exactly_the_distance_is_a_near_duplicate(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """§7:5: "within" the distance includes it, at a distance exactly representable."""
+        store = await self._world("owner")
+        bounds = LabelBounds(max_labels=3, max_chars=40, min_distance=1.0)
+        writer = make_placed_writer(store, FakeMemoryPolicy(), labels=(bounds, _Embedded()))
+        proposed = memory(
+            "m", "The user is allergic", _said("owner"), labels=(_label("a"), _label("far"))
+        )
+
+        result = await writer.ingest(_placed(proposed))
+
+        assert result.refused_labels == ("far",)
+
     # --- §5's worked example ----------------------------------------------------------------
 
     async def test_the_worked_example_ends_in_its_table(

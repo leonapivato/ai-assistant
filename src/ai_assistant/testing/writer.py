@@ -81,7 +81,7 @@ from ai_assistant.testing._observer_writes import (
     retirement_fault,
 )
 from ai_assistant.testing._operations import applied_operation
-from ai_assistant.testing._placed import created_fault, placed_write
+from ai_assistant.testing._placed import created_fault, placed_fault, placed_write
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -821,9 +821,12 @@ class FakeMemoryWriter:
             MemoryStoreError: If no bounds were wired, a label breaks them, or the
                 embedder fails.
         """
-        if not new:
-            return [], []
         bounds = self._label_bounds
+        if not new:
+            if bounds is not None and len(carried) > bounds.max_labels:
+                msg = f"refusing to write more than {bounds.max_labels} labels (ADR-0345 §7:3)"
+                raise MemoryStoreError(msg)
+            return [], []
         embedder = self._label_embedder
         if bounds is None or embedder is None:
             msg = "refusing to write a label: no label bounds were wired (ADR-0345 §7:3)"
@@ -951,6 +954,10 @@ class FakeMemoryWriter:
         placement = observed.placement
         if placement is None:  # pragma: no cover - routed here only when placed
             msg = "only a placed proposal is written by its placement"
+            raise MemoryStoreError(msg)
+        fault = placed_fault(observed)
+        if fault is not None:
+            msg = f"refusing to write {observed.proposed.id!r}: {fault}"
             raise MemoryStoreError(msg)
         named = [pair.memory for pair in placement.pairs]
         found = await self._store.get_many(named) if named else {}
