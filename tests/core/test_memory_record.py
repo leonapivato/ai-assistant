@@ -201,7 +201,6 @@ def test_a_pin_points_into_no_episode() -> None:
 @pytest.mark.parametrize(
     ("change", "match"),
     [
-        ({"direction": SupportDirection.AGAINST, "backs_as_worded": False}, "for its memory"),
         ({"backs_as_worded": False}, "as worded"),
         ({"how_sure": ReadingCertainty.LIKELY}, "sure"),
         ({"how_sure": None}, "sure"),
@@ -211,7 +210,6 @@ def test_a_pin_points_into_no_episode() -> None:
         ({"added_by": MemoryWriterName.REMEMBER}, "only the observer"),
     ],
     ids=[
-        "against",
         "not-as-worded",
         "likely",
         "not-judged",
@@ -227,6 +225,20 @@ def test_a_pinned_support_is_for_as_worded_sure_and_dated_at_the_pin(
     """§4:4, §4:6: ``for``, as worded, ``sure``, the pin's instant, nothing else; observer's."""
     with pytest.raises(ValidationError, match=match):
         MemorySupport.model_validate(pinned_support().model_dump() | change)
+
+
+def test_a_pinned_support_may_be_added_against_a_memory_where_a_dispute_is_recorded() -> None:
+    """ADR-0345 §3:8 adds the one other place a pin's support goes: ``against``, backing nothing.
+
+    A placed write records a dispute by adding a memory's backing to the memory that
+    contradicts it, a pin's support among them (ADR-0338 §4:5, in the addition alone).
+    """
+    against = MemorySupport.model_validate(
+        pinned_support().model_dump()
+        | {"direction": SupportDirection.AGAINST, "backs_as_worded": False}
+    )
+    assert against.direction is SupportDirection.AGAINST
+    assert not against.backs_as_worded
 
 
 def test_a_pinned_support_raises_its_memory_to_you_confirmed_this_wording() -> None:

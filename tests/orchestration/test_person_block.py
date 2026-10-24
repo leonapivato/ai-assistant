@@ -379,7 +379,7 @@ async def test_the_record_rule_is_applied_to_the_slot() -> None:
     """§6:5: a memory the audience may not be shown is not in the slot, as recall's is not."""
     world = _World()
     await world.held(
-        _fact("m:about-ada", "Ada is allergic to nuts.", about_person="Ada"),
+        _fact("m:about-ada", "Ada is allergic to nuts.", subjects=("Ada",)),
         _fact("m:diet", "Eats no meat."),
     )
     await world.pin("m:about-ada", "m:diet")
@@ -633,7 +633,7 @@ async def test_a_pin_suggestions_memory_must_be_current_and_pass_the_record_rule
     await world.held(
         _ended("m:old", "Lives in Porto.", successor="m:new"),
         _fact("m:new", "Lives in Coimbra."),
-        _fact("m:about-ada", "Ada is allergic to nuts.", about_person="Ada"),
+        _fact("m:about-ada", "Ada is allergic to nuts.", subjects=("Ada",)),
     )
     for one in ("m:old", "m:about-ada", "m:gone"):
         await world.people.record_suggestion(OWNER_PERSON_ID, _pin(one))

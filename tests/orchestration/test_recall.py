@@ -100,7 +100,7 @@ def _fact(
         band_of(source),
         attestation=_provenance(source).attestation,
         placement=Placement() if placement is None else placement,
-        about_person=about,
+        subjects=None if about is None else (about,),
     )
 
 

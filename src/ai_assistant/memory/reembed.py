@@ -59,7 +59,7 @@ from ai_assistant.core.errors import (
     MemoryStoreEmbeddingExpiredError,
     MemoryStoreError,
 )
-from ai_assistant.core.types import EpisodicMemory, record_band
+from ai_assistant.core.types import EpisodicMemory, Memory, record_band
 from ai_assistant.memory._channel_reads import channel_of
 from ai_assistant.memory._episode_format import (
     MEMORY_RECORD_FORMAT,
@@ -78,7 +78,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
     from ai_assistant.core.protocols import Embedder
-    from ai_assistant.core.types import Embedding, EvaluationTrace, MemoryRecord
+    from ai_assistant.core.types import Embedding, EvaluationTrace, MemoryRecord, SituationLabel
 
 #: Appended to the live store's name for the store being built beside it. A
 #: sibling rather than a temporary directory because ``os.replace`` is atomic only
@@ -160,7 +160,15 @@ _DESTINATION_FIELDS: Final = frozenset(
     name.strip() for name in _DESTINATION_COLUMNS.split(",") if name.strip() != "rowid"
 )
 _DESTINATION_TABLES: Final = frozenset(
-    {"records", "vec_records", "revision_issuer", "meta", "episode_record_format"}
+    {
+        "records",
+        "vec_records",
+        "situation_labels",
+        "vec_situation_labels",
+        "revision_issuer",
+        "meta",
+        "episode_record_format",
+    }
 )
 
 #: Where the stamp sits in a source row read through either of the two above.
@@ -481,7 +489,7 @@ def _derived(
         expires,
         valid_until,
         valid_from,
-        record.about_person,
+        record.about_person if isinstance(record, EpisodicMemory) else None,
         occurred_at,
         None if channel is None else channel.channel_type,
         None if channel is None else channel.instance_id,
@@ -868,10 +876,19 @@ class Reembedder:
                 await self._embed([record.content for record in records if not is_open(record)])
             )
             vectors = [None if is_open(record) else next(embedded_vectors) for record in records]
+            # ADR-0345 §7:4: a memory's labels are embedded as its wording is, so the
+            # rebuild re-embeds them in the target space beside it.
+            texts = [label.text for record in records for label in _labels_of(record)]
+            embedded_labels = iter(await self._embed(texts) if texts else [])
+            labels = [
+                tuple(next(embedded_labels) for _ in _labels_of(record)) for record in records
+            ]
             cursor = int(rows[-1][0])
             with transaction(work, "copy a re-embedded chunk", error=MemoryStoreError):
-                for row, record, vector in zip(rows, records, vectors, strict=True):
-                    _insert(work, row, record, vector)
+                for row, record, vector, carried in zip(
+                    rows, records, vectors, labels, strict=True
+                ):
+                    _insert(work, row, record, vector, carried)
                 _write_meta(work, _CURSOR_KEY, str(cursor))
             embedded += len(rows)
             if progress is not None:
@@ -1153,11 +1170,17 @@ def _chunk(source: sqlite3.Connection, cursor: int | None, size: int, columns: s
         raise MemoryStoreError(msg) from exc
 
 
+def _labels_of(record: MemoryRecord) -> tuple[SituationLabel, ...]:
+    """A memory's labels, which the store embeds (ADR-0345 §7:4); none on an episode."""
+    return record.labels if isinstance(record, Memory) else ()
+
+
 def _insert(
     work: sqlite3.Connection,
     row: _Row,
     record: MemoryRecord,
     vector: Embedding | None,
+    labels: Sequence[Embedding] = (),
 ) -> None:
     """Write one copied row and its recomputed vector into the open transaction.
 
@@ -1213,6 +1236,14 @@ def _insert(
         work.execute(
             "INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)",
             (rowid, sqlite_vec.serialize_float32(list(vector))),
+        )
+    for label, embedding in zip(_labels_of(record), labels, strict=True):
+        cursor = work.execute(
+            "INSERT INTO situation_labels(record_rowid, text) VALUES (?, ?)", (rowid, label.text)
+        )
+        work.execute(
+            "INSERT INTO vec_situation_labels(rowid, embedding) VALUES (?, ?)",
+            (cursor.lastrowid, sqlite_vec.serialize_float32(list(embedding))),
         )
 
 

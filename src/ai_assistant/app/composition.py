@@ -37,6 +37,7 @@ from ai_assistant.core.types import (
     DELIVERY_RESERVE_BYTES,
     CanonicalDestination,
     DestinationProtocol,
+    LabelBounds,
     SecretScope,
 )
 from ai_assistant.evaluation import FileDiagnosticRecord, MeasureReader, SqliteTraceStore
@@ -235,6 +236,14 @@ _READ_CHUNK: Final = 64 * 1024
 #: honest figure is the one this build used, not one restated beside a default this
 #: module does not control.
 CONFLICT_LIMIT: Final = 100
+
+#: The composition root's numbers for a memory's situation labels (ADR-0345 §7:3,
+#: §7:5): at most eight labels on one memory, each at most eighty characters, and a new
+#: label within a cosine distance of 0.1 of one the memory already carries is a
+#: near-duplicate and not added. **Provisional**: no producer writes a label until the
+#: observer's framing does (ADR-0346 §9), and the distance is to be measured on the
+#: labels it writes, against the embedder wired, as recall's threshold was.
+LABEL_BOUNDS: Final = LabelBounds(max_labels=8, max_chars=80, min_distance=0.1)
 
 #: How many episodes the understanding stage's **episode window** holds (ADR-0276 §4),
 #: on ADR-0158 §5's rule: a cardinality control whose
@@ -1736,6 +1745,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 prompt=prompts[MEMORY_RECONCILER_PROMPT.name],
                 max_conflicts=settings.reconciler_max_conflicts,
             ),
+            # ADR-0345 §7: the root's label bounds, and the store's own embedder, so a
+            # near-duplicate is judged in the space the store embeds every label in.
+            label_bounds=LABEL_BOUNDS,
+            label_embedder=embedder,
         )
         # ADR-0300 §5's tidy-up, **one operation** for planning's tidy-up call (ADR-0300 §10:4), so
         # at most one run is on a story at a time (§5:10). Its lookalike search keeps what recall

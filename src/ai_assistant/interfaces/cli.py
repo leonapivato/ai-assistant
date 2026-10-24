@@ -273,7 +273,9 @@ from ai_assistant.core.types import (
     DiscloserProvenance,
     EgressBinding,
     GrantScope,
+    HolderKind,
     MemoryKind,
+    MemoryMark,
     MemoryStanding,
     MemoryStatus,
     MessageAddedChange,
@@ -302,6 +304,7 @@ from ai_assistant.core.types import (
     StoryMember,
     StoryMemberKind,
     SupportDirection,
+    SupportHolder,
     SupportOrigin,
     ToolOutcome,
     TranscriptMessage,
@@ -6912,7 +6915,14 @@ def _standing_line(belief: Belief | BeliefSummary) -> str:
     """
     if belief.standing is None:
         return f"\n  [bold cyan]{belief.band.value}[/] · a captured exchange"
-    head = f"\n  [bold cyan]{belief.band.value}[/] · {_STANDING_WORDS[belief.standing]}"
+    # ADR-0345 §12:4: a memory marked as the assistant's statement is said to be what I
+    # said, never by its standing as a source's word or yours.
+    standing = (
+        _SAID_BY_ME
+        if MemoryMark.ASSISTANT_STATEMENT in belief.marks
+        else _STANDING_WORDS[belief.standing]
+    )
+    head = f"\n  [bold cyan]{belief.band.value}[/] · {standing}"
     match belief.status:
         case MemoryStatus.CURRENT:
             return head
@@ -6961,14 +6971,54 @@ def _outside_warrant(belief: Belief | BeliefSummary) -> str:
     )
 
 
+#: ADR-0345 §12:4: the standing words a memory marked ``assistant_statement`` takes.
+_SAID_BY_ME: Final = "what I said"
+
+
+def _holder_words(holder: SupportHolder) -> str:
+    """Whose belief a support records, as this surface says it (ADR-0345 §12)."""
+    match holder.kind:
+        case HolderKind.PERSON if holder.identifier == OWNER_PERSON_ID:
+            return "you"
+        case HolderKind.PERSON:
+            return f"another person ({_safe(holder.identifier or '')})"
+        case HolderKind.OUTSIDE_SOURCE if holder.claimed:
+            return f"a forward claimed to come from {_safe(holder.identifier or '')}"
+        case HolderKind.OUTSIDE_SOURCE:
+            return f"the source {_safe(holder.identifier or '')}"
+        case HolderKind.ASSISTANT_STATEMENT:
+            return "my own words"
+        case _:
+            return "an unknown source"
+
+
+def _said_why(belief: Belief | BeliefSummary) -> str:
+    """Why a memory marked ``assistant_statement`` is held (ADR-0345 §12:4).
+
+    What I said, where and when, and who kept it where someone did: never as your word
+    or a source's, whatever its standing.
+    """
+    when = ", ".join(_when_or_unknown(one.when) for one in belief.statements) or "unknown"
+    kept = [one for one in belief.holders if one.kind is HolderKind.PERSON]
+    keeper = (
+        f" {', '.join(_holder_words(one) for one in kept)} kept it."
+        if kept
+        else " Nobody but me said it."
+    )
+    return f"I said this, in my message of {when}; it is a record of what I said.{keeper}"
+
+
 def _why(belief: Belief | BeliefSummary) -> str:
     """Why this memory is held: its standing, said in plain words (ADR-0328 §15:4).
 
     Total over :class:`~ai_assistant.core.types.MemoryStanding`, mechanically so: the
     wildcard does nothing but ``assert_never``. An inference says its evidence summary,
     and whether any of it came from outside (ADR-0189 §4's clause, on the ``DERIVED``
-    band where that ADR put it).
+    band where that ADR put it). A memory marked ``assistant_statement`` is said to be
+    what I said, whatever its standing (ADR-0345 §12:4).
     """
+    if MemoryMark.ASSISTANT_STATEMENT in belief.marks:
+        return _said_why(belief)
     match belief.standing:
         case None:
             return _why_episodic(belief)
@@ -7192,6 +7242,9 @@ def _render_belief_fields(belief: Belief | BeliefSummary) -> None:
         return
     _print(f"  [dim]Learned:[/] {_when_or_unknown(belief.learned)}")
     _print(f"  [dim]As of:[/] {_when_or_unknown(belief.as_of)}")
+    if belief.holders and belief.holders != (SupportHolder.person(OWNER_PERSON_ID),):
+        # ADR-0345 §12:1: whose belief it is, wherever that is not yours alone.
+        _print(f"  [dim]Held by:[/] {', '.join(_holder_words(one) for one in belief.holders)}")
     _render_reported_by(belief)
     certainty = belief.reading_certainty
     if certainty is not ReadingCertainty.SURE:

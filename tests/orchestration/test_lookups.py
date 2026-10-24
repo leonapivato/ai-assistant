@@ -208,7 +208,7 @@ async def test_a_search_applies_the_audience_predicate_at_the_search() -> None:
     """
     store = await _store(
         _fact("said", "dentist with Dr Rao"),
-        _fact("about-sam", "dentist for Sam on Monday", about_person="Sam"),
+        _fact("about-sam", "dentist for Sam on Monday", subjects=("Sam",)),
         _fact("reported", "dentist moved to 3pm", outside=True),
     )
     look_ups = LookUps(memory=store, views=None, search_limit=5)

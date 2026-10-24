@@ -46,8 +46,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, final
 
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     BeliefBand,
     DataTier,
+    Memory,
     MemorySource,
     PlacementReach,
     band_of,
@@ -205,6 +207,21 @@ def admits_owner_placed(supply: TurnSupply) -> bool:
     return isinstance(supply, BoundedAudienceSupply)
 
 
+def _about_another(record: SuppliedRecord) -> bool:
+    """Whether ADR-0199 §3's household clause finds ``record`` about someone else.
+
+    An episode or a minted record states it as ``about_person`` (ADR-0100). A memory
+    carries ``subjects`` in its place (ADR-0345 §9:1), naming the owner by
+    :data:`~ai_assistant.core.types.OWNER_PERSON_ID` (§9:4), so the clause reads a
+    memory naming anyone else among its subjects, which is what an upgraded
+    ``about_person`` becomes (§13:1). Read fail-closed, as the clause was: a memory
+    whose subjects were never determined is read as the owner's, as ``None`` was.
+    """
+    if isinstance(record, Memory):
+        return any(name != OWNER_PERSON_ID for name in record.subjects or ())
+    return record.about_person is not None
+
+
 def _speakable(record: SuppliedRecord, *, speakable_attested_sources: frozenset[str]) -> bool:
     """Whether ADR-0199 §3 places this record as speakable on an unbounded channel.
 
@@ -253,7 +270,7 @@ def _speakable(record: SuppliedRecord, *, speakable_attested_sources: frozenset[
     Returns:
         Whether it may reach any stage of a turn on this channel (ADR-0203 §1).
     """
-    if record.about_person is not None:
+    if _about_another(record):
         return False
     if record.placement.reach is not PlacementReach.ANYONE:
         return False

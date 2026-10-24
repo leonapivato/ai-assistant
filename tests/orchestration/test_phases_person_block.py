@@ -167,7 +167,7 @@ async def test_a_connected_sources_event_is_the_owners_too() -> None:
 
 #: A pin placed for the owner alone: a memory about someone else (ADR-0199 §3).
 ABOUT_ADA: Final = memory(
-    "m:ada", "Ada is allergic to nuts.", said_support(when=AT, added_at=AT), about_person="Ada"
+    "m:ada", "Ada is allergic to nuts.", said_support(when=AT, added_at=AT), subjects=("Ada",)
 )
 
 

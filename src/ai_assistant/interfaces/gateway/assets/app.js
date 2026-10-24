@@ -4667,9 +4667,49 @@ function confirmedHow(belief) {
   return "You confirmed this wording.";
 }
 
+// Whether a memory is marked as the assistant's own statement (ADR-0345 §8:1).
+function saidByMe(belief) {
+  return Array.isArray(belief.marks) && belief.marks.includes("assistant_statement");
+}
+
+// Whose belief a support records, in plain words (ADR-0345 §12), as the CLI says it
+// (`_holder_words`).
+function holderWords(holder) {
+  if (holder.kind === "person") {
+    return holder.owner ? "you" : `another person (${holder.identifier})`;
+  }
+  if (holder.kind === "outside_source") {
+    return holder.claimed
+      ? `a forward claimed to come from ${holder.identifier}`
+      : `the source ${holder.identifier}`;
+  }
+  if (holder.kind === "assistant_statement") {
+    return "my own words";
+  }
+  return "an unknown source";
+}
+
+// Why a memory marked as my statement is held (ADR-0345 §12:4): what I said, where and
+// when, and who kept it, never as your word or a source's, whatever its standing.
+function saidWhy(belief) {
+  const when = (belief.statements || [])
+    .map((one) => (one.when === null ? "unknown" : localTime(one.when)))
+    .join(", ");
+  const kept = (belief.holders || []).filter((one) => one.kind === "person");
+  const keeper =
+    kept.length > 0
+      ? ` ${kept.map(holderWords).join(", ")} kept it.`
+      : " Nobody but me said it.";
+  return `I said this, in my message of ${when || "unknown"}; it is a record of what I said.${keeper}`;
+}
+
 // Why a memory is held: its standing, said in plain words (ADR-0328 §15:4). An
-// inference says its evidence summary, and whether any of it came from outside.
+// inference says its evidence summary, and whether any of it came from outside. A memory
+// marked as my statement is said to be what I said (ADR-0345 §12:4).
 function whyHeld(belief) {
+  if (saidByMe(belief)) {
+    return saidWhy(belief);
+  }
   if (belief.standing === "confirmed") {
     return confirmedHow(belief);
   }
@@ -4711,6 +4751,11 @@ function beliefLines(belief) {
     `Learned: ${belief.learned === null ? "unknown" : localTime(belief.learned)}`,
     `As of: ${belief.as_of === null ? "unknown" : localTime(belief.as_of)}`,
   ];
+  const holders = belief.holders || [];
+  if (holders.length > 0 && !(holders.length === 1 && holders[0].owner)) {
+    // ADR-0345 §12:1: whose belief it is, wherever that is not yours alone.
+    lines.push(`Held by: ${holders.map(holderWords).join(", ")}`);
+  }
   if (belief.attestation !== null) {
     // ADR-0189 §1, §4: which source its standing rests on, and when that source said so
     // on its own clock (ADR-0328 §2:6), as the CLI says it.
@@ -4754,7 +4799,8 @@ function beliefLines(belief) {
 // say the same words they are said once.
 function beliefHeading(belief) {
   const band = bandWords(belief.band);
-  const standing = standingWords(belief.standing);
+  // ADR-0345 §12:4: a memory marked as my statement is said to be what I said.
+  const standing = saidByMe(belief) ? "what I said" : standingWords(belief.standing);
   return band.toLowerCase() === standing.toLowerCase() ? band : `${band} · ${standing}`;
 }
 

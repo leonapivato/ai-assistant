@@ -326,6 +326,9 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "ToolInvocation",
         "RecordedInvocation",
         "SupportView",
+        # ADR-0345 §12:4: where and when a memory marked as the assistant's statement
+        # was said, carried on both projections.
+        "StatementCitation",
         "BeliefSummary",
         "Belief",
         "ConversationSummary",
@@ -1842,6 +1845,13 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     route the methods a peer at 116 calls (ADR-0124 §9:2). **The method set moves from
     61 to 69.**
 
+    **117 is ADR-0345 §12:5, on wire-carried core types alone.** ``Belief`` and
+    ``BeliefSummary`` gain holders, ``subjects`` and ``involved``, labels, marks and the
+    statements a memory marked ``assistant_statement`` cites, ``SupportView`` each
+    support's holder, and the wire-carried ``Memory`` loses ``about_person`` and
+    ``topics``. A peer at 116 refuses the new fields as extra (ADR-0124 §9:2). **The
+    method set does not move and stays at 69.**
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1850,7 +1860,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (69, 116), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (69, 117), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

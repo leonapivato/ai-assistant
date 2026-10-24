@@ -46,6 +46,7 @@ from ai_assistant.core.types import (
     MemoryWriteMode,
     ProcessingStatus,
     RecordChunk,
+    names_person,
     record_band,
     record_transaction_time,
 )
@@ -449,13 +450,15 @@ class InMemoryMemoryStore:
             and not self._is_expired(record, now)
         }
 
-    async def search(
+    async def search(  # noqa: PLR0913 — one argument per eligibility axis
         self,
         query: str,
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        person: str | None = None,
+        as_subject: bool = False,
     ) -> MemorySearchResult:
         """Return the records most relevant to ``query``, best first.
 
@@ -487,6 +490,10 @@ class InMemoryMemoryStore:
             kinds: If given, restrict results to these memory kinds.
             bands: If given, restrict results to these belief bands; ``None`` is
                 every band and ``()`` none, conjunctive with ``kinds``.
+            person: If given, only memories naming it in ``subjects`` or
+                ``involved`` (ADR-0345 §9:6), as :func:`~ai_assistant.core.types.names_person`
+                rules, conjunctive with the rest.
+            as_subject: With ``person``, read ``subjects`` alone.
 
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult` holding the
@@ -519,6 +526,7 @@ class InMemoryMemoryStore:
             and not is_open(record)
             and (wanted is None or record.kind in wanted)
             and (wanted_bands is None or record_band(record) in wanted_bands)
+            and names_person(record, person, as_subject=as_subject)
             and (score := _relevance(query_terms, record.content)) > 0.0
         ]
         scored.sort(key=lambda record: record.score or 0.0, reverse=True)

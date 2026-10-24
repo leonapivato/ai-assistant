@@ -67,7 +67,7 @@ class FakeMemoryPolicy:
     :attr:`calls` and answered with :attr:`kind`, so a test picks the branch it
     wants to exercise instead of constructing a proposal that provokes it.
 
-    Four contract obligations override the configured kind, because a fake that
+    Five contract obligations override the configured kind, because a fake that
     could be configured into violating its own conformance suite would be a trap:
 
     * **Secret-tier proposals are never committed** (ADR-0004 §3) — they return
@@ -82,8 +82,12 @@ class FakeMemoryPolicy:
       fold decision, so either falls back to ``ACCEPT``.
     * **Nothing is stored tentatively** (ADR-0328 §10:3): a configured
       ``STORE_TEMPORARY`` is answered with ``ACCEPT``.
+    * **A placed proposal is folded by no ruling** (ADR-0345 §4:5): the fake has no
+      rule on a confirmed proposal, so a configured ``REINFORCE`` or ``SUPERSEDE`` on a
+      placed one is answered with ``ACCEPT``, which its writer reads as "apply the
+      placement".
 
-    All four are visible in the returned :attr:`~MemoryDecision.reason`, so a
+    All five are visible in the returned :attr:`~MemoryDecision.reason`, so a
     surprised test can see what happened rather than silently passing.
 
     The taint override is **as narrow as the contract clause and no narrower**:
@@ -105,7 +109,7 @@ class FakeMemoryPolicy:
         self.kind = kind
         self.calls: list[PolicyCall] = []
 
-    async def decide(
+    async def decide(  # noqa: PLR0911 — one return per obligation the fake keeps
         self,
         proposal: MemoryUpdateProposal,
         *,
@@ -159,6 +163,14 @@ class FakeMemoryPolicy:
             return MemoryDecision(
                 kind=MemoryDecisionKind.ACCEPT,
                 reason="fake: no conflict to fold into, accepted instead",
+            )
+        if kind in _FOLD_KINDS and proposal.placement is not None:
+            return MemoryDecision(
+                kind=MemoryDecisionKind.ACCEPT,
+                reason=(
+                    "fake: a placed proposal is ruled by the floor alone, and its writer "
+                    "applies its placement (ADR-0345 §4:5)"
+                ),
             )
 
         if kind in _FOLD_KINDS:

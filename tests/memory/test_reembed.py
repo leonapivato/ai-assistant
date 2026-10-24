@@ -88,14 +88,14 @@ def _record(
     *,
     expires_at: datetime | None = None,
     validity: Validity | None = None,
-    about_person: str | None = None,
+    subject: str | None = None,
 ) -> MemoryRecord:
     return memory(
         record_id,
         content,
         expires_at=expires_at,
         validity=validity or Validity(),
-        about_person=about_person,
+        subjects=None if subject is None else (subject,),
     )
 
 
@@ -238,7 +238,7 @@ async def test_rowids_and_stored_json_survive_the_migration_byte_for_byte(tmp_pa
     records = [
         _record("a", "espresso", expires_at=_WHEN + timedelta(days=365)),
         _record("b", "oat milk", validity=Validity(valid_until=_WHEN + timedelta(days=30))),
-        _record("c", "decaf after six", about_person="Sam"),
+        _record("c", "decaf after six", subject="Sam"),
     ]
     await _seed(store, records)
     before = _read(store, f"{_ALL_COLUMNS} ORDER BY rowid")

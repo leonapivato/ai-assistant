@@ -67,6 +67,7 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     RecordChunk,
     WalkPosition,
+    names_person,
     record_band,
     record_transaction_time,
 )
@@ -733,13 +734,15 @@ class FakeMemoryStore:
                 and not self._is_expired(record, now)
             }
 
-    async def search(
+    async def search(  # noqa: PLR0913 — one argument per eligibility axis
         self,
         query: str,
         *,
         limit: int = 10,
         kinds: Sequence[MemoryKind] | None = None,
         bands: Sequence[BeliefBand] | None = None,
+        person: str | None = None,
+        as_subject: bool = False,
     ) -> MemorySearchResult:
         """Return live records matching ``query`` by lexical overlap, best first.
 
@@ -795,6 +798,8 @@ class FakeMemoryStore:
                 ):
                     continue
                 if wanted_bands is not None and record_band(record) not in wanted_bands:
+                    continue
+                if not names_person(record, person, as_subject=as_subject):
                     continue
                 content = record.content.lower()
                 hits = sum(1 for term in query_terms if term in content)

@@ -60,18 +60,33 @@ MEMORIES_RECORD_FORMAT: Final[int] = 13
 #: a file at 14, whose records it would misread (ADR-0326 §5:3).
 JOINED_RECORD_FORMAT: Final[int] = 14
 
-#: The memory store's own label, the one this build writes. ADR-0338 §4:4 advances it
-#: to 15 for the pin's support: ``SupportOrigin`` gains ``pinned`` and ``SupportPart``
-#: the part ``pin``, members of closed enumerations a stored memory names (ADR-0326
-#: §2:3). A file at 14 is upgraded in place by the label alone, since a record written at
-#: 14 validates unchanged, and an older build, which serves 12 to 14, refuses a file at
-#: 15, whose pinned supports it would not read (ADR-0326 §5:3).
-MEMORY_RECORD_FORMAT: Final[int] = 15
+#: The memory store's label for ADR-0338 §4:4's record. It advances to 15 for the pin's
+#: support: ``SupportOrigin`` gains ``pinned`` and ``SupportPart`` the part ``pin``,
+#: members of closed enumerations a stored memory names (ADR-0326 §2:3). A file at 14 is
+#: upgraded in place by the label alone, since a record written at 14 validates
+#: unchanged, and an older build, which serves 12 to 14, refuses a file at 15, whose
+#: pinned supports it would not read (ADR-0326 §5:3).
+PINNED_RECORD_FORMAT: Final[int] = 15
+
+#: The memory store's own label, the one this build writes. ADR-0345 §13:3 advances it
+#: to 16 for its memory record: every support records its holder, and a memory carries
+#: labels, marks, ``subjects`` and ``involved`` in place of ``about_person`` and
+#: ``topics``. A file at 15 is upgraded in place (§13:1), every memory rewritten by
+#: :func:`~ai_assistant.memory._placed_upgrade.placed_memory`, and an older build, which
+#: serves 12 to 15, refuses a file at 16, whose memories it would not read (ADR-0326
+#: §5:3).
+MEMORY_RECORD_FORMAT: Final[int] = 16
 
 #: The memory store's labels a build opens: its own, and each it upgrades from, in
 #: order (ADR-0326 §4:5, §5:1).
 MEMORY_RECORD_FORMATS: Final[frozenset[int]] = frozenset(
-    {EPISODE_RECORD_FORMAT, MEMORIES_RECORD_FORMAT, JOINED_RECORD_FORMAT, MEMORY_RECORD_FORMAT}
+    {
+        EPISODE_RECORD_FORMAT,
+        MEMORIES_RECORD_FORMAT,
+        JOINED_RECORD_FORMAT,
+        PINNED_RECORD_FORMAT,
+        MEMORY_RECORD_FORMAT,
+    }
 )
 
 

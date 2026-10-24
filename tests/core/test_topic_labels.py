@@ -21,8 +21,10 @@ from ai_assistant.core.types import (
     DataTier,
     MemorySource,
     MemoryUpdateProposal,
+    MemoryWriterName,
     Provenance,
     SemanticMemory,
+    SituationLabel,
     TopicLabel,
 )
 from ai_assistant.testing.memories import memory
@@ -171,19 +173,28 @@ def test_a_record_over_the_install_bound_constructs_and_decodes() -> None:
     assert SemanticMemory.model_validate_json(record.model_dump_json()).topics == labels
 
 
-# --- §12.19: out of the fingerprint -----------------------------------------
+# --- §12.19: out of the fingerprint, which a memory's labels inherit ----------
+# A memory carries no topics (ADR-0345 §10:1); its situation labels take their place in
+# the fingerprint's exclusions, being how a memory is filed and not what it states.
+
+
+def _labelled(texts: tuple[str, ...]) -> tuple[SituationLabel, ...]:
+    return tuple(
+        SituationLabel(text=text, added_at=_NOW, added_by=MemoryWriterName.OBSERVER)
+        for text in texts
+    )
 
 
 def _proposal(topics: tuple[str, ...]) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(
-        proposed=memory("m-1", "the user sleeps badly", topics=topics),
+        proposed=memory("m-1", "the user sleeps badly", labels=_labelled(topics)),
         rationale="because the episodes support it",
         sensitivity=DataTier.PERSONAL,
     )
 
 
-def test_two_proposals_differing_only_in_topics_are_one_question() -> None:
-    """Topics are how a record is filed, not what is believed (§10, ADR-0078 §7).
+def test_two_proposals_differing_only_in_labels_are_one_question() -> None:
+    """Labels are how a memory is filed, not what is believed (ADR-0078 §7, ADR-0345 §7).
 
     Both layers, because the outer one is what the deferral queue dedups on: a
     difference the user was never shown must not mint a second question.
@@ -198,7 +209,7 @@ def test_a_content_difference_still_separates_two_questions() -> None:
     """The exclusion is of one field, not of the projection's discrimination."""
     labelled = _proposal(("health",))
     other = MemoryUpdateProposal(
-        proposed=memory("m-1", "the user swims", topics=("health",)),
+        proposed=memory("m-1", "the user swims", labels=_labelled(("health",))),
         rationale="because the episodes support it",
         sensitivity=DataTier.PERSONAL,
     )

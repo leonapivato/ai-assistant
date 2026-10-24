@@ -544,6 +544,10 @@ class DefaultMemoryPolicy:
     14. Otherwise the proposal is accepted, with a ``reason`` telling "no conflict"
         from "conflicts, none restating and none contradicting" (ADR-0159 §4).
 
+    **A placed proposal is ruled by rules 1 to 4 alone** (ADR-0345 §4:5): past them it is
+    accepted, and the writer applies its placement. Rules 5 to 12 read no placed
+    proposal.
+
     It takes no construction-time knob: ``min_confidence`` and ``temporary_ttl``
     retired with rule 13 (ADR-0328 §10:3).
     """
@@ -569,6 +573,13 @@ class DefaultMemoryPolicy:
             confirmed = _rule_on_confirmation(proposal.confirmation, conflicts)
             if confirmed is not None:
                 return confirmed
+        if proposal.placement is not None:
+            # ADR-0345 §4:5: rules 5 to 12 read no placed proposal. Its producer has
+            # said how it stands to each memory it read, and the writer applies that.
+            return MemoryDecision(
+                kind=MemoryDecisionKind.ACCEPT,
+                reason="placed: the writer applies its placement (ADR-0345 §4:5)",
+            )
         return self._rule_on_conflicts(proposal, conflicts, relations)
 
     @staticmethod

@@ -2690,7 +2690,19 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     are built from; and ``core.errors`` gains ``PersonModelOffError``, which the wire
 #:     rebuilds by its name. A hub at 115 does not route the eight methods a peer at
 #:     116 calls (ADR-0124 §9:2).
-PROTOCOL_VERSION: Final[int] = 116
+#: 117: ADR-0345 §12:5 advances the version once for the memory record, on these
+#:     grounds: ``Belief`` and ``BeliefSummary``, carried by ``belief`` and ``beliefs``,
+#:     gain the holders and partial supporters (``SupportHolder``), ``subjects`` and
+#:     ``involved``, the labels (``SituationLabel``), the marks (``MemoryMark``) and the
+#:     round messages a memory marked ``assistant_statement`` cites
+#:     (``StatementCitation``), and ``SupportView`` each support's holder (§12:1, §12:2);
+#:     and the wire-carried ``Memory``, on ``TurnResult.memories``, gains the same
+#:     fields and loses ``about_person`` and ``topics`` (§9:1, §10:1), its supports each
+#:     carrying a holder. ``MemoryWriterName`` gains ``owner``. A peer at 116 refuses the
+#:     new fields as extra and the new members as unknown (ADR-0124 §9:2). The method
+#:     set does not move: ``MemoryStore.search``'s person filter and ``MemoryWriter``'s
+#:     label write are on no engine method.
+PROTOCOL_VERSION: Final[int] = 117
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client
