@@ -412,6 +412,14 @@ _LISTED: Final = {
     "rests_on_outside_content",
     "supports_gone",
     "attestation",
+    # ADR-0345 §12:1: whose belief it is, whom it is about, what it is for, and its marks.
+    "holders",
+    "partial_supporters",
+    "subjects",
+    "involved",
+    "labels",
+    "marks",
+    "statements",
 }
 
 
@@ -460,6 +468,8 @@ async def test_the_single_view_carries_the_listings_fields_and_every_support() -
             "about_when",
             "source_details",
             "counts",
+            # ADR-0345 §12:2: each support's holder.
+            "holder",
         }
         assert belief["supports"][0]["origin"] == "user_message"
 

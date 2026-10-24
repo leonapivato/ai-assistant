@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 from assistant_engine_contract import (
+    _BELIEF_LIMIT,
     _DECISION_LIMIT,
     _INVOCATION_LIMIT,
     _NOT_CANONICAL,
@@ -370,8 +371,12 @@ class TestHubEngineClientContract(AssistantEngineContract):
     @pytest.fixture
     async def tiny_beliefs(self, tmp_path: Path) -> AsyncIterator[BeliefSubject]:
         """:meth:`beliefs`' subject on :meth:`tiny_engine`'s hub, for its reason."""
-        backing = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
-        async with serving(backing, tmp_path / "hub.sock", max_frame_bytes=_TINY_FRAME) as client:
+        backing = FakeAssistantEngine(max_payload_bytes=_BELIEF_LIMIT)
+        async with serving(
+            backing,
+            tmp_path / "hub.sock",
+            max_frame_bytes=_BELIEF_LIMIT + ENVELOPE_RESERVE_BYTES,
+        ) as client:
             yield BeliefSubject(engine=client, hold=fake_belief_holder(backing))
 
     @pytest.fixture

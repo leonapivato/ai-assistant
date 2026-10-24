@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from assistant_engine_contract import (
+    _BELIEF_LIMIT,
     _DECISION_LIMIT,
     _INVOCATION_LIMIT,
     _NOT_CANONICAL,
@@ -266,7 +267,7 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
     @pytest.fixture
     def tiny_beliefs(self) -> BeliefSubject:
         """:meth:`beliefs`' subject at the limit small enough to reach."""
-        built = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
+        built = FakeAssistantEngine(max_payload_bytes=_BELIEF_LIMIT)
         return BeliefSubject(engine=built, hold=fake_belief_holder(built))
 
     @pytest.fixture

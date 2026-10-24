@@ -176,6 +176,15 @@ _PATIENT = timedelta(seconds=30)
 #: setup call is comfortably inside the bound and only the *page* crosses it.
 _TINY_LIMIT = 512
 
+#: A contract limit that lists **one** belief and not six.
+#:
+#: A constant of its own rather than :data:`_TINY_LIMIT`, for :data:`_DECISION_LIMIT`'s
+#: reason: a listed memory encodes to a little over 600 bytes since it carries its
+#: holders, its people, labels and marks (ADR-0345 §12:1), so at 512 the one-belief page
+#: would be refused too and the discriminating case would assert nothing. Large enough
+#: that one belief lists, small enough that six do not.
+_BELIEF_LIMIT = 1024
+
 
 #: The one grantable identity every ``granting_engine`` fixture holds. A declared
 #: constant, which is what a reader's ``name`` is (ADR-0093 §7) and therefore what
@@ -1232,7 +1241,7 @@ class AssistantEngineContract(
     @pytest.fixture
     @abstractmethod
     def tiny_beliefs(self) -> BeliefSubject:
-        """:attr:`beliefs`' subject at :data:`_TINY_LIMIT`, for :attr:`tiny_engine`'s reason."""
+        """:attr:`beliefs`' subject at :data:`_BELIEF_LIMIT`, for :attr:`tiny_engine`'s reason."""
 
     @pytest.fixture
     @abstractmethod
@@ -2025,8 +2034,8 @@ class AssistantEngineContract(
             await tiny_beliefs.hold(f"the office is in Boston, building {index}")
         with pytest.raises(OversizedValueError) as caught:
             await tiny_beliefs.engine.beliefs()
-        assert caught.value.limit == _TINY_LIMIT
-        assert caught.value.size > _TINY_LIMIT
+        assert caught.value.limit == _BELIEF_LIMIT
+        assert caught.value.size > _BELIEF_LIMIT
         assert caught.value.field is None
 
     async def test_a_result_that_fits_is_returned(self, tiny_beliefs: BeliefSubject) -> None:

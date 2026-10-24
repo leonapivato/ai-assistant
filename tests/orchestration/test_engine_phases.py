@@ -3269,7 +3269,7 @@ async def test_a_search_applies_the_audience_predicate_at_the_search_and_at_the_
         _SAID,
         _REPORTED,
         later,
-        _SAID.model_copy(update={"id": "about-sam", "about_person": "Sam"}),
+        _SAID.model_copy(update={"id": "about-sam", "subjects": ("Sam",)}),
     ):
         await harness.memory.add(record)
     path = _phases(completer, look_ups=True)(harness)
@@ -3295,7 +3295,7 @@ async def test_a_search_applies_the_audience_predicate_at_the_search_and_at_the_
     assert len(working.held) == 0
 
     # At the fetch: the fact now about someone else is refused, and recorded missing.
-    await harness.memory.add(later.model_copy(update={"about_person": "Sam"}))
+    await harness.memory.add(later.model_copy(update={"subjects": ("Sam",)}))
     assert (await stages[ControllerStage.PLANNING].run(given)).outcome is StageOutcome.DONE
     assert one.result_id is not None
     assert [record.id for record in working.searched[one.result_id]] == ["said"]

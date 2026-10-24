@@ -494,6 +494,10 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "Memory",
         "MemoryOperation",
         "MemorySupport",
+        # ADR-0345 §2, §7: a support's holder names an identifier the record carries, and
+        # a label is a producer's wording, both judged as the memory's other text is.
+        "SituationLabel",
+        "SupportHolder",
         "Message",
         "NewConversation",
         "ObserverInferencePart",

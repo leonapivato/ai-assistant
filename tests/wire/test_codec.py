@@ -427,15 +427,17 @@ _BELIEF_BYTES: Final = (
     b'{"as_of":"2026-08-01T12:00:00Z","attestation":null,"band":"asserted",'
     b'"content":"prefers dark mode",'
     b'"evidence":{"against":0,"episodes":2,"latest":"2026-08-01T12:00:00Z","supporting":2},'
-    b'"id":"b-1","kind":"memory","learned":"2026-08-01T12:00:00Z","legacy":false,'
+    b'"holders":[],"id":"b-1","involved":null,"kind":"memory","labels":[],'
+    b'"learned":"2026-08-01T12:00:00Z","legacy":false,"marks":[],"partial_supporters":[],'
     b'"reading_certainty":null,'
-    b'"rests_on_outside_content":false,"standing":"said","status":"current",'
+    b'"rests_on_outside_content":false,"standing":"said","statements":[],"status":"current",'
+    b'"subjects":null,'
     b'"supports":[{"about_when":null,"content":"said so","counts":true,"direction":"for",'
-    b'"how_sure":null,"note":"","origin":"user_message","part":"input",'
+    b'"holder":null,"how_sure":null,"note":"","origin":"user_message","part":"input",'
     b'"source_details":null,"when":"2026-08-01T12:00:00Z"},'
-    b'{"about_when":null,"content":null,"counts":true,"direction":"for","how_sure":null,'
-    b'"note":"","origin":"remembered","part":"remember_call","source_details":null,'
-    b'"when":null}],"supports_gone":false,'
+    b'{"about_when":null,"content":null,"counts":true,"direction":"for","holder":null,'
+    b'"how_sure":null,"note":"","origin":"remembered","part":"remember_call",'
+    b'"source_details":null,"when":null}],"supports_gone":false,'
     b'"track_record":{"held_up":0,"last_used":null,"let_down":0,"relied_on":0},'
     b'"unbacked":false,"valid_until":null}'
 )
@@ -467,9 +469,11 @@ def test_a_belief_shaped_model_takes_its_ratified_bytes() -> None:
     field set of ADR-0328 §15:1-§15:2. What the row exists to witness is unmoved:
     sorted members at every depth, an enum as its member value, an instant, and a
     ``null`` field emitted rather than omitted, which is what ADR-0124 §9's second limb
-    rests on for version 110.
+    rests on for version 110. ADR-0345 §12:1-§12:2 add the holders, the people, the
+    labels, the marks and the statements to the field set, and each support's holder,
+    each at its default here, ``null`` or empty, emitted rather than omitted (117).
     """
-    assert len(_BELIEF_BYTES) == 859
+    assert len(_BELIEF_BYTES) == 995
     assert _both(_belief()) == _BELIEF_BYTES
 
 

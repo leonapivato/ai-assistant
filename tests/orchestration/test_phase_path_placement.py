@@ -172,7 +172,7 @@ _RECALLED: Final = {
     "stamped": _stamped(_remembered("said", MemorySource.USER_ASSERTED, "the dentist")),
     "about someone else": _remembered(
         "sam", MemorySource.USER_ASSERTED, "Sam's dentist"
-    ).model_copy(update={"about_person": "Sam"}),
+    ).model_copy(update={"subjects": ("Sam",)}),
     "an unplaced source": _remembered("reported", MemorySource.EXTERNAL, "moved to 3pm"),
 }
 
