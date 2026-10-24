@@ -1496,7 +1496,11 @@ class MemoryIngestor:
             )
             raise MemoryStoreError(msg)
         try:
-            vectors = list(await embedder.embed([*carried, *new]))
+            # Read whole inside the boundary, so a malformed element (a ``None``, a
+            # non-number) is the writer's error rather than one raised comparing it.
+            vectors = [
+                [float(value) for value in one] for one in await embedder.embed([*carried, *new])
+            ]
         except Exception as exc:  # any fault from the injected embedder is the writer's error
             msg = f"refusing to write a label: the embedder failed ({exc})"
             raise MemoryStoreError(msg) from exc
