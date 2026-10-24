@@ -100,6 +100,7 @@ def _with_nothing_new(blob: dict[str, Any]) -> dict[str, Any]:
             | {
                 "annotations": None,
                 "further_candidates": [],
+                "framed": [],
                 "outcome": None
                 if one.get("outcome") is None
                 else one["outcome"] | {"unclear": [], "asked": []},

@@ -341,3 +341,29 @@ def test_style_and_pin_are_read_only_where_the_call_was_given_a_person() -> None
 
     assert (with_person.style, with_person.pin) == (True, False)
     assert (without.style, without.pin) == (False, False)
+
+
+def test_two_claims_of_one_exchange_each_pass_on_their_own_part() -> None:
+    """The compound-claim case's split, as code checks it (prompt_cases/observer_framing).
+
+    Each message of the exchange under review backs the claim it states, so each memory
+    passes on its own evidence alone.
+    """
+    swim = _part("P1", _SWIM, part=InputPart(episode=address("one"), message=0))
+    run = _part(
+        "P2", "and tuesday mornings I run", part=InputPart(episode=address("one"), message=1)
+    )
+
+    result = _framed(
+        _view(swim, run),
+        framing(
+            framed("The user swims on Friday evenings.", "P1"),
+            framed("The user runs on Tuesday mornings.", "P2"),
+        ),
+    )
+
+    assert [one.memory.content for one in result.memories] == [
+        "The user swims on Friday evenings.",
+        "The user runs on Tuesday mornings.",
+    ]
+    assert result.failed == 0

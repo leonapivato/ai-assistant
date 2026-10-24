@@ -261,6 +261,7 @@ async def test_an_outcome_entry_holds_the_outcome_and_what_framing_decided() -> 
         "ruling": "accept",
         "kept": [write.memory],
         "refused": None,
+        "unclear": [],
     }
 
 
@@ -315,8 +316,9 @@ async def test_an_unclear_placement_is_in_the_outcome_entry() -> None:
         {"memory": "m-seat", "wording": _CLAIM, "note": "Which trip is not shown."}
     ]
     (placed,) = _body(outcome)["decided"]["placed"]
-    assert placed["relations"] == [
-        {"memory": "m-seat", "relation": "unclear", "note": "Which trip is not shown."}
+    assert placed["relations"] == [{"memory": "m-seat", "relation": "unclear"}]
+    assert placed["unclear"] == [
+        {"memory": "m-seat", "wording": _CLAIM, "note": "Which trip is not shown."}
     ]
 
 

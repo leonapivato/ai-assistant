@@ -253,23 +253,45 @@ async def test_only_what_the_record_points_at_is_read_and_no_search_is_run() -> 
     assert "Window seats are best." not in json.dumps(reading.payload())
 
 
-async def test_an_input_answers_what_the_assistant_last_said_among_what_was_read() -> None:
-    """ADR-0346 §5:1: a reply carries the message it answers, read from the record alone."""
+async def test_an_input_answers_the_question_its_understanding_recorded() -> None:
+    """ADR-0346 §5:1, §2:4: by the recorded answer pointer, never by guessed adjacency.
+
+    An earlier exchange the record points at that asked something else is no question
+    the input answers, so an input with no recorded answer answers nothing.
+    """
     harness = Harness()
+    understood = ActivationUnderstanding(
+        version=1,
+        recorded_at=AT,
+        producer=UnderstandingProducer.INTERPRETATION,
+        meaning="The user picks the window.",
+        meaning_ground=UnderstandingGround.STATED,
+        answers=(AnsweredQuestion(activation_id="asked", round="r1"),),
+    )
+    labels = (
+        _label("E1", LabelKind.EPISODE, address("asked")),
+        _label("E2", LabelKind.EPISODE, address("other")),
+    )
     await harness.hold(
-        episode("asked", at=AT - timedelta(minutes=5), rounds=(said("r1", "Window or aisle?"),)),
+        episode("asked", at=AT - timedelta(minutes=9), rounds=(said("r1", "Window or aisle?"),)),
+        episode("other", at=AT - timedelta(minutes=5), rounds=(said("r2", "Cancel the booking?"),)),
         episode(
             "one",
             at=AT - timedelta(minutes=3),
             text="Window.",
-            labels=(_label("E1", LabelKind.EPISODE, address("asked")),),
+            labels=labels,
+            understanding=(understood,),
         ),
+        episode("bare", at=AT - timedelta(minutes=2), text="Yes.", labels=labels),
     )
 
-    reading = await _read(harness, "one")
+    answered = await _read(harness, "one")
+    unanswered = await _read(harness, "bare")
 
-    (window,) = reading.leaving.parts
+    (window,) = answered.leaving.parts
     assert (window.text, window.answers) == ("Window.", "Window or aisle?")
+    (yes,) = unanswered.leaving.parts
+    assert yes.answers is None
 
 
 def _recall(*items: RecalledItem) -> ActivationRecall:

@@ -41,8 +41,10 @@ from ai_assistant.core.types import (
     PlacedAnswer,
     PlacedPair,
     PlacedRelation,
+    Placement,
     Role,
     origin_is_outside,
+    part_episode,
 )
 from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.observer.reading import (
@@ -73,6 +75,7 @@ __all__ = [
     "PlacementReply",
     "PlacementView",
     "Retrieved",
+    "narrows",
     "placement_messages",
     "placement_of",
     "retrieved",
@@ -110,12 +113,15 @@ class Retrieved:
         questions: Its open questions' ids, by the labels they are shown under.
         recent: Its most recent supports, newest first, each with its part's content,
             or ``None`` where the part no longer resolves.
+        supplied: The placement of every episode read to show those supports, which the
+            write placed against it takes the meet of (ADR-0329 §12:6).
     """
 
     handle: str
     memory: Memory
     questions: dict[str, str] = field(default_factory=dict)
     recent: tuple[tuple[MemorySupport, str | None], ...] = ()
+    supplied: tuple[Placement, ...] = ()
 
     def rendered(self) -> dict[str, FrozenJson]:
         """The compact form, computed from the stored record and never by a model."""
@@ -277,11 +283,17 @@ async def _compact(
             if not question.resolved:
                 asked += 1
                 questions[f"Q{asked}"] = question.id
+        read = {
+            episode
+            for support in newest[one.id]
+            if (episode := part_episode(support.points_at)) is not None
+        }
         compact.append(
             Retrieved(
                 handle=f"M{index}",
                 memory=one,
                 questions=questions,
+                supplied=tuple(episodes[key].placement for key in sorted(read) if key in episodes),
                 recent=tuple(
                     (
                         support,
@@ -297,6 +309,26 @@ async def _compact(
             )
         )
     return tuple(compact)
+
+
+def narrows(supply: Placement, target: Memory) -> bool:
+    """Whether a write resting on ``supply`` would reach fewer people than ``target`` does.
+
+    The meet over the two is narrower in reach than the target's placement, or decided by
+    a stronger setter (ADR-0217 §3:3). An operation on a stored memory writes no placement
+    (ADR-0328 §5:2), so a relation's supports, notes and questions written onto such a
+    memory would carry what ``supply`` holds to people it may not reach.
+
+    Args:
+        supply: The placement the write rests on.
+        target: The stored memory.
+
+    Returns:
+        Whether writing onto ``target`` would widen what ``supply`` reaches.
+    """
+    held = target.placement
+    meet = Placement.narrowest_of((supply, held))
+    return meet.reach is not held.reach or meet.set_by is not held.set_by
 
 
 def placement_messages(view: PlacementView, instruction: RenderedPrompt) -> list[Message]:

@@ -47,6 +47,8 @@ from ai_assistant.core.types import (
     MemoryOperationKind,
     MemorySource,
     MemoryStanding,
+    MemoryWrite,
+    MemoryWriteMode,
     ObservationAttemptEnd,
     ObservationState,
     ObserverStep,
@@ -949,20 +951,24 @@ async def test_what_a_failed_commit_wrote_is_merged_into_its_later_outcome() -> 
     )
 
     harness.clock.advance(timedelta(minutes=1))
-    restarted = harness.observer(commit=FakeModelProvider.scripted(_nothing()), per_run=1)
+    framing_again = FakeModelProvider.scripted()
+    restarted = harness.observer(commit=framing_again, per_run=1)
     await restarted.run()
 
     (record,) = await harness.plans.observations(["activation:one"])
     outcome = record.findings[0].outcome
     assert outcome is not None
     assert [(one.memory, one.operations) for one in outcome.writes] == [
-        (written.memory, (MemoryOperationKind.CREATE,))
+        (written.memory, (MemoryOperationKind.CREATE,)),
+        ("observed:2", (MemoryOperationKind.CREATE,)),
     ]
+    assert framing_again.calls == [], "the retry resumes from what framing kept"
     assert record.findings[0].written == (), "the outcome clears what it merged"
+    assert record.findings[0].framed == ()
 
 
-async def test_a_retry_restates_what_an_earlier_attempt_already_wrote() -> None:
-    """ADR-0346 §6, ADR-0328 §4:8: framed again, placed against itself, nothing twice."""
+async def test_a_retry_resumes_after_the_memories_already_written() -> None:
+    """ADR-0329 §16:4: resumed after the memory already written, nothing framed twice."""
     harness = Harness()
     await _three(harness)
     ingest = harness.writer.ingest
@@ -984,12 +990,7 @@ async def test_a_retry_restates_what_an_earlier_attempt_already_wrote() -> None:
     await observer.run()
     harness.clock.advance(timedelta(minutes=1))
 
-    def restate(shown: dict[str, Any]) -> str:
-        if "claim" in shown:
-            return _two_memories()
-        return placing(*((one["memory"], "restates", "The same claim.") for one in shown["stored"]))
-
-    restarted = harness.observer(commit=_answering(restate))
+    restarted = harness.observer(commit=FakeModelProvider.scripted())
     await restarted.run()
 
     stored = [one for one in await harness.memory.export() if isinstance(one, Memory)]
@@ -1175,7 +1176,7 @@ async def test_a_stuck_episode_keeps_what_its_failed_commit_wrote_for_a_re_run()
         record.model_copy(update={"state": ObservationState.WAITING}),
         expected_revision=record.revision,
     )
-    restarted = harness.observer(commit=FakeModelProvider.scripted(_nothing()), per_run=1)
+    restarted = harness.observer(commit=FakeModelProvider.scripted(), per_run=1)
 
     await restarted.run()
 
@@ -1183,12 +1184,13 @@ async def test_a_stuck_episode_keeps_what_its_failed_commit_wrote_for_a_re_run()
     outcome = record.findings[0].outcome
     assert outcome is not None
     assert [(one.memory, one.operations) for one in outcome.writes] == [
-        (written.memory, (MemoryOperationKind.CREATE,))
+        (written.memory, (MemoryOperationKind.CREATE,)),
+        ("observed:2", (MemoryOperationKind.CREATE,)),
     ]
 
 
-async def test_a_run_cancelled_before_a_landing_was_recorded_restates_on_the_retry() -> None:
-    """§16:1, ADR-0328 §4:8: the retry folds into what landed, and writes nothing twice."""
+async def test_a_run_cancelled_after_a_write_landed_records_it_on_the_retry() -> None:
+    """§16:1: the proposal was on the record before it was sent, so the retry reads it back."""
     harness = Harness()
     await _three(harness)
     ingest = harness.writer.ingest
@@ -1216,23 +1218,17 @@ async def test_a_run_cancelled_before_a_landing_was_recorded_restates_on_the_ret
 
     harness.writer.ingest = ingest  # type: ignore[method-assign]  # nothing more to cancel
 
-    def restate(shown: dict[str, Any]) -> str:
-        if "claim" in shown:
-            return _frame()
-        return placing(("M1", "restates", "The same claim."))
-
-    restarted = harness.observer(commit=_answering(restate))
+    restarted = harness.observer(commit=FakeModelProvider.scripted())
     await restarted.run()
 
     (record,) = await harness.plans.observations(["activation:one"])
     outcome = record.findings[0].outcome
     assert outcome is not None
-    # The cancellation came before the landing reached the record, so the retry finds
-    # the memory held, folds into it and adds nothing, and lists no operation it did
-    # not make.
-    assert outcome.unwritten is FindingUnwritten.ALREADY_HELD
+    assert [(one.memory, one.operations) for one in outcome.writes] == [
+        (created[0].id, (MemoryOperationKind.CREATE,))
+    ]
     stored = [one for one in await harness.memory.export() if isinstance(one, Memory)]
-    assert stored == created, "the retry restates the memory, and writes no second one"
+    assert stored == created, "nothing is proposed a second time"
 
 
 async def test_a_placement_reply_that_does_not_parse_fails_the_attempt() -> None:
@@ -1254,3 +1250,91 @@ async def test_a_placement_reply_that_does_not_parse_fails_the_attempt() -> None
     seat = await harness.memory.get("m-seat")
     assert isinstance(seat, Memory)
     assert len(seat.supports) == 1, "nothing is written on a placement that did not parse"
+
+
+async def test_a_retry_takes_a_source_narrowed_since_the_finding_was_proposed() -> None:
+    """§12:6: every attempt's reading narrows the pending findings' supply, never widens."""
+    harness = Harness()
+    await _three(harness)
+    first = harness.observer(scout=FakeModelProvider.scripted(_scout("P1")), daily_calls=1)
+    assert (await first.run()).held
+    leaving = await harness.memory.get("activation:one")
+    assert isinstance(leaving, EpisodicMemory)
+    owner_only = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.OWNER_ACT, set_at=AT)
+    await harness.memory.write_atomic(
+        [
+            MemoryWrite(
+                record=leaving.model_copy(update={"placement": owner_only}),
+                mode=MemoryWriteMode.IF_UNCHANGED,
+                expected_revision=leaving.revision,
+            )
+        ]
+    )
+    harness.clock.advance(timedelta(hours=25))
+    restarted = harness.observer(commit=FakeModelProvider.scripted(_frame()))
+
+    await restarted.run()
+
+    (record,) = await harness.plans.observations(["activation:one"])
+    outcome = record.findings[0].outcome
+    assert outcome is not None
+    (write,) = outcome.writes
+    kept = await harness.memory.get(write.memory)
+    assert isinstance(kept, Memory)
+    assert kept.placement.reach is PlacementReach.OWNER
+
+
+async def test_a_budget_of_one_call_a_day_still_completes_a_placed_finding() -> None:
+    """§16:9: each step is kept, so every window's one call moves the finding on."""
+    harness = Harness()
+    await _three(harness)
+    await _held_seat(harness)
+    commit = FakeModelProvider.scripted(_frame(), placing(("M1", "restates", "Same.")))
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")), commit=commit, daily_calls=1
+    )
+
+    for _ in range(3):
+        await observer.run()
+        harness.clock.advance(timedelta(hours=24, seconds=1))
+    await observer.run()
+
+    (record,) = await harness.plans.observations(["activation:one"])
+    assert record.state is ObservationState.PROCESSED
+    assert len(commit.calls) == 2, "framing once, then the placement, each in its own day"
+    outcome = record.findings[0].outcome
+    assert outcome is not None
+    assert [one.memory for one in outcome.writes] == ["m-seat"]
+
+
+async def test_a_question_a_memory_raised_is_not_raised_again_by_a_retry() -> None:
+    """§16:4: the memory whose recheck landed is done, so no second question is asked."""
+    harness = Harness()
+    await _three(harness)
+    await _held_seat(harness)
+    ingest = harness.writer.ingest
+    calls = 0
+
+    async def failing_second(proposal: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            msg = "database temporarily unavailable"
+            raise MemoryStoreError(msg)
+        return await ingest(proposal)
+
+    harness.writer.ingest = failing_second  # type: ignore[method-assign]  # an outage midway
+    two = framing(framed(_CLAIM, "P1"), framed("The user flies.", "P1"))
+    observer = harness.observer(
+        scout=FakeModelProvider.scripted(_scout("P1")),
+        commit=FakeModelProvider.scripted(two, placing(("M1", "recheck", "Still the window?"))),
+    )
+    await observer.run()
+    harness.clock.advance(timedelta(minutes=1))
+    harness.writer.ingest = ingest  # type: ignore[method-assign]  # the outage passes
+
+    await harness.observer(commit=FakeModelProvider.scripted()).run()
+
+    seat = await harness.memory.get("m-seat")
+    assert isinstance(seat, Memory)
+    assert len(seat.open_questions) == 1

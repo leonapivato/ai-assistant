@@ -730,7 +730,7 @@ class EpisodeReader:
         history = await self._memory.get_history(list(pointed.memories))
         labels = _Labels()
         shown = _Shown(labels, await self._outsides_of([leaving, *earlier_records]))
-        answers = _answers([*earlier_records, leaving])
+        answers = _answers(leaving, earlier_records)
         read_leaving = shown.episode(leaving, answers)
         earlier = [shown.episode(one, answers) for one in earlier_records]
         handles = {one.episode: one.handle for one in earlier}
@@ -979,33 +979,29 @@ class EpisodeReader:
         return hints
 
 
-def _answers(records: Sequence[EpisodicMemory]) -> dict[str, str]:
-    """What each read episode's input replies to, among the episodes read (ADR-0346 §5:1).
+def _answers(leaving: EpisodicMemory, records: Sequence[EpisodicMemory]) -> dict[str, str]:
+    """What the leaving episode's input replies to, by its recorded answer pointers (§5:1).
 
-    The assistant's last message in the latest earlier episode read on the same channel
-    that holds one: read from what the record points at alone, never by a search of the
-    channel's history (§2:4).
+    The question its understanding recorded the input as answering (ADR-0321 §3:1), named
+    by its asking activation and round: that round's message, where the asking episode
+    is among those read. Nothing else is taken for one: an episode's place among those its
+    record points at says nothing of what came between, so no adjacency is guessed, and
+    an input that answers no recorded question is shown answering nothing (§2:4).
     """
-    ordered = sorted(records, key=lambda one: (one.occurred_at, one.id))
-    answers: dict[str, str] = {}
-    for index, record in enumerate(ordered):
-        channel = _channel(record)
-        if channel is None:
+    processing = leaving.processing_record
+    if processing is None or not processing.understanding:
+        return {}
+    latest = max(processing.understanding, key=lambda one: one.version)
+    read = {one.id: one for one in records}
+    for answer in latest.answers:
+        asking = read.get(episode_address(answer.activation_id))
+        asked = None if asking is None else asking.processing_record
+        if asked is None or answer.round is None:
             continue
-        for before in reversed(ordered[:index]):
-            if _channel(before) != channel:
-                continue
-            processing = before.processing_record
-            said = [] if processing is None else [one.text for one in processing.rounds if one.text]
-            if said:
-                answers[record.id] = said[-1]
-                break
-    return answers
-
-
-def _channel(record: EpisodicMemory) -> object | None:
-    processing = record.processing_record
-    return None if processing is None else processing.trigger.channel
+        said = next((one.text for one in asked.rounds if one.id == answer.round), None)
+        if said:
+            return {leaving.id: said}
+    return {}
 
 
 def _understood(
