@@ -88,6 +88,7 @@ from ai_assistant.core.types import (
     Placement,
     PlacementReach,
     PlacementSetter,
+    SupportOrigin,
     UnclearPlacement,
 )
 from ai_assistant.orchestration.observer.person import PIN_NOTE
@@ -130,19 +131,13 @@ _RATIONALE: Final = "the observer kept this from an episode that left the episod
 #: The relations that write nothing on the stored memory they name (ADR-0345 §5).
 _WRITES_NOTHING: Final = frozenset({PlacedRelation.INDEPENDENT, PlacedRelation.UNCLEAR})
 
-#: What each relation's write may make on the memory it names, but a ``recheck``'s one
-#: question (ADR-0345 §3:1-§3:7, §5).
-_MAY_MAKE: Final[dict[PlacedRelation, frozenset[MemoryOperationKind]]] = {
+#: What a relation writes on the memory it names, in a write that installs the proposal,
+#: beside the supports it adds (ADR-0345 §3:1-§3:4, §5); a ``recheck`` raises its question
+#: alone. Nothing folds in such a write, so a ``restates`` writes nothing there.
+_INSTALL_MAKES: Final[dict[PlacedRelation, frozenset[MemoryOperationKind]]] = {
     **dict.fromkeys(
         (PlacedRelation.SUPPORTS, PlacedRelation.WEAKENS, PlacedRelation.CONTAINED),
         frozenset({MemoryOperationKind.ADD_SUPPORT, MemoryOperationKind.RESOLVE_QUESTION}),
-    ),
-    PlacedRelation.RESTATES: frozenset(
-        {
-            MemoryOperationKind.ADD_SUPPORT,
-            MemoryOperationKind.STOP_COUNTING,
-            MemoryOperationKind.RESOLVE_QUESTION,
-        }
     ),
     **{
         relation: frozenset(
@@ -549,28 +544,29 @@ def _sent(record: FramedMemory) -> MemoryPlacement:
 def _its_install(
     record: FramedMemory, installed: Memory, held: Mapping[str, Memory]
 ) -> dict[str, list[MemoryOperation]]:
-    """What a proposal found installed wrote, by memory, read off the store.
+    """What a proposal found installed wrote, by memory, as far as the store establishes it.
 
     Its own id installed shows the one atomic write landed (ADR-0345 §5:6), so the store
-    holds every effect of it, and what is read here is only which operations to list. The
-    write was made at the revisions it read (ADR-0219 §2), so on each memory the placement
-    names its operations are the first past the log length recorded when the proposal was
-    sent, all at the write's one instant and the observer's. Only an operation the write
-    could have made is listed (ADR-0345 §3, §5):
+    holds every effect of it, and what is read here is only which operations to list:
+    those whose being this write's the store establishes (ADR-0329 §16:1, as the reading
+    ruled on this PR has it). The write was made at the revisions it read (ADR-0219 §2), so
+    on each memory the placement names its operations are the first past the log length
+    recorded when the proposal was sent, at the write's one instant. Two operations
+    establish that instant:
 
-    - on a memory it asks to be rechecked, the one question it raised, which every such
-      write raises, so it is the first operation past that length;
-    - on any other memory a relation writes onto, an operation of a kind that relation
-      makes, carrying its note (§5:7) and citing one of this memory's own parts, as every
-      support, stop, retirement and answer a relation writes does; a support it already
-      carried is never added again (ADR-0328 §4:8), so an addition citing one of them is
-      this write's alone;
-    - on the installed memory, its create, and each dispute a retiring relation added,
-      carrying that relation's note and citing a support of the memory it named (§3:5).
+    - a support the write's relation adds, citing one of the parts it adds there: a part a
+      memory carries is never added to it again (ADR-0328 §4:8), so whichever write added
+      it past that length, it was this one, which would have;
+    - on a memory it asks to be rechecked, the first operation past that length, the
+      question every such write raises (ADR-0345 §5:9).
 
-    A later write that also cites this memory's parts on a memory it retires, in the same
-    notes, could still be listed with it; telling the two apart needs a write identity the
-    store does not keep (#3394).
+    At that instant, each memory's leading operations of a kind its relation makes in a
+    write that installs, in its note (§5:7) and citing one of the proposal's parts, and
+    the installed memory's disputes, in a retiring relation's note, citing a support of the
+    memory that relation named (§3:5), are listed with the create. Where nothing
+    establishes the instant, the create alone is: telling the write's other operations
+    from a later write's that left the same stamps needs a write identity the store does
+    not keep (#3394).
 
     Args:
         record: The memory, its proposal sent with the pairs ``named`` records.
@@ -580,48 +576,71 @@ def _its_install(
     Returns:
         The operations the write made, by memory.
     """
-    parts = {one.points_at for one in record.memory.supports}
+    replacing = any(one.relation is PlacedRelation.CLAIMED_TOO_MUCH for one in record.named)
+    backing = record.memory.backing_supports
+    # ADR-0328 §4:6, ADR-0345 §5:8: a confirmation is added elsewhere only as `against`.
+    added_for = {one.points_at for one in backing if one.origin is not SupportOrigin.CONFIRMATION}
+    added_against = {one.points_at for one in backing}
     runs: dict[str, list[MemoryOperation]] = {}
+    instants: set[datetime] = set()
     disputed: set[SupportPart] = set()
     for named in record.named:
         stored = held.get(named.memory)
-        if stored is None or named.relation in _WRITES_NOTHING:
+        if stored is None:
             continue
         after = stored.operations[named.operations :]
-        if named.relation in RETIRING_RELATIONS:
-            disputed.update(one.points_at for one in stored.supports)
         if named.relation is PlacedRelation.RECHECK:
-            runs[named.memory] = [
+            run = [
                 one
                 for one in after[:1]
                 if one.kind is MemoryOperationKind.RAISE_QUESTION
                 and one.by is MemoryWriterName.OBSERVER
                 and one.note == named.note
             ]
+            instants.update(one.at for one in run)
+            runs[named.memory] = run
             continue
-        runs[named.memory] = _its_run(after, _made_by(named, parts))
-    retiring = {one.note for one in record.named if one.relation in RETIRING_RELATIONS}
+        makes = _INSTALL_MAKES.get(named.relation, frozenset())
+        if named.relation is PlacedRelation.CONTAINED and replacing:
+            makes = frozenset()
+        if not makes:
+            continue
+        retiring = named.relation in RETIRING_RELATIONS
+        if retiring:
+            disputed.update(one.points_at for one in stored.supports)
+        adds = added_against if retiring else added_for
+        run = _its_run(after, _made_by(named, makes, added_against))
+        instants.update(
+            one.at
+            for one in run
+            if one.kind is MemoryOperationKind.ADD_SUPPORT and one.cites in adds
+        )
+        runs[named.memory] = run
+    create = installed.operations[0]
+    if len(instants) != 1:
+        return {installed.id: [create]}
+    (at,) = instants
+    notes = {one.note for one in record.named if one.relation in RETIRING_RELATIONS}
     own = _its_run(
         installed.operations[1:],
         lambda one: (
             one.kind is MemoryOperationKind.ADD_SUPPORT
-            and one.note in retiring
+            and one.note in notes
             and one.cites in disputed
         ),
     )
-    firsts = [run[0].at for run in (*runs.values(), own) if run]
-    at = min(firsts) if firsts else None
     operations = {key: run for key, run in runs.items() if run and run[0].at == at}
-    operations[installed.id] = [installed.operations[0], *(own if own and own[0].at == at else ())]
+    operations[installed.id] = [create, *(own if own and own[0].at == at else ())]
     return operations
 
 
-def _made_by(named: NamedRevision, parts: Set[SupportPart]) -> Callable[[MemoryOperation], bool]:
-    """Whether an operation is one ``named``'s relation could make on its memory (§5)."""
-    kinds = _MAY_MAKE[named.relation]
+def _made_by(
+    named: NamedRevision, makes: frozenset[MemoryOperationKind], parts: Set[SupportPart]
+) -> Callable[[MemoryOperation], bool]:
+    """Whether an operation is one ``named``'s relation makes, in its note, citing ``parts``."""
 
     def made(one: MemoryOperation) -> bool:
-        return one.kind in kinds and one.note == named.note and one.cites in parts
+        return one.kind in makes and one.note == named.note and one.cites in parts
 
     return made
 
