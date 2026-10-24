@@ -1,4 +1,8 @@
-"""Ended-activation capture ordering, uncertainty, and deletion compensation (ADR-0283 §7)."""
+"""Ended-activation capture ordering, uncertainty, and deletion compensation (ADR-0283 §7).
+
+And the admission write's read of the story store's position, recorded on the episode as
+``stories_position`` and kept by every later write of it (ADR-0347 §4:1).
+"""
 
 from __future__ import annotations
 
@@ -14,6 +18,7 @@ from ai_assistant.core.errors import (
     ConversationStoreError,
     MemoryStoreConflictError,
     MemoryStoreError,
+    StoryStoreError,
 )
 from ai_assistant.core.types import (
     ActivationEnding,
@@ -34,6 +39,11 @@ from ai_assistant.core.types import (
     RecordedChannelTrigger,
     StageEntry,
     StageOutcome,
+    StoryActor,
+    StoryMember,
+    StoryMemberKind,
+    StorySummaryDraft,
+    StorySummaryLine,
     TextChannelPayload,
     WholeTextReply,
 )
@@ -44,7 +54,7 @@ from ai_assistant.orchestration.conversations import (
     conversation_state,
     episodes_on_place,
 )
-from ai_assistant.testing import FakeConversationStore, FakeMemoryStore
+from ai_assistant.testing import FakeConversationStore, FakeMemoryStore, FakeStoryStore
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -129,16 +139,19 @@ class Wiring:
         *,
         memory: FakeMemoryStore | None = None,
         conversations: FakeConversationStore | None = None,
+        stories: FakeStoryStore | None = None,
     ) -> None:
         self.memory = memory if memory is not None else FakeMemoryStore(now=lambda: _AT)
         self.conversations = (
             conversations if conversations is not None else FakeConversationStore(now=lambda: _AT)
         )
+        self.stories = stories
         self.writer = ActivationWriter(
             memory=self.memory,
             conversations=self.conversations,
             retention=timedelta(days=30),
             now=lambda: _AT,
+            stories=stories,
         )
 
     async def state(
@@ -711,6 +724,7 @@ def _restarted(wiring: Wiring) -> ActivationWriter:
         conversations=wiring.conversations,
         retention=timedelta(days=30),
         now=lambda: _AT,
+        stories=wiring.stories,
     )
 
 
@@ -742,3 +756,125 @@ async def test_a_close_that_would_exceed_the_record_bound_deletes_the_episode() 
 
     assert [(row["stage"], row["reason"]) for row in logs] == [("close", "invalid_or_oversized")]
     assert await wiring.memory.export() == []
+
+
+# --- the story store's position at admission (ADR-0347 §4:1) ---------------------------
+
+
+async def _story_with_a_summary(stories: FakeStoryStore) -> tuple[str, int]:
+    """A story with one summary written, and that summary's version."""
+    made = await stories.create(
+        [StoryMember(kind=StoryMemberKind.ACTIVATION, id="act-earlier")], actor=StoryActor.OWNER
+    )
+    assert made.story_id is not None
+    return made.story_id, await _summarised(stories, made.story_id, "Before.")
+
+
+async def _summarised(stories: FakeStoryStore, story_id: str, text: str) -> int:
+    read = await stories.current_summary(story_id)
+    assert read is not None
+    outcome = await stories.write_summary(
+        story_id,
+        StorySummaryDraft(lines=(StorySummaryLine(text=text),), outside=False),
+        as_of=read.as_of,
+    )
+    assert outcome.version is not None, outcome
+    return outcome.version.version
+
+
+async def _recorded_position(wiring: Wiring) -> int | None:
+    stored = await wiring.memory.get(_ADDRESS)
+    assert isinstance(stored, EpisodicMemory)
+    assert stored.processing_record is not None
+    return stored.processing_record.stories_position
+
+
+async def test_the_admission_write_records_the_story_stores_position_and_every_write_keeps_it() -> (
+    None
+):
+    """ADR-0347 §4:1: read once at admission, beside ``started_at``, and kept.
+
+    A version written before the activation lies at or below the recorded position, and
+    one written while it runs above it (§2:5), so the position names the summary the
+    activation started from; the appends and the freeze carry it unchanged.
+    """
+    stories = FakeStoryStore(now=lambda: _AT)
+    story_id, before = await _story_with_a_summary(stories)
+    wiring = Wiring(stories=stories)
+    state = await wiring.state()
+
+    await wiring.admit(state)
+
+    recorded = await _recorded_position(wiring)
+    assert recorded == await stories.position()
+    assert recorded is not None
+    assert before <= recorded
+    during = await _summarised(stories, story_id, "During.")
+    assert during > recorded
+    state.stages.append(_entry(ControllerStage.PLANNING, ControllerRule.FIRST_ROUND_DUE))
+    await wiring.append(state)
+    assert await _recorded_position(wiring) == recorded
+    state.stages.end(ControllerRule.NOTHING_DUE, _AT)
+
+    report = await _freeze(wiring, state)
+
+    assert report.state == "recorded"
+    assert await _recorded_position(wiring) == recorded
+    assert state.processing(_AT, None).stories_position == recorded
+
+
+async def test_a_restarts_close_keeps_the_position_the_admission_recorded() -> None:
+    """ADR-0286 §7: the close freezes the record as the dead pass left it, position too."""
+    stories = FakeStoryStore(now=lambda: _AT)
+    await _story_with_a_summary(stories)
+    wiring = Wiring(stories=stories)
+    state = await wiring.state()
+    await wiring.admit(state)
+    recorded = await _recorded_position(wiring)
+    assert recorded is not None
+    await _story_with_a_summary(stories)
+
+    await _restarted(wiring).close_open(stage_limit=8, payload_limit=1024)
+
+    closed = await wiring.memory.get(_ADDRESS)
+    assert isinstance(closed, EpisodicMemory)
+    assert closed.processing_record is not None
+    assert not closed.processing_record.is_open
+    assert closed.processing_record.stories_position == recorded
+
+
+async def test_an_unreadable_position_records_none_and_capture_goes_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0347 §4:3: an episode with no position shows its stories by identity alone.
+
+    So a failed read costs only that, never the episode: the admission write is made
+    without it, and the freeze follows.
+    """
+    stories = FakeStoryStore(now=lambda: _AT)
+
+    async def unread() -> int:
+        raise StoryStoreError("the story store could not be read")
+
+    monkeypatch.setattr(stories, "position", unread)
+    wiring = Wiring(stories=stories)
+    state = await wiring.state()
+
+    with capture_logs() as logs:
+        await wiring.admit(state)
+
+    assert await _recorded_position(wiring) is None
+    assert [one["event"] for one in logs] == ["activation.stories_position_unread"]
+    state.stages.end(ControllerRule.NOTHING_DUE, _AT)
+    report = await _freeze(wiring, state)
+    assert report.state == "recorded"
+    assert await _recorded_position(wiring) is None
+
+
+async def test_with_no_story_store_no_position_is_recorded() -> None:
+    wiring = Wiring()
+    state = await wiring.state()
+
+    await wiring.admit(state)
+
+    assert await _recorded_position(wiring) is None

@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from datetime import timedelta
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.protocols import ConversationStore, MemoryStore
+    from ai_assistant.core.protocols import ConversationStore, MemoryStore, StoryStore
     from ai_assistant.core.types import MemoryRecord
     from ai_assistant.orchestration.activation_state import ActivationState
 
@@ -100,10 +100,17 @@ class ActivationWriter:
         memory: MemoryStore,
         retention: timedelta | None,
         now: Clock,
+        stories: StoryStore | None = None,
     ) -> None:
-        """Receive only the lifecycle's injected store contracts and capture settings."""
+        """Receive only the lifecycle's injected store contracts and capture settings.
+
+        ``stories`` is the story store whose position the admission write records
+        (ADR-0347 §4:1); with none, every episode records no position, which the
+        observer reads as it reads an episode written before the field (§4:3).
+        """
         self._conversations = conversations
         self._memory = memory
+        self._stories = stories
         self._retention = retention
         self._now = checked_clock(now, owner="ActivationWriter")
         #: The captures in flight, by address, from the admission write until each
@@ -151,8 +158,15 @@ class ActivationWriter:
 
         Called once the activation is admitted and before any of its processing runs.
         The record carries what admission holds — the trigger as admitted,
-        ``started_at``, no stage entry — and the write takes the capture timestamp
-        once (§2:2).
+        ``started_at``, the story store's position, no stage entry — and the write takes
+        the capture timestamp once (§2:2).
+
+        **The story store's position is read once, here**, before the record is built
+        (ADR-0347 §4:1), and recorded as ``stories_position``: every version of a story
+        written before this activation's processing has a number at or below it. A read
+        that fails records none, and capture goes on: the position only chooses which
+        summary the observer shows of a story, and an episode with none shows its stories
+        by identity alone (§4:3), as one written before the field does.
 
         **A collision writes nothing and deletes nothing** (§2:4): the record at the
         address is not this activation's, so capture ends without touching it. Any
@@ -162,6 +176,7 @@ class ActivationWriter:
         address = state.episode_address
         if state.capture is not None or address is None or state.started_at is None:
             return
+        state.stories_position = await self._stories_position()
         try:
             captured_at = self._now()
         except Exception:
@@ -195,6 +210,16 @@ class ActivationWriter:
             return
         progress.written = episode
         progress.uncertain = None
+
+    async def _stories_position(self) -> int | None:
+        """The story store's position for the admission write, or ``None`` (ADR-0347 §4:1)."""
+        if self._stories is None:
+            return None
+        try:
+            return await self._stories.position()
+        except Exception:
+            _log.warning("activation.stories_position_unread")
+            return None
 
     async def append(
         self,

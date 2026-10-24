@@ -203,6 +203,10 @@ class ActivationState:
     planned_over_withheld: bool = False
     #: The writer's account of this activation's episode, from its admission write.
     capture: EpisodeProgress | None = field(default=None, repr=False)
+    #: ADR-0347 §4:1: the story store's position, read by the admission write and
+    #: recorded on the episode beside ``started_at``. ``None`` until that write reads
+    #: it, and where it could not; never changed once read, as the record keeps it.
+    stories_position: int | None = None
     #: ADR-0297 §3: the stop mark, set by :meth:`stop` and never cleared. The
     #: controller reads it before each evaluation of the rules and once each stage's
     #: result is in hand (§4), and a resume reads it before it composes.
@@ -557,6 +561,7 @@ class ActivationState:
             labels=self.labels,
             digests=self.digests,
             joined=self.joined,
+            stories_position=self.stories_position,
         )
 
     def open_processing(self) -> EpisodeProcessingRecord:
@@ -591,6 +596,7 @@ class ActivationState:
             labels=self.labels,
             digests=self.digests,
             joined=self.joined,
+            stories_position=self.stories_position,
         )
 
     def _stage_record(

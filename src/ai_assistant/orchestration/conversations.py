@@ -77,6 +77,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import (
         ConversationStore,
         MemoryStore,
+        StoryStore,
     )
     from ai_assistant.core.types import (
         ChatDevice,
@@ -581,6 +582,7 @@ class ConversationLifecycle:
         memory: MemoryStore,
         retention: timedelta | None,
         now: Clock = _utcnow,
+        stories: StoryStore | None = None,
     ) -> None:
         """Wire the stage from the injected stores.
 
@@ -613,6 +615,9 @@ class ConversationLifecycle:
                 :func:`~ai_assistant.core.clock.checked_clock`, so a non-conforming
                 reading is this stage's own failure rather than a silently bad
                 timestamp.
+            stories: The story store whose position each episode's admission write
+                records (ADR-0347 §4:1), handed to the writer and read by nothing
+                else here. With none, no episode records a position.
         """
         self._conversations = conversations
         self._memory = memory
@@ -623,6 +628,7 @@ class ConversationLifecycle:
             memory=memory,
             retention=retention,
             now=now,
+            stories=stories,
         )
 
     @property

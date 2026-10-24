@@ -2063,6 +2063,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 conversations=conversations,
                 memory=memory,
                 retention=settings.episode_retention,
+                # ADR-0347 §4:1: the story store each episode's admission write reads
+                # its position from, the one every story stage writes.
+                stories=stories,
             ),
             # Leg 10's upcoming-event producer (ADR-0132). **The first holder of
             # ADR-0130 §3's seam**, and the reason `notification_writer` above
