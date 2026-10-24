@@ -43,8 +43,9 @@ an activation of its own. The activation's page shows it as a learning lane, att
 attempt, each on the observer's own instants, so it never widens the activation's
 timeline; an activation whose own file is gone is shown with that lane alone. The
 Learning view lists every activation the observer wrote about, its latest work first:
-each finding's claim and outcome in short, a click from the scout's and the commit step's
-prompt and reply behind it (§5).
+each finding's claim and outcome in short, a click from the scout's, framing's and each
+placement's prompt and reply behind it (§5; ADR-0346 cut the commit step into framing and
+placement, and a record from before it still shows its commit calls).
 
 What a replay sent again over a copy of the hub's record is in a third file beside the
 activation's, ``<activation_id>.replay.jsonl``, written by ``prompt_replay.py`` (ADR-0335
@@ -895,8 +896,13 @@ def timeline(activation_id: str, lines: Sequence[Line]) -> dict[str, object]:
 # activation's own (ADR-0333 §3:1). Every key read here is a hint, as the timeline's are
 # (ADR-0316 §5:2): a body of another shape loses its summary and is still shown whole.
 
-#: The observer's two steps that make a model call (ADR-0329 §9).
-OBSERVER_CALLS: Final = frozenset({"scout", "commit"})
+#: The observer's steps that make a model call: the scout, framing and placement
+#: (ADR-0346 §10:1), and ADR-0329 §9's commit step, which a record written before ADR-0346
+#: still holds.
+OBSERVER_CALLS: Final = frozenset({"scout", "commit", "framing", "placement"})
+
+#: The steps whose call decides one finding, and whose given entry names it whole.
+_FINDING_CALLS: Final = frozenset({"commit", "framing", "placement"})
 
 #: What a write did, in short, by the operations it names, the first that applies.
 _WRITE_WORDS: Final = (
@@ -911,7 +917,8 @@ _WRITE_WORDS: Final = (
 
 #: Why a finding's commit wrote nothing, in short, by ``FindingUnwritten``'s values.
 _UNWRITTEN_WORDS: Final = {
-    "not_kept": "the commit step kept nothing",
+    "not_kept": "nothing in it was kept",
+    "already_held": "already held as it would be written",
     "single_observation": "a single observation, left as evidence",
     "below_floor": "below the evidence floor",
     "check_failed": "failed a check",
@@ -1067,9 +1074,9 @@ class Learned:
             attempt.items.append(item)
             self.waiting.setdefault(key, []).append(item)
             self.pairs[line.line] = None
-            if stage == "commit" and finding is not None and finding not in self.current:
+            if stage in _FINDING_CALLS and finding is not None and finding not in self.current:
                 # Its findings entry is not in this file (written while the record was
-                # off, say): the commit's own given entry names the finding.
+                # off, say): the call's own given entry names the finding.
                 self._stub(attempt, finding, _mapping(body.get("finding")).get("claim"))
             self._called(attempt, stage, finding, {"given": line.line, "returned": None})
             return
@@ -1094,8 +1101,20 @@ class Learned:
     ) -> None:
         if stage == "scout":
             attempt.scout = lines
-        elif finding is not None and finding in self.current:
-            self.current[finding]["commit"] = lines
+        elif finding is None or finding not in self.current:
+            return
+        elif stage == "placement":
+            # One per memory framing kept (ADR-0346 §6:2): the returned entry closes the
+            # placement its given entry opened.
+            placements = self.current[finding]["placements"]
+            assert isinstance(placements, list)  # noqa: S101 — set on every finding
+            held = next((one for one in placements if one["given"] == lines["given"]), None)
+            if held is None:
+                placements.append(lines)
+            else:
+                held["returned"] = lines["returned"]
+        else:
+            self.current[finding][stage] = lines
 
     def _step(self, attempt: _Try, line: Entry, stage: str, body: Mapping[str, object]) -> None:
         if stage == "findings":
@@ -1128,6 +1147,8 @@ class Learned:
             "findings_line": line.line,
             "scout": dict(attempt.scout),
             "commit": None,
+            "framing": None,
+            "placements": [],
             "outcome": None,
         }
         self.findings.append(record)
@@ -1139,7 +1160,7 @@ class Learned:
         record: dict[str, object] = {
             "id": finding_id, "claim": _text(claim), "parts": None, "candidate": None,
             "relied_on": None, "attempt": attempt.key, "findings_line": None, "scout": {},
-            "commit": None, "outcome": None,
+            "commit": None, "framing": None, "placements": [], "outcome": None,
         }  # fmt: skip
         self.findings.append(record)
         self.current[finding_id] = record
@@ -1154,15 +1175,15 @@ class Learned:
             record = self._stub(attempt, finding_id, body.get("claim"))
         decided = _mapping(body.get("decided"))
         short = outcome_in_short(body.get("outcome"))
+        held = _mapping(body.get("outcome"))
         record["outcome"] = {
             **short,
-            "action": _text(decided.get("action")),
-            "wording": _text(decided.get("wording")) if decided.get("action") != "raise_question"
-            else _text(decided.get("asks")),
-            "note": _text(decided.get("note")),
+            **_decided_in_short(decided),
+            "unclear": len(_sequence(held.get("unclear"))),
+            "asked": len(_sequence(held.get("asked"))),
             "line": line.line,
             "attempt": attempt.key,
-        }  # fmt: skip
+        }
         tone = "kept" if short["kept"] else "not_kept"
         self._point(attempt, line, "outcome", f"{finding_id} · {short['short']}", tone)
 
@@ -1221,6 +1242,30 @@ class Learned:
         }
 
 
+def _decided_in_short(decided: Mapping[str, object]) -> dict[str, object]:
+    """What a finding's calls decided, in short: an action, a wording and a note.
+
+    Framing's (ADR-0346 §5): each memory it kept, joined, and its reason where it kept
+    nothing, or how many memories a check refused. The commit step's, for a record written
+    before ADR-0346: its action, its wording or a question's, and its note.
+    """
+    if "framed" in decided:
+        framed = [_mapping(one) for one in _sequence(decided.get("framed"))]
+        kept = [
+            wording
+            for one in framed
+            if one.get("refused") is None and (wording := _text(one.get("wording")))
+        ]
+        refused = sum(1 for one in framed if one.get("refused") is not None)
+        note = _text(decided.get("nothing"))
+        if note is None and refused:
+            note = f"{refused} framed {'memory' if refused == 1 else 'memories'} failed a check"
+        return {"action": "frame", "wording": " · ".join(kept) or None, "note": note}
+    action = _text(decided.get("action"))
+    said = decided.get("asks") if action == "raise_question" else decided.get("wording")
+    return {"action": action, "wording": _text(said), "note": _text(decided.get("note"))}
+
+
 def _in_short(record: Mapping[str, object]) -> dict[str, object]:
     """A finding as the overview lists it: its claim and outcome in short, and its lines."""
     claim = _text(record.get("claim"))
@@ -1231,6 +1276,8 @@ def _in_short(record: Mapping[str, object]) -> dict[str, object]:
         "findings_line": record.get("findings_line"),
         "scout": record.get("scout"),
         "commit": record.get("commit"),
+        "framing": record.get("framing"),
+        "placements": record.get("placements") or [],
         "outcome": None,
     }
     if outcome:
@@ -2144,7 +2191,7 @@ def learning_call(lines: Sequence[Line], number: int) -> dict[str, object] | Non
         number: The line of the call's given entry or of its returned one.
 
     Returns:
-        ``None`` where that line is no scout's or commit's given or returned entry; else
+        ``None`` where that line is no observer call's given or returned entry; else
         the call's parts as :func:`model_call` gives them, and which step, finding and
         attempt it was.
     """
@@ -2702,8 +2749,8 @@ PAGE: Final = """<!doctype html>
   <div class="ov-head-block">
     <h1 class="ov-title">What the observer learned</h1>
     <p class="note">Every activation the observer wrote about, its latest work first: each finding
-      the scout proposed, what the commit step kept of it or why not, and the prompt and reply
-      behind each.</p>
+      the scout proposed, what framing kept of it or why not, and the prompt and reply behind
+      each call.</p>
     <div class="ov-stats" id="ov-stats"></div>
     <div class="ov-tools">
       <div class="ov-filters" id="ov-filters"></div>
@@ -3132,6 +3179,7 @@ details.part[open] > summary::before { content: "\u25be"; }
 }
 .ln-track .bar.call { top: 9px; height: 12px; line-height: 12px; }
 .ln-track .s-scout { --lane: var(--scout); } .ln-track .s-commit { --lane: var(--commit); }
+.ln-track .s-framing, .ln-track .s-placement { --lane: var(--commit); }
 .ln-track .pt { --lane: var(--scout); }
 .pt.k-outcome.t-kept { background: var(--kept); }
 .pt.k-outcome.t-not_kept { background: var(--not-kept); }
@@ -3835,9 +3883,17 @@ SCRIPT: Final = r"""
       links.appendChild(go);
     };
     const scout = f.scout || {};
-    const commit = f.commit || {};
     jump("Scout", [scout.given, scout.returned], scout.given);
-    jump("Commit", [commit.given, commit.returned], commit.given);
+    if (f.commit) {
+      jump("Commit", [f.commit.given, f.commit.returned], f.commit.given);
+    } else {
+      const framing = f.framing || {};
+      jump("Framing", [framing.given, framing.returned], framing.given);
+    }
+    arr(f.placements).forEach((one, at) => {
+      const placed = obj(one);
+      jump("Placement " + (at + 1), [placed.given, placed.returned], placed.given);
+    });
     jump("Outcome", [f.findings_line, o ? o.line : null]);
     row.appendChild(links);
     return row;
@@ -4713,9 +4769,20 @@ SCRIPT: Final = r"""
       for (const f of arr(b.findings)) {
         const one = obj(f);
         box.appendChild(el("h4", null, (one.id || "finding") + " \u00b7 " + (one.claim || "")));
+        const about = obj(one.annotations);
         kv(box, [["candidate", one.candidate || undefined],
           ["relied on", one.relied_on || undefined],
-          ["rests on", arr(one.rests_on).length + " part(s)"]]);
+          ["rests on", arr(one.rests_on).length + " part(s)"],
+          ["subjects", arr(about.subjects).join(", ") || undefined],
+          ["involved", arr(about.involved).join(", ") || undefined],
+          ["why", about.why || undefined],
+          ["situations", arr(about.situations).join("; ") || undefined],
+          ["narrowing", about.narrowing ? obj(about.narrowing).reach + ": "
+            + obj(about.narrowing).note : undefined]]);
+      }
+      for (const d of arr(b.declines)) {
+        const one = obj(d);
+        kv(box, [["declined", one.candidate + " \u00b7 " + one.reason]]);
       }
       return;
     }
@@ -4725,9 +4792,43 @@ SCRIPT: Final = r"""
       kv(box, [["finding", b.finding], ["claim", b.claim], ["ruling", o.ruling],
         ["unwritten", o.unwritten || undefined],
         ["writes", arr(o.writes).map((w) => obj(w).memory + " (" + arr(obj(w).operations)
-          .join(", ") + ")").join("; ") || undefined]]);
+          .join(", ") + ")").join("; ") || undefined],
+        ["asked", arr(o.asked).join("; ") || undefined]]);
+      for (const u of arr(o.unclear)) {
+        const one = obj(u);
+        kv(box, [["unclear", one.memory + " \u00b7 " + one.wording + " \u00b7 " + one.note]]);
+      }
       const d = obj(b.decided);
-      if (b.decided) {
+      if (b.decided && d.framed !== undefined) {
+        const fb = sec(holder, "What framing decided");
+        kv(fb, [["nothing kept, because", d.nothing || undefined],
+          ["failed a check", d.failed || undefined]]);
+        for (const n of arr(d.framed)) {
+          const one = obj(n);
+          fb.appendChild(el("h4", null, (one.refused ? "refused: " : "") + (one.wording || "")));
+          if (one.refused) kv(fb, [["why", one.refused]]);
+          const held = obj(one.framed);
+          if (one.framed) {
+            kv(fb, [["subjects", arr(held.subjects).join(", ") || undefined],
+              ["involved", arr(held.involved).join(", ") || undefined],
+              ["labels", arr(held.labels).join("; ") || undefined],
+              ["marks", arr(held.marks).join(", ") || undefined],
+              ["valid until", held.valid_until || undefined]]);
+            supportsView(fb, held.supports);
+          }
+        }
+        const pb = sec(holder, "What placement decided");
+        for (const p of arr(d.placed)) {
+          const one = obj(p);
+          pb.appendChild(el("h4", null, one.wording || ""));
+          kv(pb, [["ruling", one.ruling || undefined], ["refused", one.refused || undefined],
+            ["held at", arr(one.kept).join(", ") || undefined]]);
+          for (const r of arr(one.relations)) {
+            const rel = obj(r);
+            kv(pb, [[rel.relation, rel.memory + (rel.note ? " \u00b7 " + rel.note : "")]]);
+          }
+        }
+      } else if (b.decided) {
         const db = sec(holder, "What the commit decided");
         kv(db, [["action", d.action], ["memory", d.memory], ["wording", d.wording],
           ["asks", d.asks], ["reason", d.reason], ["note", d.note],
