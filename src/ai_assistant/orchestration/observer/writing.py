@@ -99,7 +99,7 @@ from ai_assistant.orchestration.observer.placement import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping, Sequence, Set
     from datetime import datetime
 
     from ai_assistant.core.protocols import MemoryStore, PlanStore
@@ -129,6 +129,33 @@ _RATIONALE: Final = "the observer kept this from an episode that left the episod
 
 #: The relations that write nothing on the stored memory they name (ADR-0345 §5).
 _WRITES_NOTHING: Final = frozenset({PlacedRelation.INDEPENDENT, PlacedRelation.UNCLEAR})
+
+#: What each relation's write may make on the memory it names, but a ``recheck``'s one
+#: question (ADR-0345 §3:1-§3:7, §5).
+_MAY_MAKE: Final[dict[PlacedRelation, frozenset[MemoryOperationKind]]] = {
+    **dict.fromkeys(
+        (PlacedRelation.SUPPORTS, PlacedRelation.WEAKENS, PlacedRelation.CONTAINED),
+        frozenset({MemoryOperationKind.ADD_SUPPORT, MemoryOperationKind.RESOLVE_QUESTION}),
+    ),
+    PlacedRelation.RESTATES: frozenset(
+        {
+            MemoryOperationKind.ADD_SUPPORT,
+            MemoryOperationKind.STOP_COUNTING,
+            MemoryOperationKind.RESOLVE_QUESTION,
+        }
+    ),
+    **{
+        relation: frozenset(
+            {
+                MemoryOperationKind.ADD_SUPPORT,
+                MemoryOperationKind.STOP_COUNTING,
+                MemoryOperationKind.RESOLVE_QUESTION,
+                kind,
+            }
+        )
+        for relation, kind in RETIRING_RELATIONS.items()
+    },
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -525,14 +552,24 @@ def _its_install(
     """What a proposal found installed wrote, by memory, read off the store.
 
     Its own id installed shows the one atomic write landed (ADR-0345 §5:6), so the store
-    holds every effect of it, and what is read here is only which operations to list.
-    On the installed memory, its create and the leading operations past it carrying a
-    retiring relation's note, whose dispute lands there (§3:5). On each memory the
-    placement names, the leading operations past the log length recorded when the
-    proposal was sent, each the observer's, at the write's one instant, and carrying that
-    memory's own relation's note or a retiring relation's (§5:7): the write was made at
-    the revisions it read (ADR-0219 §2), so its operations are the first past that length.
-    Telling them from a later write that left the same stamps needs a write identity the
+    holds every effect of it, and what is read here is only which operations to list. The
+    write was made at the revisions it read (ADR-0219 §2), so on each memory the placement
+    names its operations are the first past the log length recorded when the proposal was
+    sent, all at the write's one instant and the observer's. Only an operation the write
+    could have made is listed (ADR-0345 §3, §5):
+
+    - on a memory it asks to be rechecked, the one question it raised, which every such
+      write raises, so it is the first operation past that length;
+    - on any other memory a relation writes onto, an operation of a kind that relation
+      makes, carrying its note (§5:7) and citing one of this memory's own parts, as every
+      support, stop, retirement and answer a relation writes does; a support it already
+      carried is never added again (ADR-0328 §4:8), so an addition citing one of them is
+      this write's alone;
+    - on the installed memory, its create, and each dispute a retiring relation added,
+      carrying that relation's note and citing a support of the memory it named (§3:5).
+
+    A later write that also cites this memory's parts on a memory it retires, in the same
+    notes, could still be listed with it; telling the two apart needs a write identity the
     store does not keep (#3394).
 
     Args:
@@ -543,33 +580,62 @@ def _its_install(
     Returns:
         The operations the write made, by memory.
     """
-    retiring = frozenset(
-        one.note for one in record.named if one.relation in RETIRING_RELATIONS and one.note
-    )
+    parts = {one.points_at for one in record.memory.supports}
     runs: dict[str, list[MemoryOperation]] = {}
+    disputed: set[SupportPart] = set()
     for named in record.named:
         stored = held.get(named.memory)
-        if stored is not None and named.relation not in _WRITES_NOTHING:
-            notes = retiring | {named.note}
-            runs[named.memory] = _its_run(stored.operations[named.operations :], notes)
-    own = _its_run(installed.operations[1:], retiring)
-    instants = [own[0].at] if own else sorted({run[0].at for run in runs.values() if run})
-    at = instants[0] if instants else None
+        if stored is None or named.relation in _WRITES_NOTHING:
+            continue
+        after = stored.operations[named.operations :]
+        if named.relation in RETIRING_RELATIONS:
+            disputed.update(one.points_at for one in stored.supports)
+        if named.relation is PlacedRelation.RECHECK:
+            runs[named.memory] = [
+                one
+                for one in after[:1]
+                if one.kind is MemoryOperationKind.RAISE_QUESTION
+                and one.by is MemoryWriterName.OBSERVER
+                and one.note == named.note
+            ]
+            continue
+        runs[named.memory] = _its_run(after, _made_by(named, parts))
+    retiring = {one.note for one in record.named if one.relation in RETIRING_RELATIONS}
+    own = _its_run(
+        installed.operations[1:],
+        lambda one: (
+            one.kind is MemoryOperationKind.ADD_SUPPORT
+            and one.note in retiring
+            and one.cites in disputed
+        ),
+    )
+    firsts = [run[0].at for run in (*runs.values(), own) if run]
+    at = min(firsts) if firsts else None
     operations = {key: run for key, run in runs.items() if run and run[0].at == at}
-    operations[installed.id] = [installed.operations[0], *own]
+    operations[installed.id] = [installed.operations[0], *(own if own and own[0].at == at else ())]
     return operations
 
 
-def _its_run(operations: Sequence[MemoryOperation], notes: frozenset[str]) -> list[MemoryOperation]:
-    """The leading ``operations`` one write made: the observer's, at one instant, each noted."""
+def _made_by(named: NamedRevision, parts: Set[SupportPart]) -> Callable[[MemoryOperation], bool]:
+    """Whether an operation is one ``named``'s relation could make on its memory (§5)."""
+    kinds = _MAY_MAKE[named.relation]
+
+    def made(one: MemoryOperation) -> bool:
+        return one.kind in kinds and one.note == named.note and one.cites in parts
+
+    return made
+
+
+def _its_run(
+    operations: Sequence[MemoryOperation], made: Callable[[MemoryOperation], bool]
+) -> list[MemoryOperation]:
+    """The leading ``operations`` one write made: the observer's, at one instant, each ``made``."""
     if not operations:
         return []
     first = operations[0].at
     return list(
         takewhile(
-            lambda one: (
-                one.at == first and one.by is MemoryWriterName.OBSERVER and one.note in notes
-            ),
+            lambda one: one.at == first and one.by is MemoryWriterName.OBSERVER and made(one),
             operations,
         )
     )
