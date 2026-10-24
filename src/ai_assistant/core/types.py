@@ -9579,6 +9579,11 @@ class FindingUnwritten(StrEnum):
     ASKED = "asked"
     """``MemoryPolicy`` ruled ``ASK_USER`` naming no stored memory, so nothing was
     raised and the candidate waits on its episode (§13:3)."""
+    ALREADY_HELD = "already_held"
+    """Every memory framed from it was folded into a stored memory that already carried
+    each support it would add, so the write changed nothing (ADR-0328 §4:8, ADR-0346
+    §6:6): what it states is held, and no operation is listed that the store did not
+    make."""
 
 
 class UnclearPlacement(BaseModel):

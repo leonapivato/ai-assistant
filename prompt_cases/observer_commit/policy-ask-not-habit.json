@@ -1,9 +1,0 @@
-{
-  "messages": [
-    {
-      "role": "user",
-      "content": "{\"claim\": \"The user likes to confirm each restaurant booking before it is made.\", \"under_review\": \"E1\", \"parts\": [{\"part\": \"P1\", \"exchange\": \"E1\", \"occurred_at\": \"2026-06-06T17:22:00+00:00\", \"from\": \"the user\", \"outside\": false, \"at\": null, \"text\": \"yes\", \"answers\": \"Saltmarsh has a table for two at 19:30 tomorrow, by the window.\\nNeeds your yes:\\nBook a table at Saltmarsh, Sun 7 Jun 2026 at 19:30, for 2\"}, {\"part\": \"P2\", \"exchange\": \"E2\", \"occurred_at\": \"2026-05-23T12:07:00+00:00\", \"from\": \"the user\", \"outside\": false, \"at\": null, \"text\": \"yep go ahead\", \"answers\": \"Brindle & Vine can seat four at 13:00 on Sunday.\\nNeeds your yes:\\nBook a table at Brindle & Vine, Sun 24 May 2026 at 13:00, for 4\"}], \"memories\": []}",
-      "name": null
-    }
-  ]
-}

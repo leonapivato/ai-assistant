@@ -28,7 +28,8 @@ from ai_assistant.models.follow_up import FOLLOW_UP_PROMPT
 from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
 from ai_assistant.orchestration.matters_pass import MATTERS_PASS_PROMPT
 from ai_assistant.orchestration.observer.prompts import (
-    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_FRAMING_PROMPT,
+    OBSERVER_PLACEMENT_PROMPT,
     OBSERVER_SCOUT_PROMPT,
 )
 from ai_assistant.orchestration.planning import PLANNING_PROMPT
@@ -102,8 +103,8 @@ def test_each_default_ships_in_the_wheel_beside_its_module() -> None:
         assert f"{declaration.package.replace('.', '/')}/{declaration.filename}" in shipped
 
 
-def test_the_nine_prompts_carry_their_flags_and_values() -> None:
-    """§2:1: all nine prompts, ADR-0337 §6:1's follow-up the ninth, with their flags and values."""
+def test_the_ten_prompts_carry_their_flags_and_values() -> None:
+    """§2:1: all ten prompts, ADR-0346 §10:1's two in ``observer_commit``'s place."""
     assert PROMPTS == (
         UNDERSTANDING_PROMPT,
         PLANNING_PROMPT,
@@ -111,7 +112,8 @@ def test_the_nine_prompts_carry_their_flags_and_values() -> None:
         STORY_TIDY_UP_PROMPT,
         MATTERS_PASS_PROMPT,
         OBSERVER_SCOUT_PROMPT,
-        OBSERVER_COMMIT_PROMPT,
+        OBSERVER_FRAMING_PROMPT,
+        OBSERVER_PLACEMENT_PROMPT,
         MEMORY_RECONCILER_PROMPT,
         FOLLOW_UP_PROMPT,
     )
@@ -133,17 +135,19 @@ def test_the_nine_prompts_carry_their_flags_and_values() -> None:
         {"approved_action_tool", "note_reliance_capability", "needs_your_yes"}
     )
     assert STORY_TIDY_UP_PROMPT.values == frozenset({"story_summary_cap_chars"})
-    # ADR-0338 §9:1-§9:5: the observer's two steps, given a person's fields or not.
+    # ADR-0338 §9:1-§9:3: the scout, given a person's fields or not; framing and
+    # placement declare no flag (ADR-0346 §10:1).
     assert OBSERVER_SCOUT_PROMPT.flags == frozenset({"person"})
-    assert OBSERVER_COMMIT_PROMPT.flags == frozenset({"person"})
     for declaration in PROMPTS[2:]:
-        if declaration not in {OBSERVER_SCOUT_PROMPT, OBSERVER_COMMIT_PROMPT}:
+        if declaration is not OBSERVER_SCOUT_PROMPT:
             assert declaration.flags == frozenset()
+    assert "observer_commit" not in {one.name for one in PROMPTS}
     for declaration in (
         DIGESTING_PROMPT,
         MATTERS_PASS_PROMPT,
         OBSERVER_SCOUT_PROMPT,
-        OBSERVER_COMMIT_PROMPT,
+        OBSERVER_FRAMING_PROMPT,
+        OBSERVER_PLACEMENT_PROMPT,
         MEMORY_RECONCILER_PROMPT,
         FOLLOW_UP_PROMPT,
     ):

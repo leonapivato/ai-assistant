@@ -1,15 +1,17 @@
-"""The observer wired and on, driven end to end through the production root (ADR-0329).
+"""The observer wired and on, driven end to end through the production root (ADR-0346).
 
 #3154's first scenario, in process: "remember I'm allergic to peanuts" records a
 candidate (§3:1), which the panel shows pending (§18:1); once ten more activations have
 pushed its episode out of the episode window, the run the last freeze starts (§7:6)
-commits the memory at "you said it", citing the user's message (§9, §11:1, §12), records
-the episode processed (§16:1), and the candidate is pending no more.
+reads the episode's record (ADR-0346 §2), scouts it, frames the memory and, with nothing
+stored like it, proposes it with nothing to place (§5, §6), at "you said it", citing the
+user's message; it records the episode processed (§16:1), and the candidate is pending no
+more.
 
 The substitutes are the model-facing seams alone, as every ``tests/app`` phases suite
 substitutes them (:mod:`phases_composition_support`): planning's rounds are scripted, and
 the provider's ``complete`` answers understanding with a stated reading and the
-observer's two steps from what each is shown. **No call leaves the process**, and
+observer's steps from what each is shown. **No call leaves the process**, and
 nothing contacts a hub.
 """
 
@@ -22,6 +24,7 @@ from phases_composition_support import UNDERSTANDING_INSTRUCTIONS, build_phased,
 
 from ai_assistant.app import composition
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     InputPart,
     Memory,
     MemoryOperationKind,
@@ -36,7 +39,7 @@ from ai_assistant.core.types import (
 from ai_assistant.core.types import Message as ModelMessage
 from ai_assistant.models import PydanticAIProvider
 from ai_assistant.orchestration.observer.prompts import (
-    OBSERVER_COMMIT_PROMPT,
+    OBSERVER_FRAMING_PROMPT,
     OBSERVER_SCOUT_PROMPT,
 )
 from ai_assistant.testing import FakeToolCallingCompleter, default_renderings
@@ -52,9 +55,9 @@ if TYPE_CHECKING:
 _FACT: Final = "The user is allergic to peanuts."
 _ASKED: Final = "remember I'm allergic to peanuts"
 _UNDERSTOOD: Final = json.dumps({"meaning": "As said.", "meaning_ground": "stated"})
-#: The observer's two steps' calls, told apart by their default's renderings, not words.
+#: The observer's steps' calls, told apart by their default's renderings, not words.
 _SCOUT: Final = default_renderings(OBSERVER_SCOUT_PROMPT)
-_COMMIT: Final = default_renderings(OBSERVER_COMMIT_PROMPT)
+_FRAMING: Final = default_renderings(OBSERVER_FRAMING_PROMPT)
 
 
 class _Planning:
@@ -79,7 +82,7 @@ class _Planning:
 
 
 class _Models:
-    """The provider's ``complete``: understanding, the scout and the commit step."""
+    """The provider's ``complete``: understanding, the scout and framing."""
 
     def __init__(self) -> None:
         self.steps: list[ObserverStep] = []
@@ -92,32 +95,43 @@ class _Models:
         if system in _SCOUT:
             self.steps.append(ObserverStep.SCOUT)
             return self._scout(json.loads(messages[-1].content))
-        if system in _COMMIT:
-            self.steps.append(ObserverStep.COMMIT)
-            return self._commit(json.loads(messages[-1].content))
+        if system in _FRAMING:
+            self.steps.append(ObserverStep.FRAMING)
+            return self._frame(json.loads(messages[-1].content))
         return "Noted."
 
     def _scout(self, shown: dict[str, Any]) -> str:
         self.scouted.append(shown)
-        leaving = shown["leaving"]
+        leaving = shown["exchange"]
         findings = [
             {
                 "claim": hint["fact"],
                 "rests_on": [
                     part["part"] for part in leaving["parts"] if part["from"] == "the user"
                 ],
-                "candidate": hint["candidate"],
+                "candidates": [hint["candidate"]],
+                "subjects": ["the user"],
+                "involved": [],
+                "why": "Health.",
+                "situations": ["choosing where to eat"],
             }
             for hint in leaving["candidates"]
         ]
-        return json.dumps({"findings": findings})
+        return json.dumps({"findings": findings, "declines": []})
 
-    def _commit(self, shown: dict[str, Any]) -> str:
+    def _frame(self, shown: dict[str, Any]) -> str:
         supports = [
             {"part": part["part"], "direction": "for", "backs_as_worded": True, "how_sure": "sure"}
             for part in shown["parts"]
         ]
-        return json.dumps({"action": "create", "wording": shown["claim"], "supports": supports})
+        memory = {
+            "wording": shown["claim"],
+            "supports": supports,
+            "subjects": ["the user"],
+            "involved": [],
+            "labels": ["choosing where to eat"],
+        }
+        return json.dumps({"memories": [memory]})
 
 
 async def test_a_request_to_remember_is_pending_then_kept_once_it_leaves_the_window(
@@ -164,7 +178,7 @@ async def test_a_request_to_remember_is_pending_then_kept_once_it_leaves_the_win
         await until(processed, what="the request's episode to be processed")
         (record,) = await plans.observations([asked.address])
         (attempt,) = record.attempts
-        assert [one.step for one in attempt.calls] == [ObserverStep.SCOUT, ObserverStep.COMMIT]
+        assert [one.step for one in attempt.calls] == [ObserverStep.SCOUT, ObserverStep.FRAMING]
         (finding,) = record.findings
         assert finding.candidate is not None
         assert finding.written == ()
@@ -174,7 +188,11 @@ async def test_a_request_to_remember_is_pending_then_kept_once_it_leaves_the_win
 
         kept = await phased.memory.get(write.memory)
         assert isinstance(kept, Memory)
-        assert kept.content == _FACT
+        assert (kept.content, kept.subjects, [one.text for one in kept.labels]) == (
+            _FACT,
+            (OWNER_PERSON_ID,),
+            ["choosing where to eat"],
+        )
         assert kept.standing is MemoryStanding.SAID
         (support,) = kept.supports
         assert support.origin is SupportOrigin.USER_MESSAGE
@@ -183,7 +201,7 @@ async def test_a_request_to_remember_is_pending_then_kept_once_it_leaves_the_win
         assert support.added_by.value == "observer"
         # The scout read the request's own words, quoted, with its candidate as a hint.
         (shown,) = models.scouted
-        assert any(_ASKED in part["text"] for part in shown["leaving"]["parts"])
+        assert any(_ASKED in part["text"] for part in shown["exchange"]["parts"])
         assert engine._observer is not None
         assert await engine.pending_candidates() == ()
     finally:

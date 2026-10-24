@@ -1,9 +1,10 @@
 """What the observer gives the diagnostic record, and nothing it reads back (ADR-0333 §2-§4).
 
 Where ``Settings.diagnostic_record`` is on, the observer writes, as the source
-``observer``, what each of its model calls was given and returned, the scout's findings as
-recorded, each finding's outcome with the words its commit decided, and how each attempt
-ended (§2:1's table). The composition root hands it its ``DiagnosticSink``, as ``None``
+``observer``, what each of its model calls was given and returned, the scout's findings and
+declines as recorded, each finding's outcome with what its framing and placements decided,
+every ``unclear`` among them included (ADR-0346 §6:5), and how each attempt ended (§2:1's
+table). The composition root hands it its ``DiagnosticSink``, as ``None``
 where the setting is false, and then nothing here builds an entry (§2:7).
 
 **Under the leaving episode's activation, never bound** (§2:8, §2:10). The observer is a
@@ -17,7 +18,8 @@ second file, so the activation's own file still ages from its run (§3:1).
 
 **Every body names the episode and its attempt** (§2:3): ``episode`` is the leaving
 episode's id and ``attempt_started_at`` the instant its attempt started, and ``stage``
-says which entry it is: ``scout`` or ``commit`` for a call's given and returned entries,
+says which entry it is: ``scout``, ``framing`` or ``placement`` for a call's given and
+returned entries,
 and ``findings``, ``outcome`` or ``end`` for the three step entries. A call's given entry
 also names, as ``prompt``, the template its system message was rendered from (ADR-0334
 §8:2).
@@ -43,15 +45,6 @@ from ai_assistant.core.types import (
     DiagnosticSource,
     fault_class_of,
 )
-from ai_assistant.orchestration.observer.commit import (
-    AddSupports,
-    Blocked,
-    Create,
-    RaiseQuestion,
-    RecordUse,
-    Unwritten,
-)
-from ai_assistant.orchestration.observer.writing import policy_ask_wording
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -60,16 +53,15 @@ if TYPE_CHECKING:
     from ai_assistant.core.prompts import RenderedPrompt
     from ai_assistant.core.protocols import DiagnosticSink
     from ai_assistant.core.types import (
+        CandidateDecline,
         EpisodicMemory,
         FindingOutcome,
-        MemorySupport,
         Message,
         ObservationAttemptEnd,
         ObservationFinding,
         ObservationState,
         ObserverStep,
     )
-    from ai_assistant.orchestration.observer.commit import Checked, Resolve
 
 __all__ = ["Diagnosed", "ObserverEntries"]
 
@@ -149,7 +141,7 @@ class ObserverEntries:
             messages: Its rendered request.
             prompt: Its system message's instruction, whose template and flags the
                 entry names (ADR-0334 §8:2, ADR-0335 §9:1).
-            finding: The finding a commit call decides.
+            finding: The finding a framing or a placement call decides.
         """
 
         def body() -> dict[str, object]:
@@ -180,7 +172,7 @@ class ObserverEntries:
             step: The step that made it.
             reply: The model's reply, where it returned.
             failure: How it failed, where it did.
-            finding: The id of the finding a commit call decided.
+            finding: The id of the finding a framing or a placement call decided.
         """
 
         def body() -> dict[str, object]:
@@ -196,14 +188,20 @@ class ObserverEntries:
         await self._each(targets, DiagnosticKind.RETURNED, body)
 
     async def findings(
-        self, target: Diagnosed | None, findings: Sequence[ObservationFinding], dropped: int
+        self,
+        target: Diagnosed | None,
+        findings: Sequence[ObservationFinding],
+        dropped: int,
+        *,
+        declines: Sequence[CandidateDecline] = (),
     ) -> None:
-        """The scout's findings as recorded, and how many of its proposals were dropped (§2:4).
+        """The scout's findings and declines as recorded, and how many it dropped (§2:4).
 
         Args:
             target: The attempt, or ``None`` where it has no activation.
             findings: The findings the scout's reply kept, as recorded.
             dropped: How many of its proposals code dropped.
+            declines: The candidates it declined, with their reasons (ADR-0346 §4:6).
         """
         await self._each(
             _one(target),
@@ -212,6 +210,7 @@ class ObserverEntries:
                 "stage": "findings",
                 "findings": [_finding(one) for one in findings],
                 "dropped": dropped,
+                "declines": [one.model_dump(mode="json") for one in declines],
             },
         )
 
@@ -221,18 +220,18 @@ class ObserverEntries:
         finding: ObservationFinding,
         outcome: FindingOutcome,
         *,
-        decided: Checked | None = None,
-        note: str | None = None,
+        decided: Mapping[str, object] | None = None,
     ) -> None:
-        """A finding's outcome, with the words its commit decided (§2:5).
+        """A finding's outcome, with what its framing and placements decided (§2:5).
 
         Args:
             target: The attempt, or ``None`` where it has no activation.
             finding: The finding.
-            outcome: Its outcome, as the observation record gives it.
-            decided: The commit's decision after code's checks, where a commit call
-                decided it; ``None`` where a check failed before any call.
-            note: The commit step's own note on its decision.
+            outcome: Its outcome, as the observation record gives it, every ``unclear``
+                its placements named among it (ADR-0346 §6:5).
+            decided: What its framing and placements decided, after code's checks,
+                where a framing call decided it; ``None`` where a check failed before
+                any call.
         """
         await self._each(
             _one(target),
@@ -242,7 +241,7 @@ class ObserverEntries:
                 "finding": finding.id,
                 "claim": finding.claim,
                 "outcome": outcome.model_dump(mode="json"),
-                "decided": None if decided is None else _decided(decided, note),
+                "decided": None if decided is None else dict(decided),
             },
         )
 
@@ -320,94 +319,13 @@ def _dropped(activation_id: str, error: Exception) -> None:
 
 
 def _finding(finding: ObservationFinding) -> dict[str, object]:
-    """A finding as the scout proposed it: its id, claim, parts and where it came from."""
+    """A finding as the scout proposed it: its id, claim, parts, annotations and source."""
     return {
         "id": finding.id,
         "claim": finding.claim,
         "rests_on": [one.model_dump(mode="json") for one in finding.rests_on],
         "candidate": finding.candidate,
-        "relied_on": finding.relied_on,
-    }
-
-
-def _support(support: MemorySupport) -> dict[str, object]:
-    """A support as its commit decided it: its part, direction and note, and the rest."""
-    return {
-        "part": support.points_at.model_dump(mode="json"),
-        "origin": support.origin.value,
-        "direction": support.direction.value,
-        "backs_as_worded": support.backs_as_worded,
-        "how_sure": None if support.how_sure is None else support.how_sure.value,
-        "about_when": None if support.about_when is None else support.about_when.isoformat(),
-        "note": support.note,
-    }
-
-
-def _decided(checked: Checked, note: str | None) -> dict[str, object]:
-    """The words a commit decided for what it would write (§2:5)."""
-    decided = _primary(checked.primary)
-    if checked.resolve is not None:
-        decided["resolves"] = _resolve(checked.resolve)
-    if note is not None:
-        decided["note"] = note
-    return decided
-
-
-def _primary(
-    primary: Create | AddSupports | RaiseQuestion | RecordUse | Unwritten | Blocked,
-) -> dict[str, object]:
-    match primary:
-        case Create(memory=memory, retiring=retiring):
-            return {
-                "action": "create",
-                "memory": memory.id,
-                "wording": memory.content,
-                "supports": [_support(one) for one in memory.supports],
-                "retiring": None
-                if retiring is None
-                else {
-                    "memory": retiring.memory.id,
-                    "wording": retiring.memory.content,
-                    "kind": retiring.kind.value,
-                    "note": retiring.note,
-                },
-                # The question a ruling of ask_user would raise on each memory it names.
-                "asks_if_the_policy_asks": policy_ask_wording(memory.content),
-            }
-        case AddSupports(target=target, supports=supports):
-            return {
-                "action": "add_supports",
-                "memory": target.id,
-                "wording": target.content,
-                "supports": [_support(one) for one in supports],
-            }
-        case RaiseQuestion(target=target, kind=kind, asks=asks, support=support):
-            return {
-                "action": "raise_question",
-                "memory": target.id,
-                "wording": target.content,
-                "question": kind.value,
-                "asks": asks,
-                "support": _support(support),
-            }
-        case RecordUse(memory=memory, entry=entry):
-            return {
-                "action": "record_use",
-                "memory": memory.id,
-                "wording": memory.content,
-                "held_up": entry.held_up,
-                "entry_note": entry.note,
-            }
-        case Unwritten(reason=reason):
-            return {"action": "nothing", "reason": reason.value}
-        case Blocked():
-            return {"action": "blocked"}
-
-
-def _resolve(resolve: Resolve) -> dict[str, object]:
-    return {
-        "memory": resolve.target.id,
-        "question": resolve.question,
-        "note": resolve.note,
-        "support": _support(resolve.support),
+        "annotations": None
+        if finding.annotations is None
+        else finding.annotations.model_dump(mode="json"),
     }

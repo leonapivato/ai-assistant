@@ -1,64 +1,48 @@
-"""The observer's writes, through the write stage, and each one's outcome (ADR-0329 §12-§14).
+"""The observer's writes: each framed memory placed and proposed, and the outcome.
 
 Every write the observer makes goes through the orchestration write stage
-(``MemoryWriteStage``), never to the store or a ``MemoryWriter`` directly (§12:1):
+(``MemoryWriteStage``), never to the store or a ``MemoryWriter`` directly (ADR-0329
+§12:1). Under ADR-0346 every write is a placed proposal's (§6:6, ADR-0345 §4-§5): for each
+memory a framing kept, code retrieves the stored memories like it (§6:1), the placement
+call names its relation to each (§6:2), and the memory is proposed to
+``MemoryWriter.ingest`` carrying that placement, with the revision each retrieved memory
+was read at. The writer derives the write from the relations by rule: a fold, an install
+beside, evidence for or against, a ``recheck`` question, a retirement in the holder's own
+beliefs, an answered question. No reconciler runs and no retirement, question or support
+is written by the observer itself.
 
-- **a new memory** is proposed through ``ingest`` and ruled on by ``MemoryPolicy``
-  (§12:2), carrying the one retiring operation a finding that ends, marks wrong or
-  replaces a stored memory makes (§12:4);
-- **supports added** to a memory that already states the claim as worded are one add
-  support each, through ``apply`` (§12:3);
-- **an open question** is raised, or resolved, by that same member (§12:3, §13);
-- **a track-record entry** is recorded through ``record_use``, conditionally on the
-  revision read (§14:4).
+**Where the memory is placed for** (ADR-0329 §12:6, ADR-0346 §5:7). The memory takes the
+narrowest placement over every record its run was supplied, the scout's supply and the
+memories retrieved for it included; and, where that leaves it placed for anyone with no
+setter, the scout's proposed narrowing as a ``proposed`` placement at its create, within
+ADR-0217 §4's bounds.
 
-Each memory written on is read again just before its write, and the write is made only
-where the memory still stands at the revision the commit step decided on, or at the one
-this finding's own last write left it at; otherwise the attempt fails as stale and the
-finding is decided again on a retry (ADR-0219 §2-§3). Every write adds to the record and
-none removes anything (§12:7): a support already on a memory changes nothing (ADR-0328
-§4:8), and it is recorded as its add support, so a finding processed again after a clear
-says what the memory carries rather than nothing; an entry the memory already holds for
-the episode is recorded as the one held (ADR-0328 §8:3).
+**A stale placement is placed again** (§6:7). Where the writer refuses the proposal as
+stale (ADR-0345 §4:7), nothing was written, and code retrieves and places it again, up to
+a composition-root count, within the same attempt; past it the attempt fails, and is
+retried with its backoff (ADR-0329 §16:4). The pin pass runs, strictly, before each
+retrieval, so a pin a person made counts in the write its memory is placed in
+(ADR-0338 §9:9).
 
-**The outcome** names what was written, with the memory ids and the operations, or why
-nothing was (§16:1). A ruling that writes nothing is ``refused``; an ``ASK_USER`` ruling
-raises a ``policy_ask`` question on each stored memory it names (§13:1), and one that
-names none writes nothing and is ``asked`` (§13:3) — never logged and dropped (§13:6).
-A write the writer refuses as self-consuming or as a fold onto a record it cites is
-``refused`` (§12:5), and one whose part points at an episode the store no longer holds
-failed §9:5's check. Every other failure of the write path fails the attempt, which is
-retried and in the end set aside as stuck (§16:4-§16:5): ``MemoryStoreError`` is a
-store's failure as well as a refusal, and only a retry tells a passing outage from a
-refusal, so neither is recorded as a terminal outcome.
+**What the policy's floor rules is final** (ADR-0345 §4:6). A ``reject`` writes nothing,
+and the memory is refused; an ``ask_user`` raises nothing, and the finding's outcome
+records the ask, the framed memory's wording among those asked about (ADR-0346 §6:8,
+ADR-0336 §7:4).
 
-**A retirement is ruled against the standing its memory's pins give it** (ADR-0338
-§9:9). Before every proposal to ``ingest`` — which may end, mark wrong or replace the
-memory its retirement names, or end those a ``SUPERSEDE`` ruling retires — the pin pass
-is run strictly (``PinConfirmations``): each pin a person made on their own profile that
-no support of its memory points at yet earns its ``pinned`` support, a support that
-cannot be written fails the attempt, and every memory the finding holds as read that the
-pass moved is read again. The policy then rules a supersession against the stored
-standing, the pins' included. Where the pins lift the memory a retirement names above the
-support it cites, the retirement is not proposed, and the ``conflict`` question the
-commit decided beside it is raised instead (ADR-0328 §6:5, §13:1). Those supports are
-the pin pass's writes, never the finding's, so its outcome does not list them; a
-retirement that already landed while a pin was being made stands, and the next run's
-pass adds that pin's support to the retired memory (§9:10).
-
-**What one finding wrote is handed to the caller as each write lands** (§16:1), before
-the write is verified and before anything else is read or written, so the caller can put
-it on the durable record and a later failure, a cancellation or a stop loses none of it.
-A supersession is handed over as its replacement's create before what it retired is
-read, so a read that fails there leaves the replacement on the record, and what it
-retired is read off its create again (:meth:`FindingWriter.retirements`).
+**The outcome** names what was written, by memory, with the operations each memory's own
+log gained from the write, read off it after the write, or why nothing was (ADR-0329
+§16:1); every ``unclear`` a placement named, with its note and the memory it named (§6:5);
+and the wordings the floor asked about. What one memory's write landed is handed to the
+caller as soon as it lands, before anything else is read, so a later failure, a
+cancellation or a stop loses none of it from the record.
 """
 
 from __future__ import annotations
 
-# At runtime, not under TYPE_CHECKING: `Landed` is a PEP 695 alias, whose value is read
-# lazily and must resolve when it is (#1706).
+# At runtime, not under TYPE_CHECKING: `Landed` and `Place` are PEP 695 aliases, whose
+# values are read lazily and must resolve when they are (#1706).
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.errors import (
@@ -67,703 +51,355 @@ from ai_assistant.core.errors import (
     UnresolvedEvidenceError,
 )
 from ai_assistant.core.types import (
-    BeliefBand,
     FindingOutcome,
     FindingUnwritten,
-    Memory,
-    MemoryChange,
     MemoryDecisionKind,
-    MemoryOperation,
     MemoryOperationKind,
-    MemoryRetirement,
+    MemoryPlacement,
     MemoryUpdateProposal,
-    MemoryWriterName,
     ObservationWrite,
-    OpenQuestion,
-    OpenQuestionKind,
-    PinPart,
-    SupportOrigin,
-    origin_standing,
-    standing_rank,
+    PlacedRelation,
+    Placement,
+    PlacementReach,
+    PlacementSetter,
+    UnclearPlacement,
 )
-from ai_assistant.orchestration.observer.commit import (
-    AddSupports,
-    Blocked,
-    Checked,
-    Create,
-    RaiseQuestion,
-    RecordUse,
-    Resolve,
-    Unwritten,
-    narrows,
-)
+from ai_assistant.orchestration.observer.placement import PlacementView, retrieved
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
     from datetime import datetime
 
-    from ai_assistant.core.protocols import MemoryStore
+    from ai_assistant.core.protocols import MemoryStore, PlanStore
     from ai_assistant.core.types import (
+        FrozenJson,
+        Memory,
         MemoryIngestResult,
-        MemorySupport,
-        Placement,
-        TrackRecordEntry,
+        ProposedNarrowing,
     )
+    from ai_assistant.orchestration.observer.framing import Framed, Framing
     from ai_assistant.orchestration.observer.person import PinConfirmations
+    from ai_assistant.orchestration.observer.placement import Retrieved
     from ai_assistant.orchestration.writes import MemoryWriteStage
 
-__all__ = ["FindingWriter", "Landed", "WriteBlocked", "policy_ask_wording"]
+__all__ = ["FindingWriter", "Landed", "Place", "Placed", "WriteLimits", "Written"]
 
 #: What a commit hands its caller as each write lands: everything it has written so far,
-#: by memory, in the order written (§16:1).
+#: by memory, in the order written (ADR-0329 §16:1).
 type Landed = Callable[[tuple[ObservationWrite, ...]], Awaitable[None]]
 
-#: What a ``policy_ask`` question asks, in words, before the claim the policy asked about.
-_ASK_ASKS: Final = "The write path asked before keeping this beside this memory: "
+#: The placement call, which the caller makes inside its budget and records: the
+#: placement a view's reply states (ADR-0346 §6:2).
+type Place = Callable[[PlacementView], Awaitable[MemoryPlacement]]
+
+#: Why the observer proposes a memory, on every proposal it makes: code-owned words.
+_RATIONALE: Final = "the observer kept this from an episode that left the episode window"
 
 
-def policy_ask_wording(claim: str) -> str:
-    """What a ``policy_ask`` question raised over ``claim`` asks (§13:1).
-
-    Args:
-        claim: The wording of the memory the policy asked about.
-
-    Returns:
-        The question's wording.
-    """
-    return _ASK_ASKS + claim
-
-
-class WriteBlocked(Exception):  # noqa: N818 — a control-flow signal the stage turns into a retry
-    """A write the supply's placement keeps off a wider memory (§12:6): retried until stuck.
+@dataclass(frozen=True, slots=True)
+class WriteLimits:
+    """The composition root's numbers a finding's writes are made within (ADR-0346 §6).
 
     Attributes:
-        partial: What the finding wrote before it was blocked.
+        threshold: The least relevance a memory is retrieved at by its wording (§6:1).
+        bound: The most memories retrieved for one framed memory (§6:1).
+        recent: The most recent supports a retrieved memory is shown with (§6:2).
+        stale_retries: How many times a stale placement is placed again (§6:7).
     """
 
-    def __init__(self, partial: tuple[ObservationWrite, ...] = ()) -> None:
-        """Carry what was written before the block."""
-        super().__init__("placement")
-        self.partial = partial
+    threshold: float
+    bound: int
+    recent: int
+    stale_retries: int
 
 
-class _Refusal(Exception):  # noqa: N818 — a control-flow signal carrying a code-owned reason
-    def __init__(self, reason: FindingUnwritten) -> None:
-        super().__init__(reason.value)
-        self.reason = reason
+@dataclass(frozen=True, slots=True)
+class Placed:
+    """What became of one framed memory: what the diagnostic record shows of it.
+
+    Attributes:
+        wording: Its wording.
+        relations: Each relation its placement named, by the stored memory's id.
+        ruling: The policy's ruling on its proposal, where one reached the policy.
+        kept: The memories it is now held at: the one installed, or those it was folded
+            into; none where nothing was written.
+        refused: Why the writer refused it before any ruling, where it did.
+        framed: The framed memory itself.
+    """
+
+    wording: str
+    relations: tuple[dict[str, FrozenJson], ...] = ()
+    ruling: MemoryDecisionKind | None = None
+    kept: tuple[str, ...] = ()
+    refused: str | None = None
+    framed: Framed | None = None
+
+    def rendered(self) -> dict[str, FrozenJson]:
+        """The memory's placement and its fate, for the outcome's diagnostic entry."""
+        return {
+            "wording": self.wording,
+            "relations": list(self.relations),
+            "ruling": None if self.ruling is None else self.ruling.value,
+            "kept": list(self.kept),
+            "refused": self.refused,
+        }
 
 
+@dataclass(frozen=True, slots=True)
+class Written:
+    """A finding's writes: its outcome, and what became of each framed memory."""
+
+    outcome: FindingOutcome
+    placed: tuple[Placed, ...]
+
+
+@dataclass(slots=True)
 class _Ledger:
-    """What one finding's commit wrote, by memory, in the order written."""
+    """What one finding's writes wrote, by memory, in the order written."""
 
-    def __init__(self) -> None:
-        self.operations: dict[str, list[MemoryOperationKind]] = {}
-        self.track_record: dict[str, bool] = {}
-        self.ruling: MemoryDecisionKind | None = None
+    operations: dict[str, list[MemoryOperationKind]] = field(default_factory=dict)
+    unclear: list[UnclearPlacement] = field(default_factory=list)
+    asked: list[str] = field(default_factory=list)
+    rulings: list[MemoryDecisionKind] = field(default_factory=list)
+    wrote_under: MemoryDecisionKind | None = None
+    reached_policy: bool = False
 
-    def wrote(self, memory: str, *kinds: MemoryOperationKind) -> None:
-        self.operations.setdefault(memory, []).extend(kinds)
-
-    def recorded(self, memory: str, *, held_up: bool) -> None:
-        self.operations.setdefault(memory, [])
-        self.track_record[memory] = held_up
+    def wrote(self, memory: str, kinds: Sequence[MemoryOperationKind]) -> None:
+        if kinds:
+            self.operations.setdefault(memory, []).extend(kinds)
 
     def writes(self) -> tuple[ObservationWrite, ...]:
-        """What was written so far, by memory."""
         return tuple(
-            ObservationWrite(
-                memory=memory,
-                operations=tuple(kinds),
-                track_record=self.track_record.get(memory),
-            )
+            ObservationWrite(memory=memory, operations=tuple(kinds))
             for memory, kinds in self.operations.items()
-        )
-
-    def outcome(self, at: datetime, unwritten: FindingUnwritten | None) -> FindingOutcome:
-        writes = tuple(
-            ObservationWrite(
-                memory=memory,
-                operations=tuple(kinds),
-                track_record=self.track_record.get(memory),
-            )
-            for memory, kinds in self.operations.items()
-        )
-        if writes:
-            return FindingOutcome(at=at, ruling=self.ruling, writes=writes)
-        return FindingOutcome(
-            at=at, ruling=self.ruling, unwritten=unwritten or FindingUnwritten.REFUSED
+            if kinds
         )
 
 
 class FindingWriter:
-    """Writes one checked commit decision through the write stage (§12:1)."""
+    """Places and proposes each memory a framing kept, through the write stage (§12:1)."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — the stores, the clock, the bounds and the pin pass
         self,
         *,
         writes: MemoryWriteStage,
         memory: MemoryStore,
+        plans: PlanStore,
         now: Callable[[], datetime],
-        mint: Callable[[], str],
+        limits: WriteLimits,
         pins: PinConfirmations | None = None,
     ) -> None:
         """Wire the writer.
 
         Args:
             writes: The write stage every write goes through.
-            memory: The memory store a memory is read again from before it is written.
-            now: The clock an operation, a question and an outcome are stamped from.
-            mint: Mints a fresh id for a question.
-            pins: The pin pass a retirement first runs on its memory (ADR-0338 §9:9),
+            memory: The memory store memories are retrieved and read again from.
+            plans: The plan store a retrieved support's content is read from.
+            now: The clock an outcome and a proposed narrowing are stamped from.
+            limits: The composition root's numbers (ADR-0346 §6).
+            pins: The pin pass run strictly before each retrieval (ADR-0338 §9:9),
                 where the observer holds a person-model store; ``None`` where it holds
-                none, and a retirement is proposed as it was.
+                none.
         """
         self._writes = writes
         self._memory = memory
+        self._plans = plans
         self._now = now
-        self._mint = mint
+        self._limits = limits
         self._pins = pins
-        self._expected: dict[str, int] = {}
-        self._shown: dict[str, Memory] = {}
-        self._ledger = _Ledger()
-        self._landed: Landed | None = None
 
     async def write(
-        self, checked: Checked, *, shown: Sequence[Memory] = (), landed: Landed | None = None
-    ) -> FindingOutcome:
-        """Write ``checked`` and return the finding's outcome (§16:1).
+        self,
+        framing: Framing,
+        *,
+        supply: Placement,
+        narrowing: ProposedNarrowing | None,
+        place: Place,
+        landed: Landed | None = None,
+    ) -> Written:
+        """Place and propose each framed memory, and return the finding's outcome.
 
         Args:
-            checked: The decision, after code's checks.
-            shown: The memories the commit step was shown, as read, against which a
-                fold onto one of them is verified as this finding's own.
-            landed: Handed everything this commit has written so far, each time a write
-                lands and before anything else is read or written, so the caller keeps it
-                on the durable record whatever follows (§16:1). What it raises fails the
-                commit, as a failure of the write path does.
+            framing: What the framing call decided, after code's checks.
+            supply: The meet over every record the run was supplied (ADR-0329 §12:6).
+            narrowing: The scout's proposed narrowing (ADR-0346 §5:7).
+            place: Makes the placement call for a view and returns its placement.
+            landed: Handed everything written so far each time a write lands, before
+                anything else is read or written (§16:1).
 
         Returns:
-            What was written, or why nothing was.
+            The outcome, and what became of each framed memory.
 
         Raises:
-            MemoryStoreStaleError: Where a memory moved between the read the decision
-                was made on and its write, so the attempt is retried (§16:4).
+            MemoryStoreStaleError: Where a placement stayed stale past the count (§6:7).
             MemoryStoreError: Where the write path failed or refused in a way only a
-                retry tells apart (§16:4).
+                retry tells apart (ADR-0329 §16:4).
         """
         ledger = _Ledger()
-        self._expected = {}
-        self._shown = {one.id: one for one in shown}
-        self._ledger = ledger
-        self._landed = landed
-        unwritten: FindingUnwritten | None = None
-        try:
-            unwritten = await self._primary(checked.primary, ledger)
-        except _Refusal as refusal:
-            unwritten = refusal.reason
-        if checked.resolve is not None:
-            try:
-                await self._resolve(checked.resolve, ledger)
-            except _Refusal as refusal:
-                unwritten = unwritten or refusal.reason
-        return ledger.outcome(self._now(), unwritten)
+        placed: list[Placed] = []
+        for framed in framing.memories:
+            placed.append(await self._one(framed, supply, narrowing, place, ledger, landed))
+        return Written(outcome=self._outcome(framing, ledger, placed), placed=tuple(placed))
 
-    async def _kept(self) -> None:
-        """Hand what this commit has written so far to the caller (§16:1)."""
-        if self._landed is not None:
-            await self._landed(self._ledger.writes())
-
-    async def _primary(
+    async def _one(  # noqa: PLR0913 — one framed memory, and what its write is made within
         self,
-        primary: Create | AddSupports | RaiseQuestion | RecordUse | Unwritten | Blocked,
+        framed: Framed,
+        supply: Placement,
+        narrowing: ProposedNarrowing | None,
+        place: Place,
         ledger: _Ledger,
-    ) -> FindingUnwritten | None:
-        match primary:
-            case Unwritten(reason=reason):
-                return reason
-            case Blocked():
-                raise WriteBlocked
-            case Create():
-                return await self._create(primary, ledger)
-            case AddSupports():
-                target = await self._fresh(primary.target)
-                for support in primary.supports:
-                    await self._apply(target, MemoryOperationKind.ADD_SUPPORT, support, ledger)
-                    target = await self._fresh(primary.target)
-                return None
-            case RaiseQuestion():
-                await self._raise(
-                    primary.target, primary.kind, primary.asks, primary.support, ledger
-                )
-                return None
-            case RecordUse():
-                memory = await self._fresh(primary.memory)
-                entry = primary.entry
-                held = next(
-                    (one for one in memory.track_record if one.episode == entry.episode), None
-                )
-                if held is not None:
-                    ledger.recorded(memory.id, held_up=held.held_up)
-                    return None
-                await self._guarded(
-                    self._writes.record_use(memory, entry),
-                    {memory.id: (memory, lambda after: _recorded(memory, after, entry))},
-                    lambda: ledger.recorded(memory.id, held_up=entry.held_up),
-                )
-                return None
-
-    async def _create(self, create: Create, ledger: _Ledger) -> FindingUnwritten | None:
-        """§12:2, §12:4: one proposal to ``ingest``, and what its ruling wrote."""
-        retiring = create.retiring
-        shown = None if retiring is None else await self._fresh(retiring.memory)
-        # ADR-0338 §9:9: every ingest may retire a memory — the one its retirement names,
-        # or those a ``SUPERSEDE`` ruling ends (ADR-0328 §11:7) — so every pin lacking its
-        # support earns it first, and a write that fails fails the attempt.
-        confirmed = await self._confirmed([] if shown is None else [shown])
-        if retiring is not None and shown is not None:
-            fresh = confirmed.get(shown.id, shown)
-            if fresh is not shown and self._outranks(fresh, create):
-                # ADR-0338 §9:9, ADR-0328 §6:5: the pins lifted the memory above what the
-                # retirement cites, so its question is raised instead (§13:1).
-                conflict = create.conflict
-                if conflict is None:
-                    raise _Refusal(FindingUnwritten.REFUSED)
-                await self._raise(fresh, conflict.kind, conflict.asks, conflict.support, ledger)
-                return None
-            retiring = MemoryRetirement(
-                memory=fresh,
-                kind=retiring.kind,
-                cites=retiring.cites,
-                note=retiring.note,
+        landed: Landed | None,
+    ) -> Placed:
+        """Retrieve, place and propose one framed memory, again while its placement is stale."""
+        wording = framed.memory.content
+        for _ in range(self._limits.stale_retries + 1):
+            if self._pins is not None:
+                await self._pins.confirm(strict=True)
+            stored = await retrieved(
+                framed.memory,
+                memory=self._memory,
+                plans=self._plans,
+                threshold=self._limits.threshold,
+                bound=self._limits.bound,
+                recent=self._limits.recent,
             )
-        proposal = MemoryUpdateProposal(
-            proposed=create.memory, rationale=create.rationale, retiring=retiring
-        )
-        checks: dict[str, tuple[Memory, Callable[[Memory], bool]]] = {}
-        if retiring is not None:
-            before = retiring.memory
-            checks[before.id] = (before, lambda after: _retired(before, after, retiring.kind))
-        outcome = await self._guarded(self._writes.write(proposal), {})
-        result = outcome.result
-        ledger.ruling = result.decision.kind
-        # What the ruling wrote is in the ledger before anything is verified, so a
-        # verification that fails still leaves it to be recorded (§16:1).
-        unwritten = await self._ruled(create, retiring, result, ledger)
-        target = None if result.record_id is None else self._shown.get(result.record_id)
-        if target is not None and result.decision.kind is MemoryDecisionKind.REINFORCE:
-            checks[target.id] = (target, lambda after: _reinforced(target, after, create.memory))
-        await self._verified(checks)
-        return unwritten
+            memory = framed.memory.model_copy(
+                update={"placement": self._placement(supply, stored, narrowing)}
+            )
+            view = PlacementView(framed=memory, texts=framed.texts, retrieved=stored)
+            placement = await place(view) if stored else MemoryPlacement()
+            relations = _relations(placement)
+            proposal = MemoryUpdateProposal(
+                proposed=memory, rationale=_RATIONALE, placement=placement
+            )
+            try:
+                result = (await self._writes.write(proposal)).result
+            except UnresolvedEvidenceError:
+                return Placed(wording=wording, relations=relations, refused="check_failed")
+            except SelfConsumingWriteError:
+                return Placed(wording=wording, relations=relations, refused="refused")
+            if result.stale:
+                continue
+            ledger.reached_policy = True
+            ledger.rulings.append(result.decision.kind)
+            ledger.unclear.extend(_unclear(placement, wording))
+            ruled = Placed(
+                wording=wording, relations=relations, ruling=result.decision.kind, framed=framed
+            )
+            return await self._ruled(ruled, result, stored, ledger, landed)
+        msg = "the observer's placement stayed stale past its count (ADR-0346 §6:7)"
+        raise MemoryStoreStaleError(msg)
 
     async def _ruled(
         self,
-        create: Create,
-        retiring: MemoryRetirement | None,
+        ruled: Placed,
         result: MemoryIngestResult,
+        stored: Sequence[Retrieved],
         ledger: _Ledger,
-    ) -> FindingUnwritten | None:
-        """What a ruling wrote (§12:4, ADR-0328 §11:5-§11:8), or §13's question it raises."""
-        kind = result.decision.kind
-        if kind is MemoryDecisionKind.ASK_USER:
-            return await self._asked(create, result, ledger)
-        written = result.record_id
-        if written is None or kind not in {
-            MemoryDecisionKind.ACCEPT,
-            MemoryDecisionKind.REINFORCE,
-            MemoryDecisionKind.SUPERSEDE,
-        }:
-            return FindingUnwritten.REFUSED
-        if kind is MemoryDecisionKind.REINFORCE:
-            supports = create.memory.supports
-            ledger.wrote(written, *(MemoryOperationKind.ADD_SUPPORT for _ in supports))
+        landed: Landed | None,
+    ) -> Placed:
+        """What a ruling wrote, in the ledger and handed over as it lands (§16:1)."""
+        if ruled.ruling is MemoryDecisionKind.ASK_USER:
+            ledger.asked.append(ruled.wording)
+            return ruled
+        if result.record_id is None:
+            return ruled
+        installed = None if result.folded else result.record_id
+        ledger.wrote_under = ruled.ruling
+        if installed is not None:
+            ledger.wrote(installed, (MemoryOperationKind.CREATE,))
+        # What landed reaches the record before anything more is read (§16:1).
+        if landed is not None:
+            await landed(ledger.writes())
+        await self._read_back(stored, result.conflicts, installed, ledger)
+        if landed is not None:
+            await landed(ledger.writes())
+        return replace(ruled, kept=result.folded or (result.record_id,))
+
+    def _placement(
+        self,
+        supply: Placement,
+        stored: Sequence[Retrieved],
+        narrowing: ProposedNarrowing | None,
+    ) -> Placement:
+        """Where the memory is placed for (ADR-0329 §12:6, ADR-0346 §5:7)."""
+        meet = Placement.narrowest_of([supply, *(one.memory.placement for one in stored)])
+        if narrowing is not None and meet.reach is PlacementReach.ANYONE and meet.set_by is None:
+            return Placement(
+                reach=narrowing.reach, set_by=PlacementSetter.PROPOSED, set_at=self._now()
+            )
+        return meet
+
+    async def _read_back(
+        self,
+        stored: Sequence[Retrieved],
+        conflicts: Sequence[str],
+        installed: str | None,
+        ledger: _Ledger,
+    ) -> None:
+        """Each stored memory the write changed, and the operations its log gained.
+
+        Read through the history read, so a memory the write retired is read as it now
+        stands; what its log gained past the revision it was read at is what this write
+        wrote on it, since the observer is the one writer and runs one run at a time
+        (ADR-0345 §11:1).
+        """
+        before: dict[str, Memory] = {one.memory.id: one.memory for one in stored}
+        wanted = [one for one in dict.fromkeys((*before, *conflicts)) if one != installed]
+        if not wanted:
+            return
+        after = await self._memory.get_history(wanted)
+        for memory_id in wanted:
+            now = after.get(memory_id)
+            then = before.get(memory_id)
+            if now is None or then is None:
+                continue
+            gained = now.operations[len(then.operations) :]
+            ledger.wrote(memory_id, [one.kind for one in gained])
+
+    def _outcome(
+        self, framing: Framing, ledger: _Ledger, placed: Sequence[Placed]
+    ) -> FindingOutcome:
+        """The finding's outcome: what was written, or why nothing was (ADR-0329 §16:1)."""
+        at = self._now()
+        writes = ledger.writes()
+        unclear = tuple(ledger.unclear)
+        asked = tuple(ledger.asked)
+        if writes:
+            return FindingOutcome(
+                at=at, ruling=ledger.wrote_under, writes=writes, unclear=unclear, asked=asked
+            )
+        if asked:
+            return FindingOutcome(
+                at=at,
+                ruling=MemoryDecisionKind.ASK_USER,
+                unwritten=FindingUnwritten.ASKED,
+                unclear=unclear,
+                asked=asked,
+            )
+        ruling = ledger.rulings[-1] if ledger.rulings else None
+        if not framing.memories and framing.failed == 0:
+            reason = FindingUnwritten.NOT_KEPT
+        elif any(one.kept for one in placed):
+            reason = FindingUnwritten.ALREADY_HELD
+        elif not ledger.reached_policy and not any(one.refused == "refused" for one in placed):
+            reason = FindingUnwritten.CHECK_FAILED
         else:
-            ledger.wrote(written, MemoryOperationKind.CREATE)
-        if retiring is not None:
-            ledger.wrote(retiring.memory.id, retiring.kind)
-        # What the ruling wrote reaches the record before anything more is read (§16:1).
-        await self._kept()
-        if kind is MemoryDecisionKind.SUPERSEDE:
-            # The supersession landed whole, so what it retired is read off the installed
-            # replacement; a read that fails leaves the replacement's create on the
-            # record, and a retry reads its retirements again (§16:1).
-            for retired in await self.retirements([written]):
-                ledger.wrote(retired.memory, *retired.operations)
-            await self._kept()
-        return None
-
-    async def _confirmed(self, read: Sequence[Memory]) -> dict[str, Memory]:
-        """Run the pin pass strictly before an ingest (ADR-0338 §9:9); what it moved, read.
-
-        Each memory the pass added supports to that this finding holds as read — ``read``,
-        and the memories the commit step was shown — is read again and adopted only where
-        the pass's own add supports are all that changed, so the revision this finding's
-        next write expects is the one they left (ADR-0219 §2).
-
-        Args:
-            read: The memories read for the write beyond those the step was shown.
-
-        Returns:
-            Each such memory as it now stands, by id.
-
-        Raises:
-            _Refusal: ``check_failed`` where the store no longer holds one as current.
-            MemoryStoreStaleError: Where another writer moved one beside the pass.
-            MemoryStoreError: Where the history read, or a support's write, fails: the
-                attempt fails, and the retry runs the pass again.
-            PersonModelStoreError: Where the pins cannot be read, likewise.
-        """
-        if self._pins is None:
-            return {}
-        added = await self._pins.confirm(strict=True)
-        held = {**self._shown, **{one.id: one for one in read}}
-        moved: dict[str, Memory] = {}
-        for memory_id, count in added.items():
-            before = held.get(memory_id)
-            if before is None:
-                continue
-            after = await self._memory.get(memory_id)
-            if not isinstance(after, Memory):
-                raise _Refusal(FindingUnwritten.CHECK_FAILED)
-            if not _pinned(before, after, count):
-                msg = "a memory moved beside the observer's confirmation of its pins"
-                raise MemoryStoreStaleError(msg)
-            self._expected[memory_id] = after.revision
-            if memory_id in self._shown:
-                self._shown[memory_id] = after
-            moved[memory_id] = after
-        return moved
-
-    @staticmethod
-    def _outranks(target: Memory, create: Create) -> bool:
-        """Whether ``target`` stands above the support its retirement cites (§6:5).
-
-        Also where a confirmation is cited over a memory its pins made an assertion,
-        which only the commit step, shown the memory as it now stands, can rule on
-        (ADR-0329 §12:4): that is read as stale, and the finding decided again.
-
-        Raises:
-            MemoryStoreStaleError: Where a confirmation is cited over an assertion.
-        """
-        retiring = create.retiring
-        if retiring is None:  # pragma: no cover - called on a retirement alone
-            return False
-        cited = create.memory.support_at(retiring.cites)
-        if cited is None:  # pragma: no cover - the commit cites a support it adds
-            return False
-        if (
-            cited.origin is SupportOrigin.CONFIRMATION
-            and target.band is BeliefBand.ASSERTED
-            and retiring.memory.band is not BeliefBand.ASSERTED
-        ):
-            msg = "a memory's pins made it an assertion the retirement was not decided on"
-            raise MemoryStoreStaleError(msg)
-        return standing_rank(origin_standing(cited.origin)) < standing_rank(target.standing)
-
-    async def retirements(self, installed: Sequence[str]) -> tuple[ObservationWrite, ...]:
-        """The end on each memory the replacements ``installed`` retired (ADR-0328 §5:6).
-
-        Args:
-            installed: The ids of replacements a supersession installed.
-
-        A replacement no longer current — retired itself since, by a later write — is
-        read from the store's whole export, which holds every memory whatever its
-        status: what the supersession retired is on its create however it stands now.
-
-        Returns:
-            An end on each memory their creates name as replaced, in the order named.
-
-        Raises:
-            MemoryStoreError: Where a replacement cannot be read: its create stays on
-                the record, and a retry reads it again (§16:1).
-        """
-        found: dict[str, object] = (
-            dict(await self._memory.get_many(list(installed))) if installed else {}
-        )
-        if any(not isinstance(found.get(one), Memory) for one in installed):
-            wanted = set(installed)
-            found.update(
-                (record.id, record)
-                for record in await self._memory.export()
-                if record.id in wanted and record.id not in found
-            )
-        ends: dict[str, None] = {}
-        for one in installed:
-            record = found.get(one)
-            if isinstance(record, Memory):
-                ends.update(dict.fromkeys(record.operations[0].replaces))
-        return tuple(
-            ObservationWrite(memory=retired, operations=(MemoryOperationKind.END,))
-            for retired in ends
-        )
-
-    async def _asked(
-        self, create: Create, result: MemoryIngestResult, ledger: _Ledger
-    ) -> FindingUnwritten | None:
-        """§13:1, §13:3: a ``policy_ask`` on each stored memory the ruling names, or none.
-
-        The memories named are the result's ``contradicted`` — the assertions the writer
-        holds the finding contradicts — and never its ``conflicts``, which are a
-        similarity set: a question is not a neutral write, so one raised on a memory the
-        finding says nothing about would be a false mark on it (ADR-0336 §7:4).
-        """
-        named = (
-            await self._memory.get_many(list(result.contradicted)) if result.contradicted else {}
-        )
-        memories = [one for one in named.values() if isinstance(one, Memory)]
-        if any(narrows(create.memory.placement, one) for one in memories):
-            # §12:6: a question carries the supply onto the memory it is raised on, which
-            # an operation cannot narrow (ADR-0328 §5:2): nothing is raised, and the
-            # finding is retried rather than its ask dropped (§13:6).
-            raise WriteBlocked
-        if not memories or create.asked_on is None:
-            return FindingUnwritten.ASKED
-        for memory in memories:
-            await self._raise(
-                memory,
-                OpenQuestionKind.POLICY_ASK,
-                policy_ask_wording(create.memory.content),
-                create.asked_on,
-                ledger,
-            )
-        return None
-
-    async def _raise(
-        self,
-        target: Memory,
-        kind: OpenQuestionKind,
-        asks: str,
-        support: MemorySupport,
-        ledger: _Ledger,
-    ) -> None:
-        """Raise one open question on ``target``, resting on ``support`` (§13:1-§13:2).
-
-        A question the observer already raised on it, open, of the same kind, asking the
-        same and resting on the same part, is the one held: a retry of a decision whose
-        question landed records it rather than raising it twice.
-        """
-        memory = await self._fresh(target)
-        if any(
-            not one.resolved
-            and one.kind is kind
-            and one.asks == asks
-            and one.rests_on == (support.points_at,)
-            and one.raised_by is MemoryWriterName.OBSERVER
-            for one in memory.open_questions
-        ):
-            ledger.wrote(memory.id, MemoryOperationKind.RAISE_QUESTION)
-            return
-        now = self._now()
-        question = OpenQuestion(
-            id=f"question:{self._mint()}",
-            kind=kind,
-            asks=asks,
-            rests_on=(support.points_at,),
-            raised_at=now,
-            raised_by=MemoryWriterName.OBSERVER,
-        )
-        operation = MemoryOperation(
-            kind=MemoryOperationKind.RAISE_QUESTION,
-            cites=support.points_at,
-            note=asks,
-            at=now,
-            by=MemoryWriterName.OBSERVER,
-            question=question.id,
-        )
-        carried = memory.support_at(support.points_at)
-        change = MemoryChange(
-            memory=memory,
-            operation=operation,
-            support=None if carried is not None else support,
-            question=question,
-        )
-        await self._guarded(
-            self._writes.apply(change),
-            {memory.id: (memory, lambda after: _applied(memory, after, operation))},
-            lambda: ledger.wrote(memory.id, MemoryOperationKind.RAISE_QUESTION),
-        )
-
-    async def _resolve(self, resolve: Resolve, ledger: _Ledger) -> None:
-        """§13:5: resolve the question, citing the support added from the answer."""
-        memory = await self._fresh(resolve.target)
-        held = next((one for one in memory.open_questions if one.id == resolve.question), None)
-        if held is None or held.resolved:
-            raise _Refusal(FindingUnwritten.CHECK_FAILED)
-        operation = MemoryOperation(
-            kind=MemoryOperationKind.RESOLVE_QUESTION,
-            cites=resolve.support.points_at,
-            note=resolve.note,
-            at=self._now(),
-            by=MemoryWriterName.OBSERVER,
-            question=resolve.question,
-        )
-        carried = memory.support_at(resolve.support.points_at)
-        change = MemoryChange(
-            memory=memory,
-            operation=operation,
-            support=None if carried is not None else resolve.support,
-        )
-        await self._guarded(
-            self._writes.apply(change),
-            {memory.id: (memory, lambda after: _applied(memory, after, operation))},
-            lambda: ledger.wrote(memory.id, MemoryOperationKind.RESOLVE_QUESTION),
-        )
-
-    async def _apply(
-        self, memory: Memory, kind: MemoryOperationKind, support: MemorySupport, ledger: _Ledger
-    ) -> None:
-        """One add support citing ``support`` (§12:3), a no-op where it is carried (§4:8)."""
-        operation = MemoryOperation(
-            kind=kind,
-            cites=support.points_at,
-            note=support.note,
-            at=self._now(),
-            by=MemoryWriterName.OBSERVER,
-        )
-        carried = memory.support_at(support.points_at)
-        change = MemoryChange(
-            memory=memory, operation=operation, support=None if carried is not None else support
-        )
-        await self._guarded(
-            self._writes.apply(change),
-            {memory.id: (memory, lambda after: _applied(memory, after, operation))},
-            lambda: ledger.wrote(memory.id, kind),
-        )
-
-    async def _fresh(self, memory: Memory) -> Memory:
-        """``memory`` as the store holds it now, still at the revision decided on.
-
-        The revision expected is the one this finding's own last write left the memory
-        at, or else the one the commit step was shown (ADR-0219 §2).
-
-        Raises:
-            _Refusal: ``check_failed`` where the store no longer holds it as a memory.
-            MemoryStoreStaleError: Where another writer moved it since: the finding is
-                decided again on a retry (ADR-0219 §3).
-        """
-        held = await self._memory.get(memory.id)
-        if not isinstance(held, Memory):
-            raise _Refusal(FindingUnwritten.CHECK_FAILED)
-        if held.revision != self._expected.get(memory.id, memory.revision):
-            msg = "a memory moved between the read the observer decided on and its write"
-            raise MemoryStoreStaleError(msg)
-        return held
-
-    async def _guarded[T](
-        self,
-        write: Awaitable[T],
-        checks: Mapping[str, tuple[Memory, Callable[[Memory], bool]]],
-        written: Callable[[], None] | None = None,
-    ) -> T:
-        """Await one write, note it in the ledger, then verify what it left.
-
-        ``written`` notes the write in the finding's ledger as soon as it lands, before
-        the verification, which may fail: what was written is recorded either way
-        (§16:1).
-
-        Raises:
-            _Refusal: ``check_failed`` for a support whose episode the store does not
-                hold (§9:5), ``refused`` for a self-consuming write or a fold onto a
-                record the proposal cites (§12:5).
-            MemoryStoreError: Every other failure or refusal, re-raised: the attempt is
-                retried (§16:4); ``MemoryStoreStaleError`` where another writer's change
-                is found beside this one's.
-        """
-        try:
-            done = await write
-        except UnresolvedEvidenceError as exc:
-            raise _Refusal(FindingUnwritten.CHECK_FAILED) from exc
-        except SelfConsumingWriteError as exc:
-            raise _Refusal(FindingUnwritten.REFUSED) from exc
-        if written is not None:
-            written()
-            await self._kept()
-        await self._verified(checks)
-        return done
-
-    async def _verified(
-        self, checks: Mapping[str, tuple[Memory, Callable[[Memory], bool]]]
-    ) -> None:
-        """Adopt a memory's new revision only where this finding's own write made it.
-
-        Each memory is read again after the write: unchanged, it is left; changed exactly
-        as this write changes it, its revision becomes the one the finding's next write
-        expects; changed in any other way, another writer moved it in between, and the
-        finding is decided again on a retry (ADR-0219 §2-§3).
-
-        Raises:
-            MemoryStoreStaleError: Where another writer's change is found.
-        """
-        if not checks:
-            return
-        found = await self._memory.get_many(list(checks))
-        for memory_id, (before, mine) in checks.items():
-            after = found.get(memory_id)
-            if not isinstance(after, Memory) or after.revision == before.revision:
-                continue
-            if not mine(after):
-                msg = "a memory moved beside the observer's own write"
-                raise MemoryStoreStaleError(msg)
-            self._expected[memory_id] = after.revision
+            reason = FindingUnwritten.REFUSED
+        return FindingOutcome(at=at, ruling=ruling, unwritten=reason, unclear=unclear)
 
 
-def _extends(
-    before: Memory, after: Memory, added: int, *, placement: Placement | None = None
-) -> bool:
-    """Whether ``after`` is ``before`` with ``added`` observer operations appended.
-
-    The track record and the placement stay as they were (the placement becomes
-    ``placement`` where a fold's meet is expected): a change to either is another
-    writer's, since no operation writes them (ADR-0328 §5:2).
-    """
-    head = after.operations[: len(before.operations)]
-    tail = after.operations[len(before.operations) :]
-    return (
-        head == before.operations
-        and len(tail) == added
-        and all(one.by is MemoryWriterName.OBSERVER for one in tail)
-        and after.track_record == before.track_record
-        and after.placement == (before.placement if placement is None else placement)
+def _relations(placement: MemoryPlacement) -> tuple[dict[str, FrozenJson], ...]:
+    return tuple(
+        {"memory": one.memory, "relation": one.relation.value, "note": one.note}
+        for one in placement.pairs
     )
 
 
-def _pinned(before: Memory, after: Memory, added: int) -> bool:
-    """``added`` add supports appended, each citing a pin, and nothing else changed."""
-    return _extends(before, after, added) and all(
-        one.kind is MemoryOperationKind.ADD_SUPPORT and isinstance(one.cites, PinPart)
-        for one in after.operations[len(before.operations) :]
-    )
-
-
-def _applied(before: Memory, after: Memory, operation: MemoryOperation) -> bool:
-    """One operation appended, and it is this one."""
-    return _extends(before, after, 1) and after.operations[-1] == operation
-
-
-def _retired(before: Memory, after: Memory, kind: MemoryOperationKind) -> bool:
-    """One retiring operation of ``kind`` appended by the observer's proposal."""
-    return _extends(before, after, 1) and after.operations[-1].kind is kind
-
-
-def _reinforced(before: Memory, after: Memory, proposed: Memory) -> bool:
-    """The proposal's supports added by one add support each, and the fold's meet alone.
-
-    A ``REINFORCE`` adds each support the target did not carry by one add support, takes
-    the placement's fold (ADR-0217 §3:3), and changes nothing else (ADR-0328 §11:6,
-    §11:9): a memory carries no topics (ADR-0345 §10:1), and a fold writes no label.
-    """
-    added = sum(1 for one in proposed.supports if before.support_at(one.points_at) is None)
-    return (
-        _extends(before, after, added, placement=before.placement.folded_with(proposed.placement))
-        and all(after.support_at(one.points_at) is not None for one in proposed.supports)
-        and after.labels == before.labels
-    )
-
-
-def _recorded(before: Memory, after: Memory, entry: TrackRecordEntry) -> bool:
-    """The entry recorded, and nothing else changed (ADR-0328 §8:4)."""
-    return (
-        entry in after.track_record
-        and len(after.track_record) == len(before.track_record) + 1
-        and after.operations == before.operations
-        and after.supports == before.supports
-    )
+def _unclear(placement: MemoryPlacement, wording: str) -> list[UnclearPlacement]:
+    """Every ``unclear`` a placement named, as the outcome keeps it (ADR-0346 §6:5)."""
+    return [
+        UnclearPlacement(memory=one.memory, wording=wording, note=one.note)
+        for one in placement.pairs
+        if one.relation is PlacedRelation.UNCLEAR
+    ]

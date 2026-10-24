@@ -1,8 +1,11 @@
-"""The observer's writes, through the write stage, and each one's outcome (§12-§14, §16:1).
+"""The observer's writes: each framed memory placed and proposed, and the outcome.
 
-Driven over the canonical writer and store: a new memory through ``ingest`` under each
-ruling, supports and questions through ``apply``, an entry through ``record_use``, and
-the outcome naming what was written, by memory and operation, or why nothing was.
+Driven over the canonical fakes (ADR-0346 §6, ADR-0345 §4-§5). Every write is a placed
+proposal through the write stage: retrieval, one placement call where anything is
+retrieved, and an ingest carrying the placement at the revisions read. A stale placement
+is placed again up to a count (§6:7); the floor's ruling is final, an ask raising nothing
+(§6:8); every ``unclear`` is kept on the outcome (§6:5); and the outcome lists the
+operations each memory's log gained, never one the store did not make.
 """
 
 from __future__ import annotations
@@ -11,761 +14,329 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
-from observer_support import AT, Harness, address, episode
+from observer_support import AT, Harness, Minter, address, episode
 
-from ai_assistant.core.errors import MemoryStoreError, MemoryStoreStaleError
+from ai_assistant.core.errors import MemoryStoreStaleError, UnresolvedEvidenceError
 from ai_assistant.core.types import (
-    ConflictRelation,
+    OWNER_PERSON_ID,
     FindingUnwritten,
     InputPart,
     Memory,
-    MemoryChange,
     MemoryDecisionKind,
-    MemoryOperation,
     MemoryOperationKind,
-    MemoryRetirement,
+    MemoryPlacement,
     MemoryStatus,
-    MemorySupport,
-    MemoryUpdateProposal,
+    MemoryWrite,
+    MemoryWriteMode,
     MemoryWriterName,
-    ObservationWrite,
-    OpenQuestion,
-    OpenQuestionKind,
+    PlacedPair,
+    PlacedRelation,
     Placement,
     PlacementReach,
     PlacementSetter,
-    ReadingCertainty,
-    SupportDirection,
-    SupportOrigin,
-    TrackRecordEntry,
+    ProposedNarrowing,
+    SupportHolder,
 )
-from ai_assistant.orchestration.observer.commit import (
-    AddSupports,
-    Checked,
-    Create,
-    RaiseQuestion,
-    RecordUse,
-    Resolve,
-    Unwritten,
-)
-from ai_assistant.orchestration.observer.writing import FindingWriter, WriteBlocked
-from ai_assistant.testing.memories import memory, said_support, sourced_support
+from ai_assistant.orchestration.observer.framing import Framed, Framing
+from ai_assistant.orchestration.observer.writing import FindingWriter, WriteLimits
+from ai_assistant.testing.memories import memory, said_support
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable
 
-_NOW = AT + timedelta(hours=1)
-_CLAIM = "The user prefers window seats."
+    from ai_assistant.core.types import ObservationWrite
+    from ai_assistant.orchestration.observer.placement import PlacementView
 
-#: A claim :data:`_CLAIM` contradicts rather than restates. A supersession retires it,
-#: since a restatement is never retired by any ruling (ADR-0159 §5); and a question is
-#: raised on it, since a deferral names only a contradicted assertion (ADR-0336 §7). The
-#: writer labels every ingest since ADR-0336 §2, and the certain rung would call
-#: :data:`_CLAIM` itself a restatement whatever a stub said.
-_OLD_CLAIM = "The user prefers aisle seats."
+_SEAT = "The user prefers window seats."
 
 
-def _writer(harness: Harness) -> FindingWriter:
+def _writer(harness: Harness, *, stale_retries: int = 2) -> FindingWriter:
     return FindingWriter(
-        writes=harness.writes, memory=harness.memory, now=harness.clock, mint=harness.mint
+        writes=harness.writes,
+        memory=harness.memory,
+        plans=harness.plans,
+        now=harness.clock,
+        limits=WriteLimits(threshold=0.8, bound=5, recent=3, stale_retries=stale_retries),
     )
 
 
-def _said(
-    episode_id: str = "leaving", *, direction: SupportDirection = SupportDirection.FOR
-) -> MemorySupport:
-    return MemorySupport(
-        points_at=InputPart(episode=address(episode_id)),
-        origin=SupportOrigin.USER_MESSAGE,
-        direction=direction,
-        backs_as_worded=direction is SupportDirection.FOR,
-        how_sure=ReadingCertainty.SURE,
-        when=AT,
-        added_at=_NOW,
-        added_by=MemoryWriterName.OBSERVER,
-    )
-
-
-def _new(content: str = _CLAIM, *supports: MemorySupport) -> Memory:
-    held = supports or (_said(),)
-    return Memory(
-        id="observed:new",
-        content=content,
-        supports=held,
-        operations=(
-            MemoryOperation(
-                kind=MemoryOperationKind.CREATE,
-                cites=held[0].points_at,
-                at=_NOW,
-                by=MemoryWriterName.OBSERVER,
-            ),
-        ),
-    )
-
-
-async def _harness(
-    ruling: MemoryDecisionKind = MemoryDecisionKind.ACCEPT,
-    *,
-    labels: Mapping[str, ConflictRelation] | None = None,
-) -> Harness:
-    harness = Harness(ruling=ruling, labels=labels)
-    harness.clock.at = _NOW
-    await harness.hold(episode("leaving"), episode("past", at=AT - timedelta(days=1)))
-    return harness
-
-
-async def _stored(harness: Harness, record: Memory) -> Memory:
-    await harness.hold(record)
-    held = await harness.memory.get(record.id)
-    assert isinstance(held, Memory)
-    return held
-
-
-async def test_an_accepted_memory_is_installed_and_named() -> None:
-    """§12:2: through ``ingest``; the outcome names the memory and its create."""
-    harness = await _harness()
-
-    outcome = await _writer(harness).write(Checked(primary=Create(memory=_new())))
-
-    assert outcome.ruling is MemoryDecisionKind.ACCEPT
-    (write,) = outcome.writes
-    assert (write.memory, write.operations) == ("observed:new", (MemoryOperationKind.CREATE,))
-    assert isinstance(await harness.memory.get("observed:new"), Memory)
-
-
-async def test_a_ruling_that_writes_nothing_is_refused() -> None:
-    """§12:4, §16:1: a reject writes nothing, and the outcome carries the ruling."""
-    harness = await _harness(MemoryDecisionKind.REJECT)
-
-    outcome = await _writer(harness).write(Checked(primary=Create(memory=_new())))
-
-    assert (outcome.ruling, outcome.unwritten) == (
-        MemoryDecisionKind.REJECT,
-        FindingUnwritten.REFUSED,
-    )
-    assert await harness.memory.get("observed:new") is None
-
-
-async def test_an_ask_naming_no_memory_is_asked_and_raises_nothing() -> None:
-    """§13:3: the finding's outcome records the ask; the candidate waits."""
-    harness = await _harness(MemoryDecisionKind.ASK_USER)
-
-    outcome = await _writer(harness).write(
-        Checked(primary=Create(memory=_new(), asked_on=_said(direction=SupportDirection.AGAINST)))
-    )
-
-    assert (outcome.ruling, outcome.unwritten) == (
-        MemoryDecisionKind.ASK_USER,
-        FindingUnwritten.ASKED,
-    )
-
-
-async def test_an_ask_raises_a_policy_ask_on_each_memory_it_names() -> None:
-    """§13:1: ``policy_ask`` on each stored memory the ruling names, never dropped.
-
-    The ruling names what the writer labels a contradicted assertion (ADR-0336 §7:4).
-    """
-    harness = await _harness(
-        MemoryDecisionKind.ASK_USER, labels={"m-seat": ConflictRelation.CONTRADICTS}
-    )
-    held = await _stored(harness, memory("m-seat", _OLD_CLAIM, said_support(address("past"))))
-    against = _said(direction=SupportDirection.AGAINST)
-
-    outcome = await _writer(harness).write(Checked(primary=Create(memory=_new(), asked_on=against)))
-
-    (write,) = outcome.writes
-    assert (write.memory, write.operations) == (held.id, (MemoryOperationKind.RAISE_QUESTION,))
-    asked = await harness.memory.get(held.id)
-    assert isinstance(asked, Memory)
-    (question,) = asked.open_questions
-    assert question.kind is OpenQuestionKind.POLICY_ASK
-    assert question.rests_on == (against.points_at,)
-    assert question.raised_by is MemoryWriterName.OBSERVER
-
-
-async def test_an_ask_raises_no_question_on_a_memory_it_does_not_contradict() -> None:
-    """ADR-0336 §7:4: a question lands on what the deferral rests on, and nowhere else.
-
-    Two stored memories resemble the finding; the writer labels one a contradiction.
-    The other is in the result's ``conflicts`` and gains no question, and no
-    ``against`` support either (ADR-0329 §13:2): a question raised on a memory the
-    finding says nothing about would be a false mark on it.
-    """
-    harness = await _harness(
-        MemoryDecisionKind.ASK_USER, labels={"m-seat": ConflictRelation.CONTRADICTS}
-    )
-    held = await _stored(harness, memory("m-seat", _OLD_CLAIM, said_support(address("past"))))
-    bystander = await _stored(
-        harness,
-        memory(
-            "m-bystander", "The user prefers window seats on trains.", said_support(address("past"))
-        ),
-    )
-
-    outcome = await _writer(harness).write(
-        Checked(primary=Create(memory=_new(), asked_on=_said(direction=SupportDirection.AGAINST)))
-    )
-
-    assert [(one.memory, one.operations) for one in outcome.writes] == [
-        (held.id, (MemoryOperationKind.RAISE_QUESTION,))
-    ]
-    after = await harness.memory.get(bystander.id)
-    assert after == bystander
-
-
-async def test_an_ask_resting_on_no_labelled_contradiction_raises_nothing() -> None:
-    """ADR-0336 §7:4 with §13:3: an ``ASK_USER`` whose field is empty raises nothing.
-
-    The stored assertion is in the ruled-on set, but the writer holds no relation
-    for it, so it is not what the deferral rests on.
-    """
-    harness = await _harness(MemoryDecisionKind.ASK_USER)
-    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
-
-    outcome = await _writer(harness).write(
-        Checked(primary=Create(memory=_new(), asked_on=_said(direction=SupportDirection.AGAINST)))
-    )
-
-    assert (outcome.ruling, outcome.unwritten) == (
-        MemoryDecisionKind.ASK_USER,
-        FindingUnwritten.ASKED,
-    )
-    assert outcome.writes == ()
-    assert await harness.memory.get(held.id) == held
-
-
-async def test_a_reinforced_memory_gains_the_supports() -> None:
-    """§12:3: a create the policy rules ``REINFORCE`` adds its supports to the target."""
-    harness = await _harness(MemoryDecisionKind.REINFORCE)
-    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
-
-    outcome = await _writer(harness).write(Checked(primary=Create(memory=_new())))
-
-    (write,) = outcome.writes
-    assert (write.memory, write.operations) == (held.id, (MemoryOperationKind.ADD_SUPPORT,))
-    reinforced = await harness.memory.get(held.id)
-    assert isinstance(reinforced, Memory)
-    assert reinforced.support_at(InputPart(episode=address("leaving"))) is not None
-
-
-async def test_a_retiring_proposal_installs_the_new_memory_and_retires_the_old() -> None:
-    """§12:4: on an ``ACCEPT``, one atomic write, each naming the other."""
-    harness = await _harness()
-    held = await _stored(
-        harness,
-        memory("m-aisle", "The user likes aisle seats.", sourced_support(episode=address("past"))),
-    )
-    new = _new()
-    retiring = MemoryRetirement(
-        memory=held, kind=MemoryOperationKind.END, cites=new.supports[0].points_at
-    )
-
-    outcome = await _writer(harness).write(Checked(primary=Create(memory=new, retiring=retiring)))
-
-    assert [(one.memory, one.operations) for one in outcome.writes] == [
-        ("observed:new", (MemoryOperationKind.CREATE,)),
-        ("m-aisle", (MemoryOperationKind.END,)),
-    ]
-    (ended,) = [one for one in await harness.memory.export() if one.id == "m-aisle"]
-    assert isinstance(ended, Memory)
-    assert ended.status is MemoryStatus.ENDED
-
-
-async def test_supports_are_added_one_operation_each() -> None:
-    """§12:3: one add support each, through ``apply``."""
-    harness = await _harness()
-    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
-
-    outcome = await _writer(harness).write(
-        Checked(primary=AddSupports(target=held, supports=(_said(),)))
-    )
-
-    (write,) = outcome.writes
-    assert write.operations == (MemoryOperationKind.ADD_SUPPORT,)
-    added = await harness.memory.get(held.id)
-    assert isinstance(added, Memory)
-    assert added.operations[-1].by is MemoryWriterName.OBSERVER
-
-
-async def test_a_question_is_raised_and_another_resolved() -> None:
-    """§13:1, §13:5: raise and resolve, each an operation through ``apply``."""
-    harness = await _harness()
-    raised = OpenQuestion(
-        id="question:old",
-        kind=OpenQuestionKind.RECHECK,
-        asks="Still aisle?",
-        rests_on=(InputPart(episode=address("past")),),
-        raised_at=AT,
-        raised_by=MemoryWriterName.OBSERVER,
-    )
-    record = memory("m-aisle", "The user likes aisle seats.", said_support(address("past")))
-    record = record.model_copy(
-        update={
-            "open_questions": (raised,),
-            "operations": (
-                *record.operations,
-                MemoryOperation(
-                    kind=MemoryOperationKind.RAISE_QUESTION,
-                    cites=InputPart(episode=address("past")),
-                    at=AT,
-                    by=MemoryWriterName.OBSERVER,
-                    question="question:old",
-                ),
-            ),
-        }
-    )
-    held = await _stored(harness, Memory.model_validate(record.model_dump()))
-    against = _said(direction=SupportDirection.AGAINST)
-
-    outcome = await _writer(harness).write(
-        Checked(
-            primary=RaiseQuestion(
-                target=held, kind=OpenQuestionKind.RECHECK, asks="Check the seat.", support=against
-            ),
-            resolve=Resolve(
-                target=held, question="question:old", support=against, note="window now"
-            ),
+def _framing(*contents: str, mint: Minter | None = None) -> Framing:
+    minter = mint or Minter()
+    framed = []
+    for content in contents:
+        support = said_support(address("one"), added_at=AT).model_copy(
+            update={"added_by": MemoryWriterName.OBSERVER}
         )
+        built = memory(f"observed:{minter()}", content, support, subjects=())
+        framed.append(
+            Framed(memory=built, texts={InputPart(episode=address("one")): "Window seats, please."})
+        )
+    return Framing(memories=tuple(framed))
+
+
+async def _held_seat(harness: Harness, *, content: str = _SEAT) -> Memory:
+    support = said_support(address("past"), added_at=AT - timedelta(days=1)).model_copy(
+        update={"holder": SupportHolder.person(OWNER_PERSON_ID)}
+    )
+    await harness.hold(
+        episode("past", at=AT - timedelta(days=1), text="Window seats."),
+        episode("one", at=AT - timedelta(minutes=3), text="Window seats, please."),
+        Memory.model_validate(
+            memory("m-seat", content, support, subjects=(OWNER_PERSON_ID,)).model_dump()
+        ),
+    )
+    stored = await harness.memory.get("m-seat")
+    assert isinstance(stored, Memory)
+    return stored
+
+
+def _placing(
+    relation: PlacedRelation, note: str = "How the two relate."
+) -> Callable[[PlacementView], object]:
+    async def place(view: PlacementView) -> MemoryPlacement:
+        return MemoryPlacement(
+            pairs=tuple(
+                PlacedPair(
+                    memory=one.memory.id,
+                    revision=one.memory.revision,
+                    relation=relation,
+                    note=note,
+                )
+                for one in view.retrieved
+            )
+        )
+
+    return place
+
+
+async def _never(_view: PlacementView) -> NoReturn:
+    msg = "nothing was retrieved, so nothing is placed"
+    raise AssertionError(msg)
+
+
+async def test_a_memory_like_nothing_stored_is_installed_with_no_placement_call() -> None:
+    harness = Harness()
+    await harness.hold(episode("one", at=AT - timedelta(minutes=3)))
+
+    written = await _writer(harness).write(
+        _framing(_SEAT), supply=Placement(), narrowing=None, place=_never
     )
 
-    (write,) = outcome.writes
-    assert write.operations == (
-        MemoryOperationKind.RAISE_QUESTION,
-        MemoryOperationKind.RESOLVE_QUESTION,
-    )
-    after = await harness.memory.get(held.id)
-    assert isinstance(after, Memory)
-    old, new = after.open_questions
-    assert old.resolved
-    assert old.resolution == "window now"
-    assert not new.resolved
-    assert new.asks == "Check the seat."
+    (write,) = written.outcome.writes
+    assert write.operations == (MemoryOperationKind.CREATE,)
+    assert written.outcome.ruling is MemoryDecisionKind.ACCEPT
+    stored = await harness.memory.get(write.memory)
+    assert isinstance(stored, Memory)
+    assert stored.content == _SEAT
+    (placed,) = written.placed
+    assert placed.kept == (write.memory,)
 
 
-async def test_a_track_record_entry_is_recorded_through_record_use() -> None:
-    """§14:4: an entry, conditionally on the revision read."""
-    harness = await _harness()
-    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
-    entry = TrackRecordEntry(
-        episode=address("leaving"),
-        relied_at=AT,
-        held_up=True,
-        note="booked it",
-        recorded_at=_NOW,
-        recorded_by=MemoryWriterName.OBSERVER,
+async def test_a_restatement_folds_into_the_stored_memory() -> None:
+    """ADR-0345 §5:2-§5:3: the operations the stored memory's log gained, listed."""
+    harness = Harness()
+    await _held_seat(harness)
+
+    written = await _writer(harness).write(
+        _framing(_SEAT),
+        supply=Placement(),
+        narrowing=None,
+        place=_placing(PlacedRelation.RESTATES),  # type: ignore[arg-type]  # an async callable
     )
 
-    outcome = await _writer(harness).write(Checked(primary=RecordUse(memory=held, entry=entry)))
+    assert [(one.memory, one.operations) for one in written.outcome.writes] == [
+        ("m-seat", (MemoryOperationKind.ADD_SUPPORT,))
+    ]
+    (placed,) = written.placed
+    assert placed.kept == ("m-seat",)
 
-    (write,) = outcome.writes
-    assert (write.memory, write.operations, write.track_record) == (held.id, (), True)
-    after = await harness.memory.get(held.id)
-    assert isinstance(after, Memory)
-    assert after.track_record == (entry,)
+
+async def test_a_holders_own_no_longer_true_retires_the_stored_memory() -> None:
+    """ADR-0345 §3:3-§3:4, §5:4: installed, and the owner's own memory ended."""
+    harness = Harness()
+    await _held_seat(harness, content="The user prefers aisle seats.")
+
+    written = await _writer(harness).write(
+        _framing(_SEAT),
+        supply=Placement(),
+        narrowing=None,
+        place=_placing(PlacedRelation.NO_LONGER_TRUE, "The user now prefers the window."),  # type: ignore[arg-type]  # an async callable
+    )
+
+    operations = {one.memory: one.operations for one in written.outcome.writes}
+    assert MemoryOperationKind.END in operations["m-seat"]
+    (created,) = [
+        one for one, kinds in operations.items() if kinds == (MemoryOperationKind.CREATE,)
+    ]
+    ended = (await harness.memory.get_history(["m-seat"]))["m-seat"]
+    assert ended.status is MemoryStatus.ENDED
+    assert created != "m-seat"
+
+
+async def test_every_unclear_is_kept_on_the_outcome() -> None:
+    """ADR-0346 §6:5: with its note and the memory it named, beside what was written."""
+    harness = Harness()
+    await _held_seat(harness)
+
+    written = await _writer(harness).write(
+        _framing(_SEAT),
+        supply=Placement(),
+        narrowing=None,
+        place=_placing(PlacedRelation.UNCLEAR, "Whether it is the same trip is not shown."),  # type: ignore[arg-type]  # an async callable
+    )
+
+    (unclear,) = written.outcome.unclear
+    assert (unclear.memory, unclear.wording) == ("m-seat", _SEAT)
+    assert unclear.note == "Whether it is the same trip is not shown."
+    assert written.outcome.writes, "an unclear installs the memory beside (ADR-0345 §5)"
+
+
+async def test_a_stale_placement_is_placed_again_within_the_attempt() -> None:
+    """ADR-0346 §6:7: the writer refuses it whole, and code retrieves and places again."""
+    harness = Harness()
+    held = await _held_seat(harness)
+    calls = 0
+
+    async def place(view: PlacementView) -> MemoryPlacement:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            # Another write lands between this retrieval and the proposal.
+            await harness.memory.write_atomic(
+                [
+                    MemoryWrite(
+                        record=held,
+                        mode=MemoryWriteMode.IF_UNCHANGED,
+                        expected_revision=held.revision,
+                    )
+                ]
+            )
+        return await _placing(PlacedRelation.RESTATES)(view)  # type: ignore[misc,no-any-return]  # an async callable
+
+    written = await _writer(harness).write(
+        _framing(_SEAT), supply=Placement(), narrowing=None, place=place
+    )
+
+    assert calls == 2
+    assert [one.memory for one in written.outcome.writes] == ["m-seat"]
+
+
+async def test_a_placement_stale_past_its_count_fails_the_attempt() -> None:
+    harness = Harness()
+    held = await _held_seat(harness)
+
+    async def place(view: PlacementView) -> MemoryPlacement:
+        current = await harness.memory.get("m-seat")
+        assert isinstance(current, Memory)
+        await harness.memory.write_atomic(
+            [
+                MemoryWrite(
+                    record=held,
+                    mode=MemoryWriteMode.IF_UNCHANGED,
+                    expected_revision=current.revision,
+                )
+            ]
+        )
+        return await _placing(PlacedRelation.RESTATES)(view)  # type: ignore[misc,no-any-return]  # an async callable
+
+    with pytest.raises(MemoryStoreStaleError):
+        await _writer(harness, stale_retries=1).write(
+            _framing(_SEAT), supply=Placement(), narrowing=None, place=place
+        )
+
+
+async def test_an_ask_from_the_floor_raises_nothing_and_is_asked() -> None:
+    """ADR-0346 §6:8, ADR-0336 §7:4."""
+    harness = Harness(ruling=MemoryDecisionKind.ASK_USER)
+    await harness.hold(episode("one", at=AT - timedelta(minutes=3)))
+
+    written = await _writer(harness).write(
+        _framing(_SEAT), supply=Placement(), narrowing=None, place=_never
+    )
+
+    outcome = written.outcome
+    assert (outcome.unwritten, outcome.ruling) == (
+        FindingUnwritten.ASKED,
+        MemoryDecisionKind.ASK_USER,
+    )
+    assert outcome.asked == (_SEAT,)
+    assert [one for one in await harness.memory.export() if isinstance(one, Memory)] == []
+
+
+async def test_a_rejection_writes_nothing_and_is_refused() -> None:
+    harness = Harness(ruling=MemoryDecisionKind.REJECT)
+    await harness.hold(episode("one", at=AT - timedelta(minutes=3)))
+
+    written = await _writer(harness).write(
+        _framing(_SEAT), supply=Placement(), narrowing=None, place=_never
+    )
+
+    assert (written.outcome.unwritten, written.outcome.ruling) == (
+        FindingUnwritten.REFUSED,
+        MemoryDecisionKind.REJECT,
+    )
 
 
 async def test_a_support_on_an_episode_no_longer_held_fails_the_check() -> None:
-    """§9:5, ADR-0328 §4:7: the writer refuses it, and the outcome says so."""
-    harness = await _harness()
+    """ADR-0329 §9:5: the writer refuses a part no stored episode holds."""
+    harness = Harness()
 
-    outcome = await _writer(harness).write(
-        Checked(primary=Create(memory=_new(_CLAIM, _said("gone"))))
+    async def unresolved(_proposal: object) -> NoReturn:
+        msg = "no such episode"
+        raise UnresolvedEvidenceError(msg)
+
+    harness.writes.write = unresolved  # type: ignore[method-assign,assignment]  # the writer refuses
+    written = await _writer(harness).write(
+        _framing(_SEAT), supply=Placement(), narrowing=None, place=_never
     )
 
-    assert outcome.unwritten is FindingUnwritten.CHECK_FAILED
+    assert written.outcome.unwritten is FindingUnwritten.CHECK_FAILED
 
 
-async def test_a_memory_gone_before_its_write_fails_the_check() -> None:
-    harness = await _harness()
-    gone = memory("m-gone", _CLAIM, said_support(address("past"))).model_copy(
-        update={"revision": 3}
+async def test_a_narrowing_is_proposed_only_where_nothing_narrowed_the_supply() -> None:
+    """ADR-0346 §5:7, ADR-0217 §4: ``proposed`` over anyone, the supply's meet otherwise."""
+    harness = Harness()
+    await harness.hold(episode("one", at=AT - timedelta(minutes=3)))
+    narrowing = ProposedNarrowing(reach=PlacementReach.OWNER, note="Between us.")
+    derived = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)
+    mint = Minter()
+
+    proposed = await _writer(harness).write(
+        _framing(_SEAT, mint=mint), supply=Placement(), narrowing=narrowing, place=_never
+    )
+    supplied = await _writer(harness).write(
+        _framing("The user flies often.", mint=mint),
+        supply=derived,
+        narrowing=narrowing,
+        place=_never,
     )
 
-    outcome = await _writer(harness).write(
-        Checked(primary=AddSupports(target=gone, supports=(_said(),)))
+    first = await harness.memory.get(proposed.outcome.writes[0].memory)
+    second = await harness.memory.get(supplied.outcome.writes[0].memory)
+    assert isinstance(first, Memory)
+    assert isinstance(second, Memory)
+    assert (first.placement.reach, first.placement.set_by) == (
+        PlacementReach.OWNER,
+        PlacementSetter.PROPOSED,
+    )
+    assert second.placement.set_by is PlacementSetter.DERIVED
+
+
+async def test_what_lands_is_handed_over_as_it_lands() -> None:
+    """ADR-0329 §16:1: before anything more is read."""
+    harness = Harness()
+    await harness.hold(episode("one", at=AT - timedelta(minutes=3)))
+    handed: list[tuple[ObservationWrite, ...]] = []
+
+    async def landed(writes: tuple[ObservationWrite, ...]) -> None:
+        handed.append(writes)
+
+    await _writer(harness).write(
+        _framing(_SEAT, "The user flies often."),
+        supply=Placement(),
+        narrowing=None,
+        place=_never,
+        landed=landed,
     )
 
-    assert outcome.unwritten is FindingUnwritten.CHECK_FAILED
-
-
-async def test_a_reason_alone_is_the_outcome() -> None:
-    harness = await _harness()
-
-    outcome = await _writer(harness).write(Checked(primary=Unwritten(FindingUnwritten.BELOW_FLOOR)))
-
-    assert (outcome.writes, outcome.unwritten, outcome.at) == (
-        (),
-        FindingUnwritten.BELOW_FLOOR,
-        _NOW,
-    )
-
-
-async def test_what_one_finding_wrote_before_a_later_write_failed_is_recorded() -> None:
-    """§16:1: the first support stays written, and the outcome says so."""
-    harness = await _harness()
-    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
-
-    outcome = await _writer(harness).write(
-        Checked(primary=AddSupports(target=held, supports=(_said(), _said("gone"))))
-    )
-
-    (write,) = outcome.writes
-    assert write.operations == (MemoryOperationKind.ADD_SUPPORT,)
-    assert outcome.unwritten is None
-
-
-async def test_an_entry_already_held_for_the_episode_is_recorded_as_held() -> None:
-    """ADR-0328 §8:3: recording again changes nothing, and the outcome says what is held."""
-    harness = await _harness()
-    first = TrackRecordEntry(
-        episode=address("leaving"),
-        relied_at=AT,
-        held_up=True,
-        recorded_at=_NOW,
-        recorded_by=MemoryWriterName.OBSERVER,
-    )
-    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
-    await harness.writes.record_use(held, first)
-    again = await harness.memory.get(held.id)
-    assert isinstance(again, Memory)
-
-    outcome = await _writer(harness).write(
-        Checked(primary=RecordUse(memory=again, entry=first.model_copy(update={"held_up": False})))
-    )
-
-    (write,) = outcome.writes
-    assert write.track_record is True
-    after = await harness.memory.get(held.id)
-    assert isinstance(after, Memory)
-    assert after.track_record == (first,)
-    assert after.revision == again.revision
-
-
-async def test_a_memory_moved_since_the_decision_fails_the_attempt_as_stale() -> None:
-    """ADR-0219 §2-§3: the decision is made again rather than applied to another state."""
-    harness = await _harness()
-    seen = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
-    await harness.writes.record_use(
-        seen,
-        TrackRecordEntry(
-            episode=address("past"),
-            relied_at=AT,
-            held_up=True,
-            recorded_at=_NOW,
-            recorded_by=MemoryWriterName.OBSERVER,
-        ),
-    )
-
-    with pytest.raises(MemoryStoreStaleError):
-        await _writer(harness).write(Checked(primary=AddSupports(target=seen, supports=(_said(),))))
-
-
-async def test_a_failing_store_fails_the_attempt_rather_than_refusing_the_finding() -> None:
-    """§16:4: only a retry tells an outage from a refusal."""
-    harness = await _harness()
-
-    async def down(_proposal: MemoryUpdateProposal) -> NoReturn:
-        msg = "database temporarily unavailable"
-        raise MemoryStoreError(msg)
-
-    harness.writer.ingest = down  # type: ignore[method-assign,assignment]  # an outage no fake arms
-
-    with pytest.raises(MemoryStoreError):
-        await _writer(harness).write(Checked(primary=Create(memory=_new())))
-
-
-async def test_an_ask_on_a_memory_wider_than_the_supply_is_blocked_not_dropped() -> None:
-    """§12:6, §13:6: no question carries the owner-only supply onto an ``anyone`` memory,
-    and the ask is retried rather than recorded as asked.
-    """
-    harness = await _harness(
-        MemoryDecisionKind.ASK_USER, labels={"m-seat": ConflictRelation.CONTRADICTS}
-    )
-    held = await _stored(harness, memory("m-seat", _OLD_CLAIM, said_support(address("past"))))
-    narrow = _new().model_copy(
-        update={"placement": Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED)}
-    )
-
-    with pytest.raises(WriteBlocked):
-        await _writer(harness).write(
-            Checked(
-                primary=Create(memory=narrow, asked_on=_said(direction=SupportDirection.AGAINST))
-            )
-        )
-
-    after = await harness.memory.get(held.id)
-    assert isinstance(after, Memory)
-    assert after.open_questions == ()
-
-
-async def test_another_writer_between_two_own_writes_fails_the_attempt_as_stale() -> None:
-    """ADR-0219 §2-§3: a revision is adopted only where this finding's own write made it."""
-    harness = await _harness()
-    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
-    apply = harness.writes.apply
-
-    async def interleaved(change: MemoryChange) -> None:
-        await apply(change)
-        moved = await harness.memory.get(held.id)
-        assert isinstance(moved, Memory)
-        await harness.writer.record_use(
-            moved,
-            TrackRecordEntry(
-                episode=address("past"),
-                relied_at=AT,
-                held_up=True,
-                recorded_at=_NOW,
-                recorded_by=MemoryWriterName.OBSERVER,
-            ),
-        )
-
-    harness.writes.apply = interleaved  # type: ignore[method-assign]  # another writer, between
-
-    with pytest.raises(MemoryStoreStaleError):
-        await _writer(harness).write(
-            Checked(primary=AddSupports(target=held, supports=(_said(), _said("past"))))
-        )
-
-
-async def test_another_writer_between_a_fold_and_a_resolution_fails_the_attempt() -> None:
-    """ADR-0219 §2-§3: a fold's result is adopted only as the fold makes it."""
-    harness = await _harness(MemoryDecisionKind.REINFORCE)
-    raised = OpenQuestion(
-        id="question:old",
-        kind=OpenQuestionKind.RECHECK,
-        asks="Still?",
-        rests_on=(InputPart(episode=address("past")),),
-        raised_at=AT,
-        raised_by=MemoryWriterName.OBSERVER,
-    )
-    base = memory("m-seat", _CLAIM, said_support(address("past")))
-    record = Memory.model_validate(
-        {
-            **base.model_dump(),
-            "open_questions": (raised,),
-            "operations": (
-                *base.operations,
-                MemoryOperation(
-                    kind=MemoryOperationKind.RAISE_QUESTION,
-                    cites=InputPart(episode=address("past")),
-                    at=AT,
-                    by=MemoryWriterName.OBSERVER,
-                    question="question:old",
-                ),
-            ),
-        }
-    )
-    held = await _stored(harness, record)
-    write = harness.writes.write
-
-    async def interleaved(proposal: MemoryUpdateProposal) -> object:
-        done = await write(proposal)
-        moved = await harness.memory.get(held.id)
-        assert isinstance(moved, Memory)
-        await harness.writer.record_use(
-            moved,
-            TrackRecordEntry(
-                episode=address("past"),
-                relied_at=AT,
-                held_up=True,
-                recorded_at=_NOW,
-                recorded_by=MemoryWriterName.OBSERVER,
-            ),
-        )
-        return done
-
-    harness.writes.write = interleaved  # type: ignore[method-assign,assignment]  # another writer
-    against = _said(direction=SupportDirection.AGAINST)
-
-    with pytest.raises(MemoryStoreStaleError):
-        await _writer(harness).write(
-            Checked(
-                primary=Create(memory=_new()),
-                resolve=Resolve(target=held, question="question:old", support=against, note="n"),
-            ),
-            shown=[held],
-        )
-
-
-async def test_a_write_that_lands_is_kept_though_its_verification_fails() -> None:
-    """§16:1: the support is written, so the ledger the stage keeps names it."""
-    harness = await _harness()
-    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
-    get_many = harness.memory.get_many
-    apply = harness.writes.apply
-    landed = False
-
-    async def landing(change: MemoryChange) -> None:
-        nonlocal landed
-        await apply(change)
-        landed = True
-
-    async def failing_after_write(ids: list[str]) -> object:
-        if landed:
-            msg = "the store could not read"
-            raise MemoryStoreError(msg)
-        return await get_many(ids)
-
-    harness.writes.apply = landing  # type: ignore[method-assign]  # notes when the write lands
-    harness.memory.get_many = failing_after_write  # type: ignore[method-assign,assignment]  # then an outage
-    writer = _writer(harness)
-    kept: list[tuple[ObservationWrite, ...]] = []
-
-    async def landed_writes(writes: tuple[ObservationWrite, ...]) -> None:
-        kept.append(writes)
-
-    with pytest.raises(MemoryStoreError):
-        await writer.write(
-            Checked(primary=AddSupports(target=held, supports=(_said(),))), landed=landed_writes
-        )
-
-    assert [[(one.memory, one.operations) for one in writes] for writes in kept] == [
-        [("m-seat", (MemoryOperationKind.ADD_SUPPORT,))]
-    ]
-    landed = False
-    after = await harness.memory.get(held.id)
-    assert isinstance(after, Memory)
-    assert after.support_at(InputPart(episode=address("leaving"))) is not None
-
-
-async def test_a_supersession_records_the_end_of_each_memory_it_replaced() -> None:
-    """§12:2, §16:1: a ``SUPERSEDE`` installs the replacement and ends what it replaced."""
-    harness = await _harness(MemoryDecisionKind.SUPERSEDE)
-    await _stored(harness, memory("m-old", _OLD_CLAIM, sourced_support(episode=address("past"))))
-    writer = _writer(harness)
-
-    outcome = await writer.write(Checked(primary=Create(memory=_new())))
-
-    assert outcome.ruling is MemoryDecisionKind.SUPERSEDE
-    assert [one.operations for one in outcome.writes] == [
-        (MemoryOperationKind.CREATE,),
-        (MemoryOperationKind.END,),
-    ]
-    assert outcome.writes[1].memory == "m-old"
-
-
-async def test_a_supersession_whose_replacement_cannot_be_read_keeps_it_to_read_again() -> None:
-    """§16:1: the supersession landed whole, so what it retired is recovered on a retry."""
-    harness = await _harness(MemoryDecisionKind.SUPERSEDE)
-    await _stored(harness, memory("m-old", _OLD_CLAIM, sourced_support(episode=address("past"))))
-    get_many = harness.memory.get_many
-    write = harness.writes.write
-    failing = False
-
-    async def landing(proposal: MemoryUpdateProposal) -> object:
-        nonlocal failing
-        done = await write(proposal)
-        failing = True
-        return done
-
-    async def failing_replacement(ids: list[str]) -> object:
-        if failing:
-            msg = "the store could not read"
-            raise MemoryStoreError(msg)
-        return await get_many(ids)
-
-    harness.writes.write = landing  # type: ignore[method-assign,assignment]  # notes the landing
-    harness.memory.get_many = failing_replacement  # type: ignore[method-assign,assignment]  # an outage
-    writer = _writer(harness)
-    kept: list[tuple[ObservationWrite, ...]] = []
-
-    async def landed_writes(writes: tuple[ObservationWrite, ...]) -> None:
-        kept.append(writes)
-
-    with pytest.raises(MemoryStoreError):
-        await writer.write(Checked(primary=Create(memory=_new())), landed=landed_writes)
-
-    (writes,) = kept
-    (created,) = writes
-    installed = created.memory
-    assert created.operations == (MemoryOperationKind.CREATE,)
-    failing = False
-    assert [(one.memory, one.operations) for one in await writer.retirements([installed])] == [
-        ("m-old", (MemoryOperationKind.END,))
-    ]
-
-
-async def test_a_question_already_raised_is_recorded_rather_than_raised_twice() -> None:
-    """§16:4: a retry of a decision whose question landed raises no second question."""
-    harness = await _harness()
-    held = await _stored(harness, memory("m-seat", _CLAIM, said_support(address("past"))))
-    against = _said(direction=SupportDirection.AGAINST)
-    question = Checked(
-        primary=RaiseQuestion(
-            target=held, kind=OpenQuestionKind.RECHECK, asks="Check the seat.", support=against
-        )
-    )
-
-    await _writer(harness).write(question)
-    raised = await harness.memory.get(held.id)
-    assert isinstance(raised, Memory)
-    again = await _writer(harness).write(
-        Checked(
-            primary=RaiseQuestion(
-                target=raised,
-                kind=OpenQuestionKind.RECHECK,
-                asks="Check the seat.",
-                support=against,
-            )
-        )
-    )
-
-    (write,) = again.writes
-    assert write.operations == (MemoryOperationKind.RAISE_QUESTION,)
-    after = await harness.memory.get(held.id)
-    assert isinstance(after, Memory)
-    assert len(after.open_questions) == 1
-    assert after.revision == raised.revision
-
-
-async def test_retirements_are_read_from_a_replacement_retired_since() -> None:
-    """§16:1: a replacement a later write retired still names what it replaced."""
-    harness = await _harness(MemoryDecisionKind.SUPERSEDE)
-    await _stored(harness, memory("m-old", _OLD_CLAIM, sourced_support(episode=address("past"))))
-    first = await _writer(harness).write(Checked(primary=Create(memory=_new())))
-    installed = first.writes[0].memory
-    replacement = await harness.memory.get(installed)
-    assert isinstance(replacement, Memory)
-    await harness.writes.apply(
-        MemoryChange(
-            memory=replacement,
-            operation=MemoryOperation(
-                kind=MemoryOperationKind.END,
-                cites=replacement.supports[0].points_at,
-                at=_NOW,
-                by=MemoryWriterName.OBSERVER,
-            ),
-        )
-    )
-    assert await harness.memory.get(installed) is None
-
-    ends = await _writer(harness).retirements([installed])
-
-    assert [(one.memory, one.operations) for one in ends] == [("m-old", (MemoryOperationKind.END,))]
-
-
-async def test_a_recovered_retirement_stands_beside_an_earlier_operation_on_its_memory() -> None:
-    """§16:1: an end read off a replacement joins whatever else ``written`` holds there.
-
-    A memory is retired once, so only one already shown retired gains nothing: the
-    end recovered from a replacement's create stands beside an add support the same
-    finding wrote on that memory earlier.
-    """
-    harness = await _harness(MemoryDecisionKind.SUPERSEDE)
-    await _stored(harness, memory("m-old", _OLD_CLAIM, sourced_support(episode=address("past"))))
-    installed = (
-        (await _writer(harness).write(Checked(primary=Create(memory=_new())))).writes[0].memory
-    )
-    observer = harness.observer()
-    created = ObservationWrite(memory=installed, operations=(MemoryOperationKind.CREATE,))
-
-    def written(*kinds: MemoryOperationKind) -> tuple[ObservationWrite, ...]:
-        return (ObservationWrite(memory="m-old", operations=kinds), created)
-
-    beside = await observer._recovered(written(MemoryOperationKind.ADD_SUPPORT))
-    assert [(one.memory, one.operations) for one in beside] == [
-        ("m-old", (MemoryOperationKind.ADD_SUPPORT, MemoryOperationKind.END)),
-        (installed, (MemoryOperationKind.CREATE,)),
-    ]
-    for retired in (MemoryOperationKind.END, MemoryOperationKind.MARK_WRONG):
-        assert await observer._recovered(written(retired)) == written(retired)
+    assert [len(one) for one in handed] == [1, 1, 2, 2]

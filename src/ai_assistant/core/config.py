@@ -3206,10 +3206,13 @@ class Settings(BaseSettings):
     # provider the operator did not already configure, so ADR-0004 §2's property cannot
     # be breached by leaving them unset — and never falls back, because the work is
     # deferrable and a second provider would widen who reads the user's episodes for a
-    # reliability nobody is waiting on. The scout reads an episode and what came after
-    # it and proposes what is worth keeping, so it is meant for a capable model; the
-    # commit step decides one finding from only what it rests on, so a cheaper model
-    # will do. The settings choose; the decision does not.
+    # reliability nobody is waiting on. The scout reads an episode and what its record
+    # points at and proposes what is worth keeping, so it is meant for a capable model;
+    # the commit step, which ADR-0346 cuts into framing a finding from only what it rests
+    # on and placing each memory among what is stored, rides one route for both
+    # (ADR-0346 §10:2), so a cheaper model will do. The settings choose; the decision
+    # does not. The commit route keeps its name: renaming it would break an operator's
+    # setting for no change in what it routes.
     observer_scout_model: _ModelSpec | None = Field(
         default=None,
         description=(
@@ -3221,24 +3224,25 @@ class Settings(BaseSettings):
     observer_commit_model: _ModelSpec | None = Field(
         default=None,
         description=(
-            "Model the observer's commit step decides each proposed memory with, from only "
-            "what it rests on, in pydantic-ai 'provider:model' form. Unset means the same "
-            "route conversation uses. Never falls back."
+            "Model the observer's commit step frames each finding with, from only what it "
+            "rests on, and places each memory it keeps among what is stored, in pydantic-ai "
+            "'provider:model' form. Unset means the same route conversation uses. Never "
+            "falls back."
         ),
     )
     # **The daily budget** (ADR-0329 §16:9): the most model calls the observer makes in
-    # any 24 hours, the scout's and the commit step's together. A run that would exceed
-    # it stops and the episodes left wait, none dropped, so a low budget slows learning
-    # and loses nothing. Zero is admitted and means the observer makes no call at all:
-    # every due episode waits until the budget is raised.
+    # any 24 hours, the scout's, framing's and placement's together (ADR-0346 §10:2). A
+    # run that would exceed it stops and the episodes left wait, none dropped, so a low
+    # budget slows learning and loses nothing. Zero is admitted and means the observer
+    # makes no call at all: every due episode waits until the budget is raised.
     observer_daily_calls: _IntegerSetting = Field(
         default=300,
         ge=0,
         lt=2**63,
         description=(
-            "The most model calls the observer may make in any 24 hours, its scout's and "
-            "its commit step's together. A run that would go past it stops, and what is "
-            "left waits for a later run; nothing is dropped."
+            "The most model calls the observer may make in any 24 hours, its scout's, its "
+            "framing's and its placement's together. A run that would go past it stops, "
+            "and what is left waits for a later run; nothing is dropped."
         ),
     )
     # **The scheduler's row** (ADR-0329 §7:6, ADR-0083 §7): a run also starts when an

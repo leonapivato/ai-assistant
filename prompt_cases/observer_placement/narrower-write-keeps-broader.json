@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "{\"memory\": {\"wording\": \"The user is allergic to peanuts.\", \"supports\": [{\"from\": \"the user\", \"outside\": false, \"direction\": \"for\", \"backs_as_worded\": true, \"at\": \"2026-07-19T11:02:00+00:00\", \"text\": \"remember I'm allergic to peanuts, so skip anywhere that does satay\"}], \"subjects\": [\"the user\"], \"involved\": [], \"marks\": [], \"valid_until\": null}, \"stored\": [{\"memory\": \"M1\", \"wording\": \"The user is allergic to peanuts and to shellfish.\", \"held_by\": [\"the user\"], \"partly_supported_by\": [], \"stands\": \"you said it\", \"status\": \"current\", \"for\": 1, \"against\": 0, \"episodes\": 1, \"open_questions\": [], \"recent_supports\": [{\"from\": \"the user\", \"outside\": false, \"direction\": \"for\", \"backs_as_worded\": true, \"counted\": true, \"at\": \"2026-04-02T19:44:00+00:00\", \"text\": \"I can't have peanuts or shellfish, I'm allergic to both\"}]}]}",
+      "name": null
+    }
+  ]
+}
