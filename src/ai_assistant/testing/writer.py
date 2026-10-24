@@ -473,6 +473,24 @@ def _refuse_ungiven_names(memory: Memory, held: Mapping[str, MemoryRecord]) -> N
         raise MemoryStoreError(msg)
 
 
+def _check_label_bounds(labels: Sequence[str], bounds: LabelBounds) -> None:
+    """ADR-0345 §7:3: the labels a memory is written with, each one and all together.
+
+    Raises:
+        MemoryStoreError: If there are more than the bounds admit, or one is longer.
+    """
+    if len(labels) > bounds.max_labels:
+        msg = f"refusing to write more than {bounds.max_labels} labels (ADR-0345 §7:3)"
+        raise MemoryStoreError(msg)
+    long = next((one for one in labels if len(one) > bounds.max_chars), None)
+    if long is not None:
+        msg = (
+            f"refusing to write a label longer than {bounds.max_chars} characters "
+            f"(ADR-0345 §7:3): {long!r}"
+        )
+        raise MemoryStoreError(msg)
+
+
 def _cosine_distance(left: Embedding, right: Embedding) -> float:
     """The cosine distance between two vectors, ``0`` to ``2``; ``1`` where either is zero."""
     dot = sum(a * b for a, b in zip(left, right, strict=True))
@@ -823,15 +841,14 @@ class FakeMemoryWriter:
         """
         bounds = self._label_bounds
         if not new:
-            if bounds is not None and len(carried) > bounds.max_labels:
-                msg = f"refusing to write more than {bounds.max_labels} labels (ADR-0345 §7:3)"
-                raise MemoryStoreError(msg)
+            if bounds is not None:
+                _check_label_bounds(carried, bounds)
             return [], []
         embedder = self._label_embedder
         if bounds is None or embedder is None:
             msg = "refusing to write a label: no label bounds were wired (ADR-0345 §7:3)"
             raise MemoryStoreError(msg)
-        if any(len(text) > bounds.max_chars for text in new):
+        if any(len(text) > bounds.max_chars for text in [*carried, *new]):
             msg = f"refusing a label longer than {bounds.max_chars} characters (ADR-0345 §7:3)"
             raise MemoryStoreError(msg)
         try:
@@ -839,8 +856,8 @@ class FakeMemoryWriter:
         except Exception as exc:  # any fault from the injected embedder is the writer's error
             msg = f"refusing to write a label: the embedder failed ({exc})"
             raise MemoryStoreError(msg) from exc
-        if len(vectors) != len(carried) + len(new):
-            msg = "refusing to write a label: the embedder returned the wrong number of vectors"
+        if len(vectors) != len(carried) + len(new) or len({len(one) for one in vectors}) > 1:
+            msg = "refusing to write a label: the embedder returned malformed vectors"
             raise MemoryStoreError(msg)
         held = vectors[: len(carried)]
         accepted: list[str] = []
@@ -851,9 +868,7 @@ class FakeMemoryWriter:
                 continue
             accepted.append(text)
             held.append(vector)
-        if len(carried) + len(accepted) > bounds.max_labels:
-            msg = f"refusing to write more than {bounds.max_labels} labels (ADR-0345 §7:3)"
-            raise MemoryStoreError(msg)
+        _check_label_bounds([*carried, *accepted], bounds)
         return accepted, refused
 
     async def _labelled(self, memory: Memory) -> tuple[Memory, tuple[str, ...]]:
