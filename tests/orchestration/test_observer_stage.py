@@ -45,11 +45,14 @@ from ai_assistant.core.types import (
     LabelKind,
     Memory,
     MemoryDecisionKind,
+    MemoryOperation,
     MemoryOperationKind,
     MemorySource,
     MemoryStanding,
+    MemoryStatus,
     MemoryWrite,
     MemoryWriteMode,
+    MemoryWriterName,
     ObservationAttemptEnd,
     ObservationState,
     ObservationWrite,
@@ -67,6 +70,7 @@ from ai_assistant.core.types import (
     SupportOrigin,
     UnderstandingGround,
     UnderstandingProducer,
+    Validity,
 )
 from ai_assistant.core.types import Message as MessageType
 from ai_assistant.orchestration.observer import RunOutcome
@@ -1365,3 +1369,56 @@ async def test_a_pending_findings_earlier_writes_survive_a_part_that_no_longer_r
     outcome = record.findings[0].outcome
     assert outcome is not None
     assert outcome.writes == (written,)
+
+
+async def test_a_pending_supersession_from_before_framed_records_what_it_retired() -> None:
+    """§16:1: the create alone on the record, its retirement read off the store."""
+    harness = Harness()
+    await _three(harness)
+    old = memory("m-old", "The user prefers aisle seats.", said_support(address("one")))
+    replacement = memory(
+        "m-new", _CLAIM, said_support(address("one"), added_at=AT + timedelta(seconds=1))
+    )
+    replacement = replacement.model_copy(
+        update={
+            "operations": (replacement.operations[0].model_copy(update={"replaces": ("m-old",)}),)
+        }
+    )
+    ended = old.model_copy(
+        update={
+            "operations": (
+                *old.operations,
+                MemoryOperation(
+                    kind=MemoryOperationKind.END,
+                    cites=old.supports[0].points_at,
+                    at=AT,
+                    by=MemoryWriterName.OBSERVER,
+                    successor="m-new",
+                ),
+            ),
+            "status": MemoryStatus.ENDED,
+            "validity": Validity(valid_until=AT),
+        }
+    )
+    await harness.hold(
+        Memory.model_validate(ended.model_dump()), Memory.model_validate(replacement.model_dump())
+    )
+    first = harness.observer(scout=FakeModelProvider.scripted(_scout("P1")), daily_calls=1)
+    assert (await first.run()).held
+    (held,) = await harness.plans.observations(["activation:one"])
+    created = ObservationWrite(memory="m-new", operations=(MemoryOperationKind.CREATE,))
+    pending = held.findings[0].model_copy(update={"written": (created,)})
+    await harness.plans.write_observation(
+        held.model_copy(update={"findings": (pending,)}), expected_revision=held.revision
+    )
+    harness.clock.advance(timedelta(hours=25))
+
+    await harness.observer(commit=FakeModelProvider.scripted(_nothing())).run()
+
+    (record,) = await harness.plans.observations(["activation:one"])
+    outcome = record.findings[0].outcome
+    assert outcome is not None
+    assert [(one.memory, one.operations) for one in outcome.writes] == [
+        ("m-new", (MemoryOperationKind.CREATE,)),
+        ("m-old", (MemoryOperationKind.END,)),
+    ]

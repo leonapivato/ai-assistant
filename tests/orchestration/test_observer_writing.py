@@ -570,3 +570,124 @@ async def test_a_proposal_that_did_not_land_is_placed_again() -> None:
 
     (write,) = written.writes
     assert (write.memory, write.operations) == (framed.memory.id, (MemoryOperationKind.CREATE,))
+
+
+async def _proposing_on(harness: Harness, framed: FramedMemory) -> FramedMemory:
+    """``framed``, its proposal recorded as sent against the stored seat as it stands."""
+    seat = await harness.memory.get("m-seat")
+    assert isinstance(seat, Memory)
+    named = NamedRevision(
+        memory="m-seat", relation=PlacedRelation.RESTATES, operations=len(seat.operations)
+    )
+    return framed.model_copy(update={"state": FramedState.PROPOSING, "named": (named,)})
+
+
+async def test_a_fold_sharing_a_part_with_another_is_not_taken_for_this_ones() -> None:
+    """ADR-0329 §16:4: another finding folding in a part both rest on landed nothing of this.
+
+    This memory rests on an earlier part another finding shares and a part of its own;
+    the other finding's fold adds the shared part, and this one's own part is still to
+    be added, so it is placed again rather than done.
+    """
+    harness = Harness()
+    await _held_seat(harness)
+    await harness.hold(episode("shared", at=AT - timedelta(hours=1), text="Window, always."))
+    shared = said_support(address("shared"), added_at=AT).model_copy(
+        update={"added_by": MemoryWriterName.OBSERVER}
+    )
+    (framed,) = _framed(_SEAT)
+    framed = framed.model_copy(
+        update={
+            "memory": framed.memory.model_copy(
+                update={"supports": (*framed.memory.supports, shared)}
+            )
+        }
+    )
+    proposing = await _proposing_on(harness, framed)
+    seat = await harness.memory.get("m-seat")
+    assert isinstance(seat, Memory)
+    await harness.writer.apply(
+        MemoryChange(
+            memory=seat,
+            operation=MemoryOperation(
+                kind=MemoryOperationKind.ADD_SUPPORT,
+                cites=shared.points_at,
+                at=AT + timedelta(minutes=5),
+                by=MemoryWriterName.OBSERVER,
+            ),
+            support=shared.model_copy(update={"holder": SupportHolder.person(OWNER_PERSON_ID)}),
+        )
+    )
+
+    written = await _write(harness, (proposing,), place=_placing(PlacedRelation.RESTATES))
+
+    after = await harness.memory.get("m-seat")
+    assert isinstance(after, Memory)
+    assert after.support_at(framed.memory.supports[0].points_at) is not None
+    (write,) = written.writes
+    assert write.operations == (MemoryOperationKind.ADD_SUPPORT,)
+
+
+async def test_a_recovered_install_lists_its_own_operations_and_no_later_one() -> None:
+    """ADR-0329 §16:1: a later write on the installed memory is never taken for this one's."""
+    harness = Harness()
+    await harness.hold(episode("one", at=AT - timedelta(minutes=3)))
+    (framed,) = _framed(_SEAT)
+    first = await _write(harness, (framed,))
+    installed = first.writes[0].memory
+    stored = await harness.memory.get(installed)
+    assert isinstance(stored, Memory)
+    await harness.hold(episode("later", at=AT - timedelta(minutes=1), text="Window again."))
+    later = said_support(address("later"), added_at=AT).model_copy(
+        update={"holder": SupportHolder.person(OWNER_PERSON_ID)}
+    )
+    harness.clock.advance(timedelta(minutes=5))
+    await harness.writer.apply(
+        MemoryChange(
+            memory=stored,
+            operation=MemoryOperation(
+                kind=MemoryOperationKind.ADD_SUPPORT,
+                cites=later.points_at,
+                at=harness.clock(),
+                by=MemoryWriterName.OBSERVER,
+            ),
+            support=later,
+        )
+    )
+    proposing = framed.model_copy(update={"state": FramedState.PROPOSING})
+
+    written = await _write(harness, (proposing,))
+
+    assert [(one.memory, one.operations) for one in written.writes] == [
+        (installed, (MemoryOperationKind.CREATE,))
+    ]
+
+
+async def test_a_recovered_install_keeps_the_recheck_it_raised() -> None:
+    """ADR-0329 §16:1, ADR-0345 §5:9: a question resting on the stored memory's own supports."""
+    harness = Harness()
+    await _held_seat(harness)
+    ingest = harness.writer.ingest
+
+    async def lost_after(proposal: Any) -> Any:
+        await ingest(proposal)
+        msg = "the store failed after the write landed"
+        raise MemoryStoreError(msg)
+
+    harness.writer.ingest = lost_after  # type: ignore[method-assign]  # lost reply
+    record = _Record()
+    with pytest.raises(MemoryStoreError):
+        await _write(
+            harness,
+            _framed(_SEAT),
+            place=_placing(PlacedRelation.RECHECK, "Still the window?"),
+            record=record,
+        )
+    (proposing,), _ = record.steps[-1]
+    harness.writer.ingest = ingest  # type: ignore[method-assign]  # the store is back
+
+    written = await _write(harness, (proposing,), place=_never)
+
+    operations = {one.memory: one.operations for one in written.writes}
+    assert operations["m-seat"] == (MemoryOperationKind.RAISE_QUESTION,)
+    assert operations[proposing.memory.id] == (MemoryOperationKind.CREATE,)
