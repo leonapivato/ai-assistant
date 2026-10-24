@@ -25,6 +25,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
+    BeliefBand,
     FindingUnwritten,
     FramedMemory,
     FramedState,
@@ -55,7 +56,7 @@ from ai_assistant.core.types import (
     SupportOrigin,
 )
 from ai_assistant.orchestration.observer.writing import FindingWriter, WriteLimits, outcome_of
-from ai_assistant.testing.memories import memory, said_support
+from ai_assistant.testing.memories import memory, memory_in_band, said_support
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -826,12 +827,14 @@ async def test_another_findings_recheck_is_not_taken_for_this_ones_fold(note: st
     assert (done.state, done.kept) == (FramedState.DONE, ("m-seat",))
 
 
-async def test_a_recovered_install_keeps_its_own_dispute_where_no_target_changed() -> None:
-    """ADR-0329 §16:1, ADR-0345 §3:5: the installed memory's operations are told by its notes.
+async def test_a_recovered_install_lists_its_create_where_nothing_establishes_the_rest() -> None:
+    """ADR-0329 §16:1, ADR-0345 §3:5: only what the store establishes as the write's is listed.
 
     The stored memory already carries this memory's part, so the retiring relation adds
     nothing to it, and another holder's backing keeps it current: the write's one
-    operation beside the create is the dispute added to the installed memory.
+    operation beside the create is the dispute added to the installed memory. Nothing in
+    the store tells that dispute from a later write's in the same note and on the same
+    part (#3394), so the store holds it and the outcome lists the create alone.
     """
     harness = Harness()
     (framed,) = _framed(_SEAT)
@@ -868,8 +871,13 @@ async def test_a_recovered_install_keeps_its_own_dispute_where_no_target_changed
     written = await _write(harness, (proposing,), place=_never)
 
     assert [(one.memory, one.operations) for one in written.writes] == [
-        (framed.memory.id, (MemoryOperationKind.CREATE, MemoryOperationKind.ADD_SUPPORT))
+        (framed.memory.id, (MemoryOperationKind.CREATE,))
     ]
+    installed = (await harness.memory.get_history([framed.memory.id]))[framed.memory.id]
+    assert [one.kind for one in installed.operations] == [
+        MemoryOperationKind.CREATE,
+        MemoryOperationKind.ADD_SUPPORT,
+    ], "the dispute is held, once"
 
 
 async def test_a_recovered_install_lists_no_later_question_in_its_targets_words() -> None:
@@ -919,6 +927,51 @@ async def test_a_recovered_install_lists_no_later_question_in_its_targets_words(
 
     assert [(one.memory, one.operations) for one in written.writes] == [
         (framed.memory.id, (MemoryOperationKind.CREATE,))
+    ]
+
+
+async def test_a_recovered_install_lists_no_later_support_on_its_part_in_its_words() -> None:
+    """ADR-0329 §16:1, ADR-0345 §5:2: a restatement that installs beside writes nothing there.
+
+    This memory restates a stored memory it would raise in standing, so it is installed
+    beside it and the stored memory is unchanged; the reply is lost. Five minutes later
+    another finding resting on the same part supports the stored memory, in this
+    placement's words, adding that part to it. The recovered install lists its create
+    alone.
+    """
+    harness = Harness()
+    await harness.hold(
+        episode("one", at=AT - timedelta(minutes=3), text="Window seats, please."),
+        memory_in_band("m-seat", _SEAT, BeliefBand.DERIVED, episode=address("one")),
+    )
+    same = "The same seat."
+    restore = _losing(harness)
+    record = _Record()
+    with pytest.raises(MemoryStoreError):
+        await _write(
+            harness,
+            _framed(_SEAT),
+            place=_placing_each({"m-seat": (PlacedRelation.RESTATES, same)}),
+            record=record,
+        )
+    (proposing,), _ = record.steps[-1]
+    restore()
+    assert (await harness.memory.get_history([proposing.memory.id])).get(proposing.memory.id)
+    harness.clock.advance(timedelta(minutes=5))
+    mint = Minter()
+    mint.minted = 50
+    await _write(
+        harness,
+        _framed(_SEAT, mint=mint),
+        place=_placing_each({"m-seat": (PlacedRelation.SUPPORTS, same)}),
+    )
+    seat = (await harness.memory.get_history(["m-seat"]))["m-seat"]
+    assert seat.operations[-1].kind is MemoryOperationKind.ADD_SUPPORT
+
+    written = await _write(harness, (proposing,), place=_never)
+
+    assert [(one.memory, one.operations) for one in written.writes] == [
+        (proposing.memory.id, (MemoryOperationKind.CREATE,))
     ]
 
 
