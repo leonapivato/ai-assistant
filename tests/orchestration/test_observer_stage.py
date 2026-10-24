@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     ConfirmationPart,
     EpisodicMemory,
     FindingUnwritten,
+    InputPart,
     LabelKind,
     Memory,
     MemoryDecisionKind,
@@ -51,6 +52,7 @@ from ai_assistant.core.types import (
     MemoryWriteMode,
     ObservationAttemptEnd,
     ObservationState,
+    ObservationWrite,
     ObserverStep,
     Placement,
     PlacementReach,
@@ -1338,3 +1340,28 @@ async def test_a_question_a_memory_raised_is_not_raised_again_by_a_retry() -> No
     seat = await harness.memory.get("m-seat")
     assert isinstance(seat, Memory)
     assert len(seat.open_questions) == 1
+
+
+async def test_a_pending_findings_earlier_writes_survive_a_part_that_no_longer_resolves() -> None:
+    """§16:1: a finding from before ``framed`` keeps its writes whatever this commit finds."""
+    harness = Harness()
+    await _three(harness)
+    first = harness.observer(scout=FakeModelProvider.scripted(_scout("P1")), daily_calls=1)
+    assert (await first.run()).held
+    (held,) = await harness.plans.observations(["activation:one"])
+    written = ObservationWrite(memory="observed:old", operations=(MemoryOperationKind.CREATE,))
+    stray = InputPart(episode=address("gone"))
+    pending = held.findings[0].model_copy(
+        update={"written": (written,), "rests_on": (*held.findings[0].rests_on, stray)}
+    )
+    await harness.plans.write_observation(
+        held.model_copy(update={"findings": (pending,)}), expected_revision=held.revision
+    )
+    harness.clock.advance(timedelta(hours=25))
+
+    await harness.observer(commit=FakeModelProvider.scripted()).run()
+
+    (record,) = await harness.plans.observations(["activation:one"])
+    outcome = record.findings[0].outcome
+    assert outcome is not None
+    assert outcome.writes == (written,)

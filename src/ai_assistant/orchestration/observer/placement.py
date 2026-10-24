@@ -44,7 +44,6 @@ from ai_assistant.core.types import (
     Placement,
     Role,
     origin_is_outside,
-    part_episode,
 )
 from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.observer.reading import (
@@ -283,17 +282,15 @@ async def _compact(
             if not question.resolved:
                 asked += 1
                 questions[f"Q{asked}"] = question.id
-        read = {
-            episode
-            for support in newest[one.id]
-            if (episode := part_episode(support.points_at)) is not None
-        }
+        # Every episode read to show its supports, a confirmation's asking one included,
+        # since its text is what is shown (ADR-0329 §12:6).
+        read = episodes_to_read([one.model_copy(update={"supports": tuple(newest[one.id])})])
         compact.append(
             Retrieved(
                 handle=f"M{index}",
                 memory=one,
                 questions=questions,
-                supplied=tuple(episodes[key].placement for key in sorted(read) if key in episodes),
+                supplied=tuple(episodes[key].placement for key in read if key in episodes),
                 recent=tuple(
                     (
                         support,
