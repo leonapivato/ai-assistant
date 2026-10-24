@@ -22,6 +22,7 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     Memory,
     MemoryDecisionKind,
+    MemoryPlacement,
     MemoryRecord,
     MemorySource,
     MemoryUpdateProposal,
@@ -1952,3 +1953,40 @@ async def test_the_degraded_path_still_folds_an_agreeing_derived_member(
 
     assert decision.kind is MemoryDecisionKind.REINFORCE
     assert decision.target_id == "identical"
+
+
+# --- ADR-0345 §4:5: a placed proposal is ruled by rules 1 to 4 alone --------------------
+
+
+def _placed(record: Memory, *, sensitivity: DataTier = DataTier.PERSONAL) -> MemoryUpdateProposal:
+    """``record`` placed against nothing: its producer retrieved no stored memory."""
+    return MemoryUpdateProposal(
+        proposed=record, rationale="because", sensitivity=sensitivity, placement=MemoryPlacement()
+    )
+
+
+async def test_a_placed_proposal_past_the_floor_is_accepted_whatever_it_conflicts_with() -> None:
+    """§4:5: rules 5 to 12 read no placed proposal, so a contradicted assertion defers nothing."""
+    asserted = _semantic("asserted", source=MemorySource.USER_ASSERTED)
+    proposal = _placed(_semantic("new", source=MemorySource.USER_ASSERTED))
+
+    ruling = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[asserted], relations=_contradicts("asserted")
+    )
+
+    assert ruling.kind is MemoryDecisionKind.ACCEPT
+    assert "ADR-0345" in ruling.reason
+
+
+async def test_the_floor_still_rules_on_a_placed_proposal() -> None:
+    """§4:5, §4:6: rules 1 to 3 rule a placed proposal as any, and their ruling is final."""
+    policy = DefaultMemoryPolicy()
+    secret = await policy.decide(
+        _placed(
+            _semantic("secret", source=MemorySource.USER_ASSERTED), sensitivity=DataTier.SECRET
+        ),
+        conflicts=[],
+    )
+    assert secret.kind is MemoryDecisionKind.ASK_USER
+    bare = await policy.decide(_placed(_semantic("bare", evidence=())), conflicts=[])
+    assert bare.kind is MemoryDecisionKind.REJECT

@@ -129,6 +129,7 @@ from ai_assistant.core.types import (
     profile_field,
     profile_value,
     secret_value,
+    stamped_support,
     story_members,
     story_move_members,
     story_note_ids,
@@ -2732,14 +2733,17 @@ def _held_support(
     where ``outside`` says so; ``legacy`` a record stored before ADR-0328.
     """
     if legacy:
-        return MemorySupport(
-            points_at=LegacyPart(record=record_id),
-            origin=SupportOrigin.LEGACY_OUTSIDE if outside else SupportOrigin.LEGACY,
-            direction=SupportDirection.FOR,
-            backs_as_worded=True,
-            added_at=_AT,
-            added_by=MemoryWriterName.MIGRATION,
-            carries={"id": record_id},
+        return stamped_support(
+            MemorySupport(
+                points_at=LegacyPart(record=record_id),
+                origin=SupportOrigin.LEGACY_OUTSIDE if outside else SupportOrigin.LEGACY,
+                direction=SupportDirection.FOR,
+                backs_as_worded=True,
+                added_at=_AT,
+                added_by=MemoryWriterName.MIGRATION,
+                carries={"id": record_id},
+            ),
+            None,
         )
     match band:
         case BeliefBand.ASSERTED:
@@ -2753,15 +2757,19 @@ def _held_support(
             origin = SupportOrigin.REMEMBERED_OVER_OUTSIDE if outside else SupportOrigin.REMEMBERED
         case _:  # pragma: no cover - exhaustive
             assert_never(band)
-    return MemorySupport(
-        points_at=part,
-        origin=origin,
-        direction=SupportDirection.FOR,
-        backs_as_worded=True,
-        when=_AT,
-        source_details=attestation,
-        added_at=_AT,
-        added_by=MemoryWriterName.REMEMBER,
+    # ADR-0345 §2:2: held as a writer would have recorded it, its holder set by §2's table.
+    return stamped_support(
+        MemorySupport(
+            points_at=part,
+            origin=origin,
+            direction=SupportDirection.FOR,
+            backs_as_worded=True,
+            when=_AT,
+            source_details=attestation,
+            added_at=_AT,
+            added_by=MemoryWriterName.REMEMBER,
+        ),
+        None,
     )
 
 

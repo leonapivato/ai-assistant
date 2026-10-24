@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from memory_writer_contract import MemoryWriterContract, StubReconciler, WriterFactory
+from placed_writer_contract import PlacedWriterContract, PlacedWriterFactory
 
 from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
 from ai_assistant.testing import FakeTraceSink
@@ -21,7 +22,8 @@ from ai_assistant.testing import FakeTraceSink
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, MemoryWriter
+    from ai_assistant.core.protocols import Embedder, MemoryPolicy, MemoryStore, MemoryWriter
+    from ai_assistant.core.types import LabelBounds
 
 
 def _fixed_now() -> datetime:
@@ -73,3 +75,31 @@ class TestMemoryIngestorContract(MemoryWriterContract):
             policy=DefaultMemoryPolicy(),
             now=_fixed_now,
         )
+
+
+class TestMemoryIngestorPlaced(PlacedWriterContract):
+    """Runs MemoryIngestor through ADR-0345's shared placed-write suite (§15:2)."""
+
+    @pytest.fixture
+    def make_placed_writer(self) -> PlacedWriterFactory:
+        def build(
+            store: MemoryStore,
+            policy: MemoryPolicy,
+            *,
+            labels: tuple[LabelBounds, Embedder] | None = None,
+        ) -> MemoryWriter:
+            bounds, embedder = (None, None) if labels is None else labels
+            return MemoryIngestor(
+                store=store,
+                policy=policy,
+                traces_sink=FakeTraceSink(),
+                now=lambda: _PLACED_AT,
+                label_bounds=bounds,
+                label_embedder=embedder,
+            )
+
+        return build
+
+
+#: The instant the placed suite writes at, which its stores read at too.
+_PLACED_AT = datetime(2026, 10, 21, 12, tzinfo=UTC)

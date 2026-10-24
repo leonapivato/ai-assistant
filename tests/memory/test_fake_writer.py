@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from memory_writer_contract import MemoryWriterContract, StubReconciler, WriterFactory
+from placed_writer_contract import PlacedWriterContract, PlacedWriterFactory
 
 from ai_assistant.core.errors import MemoryStoreError, MemoryStoreStaleError
 from ai_assistant.core.types import (
@@ -34,8 +35,8 @@ from ai_assistant.testing.memories import memory, remembered_support, sourced_su
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, MemoryWriter
-    from ai_assistant.core.types import MemoryRecord
+    from ai_assistant.core.protocols import Embedder, MemoryPolicy, MemoryStore, MemoryWriter
+    from ai_assistant.core.types import LabelBounds, MemoryRecord
 
 #: The episode every memory below rests on, planted by :func:`_store` (ADR-0328 §4:7).
 _EPISODE = "cited-episode"
@@ -110,6 +111,29 @@ class TestFakeMemoryWriterContract(MemoryWriterContract):
         return FakeMemoryWriter(
             store=FakeMemoryStore(now=_fixed_now), policy=FakeMemoryPolicy(), now=_fixed_now
         )
+
+
+class TestFakeMemoryWriterPlaced(PlacedWriterContract):
+    """Runs FakeMemoryWriter through ADR-0345's shared placed-write suite (§15:2)."""
+
+    @pytest.fixture
+    def make_placed_writer(self) -> PlacedWriterFactory:
+        def build(
+            store: MemoryStore,
+            policy: MemoryPolicy,
+            *,
+            labels: tuple[LabelBounds, Embedder] | None = None,
+        ) -> MemoryWriter:
+            bounds, embedder = (None, None) if labels is None else labels
+            return FakeMemoryWriter(
+                store=store,
+                policy=policy,
+                now=lambda: datetime(2026, 10, 21, 12, tzinfo=UTC),
+                label_bounds=bounds,
+                label_embedder=embedder,
+            )
+
+        return build
 
 
 # Behaviour specific to FakeMemoryWriter, beyond the shared contract: it records

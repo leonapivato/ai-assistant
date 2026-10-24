@@ -14,6 +14,7 @@ from typing import Final
 import pytest
 
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     Attestation,
     BeliefBand,
     MemorySource,
@@ -255,6 +256,23 @@ def test_a_memory_about_somebody_else_is_withheld() -> None:
 
     assert withheld is True
     assert memories == ()
+
+
+@pytest.mark.parametrize(
+    "subjects",
+    [None, (), (OWNER_PERSON_ID,)],
+    ids=["never-determined", "about-nobody", "about-the-owner"],
+)
+def test_a_memory_about_the_owner_or_nobody_is_not_withheld_for_it(
+    subjects: tuple[str, ...] | None,
+) -> None:
+    """ADR-0345 §9:4: the owner is named by their identifier, which is not someone else."""
+    record = memory_in_band("mem-1", _WITHHELD_CONTENT, subjects=subjects)
+
+    memories, withheld = _supply(record)
+
+    assert withheld is False
+    assert memories == (record,)
 
 
 def test_the_placed_sources_are_the_three_the_adr_names() -> None:

@@ -43,7 +43,9 @@ from ai_assistant.core.types import (
     Memory,
     MemoryRecord,
     MemorySource,
+    MemoryWriterName,
     Provenance,
+    SituationLabel,
     Validity,
 )
 from ai_assistant.memory import SqliteMemoryStore
@@ -1424,3 +1426,24 @@ async def test_reembedding_refuses_a_store_whose_counter_fell_back(
         await Reembedder(store=path, embedder=HashingEmbedder(dimensions=_NEW)).run()
 
     assert path.read_bytes() == before
+
+
+async def test_a_memorys_labels_are_re_embedded_beside_its_wording(tmp_path: Path) -> None:
+    """ADR-0345 §7:4: the rebuild embeds each label in the target space, one row each."""
+    store = tmp_path / "memory.db"
+    labels = tuple(
+        SituationLabel(text=text, added_at=_WHEN, added_by=MemoryWriterName.OBSERVER)
+        for text in ("when travelling", "at the dentist")
+    )
+    labelled = _record("labelled", "a window seat").model_copy(update={"labels": labels})
+    await _seed(store, [labelled, _record("plain", "an aisle seat")])
+
+    await Reembedder(store=store, embedder=HashingEmbedder(dimensions=_NEW)).run()
+
+    rows = _read(
+        store,
+        "SELECT l.text, length(v.embedding) FROM situation_labels l "
+        "JOIN vec_situation_labels v ON v.rowid = l.label_rowid ORDER BY l.label_rowid",
+    )
+    # A float32 vector is four bytes a dimension, so each is in the target space.
+    assert rows == [("when travelling", _NEW * 4), ("at the dentist", _NEW * 4)]

@@ -27,14 +27,21 @@ from test_planning import (
 )
 
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
+    Memory,
+    MemoryMark,
     MemoryOperation,
     MemoryOperationKind,
     MemorySource,
+    MemorySupport,
     MemoryWriterName,
     OpenQuestion,
     OpenQuestionKind,
     ProposedCall,
     RoundResponse,
+    SupportDirection,
+    SupportHolder,
+    Validity,
 )
 from ai_assistant.orchestration.planning import (
     PLANNING_PROMPT,
@@ -50,7 +57,7 @@ from ai_assistant.testing import FakeDiagnosticSink, FakeToolCallingCompleter, d
 if TYPE_CHECKING:
     from ai_assistant.core.prompts import PromptTemplate
     from ai_assistant.core.types import ToolDefinition
-from ai_assistant.testing.memories import memory, said_support
+from ai_assistant.testing.memories import memory, message_support, said_support
 
 _AT: Final = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
 
@@ -278,6 +285,82 @@ async def test_a_memory_with_no_open_question_shows_none() -> None:
 
     (shown,) = _sent(completer)["recalled"]
     assert "open_questions" not in shown
+
+
+# --- ADR-0345 §12:3, §12:4: holders, disputes, a future end, and what the assistant said ---
+
+
+def _held(*supports: MemorySupport, **fields: Any) -> Memory:
+    return memory("m1", "Ana lives in Porto", *supports, **fields)
+
+
+def _by(episode: str, holder: SupportHolder, **update: Any) -> MemorySupport:
+    return said_support(episode, when=_AT, added_at=_AT).model_copy(
+        update={"holder": holder, **update}
+    )
+
+
+_USER: Final = SupportHolder.person(OWNER_PERSON_ID)
+
+
+async def test_a_memory_the_user_alone_holds_names_no_holder() -> None:
+    """§12:3: the holders are conveyed wherever they are not the owner alone."""
+    stage, completer = _stage()
+
+    await stage.plan(_inputs(recalled=(_held(_by("activation:a", _USER)),)))
+
+    (shown,) = _sent(completer)["recalled"]
+    assert "held_by" not in shown
+    assert "disputed_by" not in shown
+
+
+async def test_another_holder_and_a_dispute_are_conveyed() -> None:
+    """§12:3: who else holds it, and who disputes it, so a disputed memory reads so."""
+    stage, completer = _stage()
+    held = _held(
+        _by("activation:a", SupportHolder.person("tom")),
+        _by("activation:b", _USER, direction=SupportDirection.AGAINST, backs_as_worded=False),
+    )
+
+    await stage.plan(_inputs(recalled=(held,)))
+
+    (shown,) = _sent(completer)["recalled"]
+    assert shown["held_by"] == ["another person (tom)"]
+    assert shown["disputed_by"] == ["the user"]
+
+
+async def test_a_future_validity_end_is_conveyed() -> None:
+    """§12:3, §6:1: a memory that lapses says when."""
+    stage, completer = _stage()
+    end = _AT.replace(year=2027)
+    held = _held(_by("activation:a", _USER, about_when=end), validity=Validity(valid_until=end))
+
+    await stage.plan(_inputs(recalled=(held,)))
+
+    (shown,) = _sent(completer)["recalled"]
+    assert shown["holds_until"] == end.isoformat()
+
+
+async def test_an_assistant_statement_is_conveyed_as_what_the_assistant_said() -> None:
+    """§12:4: never as the user's word or a source's, citing when, and who kept it."""
+    stage, completer = _stage()
+    message = message_support("activation:said", when=_AT, added_at=_AT).model_copy(
+        update={"backs_as_worded": False}
+    )
+    held = _held(
+        _by("activation:kept", _USER),
+        message,
+        marks=(MemoryMark.ASSISTANT_STATEMENT,),
+    )
+
+    await stage.plan(_inputs(recalled=(held,)))
+
+    (shown,) = _sent(completer)["recalled"]
+    assert shown["standing"] == "the assistant said it"
+    assert "never what the user said" in str(shown["item"])
+    assert shown["said"] == [{"in": "an earlier exchange", "at": _AT.isoformat()}]
+    assert shown["kept_by"] == ["the user"]
+    assert "held_by" not in shown
 
 
 # --- the episode window's pending candidates (§6:9) ----------------------------------------
