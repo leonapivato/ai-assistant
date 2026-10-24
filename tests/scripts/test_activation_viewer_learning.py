@@ -104,14 +104,18 @@ def test_the_overview_shows_input_state_failure_and_each_findings_outcome(server
     assert first["outcome"]["wording"] == KEPT_CLAIM
     assert second["claim"] == NOT_KEPT_CLAIM
     assert second["outcome"]["short"] == "nothing kept"
-    assert second["outcome"]["why"] == "the commit step kept nothing"
+    assert second["outcome"]["why"] == "nothing in it was kept"
     assert second["outcome"]["note"] == NOT_KEPT_NOTE
 
     retried = shown["a-retried"]
     assert (retried["attempts"], retried["failed"], retried["state"]) == (2, 1, "processed")
     (evidence,) = retried["findings"]
     assert evidence["claim"] == EVIDENCE_CLAIM
-    assert evidence["outcome"]["reason"] == "single_observation"
+    assert (evidence["outcome"]["short"], evidence["outcome"]["wording"]) == (
+        "memory created",
+        EVIDENCE_CLAIM,
+    )
+    assert evidence["outcome"]["unclear"] == 0
 
     skipped = shown["a-skipped"]
     assert (skipped["state"], skipped["findings"]) == ("skipped", [])
@@ -120,7 +124,7 @@ def test_the_overview_shows_input_state_failure_and_each_findings_outcome(server
 def test_each_finding_names_the_lines_of_the_prompts_and_replies_behind_it(
     server: Any, record: Path
 ) -> None:
-    """The owner jumps from a finding to its scout's and its commit's request and reply."""
+    """The owner jumps from a finding to its scout's, framing's and placements' calls."""
     (second,) = [one for one in _overview(server.port)["a-kept"]["findings"] if one["id"] == "f2"]
     lines = (record / "a-kept.observer.jsonl").read_text(encoding="utf-8").splitlines()
 
@@ -129,8 +133,15 @@ def test_each_finding_names_the_lines_of_the_prompts_and_replies_behind_it(
 
     assert body(second["scout"]["given"])["stage"] == "scout"
     assert "reply" in body(second["scout"]["returned"])
-    assert body(second["commit"]["given"])["finding"]["claim"] == NOT_KEPT_CLAIM
-    assert body(second["commit"]["returned"])["finding"] == "f2"
+    assert second["commit"] is None
+    assert body(second["framing"]["given"])["finding"]["claim"] == NOT_KEPT_CLAIM
+    assert body(second["framing"]["returned"])["finding"] == "f2"
+    assert second["placements"] == []
+    (evidence,) = _overview(server.port)["a-retried"]["findings"]
+    (placed,) = evidence["placements"]
+    retried = (record / "a-retried.observer.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(retried[placed["given"]])["body"]["stage"] == "placement"
+    assert json.loads(retried[placed["returned"]])["body"]["finding"] == evidence["id"]
     assert body(second["outcome"]["line"])["stage"] == "outcome"
     assert body(second["findings_line"])["stage"] == "findings"
 
@@ -153,10 +164,11 @@ def test_the_learning_lane_groups_by_attempt_and_leaves_the_timeline_alone(
     assert second["ended"]["state"] == "processed"
     assert first["start"] > alone["end"]
     kinds = [item["kind"] for item in second["items"]]
-    assert kinds == ["call", "findings", "call", "outcome", "end"]
+    assert kinds == ["call", "findings", "call", "call", "outcome", "end"]
     assert [item["stage"] for item in second["items"] if item["kind"] == "call"] == [
         "scout",
-        "commit",
+        "framing",
+        "placement",
     ]
 
 
@@ -184,14 +196,14 @@ def test_an_activation_with_no_observer_file_has_no_lane(server: Any) -> None:
 def test_an_observer_call_reads_as_told_given_and_done(server: Any, record: Path) -> None:
     """§5:2: a call's body readable as well as raw, as every model call is."""
     (second,) = [one for one in _overview(server.port)["a-kept"]["findings"] if one["id"] == "f2"]
-    line = second["commit"]["given"]
+    line = second["framing"]["given"]
 
     view = _json(server.port, f"/api/call?id=a-kept&file=observer&line={line}")
 
     assert view["source"] == "observer"
-    assert view["about"]["stage"] == "commit"
+    assert view["about"]["stage"] == "framing"
     assert (view["about"]["finding"], view["about"]["claim"]) == ("f2", NOT_KEPT_CLAIM)
-    assert view["returned"] == second["commit"]["returned"]
+    assert view["returned"] == second["framing"]["returned"]
     assert view["told"]["sections"]
     assert view["input"][0]["keys"][0]["key"] == "claim"
     (reply,) = view["did"]["parts"]
@@ -297,8 +309,8 @@ def test_odd_observer_lines_lose_their_summary_and_nothing_else() -> None:
     assert sorted(clickable) == list(range(len(odd)))
 
 
-def test_a_commit_whose_findings_entry_is_absent_keeps_its_link(server: Any, record: Path) -> None:
-    """A finding recorded only from its commit on (the record turned on between attempts)."""
+def test_a_framing_whose_findings_entry_is_absent_keeps_its_link(server: Any, record: Path) -> None:
+    """A finding recorded only from its framing on (the record turned on between attempts)."""
     kept = (record / "a-kept.observer.jsonl").read_text(encoding="utf-8").splitlines()
     later = [one for one in kept if json.loads(one)["body"]["stage"] not in {"scout", "findings"}]
     (record / "later.observer.jsonl").write_text("\n".join(later) + "\n", encoding="utf-8")
@@ -307,9 +319,9 @@ def test_a_commit_whose_findings_entry_is_absent_keeps_its_link(server: Any, rec
 
     assert (first["claim"], second["claim"]) == (KEPT_CLAIM, NOT_KEPT_CLAIM)
     assert second["findings_line"] is None
-    commit = second["commit"]
-    assert json.loads(later[commit["given"]])["body"]["finding"]["id"] == "f2"
-    assert json.loads(later[commit["returned"]])["body"]["finding"] == "f2"
+    framed = second["framing"]
+    assert json.loads(later[framed["given"]])["body"]["finding"]["id"] == "f2"
+    assert json.loads(later[framed["returned"]])["body"]["finding"] == "f2"
     assert second["outcome"]["short"] == "nothing kept"
 
 

@@ -2817,7 +2817,9 @@ def _follow_up_asker(
             "planning": first,
             "digesting": first,
             "observer.scout": _observer_scout_spec(settings),
-            "observer.commit": _observer_commit_spec(settings),
+            # ADR-0346 §10:2: framing and placement ride the commit step's route.
+            "observer.framing": _observer_commit_spec(settings),
+            "observer.placement": _observer_commit_spec(settings),
         },
         daily_calls=settings.follow_up_daily_calls,
         timeout=settings.model_timeout_seconds,

@@ -493,7 +493,7 @@ async def test_the_overview_shows_each_findings_claim_and_outcome_newest_first(
         await expect(kept).to_contain_text(NOT_KEPT_NOTE)
         await expect(cards.nth(1)).to_contain_text("own record absent")
         await page.locator("#ov-filters button", has_text="Not kept").click()
-        await expect(page.locator(".ov-finding")).to_have_count(2)
+        await expect(page.locator(".ov-finding .claim")).to_have_text([NOT_KEPT_CLAIM])
         await page.locator("#ov-filters button", has_text="All findings").click()
         await page.locator("#ov-search").fill("vegetarian")
         await expect(page.locator(".ov-finding")).to_have_count(1)
@@ -505,17 +505,17 @@ async def test_a_finding_jumps_to_the_exact_prompt_and_reply_behind_it(
     async with _page(gateway_browser, width=1400) as page:
         await page.goto(f"http://127.0.0.1:{learning.port}/#learning")
         row = page.locator(".ov-finding", has_text=NOT_KEPT_CLAIM)
-        await row.locator(".jump", has_text="Commit").click()
+        await row.locator(".jump", has_text="Framing").click()
         readable = page.locator("#drawer-read")
         await expect(readable.locator(".call-head h2")).to_have_text(
-            "Observer · commit f2", timeout=_SHOWN
+            "Observer · framing f2", timeout=_SHOWN
         )
         await expect(readable.locator("#call-did")).to_contain_text(NOT_KEPT_NOTE)
         await page.locator("#tab-raw").click()
         await expect(page.locator("#drawer-body")).to_contain_text("observer · given")
         await page.locator("#drawer-close").click()
         await row.locator(".jump", has_text="Outcome").click()
-        await expect(page.locator("#drawer-body")).to_contain_text("What the commit decided")
+        await expect(page.locator("#drawer-body")).to_contain_text("What framing decided")
         await expect(page.locator("#drawer-tabs")).to_be_hidden()
 
 
@@ -528,6 +528,8 @@ async def test_an_activations_page_shows_its_learning_by_attempt(
         await expect(attempts).to_have_count(2, timeout=_SHOWN)
         await expect(attempts.first).to_contain_text("timed out")
         await expect(attempts.nth(1).locator(".ov-finding")).to_contain_text(EVIDENCE_CLAIM)
+        # ADR-0346 §6:2: the occasion was placed once, and its placement is a click away.
+        await expect(attempts.nth(1).locator(".jump", has_text="Placement 1")).to_be_enabled()
         await expect(page.locator("#timeline-card")).to_be_visible()
         await attempts.nth(1).locator(".ln-track .bar.call").first.click()
         await expect(page.locator("#drawer-read .call-head h2")).to_have_text(

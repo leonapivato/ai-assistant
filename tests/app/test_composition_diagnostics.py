@@ -292,7 +292,8 @@ async def test_with_the_follow_up_on_every_emitter_holds_the_asker_around_the_re
             "planning": "anthropic:claude-default",
             "digesting": "anthropic:claude-default",
             "observer.scout": "anthropic:claude-scout",
-            "observer.commit": "anthropic:claude-default",
+            "observer.framing": "anthropic:claude-default",
+            "observer.placement": "anthropic:claude-default",
         }
         assert asker._budget.limit == 7
         assert asker._timeout == 12.5

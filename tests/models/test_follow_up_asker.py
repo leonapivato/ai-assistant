@@ -951,3 +951,51 @@ def test_what_it_is_built_with_is_checked(
 
     with pytest.raises(error):
         FollowUpAsker(FakeDiagnosticSink(), **built)
+
+
+async def test_framings_and_placements_calls_are_asked_each_on_its_own_route() -> None:
+    """ADR-0337 §8:4, §8:8, ADR-0346 §10:1: framing and placement are recorded calls.
+
+    Each is asked about through its own route; the retired commit step's stage names no
+    route, and an entry under it is not asked about.
+    """
+    sink, world = FakeDiagnosticSink(), _World()
+    routes = {**dict.fromkeys(FOLLOW_UP_ROUTES, _ROUTE), "observer.placement": "fake:placing"}
+    asker = _asker(sink, world, routes=routes)
+
+    def step(kind: DiagnosticKind, stage: str, minutes: int) -> DiagnosticEntry:
+        at = _AT + timedelta(minutes=minutes)
+        named = {"episode": "episode-1", "attempt_started_at": _AT.isoformat(), "stage": stage}
+        body: dict[str, object] = (
+            {"messages": _messages(stage), "prompt": _PROMPT, "finding": {"id": "f1"}}
+            if kind is DiagnosticKind.GIVEN
+            else {"reply": "{}", "finding": "f1"}
+        )
+        return diagnostic_entry(
+            _ACTIVATION,
+            source=DiagnosticSource.OBSERVER,
+            kind=kind,
+            recorded_at=at,
+            body={**named, **body},
+        )
+
+    await _hand(
+        asker,
+        step(DiagnosticKind.GIVEN, "framing", 1),
+        step(DiagnosticKind.RETURNED, "framing", 1),
+        step(DiagnosticKind.GIVEN, "placement", 2),
+        step(DiagnosticKind.RETURNED, "placement", 2),
+        step(DiagnosticKind.GIVEN, "placement", 3),
+        step(DiagnosticKind.RETURNED, "placement", 3),
+        step(DiagnosticKind.GIVEN, "commit", 4),
+        step(DiagnosticKind.RETURNED, "commit", 4),
+    )
+    written = await _settled(sink, 3)
+
+    assert [_body(one)["follows"]["stage"] for one in written] == [
+        "framing",
+        "placement",
+        "placement",
+    ]
+    assert world.built.count("fake:placing") == 1, "placement's route, built once"
+    await asker.aclose()
