@@ -404,9 +404,10 @@ def test_the_memory_stores_carry_is_what_its_upgrade_does(tmp_path: Path) -> Non
         store.close()
     (memory,) = [one for one in STORES if one.name == "memory"]
 
-    carried = memory.carries[1](base)
+    # Carried on through ADR-0345 §13's shape, which the head's upgrade reaches next.
+    carried = memory.carries[2](memory.carries[1](base))
 
-    assert memory.shape == 2
+    assert memory.shape == 3
     assert set(carried) == set(head)
     assert {
         key: first_difference(value, head[key]) for key, value in carried.items()

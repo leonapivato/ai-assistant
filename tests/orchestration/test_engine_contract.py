@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 from assistant_engine_contract import (
+    _BELIEF_LIMIT,
     _DECISION_LIMIT,
     _INVOCATION_LIMIT,
     _NOT_CANONICAL,
@@ -638,7 +639,7 @@ class TestEngineContract(AssistantEngineContract):
     async def tiny_beliefs(self) -> AsyncIterator[BeliefSubject]:
         """:meth:`beliefs`' subject at the limit small enough to reach."""
         memory = FakeMemoryStore(now=lambda: AT)
-        built = _wire(memory=memory, max_payload_bytes=_TINY_LIMIT)
+        built = _wire(memory=memory, max_payload_bytes=_BELIEF_LIMIT)
         await built.start()
         try:
             yield BeliefSubject(engine=built, hold=_store_belief_holder(memory))

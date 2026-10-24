@@ -191,6 +191,7 @@ from ai_assistant.core.types import (
     MemoryDecision,
     MemoryDecisionKind,
     MemoryIngestResult,
+    MemoryMark,
     MemoryOperation,
     MemoryOperationKind,
     MemoryRecord,
@@ -4546,7 +4547,7 @@ class MemoryWriterContract:
         """§14:4: written conditionally on the revision read (ADR-0219 §2)."""
         store = await self._observer_store()
         read = await self._stored(store, _preference("existing"))
-        await store.add(read.model_copy(update={"topics": ("moved",)}))
+        await store.add(read.model_copy(update={"marks": (MemoryMark.OCCASION,)}))
         moved = await store.get("existing")
 
         with pytest.raises(MemoryStoreStaleError):
@@ -4829,7 +4830,7 @@ class MemoryWriterContract:
         """§12:4: the retired memory's write is conditional on its revision as read."""
         store = await self._observer_store()
         old = await self._stored(store, _preference("old"))
-        await store.add(old.model_copy(update={"topics": ("moved",)}))
+        await store.add(old.model_copy(update={"marks": (MemoryMark.OCCASION,)}))
         before = await _snapshot(store)
         new = _preference("new", _DISAGREEING, evidence=(_OTHER_CITED,))
 
