@@ -283,6 +283,7 @@ class FindingWriter:
                             memory=pair.memory,
                             relation=pair.relation,
                             operations=len(before[pair.memory].operations),
+                            note=pair.note,
                         )
                         for pair in placement.pairs
                     ),
@@ -352,8 +353,8 @@ class FindingWriter:
         if landed is None:
             return record.model_copy(update={"state": FramedState.FRAMED, "named": ()})
         kept, operations = landed
-        for memory_id, kinds in operations.items():
-            ledger.wrote(memory_id, kinds)
+        for memory_id, run in operations.items():
+            ledger.wrote(memory_id, [one.kind for one in run])
         return _finished(record, ruling=MemoryDecisionKind.ACCEPT, kept=kept)
 
     async def _read_back(
@@ -365,7 +366,8 @@ class FindingWriter:
         writer and runs one run at a time (ADR-0345 §11:1). Each memory the placement
         named, past the log length it had when named, and the memory installed, whole. A
         pin's support added by the pin pass is the pass's write, never the finding's, so
-        it is not counted.
+        it is not counted; any other operation citing a pin is the write's (a ``recheck``
+        rests on the stored memory's backing, a pin's support among it, ADR-0345 §5:9).
         """
         wanted = [
             *(one.memory for one in record.named),
@@ -381,11 +383,7 @@ class FindingWriter:
             if now is not None:
                 ledger.wrote(
                     one.memory,
-                    [
-                        op.kind
-                        for op in now.operations[one.operations :]
-                        if not isinstance(op.cites, PinPart)
-                    ],
+                    [op.kind for op in now.operations[one.operations :] if not _pin_pass(op)],
                 )
 
     async def _done(  # noqa: PLR0913 — the memory, the seam, and what its ruling says
@@ -426,65 +424,80 @@ def _finished(
 
 def _its_write(
     record: FramedMemory, held: Mapping[str, Memory]
-) -> tuple[tuple[str, ...], dict[str, list[MemoryOperationKind]]] | None:
+) -> tuple[tuple[str, ...], dict[str, list[MemoryOperation]]] | None:
     """What a proposal wrote, read off the store on a later attempt, or ``None``.
 
-    One placed write is one atomic write, every operation of it at one instant
-    (ADR-0345 §5:6), and it came before anything else written on the memories it named,
-    since the proposal was sent the moment its revisions were read. So on each memory its
-    placement related to it, the first operations past the recorded log length that share
-    an instant are its write's, where every one of them cites one of the proposal's own
-    parts or a support the memory already carried (a ``recheck`` rests on those, §5:9);
-    an operation citing anything else is another write's, and so is every later instant.
-    The write's instant is the earliest such; it landed where the store holds the
-    proposal's own id, installed, or where a memory it folds into carries every one of its
-    supports from that instant. The installed memory's operations are its create and those
-    at that instant, never one a later write made.
+    Told from every other write by what the write stamps on each operation it makes:
+    every one of them carries the note of the relation that caused it (ADR-0345 §5:7), is
+    the observer's, and shares the one atomic write's instant (§5:6). A placement's notes
+    are the placement call's words for this proposal, so an operation carrying none of
+    them is another write's, whatever it cites and whenever it was made. On each memory
+    the placement wrote on, the write's operations are the first past the log length
+    recorded when the proposal was sent, since it is written only at the revisions it
+    read (§5:6, ADR-0219 §2); on the memory it installed, the first past its create.
+    Where it installed nothing and those carry none of its notes on any memory, nothing
+    it wrote is held, and the proposal is placed again: either it did not land, or it
+    landed a fold that changed nothing, which placing again repeats harmlessly (ADR-0328
+    §4:8).
 
     Args:
-        record: The memory, its proposal sent at the log lengths ``named`` records.
+        record: The memory, its proposal sent with the pairs ``named`` records.
         held: Its own id and every memory it named, as the history read returns them.
 
     Returns:
         Where it is held and the operations it wrote, by memory; ``None`` where nothing
         shows it landed.
     """
-    own = {one.points_at for one in record.memory.supports}
+    notes = frozenset(
+        one.note for one in record.named if one.relation not in _WRITES_NOTHING and one.note
+    )
+    installed = held.get(record.memory.id)
     runs: dict[str, list[MemoryOperation]] = {}
     for named in record.named:
         stored = held.get(named.memory)
-        if stored is None or named.relation in _WRITES_NOTHING:
-            continue
-        after = [
-            one
-            for one in stored.operations[named.operations :]
-            if not isinstance(one.cites, PinPart)
-        ]
-        if not after:
-            continue
-        instant = after[0].at
-        run = list(takewhile(lambda one, at=instant: one.at == at, after))  # type: ignore[misc]
-        known = own | {one.points_at for one in stored.supports if one.added_at < instant}
-        if all(one.by is MemoryWriterName.OBSERVER and one.cites in known for one in run):
-            runs[named.memory] = run
-    at = min((run[0].at for run in runs.values()), default=None)
-    mine = {memory_id: run for memory_id, run in runs.items() if run[0].at == at}
-    installed = held.get(record.memory.id)
+        if stored is not None and named.relation not in _WRITES_NOTHING:
+            runs[named.memory] = _its_run(stored.operations[named.operations :], notes)
+    if installed is not None:
+        runs[installed.id] = _its_run(installed.operations[1:], notes)
+    instants = [run[0].at for run in runs.values() if run]
+    if installed is None and not instants:
+        return None
+    at = min(instants, default=None)
+    operations = {memory_id: run for memory_id, run in runs.items() if run and run[0].at == at}
+    if installed is not None:
+        operations[installed.id] = [installed.operations[0], *operations.get(installed.id, [])]
+        return (installed.id,), operations
+    counted = {one.points_at for one in record.memory.counted_supports}
     folded = tuple(
         one.memory
         for one in record.named
         if one.relation in _FOLDING
-        and one.memory in mine
-        and own <= {support.points_at for support in held[one.memory].supports}
+        and (stored := held.get(one.memory)) is not None
+        and counted <= {support.points_at for support in stored.supports}
     )
-    if installed is None and not folded:
-        return None
-    operations = {memory_id: [one.kind for one in run] for memory_id, run in mine.items()}
-    if installed is not None:
-        first, *rest = installed.operations
-        operations[installed.id] = [first.kind, *(one.kind for one in rest if one.at == at)]
-        return (installed.id,), operations
     return folded, operations
+
+
+def _its_run(operations: Sequence[MemoryOperation], notes: frozenset[str]) -> list[MemoryOperation]:
+    """The leading ``operations`` one write made: the observer's, at one instant, each noted."""
+    if not operations:
+        return []
+    first = operations[0].at
+    return list(
+        takewhile(
+            lambda one: (
+                one.at == first and one.by is MemoryWriterName.OBSERVER and one.note in notes
+            ),
+            operations,
+        )
+    )
+
+
+def _pin_pass(operation: MemoryOperation) -> bool:
+    """Whether ``operation`` is the pin pass's: a pin's support added (ADR-0338 §9:9)."""
+    return operation.kind is MemoryOperationKind.ADD_SUPPORT and isinstance(
+        operation.cites, PinPart
+    )
 
 
 def _placement(base: Placement, stored: Sequence[Retrieved]) -> Placement:
