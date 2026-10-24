@@ -1810,6 +1810,57 @@ class PlacedWriterContract:
 
         assert (await _all(store))["m"] == held
 
+    async def test_a_retained_label_keeps_its_entry_and_every_kept_label_its_bound(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """§7:1, §7:3, §7:6: a kept label keeps who added it and when; each is bounded."""
+        store = await self._world("owner")
+        writer = make_placed_writer(store, FakeMemoryPolicy(), labels=(_BOUNDS, _Embedded()))
+        kept = SituationLabel(
+            text="a", added_at=_SAID_AT, added_by=MemoryWriterName.OWNER, episode="activation:x"
+        )
+        overlong = _label("y" * (_BOUNDS.max_chars + 1))
+        await store.add(
+            memory("m", "The user is allergic", _said("owner"), labels=(kept, overlong))
+        )
+        held = (await _all(store))["m"]
+
+        written = await writer.write_labels(
+            MemoryLabelChange(
+                memory=held, labels=("a", "far"), by=MemoryWriterName.OBSERVER, episode="e"
+            )
+        )
+
+        assert written.labels[0] == kept
+        assert (await _all(store))["m"].labels[0] == kept
+        again = (await _all(store))["m"]
+        moved = again.model_copy(update={"labels": (kept, overlong)})
+        await store.add(moved)
+        moved = (await _all(store))["m"]
+        with pytest.raises(MemoryStoreError):
+            await writer.write_labels(
+                MemoryLabelChange(
+                    memory=moved, labels=(overlong.text,), by=MemoryWriterName.OBSERVER
+                )
+            )
+        assert (await _all(store))["m"] == moved
+
+    async def test_a_malformed_embedding_refuses_the_label_write(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """An embedder's malformed vectors are the writer's error, and nothing is written."""
+        store = await self._world("owner")
+        writer = make_placed_writer(store, FakeMemoryPolicy(), labels=(_BOUNDS, _Ragged()))
+        await store.add(memory("m", "The user is allergic", _said("owner"), labels=(_label("a"),)))
+        held = (await _all(store))["m"]
+
+        with pytest.raises(MemoryStoreError):
+            await writer.write_labels(
+                MemoryLabelChange(memory=held, labels=("a", "b"), by=MemoryWriterName.OBSERVER)
+            )
+
+        assert (await _all(store))["m"] == held
+
     async def test_a_label_at_exactly_the_distance_is_a_near_duplicate(
         self, make_placed_writer: PlacedWriterFactory
     ) -> None:
@@ -1984,6 +2035,13 @@ class _Embedded:
 
     async def embed(self, texts: Sequence[str]) -> list[Sequence[float]]:
         return [list(_VECTORS.get(text, (0.6, 0.8))) for text in texts]
+
+
+class _Ragged(_Embedded):
+    """An embedder whose vectors are of different widths."""
+
+    async def embed(self, texts: Sequence[str]) -> list[Sequence[float]]:
+        return [[1.0, 0.0] if index == 0 else [1.0] for index, _ in enumerate(texts)]
 
 
 class _MovingStore(FakeMemoryStore):
