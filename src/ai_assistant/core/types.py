@@ -9650,8 +9650,10 @@ class FramedMemory(BaseModel):
     kept from the moment the call returns (§6:5).
 
     Attributes:
-        memory: The memory as framing kept it, after code's checks, its placement not
-            yet set (§5:7).
+        memory: The memory as framing kept it, after code's checks: its placement
+            unset until a placement is made, then the narrowest any attempt placed it
+            for, so a retry never places it for more people than an earlier attempt's
+            supplied records allowed (ADR-0329 §12:6, §5:7).
         style: Whether framing said it states how the person wants to be spoken to
             (ADR-0338 §9:4).
         pin: Whether framing said it matters in every conversation (§9:5).

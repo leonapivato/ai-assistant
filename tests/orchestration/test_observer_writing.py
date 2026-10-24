@@ -990,3 +990,129 @@ async def test_a_dispute_copying_a_pin_onto_the_fold_is_the_writes_own(*, lost: 
     )
     (done,) = written.framed
     assert (done.state, done.kept) == (FramedState.DONE, ("m-seat",))
+
+
+async def _owner_only_seat(harness: Harness) -> None:
+    support = said_support(address("past"), added_at=AT - timedelta(days=1))
+    held = memory("m-seat", _SEAT, support).model_copy(update={"placement": _OWNER_ONLY})
+    await harness.hold(
+        episode("past", at=AT - timedelta(days=1), text="Window seats.").model_copy(
+            update={"placement": _OWNER_ONLY}
+        ),
+        episode("one", at=AT - timedelta(minutes=3), text="Window seats, please."),
+        Memory.model_validate(held.model_dump()),
+    )
+
+
+async def test_a_stale_retry_keeps_what_the_earlier_placement_was_shown() -> None:
+    """ADR-0329 §12:6, ADR-0346 §6:7: a retry never places it for more than an earlier one.
+
+    The first placement call is shown an owner-only memory, which is gone before the
+    proposal reaches the writer; the retry retrieves nothing, and the memory it installs
+    is still placed for the owner alone.
+    """
+    harness = Harness()
+    await _owner_only_seat(harness)
+    calls = 0
+
+    async def place(view: PlacementView) -> MemoryPlacement:
+        nonlocal calls
+        calls += 1
+        await harness.memory.delete("m-seat")
+        return await _placing(PlacedRelation.UNCLEAR, "?")(view)
+
+    written = await _write(harness, _framed(_SEAT), place=place)
+
+    assert calls == 1, "the retry retrieved nothing, so it made no placement call"
+    (created,) = written.writes
+    stored = await harness.memory.get(created.memory)
+    assert isinstance(stored, Memory)
+    assert stored.placement.reach is PlacementReach.OWNER
+
+
+async def test_a_resumed_attempt_keeps_what_the_earlier_placement_was_shown() -> None:
+    """ADR-0329 §12:6, §16:4: where an attempt placed the memory for is on its record."""
+    harness = Harness()
+    await _owner_only_seat(harness)
+    ingest = harness.writer.ingest
+
+    async def failing(proposal: Any) -> Any:
+        msg = "the store failed before the write"
+        raise MemoryStoreError(msg)
+
+    harness.writer.ingest = failing  # type: ignore[method-assign]  # the store is down
+    record = _Record()
+    with pytest.raises(MemoryStoreError):
+        await _write(
+            harness, _framed(_SEAT), place=_placing(PlacedRelation.UNCLEAR, "?"), record=record
+        )
+    (proposing,), _ = record.steps[-1]
+    harness.writer.ingest = ingest  # type: ignore[method-assign]  # the store is back
+    await harness.memory.delete("m-seat")
+
+    written = await _write(harness, (proposing,), place=_never)
+
+    (created,) = written.writes
+    stored = await harness.memory.get(created.memory)
+    assert isinstance(stored, Memory)
+    assert stored.placement.reach is PlacementReach.OWNER
+
+
+async def test_a_restatement_left_unwritten_is_not_taken_as_landed() -> None:
+    """ADR-0345 §5:1-§5:3, ADR-0329 §16:4: every memory it restates must carry its parts.
+
+    This memory restates two stored memories, the first already carrying its part and
+    the second not; its proposal did not land. Another finding then raises a recheck on
+    the first in this placement's words. The second does not carry this one's part, so
+    it is placed again, and the other's question is never listed as its own.
+    """
+    harness = Harness()
+    (framed,) = _framed(_SEAT)
+    owner = SupportHolder.person(OWNER_PERSON_ID)
+    past = said_support(address("past"), added_at=AT - timedelta(days=1)).model_copy(
+        update={"holder": owner}
+    )
+    own = framed.memory.supports[0].model_copy(update={"holder": owner})
+    await harness.hold(
+        episode("past", at=AT - timedelta(days=1), text="Window seats."),
+        episode("one", at=AT - timedelta(minutes=3), text="Window seats, please."),
+        memory("m-seat", _SEAT, past, own, subjects=(OWNER_PERSON_ID,)),
+        memory("m-window", _SEAT, past, subjects=(OWNER_PERSON_ID,)),
+    )
+    held = await harness.memory.get_history(["m-seat", "m-window"])
+    same = "The same claim."
+    proposing = framed.model_copy(
+        update={
+            "state": FramedState.PROPOSING,
+            "named": tuple(
+                NamedRevision(
+                    memory=key,
+                    relation=PlacedRelation.RESTATES,
+                    operations=len(held[key].operations),
+                    note=same,
+                )
+                for key in ("m-seat", "m-window")
+            ),
+        }
+    )
+    mint = Minter()
+    mint.minted = 50
+    await _write(
+        harness,
+        _framed(_SEAT, mint=mint),
+        place=_placing_each({"m-seat": (PlacedRelation.RECHECK, same)}),
+    )
+
+    written = await _write(
+        harness,
+        (proposing,),
+        place=_placing_each(
+            {"m-seat": (PlacedRelation.RESTATES, same), "m-window": (PlacedRelation.RESTATES, same)}
+        ),
+    )
+
+    operations = {one.memory: one.operations for one in written.writes}
+    assert "m-seat" not in operations, "the other finding's question is not this one's"
+    assert operations["m-window"] == (MemoryOperationKind.ADD_SUPPORT,)
+    window = (await harness.memory.get_history(["m-window"]))["m-window"]
+    assert window.support_at(framed.memory.supports[0].points_at) is not None
