@@ -105,6 +105,7 @@ from ai_assistant.core.errors import (
     StoryStoreError,
 )
 from ai_assistant.core.types import (
+    RETIRING_OPERATIONS,
     EpisodicMemory,
     FindingOutcome,
     FindingUnwritten,
@@ -789,6 +790,10 @@ class Observer:
         """
         finding = _finding(attempt, finding_id)
         earlier = finding.written
+        if earlier and not finding.framed:
+            # A finding the plan store held before ``framed``: its replacement's create
+            # may be on the record without what it retired (§16:1).
+            earlier = await self._recovered(earlier)
         framing: Framing | None = None
         records = finding.framed
         if not records:
@@ -855,6 +860,46 @@ class Observer:
             await self._marked(person, written.framed, episode=attempt.record.episode)
         outcome = outcome_of(written.framed, _joined(earlier, written.writes), at=self._now())
         return _Decided(outcome=outcome, decided=_decided(framing, written))
+
+    async def _recovered(
+        self, written: tuple[ObservationWrite, ...]
+    ) -> tuple[ObservationWrite, ...]:
+        """``written``, with what each replacement on it retired, read off the store (§16:1).
+
+        The writer before ADR-0346 put a supersession's create on the record before it
+        read what that create retired, so a finding the plan store held from then may
+        carry the create alone. A replacement's create names each memory it replaces
+        (ADR-0328 §5:6), and each names it as successor in the retiring operation, so
+        those operations are read off the store, each once, beside what is recorded.
+
+        Raises:
+            MemoryStoreError: Where they cannot be read: the attempt fails, and the
+                retry reads them again.
+        """
+        created = [one.memory for one in written if MemoryOperationKind.CREATE in one.operations]
+        if not created:
+            return written
+        held = await self._memory.get_history(created)
+        replaced = {
+            retired: memory_id
+            for memory_id, memory in held.items()
+            for retired in memory.operations[0].replaces
+        }
+        recorded = {
+            one.memory for one in written if RETIRING_OPERATIONS.intersection(one.operations)
+        }
+        wanted = [one for one in replaced if one not in recorded]
+        if not wanted:
+            return written
+        retired = await self._memory.get_history(wanted)
+        found = [
+            ObservationWrite(memory=memory_id, operations=(operation.kind,))
+            for memory_id in wanted
+            if (memory := retired.get(memory_id)) is not None
+            for operation in memory.operations
+            if operation.successor == replaced[memory_id]
+        ]
+        return _joined(written, found)
 
     async def _framing(
         self,

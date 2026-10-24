@@ -50,6 +50,7 @@ from __future__ import annotations
 # values are read lazily and must resolve when they are (#1706).
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
+from itertools import takewhile
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.errors import (
@@ -63,9 +64,11 @@ from ai_assistant.core.types import (
     FramedMemory,
     FramedState,
     MemoryDecisionKind,
+    MemoryOperation,
     MemoryOperationKind,
     MemoryPlacement,
     MemoryUpdateProposal,
+    MemoryWriterName,
     NamedRevision,
     ObservationWrite,
     PinPart,
@@ -84,6 +87,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import MemoryStore, PlanStore
     from ai_assistant.core.types import (
         FrozenJson,
+        Memory,
         MemoryIngestResult,
         ProposedNarrowing,
         SupportPart,
@@ -107,6 +111,9 @@ _RATIONALE: Final = "the observer kept this from an episode that left the episod
 
 #: The relations under which a placed proposal is folded into the stored memory (§5:3).
 _FOLDING: Final = frozenset({PlacedRelation.RESTATES, PlacedRelation.CONTAINED})
+
+#: The relations that write nothing on the stored memory they name (ADR-0345 §5).
+_WRITES_NOTHING: Final = frozenset({PlacedRelation.INDEPENDENT, PlacedRelation.UNCLEAR})
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,72 +342,51 @@ class FindingWriter:
     async def _resolved(self, record: FramedMemory, ledger: _Ledger) -> FramedMemory:
         """A memory whose proposal may have landed before the last attempt stopped.
 
-        Read off the store, never assumed: installed where the store holds the memory's
-        own id; folded where a memory its placement folded into gained an operation
-        citing one of its own parts, which no other finding's write cites. Where neither
-        shows, nothing landed that changed anything, and it is placed again, which a fold
-        that changed nothing repeats harmlessly (ADR-0328 §4:8). Only operations citing
-        its own parts are counted as its writes, so another episode's write on the same
-        memory in between is never taken for this one's.
+        Read off the store, never assumed (:func:`_its_write`): where it landed, its
+        operations are recovered and it is done; where nothing shows it did, it is placed
+        again, which a fold that changed nothing repeats harmlessly (ADR-0328 §4:8).
         """
-        held = await self._memory.get_history([record.memory.id])
-        installed = record.memory.id if record.memory.id in held else None
-        gained = await self._read_back(record, installed, ledger, own_only=True)
-        if installed is not None:
-            return _finished(record, ruling=MemoryDecisionKind.ACCEPT, kept=(installed,))
-        folded = tuple(
-            one.memory for one in record.named if one.relation in _FOLDING and one.memory in gained
-        )
-        if folded:
-            return _finished(record, ruling=MemoryDecisionKind.ACCEPT, kept=folded)
-        return record.model_copy(update={"state": FramedState.FRAMED, "named": ()})
+        wanted = [record.memory.id, *(one.memory for one in record.named)]
+        held = await self._memory.get_history(list(dict.fromkeys(wanted)))
+        landed = _its_write(record, held)
+        if landed is None:
+            return record.model_copy(update={"state": FramedState.FRAMED, "named": ()})
+        kept, operations = landed
+        for memory_id, kinds in operations.items():
+            ledger.wrote(memory_id, kinds)
+        return _finished(record, ruling=MemoryDecisionKind.ACCEPT, kept=kept)
 
     async def _read_back(
-        self,
-        record: FramedMemory,
-        installed: str | None,
-        ledger: _Ledger,
-        *,
-        own_only: bool = False,
-    ) -> set[str]:
+        self, record: FramedMemory, installed: str | None, ledger: _Ledger
+    ) -> None:
         """The operations each memory's log gained from the write, put in the ledger.
 
-        Each memory the placement named, past the log length it had when named, and the
-        memory installed, whole. A pin's support added by the pin pass is the pass's
-        write, never the finding's, so it is not counted. Read right after the write,
-        nothing else appends between, since the observer is the one writer and runs one
-        run at a time (ADR-0345 §11:1); read on a later attempt, ``own_only`` counts only
-        the operations citing one of the memory's own parts, its write's alone.
-
-        Returns:
-            The memories that gained an operation.
+        Read right after the write, so nothing else has appended: the observer is the one
+        writer and runs one run at a time (ADR-0345 §11:1). Each memory the placement
+        named, past the log length it had when named, and the memory installed, whole. A
+        pin's support added by the pin pass is the pass's write, never the finding's, so
+        it is not counted.
         """
-        own = {one.points_at for one in record.memory.supports}
         wanted = [
             *(one.memory for one in record.named),
             *([] if installed is None else [installed]),
         ]
         if not wanted:
-            return set()
+            return
         after = await self._memory.get_history(list(dict.fromkeys(wanted)))
-        counts = {one.memory: one.operations for one in record.named}
-        gained: set[str] = set()
         if installed is not None and (held := after.get(installed)) is not None:
             ledger.wrote(installed, [one.kind for one in held.operations])
-            gained.add(installed)
-        for memory_id, count in counts.items():
-            now = after.get(memory_id)
-            if now is None:
-                continue
-            kinds = [
-                one.kind
-                for one in now.operations[count:]
-                if not isinstance(one.cites, PinPart) and (not own_only or one.cites in own)
-            ]
-            if kinds:
-                ledger.wrote(memory_id, kinds)
-                gained.add(memory_id)
-        return gained
+        for one in record.named:
+            now = after.get(one.memory)
+            if now is not None:
+                ledger.wrote(
+                    one.memory,
+                    [
+                        op.kind
+                        for op in now.operations[one.operations :]
+                        if not isinstance(op.cites, PinPart)
+                    ],
+                )
 
     async def _done(  # noqa: PLR0913 — the memory, the seam, and what its ruling says
         self,
@@ -436,6 +422,69 @@ def _finished(
             "refused": refused,
         }
     )
+
+
+def _its_write(
+    record: FramedMemory, held: Mapping[str, Memory]
+) -> tuple[tuple[str, ...], dict[str, list[MemoryOperationKind]]] | None:
+    """What a proposal wrote, read off the store on a later attempt, or ``None``.
+
+    One placed write is one atomic write, every operation of it at one instant
+    (ADR-0345 §5:6), and it came before anything else written on the memories it named,
+    since the proposal was sent the moment its revisions were read. So on each memory its
+    placement related to it, the first operations past the recorded log length that share
+    an instant are its write's, where every one of them cites one of the proposal's own
+    parts or a support the memory already carried (a ``recheck`` rests on those, §5:9);
+    an operation citing anything else is another write's, and so is every later instant.
+    The write's instant is the earliest such; it landed where the store holds the
+    proposal's own id, installed, or where a memory it folds into carries every one of its
+    supports from that instant. The installed memory's operations are its create and those
+    at that instant, never one a later write made.
+
+    Args:
+        record: The memory, its proposal sent at the log lengths ``named`` records.
+        held: Its own id and every memory it named, as the history read returns them.
+
+    Returns:
+        Where it is held and the operations it wrote, by memory; ``None`` where nothing
+        shows it landed.
+    """
+    own = {one.points_at for one in record.memory.supports}
+    runs: dict[str, list[MemoryOperation]] = {}
+    for named in record.named:
+        stored = held.get(named.memory)
+        if stored is None or named.relation in _WRITES_NOTHING:
+            continue
+        after = [
+            one
+            for one in stored.operations[named.operations :]
+            if not isinstance(one.cites, PinPart)
+        ]
+        if not after:
+            continue
+        instant = after[0].at
+        run = list(takewhile(lambda one, at=instant: one.at == at, after))  # type: ignore[misc]
+        known = own | {one.points_at for one in stored.supports if one.added_at < instant}
+        if all(one.by is MemoryWriterName.OBSERVER and one.cites in known for one in run):
+            runs[named.memory] = run
+    at = min((run[0].at for run in runs.values()), default=None)
+    mine = {memory_id: run for memory_id, run in runs.items() if run[0].at == at}
+    installed = held.get(record.memory.id)
+    folded = tuple(
+        one.memory
+        for one in record.named
+        if one.relation in _FOLDING
+        and one.memory in mine
+        and own <= {support.points_at for support in held[one.memory].supports}
+    )
+    if installed is None and not folded:
+        return None
+    operations = {memory_id: [one.kind for one in run] for memory_id, run in mine.items()}
+    if installed is not None:
+        first, *rest = installed.operations
+        operations[installed.id] = [first.kind, *(one.kind for one in rest if one.at == at)]
+        return (installed.id,), operations
+    return folded, operations
 
 
 def _placement(base: Placement, stored: Sequence[Retrieved]) -> Placement:
