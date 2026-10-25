@@ -1,524 +1,508 @@
-# Three operations between activations: spawn, stop and share
+# Operations between activations, and the Task Scheduler
 
-**The question.** Activations run side by side. What can one of them do to another, and is
-there a small set of operations that covers every case, so that joining, takeover,
-reminders, background work and whatever comes next are built from the same few pieces
-instead of each being a mechanism of its own?
+**The question.** Activations run side by side. How does one start another, now or later?
+How is one stopped? How do two that run at the same time learn from each other, and when
+do they become one? This proposal answers with three operations (spawn, stop and share),
+merge built from two of them, and one place, the **Task Scheduler**, that every spawn goes
+through. A view over it, the **Task Manager**, is the one way in from outside.
 
-This is a proposal for the owner's design walk. It starts from the owner's direction of
-2026-10-21:
+This is a proposal for the owner's design walk. It records the walk of 2026-10-21 to
+2026-10-24, in which the owner ruled each part. It would convert into two ADRs:
 
-> *"What if there was some basic operations that can be done in parallel activations, such
-> as merging, because merging is essentially what takeover and joining is, except one goes
-> into the newer, one goes into older activation. So there's merging. There's potentially
-> forking … And then maybe a split … Or do these operations merge, fork, split, cover,
-> essentially anything that could happen?"*
+- **A**, the operations between activations (§§1–5);
+- **B**, the Task Scheduler and the Task Manager (§§6–11).
 
-The conversation that followed agreed the shape below. Merge is a share and a stop done as
-one step, joining and takeover are just merges, start is a normal activation, and the
-primitives are **spawn, stop and share**. This file writes that down, tests it against every
-situation we could find, and names what it would change. An independent read of an earlier
-draft tried to break it; what it found about the operations themselves is folded in.
+ADR-0340 (reminders, #3271) would then be rewritten on top of B (§11).
+
+## Where it came from
+
+The owner, 2026-10-21: *"What if there was some basic operations that can be done in
+parallel activations, such as merging … Or do these operations merge, fork, split, cover,
+essentially anything that could happen?"*
+
+The walk narrowed that to three operations, plus merge as a share and a stop. Along the
+way the owner set the principles the rest follows:
+
+- **Spawned work is ordinary.** *"Things like the reminder or background task are just
+  normal activations that might have spawned from a certain conversation, but they don't
+  live there."*
+- **A place ties an activation to nothing.** It is only what caused the activation.
+- **The machinery is uniform.** *"I like how a spawn is just an actuator action in the
+  place, which gets sensed by the sensor and starts an activation, it's its own loop."*
+- **Do the simple version.** *"For now, do a simple design that works. Don't worry much
+  about who and what and privacy. That stuff will be addressed later."*
 
 **What it assumes.** Outside content, disclosure (who may see what) and authority
-(approvals) are other designs, and this proposal assumes they work, as the owner directed
-on 2026-10-21. It says only that whatever crosses between activations carries its author,
-its authority and its outside-content marks with it. What those mean is decided there.
-
-**It is the simple version.** The owner, the same day: *"For now, do a simple design that
-works. Don't worry much about who and what and privacy. That stuff will be addressed
-later."* So who may use these operations on whose activations, by person or by device, is
-left for later. For now the operations reach only what is already wired: what ADR-0332 §4
-shows understanding, and the places ADR-0340 already speaks into.
+(approvals) are other designs, and this proposal assumes they work. Whatever crosses
+between activations carries its author, its authority and its marks. The gaps those
+designs must close are listed under *What it leaves open*. The owner: *"Just note that the
+gaps need to be closed."*
 
 ## Baseline
 
-**Wiki, read at revision `84f20c8`** (direction where not ratified):
+**Wiki, read at revision `84f20c8`:**
 [Concurrent activations](https://github.com/leonapivato/ai-assistant/wiki/Concurrent-activations),
 [Controller](https://github.com/leonapivato/ai-assistant/wiki/Controller),
-[Activations](https://github.com/leonapivato/ai-assistant/wiki/Activations),
-[Internal sensors](https://github.com/leonapivato/ai-assistant/wiki/Internal-sensors).
-The Concurrent activations page already says *"taking over and merging are one
-mechanism: the older activation is stopped, and the newer sees its progress."* This
-proposal takes that sentence as its seed.
+[Channels](https://github.com/leonapivato/ai-assistant/wiki/Channels),
+[Sensors](https://github.com/leonapivato/ai-assistant/wiki/Sensors),
+[Internal sensors](https://github.com/leonapivato/ai-assistant/wiki/Internal-sensors),
+[Place window](https://github.com/leonapivato/ai-assistant/wiki/Place-window),
+[Episode window](https://github.com/leonapivato/ai-assistant/wiki/Episode-window).
 
-**ADRs it reads, as they stand on `main`:**
+**ADRs it reads:**
 
-- ADR-0280 §3 (the controller's working set; rules never read text).
-- ADR-0292 §5 (an input's author and authority), §7 (output, and proactivity needing
-  nothing of its own), §11 (activations side by side; merging and taking over as one
-  mechanism), §12:5–§12:6 (a command is a structured act; the same operation asked for in
-  words is input like any other).
-- ADR-0295 (a stop: a command naming one activation, and what it guarantees) and ADR-0297
-  (the stop mark).
-- ADR-0306 §5 (acting's claims and records) and ADR-0321 §4 (an approval is used only by
-  the activation the yes was given in).
-- ADR-0332 §2–§4 (one at a time within a place, joining until the first act, the
-  cross-place takeover), §8 (the line's `/stop`) and §9, which leaves open *"whether a typed
-  'scratch that' can halt an activation that has committed"* (#2515) and background work.
-- ADR-0343 (a join is taken pending its readers' marking).
+- **ADR-0292,** the channel model:
+  - §1, the edge: sensors and actuators on channels, direct reads of the hub's own
+    records, commands and queries;
+  - §2, spokes, channels and places;
+  - §5, an input's author and authority;
+  - §6, push and pull;
+  - §7, output, and *"proactivity needs nothing of its own"*;
+  - §10, windows;
+  - §11, the end state: every message its own activation, understanding judging the
+    relation, merging and taking over as one mechanism.
+- **ADR-0295 and ADR-0297,** the stop.
+- **ADR-0286,** an episode open while its activation runs.
+- **ADR-0276 §4,** the episode window.
+- **ADR-0306 and ADR-0321 §4,** acting and approvals.
+- **ADR-0332:**
+  - one activation at a time within a place;
+  - joining by code;
+  - the takeover;
+  - `/stop`;
+  - the numbers.
+- **ADR-0341,** a pure read does not commit.
+- **ADR-0083 §7,** the hub's housekeeping scheduler, which this leaves alone.
 
-**And one draft:** ADR-0340 (#3271, Proposed, held for the owner's question 2), which makes a
-reminder a record in the plan store that the clock turns into an ordinary activation when
-it comes due, and a finished background task's report the same kind of record.
+**And one draft:** ADR-0340, reminders, which §11 rewrites.
 
-## The idea in brief
+---
 
-Three operations act between activations:
+# A. Operations between activations
 
-- **Spawn.** An activation sets up a new one, to start now or later, carrying part of its
-  work. The spawn is a record, written as the spawning activation's effect.
-- **Stop.** An activation stops: it takes no further step, writes nothing new into its
-  place, and keeps what it already finished. This is ADR-0295's stop, unchanged.
-- **Share.** A copy of what one running activation has reaches another, as input that
-  informs and never authorizes. The one it came from carries on untouched.
+## 1. A place is what caused an activation, and nothing more
 
-One composition gets a name of its own, because it must be done as one step:
+An activation's **place** is where its input came from. It ties the activation to nothing
+else:
 
-- **Merge** is a share and a stop together. The giver's input is copied into the receiver
-  and the giver is stopped, with nothing able to happen in between. Joining (newer into
-  older) and takeover (older into newer) are both merges and need no other names.
+- **Context** comes from the windows, recall and stories. Where an activation needs another
+  place's recent messages, it pulls them, a pull ADR-0292 §6 already lists (*"earlier
+  messages in a conversation"*).
+- **Speaking** is an act like any other call (decision C, *Depends on*), so an activation
+  may speak into any place it is allowed to.
+- **"Working…" and a stop control** are features a kind may declare for its places, not
+  part of the general model (§3).
+- **Admission, waiting and the reply a conversation expects** stay the rules of the
+  causing place's kind (§5).
 
-Everything after an activation has acted goes through **records**, not through an
-operation. The next activation reads what the last one did: its episode, its stories, its
-effects and any pending spawns. That is how a correction after a reply works today, and it
-stays that way.
+An earlier draft gave each activation a **home place** for its window, its "working…" and
+its stop. The owner dropped it: a place is only what causes the activation.
 
-Start is not an operation. An input arriving, whether a message, a clock push or a task's
-next turn, begins an activation the same way every time.
+## 2. The operations
 
-## Where an activation can be, and what applies there
+| Operation | What it is |
+| --- | --- |
+| **Spawn** | An activation sets up another, to start now, later or after other tasks end, as a write into the Task Scheduler (§7) |
+| **Stop** | ADR-0295's stop, unchanged: nothing new starts, what is in flight finishes and is recorded, nothing new is written, and nothing is abandoned or undone |
+| **Share** | An activation sees what others are doing, and can fetch what they found (§4) |
+| **Merge** | A share and a stop as one step: the newest activation takes in an older one's input and findings, and the older is stopped (§5) |
 
-The line that shapes every rule is **the first act**: ADR-0332 §3's *committed*. Before it,
-an activation's work is only thinking, and it can be thrown away or redone. After it, the
-activation has done something in the world or in the hub's records that cannot be copied,
-combined or taken back.
+**Start is not an operation.** An input arriving begins an activation the same way every
+time, whether it is a message, an email or a scheduled task coming due.
 
-```mermaid
-stateDiagram-v2
-    [*] --> Pending: spawned for later
-    [*] --> Open: an input arrives, or a spawn comes due
-    Pending --> Open: its time comes and its place is free
-    Pending --> [*]: cancelled, an act on its record
-    Open --> Committed: its first act
-    Open --> Stopped: stop, or merged into another
-    Committed --> Stopped: stop
-    Open --> Ended: done
-    Committed --> Ended: done
-    Stopped --> [*]
-    Ended --> [*]
-```
+**After an activation has acted, nothing merges into it.** What comes next is a new
+activation that reads the records. That is how a correction after a reply works today, and
+it stays so.
 
-| Operation on activation A | Pending (spawned, not started) | Open (running, not yet acted) | Committed (running, has acted) | Ended or stopped |
-| --- | --- | --- | --- | --- |
-| **Stop A** | Not a stop: cancelling is an act on its record | Yes | Yes; what is in flight finishes and is recorded | Nothing changes (ADR-0295 §1:6) |
-| **Share from A** | Nothing to share | Yes | Yes | Not a share: the next activation reads A's records |
-| **Merge A with another** | No | Yes, where the other has not acted either | No, because A has acted | No |
-| **A spawns** | — | Yes, and spawning is itself A's first act | Yes | — |
+**The first act is the line** for every rule here. It is ADR-0332 §3's *committed*: acting
+has committed to a call that is not a pure read, or to a message.
 
-## 1. Stop
+## 3. Stop
 
-**The meaning stays ADR-0295's.** A stop is graceful. Nothing new starts, an effect already
-sent finishes and its outcome is recorded, nothing acquired is orphaned, nothing new is
-written into the place, and the place's current state shows what finished. A stop abandons
-no goal and undoes nothing (ADR-0295 §2–§4), so "go on" after a stop is how the person takes
-it back.
+**One operation, with ADR-0295's guarantees.** It names exactly one activation. There are
+three ways to reach it:
 
-**What causes a stop.** There are three routes. Two are built, and one is new:
+1. **A command from outside,** through the Task Manager (§10). The hub chat's stop control
+   and the line's `/stop` are shortcuts that send it for the activation their place shows.
+   Both already call one engine operation, `AssistantEngine.stop_activation`.
+2. **A merge.** The older activation is stopped (§5, ADR-0295 §5).
+3. **Words, across places.** "Never mind the booking," said on Telegram after the web
+   activation has acted:
+   - understanding names the running activation the input **cancels**, a closed field
+     beside `continues`;
+   - a rule stops it;
+   - the reply says what had finished.
 
-1. **The command** (built). The stop control beside *working…*, the line's `/stop`, and
-   the command line. It is set by code at once, works in the middle of acting, needs no
-   model call to be obeyed, and nothing read or written can fake it (ADR-0295 §1,
-   ADR-0332 §8).
-2. **A merge** (built). The giver of a merge is stopped (ADR-0295 §5, ADR-0332 §4).
-3. **A cancel across places** (new). The person on Telegram says "never mind the booking"
-   while the activation the web started has already acted. Today the takeover is *not
-   taken* and *"nothing is stopped"* (ADR-0332 §4:8), so the older one goes on. With this
-   route, the web one is stopped under every guarantee above, and the person hears what
-   finished and what didn't. This is the case ADR-0332 §9 left to #2515. The owner,
-   2026-10-21: *"Yes, you should be able to cancel across devices. Maybe this has some sort
-   of permission depending on devices. For now, we can disregard it."*
+   "Go on" afterwards takes it back, because a stop abandons no goal (ADR-0295 §4:1). This
+   is the item ADR-0332 §9 left to #2515.
 
-**How the cancel across places is decided.** It is a takeover's sibling, and decided the
-same way. ADR-0292 §11:2 already has the shape: *"Understanding judges how a new activation
-relates to one running, and a rule acts on the judgment."*
+**Whether a place shows running work and offers a stop is its kind's declaration:**
+- the hub chat: "working…" and the stop button;
+- the line: typing and `/stop`;
+- the Task Scheduler: nothing, until the Task Manager's view opens.
 
-- Understanding is already shown the person's running work on their other places, under
-  ADR-0332 §4's limits. Its reply may name one shown activation that this input
-  **cancels**, in a closed field beside `continues`.
-- A rule then stops it, in one step, after checking that it is still running. The controller
-  reads no text (ADR-0280 §3:4): the judgment is understanding's and the act is a rule's.
-- Its targets are activations started by the person's own requests. A task is stopped
-  through its record (§4). A reminder that is being said is stopped by the stop control, so
-  a misread "never mind" can't end it for good (ADR-0340 §3:6).
-- Where "never mind" could mean either of two running activations, understanding names
-  neither, and the reply asks which.
+A conversation shows and stops the activations it caused. A spawned activation speaking
+into that conversation was caused by the Task Scheduler, so it is stopped in words or
+through the Task Manager.
 
-**What it costs.** A stop is the conservative direction: a misread one can never cause an
-act. It can still leave multi-step work half done, such as half the invitations sent. That
-is already true of the stop control. The place's current state shows what finished, and
-durability across a stop during an act is #2584's.
+## 4. Share
 
-**Where it does not reach.** On the same place, a typed "never mind" after the running
-activation has acted still waits behind it, because a place runs one activation at a time
-(ADR-0332 §2:3). The control is the way there, which is why it exists (ADR-0295 §1:5's
-note). Before the running activation has acted, a typed "wait, not that" joins it, and
-understanding reads it (ADR-0332 §3).
+**No supervisor.** An earlier draft had rules that pushed findings between activations
+(same story, same person, lineage). The walk replaced them with something simpler, built
+mostly from what exists:
 
-**Stopping what has not started.** A pending spawn is a record waiting for its time, so
-"cancel the bins reminder" is an act on that record (ADR-0340 §4's cancel), not a stop.
+**1. The in-progress section of the episode window, refreshed every round.**
+- **What it holds:** beside the episode window, a short entry for every activation now
+  running. The wiki's Episode window page already directs this (owner, 2026-10-05), and
+  ADR-0332 §4 builds it for the person's other places.
+- **Who sees it:** understanding, as now, and **planning, read fresh at every round.** Today
+  planning's episode window skips open episodes (`planning.py`, `_Request._episodes`).
+- **What each entry shows, in version 1:**
+  - a label (`P1`);
+  - what caused it: the hub chat, Telegram or the Task Scheduler;
+  - what it took in, in brief, through the episode window's projection, so outside input
+    never appears raw;
+  - whether it has acted.
+- **What this solves:** a running activation learns of a newer one at its next round. "My
+  budget's $400 now," said on Telegram, reaches the running flight search before its next
+  round, and the search adapts. Every activation sees the others, so it works in both
+  directions.
+- **Where it sits in planning's document:** after the parts cached across rounds (#3084),
+  so a section that changes every round doesn't break the cache.
 
-## 2. Share
+**2. Pull tools, for anything more.** Planning calls:
+- **the findings of one running activation:** "what has the flight search found?";
+- **the list of what is running and scheduled:** "what are you doing right now?"
 
-**What it is.** A copy of what activation A has so far reaches activation B as input that
-informs. A is not touched, slowed or told.
+Both are pure reads of the hub's own records (ADR-0341). Both read activations' **open
+episodes** (ADR-0286), which are written as each stage ends. One read function serves the
+summary, the pulls and recall's rendering of episodes:
 
-**The case it serves.** The person asks on the web for flights to Denver. That activation
-is searching and has already acted. The person then asks on Telegram, "what's the cheapest
-so far?" Today the Telegram activation is shown only the web activation's input and that it
-has committed (ADR-0332 §4), so it can only say the search is still running. With a share,
-it answers from what the search has found, and the search carries on.
+- **Only finished work is visible:** a round in progress or a draft never is.
+- **A peer is shown only its own work,** never what it read from others, so nothing echoes
+  back and no reads chain.
+- **By kind of entry,** a pull shows:
+  - what the activation is doing;
+  - the call outcomes that carried information, with their digests;
+  - the acts it has done.
 
-**How it would work, as the pick:**
+  It never shows recall results, links, failed calls, drafts or approvals.
 
-- **Pull only, to start.** B's understanding is shown A's running work under ADR-0332 §4. It
-  may name A as one it draws on, in a closed field beside `continues` and `cancels`. A rule
-  then copies A's findings into B's working set, and B's planning is shown them labelled as
-  A's.
-- **What is copied:** what A has found so far, in the form A's planning was shown it. Drafts
-  and approvals are never copied.
-- **What it carries:** no authority, because a copy informs. Each piece keeps its marks, so
-  outside content stays outside content in B.
-- **Who it reaches:** whatever understanding is already shown under ADR-0332 §4. Who may
-  share with whom is decided later.
-- **The record:** B's episode records the share, naming A and the moment it was taken, so
-  the viewer and the observer can see why B knew what it knew.
+**What sharing never does:** authorize. A shared item carries no authority, approvals are
+never shown, and an approval is used only by its yes's activation (ADR-0321 §4:1).
 
-**Why pull and not push.** For A to push to B, A would have to judge, while busy with its
-own work, that B would benefit, and no case has needed that yet. A pull lands before B
-acts, because B's understanding runs before B acts. So the question of a share arriving
-after B's first act does not come up yet.
+## 5. Merge
 
-## 3. Merge
+**The newest decides, and the newest absorbs.** The owner: *"the newest activation has the
+most up-to-date information, and therefore it should be the choice of the newest
+activation."*
 
-**A merge is a share and a stop done as one step.** The giver's input is copied into the
-receiver, and the giver is stopped. The receiver re-reads everything from understanding,
-with the authority each input carries.
+1. **Every input starts its own activation,** after the place's short wait (ADR-0332 §5).
+2. **The newest's understanding sees the older ones** in the in-progress section, and,
+   within one conversation, the earlier messages in its place window.
+3. **It may name the older activations its input continues.** The meaning is narrowed from
+   ADR-0332 §4:4's *"completes, corrects or adds to"* to **"corrects, completes, cancels or
+   changes the same work."**
+4. **A rule absorbs them, in one step with no await between.** Each named activation must
+   be:
+   - older;
+   - not yet acted;
+   - not stopped;
+   - of the same author, authority and origin.
 
-**Why it isn't a fourth primitive.** It can look as if a merge *moves* an input with its
-authority, while a share copies without authority, so merge would be "move and stop". But a
-move is exactly a copy and the original's removal. Stopping the giver
-in the same step is the removal: once it is stopped, the copy is the only live one, so it
-can keep the authority. A share on its own can't, because the original is still live and
-one yes would count twice. The atomic stop is what turns a share into a move.
+   Each is stopped, and **its input and its finished findings** move to the newest. A
+   lookup in the hub's own records is not acting, so an older activation may have done real
+   work, and a merge keeps it.
+5. **A named activation already absorbed by another is followed forward** to whoever
+   absorbed it.
+6. **One activation holds at most a limited number of inputs,** in place of ADR-0332 §6's
+   `join_limit`.
 
-**It must be one step.** If it were a share and then a stop, the giver could act in
-between, and the same message would be acted on twice. ADR-0332 §4 already does the check,
-the stop mark and the copy *"in one step with no await between"*.
+**One direction, so no cycles.** Only the newer absorbs the older. "Joining" and
+"takeover" stop being two mechanisms. Within a conversation, the earlier messages are in
+the newest's place window in full, so its first reading already covers them.
 
-**When it is allowed:** neither side has acted, neither is stopped, both inputs have the same
-author, authority and origin, no earlier input on the place is waiting, and the join limit
-is not reached (ADR-0332 §3:3, §4:6, §6:5). Who decides depends on the case:
+**When merging is wrong.** A separate task on the same matter stays separate, for example
+"what's the weather there?" while a hotel search runs. Kept separate:
+- the weather comes back first;
+- each runs in its own mode;
+- a failure stays contained;
+- each reply lands where it was asked.
 
-- **Joining** is a merge decided by code when the input arrives: a new input on a place
-  whose running activation has not acted. The newer input never starts an activation of
-  its own, so "stopping" it means it never starts. Its record names the place it came from
-  (ADR-0332 §3).
-- **Takeover** is a merge decided by understanding's `continues`, across places: the older
-  activation is stopped, and its input moves into the newer one. Its record names the
-  activation it came from (ADR-0332 §3–§4).
+The two can still see each other in the in-progress section.
 
-Nothing in how either behaves changes. This proposal only names them.
+**Replies out of order.** Replies arrive in the order the work finishes. A say-call takes an
+optional *in reply to* a place-window label. Each kind's actuator delivers it:
+- the line: a native reply;
+- the hub chat: a "replying to…" display;
+- a kind without replies: a fixed prefix written by code.
 
-**Not the stories' merge.** A story merge (ADR-0289) joins two stored matters. An
-activation merge joins two running pieces of work. They share a word and nothing else.
+It is attached by rule whenever the message answered is no longer the latest in its
+conversation. That is decision C's.
 
-## 4. Spawn
+**The conversation kind's rule** replaces ADR-0332 §2:3–§2:4's one activation at a time:
+- **While nothing running in the conversation has acted,** every message starts its own
+  activation, and the newest decides.
+- **Once something running in it has acted,** new messages wait. They are never refused,
+  keep their authority (ADR-0292 §5:7), and are taken in when it ends, so the next one sees
+  the finished result in the records. Running beside work that has acted would mean acting
+  on a half-finished picture, such as rebooking while the first booking is still in flight.
 
-**What it is.** Activation A sets up a new activation, to start now or later, carrying part
-of its work. The spawn is written as a record in the plan store and claimed as A's effect
-in one step, as ADR-0340 §4:3 does for a reminder. Because it is a record, it survives a
-restart, can be listed, and can be changed or cancelled by the person.
+Across places there is no wait. A newer related activation sees "has acted," and can stop
+the older or follow after it. A true race between two acts on one thing is the lock and
+recheck's (#2586).
 
-**What a spawn holds:**
+---
+
+# B. The Task Scheduler and the Task Manager
+
+## 6. The Task Scheduler
+
+The **Task Scheduler** is a built-in channel with one place, the schedule. It is a hosted
+medium in ADR-0292 §1's sense: something the hub runs that is not the assistant. The
+assistant reaches it only through its sensor and its actuator, and it is fully private for
+now: no person's device attaches to it.
+
+| Part | What it does |
+| --- | --- |
+| **Its contents** | Only **scheduled tasks**: activations waiting to be started, each with its outcome once it has run. What is running now is live state, never stored there (ADR-0292 §11:7). |
+| **Its actuator** | Writes a scheduled task: the spawn. It also changes and cancels them. |
+| **Its sensor** | **Pushes** a task that comes due, which starts an activation. **Answers pulls** about what is scheduled. |
+| **Its kind's declarations** | Its activations run **side by side**. It takes no message from people, shows no running work, and expects no reply. |
+
+**Names.** The owner chose Task Scheduler and Task Manager over the agenda and the
+activation scheduler. Two conventions keep them clear:
+- an item is a **scheduled task**, meaning a scheduled activation, and Python's kind is
+  always an *asyncio task*;
+- the name is always **Task Scheduler** in full, because "the scheduler" stays the hub's
+  housekeeping loop (ADR-0083 §7), which is unchanged.
+
+## 7. Spawning
+
+**A spawn is a call:** planning calls it, authorizing checks it, and acting writes the task
+through the Task Scheduler's actuator. **Every spawn goes through the Task Scheduler,
+"now" included.** A task due at once wakes the sensor straight away. Going through it
+means:
+- a spawn survives a restart;
+- there is one path for now and later;
+- new input still reaches the controller only through a sensor;
+- the Task Manager sees everything.
+
+**What a scheduled task holds:**
 
 | Part | What it is |
 | --- | --- |
-| **For whom** | The person A is for (ADR-0338 §2:2). |
-| **Where** | The place it will speak into: the place it was set from, the line where the person named it, or, for a background task, a place of its own on an internal channel. |
-| **When** | Now; an instant; or a rule such as every weekday at 8. A condition, such as "when I get home", is a watch and comes later (#2585). |
-| **What it carries** | A reminder's text; or a task's statement, its stories, its budget and what counts as done. |
-| **Its state** | For a reminder, each occurrence's state (ADR-0340 §4:2). For a task: running, paused until a time, stopped, or ended, plus each slice's state. |
-| **Author and marks** | Its author is whoever set it, written when they set it (ADR-0292 §5's table). A report's author is the assistant (ADR-0340 §10:3). It carries its setter's outside-content mark (ADR-0340 §2:6). |
-| **Authority** | None, and no approval the setter held carries over (ADR-0321 §4:1). ADR-0292 §5:6 says this of reminders; this proposal extends it to every spawn. |
+| **For whom** | The person of the activation that spawned it (ADR-0338 §2:2) |
+| **Author** | Whoever set it: the person ("remind me…") or the assistant (its own follow-ups and next steps), written when it was set |
+| **Authority** | None. It informs and authorizes nothing, as ADR-0292 §5:6 already says of reminders, here widened to every scheduled task. No approval carries over (ADR-0321 §4:1). |
+| **When** | Now; an instant; a rule ("every weekday at 8"); or **after these tasks end**. A condition ("when I get home") waits for watches (#2585). |
+| **Where it may speak** | One place stated by the creator, or none. There is no default. With none, it may work, write records and spawn, but never speak. If the place is gone when the task comes due, the task is cancelled. |
+| **What it carries** | The creator's instruction, kept short: the reminder's text, or the step to do |
+| **Its pointers** | Its **parent**, the activation that spawned it, whose episode it may read. A gather step also points to **the tasks it waits for**. These replace "lineage" as a sharing rule: they are reads of finished episodes, not sharing. |
+| **Where it was set** | The place the spawning activation came from, as data |
+| **Its marks** | Its setter's outside-content mark (ADR-0340 §2:6) |
+| **Its state and outcome** | Pending, pushed (naming its activation), and then how it ended |
 
-**How it starts.** When it comes due, a sensor in the hub pushes it, and that starts an
-ordinary activation. For time, that sensor is ADR-0340 §6's clock. A spawn speaking into a
-person's place counts as that place's activation, so it waits while another runs there and
-reads its record again before it starts (ADR-0340 §3:4–§3:5).
+**What spawning is for.** It is the rarer case. Most activations just work: they call
+tools, speak wherever they need to and end. A spawn covers:
+- **continuing** work too long for one activation;
+- **breaking down** work into independent pieces;
+- **isolating** work in a separate context;
+- **reminders and schedules;**
+- **the assistant's own follow-ups:** a retry, a check back, a nudge.
 
-**Spawning is an act, so it commits the spawner.** Writing the record is a write to the
-hub's own records, which ADR-0332 §3 counts as a first act. So "remind me at 8" followed a
-moment later by "make it 9" is one input if the second arrives during the short wait. If it
-arrives after the reminder is set, it waits, and the next activation changes the record.
+These vary on two axes only: **when** (now, later, after other tasks, or on a condition)
+and **where** (the place it may speak in, or none). "Background task" is dropped as a
+concept, because an activation spawning its own next step covers it.
 
-**A background task is one record, worked in slices.** The earlier draft had each slice
-spawn the next. The independent read showed three ways that breaks, none of them about
-anything outside these operations:
+## 8. How a scheduled task starts, and restarts
 
-- a slice stopped before it spawned its successor would end the task silently, with no
-  report;
-- a restart after a slice spawned its successor, but before the slice ended, would rerun
-  the slice and fork the chain in two;
-- "pause until tomorrow" would have no record to move.
+**The sensor:**
+- sleeps until the earliest task is due;
+- wakes early whenever a task is written;
+- never sleeps longer than a set recheck interval;
+- compares wall-clock instants, not elapsed sleep;
+- pushes everything due at or before now;
+- marks each task *pushed*, naming the activation it started.
 
-So a task is one spawn record, the way a recurring reminder is, and its slices are its
-occurrences:
+All of this is ADR-0340 §6, carried over.
 
-- The sensor pushes the next slice from the task record, numbered in sequence. It marks the
-  slice *pushed*, naming its activation, as ADR-0340 §6:5 does an occurrence. At start it
-  settles every pushed slice from its effect records, and never pushes a number twice.
-- A slice spawns nothing. It appends what it found to the task's story and records whether
-  the task is done, needs the person, or should go on.
-- Each slice reads the task record when it starts, so "actually, up to $2.5k" said after
-  the task started is an act on the record, and the next slice works from it.
-- Stop, pause and resume are each one atomic write to the task record, and a stop also
-  stops the slice running, if any. A cancel can't race a slice's spawn, because no slice
-  spawns.
-- The report is set by rule when the task leaves *running*, however it leaves, which
-  ADR-0340 §10:2 already asks for. A slice that was stopped can claim nothing, so the
-  report can't be the last slice's job, as ADR-0340 §10:1 has it. This includes a stop by
-  the person: the stopping reply confirms the stop, and the report says what was found.
-  That is one rule with no exception.
+**Due together, started separately.** Two tasks due at 8:00 start two activations. Whether
+they become one is merge's job (§5): two unrelated reminders give two messages, and a
+reminder set twice by mistake merges.
 
-**Who may spawn what.** The rule that keeps spawns from multiplying:
+**After a restart,** each pushed task is settled from its activation's records, as ADR-0340
+§6–§7 does:
+- its main act finished: done;
+- its outcome is unknown: tried once more, marked "in case my last message didn't reach
+  you";
+- nothing happened: run again;
+- **it had already spawned its next step: never run again,** so a chain cannot fork.
 
-| Activation | May spawn |
+**Missed while the hub was down:** each is said once, marked late. A recurring task never
+bursts its missed occurrences (ADR-0340 §8).
+
+## 9. Changing, cancelling and stopping scheduled work
+
+**Finding the task.** A message a scheduled task's activation wrote is labelled in the
+conversation's place window with the task that caused it ("from scheduled task `T2`").
+- **"Snooze 10 minutes,"** right after a reminder, is one call in one round: change `T2`.
+- **Anything else,** such as "cancel the bins one" or "stop the apartment search," is a pull
+  on the Task Scheduler, then the change.
+- **Where the words could mean two tasks,** it asks.
+
+**Stopping a chain:** stop the running step first, then cancel what it spawned. Once a
+stop lands, the stopped activation can't write anything new, so nothing slips through.
+
+**Pausing** is stopping the running step and moving its next task's time.
+
+**Limits:**
+- a cap on a chain's length, counted through the parent pointers;
+- a cap on pending tasks;
+- the spend ceiling, as always.
+
+## 10. The Task Manager
+
+The **Task Manager** is the one way in from outside for managing activations. In ADR-0292
+§1's terms it is a surface of **commands and queries**, which the assistant does not
+perceive, not a spoke on a channel:
+
+- **Queries:**
+  - what is running, live from the controller;
+  - what is scheduled, from the Task Scheduler;
+  - what ran lately.
+- **Commands:**
+  - stop a running activation;
+  - cancel or change a scheduled task;
+  - later, add one by hand.
+
+**Conversations offer shortcuts into it.** The stop button and `/stop` send its stop.
+
+**Inside, the same operations.** A merge's stop, "never mind" across places and planning's
+pull tools all use these same operations.
+
+**Its full view opens later.** For now its operations exist, because the shortcuts and the
+pull tools need them. A screen listing everything (running, with how long; scheduled;
+done) comes later. Shown to people, it would be called **Tasks**.
+
+## 11. Reminders are scheduled tasks
+
+A reminder is a scheduled task whose "when" is a time. **ADR-0340 keeps:**
+- local times and zones (§5): recurring tasks follow the current zone, and a one-off is a
+  fixed instant read back when set;
+- recurrence (§9);
+- the late rule (§8);
+- the second try (§7);
+- the read-back when set, now naming where it will speak;
+- set, change, cancel and done as plain words ("done", "snooze", "I already took it");
+- deleting a conversation cancels the tasks set to speak there.
+
+**ADR-0340 drops:**
+- the clock as a channel of its own, replaced by the Task Scheduler;
+- a reminder counting as its conversation's own activation and waiting for it (§3:4);
+- the say-only limit (§3:7): the ordinary authority rules apply;
+- the special report kind (§10): a chain's last step says what it found;
+- grouping at the sensor (§6:4): merge decides.
+
+ADR-0340's **question 2 dissolves.** It asked whether a reminder set in the hub chat should
+go to Telegram automatically. Now the creator states where a scheduled task may speak, and
+the read-back says so: "I'll remind you on Telegram at 8."
+
+---
+
+## Situations
+
+| Situation | What happens |
 | --- | --- |
-| One whose input carries the person's authority | A reminder; a background task |
-| A slice of a background task | Nothing. Its task record is what the sensor pushes from |
-| One a reminder or a report started | Nothing (ADR-0340 §4:4) |
-| An event's (ADR-0313 §4:3) | Nothing, until proactivity decides what an event may start |
+| Three quick messages in one chat, before any reply | The newest absorbs the older two: one reply |
+| "Actually Sunday," a second after "book Saturday," before it acts | The newest absorbs: Saturday is never booked |
+| "Actually Sunday" after it booked Saturday | It waits for that activation to end, sees the booking, and changes it as a new request |
+| "Actually Sunday" on Telegram, before the web booking acts | Takeover across places: one Sunday booking, and the reply comes on Telegram |
+| "Never mind the booking" on Telegram, after the web one acted | Understanding names what it cancels; a rule stops it; the reply says what finished |
+| "Also, what's the weather there?" while a hotel search runs | Separate activations: the weather answers first, replying to its own message |
+| "My budget's $400 now" while a flight search runs | The search sees it in the in-progress section at its next round and adapts |
+| "What's the cheapest so far?" from another device | Planning pulls the search's findings and answers |
+| "What are you doing right now?" | Planning pulls the list of what is running and scheduled |
+| "Remind me at 8 to call Mom about it" | A scheduled task speaking here at 8. Its activation reads its parent's episode for what "it" was. |
+| Two unrelated reminders due at 8:00 | Two activations, two messages |
+| A reminder set twice by mistake | They merge: one message |
+| A reminder fires while you're typing to Telegram | Separate, because their authority differs. Both happen. |
+| "Snooze 10 minutes" right after a reminder | The window shows which task wrote it: one change |
+| "Keep looking for apartments this week" | The activation spawns its next step for tomorrow, and each step spawns the next until done or capped |
+| "Compare these three apartments" | Three checks spawned now, plus a gather step timed after all three end |
+| "Stop the apartment search" | Stop the running step, then cancel the pending one |
+| The hub restarts mid-step | The step is settled from its records, and never re-run once it has spawned its next |
+| The hub was down at 8 | The reminder is said once, marked late |
+| Two newer activations name the same older one at once | The first absorbs it; the second follows forward and absorbs the first, if it hasn't acted |
 
-**Its instances.** Spawn covers more than splitting off the research:
+## Considered and not adopted
 
-| Case | As a spawn |
+| Idea | Why not |
 | --- | --- |
-| "Remind me at 8" | Later, into this place (ADR-0340, drafted) |
-| "Remind me every weekday at 8" | A rule; each occurrence starts one activation (ADR-0340 §9) |
-| "I'll look into apartments and get back to you" | A task record, now, on the task's own place; its slices are its occurrences |
-| A finished task reporting back | One report, due at once, into the place that started the task (ADR-0340 §10) |
+| **Fork,** a running copy | It doubles the model calls, and the copy could act twice. Kept from acting, a copy is just a share. |
+| **Split** into equal parts | A person answers a two-part message once and hands off the long part, which is a spawn |
+| **Suspend and resume** | It doesn't survive a restart. Ending and being continued does the same job. |
+| **"Kill"** | Too abrupt for ADR-0295's graceful stop, and "stop" already names the mechanism |
+| **A home place** | A place is only what caused an activation (§1) |
+| **A supervisor with share rules** (same story, same person, lineage) | The in-progress section refreshed every round, plus pulls, does the same job with less, and the automatic flow carries no findings |
+| **Joining by code, plus a separate takeover** | One rule, the newest absorbs, covers both |
+| **The newest able to push itself into the older** | It gains nothing, and the older's findings move with a merge anyway |
+| **Grouping due tasks at the sensor** | Merge decides, so there's no special rule |
+| **"Background task"** | Spawning one's own next step covers it |
+| **One activation at a time per conversation** | It's needed only after something has acted (§5) |
 
-So reminders, background work and report-back are one primitive with a "when" attached,
-rather than three mechanisms.
+## What it would change
 
-## 5. Continuing through records
-
-After an activation has acted, nothing merges into it, and what comes next is a new
-activation that reads the records. This is not a fourth operation. It is how the system
-already works, and it is what keeps the three operations small:
-
-- "Actually Sunday" after it booked Saturday: the next activation sees the booking.
-  Changing it is a new request (ADR-0295 §4:2).
-- "How's the search going?": recall finds the task's story, which every slice appends to,
-  and the task record says whether it is running.
-- Cancelling or changing a pending reminder or task: an act on its record through the plan
-  store's own members, which is how every activation changes shared state (ADR-0332 §2:6).
-
-## 6. The rules every operation keeps
-
-1. **The first act is the line.** A merge needs both sides not to have acted. A stop applies
-   on both sides of the line, and what is in flight finishes. A share copies only what has
-   finished.
-2. **Effects never move.** An effect belongs to the activation that claimed it. It is never
-   copied, moved or merged. A merge copies inputs, not effects.
-3. **Only a merged input carries authority**, because its giver is stopped in the same step.
-   A share and a spawn carry none, and an approval is used only by the activation its yes
-   was given in (ADR-0321 §4:1).
-4. **Marks travel.** Whatever crosses between activations carries its author, its
-   authority and its outside-content marks. What they mean is the other designs'.
-5. **Who comes later.** For now the operations reach only what ADR-0332 §4 already shows
-   understanding, and a spawn speaks only into the place it was set from or the line
-   (ADR-0340 §3:1). Who may do what to whose activations, by person or by device, is
-   decided later.
-6. **Each operation has one trigger.**
-   - A stop: a command, a merge, or understanding's `cancels`, applied by a rule.
-   - A share and a merge: code when the input arrives, or understanding's closed fields,
-     applied by a rule.
-   - A spawn, a cancel, or a change to a pending record: a capability planning calls, which
-     authorizing checks like any call.
-
-   The controller never reads text (ADR-0280 §3:4).
-7. **Every operation is recorded where it happened.**
-   - A merged input names where it came from: the place for a join, the activation for a
-     takeover.
-   - A share names its source.
-   - A spawn is its setter's effect.
-   - A stop is its activation's end entry.
-
-   The viewer and the observer can always explain why something happened.
-8. **Everything is bounded.**
-   - Merges, by the join limit.
-   - Shares, by a limit per activation.
-   - Spawns, by who may spawn what, and by a task's budget.
-   - Every activation, by its deadline, its round limit and the spend ceiling.
-9. **Nothing runs unseen.** A person can see their running activations in each place's
-   current state, and their pending reminders and tasks by listing them.
-10. **Each operation is one atomic step.**
-    - A merge's check, stop and copy happen with no await between (ADR-0332 §4).
-    - A spawn writes its record and claims its effect together (ADR-0340 §4:3).
-    - A stop and a claim race in the store, and whichever lands first wins (ADR-0295 §2:2).
-
-## 7. The situations
-
-Status:
-- **built** is on `main` and live;
-- **drafted** is in ADR-0340, not yet ratified;
-- **new** is what this proposal adds;
-- **elsewhere** is another decision's.
-
-**One person, one place**
-
-| Situation | What happens | Status |
-| --- | --- | --- |
-| A burst of three messages before any reply | Merge (joining): one activation, one reply to all three | Built |
-| "Actually Sunday" a second after "book Saturday", before it acts | Merge: understanding reads both, and Saturday is never booked | Built |
-| "Actually Sunday" after it booked Saturday | Waits; the next activation sees the booking, and changing it is a new request | Built |
-| A typed "never mind" after it has acted | Waits behind the work; the stop control or `/stop` is the way | Built |
-| The stop control mid-booking | Stop: the booking in flight finishes and is recorded; nothing new is written; the state shows what finished | Built |
-| "Go on" right after a stop | A new activation; the goal stood (ADR-0295 §4:1), so it picks up from the records | Built |
-| An unrelated question while a long answer is still being thought out | Merge if it hasn't acted, so one reply answers both, as a person would; otherwise it waits | Built |
-| "Answer the next question off the top of your head" | Not an operation: a pending mode is a record the next activation reads when it starts (the modes decision) | Elsewhere |
-
-**One person, several places**
-
-| Situation | What happens | Status |
-| --- | --- | --- |
-| Start a thought on Telegram, finish it on the web, before any reply | Merge (takeover): the Telegram activation is stopped, and its input moves to the web one | Built, not yet seen live |
-| The same, but Telegram already replied | No merge; the web activation sees how far Telegram's got | Built |
-| "What's the cheapest so far?" on Telegram while the web activation is mid-search | Share: Telegram answers from what the search has found, and the search goes on | New |
-| "Never mind the booking" on Telegram after the web activation has acted | Cancel across places: understanding names it, and a rule stops it; the reply says what finished | New |
-| "Never mind" while two activations run on other places | Understanding names neither, and the reply asks which | New |
-| A misread "never mind" stopped the wrong work | "Go on" picks it up again: a stop abandons no goal | New, by ADR-0295 §4:1 |
-| "Book the table" sent from two devices | Merge where neither has acted; otherwise the second sees the first's effect, and a true race is the lock and recheck's (#2586) | Built, with #2586 open |
-
-**Background work and time**
-
-| Situation | What happens | Status |
-| --- | --- | --- |
-| "What's the weather, and find me apartments under $2k" | One reply gives the weather and says it will look; the apartments are a task record | New, built by the background-work decision |
-| Each step of the long task | The sensor pushes the task's slices one at a time on its own place, so the person's place is free | New, as above |
-| "Actually, up to $2.5k" just after the task started | Waits, then an act on the task record; the next slice reads the new statement | New, as above |
-| The task finishes, gives up, needs a yes or runs out of budget | A rule sets its one report into the place that started it, when it leaves *running* | Drafted (ADR-0340 §10), changed here |
-| The task's next step needs a yes | Its report asks, and the person's yes starts an activation that makes the call itself, reading the task's story | Open (see below) |
-| "How's the search going?" | Records: the task's story and its state | New, as above |
-| "Stop the research" or "pause it until tomorrow" | One write to the task record, which also stops the slice running | New, as above |
-| The hub restarts mid-slice | The slice closes as `hub_stopped`; at start the sensor settles each pushed slice from its effects and never pushes a number twice | New, as above |
-| "Remind me at 8" | Spawn later into this place | Drafted |
-| The reminder comes due while the person is mid-conversation there | It waits for the place, reads its record again, then speaks. It never merges in, because it carries no authority and a merge needs the same authority | Drafted (ADR-0340 §3:4–§3:5); see the busy-place item below |
-| "Cancel the bins reminder" or "make it 9" | An act on the pending spawn's record | Drafted |
-| The hub restarts mid-reminder | At start the clock settles each pushed occurrence from its effects and pushes again only what was not said, or is due a second try | Drafted (ADR-0340 §6:6, §7) |
-| The hub was down at 8 | The reminder is said once, marked late | Drafted (ADR-0340 §8) |
-| The person deletes the conversation | Its pending reminders are cancelled with it | Drafted (ADR-0340 §4:10); tasks are open below |
-| "Remind me when I get home" | A spawn on a condition, which is a watch | Elsewhere (#2585) |
-
-**Several people**
-
-| Situation | What happens | Status |
-| --- | --- | --- |
-| Two people in one shared place | One activation at a time; only the same author's input joins | The rule is decided (ADR-0332 §2:5); shared places themselves wait for the household design |
-| Your partner's activation could use what yours is finding ("are we having pasta?" while yours plans dinner) | No share across people yet; who may share with whom comes later | Later |
-| A forwarded message or an email, whose author is only claimed | Never merges with the person's own activation, because its authority differs | Built |
-
-**Races and bounds**
-
-| Situation | What happens | Status |
-| --- | --- | --- |
-| Two activations try to merge with each other at once | The atomic step decides: the first wins, and the second finds its target stopped and takes nothing | Built (ADR-0332 §4) |
-| A chain of merges | Bounded by the join limit | Built |
-| A cancel and a takeover aimed at the same activation at once | Both set the same stop mark in one step; whichever lands second finds it stopped | New |
-| A task that never finishes | Its budget, and only its record's sensor pushes slices | New |
-| A yes given in one activation used by a spawned or shared one | Impossible: an approval is used only by its yes's activation | Built (ADR-0321 §4:1) |
-
-## 8. Operations considered and not added
-
-| Operation | Why it isn't a primitive |
+| Part | Amends |
 | --- | --- |
-| **Fork**, a running copy | It doubles the model calls, and the copy could act, so it would send two emails or make two bookings. Barred from acting, it is no longer a copy but a snapshot, which is a share. Trying two approaches and keeping the better one belongs inside a phase (two drafts and a critique), not between activations. |
-| **Split** into equal parts | A person answers a two-part message in one reply and hands off only the long part. That is a spawn. Splitting into peers would give two replies to one message. |
-| **Move** | A copy and the original's removal: a share and a stop in one step, which is a merge (§3). |
-| **Suspend and resume** | A paused activation doesn't survive a restart and holds its place while paused. Ending, then being continued by a spawn or by the next activation, does the same job safely. |
-| **Pause** | A write to the task record; the running slice is stopped. |
-| **Wait for another activation** | The awaited work reports back with a spawn, and the waiting is done by records. |
-| **Cancel and change** | Acts on a pending spawn's record, through the plan store's members, as every activation changes shared state. |
-| **Undo** | A new request (ADR-0295 §4:2). |
-| **Redirect** ("send that to my phone") | Planning chooses an output's place (ADR-0292 §7:2). It is delivery, not an operation between activations. |
-| **Priority and preemption** | A long task runs in short slices on its own place, so nothing needs to be preempted. |
-| **Supersede** ("never mind, do X instead") | A merge before the first act; a cancel across places after it. |
+| **A place ties nothing; speaking anywhere** | ADR-0306's limit of messages to the input's place. This belongs to decision C, with B's narrow interim below. |
+| **Stop by words across places** | ADR-0332 §4:8, where nothing is stopped once the older has committed; ADR-0295 §1:1, §1:4 and §1:5, for this route alone |
+| **Running work shown where the kind declares** | ADR-0292 §11:7 |
+| **The in-progress section for planning, every round** | Planning's document (ADR-0307); ADR-0332 §4:1–§4:3, which drops "other places" and adds spawned activations |
+| **The newest absorbs** | ADR-0332 §3, joining by code, which is replaced; §4:4, where `continues` is narrowed and gains `cancels`; §4:6, where the merge carries findings; §6:5, where the join limit becomes a held-inputs limit |
+| **The conversation waits only after acting** | ADR-0332 §2:3–§2:4; ADR-0292 §11:5; and the controller walk's answer 1 on #3257, which chose one activation at a time within a place and is reversed by the owner here |
+| **The Task Scheduler** | ADR-0340's clock channel and its records, which it replaces |
+| **No authority on any scheduled task** | ADR-0292 §5:6, widened from reminders to every scheduled task |
 
-**The words** are spawn, stop and share, agreed with the owner on 2026-10-21. The owner first
-suggested "kill", and took "stop" instead. "Kill" means abrupt and without cleanup, and taken
-at its word it would drop the record of an act in flight, which is the unknown-outcome
-problem (#2584). "Stop" also already names the mechanism: ADR-0295, ADR-0297, `/stop`, the
-stop control and the record's *stopped*.
+**B's interim, before decision C lands.** An activation the Task Scheduler starts speaks
+only into the place its task states. That narrow widening of ADR-0306 lets B ship before
+speaking becomes a say-call everywhere.
 
-## 9. What it would change
+## Depends on, and beside
 
-| Part | What changes | Amends |
-| --- | --- | --- |
-| **The words** | Spawn, stop, share and merge become the names later decisions use; joining and takeover are restated as merges | Nothing: no behaviour changes |
-| **The rules of §6** | Gathered in one place as the floors every operation keeps | Nothing new, except where the rows below name it |
-| **Cancel across places** | Understanding may name a shown activation the input cancels, and a rule stops it even after it has acted | ADR-0332 §4:8 (*"nothing is stopped"* where it has committed), and ADR-0332 §4:4, which names only `continues`; ADR-0295 §1:1 and §1:4 (a stop is a command, accepted only as a device's structured act) and §1:5 (typed words are never a stop), for this route alone; it answers the item ADR-0332 §9 left to #2515, and ADR-0292 §11:2's end state |
-| **Share by pull** | Understanding may name a running activation it draws on, and a rule copies what it has found | ADR-0332 §2:1 (no activation reads another's state except as §3 and §4 state) and §4:1 (what understanding is shown); ADR-0280 §3:5 (the working set gains the copy). How a copy's outside-content marks count is the outside-content design's |
-| **Spawn** | Every spawn carries no authority; a task is one record whose slices are its occurrences | ADR-0292 §5:6, widened from reminders to every spawn; for ADR-0340, still a draft: §10:1, so that a rule sets the report when a task leaves *running* rather than its last slice |
+- **Decision C, calls onto channels** (its own track). It covers:
+  - every channel the same shape, with at least one place;
+  - a call is a pull, an act, or a direct read or write of the hub's own records;
+  - **speaking as a say-call** with *in reply to*;
+  - a conversation's expected reply as its kind's declared requirement;
+  - planning says what, and each kind's actuator decides how.
 
-**How it might convert.** My pick is one ADR that:
-- names the three operations and merge;
-- states the rules of §6;
-- restates joining and takeover as merges;
-- decides the cancel across places and the share by pull, each built later by its own lane.
-
-ADR-0340 takes one change in its rebased round (§10:1, above). Otherwise its text need not
-change: the new ADR names its reminder and report as spawn's first instances.
-
-The alternative is a words-only ADR now, with the cancel and the share each their own
-decision when a lane needs them. That is cheaper to ratify, but leaves the two behaviours
-without a home for longer.
+  It supersedes ADR-0170's "a reply is not a tool" (#2593).
+- **Modes** (quick, normal, deliberate, "just blurt"), next on this front. A pending
+  "answer the next one quickly" is likely an entry the next activation reads at admission.
 
 ## What it leaves open
 
-- **A reminder in a busy place, for ADR-0340.** The clock admits only when the place is
-  idle (ADR-0340 §3:4), and it wakes on its own interval. Messages that waited are taken in
-  the moment an activation ends (ADR-0332 §2:4), so in a busy chat a medicine reminder can
-  keep losing that race. The simple rule, taken here, is that a due spawn takes its turn in
-  the place's arrival order, admitted as an input of its own and never folded into the
-  person's messages. ADR-0340's rebased round carries it.
-- **How a task asks for a yes,** and how the yes reaches the call it proposed, is the
-  background-work decision's, with the authority design.
-- **Exactly what a share copies.**
-- **Push shares,** where an activation offers what it found to another, wait for a case.
-- **Who may do what.** Shares, merges and cancels between household members, and any
-  permission by device, come later.
-- **A background task's authority.** Whether a task's first yes can cover a stated set of
-  later calls is the owner's authority design (the controller walk's answer 10, on #3257).
-- **Spawns on a condition** (#2585), and what an event's activation may spawn, wait for
-  proactivity.
-- **A task whose starting conversation is deleted.** Its reminders are cancelled
-  (ADR-0340 §4:10). Whether its task is cancelled too belongs to the background-work
-  decision.
-- **Who hears where the matter went** after a takeover or a cancel across places (#2588).
-- **The numbers:** the share limit per activation, and a task's default budget (#2589).
+- **The gaps for the outside-content, privacy and audience work.** These are noted, not
+  closed:
+  - marks must travel on every read of a peer's episode, through the one read function;
+  - shares and merges stay within one person until the household design;
+  - every read is fresh each round, so a forget or deletion is honored (cf. #3319);
+  - the audience where a message lands (#2590).
+- **Which places a creator may name for a scheduled task,** and spawning for other people.
+- **Opening the Task Manager's view to people,** and adding tasks by hand.
+- **Spawns on a condition** (#2585), and what an event's activation may spawn.
+- **What a taken-over place hears** about where the matter went (#2588).
+- **The lock and recheck** for two acts on one thing (#2586).
+- **Batching** unrelated messages into one, if two messages ever feel chatty.
+- **The numbers** (#2589):
+  - the held-inputs limit;
+  - the chain and pending caps;
+  - the in-progress section's size;
+  - the sensor's recheck interval.
 
-## Where the walk stands (2026-10-21)
+## How it converts
 
-| Question | Answer |
-| --- | --- |
-| The words | Spawn, stop and share, with merge as share plus stop (the owner). |
-| Cancel across places | Yes; permission by device comes later (the owner). Decided by understanding and applied by a rule, as takeover is. |
-| Share | The simple version: pull only, reaching what understanding is already shown (the owner's *"simple design that works"*). |
-| A background task | One record whose slices are its occurrences, with one report however it ends, a stop by the person included. It is the simple rule that removes the wrong-moment failures. |
-| A reminder in a busy place | It takes its turn in the place's arrival order. That is the simple rule. Weaving it into a running reply would make whether it was said depend on how that reply was worded. |
-| Conversion | One ADR, as §9's pick, unless the owner says otherwise. |
-
-**Still open:** the ADR's number, which is assigned at conversion, and anything the owner
-finds missing or wrong in the situations above.
+Two ADRs: **A** (§§1–5) and **B** (§§6–11). B depends on A's merge rule for tasks that come
+due together. ADR-0340 is then rewritten on top of B. The numbers come from the
+coordinator at conversion.
