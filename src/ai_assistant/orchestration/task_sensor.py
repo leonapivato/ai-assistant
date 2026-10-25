@@ -191,6 +191,10 @@ class TaskSchedulerSensor:
         self._now = now
         self._woken = asyncio.Event()
         self._stopped = False
+        #: Whether a pushed occurrence may be left unsettled: a restart's settlement that
+        #: could not finish, or a push that failed after its pushed mark was written. The
+        #: loop settles again before each look until none is (§8:1).
+        self._unsettled = False
 
     def wake(self) -> None:
         """Wake the loop: a task was written, or an occurrence ended (§7:2, §7:7)."""
@@ -210,9 +214,13 @@ class TaskSchedulerSensor:
         Raises:
             CancelledError: Where a shutdown cancelled it.
         """
-        await self.settle_restart()
+        self._unsettled = not await self.settle_restart()
         while not self._done():
             self._woken.clear()
+            if self._unsettled:
+                # §8:1: what a store failure left pushed and running nowhere is settled
+                # before anything more is pushed.
+                self._unsettled = not await self.settle_restart()
             wait = await self.look()
             if self._done():
                 return
@@ -249,8 +257,11 @@ class TaskSchedulerSensor:
         except asyncio.CancelledError:
             raise
         except PlanningError:
+            # The pushed mark may have landed: the next look settles what it left.
+            self._unsettled = True
             _log.warning("task_sensor_push_failed", stage="task_sensor", reason="store_failed")
         except Exception as exc:  # the sensor runs as long as the hub: a defect is logged
+            self._unsettled = True
             if is_defect(exc):
                 log_defect("task_sensor_push_failed", exc, stage="task_sensor", activation_id=None)
             else:
@@ -258,35 +269,45 @@ class TaskSchedulerSensor:
 
     # --- after a restart (§8) ---
 
-    async def settle_restart(self) -> None:
+    async def settle_restart(self) -> bool:
         """Settle each pushed occurrence whose activation is not running (§8:1-§8:7).
 
-        Never raises but for a cancellation: an occurrence not settled now stays pushed,
-        and the next start settles it.
+        Never raises but for a cancellation: an occurrence a store failure kept from
+        being settled now stays pushed, and is settled at a later call.
+
+        Returns:
+            Whether every such occurrence was settled.
         """
+        complete = True
         for person in self._persons:
             try:
                 held = await self._plans.person_scheduled_tasks(person, [OccurrenceState.PUSHED])
             except PlanningError:
                 _log.warning("task_restart_unsettled", stage="task_sensor", reason="store_failed")
+                complete = False
                 continue
             for task in held:
                 for one in task.occurrences:
                     activation = one.pushed_to
                     if activation is None or self._is_running(activation):
                         continue
-                    await self._settle_one(task, one, activation)
+                    complete = await self._settle_one(task, one, activation) and complete
+        return complete
 
     async def _settle_one(
         self, task: ScheduledTask, occurrence: ScheduledOccurrence, activation_id: str
-    ) -> None:
+    ) -> bool:
+        """Settle one occurrence; whether it was, a store failure leaving it pushed."""
         try:
             if activation_id in await self._plans.stopped_activations([activation_id]):
                 settled = await self._plans.settle_occurrence(
                     activation_id, OccurrenceState.STOPPED
                 )
             else:
-                await self.confirm(activation_id)
+                if not await self.confirm(activation_id):
+                    # §8:11: a transcript that could not be read is no answer, so nothing
+                    # is settled from a guess: it is read again at a later call.
+                    return False
                 effects = await self._plans.activation_effects([activation_id])
                 record = await self._memory.get(f"activation:{activation_id}")
                 episode = record if isinstance(record, EpisodicMemory) else None
@@ -298,16 +319,22 @@ class TaskSchedulerSensor:
                 )
         except PlanningError, MemoryStoreError:
             _log.warning("task_restart_unsettled", stage="task_sensor", reason="store_failed")
-            return
+            return False
         _log.info("task_restart_settled", stage="task_sensor", task=task.id)
         await self._settled(settled)
+        return True
 
-    async def confirm(self, activation_id: str) -> None:
+    async def confirm(self, activation_id: str) -> bool:
         """Confirm each of the activation's messages whose outcome is unknown (§8:11).
+
+        Returns:
+            Whether every message a kind can confirm was read: ``False`` where a
+            transcript could not be read, which leaves its record as it was.
 
         Raises:
             PlanningError: If the plan store cannot be read or written.
         """
+        complete = True
         for effect in await self._plans.activation_effects([activation_id]):
             if effect.is_call or effect.outcome not in {None, ToolOutcome.INDETERMINATE}:
                 continue
@@ -323,7 +350,9 @@ class TaskSchedulerSensor:
                 _log.warning(
                     "task_delivery_unconfirmed", stage="task_sensor", reason="store_failed"
                 )
+                complete = False
                 continue
             await self._plans.confirm_message_effect(
                 effect.id, delivered=position is not None, position=position
             )
+        return complete

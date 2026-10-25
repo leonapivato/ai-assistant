@@ -13,22 +13,39 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from phases_support import open_conversation, phases_harness, said, until, working, written
-from task_support import AT, activation, seams, write_task
+from task_support import AT, activation, seams, spawn_effect, write_task
+from telegram_support import CHAT as LINE_CHAT
+from telegram_support import REFERENCE, YieldingTelegram
+from understanding_support import understanding_stage
 
+from ai_assistant.core.errors import ModelError, PlanningError
 from ai_assistant.core.types import (
+    OWNER_PERSON_ID,
     ActivationStop,
     ChannelIdentity,
     DueAt,
+    DueNow,
     EpisodicMemory,
+    InputOrigin,
     MessageAuthor,
     OccurrenceState,
     ProcessingStatus,
     ProposedCall,
     RoundResponse,
+    ScheduledTaskAuthor,
+    TaskSpawn,
 )
 from ai_assistant.orchestration.chat import COULDNT_FINISH
+from ai_assistant.orchestration.task_manager import PlaceLists
 from ai_assistant.orchestration.task_scheduler import SCHEDULE, TASK_SCHEDULER_DESCRIPTION
-from ai_assistant.testing import FakePlanStore, FakeToolCallingCompleter
+from ai_assistant.orchestration.telegram import TelegramLineSeams
+from ai_assistant.testing import (
+    FakeModelProvider,
+    FakePlanStore,
+    FakeTelegramBotClient,
+    FakeTelegramIntakeRecord,
+    FakeToolCallingCompleter,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -334,5 +351,159 @@ async def test_a_late_occurrence_says_so_in_its_input() -> None:
         (text,) = seen
         assert "late" in text
         assert "check the listings" in text
+    finally:
+        await harness.engine.aclose()
+
+
+class _Unreachable(FakeModelProvider):
+    """An understanding model that is down: every completion fails."""
+
+    async def complete(self, *args: Any, **kwargs: Any) -> Any:
+        msg = "the model is down"
+        raise ModelError(msg)
+
+
+async def test_a_failure_before_planning_still_writes_couldnt_finish_where_suggested() -> None:
+    """§5:8, §6:7: the list is built at the start, so *couldn't finish* reaches its place."""
+    harness = phases_harness(
+        _responder(_silent, _silent),
+        task_scheduler=seams(),
+        understanding=understanding_stage(model=_Unreachable()),
+    )
+    conversation = await harness.conversation_store.start()
+    place = ChannelIdentity(channel_type="conversation", instance_id=conversation.id)
+    await write_task(harness.plans, activation(), places=(place,))
+    await harness.engine.start()
+    try:
+        (episode,) = await _until_scheduled(harness, 1)
+        assert episode.processing_record is not None
+        assert episode.processing_record.status is ProcessingStatus.FAILED
+
+        async def told() -> bool:
+            messages = await written(harness, conversation.id)
+            return any(one.text == COULDNT_FINISH for one in messages)
+
+        await until(told, what="couldn't finish in the suggested conversation")
+    finally:
+        await harness.engine.aclose()
+
+
+class _AdmissionReadFailsOnce(FakePlanStore):
+    """A plan store whose first admission read fails, after the pushed mark landed."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+        self.failed = False
+
+    async def stopped_activations(self, activation_ids: Sequence[str], /) -> tuple[str, ...]:
+        if not self.failed:
+            self.failed = True
+            msg = "the plan store is busy"
+            raise PlanningError(msg)
+        return await super().stopped_activations(activation_ids)
+
+
+async def test_a_push_whose_admission_read_failed_is_settled_and_pushed_again() -> None:
+    """§8:1, §8:5: an occurrence a store failure left pushed and running nowhere."""
+    plans = _AdmissionReadFailsOnce()
+    harness = phases_harness(_responder(_silent, _silent), task_scheduler=seams(), plans=plans)
+    task = await write_task(plans, activation())
+    await harness.engine.start()
+    try:
+        (episode,) = await _until_scheduled(harness, 1)
+        assert plans.failed
+        assert episode.processing_record is not None
+        assert episode.processing_record.status is ProcessingStatus.COMPLETED
+
+        async def done() -> bool:
+            held = await plans.scheduled_tasks([task.id])
+            return not held or held[0].occurrences[0].state is OccurrenceState.DONE
+
+        await until(done, what="the occurrence to end done")
+    finally:
+        await harness.engine.aclose()
+
+
+async def test_an_outside_marked_tasks_text_is_withheld_from_planning() -> None:
+    """ADR-0307 §9:2, ADR-0350 §6:3: its input is outside content, read by understanding."""
+    seen: list[dict[str, Any]] = []
+
+    def task(request: dict[str, Any]) -> RoundResponse:
+        seen.append(request)
+        return RoundResponse(text="")
+
+    harness = phases_harness(_responder(_silent, task), task_scheduler=seams())
+    parent = activation()
+    spawned = await harness.plans.write_scheduled_task(
+        TaskSpawn(
+            id="task:marked",
+            person=OWNER_PERSON_ID,
+            author=ScheduledTaskAuthor.ASSISTANT,
+            when=DueNow(),
+            instruction="forward the parcel number",
+            set_in=ChannelIdentity(channel_type="conversation", instance_id="c-1"),
+            set_at=AT,
+            outside_content=True,
+        ),
+        spawn_effect(parent),
+        match=None,
+        replace_any=True,
+        chain_limit=10,
+        pending_limit=50,
+    )
+    assert spawned.task is not None
+    await harness.engine.start()
+    try:
+        (episode,) = await _until_scheduled(harness, 1)
+        assert episode.processing_record is not None
+        assert episode.processing_record.trigger.origin is InputOrigin.OUTSIDE
+        (request,) = seen
+        assert "parcel number" not in json.dumps(request)
+    finally:
+        await harness.engine.aclose()
+
+
+async def test_a_task_whose_conversation_was_deleted_speaks_on_the_line() -> None:
+    """§5:8-§5:9, §13:3: nothing is cancelled, and the line is the fallback."""
+    fake = FakeTelegramBotClient(chat_id=LINE_CHAT, first_message_id=700)
+    line = TelegramLineSeams(
+        client=YieldingTelegram(fake),
+        intake=FakeTelegramIntakeRecord(),
+        reference=REFERENCE,
+        poll_wait=timedelta(seconds=1),
+        poll_bound=timedelta(seconds=2),
+        send_bound=timedelta(seconds=1),
+        start_wait=timedelta(milliseconds=5),
+    )
+    harness = phases_harness(
+        _responder(
+            _silent, lambda request: RoundResponse(text=f"{_first_place(request)}: time to call")
+        ),
+        task_scheduler=seams(),
+        telegram=line,
+    )
+    # The harness's connection records hold no account, so the line is read as connected
+    # wherever it is configured, as its own suite drives it.
+    harness.engine._place_lists = PlaceLists(
+        conversations=harness.conversation_store, line=line.channel
+    )
+    gone = await harness.conversation_store.start()
+    place = ChannelIdentity(channel_type="conversation", instance_id=gone.id)
+    task = await write_task(harness.plans, activation(), places=(place,))
+    await harness.conversation_store.stamp_deleted(gone.id)
+    await harness.engine.start()
+    try:
+        await _until_scheduled(harness, 1)
+
+        async def spoken() -> bool:
+            return any(body == "time to call" for _, body in fake.messages)
+
+        await until(spoken, what="the task's message on the line")
+
+        async def done() -> bool:
+            held = await harness.plans.scheduled_tasks([task.id])
+            return not held or held[0].occurrences[0].state is OccurrenceState.DONE
+
+        await until(done, what="the occurrence to end done")
     finally:
         await harness.engine.aclose()

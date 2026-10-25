@@ -2184,6 +2184,9 @@ class Engine:
         #: ADR-0350 §9:10: each id an occurrence is being pushed to and not yet admitted,
         #: with whether a stop named it meanwhile, which refuses its admission.
         self._pushed: dict[str, bool] = {}
+        #: Each activation the Task Scheduler started, from its admission until its
+        #: occurrence's outcome is written (§7:6).
+        self._admitted: set[str] = set()
         if task_scheduler is not None:
             self._wire_task_scheduler(task_scheduler, plans=plans, memory=memory)
         # ADR-0298 §7: the engine's half of the change stream, over the same chat
@@ -6697,8 +6700,16 @@ class Engine:
         return self._task_manager
 
     def _is_live(self, activation_id: str) -> bool:
-        """Whether an activation is running here, or pushed and not yet admitted."""
-        return activation_id in self._pushed or self._running_state(activation_id) is not None
+        """Whether an activation is running here, pushed and not yet admitted, or ending.
+
+        One the Task Scheduler started counts until its occurrence's outcome is written,
+        so a later settlement never settles it twice (§7:6, §8:1).
+        """
+        return (
+            activation_id in self._pushed
+            or activation_id in self._admitted
+            or self._running_state(activation_id) is not None
+        )
 
     def _wake_sensor(self) -> None:
         if self._task_sensor is not None:
@@ -6870,6 +6881,7 @@ class Engine:
             deadline=deadline,
         )
         # Admitted: the activation is among those running from here (eager start).
+        self._admitted.add(activation_id)
         self._pushed.pop(activation_id, None)
         self._spawn_read(self._task_ended(work, state, activation_id))
 
@@ -6885,6 +6897,17 @@ class Engine:
         *stopped* where a stop ended it, and *interrupted* otherwise. A shutdown's
         cancellation writes nothing: the next start settles it (§8).
         """
+        try:
+            await self._settle_ended(work, state, activation_id)
+        finally:
+            self._admitted.discard(activation_id)
+
+    async def _settle_ended(
+        self,
+        work: asyncio.Task[tuple[None, EpisodeCaptureReport | None]],
+        state: ActivationState,
+        activation_id: str,
+    ) -> None:
         failure: BaseException | None = None
         try:
             await work
@@ -6958,7 +6981,9 @@ class Engine:
             lineage=tuple(
                 PlaceItem(
                     author=PlaceAuthor.TASK_SCHEDULER,
-                    text=text if one.current else one.text,
+                    # ADR-0307 §9:2, ADR-0350 §6:3: a task carrying the outside-content
+                    # mark is shown withheld, and reaches planning through understanding.
+                    text=text if one.current and not task.outside_content else one.text,
                     at=one.at,
                     is_input=one.current,
                     episode_id=one.episode_id,
@@ -6966,7 +6991,16 @@ class Engine:
                 for one in steps
             ),
         )
-        working_phases.scheduling = self._scheduling(state, SCHEDULE, task)
+        scheduling = self._scheduling(state, SCHEDULE, task)
+        if scheduling is not None:
+            # ADR-0350 §5:8: the place list is built at the activation's start, so a stage
+            # failing before planning still writes *couldn't finish* into its suggested
+            # places (§6:7); each planning round builds it again.
+            scheduling.places, scheduling.targets = await scheduling.build()
+            working_phases.place = replace(
+                working_phases.place, takes_message=bool(scheduling.targets)
+            )
+        working_phases.scheduling = scheduling
         event = _TaskPass(
             input=resolved,
             deadline=deadline,
