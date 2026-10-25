@@ -200,6 +200,12 @@ _CONFIRM_WORDING: Final = "the user is asked to confirm this wording before it i
 #: ADR-0338 §8:5: a change to the person's profile or pins, which runs only on their yes.
 _PERSON_MODEL_YES: Final = "a change to the person's profile or pins runs only on their yes"
 _ELSEWHERE: Final = "a round's message goes only into the place its input came from"
+#: ADR-0350 §6:7: the reason a message of an activation the Task Scheduler started is
+#: refused where it names no place on its place list.
+_OFF_THE_LIST: Final = (
+    "a message of an activation the Task Scheduler started goes only into the one place on "
+    "its place list that it names by its place label"
+)
 _UNKNOWN_REPEAT: Final = (
     "a deliberate repeat of a call whose earlier outcome is unknown or not yet written "
     "needs the user's yes"
@@ -266,11 +272,12 @@ class RoundMessage:
 
     Attributes:
         text: The message's text.
-        place: The place it would go into.
+        place: The place it would go into; ``None`` where a message of an activation the
+            Task Scheduler started names no place on its list (ADR-0350 §6:7).
     """
 
     text: str
-    place: str
+    place: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,6 +398,9 @@ class RoundToAuthorize:
         yes: The yes the activation's input carries, where understanding recorded a
             pointer (ADR-0321 §3:1, ADR-0322 §2:1); ``None`` where it recorded none, and
             then no call runs under an approval (§4:5).
+        places: For an activation the Task Scheduler started, the places on its place
+            list as built for the round, which its message may go into in place of the
+            place its input came from (ADR-0350 §6:7); ``None`` for every other.
 
     Raises:
         ValueError: If two calls share a call id, or a call is not one the round
@@ -406,6 +416,7 @@ class RoundToAuthorize:
     input_place: str | None = None
     message: RoundMessage | None = None
     yes: YesContext | None = None
+    places: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         """Each call is one the round proposed, once."""
@@ -481,14 +492,14 @@ class MessageVerdict:
     """What authorizing made of the round's message (ADR-0306 §4:7).
 
     Attributes:
-        place: The place it would go into.
+        place: The place it would go into, or ``None`` where it names none.
         allowed: Whether it may be written there.
         effect_id: The effect record it is to be claimed under, where it is allowed
             (ADR-0306 §5:3).
         reason: Why it is not allowed; ``None`` where it is.
     """
 
-    place: str
+    place: str | None
     allowed: bool
     effect_id: str | None = None
     reason: str | None = None
@@ -858,8 +869,11 @@ def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
             for one in given.calls
         ),
         input_place=None if given.input_place is None else str(given.input_place),
-        message=None if message is None else RoundMessage(str(message.text), str(message.place)),
+        message=None
+        if message is None
+        else RoundMessage(str(message.text), None if message.place is None else str(message.place)),
         yes=_detached_yes(given.yes),
+        places=None if given.places is None else tuple(str(one) for one in given.places),
     )
 
 
@@ -1849,7 +1863,20 @@ class AuthorizingStage:
         message = snapshot.message
         if message is None:
             return None
-        if snapshot.input_place is None or message.place != snapshot.input_place:
+        if snapshot.places is not None:
+            # ADR-0350 §6:7: the one place on its list it names, a place gone since the
+            # list was built included, and none off it.
+            if message.place is None or message.place not in snapshot.places:
+                _log.info("authorizing_message_not_allowed", stage="authorizing")
+                return MessageVerdict(place=message.place, allowed=False, reason=_OFF_THE_LIST)
+            return MessageVerdict(
+                place=message.place, allowed=True, effect_id=self._new_effect_id()
+            )
+        if (
+            snapshot.input_place is None
+            or message.place is None
+            or message.place != snapshot.input_place
+        ):
             _log.info("authorizing_message_not_allowed", stage="authorizing")
             return MessageVerdict(place=message.place, allowed=False, reason=_ELSEWHERE)
         return MessageVerdict(place=message.place, allowed=True, effect_id=self._new_effect_id())

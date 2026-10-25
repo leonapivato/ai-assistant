@@ -54,6 +54,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final, TypeVar, cast
+from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -88,11 +89,13 @@ from ai_assistant.core.types import (
     Belief,
     BeliefSummary,
     ChannelContext,
+    ChannelContextItem,
     ChannelIdentity,
     ChannelInput,
     ChannelResult,
     ControllerStage,
     ConversationSummary,
+    DueAfterTasks,
     EpisodeCaptureReport,
     EpisodeChunk,
     EpisodePage,
@@ -105,11 +108,14 @@ from ai_assistant.core.types import (
     MessageAuthor,
     Modality,
     NotificationDelivery,
+    OccurrencePush,
+    OccurrenceState,
     PendingCandidate,
     Placement,
     PlacementReach,
     PlacementSetter,
     ProcessingStatus,
+    ProvisioningState,
     RecallOutcome,
     RecordedInputMessage,
     ReplyCapability,
@@ -155,10 +161,12 @@ from ai_assistant.orchestration.activation_state import (
     ActivationState,
     active_state,
     admit_channel,
+    terminal_status,
 )
 from ai_assistant.orchestration.activation_writer import capture_loss
 from ai_assistant.orchestration.candidates import held_candidates
 from ai_assistant.orchestration.change_stream import Activity, ChangeStream
+from ai_assistant.orchestration.channel_kinds import place_of
 from ai_assistant.orchestration.channels import (
     UNCAPTURED,
     ChannelProjection,
@@ -167,6 +175,7 @@ from ai_assistant.orchestration.channels import (
 )
 from ai_assistant.orchestration.chat import (
     CHAT_TURN_BUDGET,
+    CHAT_WINDOW_SIZE,
     DEFAULT_CHAT_COMPOSING_CAP,
     DEFAULT_CHAT_COMPOSING_LAPSE,
     DEFAULT_CHAT_START_WAIT,
@@ -198,7 +207,7 @@ from ai_assistant.orchestration.disclosure import (
     TurnSupply,
     notification_is_speakable,
 )
-from ai_assistant.orchestration.episode_reads import fit_chunk, fit_page
+from ai_assistant.orchestration.episode_reads import fit_chunk, fit_page, without_open_episodes
 from ai_assistant.orchestration.joining import (
     DEFAULT_JOIN_LIMIT,
     JoinCheck,
@@ -224,7 +233,8 @@ from ai_assistant.orchestration.payloads import (
     positive_page_argument,
 )
 from ai_assistant.orchestration.person_block import activation_person, still_held
-from ai_assistant.orchestration.phase_path import PlaceTarget, failing_stage
+from ai_assistant.orchestration.phase_path import PlaceTarget, Scheduling, failing_stage
+from ai_assistant.orchestration.planning import PlaceAuthor, PlaceItem
 from ai_assistant.orchestration.recall import Recalled
 from ai_assistant.orchestration.speech import (
     DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
@@ -245,6 +255,21 @@ from ai_assistant.orchestration.support_parts import (
     part_content,
     remember_activations,
 )
+from ai_assistant.orchestration.task_manager import (
+    PlaceLists,
+    ScheduledTaskCalls,
+    TaskManager,
+    TaskSchedulerSeams,
+)
+from ai_assistant.orchestration.task_scheduler import (
+    SCHEDULE,
+    SPAWNING_KINDS,
+    LineageStep,
+    ListedPlace,
+    lineage_steps,
+    task_input,
+)
+from ai_assistant.orchestration.task_sensor import SensorLimits, TaskSchedulerSensor
 from ai_assistant.orchestration.telegram import (
     LINE_GIVER,
     TELEGRAM,
@@ -291,6 +316,7 @@ if TYPE_CHECKING:
         ConnectionAct,
         Conversation,
         ConversationDigest,
+        DueOccurrence,
         EncodableText,
         GrantableSource,
         GrantScope,
@@ -309,6 +335,7 @@ if TYPE_CHECKING:
         ProfileField,
         RecordedInvocation,
         RequestingDevice,
+        ScheduledTask,
         SecretValue,
         SourceGrant,
         SourceReadRecord,
@@ -1080,6 +1107,23 @@ class _EventPass(_ActivationPass):
         return False
 
 
+@dataclass(slots=True)
+class _TaskPass(_EventPass):
+    """ADR-0280 §3's working set for an activation a scheduled task started (ADR-0350 §6).
+
+    An event's shape, its channel window the schedule's place window, the task's lineage
+    (§6:5), with the episodes its input links to: its task's parent's and those of the
+    tasks its task waited on, which the episode window shows wherever they are frozen.
+    """
+
+    linked: tuple[str, ...] = ()
+
+    @property
+    def informational_event(self) -> bool:
+        """Never: a scheduled task's activation is no event's."""
+        return False
+
+
 def _resolved_turn(working: _TurnPass) -> ResolvedChannelInput:
     """The turn's resolved input, which every stage after the first reads.
 
@@ -1436,7 +1480,7 @@ class Engine:
     concretes (ADR-0042 §2).
     """
 
-    def __init__(  # noqa: PLR0913, PLR0915 — one parameter per injected collaborator plus its knobs, and one assignment or wiring check per parameter
+    def __init__(  # noqa: C901, PLR0913, PLR0915 — one parameter per injected collaborator plus its knobs, and one assignment or wiring check per parameter
         self,
         *,
         plans: PlanStore,
@@ -1488,6 +1532,7 @@ class Engine:
         telegram: TelegramLineSeams | None = None,
         observer: Observer | None = None,
         person_blocks: PersonBlocks | None = None,
+        task_scheduler: TaskSchedulerSeams | None = None,
     ) -> None:
         """Wire the façade from injected collaborators.
 
@@ -1862,6 +1907,11 @@ class Engine:
                 given one, assembled once before understanding (§2:2-§2:4), and the
                 phases are attached to it, so planning is offered ``set_profile``, ``pin``
                 and ``unpin`` (§8:4); with none, they are not offered.
+            task_scheduler: The Task Scheduler's settings (ADR-0350 §12:5), or ``None``,
+                the default, for an engine with no Task Scheduler. Wired, its sensor is
+                the engine's long-running task, started with the hub and stopped with it
+                (§7:1); planning is offered spawn, cancel and the list pull (§4:1); and a
+                stop cascades (§9:6). It is refused without the phases.
 
         Raises:
             TypeError: If ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is
@@ -2064,6 +2114,8 @@ class Engine:
                 # ADR-0332 §3, §5: a message written while an activation runs joins it
                 # where it may, and one where nothing runs waits a moment first.
                 join=self._reserve_join,
+                # ADR-0350 §9:1: a message a task's activation wrote links to it too.
+                writers=self._task_writers,
                 start_wait=chat_start_wait,
                 composing_lapse=chat_composing_lapse,
                 composing_cap=chat_composing_cap,
@@ -2116,7 +2168,23 @@ class Engine:
                 # ADR-0323 §4:13, §10: the window's messages, and a quoted one, link
                 # to the activation that wrote them, by their effect records.
                 written=self._phases.written_in,
+                # ADR-0350 §9:1: and so do the messages a task's activation wrote here.
+                elsewhere=self._schedule_episodes,
             )
+        # ADR-0350 §7, §10: the Task Scheduler's sensor and its Task Manager, wired only
+        # beside the phases, which plan every activation a task starts.
+        self._telegram_seams = telegram
+        self._task_manager: TaskManager | None = None
+        self._task_sensor: TaskSchedulerSensor | None = None
+        self._place_lists: PlaceLists | None = None
+        self._task_started = False
+        self._task_zone = ZoneInfo("UTC")
+        self._lateness_grace = timedelta(0)
+        #: ADR-0350 §9:10: each id an occurrence is being pushed to and not yet admitted,
+        #: with whether a stop named it meanwhile, which refuses its admission.
+        self._pushed: dict[str, bool] = {}
+        if task_scheduler is not None:
+            self._wire_task_scheduler(task_scheduler, plans=plans, memory=memory)
         # ADR-0298 §7: the engine's half of the change stream, over the same chat
         # space and the same account of what runs as ``conversation`` reads.
         self._change_stream = ChangeStream(
@@ -2224,6 +2292,11 @@ class Engine:
         if self._telegram_reader is not None and not self._telegram_started:
             self._telegram_started = True
             self._spawn_read(self._telegram_reader.run())
+        # ADR-0350 §7:1, §8:1: the Task Scheduler's sensor starts once the dead process's
+        # open episodes are closed, and settles what a restart cut off before it pushes.
+        if self._task_sensor is not None and not self._task_started:
+            self._task_started = True
+            self._spawn_read(self._task_sensor.run())
         if self._notification_outbox is not None:
             await self._recover_leases_once()
             await self._notification_outbox.reconcile()
@@ -2857,7 +2930,28 @@ class Engine:
         activation is found and its mark set in the one synchronous step that tests
         whether it has ended.
         """
-        running = next(
+        running = self._running_state(activation_id)
+        cascades = self._task_manager is not None
+        if running is not None:
+            if not running.stop():
+                return ActivationStop.ALREADY_ENDED
+            # §3:4: only once the mark is set is the record written. ADR-0350 §9:6: a
+            # stop command first writes its cascade record, then stops the activation.
+            if cascades:
+                await self._plans.record_cascade(activation_id)
+            await self._plans.record_stop(activation_id)
+            await self._cascade(activation_id)
+            return ActivationStop.STOPPED
+        if cascades and await self._stop_pushed(activation_id, cascade=True):
+            return ActivationStop.STOPPED
+        episode = await self._memory.get(f"activation:{activation_id}")
+        return (
+            ActivationStop.NO_SUCH_ACTIVATION if episode is None else ActivationStop.ALREADY_ENDED
+        )
+
+    def _running_state(self, activation_id: str) -> ActivationState | None:
+        """The running activation by that id, where this engine holds one."""
+        return next(
             (
                 one.state
                 for one in self._running
@@ -2865,16 +2959,49 @@ class Engine:
             ),
             None,
         )
+
+    async def _stop_pushed(self, activation_id: str, *, cascade: bool) -> bool:
+        """Stop an activation the Task Scheduler pushed and has not admitted (ADR-0350 §9:10).
+
+        Its stop record is written, so admission refuses it, and the sensor's admission
+        reads the mark set here first, so nothing starts. A stop command's cascade record
+        is written first (§9:6).
+
+        Returns:
+            Whether an occurrence was pushed to it.
+        """
+        pending = activation_id in self._pushed
+        if pending:
+            self._pushed[activation_id] = True
+        if cascade and pending:
+            await self._plans.record_cascade(activation_id)
+        pushed = await self._plans.stop_pushed_activation(activation_id)
+        if cascade and pushed and not pending:
+            await self._plans.record_cascade(activation_id)
+        if cascade and (pending or pushed):
+            await self._cascade(activation_id)
+        return pending or pushed
+
+    async def _stop_one(self, activation_id: str) -> ActivationStop:
+        """Stop one running or pushed activation, as a stop does, with no cascade (§9:6).
+
+        The cascade's walk stops each activation it finds below a stopped one this way:
+        the cascade record above them already keeps everything below from being pushed.
+        """
+        running = self._running_state(activation_id)
         if running is not None:
             if not running.stop():
                 return ActivationStop.ALREADY_ENDED
-            # §3:4: only once the mark is set is the record written.
             await self._plans.record_stop(activation_id)
             return ActivationStop.STOPPED
-        episode = await self._memory.get(f"activation:{activation_id}")
-        return (
-            ActivationStop.NO_SUCH_ACTIVATION if episode is None else ActivationStop.ALREADY_ENDED
-        )
+        if await self._stop_pushed(activation_id, cascade=False):
+            return ActivationStop.STOPPED
+        return ActivationStop.NO_SUCH_ACTIVATION
+
+    async def _cascade(self, activation_id: str) -> None:
+        """The stop's walk below ``activation_id`` (ADR-0350 §9:6), where it is wired."""
+        if self._task_manager is not None:
+            await self._task_manager.cascade(activation_id)
 
     async def episodes(
         self,
@@ -5874,6 +6001,9 @@ class Engine:
             # ADR-0323 §11:11: a poll the line holds open ends now, its record unknown;
             # an activation it runs is drained as any other.
             self._telegram_reader.close()
+        if self._task_sensor is not None:
+            # ADR-0350 §7:1: the sensor stops with the hub; what it admitted is drained.
+            self._task_sensor.close()
         if self._shutdown is None:
             self._shutdown = asyncio.ensure_future(self._drain_and_close())
         await asyncio.shield(self._shutdown)
@@ -6323,6 +6453,9 @@ class Engine:
             input=resolved,
             activation=state,
         )
+        if working.phases is not None:
+            # ADR-0350 §3:4: a person's activation on the line is offered spawn.
+            working.phases.scheduling = self._scheduling(state, taken.channel)
         stages: list[ControllerStageRun[_TurnPass]] = [
             Stage(ControllerStage.WINDOWS, self._windows_stage, expired=_windows_expired),
             phases.recall_stage(
@@ -6390,6 +6523,12 @@ class Engine:
             ),
             activation=state,
         )
+        if working.phases is not None:
+            # ADR-0350 §3:4: a person's conversation is offered spawn.
+            working.phases.scheduling = self._scheduling(
+                state,
+                ChannelIdentity(channel_type="conversation", instance_id=taken.conversation_id),
+            )
         stages: list[ControllerStageRun[_TurnPass]] = [
             Stage(ControllerStage.BEGIN_CONVERSATION, self._begin_conversation_stage),
             Stage(ControllerStage.WINDOWS, self._windows_stage, expired=_windows_expired),
@@ -6494,6 +6633,422 @@ class Engine:
         self._checked(projection.terminal(result), projection.method)
         return result
 
+    # --- the Task Scheduler (ADR-0350) ---
+
+    def _wire_task_scheduler(
+        self, seams: TaskSchedulerSeams, *, plans: PlanStore, memory: MemoryStore
+    ) -> None:
+        """Build the sensor, the Task Manager and the place lists, and offer the calls.
+
+        Raises:
+            ConfigurationError: If the phases are not wired, which plan every activation
+                a task starts.
+        """
+        phases = self._phases
+        if phases is None:
+            msg = (
+                "the Task Scheduler's activations run through the phases, so it is wired "
+                "only beside them (ADR-0350 §6, ADR-0309 §2:6)"
+            )
+            raise ConfigurationError(msg)
+        self._task_zone = ZoneInfo(seams.zone)
+        self._lateness_grace = seams.lateness_grace
+        self._task_manager = TaskManager(
+            plans=plans,
+            memory=memory,
+            running=lambda: (one.state for one in self._running if one.state is not None),
+            is_running=self._is_live,
+            stop_one=self._stop_one,
+            wake=self._wake_sensor,
+            limits=seams.limits,
+            zone=self._task_zone,
+            now=self._clock,
+        )
+        self._task_sensor = TaskSchedulerSensor(
+            plans=plans,
+            memory=memory,
+            conversations=self._conversations.chat_space,
+            push=self._push_occurrence,
+            is_running=self._is_live,
+            settled=self._occurrence_settled,
+            closing=lambda: self._closing,
+            persons=seams.persons,
+            limits=SensorLimits(recheck=seams.recheck, push_limit=seams.push_limit),
+            now=self._clock,
+        )
+        line = self._telegram_seams
+        self._place_lists = PlaceLists(
+            conversations=self._conversations.chat_space,
+            line=None if line is None else line.channel,
+            line_connected=None if line is None else self._line_connected,
+        )
+        phases.attach_task_scheduler(
+            ScheduledTaskCalls(manager=self._task_manager, now=self._clock)
+        )
+
+    @property
+    def task_manager(self) -> TaskManager | None:
+        """The Task Manager (ADR-0350 §10), or ``None`` where no Task Scheduler is wired.
+
+        Concrete surface, not ``AssistantEngine``'s (§10:6): no adapter reaches it until
+        the decision that opens its view brings its operations to the local API.
+        """
+        return self._task_manager
+
+    def _is_live(self, activation_id: str) -> bool:
+        """Whether an activation is running here, or pushed and not yet admitted."""
+        return activation_id in self._pushed or self._running_state(activation_id) is not None
+
+    def _wake_sensor(self) -> None:
+        if self._task_sensor is not None:
+            self._task_sensor.wake()
+
+    async def _line_connected(self) -> bool:
+        """Whether the line's connection is active (ADR-0350 §5:8, ADR-0323 §3:7)."""
+        line = self._telegram_seams
+        if line is None:
+            return False
+        accounts = await self._connections.connected()
+        return any(
+            one.reference == line.reference and one.state is ProvisioningState.ACTIVE
+            for one in accounts
+        )
+
+    def _scheduling(
+        self,
+        state: ActivationState | None,
+        set_in: ChannelIdentity,
+        task: ScheduledTask | None = None,
+    ) -> Scheduling | None:
+        """What an activation offered spawn holds of the Task Scheduler (ADR-0350 §3:4).
+
+        Offered only to an activation that is a person's and was started from a
+        conversation, from the line or by the Task Scheduler; ``None`` otherwise, and
+        where no Task Scheduler is wired.
+        """
+        lists = self._place_lists
+        person = None if state is None else activation_person(state.trigger)
+        if lists is None or person is None or set_in.channel_type not in SPAWNING_KINDS:
+            return None
+        suggested = None if task is None else [place_of(one) for one in task.places]
+        input_place = None if task is not None else set_in
+
+        async def build() -> tuple[tuple[ListedPlace, ...], dict[str, PlaceTarget]]:
+            places = await lists.shown(input_place=input_place, suggested=suggested)
+            targets = {
+                one.place: target
+                for one in places
+                if (target := self._place_target(one.channel)) is not None
+            }
+            return places, targets
+
+        return Scheduling(person=person, set_in=set_in, build=build, task=task)
+
+    def _place_target(self, channel: ChannelIdentity) -> PlaceTarget | None:
+        """A place on a place list, with its writer: the hub chat's, or the line's."""
+        phases = self._phases
+        if channel.channel_type == "conversation" and phases is not None:
+            return phases.conversation_target(channel.instance_id)
+        writer = self._telegram_writer
+        if writer is not None and channel.channel_type == TELEGRAM.channel_type:
+            return PlaceTarget(channel=channel, writer=writer.for_place(channel))
+        return None
+
+    async def _task_writers(self) -> tuple[str, ...]:
+        """The activations the Task Scheduler started lately, which may be a message's writer.
+
+        ADR-0350 §9:1: a message such an activation wrote into a place a reader's window
+        shows links to it. Those running, and those frozen on the schedule.
+        """
+        if self._task_manager is None:
+            return ()
+        running = [
+            one.state.activation_id
+            for one in self._running
+            if one.state is not None
+            and one.state.activation_id is not None
+            and one.state.place == SCHEDULE
+        ]
+        return (
+            *running,
+            *(
+                one.processing_record.activation_id
+                for one in await self._schedule_episodes()
+                if one.processing_record is not None
+            ),
+        )
+
+    async def _schedule_episodes(self) -> tuple[EpisodicMemory, ...]:
+        """The schedule's recent frozen episodes, newest last (ADR-0350 §7:9, §9:1)."""
+        if self._task_manager is None:
+            return ()
+        try:
+            page = await self._memory.channel_episodes(SCHEDULE, limit=CHAT_WINDOW_SIZE)
+        except MemoryStoreError:
+            _log.warning("schedule_episodes_unread", stage="reader", reason="store_failed")
+            return ()
+        return tuple(
+            one.record
+            for one in page.entries
+            if one.record.processing_record is not None and not one.record.processing_record.is_open
+        )
+
+    async def _push_occurrence(self, due: DueOccurrence) -> None:
+        """Push one due occurrence, and admit its activation unless it is stopped (§7:5).
+
+        The id the activation will be admitted under is minted and held here before the
+        pushed mark is written, so a stop naming it meanwhile is noted; the mark is
+        written in one store step that refuses where the occurrence is no longer pending
+        or its lineage carries a cascade record. Admission then refuses an id carrying a
+        stop record (§9:10), read with nothing awaited between that check and the
+        admission, so nothing starts that a stop named.
+        """
+        if self._closing:
+            return
+        activation_id = self._chat_activation_id()
+        self._pushed[activation_id] = False
+        try:
+            answer = await self._plans.mark_occurrence_pushed(
+                due.task.id, due.number, activation_id
+            )
+            if answer is not OccurrencePush.PUSHED:
+                self._pushed.pop(activation_id, None)
+                if answer is OccurrencePush.CASCADE_CANCELLED and self._task_manager is not None:
+                    self._wake_sensor()
+                    await self._task_manager.tidy([due.task.id])
+                return
+            stopped = activation_id in await self._plans.stopped_activations([activation_id])
+        except BaseException:
+            self._pushed.pop(activation_id, None)
+            raise
+        pushed_at = self._now()
+        if stopped or self._pushed.get(activation_id, False):
+            self._pushed.pop(activation_id, None)
+            settled = await self._plans.settle_occurrence(activation_id, OccurrenceState.STOPPED)
+            await self._occurrence_settled(settled)
+            return
+        try:
+            self._admit_task(due, activation_id, pushed_at=pushed_at)
+        except RuntimeError:
+            # The engine began closing: left pushed, the next start settles it (§8:5).
+            self._pushed.pop(activation_id, None)
+            if not self._is_closing():
+                raise
+
+    def _is_closing(self) -> bool:
+        return self._closing
+
+    def _admit_task(self, due: DueOccurrence, activation_id: str, *, pushed_at: datetime) -> None:
+        """Admit the activation an occurrence starts, in one synchronous step (ADR-0350 §6).
+
+        Its input is the task's, stated by the hub (§6:2), on the schedule; its origin is
+        what the register declares for it, ``outside`` where the task carries the mark
+        (§6:3). It runs side by side with every other activation (§2:6), as the line's
+        and the chat's do, and its outcome is written on its occurrence once it ends.
+        """
+        task = due.task
+        occurrence = task.occurrence(due.number)
+        assert occurrence is not None  # noqa: S101 — the store pushed this occurrence
+        due_at = occurrence.due_at
+        late = due_at is not None and pushed_at - due_at > self._lateness_grace
+        text = task_input(task, occurrence, self._task_zone, late_at=pushed_at if late else None)
+        state = admit_channel(
+            ChannelInput(target=SCHEDULE, payload=TextChannelPayload(text=text)),
+            None,
+            clock=self._now,
+            id_factory=lambda: activation_id,
+            stage_limit=self._stage_record_limit,
+            carries_outside_mark=task.outside_content,
+        )
+        deadline = asyncio.get_running_loop().time() + self._chat_turn_budget.total_seconds()
+        work = self._activation_task(
+            ActivationScope(state),
+            lambda: self._task_turn(task, activation_id, deadline),
+            seam="task_scheduler",
+            check_output=_unchecked,
+            deadline=deadline,
+        )
+        # Admitted: the activation is among those running from here (eager start).
+        self._pushed.pop(activation_id, None)
+        self._spawn_read(self._task_ended(work, state, activation_id))
+
+    async def _task_ended(
+        self,
+        work: asyncio.Task[tuple[None, EpisodeCaptureReport | None]],
+        state: ActivationState,
+        activation_id: str,
+    ) -> None:
+        """Write the occurrence's outcome from how its activation ended (ADR-0350 §7:6).
+
+        *done* where its episode froze completed, *couldn't finish* where it froze failed,
+        *stopped* where a stop ended it, and *interrupted* otherwise. A shutdown's
+        cancellation writes nothing: the next start settles it (§8).
+        """
+        failure: BaseException | None = None
+        try:
+            await work
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # every ending is the occurrence's outcome
+            failure = exc
+            if not isinstance(exc, ActivationStoppedError):
+                _log_chat_failure(exc, state=state, marked=True, reader="task_scheduler")
+        if state.stopped:
+            outcome = OccurrenceState.STOPPED
+        else:
+            status, _ = terminal_status(state, failure)
+            outcome = {
+                ProcessingStatus.COMPLETED: OccurrenceState.DONE,
+                ProcessingStatus.FAILED: OccurrenceState.COULDNT_FINISH,
+            }.get(status, OccurrenceState.INTERRUPTED)
+        try:
+            settled = await self._plans.settle_occurrence(activation_id, outcome)
+        except PlanningError:
+            _log.warning("task_outcome_unwritten", stage="task_scheduler", reason="store_failed")
+            return
+        await self._occurrence_settled(settled)
+
+    async def _occurrence_settled(self, task: ScheduledTask) -> None:
+        """An occurrence ended: wake the sensor, and tidy its task away (§7:7, §7:8)."""
+        self._wake_sensor()
+        if self._task_manager is not None:
+            await self._task_manager.tidy([task.id])
+
+    def _parent_ended(self, scope: ActivationScope) -> None:
+        """An activation ended: the tasks it spawned may now be removed (§7:8)."""
+        manager = self._task_manager
+        state = scope.state
+        if manager is None or state is None or state.activation_id is None or self._closing:
+            return
+        self._spawn_read(manager.parent_ended(state.activation_id))
+
+    async def _task_turn(self, task: ScheduledTask, activation_id: str, deadline: float) -> None:
+        """An activation a scheduled task started, planned by the phases (ADR-0350 §6).
+
+        Its channel window is the schedule's place window, its task's lineage (§6:5),
+        and its episode window shows the episodes its input links to. It is an ordinary
+        activation beyond its place list (§6:10): the windows, recall, understanding and
+        the story links run as on an event's pass, then recall's second run and the four
+        phase stages, and its messages go only into places on its list (§6:7).
+        """
+        phases = self._phases
+        assert phases is not None  # noqa: S101 — the Task Scheduler is wired only beside them
+        state = active_state()
+        trigger = None if state is None else state.trigger
+        steps, linked = await self._lineage(task, activation_id)
+        payload = None if trigger is None else trigger.payload
+        text = payload.text if isinstance(payload, TextChannelPayload) else task.instruction
+        resolved = ResolvedChannelInput(
+            channel=SCHEDULE,
+            text=text,
+            modality=Modality.TEXT,
+            context=ChannelContext(
+                history=tuple(
+                    ChannelContextItem(
+                        text=one.text, item_id=one.episode_id, source="the Task Scheduler"
+                    )
+                    for one in steps
+                )
+            ),
+        )
+        working_phases = phases.begin_task(
+            activation_id=activation_id,
+            trigger_origin=None if trigger is None else trigger.origin,
+            lineage=tuple(
+                PlaceItem(
+                    author=PlaceAuthor.TASK_SCHEDULER,
+                    text=text if one.current else one.text,
+                    at=one.at,
+                    is_input=one.current,
+                    episode_id=one.episode_id,
+                )
+                for one in steps
+            ),
+        )
+        working_phases.scheduling = self._scheduling(state, SCHEDULE, task)
+        event = _TaskPass(
+            input=resolved,
+            deadline=deadline,
+            # The schedule is private (§2:4), so a record placed for the owner alone may
+            # be shown (ADR-0307 §6:4).
+            supply=BoundedAudienceSupply(
+                speakable_attested_sources=self._speakable_attested_sources
+            ),
+            understanding_wired=self._understanding is not None,
+            recall_wired=self._recall is not None,
+            story_links_wired=self._story_links is not None,
+            phases=working_phases,
+            activation=state,
+            linked=linked,
+        )
+        stages: list[ControllerStageRun[_EventPass]] = [
+            Stage(ControllerStage.WINDOWS, self._windows_stage, expired=_windows_expired),
+            phases.recall_stage(
+                TolerantStage(ControllerStage.RECALL, self._recall_stage, expired=_recall_expired),
+                self._recall,
+            ),
+            Stage(
+                ControllerStage.UNDERSTANDING,
+                self._phases_event_understanding_stage,
+                expired=_turn_expired,
+            ),
+            TolerantStage(
+                ControllerStage.STORY_LINKS, self._story_links_stage, expired=_story_links_expired
+            ),
+            Stage(ControllerStage.TAKEOVER, self._takeover_stage, expired=_takeover_expired),
+            *phases.stages(),
+        ]
+        await phases.run(event, lambda: self._controlled(event, stages), state=state)
+
+    async def _lineage(
+        self, task: ScheduledTask, activation_id: str
+    ) -> tuple[tuple[LineageStep, ...], tuple[str, ...]]:
+        """The schedule's window for ``activation_id``, and the episodes its input links to.
+
+        The lineage is read from the tasks the Task Scheduler keeps (§6:5, §7:8); the
+        links are its task's parent's episode and each waited-on task's (§6:5). A store
+        that cannot be read leaves the current step alone, and links nothing it could not
+        read.
+        """
+        try:
+            lineage = await self._plans.scheduled_lineage(activation_id)
+            waited = (
+                await self._plans.scheduled_tasks(task.when.tasks)
+                if isinstance(task.when, DueAfterTasks)
+                else ()
+            )
+        except PlanningError:
+            _log.warning("task_lineage_unread", stage="task_scheduler", reason="store_failed")
+            lineage, waited = (task,), ()
+        lineage = lineage or (task,)
+        linked = (
+            f"activation:{task.parent}",
+            *(f"activation:{one.activations[-1]}" for one in waited if one.activations),
+        )
+        addresses = sorted(
+            {
+                f"activation:{one}"
+                for one in (
+                    lineage[0].parent,
+                    *(each.activations[-1] for each in lineage if each.activations),
+                )
+            }
+            | set(linked)
+        )
+        try:
+            found = without_open_episodes(await self._memory.get_many(addresses))
+        except MemoryStoreError:
+            _log.warning("task_lineage_unread", stage="task_scheduler", reason="store_failed")
+            found = {}
+        episodes = {
+            address: record
+            for address, record in found.items()
+            if isinstance(record, EpisodicMemory)
+        }
+        return lineage_steps(lineage, episodes, self._task_zone), tuple(
+            one for one in linked if one in episodes
+        )
+
     def _activation_task[T](  # noqa: PLR0913 — the scope, the work, and one knob per way a kind's call is answered
         self,
         scope: ActivationScope,
@@ -6582,6 +7137,7 @@ class Engine:
                 self._running[:] = [one for one in self._running if one is not scope]
                 self._count_end(scope)
                 CURRENT_ACTIVATION.reset(token)
+                self._parent_ended(scope)
 
         # Eager start enters run's finally and reaches only the closed barrier.
         # No processing can run until its lifetime is in the shutdown registry.
@@ -6888,6 +7444,12 @@ class Engine:
         # deadline and return: that is the expiry too, and its decision is not made.
         if (late := _windows_expired(working)) is not None:
             raise late
+        if isinstance(working, _TaskPass) and windows.episode_ids is not None:
+            # ADR-0350 §6:5: the episodes the input links to, shown wherever frozen.
+            windows = replace(
+                windows,
+                episode_ids=tuple(dict.fromkeys((*working.linked, *windows.episode_ids))),
+            )
         working.windows = windows
 
     async def _fetch_held(self, working: _ActivationPass, windows: Windows) -> Fetched:

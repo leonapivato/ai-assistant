@@ -16,6 +16,8 @@ candidates = false
 reliance = false
 person = true
 suggestions = false
+spawn = false
+scheduled = false
 
 [property]
 check = "read"

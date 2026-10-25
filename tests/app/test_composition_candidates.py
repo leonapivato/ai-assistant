@@ -56,6 +56,9 @@ async def test_remember_records_candidates_and_reliance_is_offered(tmp_path: Pat
         assert offered[REMEMBER_CAPABILITY] == REMEMBER_CANDIDATE
         assert offered[NOTE_RELIANCE_CAPABILITY] == NOTE_RELIANCE
         runners = phases._acting._own_records
+        # The Task Scheduler's runners sit beside the composition root's seam (ADR-0350 §4:3).
+        while not isinstance(runners, OwnRecordsByCapability):
+            runners = runners._beside  # type: ignore[attr-defined]  # the seam beside them
         assert isinstance(runners, OwnRecordsByCapability)
         runner = runners._runners[REMEMBER_CAPABILITY]
         assert isinstance(runner, CandidateCalls)

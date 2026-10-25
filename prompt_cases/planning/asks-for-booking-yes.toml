@@ -17,6 +17,8 @@ candidates = false
 reliance = false
 person = false
 suggestions = false
+spawn = false
+scheduled = false
 
 [property]
 check = "asks_about"

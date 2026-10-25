@@ -800,6 +800,7 @@ class TelegramReader:
             [str, Sequence[str], Sequence[int] | None], Awaitable[Mapping[int, WrittenBy]]
         ]
         | None = None,
+        elsewhere: Callable[[], Awaitable[Sequence[EpisodicMemory]]] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         """Wire the reader.
@@ -824,9 +825,14 @@ class TelegramReader:
             written: Reads which activation wrote each message in a place, by its
                 effect record (ADR-0303 §7:1): the phases' ``written_in``. ``None``
                 links no assistant message, and the window then holds only the user's.
+            elsewhere: The recent episodes of activations started from another place that
+                may have written into the line's chat, the Task Scheduler's (ADR-0350
+                §9:1): the window shows each message one of them wrote here, linked to
+                it, and nothing of its input. ``None`` reads none.
             sleep: How the reader rests between polls.
         """
         self._client = seams.client
+        self._elsewhere = elsewhere
         self._intake = seams.intake
         self._channel = seams.channel
         self._place = place_of(seams.channel)
@@ -1323,6 +1329,17 @@ class TelegramReader:
             for one in page.entries
             if isinstance(one.record, EpisodicMemory) and one.record.processing_record is not None
         ]
+        if self._elsewhere is not None:
+            # ADR-0350 §9:1: a scheduled task's activation's messages in the line's chat.
+            # Its input was never the line's, so its episode shows only what it wrote.
+            held = {one.id for one in episodes}
+            episodes.extend(
+                one
+                for one in await self._elsewhere()
+                if one.id not in held
+                and one.processing_record is not None
+                and one.processing_record.trigger.channel != self._channel
+            )
         activations = [
             one.processing_record.activation_id
             for one in episodes

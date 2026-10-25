@@ -357,6 +357,15 @@ from ai_assistant.orchestration.story_links import admitted_episodes
 from ai_assistant.orchestration.story_privacy import SummaryVisibility
 from ai_assistant.orchestration.story_standing import story_standing
 from ai_assistant.orchestration.supplied_records import SuppliedRecords
+from ai_assistant.orchestration.task_scheduler import (
+    TASK_SCHEDULER_CALLS,
+    TASK_SCHEDULER_CAPABILITIES,
+    TASK_SCHEDULER_DESCRIPTION,
+    TASK_SCHEDULER_LABEL_ARGUMENTS,
+    Spawner,
+    decode_listing,
+    spawning,
+)
 from ai_assistant.orchestration.understanding import AskedIn, WrittenBy, fetch_held
 
 if TYPE_CHECKING:
@@ -394,6 +403,7 @@ if TYPE_CHECKING:
         MemoryRecord,
         MessageReceipt,
         PlanningRound,
+        ScheduledTask,
         SearchOutcome,
         StoryNote,
         StoryStanding,
@@ -410,6 +420,8 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.story_calls import StoryCalls
     from ai_assistant.orchestration.story_links import Candidates, ShortView, StoryCandidates
+    from ai_assistant.orchestration.task_manager import ScheduledTaskCalls
+    from ai_assistant.orchestration.task_scheduler import ListedPlace
     from ai_assistant.orchestration.understanding import (
         Fetched,
         LineMessage,
@@ -429,6 +441,7 @@ __all__ = [
     "PhaseWorking",
     "PlaceTarget",
     "PlaceWriter",
+    "Scheduling",
     "StoryReads",
     "authorized_round",
     "call_outcomes",
@@ -1493,6 +1506,36 @@ class _Round:
     planned_from: int | None = None
 
 
+@dataclass
+class Scheduling:
+    """What the phases hold of an activation offered spawn (ADR-0350 §3:4, §5:10-§5:11).
+
+    Attributes:
+        person: The person the activation is for, whom a task it spawns is for (§3:5).
+        set_in: The place of its input, where a task it spawns is set (§3:6).
+        build: Builds its place list when it is shown, at the activation's start and at
+            every planning round (§5:8), with each place's writer.
+        task: For an activation the Task Scheduler started, its task, whose suggested
+            places its place list marks and a spawn stating none carries forward (§5:6);
+            ``None`` for every other activation, which still replies where its input came
+            from (§6:8).
+        places: The place list as last built.
+        targets: Each place on that list, by place, with its writer.
+    """
+
+    person: str
+    set_in: ChannelIdentity
+    build: Callable[[], Awaitable[tuple[tuple[ListedPlace, ...], Mapping[str, PlaceTarget]]]]
+    task: ScheduledTask | None = None
+    places: tuple[ListedPlace, ...] = ()
+    targets: Mapping[str, PlaceTarget] = field(default_factory=dict)
+
+    @property
+    def speaks_by_label(self) -> bool:
+        """Whether its messages name their place by label: a task's activation's (§6:7)."""
+        return self.task is not None
+
+
 class PhaseWorking:
     """The phases' part of one activation's working set (ADR-0280 §3, ADR-0309 §3:2).
 
@@ -1618,6 +1661,11 @@ class PhaseWorking:
         self.version: int | None = None
         self._joined_taken = 0
         self._rounds: list[_Round] = []
+        # ADR-0350 §3:4: the Task Scheduler's part, for an activation offered spawn; and,
+        # once read, the scheduled task each activation the place window links to ran,
+        # by the activation (§9:1).
+        self.scheduling: Scheduling | None = None
+        self.task_links: dict[str, str] | None = None
 
     # --- what the rules read (PhaseFacts) ---
 
@@ -1867,6 +1915,12 @@ class PhaseWorking:
         searched = self.searched.get(result_id)
         if searched is not None and capability == SEARCH_MEMORY_CAPABILITY:
             return replace(outcome, result=None, records=searched)
+        if capability in TASK_SCHEDULER_CAPABILITIES:
+            # ADR-0350 §4:6-§4:8: what a spawn, a cancel or a list pull came back with,
+            # shown under labels.
+            listing = decode_listing(outcome.result)
+            if listing is not None:
+                return replace(outcome, result=None, tasks=listing)
         if capability == REMEMBER_CAPABILITY and is_candidate_result(outcome.result):
             # ADR-0329 §4:1, §4:4: a candidate's similar memories as fetched, or that its
             # lookup failed, which leaves it recorded.
@@ -2727,6 +2781,8 @@ class PhasePath:
         self._look_ups = look_ups
         # ADR-0338 §11:2: the person model's calls, attached only where a store is wired.
         self._person_calls: PersonModelCalls | None = None
+        # ADR-0350 §4: the Task Scheduler's calls, attached only where it is wired.
+        self._task_calls: ScheduledTaskCalls | None = None
         self._append: Callable[[], Awaitable[None]] | None = None
         self._spawn: Callable[[Coroutine[None, None, None]], None] = self._spawn_held
         self._closing: Callable[[], bool] = _never
@@ -2784,6 +2840,34 @@ class PhasePath:
         self._acting.add_own_records(dict.fromkeys(PERSON_MODEL_CAPABILITIES, calls))
         self._label_arguments.update(PERSON_MODEL_LABEL_ARGUMENTS)
         self._person_calls = calls
+
+    def attach_task_scheduler(self, calls: ScheduledTaskCalls) -> None:
+        """Offer planning the Task Scheduler's three calls, run by ``calls`` (ADR-0350 §4).
+
+        ``spawn``, ``cancel_task`` and ``list_tasks`` are advertised among the own records'
+        declarations; acting runs each by ``calls``, directly against the plan store
+        (§4:3); and their task, place and earlier-task arguments are named by label
+        (ADR-0307 §5:2). They are offered only to an activation offered spawn (§3:4),
+        whose working set holds :class:`Scheduling`.
+
+        Raises:
+            ValueError: If it is attached already, or a capability it declares is
+                advertised already.
+        """
+        if self._task_calls is not None:
+            msg = "the Task Scheduler's calls are attached once"
+            raise ValueError(msg)
+        self._tools.add_own_records(TASK_SCHEDULER_CALLS)
+        self._acting.add_own_records(dict.fromkeys(TASK_SCHEDULER_CAPABILITIES, calls))
+        self._label_arguments.update(TASK_SCHEDULER_LABEL_ARGUMENTS)
+        self._task_calls = calls
+
+    def conversation_target(self, conversation_id: str) -> PlaceTarget:
+        """A conversation of the hub's chat as a place a message goes into, with its writer."""
+        return PlaceTarget(
+            channel=conversation_channel(conversation_id),
+            writer=_ConversationWriter(self._writer, conversation_id),
+        )
 
     def _spawn_held(self, work: Coroutine[None, None, None]) -> None:
         """Start ``work`` as a task this path holds until it ends."""
@@ -2938,6 +3022,46 @@ class PhasePath:
             conversation_id=None,
             trigger_origin=trigger_origin,
             owner_records=owner_records,
+            round_limit=self._round_limit,
+            labels=labels,
+            users_authority=False,
+            given_at=self._now(),
+        )
+
+    def begin_task(
+        self,
+        *,
+        activation_id: str,
+        trigger_origin: InputOrigin | None,
+        lineage: Sequence[PlaceItem],
+        labels: Sequence[PlanningLabel] = (),
+    ) -> PhaseWorking:
+        """Start the working set of an activation a scheduled task started (ADR-0350 §6).
+
+        Its place is the schedule, whose window is its task's lineage (§6:5), and its
+        messages go into the places on its place list it names, each by its label
+        (§6:7): the engine attaches :class:`Scheduling` before the first round, and each
+        round's list says whether it may write a message at all (§5:7). Its input never
+        carries the person's authority: a scheduled task authorizes nothing (§3:9), so
+        no yes is read from it and no call needing the person runs.
+
+        Args:
+            activation_id: The activation.
+            trigger_origin: Who the trigger's input came from: the assistant, or outside.
+            lineage: The schedule's place window, the lineage as steps (§6:5).
+            labels: The labels the episode already records.
+
+        Returns:
+            The working set, which the engine holds on the pass.
+        """
+        return PhaseWorking(
+            activation_id=activation_id,
+            place=PlaceWindow(
+                takes_message=False, description=TASK_SCHEDULER_DESCRIPTION, items=tuple(lineage)
+            ),
+            conversation_id=None,
+            trigger_origin=trigger_origin,
+            owner_records=True,
             round_limit=self._round_limit,
             labels=labels,
             users_authority=False,
@@ -3237,6 +3361,9 @@ class PhasePath:
                 person = await self._person(working)
                 # ADR-0338 §8:6: a pin's or an unpin's memory, worded for its question.
                 outcomes = await self._worded(working)
+                # ADR-0350 §5:8, §9:1: the place list built as it is shown, and the
+                # scheduled task each linked activation ran.
+                await self._scheduled(working)
         except TimeoutError:
             raise ModelTimeoutError(_PLANNING_EXPIRED) from None
         outside = (
@@ -3262,7 +3389,9 @@ class PhasePath:
             rounds=working.planning_rounds(),
             labels=working.labels.labels,
             outcomes=outcomes,
-            capabilities=await self._offered(person=person is not None),
+            capabilities=await self._offered(
+                person=person is not None, scheduling=working.scheduling is not None
+            ),
             label_arguments=self._label_arguments,
             evidence=tuple(working.evidence),
             outside_content_read=working.read_outside_content,
@@ -3271,6 +3400,8 @@ class PhasePath:
             pending=pending,
             overtaken=working.overtaken(),
             person=person,
+            places=None if working.scheduling is None else working.scheduling.places,
+            speaks_by_label=working.scheduling is not None and working.scheduling.speaks_by_label,
         )
         # The round is recorded inside planning's call, so the recorder reads what it
         # needs of this activation from here (ADR-0321 §4:4: a question cut to fit).
@@ -3330,7 +3461,53 @@ class PhasePath:
                 working.pending = {}
         return working.pending
 
-    async def _offered(self, *, person: bool = True) -> tuple[ToolDefinition, ...]:
+    async def _scheduled(self, working: PhaseWorking) -> None:
+        """Build the place list for this round, and read the window's task links once.
+
+        ADR-0350 §5:8: the list is built when it is shown, at every round. A task's
+        activation writes a message only where its list holds a place (§5:7, §6:7).
+        §9:1-§9:2: a place-window item an activation the Task Scheduler started wrote
+        links to its task while the Task Scheduler holds it, read through the
+        occurrence's pushed mark, and is shown with that task's label.
+        """
+        scheduling = working.scheduling
+        if scheduling is not None:
+            scheduling.places, scheduling.targets = await scheduling.build()
+            if scheduling.speaks_by_label:
+                working.place = replace(working.place, takes_message=bool(scheduling.targets))
+        if self._task_calls is None or working.task_links is not None:
+            return
+        linked = {
+            item.episode_id.removeprefix("activation:")
+            for item in working.place.items
+            if item.episode_id is not None and item.author is PlaceAuthor.ASSISTANT
+        }
+        links: dict[str, str] = {}
+        for activation_id in sorted(linked):
+            try:
+                lineage = await self._plans.scheduled_lineage(activation_id)
+            except PlanningError:
+                _log.warning("phase_task_links_unread", stage="planning", reason="store_failed")
+                break
+            if lineage and activation_id in lineage[-1].activations:
+                links[activation_id] = lineage[-1].id
+        working.task_links = links
+        if links:
+            working.place = replace(
+                working.place,
+                items=tuple(
+                    item
+                    if item.episode_id is None
+                    else replace(
+                        item, task_id=links.get(item.episode_id.removeprefix("activation:"))
+                    )
+                    for item in working.place.items
+                ),
+            )
+
+    async def _offered(
+        self, *, person: bool = True, scheduling: bool = False
+    ) -> tuple[ToolDefinition, ...]:
         """The declarations this round offers planning (ADR-0306 §2:7), the clock apart.
 
         Planning's input carries ``now``, so the clock's call would only spend a round
@@ -3347,6 +3524,11 @@ class PhasePath:
             names = (*names, *sorted(PERSON_MODEL_CAPABILITIES - set(names)))
             if not person:
                 names = tuple(name for name in names if name not in PERSON_MODEL_CAPABILITIES)
+        if self._task_calls is not None:
+            # ADR-0350 §3:4: offered only to an activation offered spawn.
+            names = (*names, *sorted(TASK_SCHEDULER_CAPABILITIES - set(names)))
+            if not scheduling:
+                names = tuple(name for name in names if name not in TASK_SCHEDULER_CAPABILITIES)
         return await self._tools.offered([name for name in names if name not in _NOT_OFFERED])
 
     async def _worded(self, working: PhaseWorking) -> tuple[CallOutcome, ...]:
@@ -3642,13 +3824,22 @@ class PhasePath:
             )
             for one in planned.calls
         ]
-        target = self._target(working)
-        place = None if target is None else target.place
-        message = (
-            None
-            if planned.message is None or place is None
-            else RoundMessage(planned.message, place)
-        )
+        scheduling = working.scheduling
+        places: tuple[str, ...] | None = None
+        if scheduling is not None and scheduling.speaks_by_label:
+            # ADR-0350 §6:7: the place its label resolved to, checked against the list.
+            places = tuple(scheduling.targets)
+            named = planned.round.place
+            place = None if named is None else place_of(named)
+            message = None if planned.message is None else RoundMessage(planned.message, place)
+        else:
+            target = self._target(working)
+            place = None if target is None else target.place
+            message = (
+                None
+                if planned.message is None or place is None
+                else RoundMessage(planned.message, place)
+            )
         rounds = working.planning_rounds()
         given_round = RoundToAuthorize(
             activation_id=working.activation_id,
@@ -3662,9 +3853,10 @@ class PhasePath:
                 notes=tuple(working.notes.values()),
             ),
             calls=tuple(calls),
-            input_place=place,
+            input_place=None if places is not None else place,
             message=message,
             yes=working.yes(given.understanding),
+            places=places,
         )
         try:
             async with asyncio.timeout_at(given.deadline):
@@ -3763,7 +3955,10 @@ class PhasePath:
         if not rest:
             return ActedRound(round_id=decided.round_id)
         authorized = authorized_round(replace(decided, allowed=rest))
-        with self._tools.holding(working.supplied, working.attributions):
+        with (
+            spawning(self._spawner(given, working)),
+            self._tools.holding(working.supplied, working.attributions),
+        ):
             if self._look_ups is None:
                 return await self._acting.act(authorized, held=working.held)
             with self._look_ups.scope(
@@ -3779,6 +3974,27 @@ class PhasePath:
                     )
         self._pages(working, acted, scope.views)
         return acted
+
+    @staticmethod
+    def _spawner(given: PhasePass, working: PhaseWorking) -> Spawner | None:
+        """Who calls the Task Scheduler in this round, read from the working set (§3:4)."""
+        scheduling = working.scheduling
+        if scheduling is None:
+            return None
+        state = active_state()
+        standing = None if state is None else state.standing
+        task = scheduling.task
+        return Spawner(
+            activation_id=working.activation_id,
+            person=scheduling.person,
+            users_authority=working.users_authority,
+            set_in=scheduling.set_in,
+            places=tuple(one.place for one in scheduling.places),
+            carried=() if task is None else tuple(place_of(one) for one in task.places),
+            read_outside_content=working.read_outside_content,
+            supply=given.supply,
+            sees_running=standing is not None and standing.author is not None,
+        )
 
     @staticmethod
     def _pages(
@@ -3842,7 +4058,11 @@ class PhasePath:
         # Whether it was recorded decides whether the activation's last message was
         # delivered (ADR-0317 §3:4).
         latest.written = await self._write(
-            working, text, effect_id=verdict.effect_id, round_id=latest.planned.round.id
+            working,
+            text,
+            effect_id=verdict.effect_id,
+            round_id=latest.planned.round.id,
+            place=verdict.place,
         )
 
     async def _digest(self, given: PhasePass) -> None:
@@ -3940,7 +4160,8 @@ class PhasePath:
         """
         if not planning_round.asked:
             return planning_round
-        target = self._target(working)
+        named = planning_round.place
+        target = self._target(working, None if named is None else place_of(named))
         whole = False
         if target is not None:
             try:
@@ -3967,13 +4188,18 @@ class PhasePath:
         """
         return target.writer.fitted(text)
 
-    def _target(self, working: PhaseWorking) -> PlaceTarget | None:
+    def _target(self, working: PhaseWorking, place: str | None = None) -> PlaceTarget | None:
         """The place the activation's messages go into, and its writer, or ``None``.
 
-        The working set's own target, as the Telegram line's chat; otherwise its
-        conversation, through this path's chat writer; and ``None`` where the place
-        takes no message, an event's (ADR-0307 §3:8).
+        For an activation the Task Scheduler started, the place on its list ``place``
+        names, or ``None`` where it names none on the list (ADR-0350 §6:7). Otherwise the
+        working set's own target, as the Telegram line's chat; its conversation, through
+        this path's chat writer; and ``None`` where the place takes no message, an
+        event's (ADR-0307 §3:8).
         """
+        scheduling = working.scheduling
+        if scheduling is not None and scheduling.speaks_by_label:
+            return None if place is None else scheduling.targets.get(place)
         if working.target is not None:
             return working.target
         if working.conversation_id is None:
@@ -4076,7 +4302,13 @@ class PhasePath:
     # --- the place ---
 
     async def _write(
-        self, working: PhaseWorking, text: str, *, effect_id: str, round_id: str | None
+        self,
+        working: PhaseWorking,
+        text: str,
+        *,
+        effect_id: str,
+        round_id: str | None,
+        place: str | None = None,
     ) -> bool:
         """Claim, write and finish one message into the input's place (ADR-0306 §5:3-§5:5).
 
@@ -4088,7 +4320,7 @@ class PhasePath:
         Returns:
             Whether the medium recorded it whole.
         """
-        target = self._target(working)
+        target = self._target(working, place)
         if target is None:
             return False
         fitted = self._fitted(target, text)
@@ -4133,12 +4365,28 @@ class PhasePath:
         message, an event's, nothing is written and nothing read (ADR-0307 §3:8,
         ADR-0309 §5:6).
         """
-        if self._target(working) is None:
+        scheduling = working.scheduling
+        places: tuple[str | None, ...]
+        if scheduling is not None and scheduling.speaks_by_label:
+            # ADR-0350 §6:7: into each suggested place on the list, or nowhere.
+            places = tuple(one.place for one in scheduling.places if one.suggested)
+        else:
+            places = (None,) if self._target(working) is not None else ()
+        if not places:
             return
         effects = await self._effects(working)
         text = couldnt_finish(effects).text
+        for place in places:
+            await self._couldnt_finish_into(working, text, place)
+
+    async def _couldnt_finish_into(
+        self, working: PhaseWorking, text: str, place: str | None
+    ) -> None:
+        """Write the fixed *couldn't finish* message into one place, never raising."""
         try:
-            await self._write(working, text, effect_id=self._new_effect_id(), round_id=None)
+            await self._write(
+                working, text, effect_id=self._new_effect_id(), round_id=None, place=place
+            )
         except Exception as exc:  # the pass is ending on its own error, or on the round limit
             if is_defect(exc):
                 log_defect(

@@ -1831,8 +1831,13 @@ class _TrackedScan(ast.NodeVisitor):
 
 
 #: The engine's spokes that admit an activation from no public call, by the method that
-#: admits it, and the seam each is traced under (ADR-0293 §6, ADR-0323 §2:2).
-_READERS: Final = {"_read_in": "chat_reader", "_line_read_in": "telegram_reader"}
+#: admits it, and the seam each is traced under (ADR-0293 §6, ADR-0323 §2:2), the Task
+#: Scheduler's sensor's among them (ADR-0350 §7).
+_READERS: Final = {
+    "_read_in": "chat_reader",
+    "_line_read_in": "telegram_reader",
+    "_admit_task": "task_scheduler",
+}
 
 
 def _tracked_scan() -> _TrackedScan:

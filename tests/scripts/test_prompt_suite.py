@@ -58,6 +58,8 @@ PLANNING_FLAGS: Final = {
     "reliance": False,
     "person": False,
     "suggestions": False,
+    "spawn": False,
+    "scheduled": False,
 }
 
 WEB_SEARCH: Final = {
