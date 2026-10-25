@@ -503,9 +503,12 @@ messages, and so does one set twice by mistake.
 ### 8. After a restart, and missed tasks
 
 > **Normative.** At start, after ADR-0286 §7:2's close and before it pushes anything, the
-> sensor settles each occurrence marked pushed whose activation is not running. §8:11
-> confirms that activation's messages first. §8:2–§8:7 then apply in order, and the first
-> that applies decides.
+> sensor settles each occurrence marked pushed whose activation is not running. Where the
+> store holds a stop record for that activation (ADR-0297), the occurrence ends *stopped*,
+> is never pushed again, and §9:6's walk is run again from it, so a stop cut off by the
+> restart still finishes; nothing else in §8 applies to it. Otherwise §8:11 confirms that
+> activation's messages first, and §8:2–§8:7 then apply in order, the first that applies
+> deciding.
 
 > **Normative.** Where that activation's effect records (ADR-0306 §5:3) hold a spawn, the
 > occurrence ends *interrupted* and is never pushed again, so a chain cannot fork.
@@ -618,15 +621,20 @@ label planning was never shown is refused, with the reason (ADR-0307 §5:3).
 > reason, and writes nothing.
 
 > **Normative.** A stop command (ADR-0295 §1) naming a running or pushed activation also
-> stops what that activation spawned that is still live. It stops the activation first, so
-> the store refuses its spawns (§3:3), and then cancels the pending occurrences of the tasks
-> it spawned and stops each of their activations that is pushed or running (§9:10). Each of
-> those does the same for what it spawned, recursively, through live work only. Where a
-> push wins against a cancel (§7:5), the activation it names is stopped in turn. The stop
-> is done once nothing below the stopped activation is pending, pushed or running.
+> stops what is still live below it. It stops the activation first, so the store refuses
+> its spawns (§3:3). It then walks the tasks below it: the tasks that activation spawned,
+> and the tasks spawned by those tasks' activations in turn, read from the tasks the Task
+> Scheduler keeps (§7:8) whether or not their activations have ended. Along the walk it
+> cancels every pending occurrence and stops every activation that is pushed or running
+> (§9:10), and acts on nothing that has ended. Where a push wins against a cancel (§7:5),
+> the activation it names is stopped in turn. The stop is done once nothing below the
+> stopped activation is pending, pushed or running.
 
 There is no series or chain object: the building blocks are spawns, and a stop cascades
-down from live work. It never needs a finished ancestor, so removal (§7:8) cannot break it.
+down from live work. A step that has ended is walked through, never stopped: §7:8 keeps
+every task with anything live below it, so the walk reaches every live descendant, and it
+never needs a task that was removed. A stop naming an ended activation directly still
+changes nothing.
 A takeover's stop (ADR-0295 §5) is not a stop command and does not cascade: a new input
 that takes over running work leaves the tasks the old activation set. A stop naming an
 activation that has already ended changes nothing (ADR-0295 §1:6): what it left pending is
@@ -807,6 +815,8 @@ The lanes, each after this decision merges `Accepted`, held by milestone 15:
 > push (§8:5–§8:7); a hub chat message left with no outcome, confirmed recorded, which ends
 > its occurrence *done* with no second try, and confirmed absent, which is pushed again
 > unmarked (§8:11); a line message left with no outcome, which takes the second try; a
+> restart after a step's stop record was written but before its episode froze as stopped,
+> which ends the occurrence *stopped*, pushes nothing and finishes the stop's walk (§8:1); a
 > spawn refused on a stop record, at the chain limit and at the pending limit; a spawn
 > replacing a task with nothing pending refused, and one replacing a task that waits on
 > named tasks with an invalid wait refused (§9:4); a task removed once §7:8 holds, and one
@@ -859,7 +869,7 @@ Superseded in part. Every clause the middle column does not name stands:
 | ADR-0284 | §2:1, in the addition alone: `InputOrigin` gains `assistant`, the origin of a scheduled task's input that carries no outside-content mark | §6:3, §12:7 |
 | ADR-0292 | §5:6, in the addition alone: every scheduled task, whoever set it, informs the activation it starts and authorizes nothing; §6:8, in the addition alone: a scheduled task falling due starts an activation, though the assistant wrote it; §12:1's *setting a timer*: it is a spawn, written through the Task Scheduler's actuator | §3:9, §6:1, §3:1, §4:3 |
 | ADR-0293 | §5:2's table, in the addition alone: an assistant's message also records the effect record it was claimed under, kept for confirming delivery after a restart and shown on no device | §8:12, §12:9 |
-| ADR-0295 | §1:1, in the addition alone: a stop command naming a running or pushed activation also stops what it spawned that is still live, recursively; a takeover's stop (§5:1) does not cascade | §9:6 |
+| ADR-0295 | §1:1, in the addition alone: a stop command naming a running or pushed activation also stops what is still live below it, walking through steps that have ended; a takeover's stop (§5:1) does not cascade | §9:6 |
 | ADR-0297 | §5:5, for an id the Task Scheduler has pushed and not yet admitted: the stop writes its stop record and answers `STOPPED`, and admission refuses that id | §9:10 |
 | ADR-0303 | §7:1, in the addition alone: an item an activation the Task Scheduler started wrote also links to its scheduled task, while the Task Scheduler holds it | §9:1 |
 | ADR-0306 | §6:4, in the addition alone: a message's record whose outcome is unknown or unwritten is settled once more from its place's confirmation (§8:11, §12:3); §4:7, for an activation the Task Scheduler starts: each message goes into the place on its place list it names, and none goes off the list; §5:6's *never resolved by guessing* and §5:13's *never retried, done another way*, for that activation's message alone: one second try, where its place's kind cannot confirm delivery | §6:7, §8:6, §8:8, §8:11, §12:3 |
