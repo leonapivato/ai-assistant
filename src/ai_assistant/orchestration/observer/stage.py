@@ -830,6 +830,8 @@ class Observer:
             # What framing kept reaches the record before any placement call is made.
             await progress(records, ())
 
+        set_aside: list[dict[str, object]] = []
+
         async def place(shown: PlacementView) -> MemoryPlacement:
             text = await self._call(
                 attempt,
@@ -838,11 +840,7 @@ class Observer:
                 lambda instruction: placement_messages(shown, instruction),
                 finding=_finding(attempt, finding_id),
             )
-            reply_placed = parsed(text, PlacementReply)
-            placement = None if reply_placed is None else placement_of(reply_placed, shown)
-            if placement is None:
-                raise _Unparsed(ObserverStep.PLACEMENT)
-            return placement
+            return _placement_read(text, shown, set_aside)
 
         annotations = finding.annotations
         written = await self._writer.write(
@@ -859,7 +857,7 @@ class Observer:
             # memory done, and marks again, which the store keeps once.
             await self._marked(person, written.framed, episode=attempt.record.episode)
         outcome = outcome_of(written.framed, _joined(earlier, written.writes), at=self._now())
-        return _Decided(outcome=outcome, decided=_decided(framing, written))
+        return _Decided(outcome=outcome, decided=_decided(framing, written, set_aside))
 
     async def _recovered(
         self, written: tuple[ObservationWrite, ...]
@@ -1090,13 +1088,39 @@ class Observer:
         return state
 
 
-def _decided(framing: Framing | None, written: Written | None) -> dict[str, object]:
+def _placement_read(
+    text: str, shown: PlacementView, set_aside: list[dict[str, object]]
+) -> MemoryPlacement:
+    """The placement a reply states, what code set aside of it kept in ``set_aside``.
+
+    What code did not take of the reply goes to the diagnostic record, and its count to
+    the log, and never fails the attempt (#3398).
+
+    Raises:
+        _Unparsed: Where the reply places nothing shown readably (ADR-0329 §16:4).
+    """
+    reply = parsed(text, PlacementReply)
+    read = None if reply is None else placement_of(reply, shown)
+    if read is None:
+        raise _Unparsed(ObserverStep.PLACEMENT)
+    if read.set_aside:
+        _log.info("observer_placement", stage="placement", set_aside=len(read.set_aside))
+        set_aside.append({"wording": shown.framed.content, "set_aside": list(read.set_aside)})
+    return read.placement
+
+
+def _decided(
+    framing: Framing | None,
+    written: Written | None,
+    set_aside: Sequence[dict[str, object]] = (),
+) -> dict[str, object]:
     """What a finding's framing and placements decided, for its outcome entry (§2:5).
 
     Each memory framing proposed, with why code refused it where it did, and each kept
     one as framed, where this attempt's framing call decided them; framing's reason
-    where it kept nothing; and each kept memory's placement, with its ruling and where
-    it is now held.
+    where it kept nothing; each kept memory's placement, with its ruling and where it is
+    now held; and what code set aside of this attempt's placement replies, by the wording
+    placed (#3398).
     """
     kept = (
         {}
@@ -1110,6 +1134,7 @@ def _decided(framing: Framing | None, written: Written | None) -> dict[str, obje
         "failed": None if framing is None else framing.failed,
         "nothing": None if framing is None else framing.nothing,
         "placed": [] if written is None else list(written.placed),
+        "set_aside": list(set_aside),
     }
 
 

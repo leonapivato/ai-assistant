@@ -241,6 +241,29 @@ async def test_a_restatement_folds_into_the_stored_memory() -> None:
     assert done.kept == ("m-seat",)
 
 
+async def test_a_memory_framed_from_the_same_finding_is_never_placed_against() -> None:
+    """#3401: siblings are not prior knowledge, so neither folds into the other.
+
+    Both rest on the same part, so a fold of one into the other would add nothing and
+    lose its claim; a stored memory like them is still placed against.
+    """
+    harness = Harness()
+    await _held_seat(harness)
+    shown: list[list[str]] = []
+    independent = _placing(PlacedRelation.INDEPENDENT, "")
+
+    async def place(view: PlacementView) -> MemoryPlacement:
+        shown.append([one.memory.id for one in view.retrieved])
+        return await independent(view)
+
+    written = await _write(harness, _framed(_SEAT, _SEAT), place=place)
+
+    assert shown == [["m-seat"], ["m-seat"]]
+    assert [one.kept for one in written.framed] == [(one.memory.id,) for one in written.framed], (
+        "each installed, neither folded into its sibling"
+    )
+
+
 async def test_a_holders_own_no_longer_true_retires_the_stored_memory() -> None:
     """ADR-0345 §3:3-§3:4, §5:4: installed, and the owner's own memory ended."""
     harness = Harness()

@@ -466,19 +466,7 @@ def test_no_label_reads_the_named_fields_anywhere_in_the_reply() -> None:
         ("observer_framing", json.dumps({"error": "could not frame"})),
         ("observer_framing", json.dumps({"memories": [], "nothing": " "})),
         ("observer_placement", json.dumps({"relations": "M1"})),
-        ("observer_placement", json.dumps({"relations": [{"relation": "restates"}]})),
-        (
-            "observer_placement",
-            json.dumps({"relations": [{"memory": "M1", "relation": "contained"}]}),
-        ),
-        (
-            "observer_placement",
-            json.dumps({"relations": [{"memory": "M1", "relation": "contained", "note": " "}]}),
-        ),
-        (
-            "observer_placement",
-            json.dumps({"relations": [{"memory": "M1", "relation": "alike", "note": "n"}]}),
-        ),
+        ("observer_placement", json.dumps({"relations": ["M1"]})),
     ],
 )
 def test_a_reply_its_stage_would_refuse_passes_no_check(prompt: str, text: str) -> None:
@@ -493,6 +481,30 @@ def test_a_reply_its_stage_would_refuse_passes_no_check(prompt: str, text: str) 
         assert _judge(check.name, params[check.name], prompt, text) == (
             "the reply is not one its stage reads"
         ), check.name
+
+
+@pytest.mark.parametrize(
+    "relation",
+    [
+        {"memory": "M1", "relation": "contained"},
+        {"memory": "M1", "relation": "contained", "note": " "},
+        {"memory": "M1", "relation": "alike", "note": "n"},
+    ],
+)
+def test_a_pair_the_stage_reads_as_unclear_is_read_so_by_the_check(
+    relation: dict[str, str],
+) -> None:
+    """#3398: the stage reads an unreadable pair as ``unclear``, and so does the check."""
+    params: dict[str, object] = {"memory": "M1", "relations": ["contained"]}
+    text = json.dumps({"relations": [relation]})
+
+    assert _judge("relation_in", params, "observer_placement", text) == (
+        "the reply names another relation"
+    )
+    assert (
+        _judge("relation_in", {**params, "relations": ["unclear"]}, "observer_placement", text)
+        is None
+    )
 
 
 def test_a_key_the_stage_drops_is_not_read() -> None:

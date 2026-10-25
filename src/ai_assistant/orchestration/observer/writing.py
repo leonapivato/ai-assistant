@@ -11,6 +11,11 @@ beside, evidence for or against, a ``recheck`` question, a retirement in the hol
 beliefs, an answered question. No reconciler runs and no retirement, question or support
 is written by the observer itself.
 
+**Memories framed from one finding are siblings, not prior knowledge** (#3401). Each is
+placed against the store without the others: they usually rest on the same part, so a fold
+of one into another adds nothing, and a wrong ``contained`` would lose its claim with
+nothing written to show it.
+
 **Where the memory is placed for, and what it may be placed against** (ADR-0329 §12:6,
 ADR-0217 §3-§4, ADR-0346 §5:7). The memory takes the narrowest placement over every record
 its run was supplied: the finding's supply, the stored memories it is placed against, and
@@ -272,8 +277,13 @@ class FindingWriter:
             if record.state is FramedState.PROPOSING:
                 record = await self._resolved(index, record, supply, narrowing, keep, ledger)
             if record.state is not FramedState.DONE:
+                # #3401: a memory framed from the same finding is a sibling, never prior
+                # knowledge, so it is not placed against one installed before it.
+                siblings = frozenset(
+                    one.memory.id for number, one in enumerate(records) if number != index
+                )
                 record = await self._one(
-                    index, record, texts, supply, narrowing, place, keep, ledger
+                    index, record, texts, supply, narrowing, place, keep, ledger, siblings
                 )
             placed.append(_rendered(record))
         return Written(framed=tuple(records), writes=ledger.writes(), placed=tuple(placed))
@@ -288,12 +298,14 @@ class FindingWriter:
         place: Place,
         keep: Callable[[int, FramedMemory], Awaitable[None]],
         ledger: _Ledger,
+        siblings: Set[str],
     ) -> FramedMemory:
         """Retrieve, place and propose one framed memory, again while its placement is stale.
 
         Every attempt's supply takes in where an earlier one placed the memory for, kept on
         its record, so what an earlier placement call was shown narrows every later one,
-        within the attempt and after a restart (ADR-0329 §12:6, ADR-0217 §3).
+        within the attempt and after a restart (ADR-0329 §12:6, ADR-0217 §3). No memory
+        framed from the same finding, ``siblings``, is retrieved for it (#3401).
         """
         for _ in range(self._limits.stale_retries + 1):
             base = self._base(_carried(supply, record.memory.placement), narrowing)
@@ -306,6 +318,7 @@ class FindingWriter:
                 threshold=self._limits.threshold,
                 bound=self._limits.bound,
                 recent=self._limits.recent,
+                siblings=siblings,
             )
             # ADR-0217 §3: a memory reaching more people than everything this one is
             # supplied may is never placed against, since what a relation writes onto

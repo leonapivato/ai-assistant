@@ -31,6 +31,8 @@ from ai_assistant.core.types import (
     SupportHolder,
 )
 from ai_assistant.orchestration.observer.placement import (
+    UNREAD_NOTE,
+    PlacementRead,
     PlacementReply,
     PlacementView,
     Retrieved,
@@ -166,17 +168,30 @@ async def test_the_compact_form_is_computed_from_the_stored_record() -> None:
     assert shown.questions == {"Q1": "q-1"}
 
 
-def _view(harness_memory: Memory) -> PlacementView:
+def _view(harness_memory: Memory, *more: Memory) -> PlacementView:
     return PlacementView(
         framed=_framed(),
         texts={},
-        retrieved=(Retrieved(handle="M1", memory=harness_memory, questions={"Q1": "q-1"}),),
+        retrieved=(
+            Retrieved(handle="M1", memory=harness_memory, questions={"Q1": "q-1"}),
+            *(Retrieved(handle=f"M{index}", memory=one) for index, one in enumerate(more, start=2)),
+        ),
     )
 
 
-def _placed(view: PlacementView, text: str) -> MemoryPlacement | None:
+def _read(view: PlacementView, text: str) -> PlacementRead | None:
     read = parsed(text, PlacementReply)
     return None if read is None else placement_of(read, view)
+
+
+def _placed(view: PlacementView, text: str) -> MemoryPlacement | None:
+    read = _read(view, text)
+    return None if read is None else read.placement
+
+
+def _stored(record_id: str = "m-seat", content: str = _SEAT, **fields: object) -> Memory:
+    held = _held(record_id, content, said_support(address("past")), **fields)
+    return held.model_copy(update={"revision": 1})
 
 
 def test_a_reply_naming_each_memory_once_is_a_placement_at_the_revisions_read() -> None:
@@ -186,25 +201,23 @@ def test_a_reply_naming_each_memory_once_is_a_placement_at_the_revisions_read() 
     )
     view = _view(stored)
 
-    placement = _placed(view, placing(("M1", "contained", "Part of what it says.")))
+    read = _read(view, placing(("M1", "contained", "Part of what it says.")))
 
-    assert placement is not None
-    (pair,) = placement.pairs
+    assert read is not None
+    (pair,) = read.placement.pairs
     assert (pair.memory, pair.revision, pair.relation) == (
         "m-seat",
         7,
         PlacedRelation.CONTAINED,
     )
     assert pair.note == "Part of what it says."
-    assert placement.answers is None
+    assert read.placement.answers is None
+    assert read.set_aside == ()
 
 
-def test_a_reply_that_does_not_place_every_memory_once_is_refused() -> None:
-    """ADR-0346 §6:2: a placement the writer would refuse is never sent to it."""
-    stored = _held("m-seat", _SEAT, said_support(address("past"))).model_copy(
-        update={"revision": 1}
-    )
-    view = _view(stored)
+def test_a_reply_placing_no_memory_shown_readably_is_refused() -> None:
+    """ADR-0329 §16:4: a reply that places nothing it was shown is no placement."""
+    view = _view(_stored())
 
     assert _placed(view, reply(relations=[])) is None
     assert _placed(view, placing(("M1", "restates", "a"), ("M1", "restates", "b"))) is None
@@ -214,25 +227,123 @@ def test_a_reply_that_does_not_place_every_memory_once_is_refused() -> None:
     assert _placed(view, placing(("M1", "independent", ""))) is not None
 
 
+def test_a_pair_the_reply_does_not_place_readably_is_unclear_and_the_rest_stand() -> None:
+    """#3398, ADR-0345 §4:3: one unreadable pair never fails the attempt that placed others."""
+    view = _view(_stored(), _stored("m-aisle", "The user likes aisle seats."))
+
+    text = reply(
+        relations=[
+            {"memory": "M1", "relation": "restates", "note": "Same."},
+            {"memory": "M2", "relation": "contradicts", "note": "No."},
+            {"memory": "M7", "relation": "restates", "note": "Never shown."},
+        ]
+    )
+    read = _read(view, text)
+    unplaced = _read(view, placing(("M1", "restates", "Same.")))
+
+    assert read is not None
+    assert [(one.memory, one.relation, one.note) for one in read.placement.pairs] == [
+        ("m-seat", PlacedRelation.RESTATES, "Same."),
+        ("m-aisle", PlacedRelation.UNCLEAR, UNREAD_NOTE),
+    ]
+    assert read.set_aside == (
+        {"memory": "M7", "why": "no memory was shown under this label"},
+        {"memory": "M2", "why": "no relation of the set"},
+    )
+    assert unplaced is not None
+    assert unplaced.placement.pairs[1].relation is PlacedRelation.UNCLEAR
+    assert unplaced.set_aside == ({"memory": "M2", "why": "left unplaced"},)
+
+
+def test_the_reply_shape_reads_an_unreadable_relation_as_unclear() -> None:
+    """What any reader of the shape reads is what the stage reads (prompt_cases)."""
+    read = parsed(placing(("M1", "contradicts", "No."), ("M2", "weakens", " ")), PlacementReply)
+
+    assert read is not None
+    assert [(one.relation, one.note) for one in read.relations] == [
+        ("unclear", UNREAD_NOTE),
+        ("unclear", UNREAD_NOTE),
+    ]
+
+
 def test_an_answered_question_is_named_on_a_memory_shown() -> None:
     """ADR-0346 §6:2: at most one open question the new memory answers."""
-    stored = _held("m-seat", _SEAT, said_support(address("past"))).model_copy(
-        update={"revision": 1}
-    )
-    view = _view(stored)
+    view = _view(_stored())
 
     answered = _placed(
         view,
         placing(("M1", "restates", "Same."), answers={"memory": "M1", "question": "Q1"}),
     )
-    unknown = _placed(
+    unknown = _read(
         view,
         placing(("M1", "restates", "Same."), answers={"memory": "M1", "question": "Q9"}),
     )
 
     assert answered is not None
     assert answered.answers == PlacedAnswer(memory="m-seat", question="q-1")
-    assert unknown is None
+    assert unknown is not None, "an answer it was not shown never fails the attempt"
+    assert unknown.placement.answers is None
+    assert unknown.set_aside == (
+        {
+            "answer": {"memory": "M1", "question": "Q9"},
+            "why": "no open question shown under these labels",
+        },
+    )
+
+
+def test_a_list_of_answers_takes_the_first_naming_a_question_shown() -> None:
+    """#3398: a list is read, never refused; one is taken and the rest are set aside."""
+    view = _view(_stored())
+    text = reply(
+        relations=[{"memory": "M1", "relation": "restates", "note": "Same."}],
+        answers=[
+            {"memory": "M2", "question": "Q1"},
+            {"memory": "M1", "question": "Q1"},
+            {"memory": "M1", "question": "Q1"},
+        ],
+    )
+
+    read = _read(view, text)
+    empty = _placed(
+        view, reply(relations=[{"memory": "M1", "relation": "independent"}], answers=[])
+    )
+
+    assert read is not None
+    assert read.placement.answers == PlacedAnswer(memory="m-seat", question="q-1")
+    assert [one["why"] for one in read.set_aside] == [
+        "no open question shown under these labels",
+        "a placement answers one question at most",
+    ]
+    assert empty is not None
+    assert empty.answers is None
+
+
+def test_no_label_of_the_call_reaches_a_note() -> None:
+    """#3402: a note is stored, so the call's labels are put in words."""
+    question = OpenQuestion(
+        id="q-1",
+        kind=OpenQuestionKind.RECHECK,
+        asks="Is it still true?",
+        rests_on=(said_support(address("past")).points_at,),
+        raised_at=AT,
+        raised_by=MemoryWriterName.OBSERVER,
+    )
+    asked = _stored().model_copy(update={"open_questions": (question,)})
+    view = _view(asked, _stored("m-aisle", "Aisle, please."))
+
+    placement = _placed(
+        view,
+        placing(
+            ("M1", "recheck", "Bears on M2 and on M1's open question Q1, not on M12 or Q3."),
+            ("M2", "independent", ""),
+        ),
+    )
+
+    assert placement is not None
+    assert placement.pairs[0].note == (
+        'Bears on "Aisle, please." and on "The user prefers window seats."\'s open question '
+        '"Is it still true?", not on M12 or Q3.'
+    )
 
 
 def test_the_placement_call_is_shown_the_framed_memory_and_the_compact_forms() -> None:
