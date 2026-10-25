@@ -30,7 +30,10 @@ reply to the same input cannot fail an attempt every time it is retried:
   likewise, and a pair naming a memory it was not shown is set aside;
 - ``answers`` may be one object, a list or null: the first entry naming an open question
   shown, on a memory shown, is the one answered (§6:2's at most one), and every other entry
-  is set aside, never failing the attempt.
+  is set aside, never failing the attempt;
+- a ``recheck`` on a memory already holding an open ``recheck`` question is placed as
+  named, and the writer raises nothing for it (ADR-0348 §4:1), so the relation and its
+  note are kept beside what is set aside, where the diagnostic record shows them (§4:2).
 
 What code set aside goes to the diagnostic record. A reply placing no memory shown readably
 at all is no placement, and is refused as a reply that does not parse is (ADR-0329
@@ -61,6 +64,7 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemoryPlacement,
     Message,
+    OpenQuestionKind,
     PlacedAnswer,
     PlacedPair,
     PlacedRelation,
@@ -94,6 +98,7 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "RECHECK_HELD",
     "UNREAD_NOTE",
     "PlacementRead",
     "PlacementReply",
@@ -112,6 +117,11 @@ __all__ = [
 #: The note code gives a pair the reply placed nothing readable on (ADR-0345 §4:3): its
 #: relation is ``unclear``, which writes nothing on the stored memory.
 UNREAD_NOTE: Final = "the placement call named no relation of the set, with its note, here"
+
+#: Why a ``recheck`` on a memory already holding an open one is set aside (ADR-0348 §4:2).
+RECHECK_HELD: Final = (
+    "the memory already holds an open recheck question, so the writer raises no second one"
+)
 
 #: A label the placement call is shown, as a note may cite it: a memory's or a question's.
 _LABEL: Final = re.compile(r"\b[MQ][0-9]+\b")
@@ -175,7 +185,8 @@ class PlacementRead:
         placement: The placement, every memory shown named once.
         set_aside: Each piece of the reply code did not take as it stood, with why, for
             the diagnostic record (ADR-0333 §2:5): a pair read as ``unclear``, a pair
-            naming a memory not shown, and every answer but the one taken.
+            naming a memory not shown, and every answer but the one taken; and each
+            ``recheck`` the writer raises nothing for, with its note (ADR-0348 §4:2).
     """
 
     placement: MemoryPlacement
@@ -485,6 +496,17 @@ def placement_of(reply: PlacementReply, view: PlacementView) -> PlacementRead | 
             relation = PlacedRelation((given[0].relation or "").strip())
             note = in_words((given[0].note or "").strip(), view)
             readable = True
+            if relation is PlacedRelation.RECHECK and _held_open(shown.memory):
+                # ADR-0348 §4:2: the writer raises no second check, so the relation and its
+                # note are kept here, where the diagnostic record shows them.
+                aside.append(
+                    {
+                        "memory": shown.handle,
+                        "relation": relation.value,
+                        "note": note,
+                        "why": RECHECK_HELD,
+                    }
+                )
         elif given:
             why = "named more than once" if len(given) > 1 else "no relation of the set"
             aside.append({"memory": shown.handle, "why": why})
@@ -510,6 +532,14 @@ def placement_of(reply: PlacementReply, view: PlacementView) -> PlacementRead | 
     except ValidationError:
         return None
     return PlacementRead(placement=placement, set_aside=tuple(aside))
+
+
+def _held_open(memory: Memory) -> bool:
+    """Whether ``memory`` already holds an open ``recheck`` question (ADR-0348 §4:1)."""
+    return any(
+        question.kind is OpenQuestionKind.RECHECK and not question.resolved
+        for question in memory.open_questions
+    )
 
 
 def _answered(

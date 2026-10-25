@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     SupportHolder,
 )
 from ai_assistant.orchestration.observer.placement import (
+    RECHECK_HELD,
     UNREAD_NOTE,
     PlacementRead,
     PlacementReply,
@@ -299,6 +300,49 @@ def test_an_answered_question_is_named_on_a_memory_shown() -> None:
             "why": "no open question shown under these labels",
         },
     )
+
+
+def test_a_recheck_on_a_memory_holding_an_open_one_is_kept_for_the_diagnostic_record() -> None:
+    """ADR-0348 §4:2 (#3413): the writer raises no second check, so code keeps it beside.
+
+    The pair is placed as named, since the writer writes nothing for it (§4:1), and the
+    relation and its note are kept with what was set aside. A memory whose recheck was
+    answered holds no open one, and a question of another kind holds no check.
+    """
+    asked = OpenQuestion(
+        id="q-1",
+        kind=OpenQuestionKind.RECHECK,
+        asks="Does the 10am slot hold?",
+        rests_on=(said_support(address("past")).points_at,),
+        raised_at=AT,
+        raised_by=MemoryWriterName.OBSERVER,
+    )
+    answered = asked.model_copy(
+        update={"resolved_at": AT, "resolved_by": asked.rests_on[0], "resolution": "yes"}
+    )
+    conflict = asked.model_copy(update={"kind": OpenQuestionKind.CONFLICT})
+    note = "Worth checking; an open question already asks this, so it is not needed."
+
+    def read(*questions: OpenQuestion) -> PlacementRead:
+        stored = _stored().model_copy(update={"open_questions": questions})
+        found = _read(_view(stored), placing(("M1", "recheck", note)))
+        assert found is not None
+        return found
+
+    held = read(asked)
+    (pair,) = held.placement.pairs
+    assert pair.relation is PlacedRelation.RECHECK
+    assert held.set_aside == (
+        {
+            "memory": "M1",
+            "relation": "recheck",
+            "note": note,
+            "why": RECHECK_HELD,
+        },
+    )
+    assert read(answered).set_aside == ()
+    assert read(conflict).set_aside == ()
+    assert read().set_aside == ()
 
 
 def test_a_list_of_answers_takes_the_first_naming_a_question_shown() -> None:

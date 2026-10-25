@@ -31,8 +31,9 @@ set (ADR-0345 §2:2); it checks that:
   name is one a part the memory rests on gives (§5:5, ADR-0345 §9:3);
 - a round's message backs only a record of the saying, marked ``assistant_statement`` and
   ``occasion``; a memory marked ``assistant_statement`` cites a round's message; and one
-  that takes on what a round's message claims rests on the person's request, agreement or
-  confirmation in the leaving episode, which backs it as worded (§7:6-§7:9);
+  that takes on what a round's message claims rests on a person's agreement or
+  confirmation in the leaving episode, or on the source's part the message relays, which
+  backs it as worded (§7:6-§7:9, ADR-0348 §2);
 - an ``occasion`` carries no validity end, and an end lies in the future and is the
   about-when of the support the create cites (ADR-0345 §6:1, §8:4);
 - no memory stands on inference alone (§7:2).
@@ -115,6 +116,10 @@ _ASSISTANT_ORIGINS: Final = frozenset(
 #: The origins of a person's own word in an episode, which may take on what a round's
 #: message claims (ADR-0346 §7:6, §7:9).
 _PERSON_ORIGINS: Final = frozenset({SupportOrigin.USER_MESSAGE, SupportOrigin.CONFIRMATION})
+
+#: The origins of what a source reported, which a round's message may relay: a memory
+#: resting on one is the source's, held by it (ADR-0346 §7:6, ADR-0348 §2:2).
+_SOURCE_ORIGINS: Final = frozenset({SupportOrigin.EVIDENCE, SupportOrigin.OUTSIDE_INPUT})
 
 #: §2:4, §8:3: the marks a record of the saying carries.
 _RECORD_OF_SAYING: Final = frozenset({MemoryMark.ASSISTANT_STATEMENT, MemoryMark.OCCASION})
@@ -503,7 +508,15 @@ def _marks(proposed: Sequence[str]) -> set[MemoryMark]:
 def _assistant_words(
     supports: Mapping[str, MemorySupport], marks: set[MemoryMark], leaving: str
 ) -> None:
-    """ADR-0346 §7:6-§7:9: what a round's message may back and support."""
+    """ADR-0346 §7:6-§7:9, ADR-0348 §2: what a round's message may back and support.
+
+    A memory citing a round's message ``for``, other than a record of the saying, takes
+    on what the message claims only where a person's part in the leaving episode backs
+    it, an agreement or a confirmation (ADR-0348 §2:3), or rests on what the message
+    relays: a source's part, which backs it and holds it (§7:6, ADR-0348 §2:2). Code
+    cannot tell a person's request to keep from their agreement, so it does not try: the
+    framing call is told that a request backs nothing, and the prompt suite measures it.
+    """
     said = [one for one in supports.values() if one.origin in _ASSISTANT_ORIGINS]
     saying = _RECORD_OF_SAYING.issubset(marks)
     if MemoryMark.ASSISTANT_STATEMENT in marks and not said:
@@ -515,13 +528,18 @@ def _assistant_words(
     takes_on = any(one.direction is SupportDirection.FOR for one in said)
     if takes_on and not saying:
         kept = any(
-            _backs(one) and one.origin in _PERSON_ORIGINS and part_episode(one.points_at) == leaving
+            _backs(one)
+            and (
+                one.origin in _SOURCE_ORIGINS
+                or (one.origin in _PERSON_ORIGINS and part_episode(one.points_at) == leaving)
+            )
             for one in supports.values()
         )
         if not kept:
             msg = (
-                "what a round's message claims is kept only on a person's request, agreement "
-                "or confirmation in this exchange, which backs it (ADR-0346 §7:6, §7:9)"
+                "what a round's message claims is kept only on a person's agreement or "
+                "confirmation in this exchange, or a source's part it relays, which backs "
+                "it (ADR-0346 §7:6, ADR-0348 §2)"
             )
             raise _Refused(msg)
 

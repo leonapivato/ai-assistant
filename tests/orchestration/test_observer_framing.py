@@ -223,8 +223,12 @@ def test_a_round_message_backs_only_a_record_of_the_saying() -> None:
 
 
 def test_what_a_round_message_claims_is_kept_on_a_persons_backing_in_the_exchange() -> None:
-    """ADR-0346 §7:6, §7:9: the person's part backs it, the message cited beside."""
-    keep = _part("P1", "yes, remember that")
+    """ADR-0346 §7:6, ADR-0348 §2:3: the person's agreement backs it, the message cited beside.
+
+    Code cannot tell an agreement from a request to keep, so it reads only that a
+    person's part in the exchange backs the memory: which parts back it is the call's.
+    """
+    keep = _part("P1", "yes, that's right, six is our usual number")
     view = _view(keep, _P3)
     with_keep = framing(
         {
@@ -434,11 +438,13 @@ def test_a_list_in_one_part_passes_as_a_memory_per_item() -> None:
     assert all(one.memory.supports[0].backs_as_worded for one in result.memories)
 
 
-def test_a_kept_report_passes_on_the_request_and_the_evidence_never_on_the_relay() -> None:
-    """#3400, ADR-0346 §7:6, §7:10: "remember that" and the evidence back it, the relay not.
+def test_a_kept_report_passes_on_the_evidence_never_on_the_relay() -> None:
+    """#3400, ADR-0346 §7:6, ADR-0348 §2:2: the source's part backs it, the relay never.
 
-    ADR-0345 §5's worked example, step 3: the report rests on the source's evidence item and
-    the person's request, and cites the message that relayed it.
+    ADR-0345 §5's worked example, step 3, as ADR-0348 leaves it: the report rests on the
+    source's evidence item, which holds it, and cites the person's request and the message
+    that relayed it, neither backing it. A framing that also lets the request back it
+    passes the checks, since code cannot tell a request from an agreement.
     """
     keep = _part("P1", "Remember that.")
     relay = _part(
@@ -477,9 +483,54 @@ def test_a_kept_report_passes_on_the_request_and_the_evidence_never_on_the_relay
             }
         )
 
-    (kept,) = _framed(view, report("P1", "P3")).memories
-    assert {one.points_at for one in kept.memory.supports if one.backs_as_worded} == {
+    (kept,) = _framed(view, report("P3")).memories
+    assert {one.points_at for one in kept.memory.supports if one.backs_as_worded} == {evidence.part}
+    assert {one.points_at for one in kept.memory.supports} == {
         keep.part,
+        relay.part,
         evidence.part,
-    }
+    }, "the request and the relay are cited"
+    assert _framed(view, report("P1", "P3")).memories != ()
     assert _framed(view, report("P2")).memories == (), "a relay backs no memory but a saying"
+    assert _framed(view, report()).memories == (), "a request alone backs nothing"
+
+
+def test_a_request_to_keep_the_assistants_words_keeps_a_record_of_the_saying() -> None:
+    """ADR-0348 §2:3: kept from a round's message alone, it is a record of the saying.
+
+    Held by the assistant's statement, which backs it, and citing the person's request,
+    which backs nothing; without the person's backing, the message's claim is not kept as
+    the person's.
+    """
+    keep = _part("P1", "Remember that.")
+    view = _view(keep, _P3)
+    record = framing(
+        {
+            "wording": f"On Oct 20 the assistant said: {_SAID}",
+            "supports": [
+                {"part": "P1", "direction": "for", "backs_as_worded": False, "how_sure": "sure"},
+                {"part": "P3", "direction": "for", "backs_as_worded": True, "how_sure": "sure"},
+            ],
+            "subjects": [],
+            "involved": [],
+            "marks": ["assistant_statement", "occasion"],
+        }
+    )
+    claim = framing(
+        {
+            "wording": _SAID,
+            "supports": [
+                {"part": "P1", "direction": "for", "backs_as_worded": False, "how_sure": "sure"},
+                {"part": "P3", "direction": "for", "backs_as_worded": False, "how_sure": "sure"},
+            ],
+            "subjects": [],
+            "involved": [],
+            "marks": ["assistant_statement"],
+        }
+    )
+
+    (kept,) = _framed(view, record).memories
+    backing = {one.points_at for one in kept.memory.supports if one.backs_as_worded}
+    assert backing == {_P3.part}
+    assert kept.memory.supports[0].points_at == _P3.part, "the create cites the message"
+    assert _framed(view, claim).memories == (), "the claim is not kept as the person's"
