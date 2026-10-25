@@ -45,6 +45,8 @@ __all__ = [
     "AT",
     "HELD_EPISODE",
     "confirmed_support",
+    "derived_from",
+    "derived_support",
     "inference_support",
     "legacy_support",
     "memory",
@@ -268,6 +270,69 @@ def legacy_support(
     )
 
 
+def derived_support(
+    record: str = "legacy-1",
+    *,
+    outside: bool = False,
+    when: datetime | None = AT,
+    added_at: datetime = AT,
+) -> MemorySupport:
+    """The tests' derived stand-in: a legacy record, "inference", outside where ``outside``.
+
+    A memory standing at inference that a writer creates or folds into. A legacy
+    record's holder is unknown, so ADR-0345 §2:4's limit on what the assistant's
+    statement backs does not bind it, where a remember call's or an observer's
+    inference would make a memory the writer refuses unless it is a record of the
+    saying (§8:3). It points into no episode, so no episode need be held for it.
+
+    Args:
+        record: The id of the legacy record it carries; distinct ids are distinct parts.
+        outside: Whether it rested on recorded external content.
+        when: The support's ``when``.
+        added_at: When it was added.
+
+    Returns:
+        The support, a :func:`legacy_support` carrying a record of that id alone.
+    """
+    return legacy_support({"id": record}, outside=outside, when=when, added_at=added_at)
+
+
+def derived_from(
+    episode: str = HELD_EPISODE,
+    *,
+    key: str = "1",
+    outside: bool = False,
+    when: datetime | None = AT,
+    added_at: datetime = AT,
+) -> tuple[MemorySupport, MemorySupport]:
+    """The derived stand-in's supports where an episode must warrant the memory.
+
+    A :func:`derived_support` backing it, first, so its create cites that; and the
+    episode's round message, ``for`` and backing nothing, as ADR-0345 §2:4 lets any
+    memory cite what the assistant said. The memory stands at inference, cites
+    ``episode`` (ADR-0077 §5, read through ADR-0328 §12, so ``DefaultMemoryPolicy``
+    does not reject it for want of a warrant), and is refused by no writer.
+
+    Args:
+        episode: The episode the round message is in.
+        key: What tells two memories' parts apart: the legacy record is
+            ``legacy-{key}`` and the round ``round-{key}``.
+        outside: Whether the legacy record rested on recorded external content.
+        when: Both supports' ``when``.
+        added_at: When both were added.
+
+    Returns:
+        The two supports, the backing one first.
+    """
+    cited = message_support(
+        episode, round_id=f"round-{key}", when=when, added_at=added_at
+    ).model_copy(update={"backs_as_worded": False})
+    return (
+        derived_support(f"legacy-{key}", outside=outside, when=when, added_at=added_at),
+        cited,
+    )
+
+
 def inference_support(
     episode: str = HELD_EPISODE,
     *,
@@ -459,11 +524,13 @@ def memory_in_band(  # noqa: PLR0913 — a band and what each band's support tak
     when: datetime | None = AT,
     **envelope: object,
 ) -> Memory:
-    """A memory standing in ``band``: said, sourced, or remembered (ADR-0328 §6:4).
+    """A memory standing in ``band``: said, sourced, or inferred (ADR-0328 §6:4).
 
     ``ASSERTED`` rests on a :func:`said_support`; ``ATTESTED`` on a
     :func:`sourced_support` carrying ``attestation``; ``DERIVED`` on a
-    :func:`remembered_support`, outside where ``outside`` says so.
+    :func:`derived_support`, outside where ``outside`` says so: a legacy record, the
+    one support standing at inference that no assistant's statement holds, so a writer
+    creates such a memory (ADR-0345 §2:4, §8:3).
 
     Args:
         record_id: The memory's id.
@@ -471,7 +538,8 @@ def memory_in_band(  # noqa: PLR0913 — a band and what each band's support tak
         band: The band its one support's origin ranks it in.
         outside: Whether a ``DERIVED`` memory's support is outside content.
         attestation: The source details of an ``ATTESTED`` memory's support.
-        episode: The episode its support points into.
+        episode: The episode its support points into, or, for ``DERIVED``, the id of
+            the legacy record it carries.
         when: Its support's ``when``.
         **envelope: Any other field of the memory, as :func:`memory` takes them.
 
@@ -484,7 +552,7 @@ def memory_in_band(  # noqa: PLR0913 — a band and what each band's support tak
         case BeliefBand.ATTESTED:
             support = sourced_support(attestation, episode=episode, when=when)
         case BeliefBand.DERIVED:
-            support = remembered_support(episode, outside=outside, when=when)
+            support = derived_support(episode, outside=outside, when=when)
         case _:  # pragma: no cover - exhaustive
             assert_never(band)
     return memory(record_id, content, support, **envelope)

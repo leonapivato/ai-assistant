@@ -62,7 +62,14 @@ if TYPE_CHECKING:
         SupportPart,
     )
 
-__all__ = ["PlacedWrite", "backing_fault", "created_fault", "placed_fault", "placed_write"]
+__all__ = [
+    "PlacedWrite",
+    "added_backing_fault",
+    "backing_fault",
+    "created_fault",
+    "placed_fault",
+    "placed_write",
+]
 
 #: §5:10: the supports a placed proposal never carries.
 _NEVER_PLACED: Final = frozenset({SupportOrigin.OBSERVER_INFERENCE, SupportOrigin.PINNED})
@@ -103,13 +110,11 @@ def created_fault(memory: Memory) -> str | None:
     """Which of ADR-0345's rules on a memory any write creates it breaks, if any.
 
     §8:3's first refusal, a memory marked ``assistant_statement`` with no support
-    pointing at a round's message; §8:4's occasion with an end set at its create; and
-    §6:1's future end, which a create sets only where the support it cites carries an
-    about-when naming it. Bound on every create, by every path, and on no memory the
-    upgrade carries (§13:4).
-
-    §2:4's limit on what the assistant's statement backs, §8:3's second refusal, is
-    :func:`backing_fault`'s, which a placed proposal is held to (:func:`placed_fault`).
+    pointing at a round's message; §8:4's occasion with an end set at its create; §6:1's
+    future end, which a create sets only where the support it cites carries an
+    about-when naming it; and §2:4's limit on what the assistant's statement backs,
+    §8:3's second refusal (:func:`backing_fault`). Bound on every create, by every path,
+    and on no memory the upgrade carries (§13:4).
 
     Args:
         memory: The memory a write creates.
@@ -117,6 +122,11 @@ def created_fault(memory: Memory) -> str | None:
     Returns:
         The refusal, or ``None``.
     """
+    return _marked_fault(memory) or backing_fault(memory, memory.backing_supports)
+
+
+def _marked_fault(memory: Memory) -> str | None:
+    """§8:3's first refusal, §8:4 and §6:1 on a memory a write creates."""
     marks = set(memory.marks)
     if MemoryMark.ASSISTANT_STATEMENT in marks and not any(
         isinstance(one.points_at, RoundMessagePart) for one in memory.supports
@@ -142,6 +152,11 @@ def created_fault(memory: Memory) -> str | None:
 
 def backing_fault(memory: Memory, supports: Sequence[MemorySupport]) -> str | None:
     """§2:4, §8:3: a support the assistant's statement holds backs only a record of the saying.
+
+    A remember call, a round's message and an observer's inference alike: ADR-0346 §7:2
+    has the observer create no inference, so §2:4's exception for one no longer binds a
+    write. What the upgrade carried is never checked (§13:4), since the limit binds only
+    the supports a write creates a memory with or adds to it.
 
     Args:
         memory: The memory ``supports`` back as worded, as it is marked.
@@ -176,7 +191,25 @@ def placed_fault(proposal: MemoryUpdateProposal) -> str | None:
         return (
             "a placed proposal carries no observer_inference and no pinned support (ADR-0345 §5:10)"
         )
-    return created_fault(proposed) or backing_fault(proposed, proposed.backing_supports)
+    return created_fault(proposed)
+
+
+def added_backing_fault(before: Memory, after: Memory) -> str | None:
+    """§2:4, §8:3 on a write that adds supports to a stored memory.
+
+    Only the backing supports ``after`` carries at a part ``before`` did not: a support
+    the stored memory carries already, an upgraded one included, is never judged again
+    (§13:4).
+
+    Args:
+        before: The stored memory, as the write read it.
+        after: The same memory once the write's supports are added.
+
+    Returns:
+        The refusal, or ``None``.
+    """
+    added = [one for one in after.backing_supports if before.support_at(one.points_at) is None]
+    return backing_fault(before, added)
 
 
 def _as(  # noqa: PLR0913 — the support, and each field a relation sets on it

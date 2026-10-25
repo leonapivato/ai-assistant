@@ -41,7 +41,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import InMemoryMemoryStore, MemoryIngestor
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryWriter, FakeTraceSink
-from ai_assistant.testing.memories import memory, message_support, remembered_support, said_support
+from ai_assistant.testing.memories import derived_support, memory, message_support, said_support
 
 if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
@@ -83,33 +83,28 @@ def make_writer(request: pytest.FixtureRequest) -> WriterFactory:
 def _target(*, outside: bool, band: BeliefBand) -> Memory:
     """The stored memory the ruling folds into, in ``band``.
 
-    A ``DERIVED`` target rests on a remember call and an ``ATTESTED`` one on a
-    round's message, each outside where ``outside`` says. A said support is never
-    outside, so an ``ASSERTED`` target that is carries a second, outside support.
+    A ``DERIVED`` target rests on the tests' derived stand-in, a legacy record, and an
+    ``ATTESTED`` one on a round's message, each outside where ``outside`` says. A said
+    support is never outside, so an ``ASSERTED`` target that is carries a second,
+    outside support.
     """
     supports: tuple[MemorySupport, ...]
     match band:
         case BeliefBand.DERIVED:
-            supports = (remembered_support(_EPISODE, effect="effect-target", outside=outside),)
+            supports = (derived_support("legacy-target", outside=outside),)
         case BeliefBand.ATTESTED:
             supports = (message_support(_EPISODE, round_id="round-target", outside=outside),)
         case BeliefBand.ASSERTED:
             said = said_support(_EPISODE)
             supports = (
-                (said, remembered_support(_EPISODE, effect="effect-target", outside=True))
-                if outside
-                else (said,)
+                (said, derived_support("legacy-target", outside=True)) if outside else (said,)
             )
     return memory("target", _CONTENT, *supports)
 
 
 def _incoming(*, outside: bool) -> Memory:
-    """The proposed memory: always ``DERIVED``, resting on its own remember call."""
-    return memory(
-        "incoming",
-        _CONTENT,
-        remembered_support(_EPISODE, effect="effect-incoming", outside=outside),
-    )
+    """The proposed memory: always ``DERIVED``, resting on a derived stand-in of its own."""
+    return memory("incoming", _CONTENT, derived_support("legacy-incoming", outside=outside))
 
 
 def _confirmed_proposal(record: Memory) -> MemoryUpdateProposal:

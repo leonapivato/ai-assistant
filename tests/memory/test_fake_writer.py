@@ -30,7 +30,7 @@ from ai_assistant.core.types import (
     Validity,
 )
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore, FakeMemoryWriter
-from ai_assistant.testing.memories import memory, remembered_support, sourced_support
+from ai_assistant.testing.memories import derived_from, memory, sourced_support
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -67,11 +67,11 @@ async def _store(now: Callable[[], datetime] = _fixed_now) -> FakeMemoryStore:
 def _inferred(
     record_id: str, content: str = _CONTENT, *, validity: Validity | None = None
 ) -> Memory:
-    """A memory at inference resting on one remember call, optionally windowed."""
+    """A memory at inference on the derived stand-in, warranted by its episode, maybe windowed."""
     return memory(
         record_id,
         content,
-        remembered_support(_EPISODE, effect=f"effect-{record_id}"),
+        *derived_from(_EPISODE, key=record_id),
         validity=validity if validity is not None else Validity(),
     )
 

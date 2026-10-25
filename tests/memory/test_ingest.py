@@ -53,9 +53,9 @@ from ai_assistant.testing import (
     default_prompt,
 )
 from ai_assistant.testing.memories import (
+    derived_from,
     legacy_support,
     memory,
-    remembered_support,
     said_support,
     sourced_support,
 )
@@ -118,30 +118,37 @@ def _episodes(record: MemoryRecord | None) -> set[str]:
     return {episode for one in record.supports if (episode := part_episode(one.points_at))}
 
 
-def _support(source: MemorySource, episode: str, *, owner: str, index: int) -> MemorySupport:
-    """One support pointing into ``episode``, in the band ``source`` names (ADR-0328 §12).
+def _supports(
+    source: MemorySource, episode: str, *, owner: str, index: int
+) -> tuple[MemorySupport, ...]:
+    """What a memory rests on in ``episode``, in the band ``source`` names (ADR-0328 §12).
 
-    ``USER_ASSERTED`` is the user's message, ``EXTERNAL`` a source's evidence item
-    carrying :data:`_ATTESTED_BY`, and ``OBSERVED`` or ``INFERRED`` a remember call.
-    The part is keyed on ``owner`` (the memory's id) and ``index``, so two memories in
-    one case rest on different parts of one episode: a supersession ends its target
-    citing the correction's first support, which the target must not carry already
-    (ADR-0328 §11:7).
+    ``USER_ASSERTED`` is the user's message and ``EXTERNAL`` a source's evidence item
+    carrying :data:`_ATTESTED_BY`, one support each. ``OBSERVED`` or ``INFERRED`` is the
+    tests' derived stand-in (:func:`~ai_assistant.testing.memories.derived_from`): a
+    legacy record backing it and the episode's round message cited, since a remember
+    call would back only a record of the saying (ADR-0345 §2:4). The part is keyed on
+    ``owner`` (the memory's id) and ``index``, so two memories in one case rest on
+    different parts of one episode: a supersession ends its target citing the
+    correction's first support, which the target must not carry already (ADR-0328
+    §11:7).
     """
     position = zlib.crc32(owner.encode()) % 100_000 + index * 100_000
     match band_of(source):
         case BeliefBand.ASSERTED:
-            return said_support(episode, when=_WHEN, added_at=_WHEN).model_copy(
-                update={"points_at": InputPart(episode=episode, message=position)}
+            return (
+                said_support(episode, when=_WHEN, added_at=_WHEN).model_copy(
+                    update={"points_at": InputPart(episode=episode, message=position)}
+                ),
             )
         case BeliefBand.ATTESTED:
-            return sourced_support(
-                _ATTESTED_BY, episode=episode, item=position, when=_WHEN, added_at=_WHEN
+            return (
+                sourced_support(
+                    _ATTESTED_BY, episode=episode, item=position, when=_WHEN, added_at=_WHEN
+                ),
             )
         case BeliefBand.DERIVED:
-            return remembered_support(
-                episode, effect=f"effect-{owner}-{index}", when=_WHEN, added_at=_WHEN
-            )
+            return derived_from(episode, key=f"{owner}-{index}", when=_WHEN, added_at=_WHEN)
         case _:  # pragma: no cover - exhaustive
             raise AssertionError(source)
 
@@ -162,8 +169,9 @@ def _preference(  # noqa: PLR0913 — one keyword per memory field a case may va
     them spell them out.
     """
     supports = tuple(
-        _support(source, episode, owner=record_id, index=index)
+        one
         for index, episode in enumerate(evidence or (_EPISODE,))
+        for one in _supports(source, episode, owner=record_id, index=index)
     )
     return memory(
         record_id,
@@ -2555,7 +2563,7 @@ async def test_an_unconfirmed_externally_derived_belief_reaches_no_reconciler() 
     tainted = memory(
         "tainted",
         "user prefers morning meetings, per the newsletter",
-        remembered_support(_EPISODE, effect="effect-tainted", outside=True),
+        *derived_from(_EPISODE, key="tainted", outside=True),
     )
     reconciler = _CountingReconciler()
 

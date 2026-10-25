@@ -81,7 +81,12 @@ from ai_assistant.testing._observer_writes import (
     retirement_fault,
 )
 from ai_assistant.testing._operations import applied_operation
-from ai_assistant.testing._placed import created_fault, placed_fault, placed_write
+from ai_assistant.testing._placed import (
+    added_backing_fault,
+    created_fault,
+    placed_fault,
+    placed_write,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -425,7 +430,7 @@ def _stamped(memory: Memory, held: Mapping[str, MemoryRecord]) -> Memory:
 
 
 def _refuse_creating(decision: MemoryDecision, proposal: MemoryUpdateProposal) -> None:
-    """Refuse a ruling that would create a memory ADR-0345 §6:1, §8:3 or §8:4 refuses.
+    """Refuse a ruling that would create a memory ADR-0345 §2:4, §6:1, §8:3 or §8:4 refuses.
 
     An ``ACCEPT`` creates the proposed memory as it is, and a ``SUPERSEDE`` creates it
     afresh with an open window (ADR-0045 §4); a fold creates nothing, so no rule on a
@@ -448,7 +453,7 @@ def _refuse_creating(decision: MemoryDecision, proposal: MemoryUpdateProposal) -
 
 
 def _refuse_created(memory: Memory, held: Mapping[str, MemoryRecord]) -> None:
-    """Refuse a memory a write creates that ADR-0345 §6:1, §8:3, §8:4 or §9:3 refuses.
+    """Refuse a memory a write creates that ADR-0345 §2:4, §6:1, §8:3, §8:4 or §9:3 refuses.
 
     Raises:
         MemoryStoreError: If it breaks one of them.
@@ -554,7 +559,7 @@ def _reinforced(target: MemoryRecord, incoming: Memory, *, now: datetime) -> Mem
 
     Raises:
         MemoryStoreError: If ``target`` is not a memory, the supports it would add
-            break §9:7, or an add support is refused.
+            break §9:7 or ADR-0345 §2:4, or an add support is refused.
     """
     if not isinstance(target, Memory):
         msg = f"cannot reinforce {target.id!r}: not a memory"
@@ -589,6 +594,10 @@ def _reinforced(target: MemoryRecord, incoming: Memory, *, now: datetime) -> Mem
         except ValueError as exc:
             msg = f"cannot reinforce {target.id!r}: {exc}"
             raise MemoryStoreError(msg) from exc
+    fault = added_backing_fault(target, folded)
+    if fault is not None:
+        msg = f"cannot reinforce {target.id!r}: {fault}"
+        raise MemoryStoreError(msg)
     return folded.model_copy(update={"placement": target.placement.folded_with(incoming.placement)})
 
 
@@ -700,7 +709,7 @@ class FakeMemoryWriter:
                 at an episode the store does not hold.
             MemoryStoreStaleError: If the stored memory is not the one read.
             MemoryStoreConflictError: If the successor's id names a stored record.
-            MemoryStoreError: If §4, §5 or §6:5 refuses the operation.
+            MemoryStoreError: If §4, §5, §6:5 or ADR-0345 §2:4 refuses the operation.
         """
         observed = change.model_copy(deep=True)
         async with self._lock:
@@ -745,6 +754,11 @@ class FakeMemoryWriter:
             except ValueError as exc:
                 msg = f"refusing to apply a {observed.operation.kind} to {memory.id!r}: {exc}"
                 raise MemoryStoreError(msg) from exc
+            # ADR-0345 §2:4, §8:3: on what the operation adds, as ``MemoryIngestor``'s.
+            fault = added_backing_fault(memory, after)
+            if fault is not None:
+                msg = f"refusing to apply a {observed.operation.kind} to {memory.id!r}: {fault}"
+                raise MemoryStoreError(msg)
             if after is memory:
                 return
             batch = [

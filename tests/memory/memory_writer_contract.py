@@ -207,7 +207,6 @@ from ai_assistant.core.types import (
     Provenance,
     QuestionPart,
     SupportDirection,
-    SupportOrigin,
     SupportPart,
     TrackRecordEntry,
     UserConfirmation,
@@ -218,9 +217,12 @@ from ai_assistant.memory._reconciler import ReconcilerOutcome
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore
 from ai_assistant.testing.memories import (
     confirmed_support,
+    derived_from,
+    derived_support,
     inference_support,
     legacy_support,
     memory,
+    message_support,
     pinned_support,
     remembered_support,
     said_support,
@@ -521,7 +523,7 @@ def _hostile_typed_id() -> str:
     return _HostileTyped()  # type: ignore[return-value]  # deliberately not a str
 
 
-def _support(  # noqa: PLR0913 — the band, the episode, and the part's and dates' axes
+def _supports(  # noqa: PLR0913 — the band, the episode, and the part's and dates' axes
     source: MemorySource,
     episode: str,
     *,
@@ -529,30 +531,35 @@ def _support(  # noqa: PLR0913 — the band, the episode, and the part's and dat
     index: int,
     when: datetime | None,
     added_at: datetime,
-) -> MemorySupport:
-    """One support pointing into ``episode``, in the band ``source`` names (ADR-0328 §12).
+) -> tuple[MemorySupport, ...]:
+    """What a memory rests on in ``episode``, in the band ``source`` names (ADR-0328 §12).
 
-    ``USER_ASSERTED`` is the user's message, ``EXTERNAL`` a source's evidence item
-    carrying :data:`_ATTESTED_BY`, and ``OBSERVED`` or ``INFERRED`` a remember call.
-    The part is keyed on ``owner`` (the memory's id) and ``index``, so two memories
-    in one case rest on different parts of the same episode — a supersession ends its
-    target with the correction's first support, which the target must not carry
-    already (ADR-0328 §11:7).
+    ``USER_ASSERTED`` is the user's message and ``EXTERNAL`` a source's evidence item
+    carrying :data:`_ATTESTED_BY`, one support each. ``OBSERVED`` or ``INFERRED`` is the
+    tests' derived stand-in (:func:`~ai_assistant.testing.memories.derived_from`): a
+    legacy record backing it and the episode's round message cited, since a remember
+    call would back only a record of the saying (ADR-0345 §2:4). The part is keyed on
+    ``owner`` (the memory's id) and ``index``, so two memories in one case rest on
+    different parts of the same episode — a supersession ends its target with the
+    correction's first support, which the target must not carry already (ADR-0328
+    §11:7).
     """
     position = zlib.crc32(owner.encode()) % 100_000 + index * 100_000
     match band_of(source):
         case BeliefBand.ASSERTED:
-            return said_support(episode, when=when, added_at=added_at).model_copy(
-                update={"points_at": InputPart(episode=episode, message=position)}
+            return (
+                said_support(episode, when=when, added_at=added_at).model_copy(
+                    update={"points_at": InputPart(episode=episode, message=position)}
+                ),
             )
         case BeliefBand.ATTESTED:
-            return sourced_support(
-                _ATTESTED_BY, episode=episode, item=position, when=when, added_at=added_at
+            return (
+                sourced_support(
+                    _ATTESTED_BY, episode=episode, item=position, when=when, added_at=added_at
+                ),
             )
         case BeliefBand.DERIVED:
-            return remembered_support(
-                episode, effect=f"effect-{owner}-{index}", when=when, added_at=added_at
-            )
+            return derived_from(episode, key=f"{owner}-{index}", when=when, added_at=added_at)
         case _:  # pragma: no cover - exhaustive
             raise AssertionError(source)
 
@@ -575,7 +582,9 @@ def _preference(  # noqa: PLR0913 — one keyword per record axis a case may var
     memory's transaction time (§7:8); ``last_confirmed_at`` is the supports' ``when``.
     """
     supports = tuple(
-        _support(
+        one
+        for index, episode in enumerate(evidence or (_CITED,))
+        for one in _supports(
             source,
             episode,
             owner=record_id,
@@ -583,7 +592,6 @@ def _preference(  # noqa: PLR0913 — one keyword per record axis a case may var
             when=last_confirmed_at if last_confirmed_at is not None else last_updated,
             added_at=last_updated,
         )
-        for index, episode in enumerate(evidence or (_CITED,))
     )
     return memory(record_id, content, *supports)
 
@@ -1404,12 +1412,12 @@ class MemoryWriterContract:
         assert isinstance(stored, Memory)
         assert stored.content == target.content
         assert [one.points_at for one in stored.supports] == [
-            target.supports[0].points_at,
-            incoming.supports[0].points_at,
+            *(one.points_at for one in target.supports),
+            *(one.points_at for one in incoming.supports),
         ]
         added = stored.operations[len(target.operations) :]
         assert [(one.kind, one.cites) for one in added] == [
-            (MemoryOperationKind.ADD_SUPPORT, incoming.supports[0].points_at)
+            (MemoryOperationKind.ADD_SUPPORT, one.points_at) for one in incoming.supports
         ]
 
     async def test_reinforce_with_a_support_the_target_carries_changes_nothing(
@@ -1457,7 +1465,7 @@ class MemoryWriterContract:
         stored = await store.get("existing")
         assert isinstance(stored, Memory)
         assert [one.points_at for one in stored.supports] == [
-            target.supports[0].points_at,
+            *(one.points_at for one in target.supports),
             *(one.points_at for one in fresh),
         ]
         added = stored.operations[len(target.operations) :]
@@ -3903,7 +3911,12 @@ class MemoryWriterContract:
         store = FakeMemoryStore(now=_long_ago)
         await _cite(store)
         await store.add(_episodic(_OTHER_CITED, "a second exchange"))
-        read = await self._stored(store, _preference("existing", evidence=(_CITED, _OTHER_CITED)))
+        read = await self._stored(
+            store,
+            _preference(
+                "existing", source=MemorySource.USER_ASSERTED, evidence=(_CITED, _OTHER_CITED)
+            ),
+        )
         stopped, explaining = read.supports
         operation = MemoryOperation(
             kind=MemoryOperationKind.STOP_COUNTING,
@@ -4003,7 +4016,9 @@ class MemoryWriterContract:
         await _cite(store)
         await store.add(_episodic(_OTHER_CITED, "a second exchange"))
         read = await self._stored(store, _preference("existing"))
-        cited, other = _preference("other", evidence=(_OTHER_CITED, _CITED)).supports
+        cited, other = _preference(
+            "other", source=MemorySource.USER_ASSERTED, evidence=(_OTHER_CITED, _CITED)
+        ).supports
         operation = MemoryOperation(
             kind=MemoryOperationKind.ADD_SUPPORT,
             cites=cited.points_at,
@@ -4204,7 +4219,9 @@ class MemoryWriterContract:
         store = FakeMemoryStore(now=_long_ago)
         await _cite(store)
         read = await self._stored(store, _preference("existing"))
-        support = _preference("other", evidence=("gone",)).supports[0]
+        support = _preference(
+            "other", source=MemorySource.USER_ASSERTED, evidence=("gone",)
+        ).supports[0]
         operation = MemoryOperation(
             kind=MemoryOperationKind.ADD_SUPPORT,
             cites=support.points_at,
@@ -4288,7 +4305,12 @@ class MemoryWriterContract:
         store = FakeMemoryStore(now=_long_ago)
         await _cite(store)
         await store.add(_episodic(_OTHER_CITED, "a second exchange"))
-        read = await self._stored(store, _preference("existing", evidence=(_CITED, _OTHER_CITED)))
+        read = await self._stored(
+            store,
+            _preference(
+                "existing", source=MemorySource.USER_ASSERTED, evidence=(_CITED, _OTHER_CITED)
+            ),
+        )
         first, second = read.supports
         question = OpenQuestion(
             id="q-1",
@@ -4897,23 +4919,26 @@ class MemoryWriterContract:
 
         assert await _snapshot(store) == before
 
-    # · the observer's inference (§9:7)
+    # · the observer's inference (§9:7, ADR-0345 §2:4)
 
-    async def test_an_inference_reading_its_companions_is_kept(
+    async def test_an_inference_reading_its_companions_is_refused(
         self, make_writer: WriterFactory
     ) -> None:
-        """§9:7: ``for`` and backing, beside ``for`` supports that do not back as worded."""
+        """ADR-0345 §2:4, §8:3: the one shape §9:7 admitted is the assistant's statement.
+
+        An inference ``for`` and backing, beside ``for`` supports that do not back as
+        worded, is held by the assistant's statement. §2:4 excepted it only while §9:7
+        stood for the observer's own writes, and ADR-0346 §7:2 has the observer create
+        no inference, so the writer refuses it as it refuses any memory the assistant's
+        statement backs that is not a record of the saying, and writes nothing.
+        """
         store = await self._observer_store()
-        new = _inferred("new")
+        before = await _snapshot(store)
 
-        result = await make_writer(store, FakeMemoryPolicy()).ingest(_proposal(new))
+        with pytest.raises(MemoryStoreError, match="§2:4"):
+            await make_writer(store, FakeMemoryPolicy()).ingest(_proposal(_inferred("new")))
 
-        assert result.record_id == "new"
-        written = await store.get("new")
-        assert isinstance(written, Memory)
-        assert _unstamped(written) == new
-        assert written.standing is MemoryStanding.INFERENCE
-        assert not written.rests_on_outside_content
+        assert await _snapshot(store) == before
 
     @pytest.mark.parametrize(
         "shape",
@@ -4942,37 +4967,33 @@ class MemoryWriterContract:
         assert await _snapshot(store) == before
 
     @pytest.mark.parametrize("carried", ["every-companion", "no-companion"])
-    async def test_a_reinforce_admits_an_inference_among_the_supports_it_adds(
+    async def test_a_reinforce_adding_an_inference_is_refused(
         self, make_writer: WriterFactory, carried: str
     ) -> None:
-        """§9:7 holds over what a fold actually adds, after ADR-0328 §4:8's deduplication.
+        """§9:7, then ADR-0345 §2:4, over what a fold actually adds (ADR-0328 §4:8).
 
         Where the target already carries every companion, the fold would add the
-        inference alone, and the whole write is refused; where it carries none of them,
-        the inference arrives with the supports it reads and is added with them.
+        inference alone, which §9:7 refuses; where it carries none of them, the inference
+        would arrive with the supports it reads, and it would back the target as worded
+        while the assistant's statement holds it, which §2:4 refuses now that ADR-0346
+        §7:2 ends its exception. Either way the whole write is refused.
         """
         store = await self._observer_store()
         new = _inferred("new")
         companions = new.supports[1:]
-        base = remembered_support(_THIRD_CITED, effect="effect-target", when=_WHEN, added_at=_WHEN)
+        base = derived_support("legacy-target", when=_WHEN, added_at=_WHEN)
         held = (*companions,) if carried == "every-companion" else ()
         target = memory("target", _DISAGREEING, base, *held)
         await store.add(target)
         before = await _snapshot(store)
         writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
 
-        if carried == "every-companion":
-            with pytest.raises(MemoryStoreError, match="§9:7"):
-                await writer.ingest(_proposal(new))
-            assert await _snapshot(store) == before
-            return
-        result = await writer.ingest(_proposal(new))
-        assert result.record_id == "target"
-        written = await store.get("target")
-        assert isinstance(written, Memory)
-        assert {one.points_at for one in new.supports} <= {
-            one.points_at for one in written.supports
-        }
+        with pytest.raises(
+            MemoryStoreError, match="§9:7" if carried == "every-companion" else "§2:4"
+        ):
+            await writer.ingest(_proposal(new))
+
+        assert await _snapshot(store) == before
 
     @pytest.mark.parametrize("direction", list(SupportDirection), ids=str)
     async def test_apply_never_adds_an_inference(
@@ -4998,10 +5019,13 @@ class MemoryWriterContract:
 
         assert await store.get("existing") == read
 
-    async def test_an_inference_retires_a_memory_at_inference_and_only_there(
-        self, make_writer: WriterFactory
-    ) -> None:
-        """§9:7, §12:4: ``against`` on the memory its ingest retires; §6:5 bounds it."""
+    async def test_an_inference_retires_no_memory(self, make_writer: WriterFactory) -> None:
+        """§12:4 as ADR-0345 §2:4 leaves it: §6:5 bounds the retirement, and §2:4 refuses it.
+
+        A retirement citing the inference is refused by standing on a memory the user
+        said, and refused on one at inference too, now that the memory the inference
+        backs is one the writer will not create (ADR-0346 §7:2). Nothing is written.
+        """
         store = await self._observer_store()
         old = await self._stored(store, _preference("old"))
         said = await self._stored(
@@ -5009,28 +5033,193 @@ class MemoryWriterContract:
             _preference("said", "prefers long letters", source=MemorySource.USER_ASSERTED),
         )
         new = _inferred("new")
-        inference = new.supports[0]
         before = await _snapshot(store)
 
         with pytest.raises(MemoryStoreError, match="§6:5"):
             await make_writer(store, FakeMemoryPolicy()).ingest(
                 _retiring(new, said, MemoryOperationKind.END)
             )
+        with pytest.raises(MemoryStoreError, match="§2:4"):
+            await make_writer(store, FakeMemoryPolicy()).ingest(
+                _retiring(new, old, MemoryOperationKind.END)
+            )
+
         assert await _snapshot(store) == before
 
-        result = await make_writer(store, FakeMemoryPolicy()).ingest(
-            _retiring(new, old, MemoryOperationKind.END)
+    # · what the assistant's statement backs, on every write path (ADR-0345 §2:4, §8:3)
+
+    @pytest.mark.parametrize("made", ["remember_call", "round_message"])
+    @pytest.mark.parametrize(
+        "ruling", [MemoryDecisionKind.ACCEPT, MemoryDecisionKind.SUPERSEDE], ids=str
+    )
+    async def test_a_create_the_assistants_statement_backs_is_refused(
+        self, make_writer: WriterFactory, made: str, ruling: MemoryDecisionKind
+    ) -> None:
+        """§2:4, §8:3 on an unplaced create, by whichever ruling would create it.
+
+        A remember call or a round's message backing a memory as worded would make the
+        assistant a holder of what it said. Unless the memory is a record of the saying
+        the writer refuses it, and nothing is written: neither the memory nor, under a
+        supersede, the end of the memory it would have retired.
+        """
+        store = await self._observer_store()
+        await store.add(_preference("existing", source=MemorySource.INFERRED))
+        before = await _snapshot(store)
+        proposed = memory("new", _DISAGREEING, _assistant_backing(made))
+        policy = FakeMemoryPolicy(ruling)
+        writer = make_writer(store, policy, id_factory=_scripted("corrected"))
+
+        with pytest.raises(MemoryStoreError, match="§2:4"):
+            await writer.ingest(_proposal(proposed))
+
+        # The fake folds only onto a conflict it was shown, so a supersede was ruled.
+        assert [one.id for one in policy.calls[-1].conflicts] == ["existing"]
+        assert await _snapshot(store) == before
+
+    async def test_a_record_of_the_saying_the_assistants_statement_backs_is_created(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§2:4, §8:3: the one memory such a support backs, marked as a record of the saying."""
+        store = await self._observer_store()
+        saying = memory(
+            "saying",
+            "On Jan 1 the assistant suggested concise emails",
+            message_support(_OTHER_CITED, when=_WHEN, added_at=_WHEN),
+            marks=(MemoryMark.ASSISTANT_STATEMENT, MemoryMark.OCCASION),
         )
 
-        assert result.record_id == "new"
-        retired = {record.id: record for record in await _memories(store)}["old"]
-        assert isinstance(retired, Memory)
-        against = retired.support_at(inference.points_at)
-        assert against is not None
-        assert (against.origin, against.direction) == (
-            SupportOrigin.OBSERVER_INFERENCE,
-            SupportDirection.AGAINST,
+        result = await make_writer(store, FakeMemoryPolicy()).ingest(_proposal(saying))
+
+        assert result.record_id == "saying"
+        assert isinstance(await store.get("saying"), Memory)
+
+    @pytest.mark.parametrize("made", ["remember_call", "round_message"])
+    async def test_a_reinforce_adding_what_the_assistants_statement_backs_is_refused(
+        self, make_writer: WriterFactory, made: str
+    ) -> None:
+        """§2:4, §8:3 on a fold: the supports it adds back the target, so they are judged."""
+        store = await self._observer_store()
+        await self._stored(store, _preference("existing"))
+        before = await _snapshot(store)
+        incoming = memory("new", _CONTENT, _assistant_backing(made))
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
+
+        with pytest.raises(MemoryStoreError, match="§2:4"):
+            await writer.ingest(_proposal(incoming))
+
+        assert await _snapshot(store) == before
+
+    async def test_a_fold_onto_what_the_upgrade_carried_is_not_judged_again(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§13:4: the limit binds what a write adds, never what the upgrade carried.
+
+        A memory the upgrade carried on a remember call keeps that support backing it,
+        and a fold that adds a source's word to it is written.
+        """
+        store = await self._observer_store()
+        carried = await self._stored(
+            store, memory("carried", _CONTENT, remembered_support(_CITED, when=_WHEN))
         )
+        incoming = _preference("new", source=MemorySource.EXTERNAL, evidence=(_OTHER_CITED,))
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
+
+        result = await writer.ingest(_proposal(incoming))
+
+        assert result.record_id == "carried"
+        written = await store.get("carried")
+        assert isinstance(written, Memory)
+        assert [one.points_at for one in written.backing_supports] == [
+            carried.supports[0].points_at,
+            incoming.supports[0].points_at,
+        ]
+
+    @pytest.mark.parametrize("made", ["remember_call", "round_message"])
+    async def test_apply_adding_what_the_assistants_statement_backs_is_refused(
+        self, make_writer: WriterFactory, made: str
+    ) -> None:
+        """§2:4, §8:3 on the operation member: an added support backing as worded is judged."""
+        store = await self._observer_store()
+        read = await self._stored(store, _preference("existing"))
+        support = _assistant_backing(made)
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.ADD_SUPPORT,
+            cites=support.points_at,
+            at=_WHEN,
+            by=MemoryWriterName.OBSERVER,
+        )
+
+        with pytest.raises(MemoryStoreError, match="§2:4"):
+            await make_writer(store, FakeMemoryPolicy()).apply(
+                MemoryChange(memory=read, operation=operation, support=support)
+            )
+
+        assert await store.get("existing") == read
+
+    async def test_apply_citing_the_assistants_statement_backing_nothing_adds_it(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§2:4: on any other memory the assistant's statement is cited, and backs nothing."""
+        store = await self._observer_store()
+        read = await self._stored(store, _preference("existing"))
+        cited = message_support(_OTHER_CITED, when=_WHEN, added_at=_WHEN).model_copy(
+            update={"backs_as_worded": False}
+        )
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.ADD_SUPPORT,
+            cites=cited.points_at,
+            at=_WHEN,
+            by=MemoryWriterName.OBSERVER,
+        )
+
+        await make_writer(store, FakeMemoryPolicy()).apply(
+            MemoryChange(memory=read, operation=operation, support=cited)
+        )
+
+        written = await store.get("existing")
+        assert isinstance(written, Memory)
+        assert written.support_at(cited.points_at) is not None
+
+    async def test_apply_with_a_successor_the_assistants_statement_backs_writes_neither(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§2:4, §8:3 on the successor an operation creates: refused, the end with it (§5:6)."""
+        store = await self._observer_store()
+        read = await self._stored(store, _preference("existing"))
+        before = await _snapshot(store)
+        successor_base = memory(
+            "successor", _DISAGREEING, remembered_support(_OTHER_CITED, when=_WHEN, added_at=_WHEN)
+        )
+        create = successor_base.operations[0].model_copy(update={"replaces": ("existing",)})
+        operation = MemoryOperation(
+            kind=MemoryOperationKind.END,
+            cites=read.supports[0].points_at,
+            at=_WHEN,
+            by=MemoryWriterName.OBSERVER,
+            successor="successor",
+        )
+
+        with pytest.raises(MemoryStoreError, match="§2:4"):
+            await make_writer(store, FakeMemoryPolicy()).apply(
+                MemoryChange(
+                    memory=read,
+                    operation=operation,
+                    successor=successor_base.model_copy(update={"operations": (create,)}),
+                )
+            )
+
+        assert await _snapshot(store) == before
+
+
+def _assistant_backing(made: str) -> MemorySupport:
+    """A support the assistant's statement holds, backing as worded (ADR-0345 §2's table).
+
+    ``remember_call`` points at a remember call in :data:`_CITED`, ``round_message`` at
+    a round's message in :data:`_OTHER_CITED`.
+    """
+    if made == "remember_call":
+        return remembered_support(_CITED, when=_WHEN, added_at=_WHEN)
+    return message_support(_OTHER_CITED, when=_WHEN, added_at=_WHEN)
 
 
 #: A third episode, for a case whose memories rest on three different parts.

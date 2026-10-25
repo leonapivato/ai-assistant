@@ -25,7 +25,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.writes import DEFERRED_EVENT, MemoryWriteStage
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore, FakeMemoryWriter
-from ai_assistant.testing.memories import memory, remembered_support, said_support
+from ai_assistant.testing.memories import memory, said_support
 
 _AT = datetime(2026, 3, 4, 10, 0, tzinfo=UTC)
 
@@ -41,7 +41,7 @@ def _now() -> datetime:
 
 def _proposal(record_id: str) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(
-        proposed=memory(record_id, _CONTENT, remembered_support()),
+        proposed=memory(record_id, _CONTENT, said_support()),
         rationale=_RATIONALE,
     )
 
