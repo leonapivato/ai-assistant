@@ -464,8 +464,11 @@ outside trigger (ADR-0306 §4:5): only a task carrying the mark is one, through 
 
 > **Normative.** Before an occurrence's activation is admitted, the sensor marks it
 > **pushed**, naming the id that activation will be admitted under, in one plan-store step
-> that refuses where the occurrence is no longer pending. Where it is refused, nothing is
-> pushed. Between a cancel and a push, whichever lands first in the store wins.
+> that refuses where the occurrence is no longer pending. The same step also refuses, and
+> ends the occurrence *cancelled*, where an activation in its task's lineage carries a
+> cascade record (§9:6): its task's parent, or the parent of any task above it (§6:5).
+> Where it is refused, nothing is pushed. Between a cancel and a push, whichever lands first
+> in the store wins.
 
 > **Normative.** When the activation ends, its occurrence takes its outcome from how it
 > ended: *done* where its episode froze completed; *couldn't finish* where it froze failed;
@@ -505,8 +508,9 @@ messages, and so does one set twice by mistake.
 > **Normative.** At start, after ADR-0286 §7:2's close and before it pushes anything, the
 > sensor settles each occurrence marked pushed whose activation is not running. Where the
 > store holds a stop record for that activation (ADR-0297), the occurrence ends *stopped*,
-> is never pushed again, and §9:6's walk is run again from it, so a stop cut off by the
-> restart still finishes; nothing else in §8 applies to it. Otherwise §8:11 confirms that
+> is never pushed again, and nothing else in §8 applies to it. Anything below it that is
+> still pending is kept from running by §7:5's lineage check, so a stop cut off by the
+> restart leaves nothing below it to start. Otherwise §8:11 confirms that
 > activation's messages first, and §8:2–§8:7 then apply in order, the first that applies
 > deciding.
 
@@ -621,17 +625,22 @@ label planning was never shown is refused, with the reason (ADR-0307 §5:3).
 > reason, and writes nothing.
 
 > **Normative.** A stop command (ADR-0295 §1) naming a running or pushed activation also
-> stops what is still live below it. It stops the activation first, so the store refuses
+> stops what is still live below it. It first writes a **cascade record** naming that
+> activation in the plan store, then stops the activation (ADR-0297), so the store refuses
 > its spawns (§3:3). It then walks the tasks below it: the tasks that activation spawned,
 > and the tasks spawned by those tasks' activations in turn, read from the tasks the Task
 > Scheduler keeps (§7:8) whether or not their activations have ended. Along the walk it
 > cancels every pending occurrence and stops every activation that is pushed or running
 > (§9:10), and acts on nothing that has ended. Where a push wins against a cancel (§7:5),
 > the activation it names is stopped in turn. The stop is done once nothing below the
-> stopped activation is pending, pushed or running.
+> stopped activation is pending, pushed or running. A takeover's stop (ADR-0295 §5) writes
+> no cascade record and walks nothing.
 
 There is no series or chain object: the building blocks are spawns, and a stop cascades
-down from live work. A step that has ended is walked through, never stopped: §7:8 keeps
+down from live work. The walk does the work at once, and the cascade record makes it hold:
+whatever a restart or a failure leaves of the walk, §7:5's push step refuses every pending
+occurrence below a cascade record, from a conversation's activation or a scheduled step,
+settled or not. A step that has ended is walked through, never stopped: §7:8 keeps
 every task with anything live below it, so the walk reaches every live descendant, and it
 never needs a task that was removed. A stop naming an ended activation directly still
 changes nothing.
@@ -734,13 +743,14 @@ them (§5:6), and the line's chat is on every such activation's place list (§6:
 > (§5:9); read
 > tasks by id, by person and state, and by parent, and a task's lineage (§6:5); read
 > whether anything below a task is pending, pushed or running (§7:8, §9:6); write a stop
-> record for a pushed id not yet admitted (§9:10); read the occurrences due at an instant
+> record for a pushed id not yet admitted (§9:10); write a cascade record (§9:6) and refuse
+> a push below one (§7:5); read the occurrences due at an instant
 > and the tasks whose waits have all ended (§7:3, §5:4); mark an occurrence pushed (§7:5);
 > write an occurrence's outcome (§7:6, §8); settle a message's effect record whose outcome
 > is unknown or unwritten from its place's confirmation, once, to done with its position or
 > to not done, and refuse every other change to an outcome already written (§8:11); and
 > remove a task once §7:8 holds. `PlanExport`
-> gains the tasks the store holds and their occurrences, its `schema_version`
+> gains the tasks the store holds, their occurrences and the cascade records, its `schema_version`
 > advances, and `PlanStore.clear` erases them (ADR-0004 §6, ADR-0292 §3:11). Exact signatures
 > are the triad's, within this list.
 
@@ -816,7 +826,10 @@ The lanes, each after this decision merges `Accepted`, held by milestone 15:
 > its occurrence *done* with no second try, and confirmed absent, which is pushed again
 > unmarked (§8:11); a line message left with no outcome, which takes the second try; a
 > restart after a step's stop record was written but before its episode froze as stopped,
-> which ends the occurrence *stopped*, pushes nothing and finishes the stop's walk (§8:1); a
+> which ends the occurrence *stopped* and pushes nothing (§8:1); a crash after a stop
+> command's cascade record but before its walk cancels a pending child, for a conversation's
+> activation and for a scheduled step whose occurrence has already settled, where the child
+> is never pushed and ends *cancelled* (§7:5); a
 > spawn refused on a stop record, at the chain limit and at the pending limit; a spawn
 > replacing a task with nothing pending refused, and one replacing a task that waits on
 > named tasks with an invalid wait refused (§9:4); a task removed once §7:8 holds, and one
@@ -869,7 +882,7 @@ Superseded in part. Every clause the middle column does not name stands:
 | ADR-0284 | §2:1, in the addition alone: `InputOrigin` gains `assistant`, the origin of a scheduled task's input that carries no outside-content mark | §6:3, §12:7 |
 | ADR-0292 | §5:6, in the addition alone: every scheduled task, whoever set it, informs the activation it starts and authorizes nothing; §6:8, in the addition alone: a scheduled task falling due starts an activation, though the assistant wrote it; §12:1's *setting a timer*: it is a spawn, written through the Task Scheduler's actuator | §3:9, §6:1, §3:1, §4:3 |
 | ADR-0293 | §5:2's table, in the addition alone: an assistant's message also records the effect record it was claimed under, kept for confirming delivery after a restart and shown on no device | §8:12, §12:9 |
-| ADR-0295 | §1:1, in the addition alone: a stop command naming a running or pushed activation also stops what is still live below it, walking through steps that have ended; a takeover's stop (§5:1) does not cascade | §9:6 |
+| ADR-0295 | §1:1, in the addition alone: a stop command naming a running or pushed activation also stops what is still live below it, walking through steps that have ended, and its cascade record keeps anything below it from being pushed later; a takeover's stop (§5:1) does not cascade | §7:5, §9:6 |
 | ADR-0297 | §5:5, for an id the Task Scheduler has pushed and not yet admitted: the stop writes its stop record and answers `STOPPED`, and admission refuses that id | §9:10 |
 | ADR-0303 | §7:1, in the addition alone: an item an activation the Task Scheduler started wrote also links to its scheduled task, while the Task Scheduler holds it | §9:1 |
 | ADR-0306 | §6:4, in the addition alone: a message's record whose outcome is unknown or unwritten is settled once more from its place's confirmation (§8:11, §12:3); §4:7, for an activation the Task Scheduler starts: each message goes into the place on its place list it names, and none goes off the list; §5:6's *never resolved by guessing* and §5:13's *never retried, done another way*, for that activation's message alone: one second try, where its place's kind cannot confirm delivery | §6:7, §8:6, §8:8, §8:11, §12:3 |
