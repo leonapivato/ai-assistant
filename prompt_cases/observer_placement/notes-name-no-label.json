@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "{\"memory\": {\"wording\": \"The user has eaten fish since June 2026 and eats no other meat.\", \"supports\": [{\"from\": \"the user\", \"outside\": false, \"direction\": \"for\", \"backs_as_worded\": true, \"at\": \"2026-08-14T12:30:00+00:00\", \"text\": \"fyi I've been eating fish since June, still no other meat though\"}], \"subjects\": [\"the user\"], \"involved\": [], \"marks\": [], \"valid_until\": null}, \"stored\": [{\"memory\": \"M1\", \"wording\": \"The user is vegetarian.\", \"held_by\": [\"the user\"], \"partly_supported_by\": [], \"stands\": \"you said it\", \"status\": \"current\", \"for\": 1, \"against\": 0, \"episodes\": 1, \"open_questions\": [], \"recent_supports\": [{\"from\": \"the user\", \"outside\": false, \"direction\": \"for\", \"backs_as_worded\": true, \"counted\": true, \"at\": \"2026-03-02T19:05:00+00:00\", \"text\": \"I'm vegetarian, so no meat places\"}]}, {\"memory\": \"M2\", \"wording\": \"The user thought the grilled sardines at Harbour Lantern were excellent.\", \"held_by\": [\"the user\"], \"partly_supported_by\": [], \"stands\": \"you said it\", \"status\": \"current\", \"for\": 1, \"against\": 0, \"episodes\": 1, \"open_questions\": [{\"question\": \"Q1\", \"asks\": \"Who ate the sardines, since the user is vegetarian?\"}], \"recent_supports\": [{\"from\": \"the user\", \"outside\": false, \"direction\": \"for\", \"backs_as_worded\": true, \"counted\": true, \"at\": \"2026-07-20T21:40:00+00:00\", \"text\": \"the grilled sardines at Harbour Lantern were excellent\"}]}]}",
+      "name": null
+    }
+  ]
+}

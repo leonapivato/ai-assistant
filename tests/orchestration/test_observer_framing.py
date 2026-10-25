@@ -17,6 +17,7 @@ from observer_support import AT, LABELS, Minter, address, episode, framed, frami
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ConfirmationPart,
+    EvidenceItemPart,
     InputPart,
     MemoryMark,
     MemoryStanding,
@@ -409,3 +410,76 @@ def test_two_claims_of_one_exchange_each_pass_on_their_own_part() -> None:
         "The user runs on Tuesday mornings.",
     ]
     assert result.failed == 0
+
+
+def test_a_list_in_one_part_passes_as_a_memory_per_item() -> None:
+    """#3399's split, as code checks it (prompt_cases/observer_framing/list-in-one-clause).
+
+    One message lists two allergies; each memory is backed as worded by that one part.
+    """
+    said = _part("P1", "please remember I'm allergic to sesame and kiwi")
+
+    result = _framed(
+        _view(said),
+        framing(
+            framed("The user is allergic to sesame.", "P1"),
+            framed("The user is allergic to kiwi.", "P1"),
+        ),
+    )
+
+    assert [one.memory.content for one in result.memories] == [
+        "The user is allergic to sesame.",
+        "The user is allergic to kiwi.",
+    ]
+    assert all(one.memory.supports[0].backs_as_worded for one in result.memories)
+
+
+def test_a_kept_report_passes_on_the_request_and_the_evidence_never_on_the_relay() -> None:
+    """#3400, ADR-0346 §7:6, §7:10: "remember that" and the evidence back it, the relay not.
+
+    ADR-0345 §5's worked example, step 3: the report rests on the source's evidence item and
+    the person's request, and cites the message that relayed it.
+    """
+    keep = _part("P1", "Remember that.")
+    relay = _part(
+        "P2",
+        "Harrow Point on Monday: high of 14, low of 6, dry.",
+        episode_name="earlier",
+        minutes=2,
+        origin=SupportOrigin.ASSISTANT_MESSAGE_OVER_OUTSIDE,
+        part=RoundMessagePart(episode=address("earlier"), round="r1"),
+    )
+    evidence = _part(
+        "P3",
+        "Monday at Harrow Point: high 14, low 6.",
+        episode_name="earlier",
+        minutes=2,
+        origin=SupportOrigin.EVIDENCE,
+        part=EvidenceItemPart(episode=address("earlier"), digest=0, item=0),
+    )
+    view = _view(keep, relay, evidence)
+
+    def report(*backing: str) -> str:
+        return framing(
+            {
+                "wording": "A forecast said Harrow Point's Monday high is 14 and its low 6.",
+                "supports": [
+                    {
+                        "part": one,
+                        "direction": "for",
+                        "backs_as_worded": one in backing,
+                        "how_sure": "sure",
+                    }
+                    for one in ("P1", "P2", "P3")
+                ],
+                "subjects": [],
+                "involved": [],
+            }
+        )
+
+    (kept,) = _framed(view, report("P1", "P3")).memories
+    assert {one.points_at for one in kept.memory.supports if one.backs_as_worded} == {
+        keep.part,
+        evidence.part,
+    }
+    assert _framed(view, report("P2")).memories == (), "a relay backs no memory but a saying"
