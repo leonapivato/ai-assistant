@@ -10470,7 +10470,9 @@ class TaskRefusal(StrEnum):
     NOTHING_PENDING = "nothing_pending"
     """Nothing of the task named is pending (§9:4, §9:5)."""
     INVALID_WAIT = "invalid_wait"
-    """It waits on a task §5:4 does not allow: one not held, or another person's."""
+    """It waits on a task §5:4 does not allow, one not held or another person's; or it
+    replaces a task waiting on tasks not all ended without waiting on each of them that
+    has not, which would move that task past its wait (§9:4)."""
     CHAIN_LIMIT = "chain_limit"
     """Its chain length would exceed the chain limit (§9:7)."""
     PENDING_LIMIT = "pending_limit"

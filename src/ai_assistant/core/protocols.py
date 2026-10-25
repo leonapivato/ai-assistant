@@ -3550,21 +3550,26 @@ class PlanStore(Protocol):
 
         1. **The claim**, exactly as :meth:`claim_activation_effect` decides it: where
            the store holds a stop record for ``effect.activation_id``, the spawning
-           activation, it raises ``ClaimStopped``; a held effect id, or a held task id,
-           raises ``PlanningError``; a spent part answers ``ALREADY_USED`` and the
-           backstop ``ALREADY_DONE``. Each writes nothing.
-        2. **The replace** (§9:4), where ``spawn.replaces`` names a task. It is refused
+           activation, it raises ``ClaimStopped``; a held effect id raises
+           ``PlanningError``; a spent part answers ``ALREADY_USED`` and the backstop
+           ``ALREADY_DONE``. Each writes nothing.
+        2. **The task id.** Where the store already holds a task under ``spawn.id``, it
+           raises ``PlanningError`` and writes nothing.
+        3. **The replace** (§9:4), where ``spawn.replaces`` names a task. It is refused
            as not done where the store holds no such task, where it is for another
            person than ``spawn.person``, where ``replace_any`` is false and the spawning
            activation did not spawn it (§4:4), or where nothing of it is pending.
-        3. **The wait** (§5:4), where ``spawn.when`` waits on named tasks: each must be
-           a task the store holds for ``spawn.person``.
-        4. **The chain limit** (§9:7): the task's chain length, ``1`` where its parent
+        4. **The wait** (§5:4), where ``spawn.when`` waits on named tasks: each must be
+           a task the store holds for ``spawn.person``. And a replace never moves a task
+           past its wait (§9:4): where the replaced task waits on tasks not all ended,
+           the spawn must wait on each of them that has not. Either refusal is
+           ``invalid_wait``.
+        5. **The chain limit** (§9:7): the task's chain length, ``1`` where its parent
            was not started by the Task Scheduler and one more than that activation's
            task's otherwise, may not exceed ``chain_limit``.
-        5. **The pending limit** (§9:8): the person's pending occurrences, counted after
+        6. **The pending limit** (§9:8): the person's pending occurrences, counted after
            the replace's cancel, with the new task's, may not exceed ``pending_limit``.
-        6. Otherwise it cancels the replaced task's pending occurrences as
+        7. Otherwise it cancels the replaced task's pending occurrences as
            :meth:`cancel_scheduled_task` does, writes the task, and writes ``effect`` as
            a claim, with no outcome, which acting then finishes (ADR-0306 §5:5).
 

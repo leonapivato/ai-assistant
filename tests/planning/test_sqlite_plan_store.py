@@ -1790,6 +1790,44 @@ async def _spawn_into(store: SqlitePlanStore, task_id: str, *, spawner: str = "a
     assert answer.answer is TaskWriteAnswer.WRITTEN
 
 
+async def test_a_spawn_whose_claim_fails_after_its_replace_leaves_nothing_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3:3, §9:4: the cancel, the task and the claim are one step, or none of them is.
+
+    The replace's cancel and the new task are written before the effect record inside the
+    step's one transaction, so a backend failure at the claim rolls both back: the
+    replaced task is still pending, and neither the replacement nor its claim is held.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await _spawn_into(store, "t1")
+        before = await store.scheduled_tasks(["t1"])
+
+        def failing(_conn: sqlite3.Connection, _record: ActivationEffect) -> None:
+            msg = "disk I/O error"
+            raise sqlite3.OperationalError(msg)
+
+        with monkeypatch.context() as patched:
+            patched.setattr(sqlite_store, "_insert_effect", failing)
+            with pytest.raises(PlanningError, match="disk I/O error"):
+                await store.write_scheduled_task(
+                    _spawned("t2").model_copy(update={"replaces": "t1"}),
+                    _acted("spawn-t2").model_copy(update={"capability": "spawn"}),
+                    match=None,
+                    chain_limit=10,
+                    pending_limit=50,
+                )
+
+        assert await store.scheduled_tasks(["t1", "t2"]) == before
+        assert [one.id for one in await store.activation_effects(["act-1"])] == ["spawn-t1"]
+        await _spawn_into(store, "t3")
+        assert [one.id for one in await store.scheduled_tasks(["t1", "t3"])] == ["t1", "t3"]
+    finally:
+        store.close()
+
+
 async def test_a_scheduled_task_and_a_cascade_record_survive_a_restart(tmp_path: Path) -> None:
     """§7:8, §8:1: a pushed occurrence and a cascade record outlive the process.
 
