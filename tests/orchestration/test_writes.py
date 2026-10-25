@@ -14,6 +14,7 @@ import structlog.testing
 from orchestration_held_episodes import held_episode
 
 from ai_assistant.core.types import (
+    InputPart,
     Memory,
     MemoryChange,
     MemoryDecisionKind,
@@ -25,7 +26,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.writes import DEFERRED_EVENT, MemoryWriteStage
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore, FakeMemoryWriter
-from ai_assistant.testing.memories import memory, said_support
+from ai_assistant.testing.memories import HELD_EPISODE, memory, said_support
 
 _AT = datetime(2026, 3, 4, 10, 0, tzinfo=UTC)
 
@@ -120,7 +121,12 @@ async def test_an_operation_and_an_entry_pass_through_to_the_writer() -> None:
     await stage.write(_proposal("kept-1"))
     stored = await store.get("kept-1")
     assert isinstance(stored, Memory)
-    support = said_support(added_at=_AT)
+    # Another of the episode's messages, so the add is no repeat of the support the
+    # memory was written with (ADR-0328 §4:8) and the apply has something to write.
+    support = said_support(added_at=_AT).model_copy(
+        update={"points_at": InputPart(episode=HELD_EPISODE, message=1)}
+    )
+    assert stored.support_at(support.points_at) is None
     change = MemoryChange(
         memory=stored,
         operation=MemoryOperation(
@@ -135,6 +141,10 @@ async def test_an_operation_and_an_entry_pass_through_to_the_writer() -> None:
     await stage.apply(change)
     added = await store.get("kept-1")
     assert isinstance(added, Memory)
+    assert added.support_at(support.points_at) is not None
+    assert [(one.kind, one.cites) for one in added.operations[len(stored.operations) :]] == [
+        (MemoryOperationKind.ADD_SUPPORT, support.points_at)
+    ]
     entry = TrackRecordEntry(
         episode=support.points_at.episode,  # type: ignore[union-attr]  # an input part's episode
         relied_at=_AT,
