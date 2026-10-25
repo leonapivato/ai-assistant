@@ -1,0 +1,19 @@
+# The user asked for Monday's forecast, the assistant read it and relayed it with more than
+# the digest recorded, and the user said "Remember that." Keeping is not believing: the
+# request backs nothing, the forecast is the source's and is worded to what its evidence
+# item states, and the assistant's relay backs no memory but a record of the saying.
+prompt = "observer_framing"
+guards = "request_backs_memory"
+came_from = "#3400"
+set = "development"
+samples = 3
+
+[property]
+check = "read"
+read = """No support on P1 has backs_as_worded true. A memory stating the forecast is backed \
+as worded by P3 and states nothing P3 does not: no dry weather and no breeze. P2 backs no \
+memory as worded, unless that memory is worded as what the assistant said and is marked \
+both occasion and assistant_statement."""
+
+[input]
+file = "kept-report-held-by-source.json"

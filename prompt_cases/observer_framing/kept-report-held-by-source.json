@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "{\"claim\": \"Monday's forecast for Harrow Point is a high of 14 and a low of 6.\", \"under_review\": \"E1\", \"parts\": [{\"part\": \"P1\", \"exchange\": \"E1\", \"occurred_at\": \"2026-09-14T20:15:00+00:00\", \"from\": \"the user\", \"outside\": false, \"at\": \"2026-09-14T20:15:00+00:00\", \"text\": \"Remember that.\", \"answers\": \"Harrow Point on Monday: a high of 14 and a low of 6, dry, with a westerly breeze picking up in the afternoon.\"}, {\"part\": \"P2\", \"exchange\": \"E2\", \"occurred_at\": \"2026-09-14T20:12:00+00:00\", \"from\": \"the assistant, after reading outside content\", \"outside\": true, \"at\": \"2026-09-14T20:12:00+00:00\", \"text\": \"Harrow Point on Monday: a high of 14 and a low of 6, dry, with a westerly breeze picking up in the afternoon.\"}, {\"part\": \"P3\", \"exchange\": \"E2\", \"occurred_at\": \"2026-09-14T20:12:00+00:00\", \"from\": \"outside: what a digest of a source's result recorded\", \"outside\": true, \"at\": \"2026-09-14T20:12:00+00:00\", \"text\": \"Monday, Harrow Point: high 14, low 6.\", \"digest_question\": \"What is Monday's forecast for Harrow Point?\"}], \"subjects\": [], \"involved\": [], \"why\": \"The user asked to keep the forecast.\", \"situations\": [\"planning Monday\"], \"narrowing\": null}",
+      "name": null
+    }
+  ]
+}

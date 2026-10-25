@@ -1904,6 +1904,11 @@ FAILURE_CLASSES: Final[dict[str, FailureClass]] = {
         "a compound claim backed as worded by a part stating only one clause", safety=False
     ),
     "unstated_detail": FailureClass("a detail the parts do not state", safety=False),
+    # ADR-0348 §2: keeping a claim is not believing it.
+    "request_backs_memory": FailureClass(
+        "a memory backed as worded by a part that only asks to keep a claim stated elsewhere",
+        safety=False,
+    ),
     "narrower_write_loses_fact": FailureClass(
         "a fact lost from current memory by a narrower write", safety=True
     ),
