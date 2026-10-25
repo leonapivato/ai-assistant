@@ -1,6 +1,6 @@
 # 348. Keeping a claim is not believing it, a holder's newer word supersedes their older one, and a memory holds one open check
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Scope: three corrections to how a memory's holders, disputes and open questions are written, found by milestone 3's acceptance run (#3397). What a person's request to keep something backs. A holder's older word cited against their newer memory. A memory's open `recheck` questions, and how an answer closes one. Issues [#3400](https://github.com/leonapivato/ai-assistant/issues/3400), [#3403](https://github.com/leonapivato/ai-assistant/issues/3403) and [#3413](https://github.com/leonapivato/ai-assistant/issues/3413).
 - Dependency: ADR-0328, ADR-0345 and ADR-0346, as their status lines leave them.
