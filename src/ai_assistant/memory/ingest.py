@@ -89,6 +89,7 @@ from ai_assistant.memory._operations import applied_operation
 from ai_assistant.memory._placed import (
     added_backing_fault,
     created_fault,
+    ordered_episodes,
     placed_fault,
     placed_write,
 )
@@ -101,11 +102,12 @@ from ai_assistant.memory._reconciler import ReconcilerOutcome
 from ai_assistant.memory.policy import clears_admissibility_floor
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence, Set
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import Embedder, MemoryPolicy, MemoryStore, TraceSink
     from ai_assistant.core.types import (
+        ChannelIdentity,
         Embedding,
         LabelBounds,
         MemoryChange,
@@ -763,6 +765,51 @@ def _ended(target: MemoryRecord, successor: Memory, now: datetime) -> Memory:
     except ValueError as exc:
         msg = f"cannot retire {target.id!r}: {exc}"
         raise MemoryStoreError(msg) from exc
+
+
+#: How many of a channel's episode numbers one read takes, its bound (ADR-0283 §3:5).
+_NUMBER_PAGE: Final = 1000
+
+
+async def _episode_numbers(
+    store: MemoryStore, episodes: Set[str], held: Mapping[str, MemoryRecord]
+) -> dict[str, int]:
+    """The number the store gave each of ``episodes``, where it can be read (ADR-0283 §1).
+
+    The record's order across episodes (ADR-0348 §3:2): the store numbers every episode
+    from one counter as it inserts it, so the numbers order episodes as their passes
+    ended, and no clock reading does (ADR-0275 §4:9). A number is read through the
+    episode's channel, its processing record's, whose held episodes are enumerated in
+    number order until every one wanted on it is found: an episode on no channel has no
+    number this reads, and is ordered against no other.
+
+    Args:
+        store: The store the episodes are held in.
+        episodes: The episodes wanted, by id.
+        held: Those episodes as the store holds them, by id.
+
+    Returns:
+        Each number read, by episode id.
+    """
+    by_channel: dict[ChannelIdentity, set[str]] = {}
+    for episode in episodes:
+        found = held.get(episode)
+        record = found.processing_record if isinstance(found, EpisodicMemory) else None
+        if record is not None and record.trigger.channel is not None:
+            by_channel.setdefault(record.trigger.channel, set()).add(episode)
+    numbers: dict[str, int] = {}
+    for channel, wanted in by_channel.items():
+        after: int | None = None
+        while wanted:
+            page = await store.channel_episode_ids(channel, after=after, limit=_NUMBER_PAGE)
+            for one in page:
+                if one.episode_id in wanted:
+                    numbers[one.episode_id] = one.number
+                    wanted.discard(one.episode_id)
+            if len(page) < _NUMBER_PAGE:
+                break
+            after = page[-1].number
+    return numbers
 
 
 def _episode_of(support: MemorySupport, held: Mapping[str, MemoryRecord]) -> EpisodicMemory | None:
@@ -1658,7 +1705,7 @@ class MemoryIngestor:
         proposed, refused_labels = await self._labelled(proposed)
         observed = observed.model_copy(update={"proposed": proposed})
         if observed.placement is not None:
-            return await self._ingest_placed(observed, refused_labels)
+            return await self._ingest_placed(observed, refused_labels, held)
         retiring = self._retiring(observed, held)
         conflicts = await self._detect_conflicts(
             proposed, withheld=None if retiring is None else retiring.retirement.memory.id
@@ -1702,7 +1749,10 @@ class MemoryIngestor:
         )
 
     async def _ingest_placed(
-        self, observed: MemoryUpdateProposal, refused_labels: tuple[str, ...]
+        self,
+        observed: MemoryUpdateProposal,
+        refused_labels: tuple[str, ...],
+        held: Mapping[str, MemoryRecord],
     ) -> _Ingested:
         """A placed proposal: ruled by the floor and the confirmation rule, then placed.
 
@@ -1711,7 +1761,9 @@ class MemoryIngestor:
         with no relations, and its floor or its confirmation rule is final. On an
         ``ACCEPT`` a stale placement is refused whole, and otherwise every write
         :func:`~ai_assistant.memory._placed.placed_write` derives is made in one atomic
-        batch, each stored memory ``IF_UNCHANGED`` at the revision read (§5:6).
+        batch, each stored memory ``IF_UNCHANGED`` at the revision read (§5:6). The
+        episodes whose order ADR-0348 §3 reads are numbered first, from ``held``, the
+        episodes the proposal's supports point at.
 
         Raises:
             MemoryStoreError: If a ruling other than the floor's, the confirmation
@@ -1776,8 +1828,9 @@ class MemoryIngestor:
                 f"(ADR-0345 §4:5)"
             )
             raise MemoryStoreError(msg)
+        numbers = await _episode_numbers(self._store, ordered_episodes(observed.proposed), held)
         try:
-            placed = placed_write(observed, read, at=self._now_utc())
+            placed = placed_write(observed, read, at=self._now_utc(), numbers=numbers)
         except ValueError as exc:
             msg = f"refusing to write {observed.proposed.id!r}: {exc}"
             raise MemoryStoreError(msg) from exc
