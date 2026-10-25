@@ -2017,12 +2017,24 @@ class PlanStoreContract:
         assert [one.id for one in await store.activation_effects(["act-1"])] == ["spawn-first"]
 
     async def test_a_held_task_id_is_refused(self, store: PlanStore) -> None:
-        """A task id names one task, so a second write under it is refused whole."""
-        await _written(store, "t1")
+        """A task id names one task, so a second write under it is refused whole.
+
+        The second write carries an effect id of its own and other content, so it is the
+        task id that refuses it, and the task held is the first one, unchanged.
+        """
+        first = await _written(store, "t1")
+        again = _spawn("t1", places=(_LINE,)).model_copy(update={"instruction": "another step"})
 
         with pytest.raises(PlanningError):
-            await _write(store, "t1", spawner="act-2")
+            await store.write_scheduled_task(
+                again,
+                _spawn_effect("spawn-other", activation="act-2"),
+                match=None,
+                chain_limit=_CHAIN_LIMIT,
+                pending_limit=_PENDING_LIMIT,
+            )
 
+        assert await _held(store, "t1") == first
         assert await store.activation_effects(["act-2"]) == ()
 
     async def test_a_spawns_effect_is_a_call(self, store: PlanStore) -> None:
@@ -2161,6 +2173,45 @@ class PlanStoreContract:
         assert answer.reason is reason
         assert await store.scheduled_tasks(["t2"]) == ()
         assert "spawn-t2" not in [one.id for one in await store.activation_effects(["act-1"])]
+
+    async def test_a_replace_never_moves_a_task_past_its_wait(self, store: PlanStore) -> None:
+        """§9:4, §5:4: a task waiting on tasks not all ended is replaced only with a wait on them.
+
+        A replace due now, or waiting on fewer of them, is refused and writes nothing: the
+        waiting task is still pending, and neither the replacement nor its claim is held.
+        """
+        await _written(store, "tA")
+        await _written(store, "tB")
+        await _written(store, "tW", when=DueAfterTasks(tasks=("tA", "tB")))
+        before = await _held(store, "tW")
+
+        sooner = await _write(store, "t1", replaces="tW")
+        fewer = await _write(store, "t2", replaces="tW", when=DueAfterTasks(tasks=("tA",)))
+
+        for refused in (sooner, fewer):
+            assert refused.answer is TaskWriteAnswer.REFUSED
+            assert refused.reason is TaskRefusal.INVALID_WAIT
+        assert await _held(store, "tW") == before
+        assert await store.scheduled_tasks(["t1", "t2"]) == ()
+        effects = [one.id for one in await store.activation_effects(["act-1"])]
+        assert "spawn-t1" not in effects
+        assert "spawn-t2" not in effects
+
+    async def test_a_replace_keeps_or_widens_the_wait_and_is_free_once_it_has_ended(
+        self, store: PlanStore
+    ) -> None:
+        """§9:4: a wait on each unended task passes; once they have all ended, any when does."""
+        await _written(store, "tA")
+        await _written(store, "tB")
+        await _written(store, "tW", when=DueAfterTasks(tasks=("tA", "tB")))
+        await store.cancel_scheduled_task("tB")
+
+        kept = await _write(store, "t1", replaces="tW", when=DueAfterTasks(tasks=("tA", "tB")))
+        await store.cancel_scheduled_task("tA")
+        later = await _write(store, "t2", replaces="t1", when=DueAt(at=_WHEN + timedelta(hours=9)))
+
+        assert kept.answer is TaskWriteAnswer.WRITTEN
+        assert later.answer is TaskWriteAnswer.WRITTEN
 
     async def test_a_wait_names_tasks_held_for_the_same_person(self, store: PlanStore) -> None:
         """§5:4: a wait on a task not held, or on another person's, is refused."""

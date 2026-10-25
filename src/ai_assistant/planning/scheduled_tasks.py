@@ -459,9 +459,24 @@ def _replace_refusal(
     return None
 
 
-def _wait_allowed(tasks: dict[str, ScheduledTask], spawn: TaskSpawn) -> bool:
-    """Whether every task the spawn waits on is held and is for its person (§5:4)."""
+def _wait_allowed(
+    tasks: dict[str, ScheduledTask], spawn: TaskSpawn, replaced: ScheduledTask | None
+) -> bool:
+    """Whether the spawn's wait is one §5:4 and §9:4 allow.
+
+    Every task it waits on is held and is for its person (§5:4). And a replace never moves
+    a task past its wait (§9:4, "a task waiting on named tasks is replaced only with a
+    valid wait"; §5:4, "what it waits for never changes"): where the replaced task waits
+    on tasks not all ended, the replacement waits too, on each of them that has not.
+    """
     when = spawn.when
+    if replaced is not None and isinstance(replaced.when, DueAfterTasks):
+        unended = {
+            one for one in replaced.when.tasks if (held := tasks.get(one)) is None or not held.ended
+        }
+        named = set(when.tasks) if isinstance(when, DueAfterTasks) else set()
+        if not unended <= named:
+            return False
     if not isinstance(when, DueAfterTasks):
         return True
     return all(
@@ -507,7 +522,7 @@ def decide_task_write(  # noqa: PLR0913 — the schedule, the spawn and its spaw
         refusal = _replace_refusal(replaced, spawn, spawner, replace_any=replace_any)
         if refusal is not None:
             return _refused(refusal)
-    if not _wait_allowed(tasks, spawn):
+    if not _wait_allowed(tasks, spawn, replaced):
         return _refused(TaskRefusal.INVALID_WAIT)
     above = task_of(tasks, spawner)
     chain = (
