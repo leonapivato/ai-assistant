@@ -680,13 +680,12 @@ class TaskManager:
         a removal not made now is made at a later tidy, and nothing reads a task kept a
         little longer as anything but kept.
         """
+        # A task kept now may go once another in the walk is removed, so one is read
+        # again whenever a removal names it: each entry after the first is added by a
+        # removal, and the store holds finitely many tasks, so the walk ends.
         work = list(dict.fromkeys(task_ids))
-        seen: set[str] = set()
         while work:
             task_id = work.pop()
-            if task_id in seen:
-                continue
-            seen.add(task_id)
             try:
                 held = await self._plans.scheduled_tasks([task_id])
                 if not held or self._is_running(held[0].parent):

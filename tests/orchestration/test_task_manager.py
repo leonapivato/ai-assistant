@@ -439,3 +439,23 @@ async def test_a_cancel_and_a_push_racing_are_decided_by_whichever_lands_first()
     assert late_cancel.reason.value == "nothing_pending"
     (held,) = await world.plans.scheduled_tasks([pushed_first.id])
     assert held.occurrences[0].pushed_to == started
+
+
+async def test_overlapping_waits_are_all_removed_whichever_order_the_walk_meets_them() -> None:
+    """§7:8: a task kept by one waiting on it is removed once that one is, in one walk."""
+    for order in ((0, 1), (1, 0)):
+        world = _World()
+        parent = activation()
+        first = await write_task(world.plans, parent)
+        await world.plans.settle_occurrence(await pushed(world.plans, first), OccurrenceState.DONE)
+        second = await write_task(world.plans, parent, when=DueAfterTasks(tasks=(first.id,)))
+        await world.plans.settle_occurrence(await pushed(world.plans, second), OccurrenceState.DONE)
+        waits = (second.id, first.id)
+        gather = await write_task(
+            world.plans, parent, when=DueAfterTasks(tasks=(waits[order[0]], waits[order[1]]))
+        )
+        await world.plans.settle_occurrence(await pushed(world.plans, gather), OccurrenceState.DONE)
+
+        await world.manager.tidy([gather.id])
+
+        assert (await world.plans.export()).scheduled_tasks == ()

@@ -23,6 +23,7 @@ from task_support import (
     write_task,
 )
 
+from ai_assistant.core.errors import ConversationStoreError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     DueAt,
@@ -343,3 +344,41 @@ async def test_the_loop_sleeps_until_the_next_due_instant_within_the_recheck() -
 
     assert await world.sensor.look() == 5.0
     assert world.pushes == []
+
+
+class _UnreadableOnce(FakeConversationStore):
+    """A transcript whose first read for a claim fails."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+        self.failed = False
+
+    async def effect_position(self, conversation_id: str, effect_id: str, /) -> int | None:
+        if not self.failed:
+            self.failed = True
+            msg = "the transcript is busy"
+            raise ConversationStoreError(msg)
+        return await super().effect_position(conversation_id, effect_id)
+
+
+async def test_a_transcript_that_cannot_be_read_settles_nothing_until_it_can() -> None:
+    """§8:11: an unreadable transcript is no answer, so no second try is guessed from it."""
+    world = _World()
+    world.conversations = _UnreadableOnce()
+    world.sensor._conversations = world.conversations
+    conversation = await world.conversations.start()
+    place = CHAT.model_copy(update={"instance_id": conversation.id})
+    task = await write_task(world.plans, activation(), places=(place,))
+    cut = await pushed(world.plans, task)
+    claimed = await message(world.plans, cut, place)
+    await world.conversations.append_message(
+        conversation.id,
+        NewMessage(author=MessageAuthor.ASSISTANT, text="time for the pills", effect_id=claimed.id),
+    )
+
+    assert await world.sensor.settle_restart() is False
+    assert (await world.state(task)).state is OccurrenceState.PUSHED
+
+    assert await world.sensor.settle_restart() is True
+    occurrence = await world.state(task)
+    assert (occurrence.state, occurrence.second_try) == (OccurrenceState.DONE, False)
