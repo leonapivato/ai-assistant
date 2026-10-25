@@ -6,8 +6,8 @@
 - Dependency: [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md), [ADR-0286](0286-an-episode-is-open-while-its-activation-runs-and-frozen-when-it-ends.md), [ADR-0295](0295-stopping-an-activation-is-a-command-that-starts-nothing-new-and-cuts-off-nothing-already-sent.md), [ADR-0297](0297-a-stop-is-marked-on-the-activation-and-recorded-where-claims-are-decided.md), [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md), [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md), [ADR-0321](0321-authority-at-the-deploy-is-your-yes-to-a-question-that-showed-the-call.md), [ADR-0332](0332-activations-run-side-by-side-across-places-and-one-at-a-time-within-one-a-new-input-joins-the-running-activation-until-it-acts-and-a-place-waits-a-moment-before-it-starts.md), [ADR-0338](0338-a-person-sets-their-profile-and-pins-what-aether-always-keeps-in-mind-their-style-is-learned-as-memories-and-each-reaches-the-models-for-that-persons-activations.md) and [ADR-0341](0341-a-pure-read-is-a-call-that-writes-nothing-and-does-not-leave-the-hub-so-looking-something-up-in-the-assistants-own-records-does-not-commit-an-activation.md), as their status lines leave them.
 - Authorization: the owner ruled every part in the design walk of 2026-10-21 to 2026-10-24, recorded in proposal #3384's §§6–11. On 2026-10-24 the owner asked "Should we make this an adr and implement it first before moving to modes?", and on the coordinator's recommendation, to convert both parts and implement this one first, said "Yes to the milestone, number it correctly". The dispatcher assigned 0350. Ratifying it is the owner's, after the owner's own review: "just finish adrs A and B. And dont ratify them. Ill review when they are done." (2026-10-25).
 - Milestone: [15, Task Scheduler: reminders and work that runs later](https://github.com/leonapivato/ai-assistant/milestone/15); acceptance [#3416](https://github.com/leonapivato/ai-assistant/issues/3416).
-- **Changes `core`, so it is a contract-surface decision and a breaking change under golden rule 5.** `PlanStore` gains the scheduled-task members and `PlanExport` the tasks (§12:3). `core/types.py` gains the scheduled task, its occurrence and their enumerations (§12:1), `LabelKind` gains two members (§12:2), and `InputOrigin` gains `assistant` (§12:7), and `PlanningRound` gains its message's place (§12:8). `core`'s register of channel types gains the Task Scheduler (§2:7), and `Settings` gains six fields (§12:5). `AssistantEngine` gains no member (§10:6). `PROTOCOL_VERSION` advances in the lane whose types first cross the wire (§12:6).
-- **Partially supersedes**, in the clauses §15's first table names: ADR-0284, ADR-0292, ADR-0303, ADR-0306, ADR-0307, ADR-0323, ADR-0328, ADR-0329 and ADR-0338.
+- **Changes `core`, so it is a contract-surface decision and a breaking change under golden rule 5.** `PlanStore` gains the scheduled-task members and `PlanExport` the tasks (§12:3). `core/types.py` gains the scheduled task, its occurrence and their enumerations (§12:1), `LabelKind` gains two members (§12:2), and `InputOrigin` gains `assistant` (§12:7), and `PlanningRound` gains its message's place (§12:8). `NewMessage` and `ConversationStore` gain the claim an assistant's message was written under (§12:9). `core`'s register of channel types gains the Task Scheduler (§2:7), and `Settings` gains six fields (§12:5). `AssistantEngine` gains no member (§10:6). `PROTOCOL_VERSION` advances in TS1 (§12:6).
+- **Partially supersedes**, in the clauses §15's first table names: ADR-0284, ADR-0292, ADR-0293, ADR-0303, ADR-0306, ADR-0307, ADR-0323, ADR-0328, ADR-0329 and ADR-0338.
 
 ## Context
 
@@ -42,6 +42,9 @@ Task Manager. The walk's principles, in the owner's words:
   §3:3 joins only on such a place, and its §4:6 takes over only an activation whose input
   carries the same authority. Its §9 leaves background work to "the timers and proactivity
   milestone".
+- ADR-0292 §7:4: "What counts as *sent* is the kind's. For the conversation, a message is
+  sent once the medium has recorded it". ADR-0323 §10 gives the line an episode window
+  because a bot cannot read its chat's history.
 - ADR-0295 makes a stop a command naming one activation, and ADR-0297 decides it in the plan
   store with every claim. ADR-0286 §6:4 keeps an open episode from every model input.
 - ADR-0083 §7's scheduler is the hub's housekeeping loop, which accepts that "a missed or
@@ -63,6 +66,9 @@ Task Manager. The walk's principles, in the owner's words:
   `orchestration/planning.py`: `if processing is not None and processing.is_open:
   continue`).
 - `AssistantEngine.delete_conversation` is the engine's deletion of a conversation.
+- A message the assistant writes into a conversation (`NewMessage`, through
+  `ConversationStore.append_message`) records nothing of the effect record that claimed it,
+  so nothing reads a claim's message back from the transcript.
 
 **A draft beside it.** ADR-0340 (#3271, `Proposed`, unmerged) built reminders on a clock
 channel of their own, with their record in the plan store. The walk replaced its channel
@@ -275,13 +281,15 @@ pending (§9:4), so the same change twice leaves what one leaves.
 > **Normative.** A **hub event** is one of a closed list of events the hub notices as each
 > happens, never by polling, and only a later decision adds to the list. Its one member is
 > **named tasks ending**: a task timed on it falls due at the instant the last of the tasks
-> it names ends, however each ends (§7:6). It may name only one-off tasks for the same
-> person that exist when it is written, and what it waits for never changes.
+> it names ends, however each ends (§7:6), and at once where all of them have ended when it
+> is written. It may name only one-off tasks for the same person that exist when it is
+> written, and what it waits for never changes.
 
 "Your next message" is not a hub event, by the owner's choice. So no task waits on itself,
 and no two wait on each other. "Compare these three apartments" is three tasks spawned now
 and, in a later round that has their labels, a fourth timed after all three, which reads
-their episodes (§6:5).
+their episodes (§6:5). The three stay in the Task Scheduler while the activation that
+spawned them runs (§7:8), so that later round can name them however soon they finish.
 
 > **Normative.** A scheduled task carries **zero or more places its spawner suggests**, each
 > by its place label (§5:13). No place is suggested by default. A suggestion constrains
@@ -455,8 +463,10 @@ outside trigger (ADR-0306 §4:5): only a task carrying the mark is one, through 
 > once (§5:4), and a task with a rule has its next occurrence computed.
 
 > **Normative.** A task is removed from the Task Scheduler once nothing of it is pending, no
-> task waits on it, and each of its pushed occurrences is settled (§7:6, §8), so nothing
-> about it is left for §8 to settle or §9:6 to stop. Each task records its chain length when
+> task waits on it, each of its pushed occurrences is settled (§7:6, §8), and its parent,
+> the activation that spawned it, is no longer running. So nothing about it is left for §8
+> to settle or §9:6 to stop, and a later round of its parent can still name it in a task
+> that waits on it (§5:4). Each task records its chain length when
 > it is written (§9:7), so no count needs a task that was removed.
 
 > **Normative.** What ran is kept in episodes, never in the Task Scheduler: each occurrence
@@ -476,8 +486,9 @@ messages, and so does one set twice by mistake.
 ### 8. After a restart, and missed tasks
 
 > **Normative.** At start, after ADR-0286 §7:2's close and before it pushes anything, the
-> sensor settles each occurrence marked pushed whose activation is not running. §8:2–§8:7
-> apply in order, and the first that applies decides.
+> sensor settles each occurrence marked pushed whose activation is not running. §8:11
+> confirms that activation's messages first. §8:2–§8:7 then apply in order, and the first
+> that applies decides.
 
 > **Normative.** Where that activation's effect records (ADR-0306 §5:3) hold a spawn, the
 > occurrence ends *interrupted* and is never pushed again, so a chain cannot fork.
@@ -492,25 +503,32 @@ messages, and so does one set twice by mistake.
 > claimed no effect, or only messages each *not done*, the occurrence is pushed again. It is
 > pushed at most §12:5's push limit of times in all, and is then ended *interrupted*.
 
-> **Normative.** Where the occurrence was not itself a second try, and the activation claimed
-> only messages and any of them has an unknown outcome or none written, the occurrence is
-> pushed once more as a **second try**, and the occurrence records that it is one. Its input
+> **Normative.** Where the occurrence was not itself a second try, its pushes are still under
+> §12:5's push limit, and the activation claimed only messages and any of them has an
+> unknown outcome or none written, the occurrence is pushed once more as a **second try**,
+> and the occurrence records that it is one. Its input
 > says so, and planning's instruction has its message say that it is sent in case the last
 > did not arrive. It is never tried a third time. After the second try's activation ends,
 > the occurrence takes §7:6's outcome. Where a restart cuts that activation off too, §8:4
-> may still find it *done*, and §8:7 otherwise ends it *interrupted*.
+> may still find it *done*, and §8:7 otherwise ends it *interrupted*. Where the
+> occurrence's pushes have reached the push limit, this clause does not apply, and §8:7 ends
+> it *interrupted* with no further push.
 
 > **Normative.** Otherwise the occurrence ends *interrupted* and is never pushed again.
 > ADR-0306 §5:6 and §5:13 hold for every effect it claimed.
 
 > **Normative.** §8:6 replaces ADR-0306 §5:6's *never resolved by guessing* and §5:13's
 > *never retried, done another way* for the message of an activation the Task Scheduler
-> starts, and for no other effect. No outcome is ever reported as done.
+> starts, and for no other effect. §8:11's confirmation is not a guess: it reads the record
+> that decides, for that kind, whether a message was sent (ADR-0292 §7:4). No unknown
+> outcome is ever reported as done.
 
 A spawn's effect record outlives the task it wrote, so a step whose next step already ran
-and was removed is still found. So a step that has spawned its next is never run again. A step that may have spoken is said
-at most twice, the second time marked. A step that did nothing runs again. A step that acted
-in the world and was cut off is not repeated.
+and was removed is still found. So a step that has spawned its next is never run again.
+Where its place can confirm delivery, as the hub chat can, whether a step spoke is read, not
+guessed. A step that may have spoken where its place cannot, as on the line, is said at most
+twice, the second time marked. A step that did nothing runs again, up to the push limit. A
+step that acted in the world and was cut off is not repeated.
 
 > **Normative.** An occurrence pushed more than §12:5's lateness grace after the instant it
 > was due is **late**, and its input says so with that instant. It is said once, however
@@ -519,6 +537,28 @@ in the world and was cut off is not repeated.
 > **Normative.** A task with a rule that missed more than one occurrence pushes only its
 > latest missed occurrence, whose input says how many it skipped, and sets each earlier one
 > *skipped*, so it never bursts.
+
+**Confirming delivery.**
+
+> **Normative.** For each message the activation claimed whose outcome is unknown or none
+> written, the sensor asks the kind of the place it was claimed into whether it can confirm
+> delivery. Where the kind can, it confirms from its medium's own record, and the sensor
+> writes what it confirms onto the effect record (ADR-0306 §5:5): *done*, with its position,
+> where the medium recorded the message, and *not done* where it did not. Where the kind
+> cannot, or the place is gone (§5:8), the record is left as it was.
+
+> **Normative.** Each kind declares whether it can confirm delivery, in
+> `orchestration/channel_kinds.py`'s shape, as it declares whether its places run one
+> activation at a time. The hub chat's conversations can: the hub hosts each one's
+> transcript, a message is sent once that transcript records it (ADR-0292 §7:4), and the
+> transcript records with each of the assistant's messages the effect record it was claimed
+> under, deleted or not (§12:9). The line cannot: the Bot API gives a bot no way to read its
+> chat's history, and the line's place window is built from the hub's own episodes (ADR-0323
+> §10). Every other kind declares that it cannot.
+
+So a message the hub chat confirms ends its occurrence *done* under §8:4, with no second
+try, and one it confirms absent leaves an ordinary push again under §8:5. Only a message the
+place cannot confirm, as on the line, takes §8:6's marked second try.
 
 ### 9. Finding, changing, cancelling and stopping scheduled work
 
@@ -661,8 +701,10 @@ them (§5:6), and the line's chat is on every such activation's place list (§6:
 > **push limit** (three); and the **listing bound** for the list pull, the place pull and
 > the Task Manager's queries (twenty). Exact names are the triad's.
 
-> **Normative.** `PROTOCOL_VERSION` advances in the lane whose change first puts any type
-> this decision adds or changes on the wire (ADR-0124 §9).
+> **Normative.** `PROTOCOL_VERSION` advances in TS1 (§13), in the same change, since
+> `PlanningRound`'s place (§12:8) crosses the wire inside `EpisodicMemory.processing_record`
+> (ADR-0124 §9). Any other lane whose change alters a wire-carried type advances it again in
+> that change.
 
 > **Normative.** `InputOrigin` gains `assistant` (§6:3), added under ADR-0284 §2:1's closed
 > enumeration, and every reader of `origin` (ADR-0284 §2:3) handles it in the lane that adds
@@ -672,35 +714,57 @@ them (§5:6), and the line's chat is on every such activation's place list (§6:
 > Task Scheduler starts: the place its place label resolved to (§6:7), and nothing for any
 > other activation. Its exact shape is the triad's.
 
+> **Normative.** `NewMessage` gains, for the assistant's messages alone, the id of the effect
+> record the message was claimed under (ADR-0306 §5:4), and `ConversationStore.append_message`
+> records it with the message. `ConversationStore` gains a read answering, for a
+> conversation and such an id, whether the conversation holds the message written under it,
+> deleted or not, and at what position. The id is shown on no message a device reads and
+> carried in no export. Exact names are that triad's (§13).
+
 ### 13. Delivery
 
 The lanes, each after this decision merges `Accepted`, held by milestone 15:
 
-1. **TS1, the triad with its primary implementation** (ADR-0137 §2:1): §12's types, the
-   `LabelKind` and `InputOrigin` members with every reader of `origin`, `PlanningRound`'s
-   place (§12:8), the register entry
-   (§2:7), the six settings, the `PlanStore` members
-   and `PlanExport`, the conformance suite, the canonical fake, and the SQLite plan store in
-   `planning/` with its upgrade.
-2. **TS2, the Task Scheduler in `orchestration/`:** its kind (§2:6), its sensor (§7, §8), the
-   five capabilities (§4), the place list (§5:10–§5:14), the activation it starts (§6), the place-window links and labels
-   (§9:1–§9:3), the Task Manager's operations (§10), `delete_conversation`'s cancel (§5:9),
-   and the composition wiring in `app/`.
+1. **TS1, the `PlanStore` triad with its primary implementation** (ADR-0137 §2:1):
+   §12:1's types, the `LabelKind` and `InputOrigin` members with every reader of `origin`,
+   `PlanningRound`'s place (§12:8), the register entry (§2:7), the six settings, the
+   `PlanStore` members and `PlanExport`, the conformance suite, the canonical fake, the
+   SQLite plan store in `planning/` with its upgrade, and the advance of `PROTOCOL_VERSION`
+   (§12:6).
+2. **TS1b, the `ConversationStore` triad with its primary implementation** (ADR-0137 §2:1):
+   §12:9's `NewMessage` field and `ConversationStore` read, the conformance suite's cases for
+   them, the canonical fake, and the SQLite conversation store in `memory/` with its upgrade (ADR-0326
+   §4:1).
+3. **TS2, the Task Scheduler in `orchestration/`:** its kind (§2:6), its sensor (§7, §8), each
+   kind's declaration of whether it can confirm delivery (§8:12), the chat writer's claim id
+   (§12:9), the five capabilities (§4), the place list (§5:10–§5:14), the activation it
+   starts (§6), the place-window links and labels (§9:1–§9:3), the Task Manager's operations
+   (§10), `delete_conversation`'s cancel (§5:9), and the composition wiring in `app/`.
 
 > **Normative.** TS1 may touch `core`, `testing`, `planning` and their tests, permitted
 > expressly here as one unit. In `orchestration/` it may only adapt each reader of
-> `InputOrigin` to handle `assistant` (§6:11–§6:12, §12:7), and it touches no other package.
+> `InputOrigin` to handle `assistant` (§6:11–§6:12, §12:7). In `wire/` it may only advance
+> `PROTOCOL_VERSION` (§12:6), with the wire-surface and type-closure tests that pin it. It
+> touches no other package. TS1b may touch `core`, `testing`, `memory` and their tests,
+> permitted expressly here as one unit, and no other package.
 
-> **Normative.** TS1 merges before TS2, and TS2 is briefed only after TS1 has merged
-> (ADR-0137 §4:1).
+> **Normative.** TS1 and TS1b merge before TS2, in either order, and TS2 is briefed only after
+> both have merged (ADR-0137 §4:1).
 
 > **Normative.** TS2's tests include: two occurrences due at one instant, which start two
 > activations; a cancel and a push racing, where whichever lands first wins; each of
 > §8:2–§8:7 at start, a step that spawned its next never pushed again among them; a second
-> try cut off by a second restart before it claimed anything, which ends *interrupted*; a
+> try cut off by a second restart before it claimed anything, which ends *interrupted*;
+> three restarts, the first two before anything was claimed and the third after a message
+> was claimed into the line's chat with no outcome, which ends *interrupted* with no fourth
+> push (§8:5–§8:7); a hub chat message left with no outcome, confirmed recorded, which ends
+> its occurrence *done* with no second try, and confirmed absent, which is pushed again
+> unmarked (§8:11); a line message left with no outcome, which takes the second try; a
 > spawn refused on a stop record, at the chain limit and at the pending limit; a change of
-> a task with nothing pending refused; a task removed once §7:8 holds, and a restart after a
-> step's next task ran and was removed, which still never pushes that step again (§8:2); a
+> a task with nothing pending refused; a task removed once §7:8 holds; a child spawned now
+> that ends before a later round of its parent writes the task waiting on it, which that
+> task still names (§5:4, §7:8); a restart after a step's next task ran and was removed,
+> which still never pushes that step again (§8:2); a
 > task suggesting two places, one of them deleted, which still has the other on its list
 > (§5:8); a message of a task's activation naming a place off its list, refused (§6:7); a
 > spawn naming a channel's entry or a label never shown, refused (§5:13); a chain
@@ -727,7 +791,7 @@ The lanes, each after this decision merges `Accepted`, held by milestone 15:
 | How marks travel on every read of a peer's episode, and the audience where a message lands | The outside-content and audience designs ([#2590](https://github.com/leonapivato/ai-assistant/issues/2590)) |
 | A running step that spawns again after its pending next step was cancelled in words | Stopping in words, with Part A; the Task Manager's stop first (§9:6) |
 | The values of §12:5 | #2589 |
-| How a claim left with no outcome is recovered for any effect but §8:6's | [#2584](https://github.com/leonapivato/ai-assistant/issues/2584) |
+| How a claim left with no outcome is recovered for any effect but the message of an activation the Task Scheduler starts (§8:6, §8:11) | [#2584](https://github.com/leonapivato/ai-assistant/issues/2584) |
 
 > **Normative.** Each item the table names takes a decision of its own before any lane
 > builds it.
@@ -740,8 +804,9 @@ Superseded in part. Every clause the middle column does not name stands:
 | --- | --- | --- |
 | ADR-0284 | §2:1, in the addition alone: `InputOrigin` gains `assistant`, the origin of a scheduled task's input that carries no outside-content mark | §6:3, §12:7 |
 | ADR-0292 | §5:6, in the addition alone: every scheduled task, whoever set it, informs the activation it starts and authorizes nothing; §6:8, in the addition alone: a scheduled task falling due starts an activation, though the assistant wrote it; §10:1, in the addition alone: the Task Scheduler's window holds its task's parent's and waited-on tasks' frozen episodes; §12:1's *setting a timer*: it is a spawn, written through the Task Scheduler's actuator | §3:9, §6:1, §6:5, §3:1, §4:3 |
+| ADR-0293 | §5:2's table, in the addition alone: an assistant's message also records the effect record it was claimed under, kept for confirming delivery after a restart and shown on no device | §8:12, §12:9 |
 | ADR-0303 | §7:1, in the addition alone: an item an activation the Task Scheduler started wrote also links to its scheduled task, while the Task Scheduler holds it | §9:1 |
-| ADR-0306 | §4:7, for an activation the Task Scheduler starts: each message goes into the place on its place list it names, and none goes off the list; §5:6's *never resolved by guessing* and §5:13's *never retried, done another way*, for that activation's message alone: one second try | §6:7, §8:6, §8:8 |
+| ADR-0306 | §4:7, for an activation the Task Scheduler starts: each message goes into the place on its place list it names, and none goes off the list; §5:6's *never resolved by guessing* and §5:13's *never retried, done another way*, for that activation's message alone: one second try, where its place's kind cannot confirm delivery | §6:7, §8:6, §8:8 |
 | ADR-0307 | §3:1, §3:7 and §3:8, for an activation the Task Scheduler starts: they read the places on its place list, and *couldn't finish* goes into its suggested places on it; §5:1, in the addition alone: the label kinds `T` and `L`; §5:6, in the addition alone: an item is shown with its scheduled task's label; §6:1, in the addition alone: planning in an activation offered spawn is given the place list | §5:10–§5:13, §6:7, §9:2 |
 | ADR-0323 | §6:1's *the chat is the input's place*, for an activation the Task Scheduler starts: the chat is a place on its place list, and the writer still refuses any chat but the one the settings name | §6:7 |
 | ADR-0328 | §4:2, in the addition alone: no support points at an input whose origin is `assistant`, and the writer refuses one | §6:11 |
@@ -755,6 +820,9 @@ Read through and not superseded:
 | ADR-0292 §1:1–§1:3, §2:5–§2:6, §2:10 | Nothing: the Task Scheduler is built in, reached by a sensor and an actuator, and the Task Manager is commands and queries |
 | ADR-0292 §3 | Nothing: its clauses bind the Task Scheduler (§2:3); removal is its kind's retention (§3:5), and the assistant deletes nothing (§3:9) |
 | ADR-0292 §10:5 | Nothing: what ran is the episodes indexed by the schedule (§7:9) |
+| ADR-0292 §7:4 | Nothing: a kind that can confirm delivery reads what counts as sent for it (§8:11–§8:12) |
+| ADR-0323 §10 | Nothing: the line's window is the hub's own episodes, so the line cannot confirm delivery (§8:12) |
+| ADR-0124 §9 | Nothing: TS1 advances `PROTOCOL_VERSION` in the change that puts `PlanningRound`'s place on the wire (§12:6) |
 | ADR-0292 §6:2, §6:10 | Nothing: an occurrence falling due is a push, and one input starts one activation |
 | ADR-0292 §11:7 | Nothing: running work is current state, and a pushed mark records only which activation an occurrence was pushed to (§2:5, §7:5) |
 | ADR-0292 §12:2, §12:5–§12:6 | Nothing: a spawn is still an action that planning chooses, authorizing checks, acting runs and the record keeps; a command is a structured act |
@@ -774,7 +842,7 @@ Read through and not superseded:
 | ADR-0194 | Nothing: its ceiling binds every activation the Task Scheduler starts |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
-> dated header note of ADR-0284, ADR-0292, ADR-0303, ADR-0306, ADR-0307, ADR-0323, ADR-0328,
+> dated header note of ADR-0284, ADR-0292, ADR-0293, ADR-0303, ADR-0306, ADR-0307, ADR-0323, ADR-0328,
 > ADR-0329 and ADR-0338, atomically with this ADR under ADR-0070 and ADR-0082, preserving their ratified
 > bodies. The replacements take effect on this ADR's ratification.
 
@@ -808,22 +876,33 @@ Read through and not superseded:
 
 - **A model call per occurrence,** and per step of a chain. The chain and pending limits
   bound how many, and nothing else bounds model spend.
-- **Duplicates are possible.** A message that may not have arrived is said once more,
-  marked (§8:6).
+- **Duplicates are possible on the line.** After a restart the hub chat reads whether a
+  message was recorded (§8:11), so it never hears one twice. The line cannot, so a message
+  there that may not have arrived is said once more, marked (§8:6, §8:12).
 - **A missed occurrence is said however late** (§8:9).
 - **Words cannot stop a running step yet.** A cancel in words ends only what is pending, and
   a step still running may spawn again. Until Part A lands, the Task Manager's stop, through
   the hub chat's control, the line's `/stop` or the CLI, is the safe order (§9:6).
 - **A step that acted in the world and was cut off by a restart is not repeated** (§8:7),
   so the rest of its work waits for the person to ask again.
-- **Machinery and records.** A triad on `PlanStore` with an upgrade, a channel type in
-  `core`'s register, two label kinds, an input origin, a sensor loop, five capabilities, six
-  settings, and header records on nine ADRs.
+- **Machinery and records.** A triad on `PlanStore` with an upgrade, a smaller one on
+  `ConversationStore` with an upgrade, a channel type in `core`'s register, two label kinds,
+  an input origin, a sensor loop, a delivery declaration on each kind, five capabilities,
+  six settings, and header records on ten ADRs.
 
-**The cut, for the dispatcher.** §13's two lanes. TS1 is the `PlanStore` triad with its
-primary implementation, the SQLite plan store, as one lane under ADR-0137 §2:1. TS2 is every
-consumer, in `orchestration/` with the composition wiring, briefed against TS1's merged
-contract under ADR-0137 §4:1. The reminders decision's own lanes follow both.
+**The cut, for the dispatcher.** §13's three lanes. TS1 is the `PlanStore` triad with its
+primary implementation, the SQLite plan store, and TS1b the `ConversationStore` triad with
+the SQLite conversation store, each one lane under ADR-0137 §2:1, independent of each other.
+TS2 is every consumer, in `orchestration/` with the composition wiring, briefed against both
+merged contracts under ADR-0137 §4:1. The reminders decision's own lanes follow all three.
+
+**An origin to be recast.** `InputOrigin.assistant` (§6:3, §12:7) is written as this
+decision needs it. The owner has directed a separate decision that recasts an input's origin
+as the set of parties whose words it carries, sharing ADR-0345's holder kinds, with
+*outside* following from those parties. `assistant` here is that decision's stand-in for
+an input whose parties are {the assistant}, a party of ADR-0345's kind *the assistant's
+statement*, and not for the empty set. The empty set is kept for an input that carries no
+one's words at all, and `None` means the parties are unknown. Nothing here decides it.
 
 **What would reopen it.**
 
