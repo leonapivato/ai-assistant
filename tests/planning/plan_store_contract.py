@@ -21,6 +21,7 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -30,6 +31,10 @@ from ai_assistant.core.errors import ClaimStopped, PlanningError
 from ai_assistant.core.types import (
     ActivationEffect,
     ActivationEffectClaim,
+    ChannelIdentity,
+    DueAfterTasks,
+    DueAt,
+    DueNow,
     EvidenceItemPart,
     FindingOutcome,
     FindingUnwritten,
@@ -44,10 +49,18 @@ from ai_assistant.core.types import (
     ObservationWrite,
     ObserverCall,
     ObserverStep,
+    OccurrencePush,
+    OccurrenceState,
     Placement,
     PlacementReach,
     PlacementSetter,
     QuestionPart,
+    ScheduledTask,
+    ScheduledTaskAuthor,
+    ScheduledTaskWrite,
+    TaskRefusal,
+    TaskSpawn,
+    TaskWriteAnswer,
     ToolOutcome,
 )
 from ai_assistant.testing.cancellation import settle
@@ -455,6 +468,404 @@ class _ActivationEffectsOp(_ReadOp):
         return store.activation_effects(["act-1"])
 
 
+# --- the Task Scheduler's scheduled tasks (ADR-0350 §12:3) ---------------------------
+
+#: The person the scheduled tasks below are for, and another.
+_PERSON = "person:owner"
+_OTHER = "person:guest"
+
+#: Where the tasks below were set: a conversation, and the line's chat.
+_HUB_CHAT = ChannelIdentity(channel_type="conversation", instance_id="c-1")
+_LINE = ChannelIdentity(channel_type="telegram", instance_id="line")
+
+#: The limits the cases below write under, §12:5's defaults.
+_CHAIN_LIMIT = 10
+_PENDING_LIMIT = 50
+
+
+def _spawn(  # noqa: PLR0913 — every part a case below varies
+    task_id: str,
+    *,
+    person: str = _PERSON,
+    when: DueNow | DueAt | DueAfterTasks | None = None,
+    places: tuple[ChannelIdentity, ...] = (),
+    replaces: str | None = None,
+    outside: bool = False,
+) -> TaskSpawn:
+    """A spawn as the actuator states it (ADR-0350 §3:6), due now unless told otherwise."""
+    return TaskSpawn(
+        id=task_id,
+        person=person,
+        author=ScheduledTaskAuthor.ASSISTANT,
+        when=when or DueNow(),
+        places=places,
+        instruction=f"do the step {task_id}",
+        set_in=_HUB_CHAT,
+        set_at=_WHEN,
+        outside_content=outside,
+        replaces=replaces,
+    )
+
+
+def _spawn_effect(effect_id: str, *, activation: str = "act-1") -> ActivationEffect:
+    """A spawn's effect record, a call to the spawn capability claimed with no outcome."""
+    return _effect(
+        effect_id,
+        activation=activation,
+        capability="spawn",
+        values=hashlib.sha256(effect_id.encode()).hexdigest(),
+    )
+
+
+async def _write(  # noqa: PLR0913 — every part a case below varies
+    store: PlanStore,
+    task_id: str,
+    *,
+    spawner: str = "act-1",
+    chain_limit: int = _CHAIN_LIMIT,
+    pending_limit: int = _PENDING_LIMIT,
+    replace_any: bool = False,
+    **spawn: Any,
+) -> ScheduledTaskWrite:
+    """Write one task spawned by ``spawner``, its effect record named after the task."""
+    return await store.write_scheduled_task(
+        _spawn(task_id, **spawn),
+        _spawn_effect(f"spawn-{task_id}", activation=spawner),
+        match=None,
+        replace_any=replace_any,
+        chain_limit=chain_limit,
+        pending_limit=pending_limit,
+    )
+
+
+async def _written(store: PlanStore, task_id: str, **write: Any) -> ScheduledTask:
+    """Write one task and return it as written, failing on any other answer."""
+    answer = await _write(store, task_id, **write)
+    assert answer.answer is TaskWriteAnswer.WRITTEN, answer
+    assert answer.task is not None
+    return answer.task
+
+
+async def _held(store: PlanStore, task_id: str) -> ScheduledTask:
+    """The task the store holds under ``task_id``."""
+    (task,) = await store.scheduled_tasks([task_id])
+    return task
+
+
+async def _state(store: PlanStore, task_id: str) -> OccurrenceState:
+    """The state of the one occurrence of the task held under ``task_id``."""
+    (occurrence,) = (await _held(store, task_id)).occurrences
+    return occurrence.state
+
+
+async def _step(store: PlanStore, task_id: str, activation: str) -> ScheduledTask:
+    """Push a task's occurrence to ``activation``, failing unless it is pushed."""
+    assert await store.mark_occurrence_pushed(task_id, 1, activation) is OccurrencePush.PUSHED
+    return await _held(store, task_id)
+
+
+class _ScheduleOp:
+    """A locked Task Scheduler operation (ADR-0350 §12:3), driven as every other is.
+
+    Seeded with two tasks due now, ``tA`` and ``tB``, each spawned by its own
+    activation, and ``tB``'s occurrence pushed to ``act-B``, so the cancelled call and
+    the concurrent one act on independent subjects whatever the first's effect.
+    """
+
+    name = ""
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Two tasks, one pushed, for the operation to act on."""
+        await _written(store, "tA", spawner="act-spawner-A")
+        await _written(store, "tB", spawner="act-spawner-B")
+        await _step(store, "tB", "act-B")
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """The call the case suspends inside the resource and then cancels."""
+        raise NotImplementedError
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """The concurrent call barred from the resource until the first is done."""
+        raise NotImplementedError
+
+    async def verify(self, store: PlanStore) -> None:
+        """Both tasks are still held whole, and the store still serves reads."""
+        assert [one.id for one in await store.scheduled_tasks(["tA", "tB"])] == ["tA", "tB"]
+
+
+class _WriteScheduledTaskOp(_ScheduleOp):
+    """``write_scheduled_task``: the spawn's one step (§3:3)."""
+
+    name = "write_scheduled_task"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Write task C — the call that is cancelled."""
+        return _write(store, "tC", spawner="act-spawner-C")
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Write task D concurrently."""
+        return _write(store, "tD", spawner="act-spawner-D")
+
+    async def verify(self, store: PlanStore) -> None:
+        """Task D landed whole with its effect record."""
+        await super().verify(store)
+        assert [one.id for one in await store.scheduled_tasks(["tD"])] == ["tD"]
+        assert [one.id for one in await store.activation_effects(["act-spawner-D"])] == ["spawn-tD"]
+
+
+class _CancelScheduledTaskOp(_ScheduleOp):
+    """``cancel_scheduled_task`` (§9:5)."""
+
+    name = "cancel_scheduled_task"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """A third pending task beside the two."""
+        await super().prepare(store)
+        await _written(store, "tC", spawner="act-spawner-C")
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Cancel task A — the call that is cancelled."""
+        return store.cancel_scheduled_task("tA")
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Cancel task C concurrently."""
+        return store.cancel_scheduled_task("tC")
+
+    async def verify(self, store: PlanStore) -> None:
+        """Task C is cancelled."""
+        await super().verify(store)
+        assert await _state(store, "tC") is OccurrenceState.CANCELLED
+
+
+class _MarkOccurrencePushedOp(_ScheduleOp):
+    """``mark_occurrence_pushed`` (§7:5)."""
+
+    name = "mark_occurrence_pushed"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """A third pending task beside the two."""
+        await super().prepare(store)
+        await _written(store, "tC", spawner="act-spawner-C")
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Push task A — the call that is cancelled."""
+        return store.mark_occurrence_pushed("tA", 1, "act-A")
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Push task C concurrently."""
+        return store.mark_occurrence_pushed("tC", 1, "act-C")
+
+    async def verify(self, store: PlanStore) -> None:
+        """Task C is pushed."""
+        await super().verify(store)
+        assert await _state(store, "tC") is OccurrenceState.PUSHED
+
+
+class _SettleOccurrenceOp(_ScheduleOp):
+    """``settle_occurrence`` (§7:6, §8)."""
+
+    name = "settle_occurrence"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Task A pushed too, so both have an occurrence to settle."""
+        await super().prepare(store)
+        await _step(store, "tA", "act-A")
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Settle task A's occurrence — the call that is cancelled."""
+        return store.settle_occurrence("act-A", OccurrenceState.DONE)
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Settle task B's concurrently."""
+        return store.settle_occurrence("act-B", OccurrenceState.COULDNT_FINISH)
+
+    async def verify(self, store: PlanStore) -> None:
+        """Task B's occurrence ended as it was settled."""
+        await super().verify(store)
+        assert await _state(store, "tB") is OccurrenceState.COULDNT_FINISH
+
+
+class _StopPushedActivationOp(_ScheduleOp):
+    """``stop_pushed_activation`` (§9:10)."""
+
+    name = "stop_pushed_activation"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Task A pushed too, so both name a pushed activation."""
+        await super().prepare(store)
+        await _step(store, "tA", "act-A")
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Stop act-A — the call that is cancelled."""
+        return store.stop_pushed_activation("act-A")
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Stop act-B concurrently."""
+        return store.stop_pushed_activation("act-B")
+
+    async def verify(self, store: PlanStore) -> None:
+        """act-B carries its stop record."""
+        await super().verify(store)
+        assert await store.stopped_activations(["act-B"]) == ("act-B",)
+
+
+class _RecordCascadeOp(_ScheduleOp):
+    """``record_cascade`` (§9:6)."""
+
+    name = "record_cascade"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Record a cascade below act-spawner-A — the call that is cancelled."""
+        return store.record_cascade("act-spawner-A")
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Record one below act-B concurrently."""
+        return store.record_cascade("act-B")
+
+    async def verify(self, store: PlanStore) -> None:
+        """act-B's cascade record is held."""
+        await super().verify(store)
+        assert "act-B" in (await store.export()).cascades
+
+
+class _ConfirmMessageEffectOp(_ScheduleOp):
+    """``confirm_message_effect`` (§8:11)."""
+
+    name = "confirm_message_effect"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Two messages claimed with no outcome, beside the tasks."""
+        await super().prepare(store)
+        await store.claim_activation_effect(_message("mA", activation="act-A"), match=None)
+        await store.claim_activation_effect(_message("mB", activation="act-B"), match=None)
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Confirm message A — the call that is cancelled."""
+        return store.confirm_message_effect("mA", delivered=True, position=3)
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Confirm message B absent concurrently."""
+        return store.confirm_message_effect("mB", delivered=False)
+
+    async def verify(self, store: PlanStore) -> None:
+        """Message B is settled not done."""
+        await super().verify(store)
+        (held,) = await store.activation_effects(["act-B"])
+        assert held.outcome is ToolOutcome.FAILED
+
+
+class _RemoveScheduledTaskOp(_ScheduleOp):
+    """``remove_scheduled_task`` (§7:8)."""
+
+    name = "remove_scheduled_task"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Two ended tasks to remove, beside the two."""
+        await super().prepare(store)
+        for one in ("tC", "tD"):
+            await _written(store, one, spawner=f"act-spawner-{one}")
+            await store.cancel_scheduled_task(one)
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Remove task C — the call that is cancelled."""
+        return store.remove_scheduled_task("tC")
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Remove task D concurrently."""
+        return store.remove_scheduled_task("tD")
+
+    async def verify(self, store: PlanStore) -> None:
+        """Task D is gone, and the two are held."""
+        await super().verify(store)
+        assert await store.scheduled_tasks(["tD"]) == ()
+
+
+class _ScheduleReadOp(_ScheduleOp):
+    """A read of the schedule: the same read against the seeded store, twice."""
+
+    def read(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """The read."""
+        raise NotImplementedError
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """The read — the call that is cancelled."""
+        return self.read(store)
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """The read again, concurrently."""
+        return self.read(store)
+
+
+class _ScheduledTasksOp(_ScheduleReadOp):
+    """``scheduled_tasks``."""
+
+    name = "scheduled_tasks"
+
+    def read(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read the two by id."""
+        return store.scheduled_tasks(["tA", "tB"])
+
+
+class _PersonScheduledTasksOp(_ScheduleReadOp):
+    """``person_scheduled_tasks``."""
+
+    name = "person_scheduled_tasks"
+
+    def read(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read the person's pending tasks."""
+        return store.person_scheduled_tasks(_PERSON, [OccurrenceState.PENDING])
+
+
+class _SpawnedTasksOp(_ScheduleReadOp):
+    """``spawned_tasks``."""
+
+    name = "spawned_tasks"
+
+    def read(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read what act-spawner-A spawned."""
+        return store.spawned_tasks(["act-spawner-A"])
+
+
+class _ScheduledLineageOp(_ScheduleReadOp):
+    """``scheduled_lineage``."""
+
+    name = "scheduled_lineage"
+
+    def read(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read act-B's lineage."""
+        return store.scheduled_lineage("act-B")
+
+
+class _LiveBelowOp(_ScheduleReadOp):
+    """``live_below``."""
+
+    name = "live_below"
+
+    def read(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read whether anything below task B is live."""
+        return store.live_below("tB")
+
+
+class _DueOccurrencesOp(_ScheduleReadOp):
+    """``due_occurrences``."""
+
+    name = "due_occurrences"
+
+    def read(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read what is due."""
+        return store.due_occurrences(_WHEN)
+
+
+class _StoppedActivationsOp(_ScheduleReadOp):
+    """``stopped_activations``."""
+
+    name = "stopped_activations"
+
+    def read(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read the stop records of two activations."""
+        return store.stopped_activations(["act-A", "act-B"])
+
+
 #: Every locked ``PlanStore`` operation ADR-0060's case is run against: each is a
 #: distinct lock site with its own ``_run_to_completion`` call. The writes came
 #: first (#370); the reads are the same invariant on the other half of the surface
@@ -476,6 +887,23 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _WriteObservationOp,
     _ObservationsOp,
     _ObserverCallsSinceOp,
+    # ADR-0350 §12:3's fifteen members, each its own lock site: eight writes and
+    # seven reads.
+    _WriteScheduledTaskOp,
+    _CancelScheduledTaskOp,
+    _MarkOccurrencePushedOp,
+    _SettleOccurrenceOp,
+    _StopPushedActivationOp,
+    _RecordCascadeOp,
+    _ConfirmMessageEffectOp,
+    _RemoveScheduledTaskOp,
+    _ScheduledTasksOp,
+    _PersonScheduledTasksOp,
+    _SpawnedTasksOp,
+    _ScheduledLineageOp,
+    _LiveBelowOp,
+    _DueOccurrencesOp,
+    _StoppedActivationsOp,
 )
 
 
@@ -561,7 +989,7 @@ class PlanStoreContract:
         await store.record_stop("act-1")
 
         export = await store.export()
-        assert export.schema_version == 23
+        assert export.schema_version == 24
         # ADR-0309 §5: the old path's sections left the document.
         assert set(export.model_dump()) == {
             "schema_version",
@@ -569,6 +997,9 @@ class PlanStoreContract:
             "stopped_activations",
             "activation_effects",
             "observations",
+            # ADR-0350 §12:3: the Task Scheduler's tasks and cascade records.
+            "scheduled_tasks",
+            "cascades",
         }
         assert sorted(export.stopped_activations) == ["act-1", "act-2"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
@@ -1185,7 +1616,7 @@ class PlanStoreContract:
         await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
 
         export = await store.export()
-        assert export.schema_version == 23
+        assert export.schema_version == 24
         assert [one.id for one in export.activation_effects] == ["e1", "m1"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -1432,7 +1863,7 @@ class PlanStoreContract:
         await store.record_stop("act-stopped")
 
         export = await store.export()
-        assert export.schema_version == 23
+        assert export.schema_version == 24
         assert export.observations == (a, b)
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -1517,6 +1948,628 @@ class PlanStoreContract:
         record.__dict__["state"] = ObservationState.STUCK
 
         assert (await store.observations([stored.episode]))[0].state is ObservationState.PROCESSED
+
+    # --- ADR-0350: the Task Scheduler's scheduled tasks --------------------
+
+    async def test_a_spawn_writes_its_task_and_claims_its_effect_in_one_step(
+        self, store: PlanStore
+    ) -> None:
+        """§3:3: the task and the spawn's effect record, written together.
+
+        The store authors the parent, the chain length and the one pending occurrence,
+        due at the instant it was set for a task due now (§5:1, §9:7).
+        """
+        task = await _written(store, "t1", spawner="act-1", places=(_LINE,))
+
+        assert task.parent == "act-1"
+        assert task.chain_length == 1
+        assert task.places == (_LINE,)
+        (occurrence,) = task.occurrences
+        assert occurrence.state is OccurrenceState.PENDING
+        assert occurrence.due_at == _WHEN
+        assert occurrence.pushes == 0
+        assert await _held(store, "t1") == task
+        (effect,) = await store.activation_effects(["act-1"])
+        assert effect.id == "spawn-t1"
+        assert effect.outcome is None
+
+    async def test_a_task_due_at_an_instant_falls_due_at_it(self, store: PlanStore) -> None:
+        """§5:1-§5:2: the instant is stored as given, in UTC."""
+        at = _WHEN + timedelta(hours=8)
+
+        task = await _written(store, "t1", when=DueAt(at=at))
+
+        assert task.occurrences[0].due_at == at
+
+    async def test_a_stopped_spawner_writes_neither_the_task_nor_its_effect(
+        self, store: PlanStore
+    ) -> None:
+        """§3:3: the store refuses a stopped activation's spawn, writing nothing."""
+        await store.record_stop("act-1")
+
+        with pytest.raises(ClaimStopped):
+            await _write(store, "t1", spawner="act-1")
+
+        assert await store.scheduled_tasks(["t1"]) == ()
+        assert await store.activation_effects(["act-1"]) == ()
+
+    async def test_the_backstop_refuses_the_same_spawn_twice_and_writes_nothing(
+        self, store: PlanStore
+    ) -> None:
+        """§4:3, ADR-0306 §5:9: a spawn is not safe to repeat, so the backstop matches it."""
+        effect = _spawn_effect("spawn-first")
+        await store.write_scheduled_task(
+            _spawn("t1"), effect, match=None, chain_limit=_CHAIN_LIMIT, pending_limit=_PENDING_LIMIT
+        )
+        repeat = effect.model_copy(update={"id": "spawn-again"})
+
+        answer = await store.write_scheduled_task(
+            _spawn("t2"),
+            repeat,
+            match=("act-1",),
+            chain_limit=_CHAIN_LIMIT,
+            pending_limit=_PENDING_LIMIT,
+        )
+
+        assert answer.answer is TaskWriteAnswer.ALREADY_DONE
+        assert answer.task is None
+        assert await store.scheduled_tasks(["t2"]) == ()
+        assert [one.id for one in await store.activation_effects(["act-1"])] == ["spawn-first"]
+
+    async def test_a_held_task_id_is_refused(self, store: PlanStore) -> None:
+        """A task id names one task, so a second write under it is refused whole."""
+        await _written(store, "t1")
+
+        with pytest.raises(PlanningError):
+            await _write(store, "t1", spawner="act-2")
+
+        assert await store.activation_effects(["act-2"]) == ()
+
+    async def test_a_spawns_effect_is_a_call(self, store: PlanStore) -> None:
+        """§4:1: a spawn is a call to a capability, so a message's record is refused."""
+        with pytest.raises(PlanningError):
+            await store.write_scheduled_task(
+                _spawn("t1"),
+                _message("m1"),
+                match=None,
+                chain_limit=_CHAIN_LIMIT,
+                pending_limit=_PENDING_LIMIT,
+            )
+
+        assert await store.scheduled_tasks(["t1"]) == ()
+
+    @pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+    async def test_a_limit_is_a_positive_integer(self, store: PlanStore, limit: Any) -> None:
+        """§12:5's limits are at least one, so a write naming another is refused whole."""
+        with pytest.raises(PlanningError):
+            await _write(store, "t1", chain_limit=limit)
+        with pytest.raises(PlanningError):
+            await _write(store, "t1", pending_limit=limit)
+
+        assert await store.scheduled_tasks(["t1"]) == ()
+
+    async def test_the_chain_length_counts_the_steps_and_the_limit_refuses_writing_nothing(
+        self, store: PlanStore
+    ) -> None:
+        """§9:7, §9:9: one where the parent is no task's, one more than its task's otherwise."""
+        await _written(store, "t1", spawner="act-0")
+        await _step(store, "t1", "act-1")
+        second = await _written(store, "t2", spawner="act-1", chain_limit=2)
+        await _step(store, "t2", "act-2")
+
+        refused = await _write(store, "t3", spawner="act-2", chain_limit=2)
+
+        assert second.chain_length == 2
+        assert refused.answer is TaskWriteAnswer.REFUSED
+        assert refused.reason is TaskRefusal.CHAIN_LIMIT
+        assert await store.scheduled_tasks(["t3"]) == ()
+        assert await store.activation_effects(["act-2"]) == ()
+
+    async def test_the_pending_limit_counts_the_persons_pending_occurrences(
+        self, store: PlanStore
+    ) -> None:
+        """§9:8: a spawn past the person's pending limit is refused; another person's is not."""
+        await _written(store, "t1", pending_limit=2)
+        await _written(store, "t2", pending_limit=2, spawner="act-2")
+
+        refused = await _write(store, "t3", pending_limit=2, spawner="act-3")
+        other = await _write(store, "t4", pending_limit=2, spawner="act-4", person=_OTHER)
+
+        assert refused.reason is TaskRefusal.PENDING_LIMIT
+        assert await store.activation_effects(["act-3"]) == ()
+        assert other.answer is TaskWriteAnswer.WRITTEN
+
+    async def test_two_spawns_of_one_round_cannot_pass_the_pending_limit_together(
+        self, store: PlanStore
+    ) -> None:
+        """§9:9: the limits are checked in the step that writes, so one of two at once lands."""
+        answers = await asyncio.gather(
+            _write(store, "t1", pending_limit=1, spawner="act-1"),
+            _write(store, "t2", pending_limit=1, spawner="act-2"),
+        )
+
+        assert sorted(one.answer for one in answers) == [
+            TaskWriteAnswer.REFUSED,
+            TaskWriteAnswer.WRITTEN,
+        ]
+        exported = await store.export()
+        assert len(exported.scheduled_tasks) == 1
+        assert len(exported.activation_effects) == 1
+
+    async def test_a_replace_cancels_the_replaced_and_takes_its_parent_places_and_chain(
+        self, store: PlanStore
+    ) -> None:
+        """§9:4: one step cancels the replaced task's pending occurrences and writes the new.
+
+        The new task takes the replaced one's parent and suggested places in place of
+        its own, and so its chain length, whoever replaces it.
+        """
+        await _written(store, "t0", spawner="act-0")
+        await _step(store, "t0", "act-1")
+        await _written(store, "t1", spawner="act-1", places=(_LINE,))
+
+        replacement = await _written(
+            store,
+            "t2",
+            spawner="act-9",
+            replace_any=True,
+            replaces="t1",
+            places=(_HUB_CHAT,),
+            when=DueAt(at=_WHEN + timedelta(hours=1)),
+        )
+
+        assert await _state(store, "t1") is OccurrenceState.CANCELLED
+        assert replacement.parent == "act-1"
+        assert replacement.places == (_LINE,)
+        assert replacement.chain_length == 2
+        assert [one.id for one in await store.activation_effects(["act-9"])] == ["spawn-t2"]
+
+    async def test_a_replace_counts_the_pending_limit_after_its_cancel(
+        self, store: PlanStore
+    ) -> None:
+        """§9:4: the pending count is taken after the cancel, so a replace at the limit lands."""
+        await _written(store, "t1", pending_limit=1)
+
+        answer = await _write(store, "t2", pending_limit=1, replaces="t1")
+
+        assert answer.answer is TaskWriteAnswer.WRITTEN
+
+    @pytest.mark.parametrize(
+        ("setup", "replaces", "reason"),
+        [
+            ("none", "t-unknown", TaskRefusal.UNKNOWN_TASK),
+            ("other", "t1", TaskRefusal.ANOTHER_PERSONS),
+            ("not-its", "t1", TaskRefusal.NOT_ITS_SPAWN),
+            ("ended", "t1", TaskRefusal.NOTHING_PENDING),
+        ],
+    )
+    async def test_a_replace_the_rules_do_not_allow_is_refused_writing_nothing(
+        self, store: PlanStore, setup: str, replaces: str, reason: TaskRefusal
+    ) -> None:
+        """§4:4, §9:4: an unknown task, another person's, one not its own, or one ended."""
+        if setup == "other":
+            await _written(store, "t1", person=_OTHER)
+        elif setup == "not-its":
+            await _written(store, "t1", spawner="act-0")
+        elif setup == "ended":
+            await _written(store, "t1")
+            await store.cancel_scheduled_task("t1")
+
+        answer = await _write(store, "t2", replaces=replaces)
+
+        assert answer.answer is TaskWriteAnswer.REFUSED
+        assert answer.reason is reason
+        assert await store.scheduled_tasks(["t2"]) == ()
+        assert "spawn-t2" not in [one.id for one in await store.activation_effects(["act-1"])]
+
+    async def test_a_wait_names_tasks_held_for_the_same_person(self, store: PlanStore) -> None:
+        """§5:4: a wait on a task not held, or on another person's, is refused."""
+        await _written(store, "t1", person=_OTHER)
+
+        unknown = await _write(store, "t2", when=DueAfterTasks(tasks=("t-unknown",)))
+        others = await _write(store, "t3", when=DueAfterTasks(tasks=("t1",)))
+
+        assert unknown.reason is TaskRefusal.INVALID_WAIT
+        assert others.reason is TaskRefusal.INVALID_WAIT
+
+    async def test_a_task_waiting_on_named_tasks_falls_due_when_the_last_of_them_ends(
+        self, store: PlanStore
+    ) -> None:
+        """§5:4: due at the instant the last ends, however each ends; until then, not due."""
+        await _written(store, "t1")
+        await _written(store, "t2")
+        waiting = await _written(store, "t3", when=DueAfterTasks(tasks=("t1", "t2")))
+        await _step(store, "t1", "act-a")
+        await store.settle_occurrence("act-a", OccurrenceState.DONE)
+        half = await _held(store, "t3")
+
+        await store.cancel_scheduled_task("t2")
+
+        assert waiting.occurrences[0].due_at is None
+        assert half.occurrences[0].due_at is None
+        ended = (await _held(store, "t2")).ended_at
+        assert ended is not None
+        assert (await _held(store, "t3")).occurrences[0].due_at == ended
+        due = await store.due_occurrences(ended)
+        assert "t3" in [one.task.id for one in due.due]
+
+    async def test_a_wait_on_tasks_already_ended_is_due_at_once(self, store: PlanStore) -> None:
+        """§5:4: at once where every task it names has ended when it is written."""
+        await _written(store, "t1")
+        await store.cancel_scheduled_task("t1")
+
+        waiting = await _written(store, "t2", when=DueAfterTasks(tasks=("t1",)))
+
+        assert waiting.occurrences[0].due_at == (await _held(store, "t1")).ended_at
+
+    async def test_a_cancel_ends_every_pending_occurrence_and_stops_nothing(
+        self, store: PlanStore
+    ) -> None:
+        """§9:5: pending occurrences end cancelled; a pushed one is left to run."""
+        await _written(store, "t1")
+        await _written(store, "t2")
+        await _step(store, "t2", "act-2")
+
+        cancelled = await store.cancel_scheduled_task("t1")
+        running = await store.cancel_scheduled_task("t2")
+
+        assert cancelled.task is not None
+        assert cancelled.task.occurrences[0].state is OccurrenceState.CANCELLED
+        assert cancelled.task.ended_at is not None
+        assert running.reason is TaskRefusal.NOTHING_PENDING
+        assert await _state(store, "t2") is OccurrenceState.PUSHED
+
+    async def test_a_cancel_the_rules_do_not_allow_is_refused_writing_nothing(
+        self, store: PlanStore
+    ) -> None:
+        """§4:4: another person's task, one the asker did not spawn, and an unknown one."""
+        await _written(store, "t1", spawner="act-0")
+
+        others = await store.cancel_scheduled_task("t1", person=_OTHER)
+        not_its = await store.cancel_scheduled_task("t1", spawned_by="act-1")
+        unknown = await store.cancel_scheduled_task("t-unknown")
+        its_own = await store.cancel_scheduled_task("t1", person=_PERSON, spawned_by="act-0")
+
+        assert others.reason is TaskRefusal.ANOTHER_PERSONS
+        assert not_its.reason is TaskRefusal.NOT_ITS_SPAWN
+        assert unknown.reason is TaskRefusal.UNKNOWN_TASK
+        assert its_own.task is not None
+
+    async def test_the_tasks_are_read_by_id_by_person_and_state_and_by_parent(
+        self, store: PlanStore
+    ) -> None:
+        """§12:3's three reads, each in its order."""
+        await _written(store, "t1", spawner="act-1")
+        await _written(store, "t2", spawner="act-2")
+        await _written(store, "t3", spawner="act-1", person=_OTHER)
+        await store.cancel_scheduled_task("t2")
+
+        by_id = await store.scheduled_tasks(["t3", "t-unknown", "t1", "t3"])
+        pending = await store.person_scheduled_tasks(_PERSON, [OccurrenceState.PENDING])
+        ended = await store.person_scheduled_tasks(
+            _PERSON, [OccurrenceState.CANCELLED, OccurrenceState.DONE]
+        )
+        spawned = await store.spawned_tasks(["act-1", "act-unknown"])
+
+        assert [one.id for one in by_id] == ["t3", "t1"]
+        assert [one.id for one in pending] == ["t1"]
+        assert [one.id for one in ended] == ["t2"]
+        assert [one.id for one in spawned] == ["t1", "t3"]
+
+    @pytest.mark.parametrize("ids", ["t1", ("t1",), [b"t1"], ["\ud800"]])
+    async def test_a_read_by_ids_takes_a_sequence_of_encodable_strings(
+        self, store: PlanStore, ids: Any
+    ) -> None:
+        """A bare string, a tuple of bytes and an id with no UTF-8 encoding are refused."""
+        if ids == ("t1",):
+            assert await store.scheduled_tasks(ids) == ()
+            return
+        with pytest.raises(PlanningError):
+            await store.scheduled_tasks(ids)
+        with pytest.raises(PlanningError):
+            await store.spawned_tasks(ids)
+        with pytest.raises(PlanningError):
+            await store.stopped_activations(ids)
+
+    async def test_the_lineage_runs_from_the_start_to_the_task_pushed_to_an_activation(
+        self, store: PlanStore
+    ) -> None:
+        """§6:5: each ancestor step in order, then the current; none where none was pushed."""
+        await _written(store, "t1", spawner="act-0")
+        await _step(store, "t1", "act-1")
+        await _written(store, "t2", spawner="act-1")
+        await _step(store, "t2", "act-2")
+        await store.settle_occurrence("act-1", OccurrenceState.DONE)
+        await _written(store, "t3", spawner="act-2")
+        await _step(store, "t3", "act-3")
+
+        assert [one.id for one in await store.scheduled_lineage("act-3")] == ["t1", "t2", "t3"]
+        assert [one.id for one in await store.scheduled_lineage("act-1")] == ["t1"]
+        assert await store.scheduled_lineage("act-0") == ()
+
+    async def test_live_below_reads_the_tasks_spawned_below_and_theirs(
+        self, store: PlanStore
+    ) -> None:
+        """§7:8, §9:6: a grandchild pending is live below, through a child that has ended."""
+        await _written(store, "t1", spawner="act-0")
+        await _step(store, "t1", "act-1")
+        await _written(store, "t2", spawner="act-1")
+        await _step(store, "t2", "act-2")
+        await _written(store, "t3", spawner="act-2")
+        await store.settle_occurrence("act-2", OccurrenceState.DONE)
+
+        assert await store.live_below("t1")
+        assert not await store.live_below("t3")
+        await store.cancel_scheduled_task("t3")
+        assert not await store.live_below("t1")
+        assert not await store.live_below("t-unknown")
+
+    async def test_the_occurrences_due_are_each_their_own_and_the_next_is_named(
+        self, store: PlanStore
+    ) -> None:
+        """§7:2-§7:4: every pending occurrence due at or before the instant, and the next."""
+        later = _WHEN + timedelta(hours=1)
+        await _written(store, "t1", when=DueAt(at=_WHEN))
+        await _written(store, "t2", when=DueAt(at=_WHEN))
+        await _written(store, "t3", when=DueAt(at=later))
+        await _written(store, "t4", when=DueAt(at=_WHEN - timedelta(minutes=1)))
+        await _step(store, "t4", "act-4")
+
+        due = await store.due_occurrences(_WHEN)
+
+        assert [(one.task.id, one.number) for one in due.due] == [("t1", 1), ("t2", 1)]
+        assert due.next_due_at == later
+        assert (await store.due_occurrences(later)).next_due_at is None
+
+    async def test_the_due_read_compares_aware_instants(self, store: PlanStore) -> None:
+        """§7:3: a naive instant is refused, never read as some zone's wall clock."""
+        with pytest.raises(PlanningError):
+            await store.due_occurrences(datetime(2026, 1, 1))  # noqa: DTZ001 — the naive instant refused
+
+    async def test_a_push_marks_its_activation_once_and_whichever_lands_first_wins(
+        self, store: PlanStore
+    ) -> None:
+        """§7:5: refused where no longer pending, so a cancel and a push never both land."""
+        await _written(store, "t1")
+        await _written(store, "t2")
+
+        pushed = await store.mark_occurrence_pushed("t1", 1, "act-1")
+        again = await store.mark_occurrence_pushed("t1", 1, "act-1b")
+        late_cancel = await store.cancel_scheduled_task("t1")
+        await store.cancel_scheduled_task("t2")
+        late_push = await store.mark_occurrence_pushed("t2", 1, "act-2")
+        unknown = await store.mark_occurrence_pushed("t-unknown", 1, "act-3")
+
+        assert pushed is OccurrencePush.PUSHED
+        (occurrence,) = (await _held(store, "t1")).occurrences
+        assert occurrence.pushed_to == "act-1"
+        assert occurrence.pushes == 1
+        assert again is OccurrencePush.NOT_PENDING
+        assert late_cancel.reason is TaskRefusal.NOTHING_PENDING
+        assert late_push is OccurrencePush.NOT_PENDING
+        assert unknown is OccurrencePush.NOT_PENDING
+
+    async def test_a_cancel_and_a_push_at_once_admit_one(self, store: PlanStore) -> None:
+        """§7:5: between a cancel and a push, whichever lands first in the store wins."""
+        await _written(store, "t1")
+
+        pushed, cancelled = await asyncio.gather(
+            store.mark_occurrence_pushed("t1", 1, "act-1"), store.cancel_scheduled_task("t1")
+        )
+
+        assert (pushed is OccurrencePush.PUSHED) != (cancelled.task is not None)
+
+    async def test_a_push_refuses_an_activation_already_pushed_and_an_unheld_occurrence(
+        self, store: PlanStore
+    ) -> None:
+        """§7:5: an activation is pushed to once, and a task holds the occurrences it holds."""
+        await _written(store, "t1")
+        await _written(store, "t2")
+        await _step(store, "t1", "act-1")
+
+        with pytest.raises(PlanningError):
+            await store.mark_occurrence_pushed("t2", 1, "act-1")
+        with pytest.raises(PlanningError):
+            await store.mark_occurrence_pushed("t2", 2, "act-2")
+        with pytest.raises(PlanningError):
+            await store.mark_occurrence_pushed("t2", 0, "act-2")
+
+    async def test_a_push_below_a_cascade_record_ends_the_occurrence_cancelled(
+        self, store: PlanStore
+    ) -> None:
+        """§7:5, §9:6: its task's parent, or the parent of any task above it, refuses it."""
+        await _written(store, "t1", spawner="act-0")
+        await _step(store, "t1", "act-1")
+        await _written(store, "t2", spawner="act-1")
+        await store.settle_occurrence("act-1", OccurrenceState.DONE)
+        await _written(store, "t3", spawner="act-unrelated")
+
+        await store.record_cascade("act-0")
+        await store.record_cascade("act-0")
+
+        assert await store.mark_occurrence_pushed("t2", 1, "act-2") is (
+            OccurrencePush.CASCADE_CANCELLED
+        )
+        assert await _state(store, "t2") is OccurrenceState.CANCELLED
+        assert await store.mark_occurrence_pushed("t3", 1, "act-3") is OccurrencePush.PUSHED
+        assert (await store.export()).cascades == ("act-0",)
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            OccurrenceState.DONE,
+            OccurrenceState.COULDNT_FINISH,
+            OccurrenceState.STOPPED,
+            OccurrenceState.INTERRUPTED,
+        ],
+    )
+    async def test_a_settle_writes_the_outcome_with_when_it_ended(
+        self, store: PlanStore, outcome: OccurrenceState
+    ) -> None:
+        """§7:6: the occurrence takes its outcome from how its activation ended."""
+        await _written(store, "t1")
+        await _step(store, "t1", "act-1")
+
+        task = await store.settle_occurrence("act-1", outcome)
+
+        (occurrence,) = task.occurrences
+        assert occurrence.state is outcome
+        assert occurrence.ended_at is not None
+        assert occurrence.activations == ("act-1",)
+        with pytest.raises(PlanningError):
+            await store.settle_occurrence("act-1", OccurrenceState.DONE)
+
+    async def test_a_push_again_counts_its_pushes_and_a_second_try_is_never_tried_again(
+        self, store: PlanStore
+    ) -> None:
+        """§8:5-§8:6: pushed again it is pending; a second try is pushed once more at most."""
+        await _written(store, "t1")
+        await _step(store, "t1", "act-1")
+
+        again = await store.settle_occurrence("act-1", OccurrenceState.PENDING)
+        await _step(store, "t1", "act-2")
+        second = await store.settle_occurrence("act-2", OccurrenceState.PENDING, second_try=True)
+        retried = await _step(store, "t1", "act-3")
+
+        assert again.occurrences[0].state is OccurrenceState.PENDING
+        assert not again.occurrences[0].second_try
+        assert second.occurrences[0].second_try
+        assert retried.occurrences[0].activations == ("act-1", "act-2", "act-3")
+        assert retried.occurrences[0].pushes == 3
+        with pytest.raises(PlanningError):
+            await store.settle_occurrence("act-3", OccurrenceState.PENDING)
+        assert await _state(store, "t1") is OccurrenceState.PUSHED
+
+    async def test_a_stopped_activations_occurrence_is_never_pushed_again(
+        self, store: PlanStore
+    ) -> None:
+        """§8:1: where the store holds a stop record for it, nothing pushes it again."""
+        await _written(store, "t1")
+        await _step(store, "t1", "act-1")
+        await store.record_stop("act-1")
+
+        with pytest.raises(PlanningError):
+            await store.settle_occurrence("act-1", OccurrenceState.PENDING)
+
+        stopped = await store.settle_occurrence("act-1", OccurrenceState.STOPPED)
+        assert stopped.occurrences[0].state is OccurrenceState.STOPPED
+
+    async def test_a_settle_refuses_what_no_occurrence_pushed_and_no_outcome_names(
+        self, store: PlanStore
+    ) -> None:
+        """§7:6: only a pushed occurrence settles, to an outcome or to pending alone."""
+        await _written(store, "t1")
+        await _step(store, "t1", "act-1")
+
+        with pytest.raises(PlanningError):
+            await store.settle_occurrence("act-unknown", OccurrenceState.DONE)
+        with pytest.raises(PlanningError):
+            await store.settle_occurrence("act-1", OccurrenceState.CANCELLED)
+        with pytest.raises(PlanningError):
+            await store.settle_occurrence("act-1", OccurrenceState.DONE, second_try=True)
+        assert await _state(store, "t1") is OccurrenceState.PUSHED
+
+    async def test_a_stop_of_a_pushed_id_writes_its_stop_record_and_no_other(
+        self, store: PlanStore
+    ) -> None:
+        """§9:10: a pushed id's stop record is written, and an id never pushed gets none."""
+        await _written(store, "t1")
+        await _step(store, "t1", "act-1")
+
+        assert await store.stop_pushed_activation("act-1")
+        assert not await store.stop_pushed_activation("act-never")
+        assert await store.stopped_activations(["act-never", "act-1", "act-1"]) == ("act-1",)
+        with pytest.raises(ClaimStopped):
+            await store.claim_activation_effect(_message("m1", activation="act-1"), match=None)
+
+    async def test_a_confirmation_settles_a_messages_unknown_outcome_once(
+        self, store: PlanStore
+    ) -> None:
+        """§8:11: done with its position, or not done, and nothing written is changed."""
+        for one in ("m1", "m2", "m3"):
+            await store.claim_activation_effect(_message(one), match=None)
+        await store.finish_activation_effect("m2", ToolOutcome.INDETERMINATE)
+        await store.finish_activation_effect("m3", ToolOutcome.SUCCEEDED, position=4)
+
+        await store.confirm_message_effect("m1", delivered=True, position=7)
+        await store.confirm_message_effect("m2", delivered=False)
+
+        held = {one.id: one for one in await store.activation_effects(["act-1"])}
+        assert (held["m1"].outcome, held["m1"].position) == (ToolOutcome.SUCCEEDED, 7)
+        assert (held["m2"].outcome, held["m2"].position) == (ToolOutcome.FAILED, None)
+        for settled in ("m1", "m2", "m3"):
+            with pytest.raises(PlanningError):
+                await store.confirm_message_effect(settled, delivered=True, position=1)
+
+    async def test_a_confirmation_is_a_messages_and_carries_its_position_when_delivered(
+        self, store: PlanStore
+    ) -> None:
+        """§8:11: a call is refused, and a position rides on a message delivered alone."""
+        await store.claim_activation_effect(_effect("e1"), match=None)
+        await store.claim_activation_effect(_message("m1"), match=None)
+
+        with pytest.raises(PlanningError):
+            await store.confirm_message_effect("e1", delivered=False)
+        with pytest.raises(PlanningError):
+            await store.confirm_message_effect("m1", delivered=True)
+        with pytest.raises(PlanningError):
+            await store.confirm_message_effect("m1", delivered=False, position=2)
+        with pytest.raises(PlanningError):
+            await store.confirm_message_effect("m-unknown", delivered=False)
+        (held,) = [one for one in await store.activation_effects(["act-1"]) if one.id == "m1"]
+        assert held.outcome is None
+
+    async def test_a_task_is_removed_once_nothing_of_it_or_below_it_is_live(
+        self, store: PlanStore
+    ) -> None:
+        """§7:8: kept while pending, pushed, live below, or waited on; removed after."""
+        await _written(store, "t1", spawner="act-0")
+        assert not await store.remove_scheduled_task("t1")
+        await _step(store, "t1", "act-1")
+        assert not await store.remove_scheduled_task("t1")
+        await _written(store, "t2", spawner="act-1")
+        await store.settle_occurrence("act-1", OccurrenceState.DONE)
+        assert not await store.remove_scheduled_task("t1")
+        await _written(store, "t3", spawner="act-x", when=DueAfterTasks(tasks=("t2",)))
+        await store.cancel_scheduled_task("t2")
+        assert not await store.remove_scheduled_task("t2")
+
+        await store.cancel_scheduled_task("t3")
+
+        assert await store.remove_scheduled_task("t1")
+        assert await store.remove_scheduled_task("t3")
+        assert await store.remove_scheduled_task("t2")
+        assert not await store.remove_scheduled_task("t2")
+        assert (await store.export()).scheduled_tasks == ()
+
+    async def test_the_export_carries_the_schedule_and_clear_erases_it(
+        self, store: PlanStore
+    ) -> None:
+        """§12:3: every task in the order written, every cascade record, and clear erases both."""
+        await _written(store, "t2")
+        await _written(store, "t1", spawner="act-2")
+        await store.record_cascade("act-9")
+
+        exported = await store.export()
+        removed = await store.clear()
+
+        assert exported.schema_version == 24
+        assert [one.id for one in exported.scheduled_tasks] == ["t2", "t1"]
+        assert exported.cascades == ("act-9",)
+        assert removed == 5
+        cleared = await store.export()
+        assert cleared.scheduled_tasks == ()
+        assert cleared.cascades == ()
+
+    async def test_a_task_read_or_returned_cannot_edit_stored_state(self, store: PlanStore) -> None:
+        """A returned task is a detached snapshot, as every record here is."""
+        task = await _written(store, "t1")
+        task.__dict__["instruction"] = "something else"
+        (read,) = await store.scheduled_tasks(["t1"])
+        read.__dict__["person"] = _OTHER
+
+        assert (await _held(store, "t1")).instruction == "do the step t1"
+        assert (await _held(store, "t1")).person == _PERSON
 
     # --- cancellation (ADR-0060) -------------------------------------------
 

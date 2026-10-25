@@ -16,7 +16,7 @@ stands in for.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -323,4 +323,60 @@ def finished(
         )
     except ValidationError as exc:
         msg = f"the finished activation effect {held.id} does not validate: {exc}"
+        raise PlanningError(msg) from exc
+
+
+#: The reason a message's record is written not done when its place confirmed it absent.
+CONFIRMED_ABSENT: Final = "its place's medium has no record of it (ADR-0350 §8:11)"
+
+
+def confirmed(
+    held: ActivationEffect | None, effect_id: str, *, delivered: object, position: object
+) -> ActivationEffect:
+    """Return the record a place's confirmation settles, or refuse (ADR-0350 §8:11).
+
+    A message's record whose outcome is unknown or not yet written is settled once from
+    its place's confirmation: done, with the position its medium recorded it at, or not
+    done. Every other change to an outcome already written is refused, as a finish
+    refuses it (ADR-0306 §6:4).
+
+    Args:
+        held: The record the store holds under ``effect_id``, or ``None``.
+        effect_id: The id the caller named.
+        delivered: Whether the medium recorded the message.
+        position: Where it recorded it, or ``None``.
+
+    Returns:
+        The settled record.
+
+    Raises:
+        PlanningError: If no record is held, it is a call, its outcome is done or not
+            done, ``delivered`` is not a ``bool``, or the position does not match it.
+    """
+    if held is None:
+        msg = f"the plan store holds no activation effect {effect_id!r} to confirm"
+        raise PlanningError(msg)
+    if held.is_call:
+        msg = f"activation effect {held.id} is a call; only a message's delivery is confirmed"
+        raise PlanningError(msg)
+    if held.outcome in {ToolOutcome.SUCCEEDED, ToolOutcome.FAILED}:
+        msg = f"activation effect {held.id} is already settled; its outcome is settled once"
+        raise PlanningError(msg)
+    if not isinstance(delivered, bool):
+        msg = f"a confirmation says whether the message was recorded, not {delivered!r}"
+        raise PlanningError(msg)
+    if delivered != (position is not None):
+        msg = "a message confirmed recorded carries its position, and one confirmed absent none"
+        raise PlanningError(msg)
+    try:
+        return ActivationEffect.model_validate(
+            {
+                **held.model_dump(),
+                "outcome": ToolOutcome.SUCCEEDED if delivered else ToolOutcome.FAILED,
+                "reason": None if delivered else CONFIRMED_ABSENT,
+                "position": position,
+            }
+        )
+    except ValidationError as exc:
+        msg = f"the confirmed activation effect {held.id} does not validate: {exc}"
         raise PlanningError(msg) from exc

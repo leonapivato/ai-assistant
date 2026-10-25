@@ -181,7 +181,10 @@ def episode_content(record: EpisodicMemory) -> str:
     status and reason; followed, on its own line, by the input text or transcript
     where the trigger's ``origin`` is ``user``. So a conversational episode is found
     by its sense and by the exact names and numbers in the user's words, an outside
-    report by its sense alone, and an episode no stage understood by how it ended.
+    report by its sense alone, and an episode no stage understood by how it ended. An
+    activation the Task Scheduler started, whose ``origin`` is ``assistant``, is found by
+    its sense alone too: its input is the assistant's own instruction, never the user's
+    words (ADR-0350 §6:3, §6:12).
 
     **What it never includes** is §7:2's invariant: the input text of a trigger whose
     ``origin`` is ``outside``.
@@ -263,7 +266,10 @@ def project_episode(
 
     The input is shown where the trigger's ``origin`` is ``user``, or where it is
     ``outside`` and ``admit_outside_input`` is set — which the understanding stage's
-    episode window and its recalled episodes alone do (§8:5). An episode with no
+    episode window and its recalled episodes alone do (§8:5). It is never shown where the
+    origin is ``assistant``: a scheduled task's instruction is not the user's words, and a
+    reader that renders the input attributes it as theirs (ADR-0350 §6:12), so a reader
+    attributes such an episode from its ``origin`` and its meaning alone. An episode with no
     processing record shows its ``content`` as its input instead (§8:2), the one path on
     which a model is shown ``content``. No stage verdict is shown (ADR-0318 §3:1).
 

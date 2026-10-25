@@ -10,7 +10,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from ai_assistant.core.channel_validation import input_origin
+from ai_assistant.core.channel_validation import (
+    TASK_SCHEDULER,
+    establishes_the_user,
+    input_origin,
+)
 from ai_assistant.core.episode_encoding import episode_content, project_episode
 from ai_assistant.core.types import (
     ActivationUnderstanding,
@@ -69,6 +73,22 @@ def _trigger(origin: InputOrigin, *, text: str = _USER_WORDS) -> RecordedChannel
         context=ChannelContext(),
         reply=WholeTextReply(),
         origin=origin,
+    )
+
+
+_SCHEDULE = ChannelIdentity(channel_type=TASK_SCHEDULER, instance_id="schedule")
+_INSTRUCTION = "check back with the user about the dentist"
+
+
+def _scheduled() -> RecordedChannelTrigger:
+    """A trigger the Task Scheduler pushed: a task's instruction, its origin ``assistant``."""
+    return RecordedChannelTrigger(
+        target=_SCHEDULE,
+        channel=_SCHEDULE,
+        payload=RecordedTextInput(text=_INSTRUCTION),
+        context=ChannelContext(),
+        reply=None,
+        origin=InputOrigin.ASSISTANT,
     )
 
 
@@ -141,8 +161,9 @@ def _recordless(content: str = "The user asked: what is on today?") -> EpisodicM
 # --- §2: where the input came from ----------------------------------------------
 
 
-def test_the_origin_enumeration_is_user_and_outside() -> None:
-    assert [member.value for member in InputOrigin] == ["user", "outside"]
+def test_the_origin_enumeration_is_user_outside_and_assistant() -> None:
+    """ADR-0284 §2:1, ADR-0350 §12:7: closed, added to and never renamed."""
+    assert [member.value for member in InputOrigin] == ["user", "outside", "assistant"]
 
 
 @pytest.mark.parametrize("origin", list(InputOrigin))
@@ -169,6 +190,21 @@ def test_each_channel_type_declares_its_inputs_origin(
 def test_a_channel_type_with_no_declaration_is_refused() -> None:
     with pytest.raises(ValueError, match="declares no input origin"):
         input_origin(ChannelIdentity(channel_type="sensor", instance_id="door"))
+
+
+def test_the_task_scheduler_declares_its_origin_per_input() -> None:
+    """ADR-0350 §2:7, §6:3: ``assistant``, or ``outside`` for a task carrying the mark."""
+    assert input_origin(_SCHEDULE) is InputOrigin.ASSISTANT
+    assert input_origin(_SCHEDULE, carries_outside_mark=True) is InputOrigin.OUTSIDE
+    assert not establishes_the_user(TASK_SCHEDULER)
+
+
+def test_a_mark_is_declared_by_the_task_scheduler_alone_and_never_with_a_forward() -> None:
+    """A kind that pushes no marked input declares no origin for one, and none takes both."""
+    with pytest.raises(ValueError, match="declares no input origin"):
+        input_origin(_CONVERSATION, carries_outside_mark=True)
+    with pytest.raises(ValueError, match="not both"):
+        input_origin(_SCHEDULE, takes_in_forward=True, carries_outside_mark=True)
 
 
 # --- §7: the search text ----------------------------------------------------------
@@ -202,6 +238,24 @@ def test_an_outside_episode_no_stage_understood_never_carries_the_report() -> No
         reason=ProcessingReason.UNDERSTANDING_FAILED,
     )
     assert episode_content(record) == "status failed, reason understanding_failed"
+
+
+def test_a_scheduled_steps_episode_is_found_by_its_meaning_alone() -> None:
+    """ADR-0350 §6:3, §6:12: the instruction is the assistant's words, never the user's."""
+    record = _episode(_scheduled(), understanding=(_understanding("checking back on the dentist"),))
+    content = episode_content(record)
+    assert content == "checking back on the dentist"
+    assert _INSTRUCTION not in content
+
+
+def test_a_scheduled_steps_input_is_never_shown_and_carries_its_origin() -> None:
+    """ADR-0350 §6:12: a reader attributes it from its origin, never as the user's words."""
+    record = _episode(_scheduled(), understanding=(_understanding("checking back"),))
+    for admitted in (False, True):
+        projection = project_episode(record, excerpt_chars=200, admit_outside_input=admitted)
+        assert projection.origin is InputOrigin.ASSISTANT
+        assert projection.input is None
+        assert projection.meaning == "checking back"
 
 
 def test_an_episode_with_no_understanding_is_found_by_how_it_ended() -> None:

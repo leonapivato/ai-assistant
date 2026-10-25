@@ -1876,11 +1876,9 @@ class _Request:
         """
         place = _in_place(record, projection, self._in_place.get(record.id))
         shown: dict[str, object] = {"label": label, "at": projection.occurred_at.isoformat()}
-        if projection.origin is InputOrigin.OUTSIDE:
-            shown["input"] = "an outside report, not shown"
-            self.shown.marked = True
-        elif projection.input is not None:
-            shown["input"] = _IN_PLACE_WINDOW if place.input else _text(projection.input)
+        given = self._episode_input(projection, in_place=place.input)
+        if given is not None:
+            shown["input"] = given
         if projection.meaning is not None:
             shown["understood_then"] = projection.meaning
         if projection.response is not None:
@@ -1911,6 +1909,23 @@ class _Request:
             ]
             self.shown.marked = True
         return shown
+
+    def _episode_input(self, projection: EpisodeProjection, *, in_place: bool) -> object:
+        """Another episode's input as shown, attributed from its origin, or ``None``.
+
+        An outside report's is withheld and marks the round's notes (ADR-0303 §3:2). A
+        scheduled task's instruction, whose origin is ``assistant``, is the assistant's
+        own words, which the projection never shows and nothing reads as the user's
+        (ADR-0350 §6:12).
+        """
+        if projection.origin is InputOrigin.OUTSIDE:
+            self.shown.marked = True
+            return "an outside report, not shown"
+        if projection.origin is InputOrigin.ASSISTANT:
+            return "the assistant's own instruction for work it scheduled, not shown"
+        if projection.input is None:
+            return None
+        return _IN_PLACE_WINDOW if in_place else _text(projection.input)
 
     def _episode_round(self, one: ProjectedRound, *, in_place: bool) -> dict[str, object]:
         """One of another episode's rounds: its message, and its notes where shown.

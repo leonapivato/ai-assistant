@@ -4431,6 +4431,68 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- The Task Scheduler (ADR-0350 §12:5) -------------------------------
+    # Six defaults that #2589 may tune without a decision. None is off: the Task
+    # Scheduler is the one path every spawn takes (§3:2), so each bound has a floor
+    # and the two durations are bounded above as well, where a `timedelta.max` would
+    # leave an instant that is not representable once added to a due one.
+    task_scheduler_recheck_interval: _DurationSetting = Field(
+        default=timedelta(seconds=30),
+        gt=timedelta(0),
+        le=timedelta(days=1),
+        description=(
+            "The longest the Task Scheduler's sensor sleeps before it looks for due "
+            "scheduled tasks again, however far off the next one is; every write to a "
+            "task wakes it sooner (ADR-0350 §7:2). Positive, at most a day."
+        ),
+    )
+    task_scheduler_lateness_grace: _DurationSetting = Field(
+        default=timedelta(minutes=2),
+        ge=timedelta(0),
+        le=timedelta(days=365),
+        description=(
+            "How long after a scheduled task's occurrence was due it may be pushed "
+            "before its input says it is late (ADR-0350 §8:9). It is pushed however "
+            "late; this decides only the mark."
+        ),
+    )
+    task_scheduler_chain_limit: _IntegerSetting = Field(
+        default=10,
+        ge=1,
+        lt=2**31,
+        description=(
+            "The longest chain of scheduled steps, each spawned by the one before, a "
+            "spawn may extend; a spawn past it is refused as not done (ADR-0350 §9:7)."
+        ),
+    )
+    task_scheduler_pending_limit: _IntegerSetting = Field(
+        default=50,
+        ge=1,
+        lt=2**31,
+        description=(
+            "The most pending scheduled occurrences one person may have; a spawn past it "
+            "is refused as not done (ADR-0350 §9:8)."
+        ),
+    )
+    task_scheduler_push_limit: _IntegerSetting = Field(
+        default=3,
+        ge=1,
+        lt=2**31,
+        description=(
+            "The most times one occurrence is pushed after restarts cut it off before it "
+            "did anything; past it, it ends interrupted (ADR-0350 §8:5)."
+        ),
+    )
+    task_scheduler_listing_bound: _IntegerSetting = Field(
+        default=20,
+        ge=1,
+        lt=2**31,
+        description=(
+            "The most items each part of planning's list of scheduled work, and of the "
+            "Task Manager's queries, shows (ADR-0350 §4:6, §10:2)."
+        ),
+    )
+
     # --- The simulated booking provider (ADR-0273 §1, §5) -----------------
     # **Absent by default, and absence is the whole-or-absent shape these settings
     # already use rather than a boolean flag.** ADR-0273 §1: a deployment supplying

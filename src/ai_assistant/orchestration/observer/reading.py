@@ -512,13 +512,23 @@ def input_origin(trigger: RecordedChannelTrigger, message: int | None) -> Suppor
     ``forwarded_from`` takes it too, and the input as a whole takes it where any of its
     messages does. Everything else the user wrote is ``user_message``.
 
+    **An input whose origin is** ``assistant`` **takes none** (ADR-0350 §6:11): it is a
+    scheduled task's instruction, which no support points at, so the reading offers no
+    such part and this refuses one.
+
     Args:
         trigger: The episode's recorded trigger.
         message: The message's position, or ``None`` for the input as a whole.
 
     Returns:
         The origin.
+
+    Raises:
+        ValueError: If the input's origin is ``assistant``.
     """
+    if trigger.origin is InputOrigin.ASSISTANT:
+        msg = "no support points at an input whose origin is assistant (ADR-0350 §6:11)"
+        raise ValueError(msg)
     if trigger.origin is InputOrigin.OUTSIDE:
         return SupportOrigin.OUTSIDE_INPUT
     messages = trigger.messages if message is None else trigger.messages[message : message + 1]
@@ -1237,8 +1247,15 @@ class _Shown:
     def _inputs(
         self, record: EpisodicMemory, processing: EpisodeProcessingRecord, answers: str | None
     ) -> list[ReadPart]:
-        """The input, or each message it took in (ADR-0328 §4:4, §4:12)."""
+        """The input, or each message it took in (ADR-0328 §4:4, §4:12).
+
+        None where the input's origin is ``assistant`` (ADR-0350 §6:11): a scheduled
+        task's instruction is no part a support points at, so a support of such an
+        episode points at another part of it, such as a round's message.
+        """
         trigger = processing.trigger
+        if trigger.origin is InputOrigin.ASSISTANT:
+            return []
         if trigger.messages:
             return [
                 self._part(

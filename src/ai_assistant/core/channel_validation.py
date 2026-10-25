@@ -16,6 +16,11 @@ reader in the hub alone, which establishes the user by comparing the sender id
 Telegram reports against the setting (§4:3): a ``telegram`` input handed to
 ``receive`` would carry the user's authority on nobody's establishment, so the
 dispatch table refuses it as it refuses every type it does not list.
+
+**Nor is the Task Scheduler's** (ADR-0350 §2:7, §7). It is a built-in channel whose
+sensor pushes each scheduled task's occurrence in the hub alone; the register declares
+its origin per input, ``assistant`` or, for a task carrying the outside-content mark,
+``outside`` (§6:3), and it establishes no author as the user in its place.
 """
 
 from __future__ import annotations
@@ -40,6 +45,13 @@ if TYPE_CHECKING:
 
 _REPLY = TypeAdapter[ReplyCapability | None](ReplyCapability | None)
 
+#: ADR-0350 §2:1, §2:8: the channel type of the **Task Scheduler**, the built-in channel
+#: whose one place, the schedule, holds the scheduled tasks every spawn writes. Its kind
+#: establishes no author as the user in its place (§2:7), so it is absent from
+#: :data:`_ESTABLISHES_THE_USER`, and nothing a caller hands ``receive`` is one: its
+#: sensor pushes each occurrence in the hub alone (§7).
+TASK_SCHEDULER: Final = "task_scheduler"
+
 #: ADR-0284 §2:2: what each channel type declares about where its input comes from.
 #: It lives here, beside the dispatch table, until channels carry their own
 #: declarations (#2578). A channel type absent from it is refused at admission. This
@@ -52,6 +64,9 @@ _INPUT_ORIGINS: Final[Mapping[str, InputOrigin]] = MappingProxyType(
         # ADR-0323 §4:11: the Telegram line declares its origin per input, `user` for
         # an input that takes in no forward.
         "telegram": InputOrigin.USER,
+        # ADR-0350 §2:7, §6:3: the Task Scheduler declares its origin per input,
+        # `assistant` for a scheduled task that carries no outside-content mark.
+        TASK_SCHEDULER: InputOrigin.ASSISTANT,
     }
 )
 
@@ -60,6 +75,13 @@ _INPUT_ORIGINS: Final[Mapping[str, InputOrigin]] = MappingProxyType(
 #: absent from it takes in no forward.
 _FORWARDED_ORIGINS: Final[Mapping[str, InputOrigin]] = MappingProxyType(
     {"telegram": InputOrigin.OUTSIDE}
+)
+
+#: ADR-0350 §6:3, on ADR-0284 §2:2: the origin a kind declares for an input that carries
+#: the outside-content mark (§3:8), which is therefore an outside trigger (ADR-0306 §4:5).
+#: A channel type absent from it pushes no marked input.
+_MARKED_ORIGINS: Final[Mapping[str, InputOrigin]] = MappingProxyType(
+    {TASK_SCHEDULER: InputOrigin.OUTSIDE}
 )
 
 #: ADR-0292 §5:4, ADR-0323 §4:8: the channel types whose kind establishes the user as
@@ -131,27 +153,43 @@ def validate_combination(supplied: ChannelInput, reply: ReplyCapability | None) 
         raise ValueError(msg)
 
 
-def input_origin(target: ChannelTarget, *, takes_in_forward: bool = False) -> InputOrigin:
+def input_origin(
+    target: ChannelTarget, *, takes_in_forward: bool = False, carries_outside_mark: bool = False
+) -> InputOrigin:
     """The origin a channel declares for its input, which admission records (ADR-0284 §2:2).
 
     A new conversation is a ``conversation`` channel not yet allocated, so it
     declares what that channel type declares. A kind declares its origin per input
     where it takes forwards in (ADR-0323 §4:11): an input that takes one in has the
-    origin the kind declares for it, and every other input the kind's plain one.
+    origin the kind declares for it, and every other input the kind's plain one. The
+    Task Scheduler declares its origin per input too (ADR-0350 §6:3): ``outside`` for
+    an occurrence of a task carrying the outside-content mark, ``assistant`` otherwise.
 
     Args:
         target: The admitted input's target.
         takes_in_forward: Whether the input takes in a forward.
+        carries_outside_mark: Whether the input carries the outside-content mark.
 
     Returns:
         The channel type's declared :class:`~ai_assistant.core.types.InputOrigin`.
 
     Raises:
         ValueError: If the channel type declares none, or declares none for an input
-            that takes in a forward; admission refuses it.
+            that takes in a forward or carries the mark, or the input claims both;
+            admission refuses it.
     """
+    if takes_in_forward and carries_outside_mark:
+        msg = "an input takes in a forward or carries the outside-content mark, not both"
+        raise ValueError(msg)
     kind = "conversation" if isinstance(target, NewConversation) else target.channel_type
-    origin = (_FORWARDED_ORIGINS if takes_in_forward else _INPUT_ORIGINS).get(kind)
+    declared = (
+        _FORWARDED_ORIGINS
+        if takes_in_forward
+        else _MARKED_ORIGINS
+        if carries_outside_mark
+        else _INPUT_ORIGINS
+    )
+    origin = declared.get(kind)
     if origin is None:
         msg = "the channel type declares no input origin for this input"
         raise ValueError(msg)

@@ -231,6 +231,25 @@ def test_the_writer_keeps_a_producer_named_person_and_refuses_another_holder() -
         stamped_support(forged, _episode())
 
 
+@pytest.mark.parametrize("message", [None, 0])
+def test_no_support_points_at_an_input_whose_origin_is_assistant(message: int | None) -> None:
+    """ADR-0350 §6:11: a scheduled task's instruction is no part a support points at.
+
+    The stamp both writers use refuses it, whatever origin the producer gave it; a support
+    of such an episode points at another part of it, such as a round's message.
+    """
+    scheduled = _episode(
+        RecordedInputMessage(text="check back", sent_at=AT), origin=InputOrigin.ASSISTANT
+    )
+    pointing = said_support().model_copy(
+        update={"points_at": InputPart(episode="activation:held", message=message)}
+    )
+
+    with pytest.raises(ValueError, match="origin is assistant"):
+        stamped_support(pointing, scheduled)
+    assert stamped_support(message_support(), scheduled).holder is not None
+
+
 # --- the owner writes labels alone (§7:8) -----------------------------------------------
 
 

@@ -142,8 +142,8 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     finally:
         store.close()
 
-    assert _label(legacy) == "15"
-    assert export.schema_version == 23
+    assert _label(legacy) == "16"
+    assert export.schema_version == 24
     assert export.stopped_activations == ("act-before-stopped",)
     assert [one.id for one in export.activation_effects] == ["effect-before-remember"]
     assert export.observations == read
@@ -153,7 +153,7 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
         assert all(one.annotations is None for one in record.findings)
     # No row is rewritten: the step moves the label and nothing else.
     after = _dump(legacy)
-    assert {table: rows for table, rows in after.items() if table != "meta"} == {
+    assert {table: after[table] for table in before if table != "meta"} == {
         table: rows for table, rows in before.items() if table != "meta"
     }
 
@@ -193,7 +193,7 @@ async def test_the_upgraded_file_takes_annotations_and_declines_and_keeps_them(
         assert stored.declines[0].reason == "Trivia."
     finally:
         reopened.close()
-    assert _label(legacy) == "15"
+    assert _label(legacy) == "16"
 
 
 async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> None:

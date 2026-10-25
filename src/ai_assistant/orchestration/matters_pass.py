@@ -508,6 +508,8 @@ class _Episode:
                 if projection.origin is InputOrigin.OUTSIDE
                 else f"an exchange with the user on {source}"
                 if projection.origin is InputOrigin.USER
+                else f"work the assistant scheduled, run on {source}, never something the user said"
+                if projection.origin is InputOrigin.ASSISTANT
                 else f"an episode on {source}"
             ),
             "occurred_at": projection.occurred_at.isoformat(),

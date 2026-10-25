@@ -280,26 +280,28 @@ def test_a_scalar_output_with_a_lone_surrogate_is_rejected() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 23
+    assert export.schema_version == 24
     assert export.activation_effects == ()
     assert export.observations == ()
+    assert export.scheduled_tasks == ()
+    assert export.cascades == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_twenty_three() -> None:
+def test_export_pins_the_schema_version_to_exactly_twenty_four() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[23]`` refuses an explicit ``22`` — a document whose findings carry no
-    annotations and whose records no declines (ADR-0346 §4:5, §4:6) — and any other
-    value, so the advertised version cannot be mislabelled. The positive default is what
-    a producer gets for free; only the rejections pin it.
+    ``Literal[24]`` refuses an explicit ``23`` — a document with no scheduled tasks and
+    no cascade records (ADR-0350 §12:3) — and any other value, so the advertised version
+    cannot be mislabelled. The positive default is what a producer gets for free; only
+    the rejections pin it.
 
-    **The neighbour on each side is asserted and not only the far ones**: ``22`` is
-    the shape this contract had one decision ago and ``24`` is the shape nobody has
+    **The neighbour on each side is asserted and not only the far ones**: ``23`` is
+    the shape this contract had one decision ago and ``25`` is the shape nobody has
     decided, and a ``Literal`` that admitted either would be a document announcing a
     shape it does not have.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=23).schema_version == 23
-    for stale in (*range(1, 23), 24):
+    assert PlanExport(exported_at=_WHEN, schema_version=24).schema_version == 24
+    for stale in (*range(1, 24), 25):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)
 

@@ -606,7 +606,8 @@ def _provenance_of(record: RecalledRecord) -> RecallProvenance:
     (ADR-0284 §2:3, superseding ADR-0281 §4:4's test): a channel activation's episode is
     ``user`` exactly where its input came from the user, and an input whose origin is
     not recorded is not taken for the user's — the same reading :func:`_excerpt_of`
-    makes, so the label and the excerpt never disagree. A resume has no input (§2:4)
+    makes, so the label and the excerpt never disagree; an input whose origin is
+    ``assistant`` is not the user's either (ADR-0350 §6:12). A resume has no input (§2:4)
     and an episode with no processing record no trigger, and both are ``user``, as
     ADR-0281 §4:4 labelled them.
     """
@@ -626,7 +627,10 @@ def _excerpt_of(record: RecalledRecord) -> str:
     ``outside`` gives its latest understanding's meaning, or the fixed text that it
     was a report received on its channel. The user's own input is given where the
     ``origin`` is ``user``; an input whose origin is not recorded is not taken for
-    the user's, and gives what an outside one does.
+    the user's, and gives what an outside one does. An input whose origin is
+    ``assistant``, a scheduled task's instruction, is not the user's either (ADR-0350
+    §6:12): it gives its meaning, or the fixed text that it was work the assistant
+    scheduled.
     """
     if isinstance(record, Memory):
         return record.content
@@ -643,9 +647,12 @@ def _excerpt_of(record: RecalledRecord) -> str:
         return processing.understanding[-1].meaning
     else:
         channel = trigger.channel
+        what = (
+            "work the assistant scheduled"
+            if trigger.origin is InputOrigin.ASSISTANT
+            else "a report received"
+        )
         return (
-            "a report received"
-            if channel is None
-            else f"a report received on {channel.channel_type}:{channel.instance_id}"
+            what if channel is None else f"{what} on {channel.channel_type}:{channel.instance_id}"
         )
     return record.content
