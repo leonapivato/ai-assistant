@@ -349,16 +349,21 @@ side (§2:6), so ADR-0332 §3:3 joins nothing there. Two of the Task Scheduler's
 share one place, so neither is shown to the other under ADR-0332 §4:1. A person's
 activation and a task's never carry the same authority, so ADR-0332 §4:6 takes over neither.
 
-> **Normative.** A support that points at the input of an activation the Task Scheduler
-> started takes the origin `assistant_message` where that input's origin is `assistant`, and
-> `outside_input` where it is `outside` (ADR-0328 §4:2's origin table).
+> **Normative.** No support points at an input whose origin is `assistant`, and the code that
+> sets a support's origin and holder (ADR-0328 §4:2, ADR-0345 §2:1) refuses one that does.
+> ADR-0328 §4:2's origin table gains no row for it, and a
+> support of such an activation points at another part of its episode, such as a round's
+> message, which ADR-0328 §4:2 and ADR-0345 §2 already rule.
 
 > **Normative.** Every reader that attributes an input by its origin (ADR-0284 §2:3) attributes
 > one whose origin is `assistant` as written by the assistant, never as something the person
 > said.
 
 So a reminder's text, or a chain's next step, is never evidence that the person said it
-again when the observer reads the episode it started.
+again, nor a holder ADR-0345 §2 has no kind for. What the task rests on is in its parent's
+episode, where the observer already read it. An input whose origin is `assistant` is no
+outside trigger (ADR-0306 §4:5): only a task carrying the mark is one, through the origin
+`outside`.
 
 ### 7. The sensor
 
@@ -593,7 +598,8 @@ The lanes, each after this decision merges `Accepted`, held by milestone 15:
    and the composition wiring in `app/`.
 
 > **Normative.** TS1 may touch `core`, `testing`, `planning` and their tests, permitted
-> expressly here as one unit, and touches no other package.
+> expressly here as one unit. In `orchestration/` it may only adapt each reader of
+> `InputOrigin` to handle `assistant` (§6:11–§6:12, §12:7), and it touches no other package.
 
 > **Normative.** TS1 merges before TS2, and TS2 is briefed only after TS1 has merged
 > (ADR-0137 §4:1).
@@ -641,7 +647,7 @@ Superseded in part. Every clause the middle column does not name stands:
 | ADR-0306 | §4:7, for an activation the Task Scheduler starts: its message goes into the place its task states, or nowhere; §5:6's *never resolved by guessing* and §5:13's *never retried, done another way*, for that activation's message alone: one second try | §6:7, §8:6, §8:8 |
 | ADR-0307 | §3:1, §3:7 and §3:8, for an activation the Task Scheduler starts: they read the place its task states; §5:1, in the addition alone: the label kind `T`; §5:6, in the addition alone: an item is shown with its scheduled task's label | §6:7, §9:2 |
 | ADR-0323 | §6:1's *the chat is the input's place*, for an activation the Task Scheduler starts: the chat is the place its task states, and the writer still refuses any chat but the one the settings name | §6:7 |
-| ADR-0328 | §4:2's origin table, in the addition alone: a support pointing at an input whose origin is `assistant` takes `assistant_message` | §6:11 |
+| ADR-0328 | §4:2, in the addition alone: no support points at an input whose origin is `assistant`, and the writer refuses one | §6:11 |
 | ADR-0329 | §13:6, in the addition alone: an activation the Task Scheduler starts writes its messages into the place its task states, and no other background work messages the user | §6:7 |
 | ADR-0338 | §2:2, in the addition alone: an activation the Task Scheduler starts is for the person its task is for | §6:4 |
 
