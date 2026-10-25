@@ -54,7 +54,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
 
-from ai_assistant.core.channel_validation import establishes_the_user
+from ai_assistant.core.channel_validation import TASK_SCHEDULER, establishes_the_user
 from ai_assistant.core.errors import MemoryStoreError, PersonModelStoreError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
@@ -116,6 +116,13 @@ PLANNING_SUGGESTIONS: Final = 5
 #: pushes on a channel that exists because it is built in or the user connected it.
 _PUSHED_BY_A_CONNECTED_SOURCE: Final = frozenset({"informational_event"})
 
+#: ADR-0350 §6:4, the addition to ADR-0338 §2:2: an activation the Task Scheduler starts is
+#: for the person its task is for, and a task is for the person its spawner was (§3:5).
+#: Every activation that is a person's is the owner's (the hub serves one person), so a
+#: task's activation is the owner's; a household's people would need the trigger to name
+#: its task's person (ADR-0350 §14, #691).
+_FOR_ITS_TASKS_PERSON: Final = frozenset({TASK_SCHEDULER})
+
 
 def activation_person(trigger: RecordedChannelTrigger | None) -> str | None:
     """The person an activation is for, from its recorded trigger (ADR-0338 §2:2-§2:4).
@@ -139,7 +146,11 @@ def activation_person(trigger: RecordedChannelTrigger | None) -> str | None:
     else:
         # A new conversation: a ``conversation`` channel not yet allocated (ADR-0284 §2:2).
         kind = "conversation"
-    if establishes_the_user(kind) or kind in _PUSHED_BY_A_CONNECTED_SOURCE:
+    if (
+        establishes_the_user(kind)
+        or kind in _PUSHED_BY_A_CONNECTED_SOURCE
+        or kind in _FOR_ITS_TASKS_PERSON
+    ):
         return OWNER_PERSON_ID
     return None
 

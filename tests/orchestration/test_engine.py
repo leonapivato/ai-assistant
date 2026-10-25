@@ -121,6 +121,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.phase_path import PhasePath
     from ai_assistant.orchestration.recall import RecallStage
     from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
+    from ai_assistant.orchestration.task_manager import TaskSchedulerSeams
     from ai_assistant.orchestration.telegram import TelegramLineSeams
     from ai_assistant.orchestration.understanding import UnderstandingStage
     from ai_assistant.testing.invoker import FakeToolImplementation
@@ -331,6 +332,9 @@ class Harness:
         # varies it, so a message is taken in at once, as before the wait, and a case
         # driving the wait sets its own.
         chat_start_wait: timedelta = CASE_START_WAIT,
+        # ADR-0350's Task Scheduler. `None` is every other case's deployment: no sensor,
+        # no spawn, and a stop that cascades nothing.
+        task_scheduler: TaskSchedulerSeams | None = None,
     ) -> None:
         # ADR-0200's two seams, wired **together** or not at all — the engine refuses
         # half a pipeline. Defaulted to the canonical fakes, and kept on the harness so
@@ -456,6 +460,7 @@ class Harness:
             join_limit=join_limit,
             person_blocks=person_blocks,
             chat_start_wait=chat_start_wait,
+            task_scheduler=task_scheduler,
         )
 
 

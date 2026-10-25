@@ -737,6 +737,18 @@ def test_an_assistant_message_is_cut_to_what_its_chunk_can_carry() -> None:
     assert len(canonical_payload(_widest_chunk(_UUID_WIDE, fitted))) <= limit
 
 
+def test_a_message_cut_to_fit_keeps_the_claim_it_is_written_under() -> None:
+    """ADR-0350 §12:9: a cut message is still the one its effect record names."""
+    limit = 2048
+    reply = NewMessage(author=MessageAuthor.ASSISTANT, text="y" * 4000, effect_id="effect:abc")
+
+    fitted = fitted_message(_UUID_WIDE, reply, max_bytes=limit)
+
+    assert fitted.cut_off
+    assert fitted.effect_id == "effect:abc"
+    assert len(canonical_payload(_widest_chunk(_UUID_WIDE, fitted))) <= limit
+
+
 def test_a_set_of_devices_admitted_is_one_its_chunk_can_carry() -> None:
     """A set the chat space records travels in one chunk, its snapshot cut to none."""
     limit = 2048

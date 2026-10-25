@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, cast
 
@@ -73,7 +74,7 @@ from ai_assistant.orchestration.channel_kinds import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Iterator, Sequence
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
@@ -611,7 +612,7 @@ def decode_listing(output: FrozenJsonValue) -> TaskListing | None:
     Returns:
         The listing, or ``None`` where ``output`` is not one :func:`encode_listing` wrote.
     """
-    if not isinstance(output, dict) or output.get("kind") != _LISTING_KIND:
+    if not isinstance(output, Mapping) or output.get("kind") != _LISTING_KIND:
         return None
     try:
         held = cast("Mapping[str, object]", output)

@@ -38,6 +38,7 @@ from phases_support import (
     working,
     written,
 )
+from task_support import seams
 from test_engine import AT
 from test_engine_phases import _BOOK
 from understanding_support import STATED_PROPOSAL, understanding_stage
@@ -440,6 +441,23 @@ async def test_a_takeover_stops_the_uncommitted_work_and_brings_its_input_in() -
     assert older in (await harness.plans.export()).stopped_activations
     assert await _assistant(harness, first) == []
     assert len(await _assistant(harness, second)) == 1
+
+
+async def test_a_takeovers_stop_writes_no_cascade_record() -> None:
+    """ADR-0350 §9:6, §13:3: a takeover's stop is no stop command, and walks nothing."""
+    completer = _Counting()
+    harness = phases_harness(
+        completer, understanding=understanding_stage(model=_routed()), task_scheduler=seams()
+    )
+    _, older = await _two_running(harness, completer)
+
+    await _also_running(harness, completer, "finish it: for two", 2)
+    completer.release.set()
+    await _all_frozen(harness, 2)
+
+    held = await harness.plans.export()
+    assert older in held.stopped_activations
+    assert held.cascades == ()
 
 
 async def test_two_takeovers_in_one_pass_one_per_understanding_version() -> None:

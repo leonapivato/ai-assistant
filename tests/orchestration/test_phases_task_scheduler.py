@@ -1,0 +1,338 @@
+"""The Task Scheduler on the engine: a spawn, the activation it starts, and the stop (ADR-0350).
+
+Each case drives the engine with the phases wired and the Task Scheduler beside them, over
+the canonical fakes, with planning answered by a responder that reads the rendered
+request as planning's model would: by the labels it was shown.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any
+
+from phases_support import open_conversation, phases_harness, said, until, working, written
+from task_support import AT, activation, seams, write_task
+
+from ai_assistant.core.types import (
+    ActivationStop,
+    ChannelIdentity,
+    DueAt,
+    EpisodicMemory,
+    MessageAuthor,
+    OccurrenceState,
+    ProcessingStatus,
+    ProposedCall,
+    RoundResponse,
+)
+from ai_assistant.orchestration.chat import COULDNT_FINISH
+from ai_assistant.orchestration.task_scheduler import SCHEDULE, TASK_SCHEDULER_DESCRIPTION
+from ai_assistant.testing import FakePlanStore, FakeToolCallingCompleter
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+    from test_engine import Harness
+
+    from ai_assistant.core.types import Message, OfferedTool
+
+
+def _request(messages: Sequence[Message]) -> dict[str, Any]:
+    """The round's rendered request, as planning's model reads it."""
+    loaded: dict[str, Any] = json.loads(messages[-1].content)
+    return loaded
+
+
+def _started_by_a_task(request: dict[str, Any]) -> bool:
+    return bool(request["place"].get("description") == TASK_SCHEDULER_DESCRIPTION)
+
+
+def _first_place(request: dict[str, Any]) -> str:
+    """The first place label on the place list."""
+    return str(request["places"][0]["places"][0]["label"])
+
+
+def _responder(
+    person: Callable[[dict[str, Any]], RoundResponse],
+    task: Callable[[dict[str, Any]], RoundResponse],
+) -> FakeToolCallingCompleter:
+    def respond(messages: Sequence[Message], _tools: Sequence[OfferedTool]) -> RoundResponse:
+        request = _request(messages)
+        return task(request) if _started_by_a_task(request) else person(request)
+
+    return FakeToolCallingCompleter(response=respond)
+
+
+def _spawning(**arguments: object) -> Callable[[dict[str, Any]], RoundResponse]:
+    """A person's activation that spawns in its first round and then says nothing."""
+
+    def person(request: dict[str, Any]) -> RoundResponse:
+        if request["rounds"]:
+            return RoundResponse(text="")
+        named: dict[str, Any] = {
+            key: [_first_place(request)] if value == "first place" else value
+            for key, value in arguments.items()
+        }
+        return RoundResponse(
+            calls=(
+                ProposedCall(
+                    call_id="spawn-1",
+                    name="spawn",
+                    arguments={"instruction": "say hello", **named},
+                ),
+            )
+        )
+
+    return person
+
+
+def _silent(_request: dict[str, Any]) -> RoundResponse:
+    return RoundResponse(text="")
+
+
+async def _schedule_episodes(harness: Harness) -> list[EpisodicMemory]:
+    """The frozen episodes of the activations the Task Scheduler started."""
+    page = await harness.memory.channel_episodes(SCHEDULE, limit=100)
+    return [one.record for one in page.entries]
+
+
+async def _until_scheduled(harness: Harness, count: int) -> list[EpisodicMemory]:
+    async def done() -> bool:
+        return len(await _schedule_episodes(harness)) >= count
+
+    await until(done, what=f"{count} scheduled activation(s)")
+    return await _schedule_episodes(harness)
+
+
+async def _until_no_tasks(harness: Harness) -> None:
+    async def done() -> bool:
+        return (await harness.plans.export()).scheduled_tasks == ()
+
+    await until(done, what="the Task Scheduler to hold no task")
+
+
+async def test_a_spawn_to_start_now_starts_an_activation_that_speaks_where_it_names() -> None:
+    """§3:2, §6:7: every spawn goes through the Task Scheduler, now included."""
+    completer = _responder(
+        _spawning(places="first place"),
+        lambda request: RoundResponse(text=f"{_first_place(request)}: hello from the schedule"),
+    )
+    harness = phases_harness(completer, task_scheduler=seams())
+    await harness.engine.start()
+    try:
+        conversation = await open_conversation(harness)
+        await harness.engine.write_message(conversation, message=said("m-1", "say hello soon"))
+        (episode,) = await _until_scheduled(harness, 1)
+
+        async def spoken() -> bool:
+            return any(
+                one.author is MessageAuthor.ASSISTANT and one.text == "hello from the schedule"
+                for one in await written(harness, conversation)
+            )
+
+        await until(spoken, what="the task's message")
+        assert episode.processing_record is not None
+        assert episode.processing_record.status is ProcessingStatus.COMPLETED
+        # §12:8: the round records the place its message went into, its label stripped.
+        (round_,) = episode.processing_record.rounds
+        assert round_.text == "hello from the schedule"
+        assert round_.place == ChannelIdentity(
+            channel_type="conversation", instance_id=conversation
+        )
+        # §12:9: the transcript records the message with the claim it was written under.
+        (claim,) = await harness.plans.activation_effects([episode.processing_record.activation_id])
+        assert claim.position is not None
+        assert await harness.conversation_store.effect_position(conversation, claim.id) == (
+            claim.position
+        )
+        # §7:8: once its occurrence settled and its parent ended, it is removed.
+        await _until_no_tasks(harness)
+    finally:
+        await harness.engine.aclose()
+
+
+async def test_a_message_naming_a_place_off_its_list_is_refused() -> None:
+    """§6:7, §13:3: refused by authorizing; *couldn't finish* goes to its suggested place."""
+    completer = _responder(
+        _spawning(places="first place"),
+        lambda _request: RoundResponse(text="L9: somewhere else"),
+    )
+    harness = phases_harness(completer, task_scheduler=seams())
+    await harness.engine.start()
+    try:
+        conversation = await open_conversation(harness)
+        await harness.engine.write_message(conversation, message=said("m-1", "say hello soon"))
+        await _until_scheduled(harness, 1)
+
+        async def told() -> bool:
+            return any(one.text == COULDNT_FINISH for one in await written(harness, conversation))
+
+        await until(told, what="the task's couldn't finish")
+        texts = [one.text for one in await written(harness, conversation)]
+        assert not any("somewhere else" in one for one in texts)
+    finally:
+        await harness.engine.aclose()
+
+
+async def test_two_occurrences_due_at_one_instant_start_two_activations() -> None:
+    """§7:4, §13:3."""
+    harness = phases_harness(_responder(_silent, _silent), task_scheduler=seams())
+    await write_task(harness.plans, activation(), when=DueAt(at=AT))
+    await write_task(harness.plans, activation(), when=DueAt(at=AT))
+    await harness.engine.start()
+    try:
+        found = await _until_scheduled(harness, 2)
+        assert len({one.id for one in found}) == 2
+    finally:
+        await harness.engine.aclose()
+
+
+async def test_a_deleted_conversation_cancels_nothing_and_with_no_line_nothing_is_written() -> None:
+    """§5:8-§5:9, §13:3: the occurrence still runs, and its empty list writes nothing."""
+    spoken: list[dict[str, Any]] = []
+
+    def task(request: dict[str, Any]) -> RoundResponse:
+        spoken.append(request)
+        return RoundResponse(text="L1: hello")
+
+    harness = phases_harness(_responder(_silent, task), task_scheduler=seams())
+    gone = await harness.conversation_store.start()
+    place = ChannelIdentity(channel_type="conversation", instance_id=gone.id)
+    await write_task(harness.plans, activation(), places=(place,))
+    await harness.conversation_store.stamp_deleted(gone.id)
+    await harness.engine.start()
+    try:
+        (episode,) = await _until_scheduled(harness, 1)
+        assert episode.processing_record is not None
+        assert episode.processing_record.status is ProcessingStatus.COMPLETED
+        (request,) = spoken
+        assert request["places"] == []
+        assert request["place"]["takes_message"] is False
+    finally:
+        await harness.engine.aclose()
+
+
+class _HeldAdmission(FakePlanStore):
+    """A plan store whose admission read is held right after the pushed write (§9:10)."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.asked: list[str] = []
+
+    async def stopped_activations(self, activation_ids: Sequence[str], /) -> tuple[str, ...]:
+        if not self.entered.is_set():
+            self.asked.extend(activation_ids)
+            self.entered.set()
+            await self.release.wait()
+        return await super().stopped_activations(activation_ids)
+
+
+async def test_a_stop_of_a_pushed_id_with_admission_held_starts_nothing() -> None:
+    """§9:10, §13:3: a stop of a pushed id answers stopped, and nothing then starts."""
+    plans = _HeldAdmission()
+    harness = phases_harness(_responder(_silent, _silent), task_scheduler=seams(), plans=plans)
+    task = await write_task(plans, activation())
+    await harness.engine.start()
+    try:
+        await asyncio.wait_for(plans.entered.wait(), 5)
+        (pushed_id,) = plans.asked
+
+        assert await harness.engine.stop_activation(pushed_id) is ActivationStop.STOPPED
+        plans.release.set()
+
+        async def ended() -> bool:
+            held = await plans.scheduled_tasks([task.id])
+            return not held or held[0].occurrences[0].state is OccurrenceState.STOPPED
+
+        await until(ended, what="the occurrence to end stopped")
+        assert await harness.memory.get(f"activation:{pushed_id}") is None
+        assert await _schedule_episodes(harness) == []
+    finally:
+        await harness.engine.aclose()
+
+
+async def test_a_stop_command_cascades_to_what_its_activation_spawned() -> None:
+    """§9:6: its cascade record first, then the stop, then the walk cancels the child."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _Held(FakeToolCallingCompleter):
+        async def respond(
+            self, messages: Sequence[Message], tools: Sequence[OfferedTool], **_: Any
+        ) -> RoundResponse:
+            request = _request(messages)
+            if not request["rounds"]:
+                return RoundResponse(
+                    calls=(
+                        ProposedCall(
+                            call_id="spawn-1",
+                            name="spawn",
+                            arguments={"instruction": "check tomorrow", "delay_minutes": 1440},
+                        ),
+                    )
+                )
+            entered.set()
+            await release.wait()
+            return RoundResponse(text="")
+
+    harness = phases_harness(_Held(), task_scheduler=seams())
+    await harness.engine.start()
+    try:
+        conversation = await open_conversation(harness)
+        await harness.engine.write_message(conversation, message=said("m-1", "check tomorrow"))
+        await asyncio.wait_for(entered.wait(), 5)
+        running = await working(harness, conversation)
+        (child,) = (await harness.plans.export()).scheduled_tasks
+
+        assert await harness.engine.stop_activation(running) is ActivationStop.STOPPED
+        release.set()
+
+        held = await harness.plans.export()
+        assert running in held.cascades
+        assert all(task.id != child.id or not task.pending for task in held.scheduled_tasks)
+        await _until_no_tasks(harness)
+    finally:
+        await harness.engine.aclose()
+
+
+async def test_after_a_restart_a_cascaded_child_is_never_pushed() -> None:
+    """§7:5, §13:3: a crash after the cascade record, before its walk cancelled the child."""
+    harness = phases_harness(_responder(_silent, _silent), task_scheduler=seams())
+    stopped = activation()
+    child = await write_task(harness.plans, stopped)
+    await harness.plans.record_cascade(stopped)
+    await harness.engine.start()
+    try:
+
+        async def cancelled() -> bool:
+            held = await harness.plans.scheduled_tasks([child.id])
+            return not held or held[0].occurrences[0].state is OccurrenceState.CANCELLED
+
+        await until(cancelled, what="the child to end cancelled")
+        assert await _schedule_episodes(harness) == []
+    finally:
+        await harness.engine.aclose()
+
+
+async def test_a_late_occurrence_says_so_in_its_input() -> None:
+    """§8:9: pushed however late, and its input says so with the instant it was due."""
+    seen: list[str] = []
+
+    def task(request: dict[str, Any]) -> RoundResponse:
+        (current,) = [one for one in request["place_window"] if one.get("is_the_input")]
+        seen.append(str(current["text"]))
+        return RoundResponse(text="")
+
+    harness = phases_harness(_responder(_silent, task), task_scheduler=seams())
+    await write_task(harness.plans, activation(), when=DueAt(at=AT - timedelta(hours=3)))
+    await harness.engine.start()
+    try:
+        await _until_scheduled(harness, 1)
+        (text,) = seen
+        assert "late" in text
+        assert "check the listings" in text
+    finally:
+        await harness.engine.aclose()
