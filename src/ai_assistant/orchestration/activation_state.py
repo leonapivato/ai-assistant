@@ -683,6 +683,7 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
     id_factory: Callable[[], str],
     stage_limit: int = DEFAULT_STAGE_RECORD_LIMIT,
     messages: Sequence[RecordedInputMessage] = (),
+    carries_outside_mark: bool = False,
 ) -> ActivationState:
     """Allocate capture metadata after channel validation, without making it admission policy.
 
@@ -698,11 +699,14 @@ def admit_channel(  # noqa: PLR0913 — the input, its reply, the two metadata s
     event's is, so its episode is read by it (ADR-0283 §1, ADR-0323 §10); a
     conversation's is named once its lifecycle has resolved it (ADR-0275 §4:5).
     ``messages`` are each message the input took in, recorded on the trigger
-    (ADR-0323 §5:4); none for a channel that records none.
+    (ADR-0323 §5:4); none for a channel that records none. ``carries_outside_mark`` is
+    whether the input carries the outside-content mark, as an occurrence of a scheduled
+    task carrying it does (ADR-0350 §3:8, §6:3): its kind declares its origin for that.
     """
     origin = input_origin(
         input.target,
         takes_in_forward=any(one.forwarded_from is not None for one in messages),
+        carries_outside_mark=carries_outside_mark,
     )
     on_its_channel = (
         isinstance(input.target, ChannelIdentity) and input.target.channel_type != "conversation"

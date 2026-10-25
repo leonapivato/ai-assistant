@@ -687,7 +687,8 @@ def _widest_chunk(conversation_id: str, message: NewMessage) -> ChatStreamChunk:
         conversation_id=conversation_id,
         position=_WIDEST,
         written_at=_WIDEST_AT,
-        **message.model_dump(),
+        # A device's message never carries the claim it was written under (ADR-0350 §12:9).
+        **message.model_dump(exclude={"effect_id"}),
     )
     return ChatStreamChunk(
         change=DeviceChange(change=MessageAddedChange(seq=_WIDEST, message=recorded))
