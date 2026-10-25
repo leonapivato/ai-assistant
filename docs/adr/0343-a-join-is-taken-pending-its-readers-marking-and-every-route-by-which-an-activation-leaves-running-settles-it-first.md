@@ -1,12 +1,13 @@
 # 343. A join is taken pending its reader's marking, and every route by which an activation leaves running settles it first
 
-- Status: Accepted
+- Status: Accepted and ADR-0349 (§2:1–§4:3, whole: no join is taken by code, so none is pending)
 - Date: 2026-10-21
 - Scope: how ADR-0332's join (its §3:6) is ordered against the reader's marking of the joined messages (its §3:18). A join is taken pending that marking, and the activation commits, is taken over, ends and has its episode frozen only once each pending join is settled. A joined reply's quoted message and recall run again per understanding version are not decided here (§5).
 - Dependency: [ADR-0332](0332-activations-run-side-by-side-across-places-and-one-at-a-time-within-one-a-new-input-joins-the-running-activation-until-it-acts-and-a-place-waits-a-moment-before-it-starts.md), [ADR-0280](0280-an-activation-controller-runs-the-stages-by-rules-and-records-every-choice-with-the-episode.md), [ADR-0293](0293-the-hubs-chat-is-a-hosted-medium-and-a-conversation-keeps-its-own-transcript.md) and [ADR-0323](0323-a-telegram-chat-with-the-owners-bot-is-a-line-to-the-assistant-and-connecting-it-approves-what-the-line-carries.md), as their status lines leave them.
 - Authorization: the owner, 2026-10-21: "Dont draw the line who ratifies what, Ill just check in and if I see something wrong I'll give input to you". Under that standing delegation the coordinator ruled the reading this decision writes down, on PR #3294's adjudication request ([the ruling](https://github.com/leonapivato/ai-assistant/pull/3294#issuecomment-6312549411), answering [the request](https://github.com/leonapivato/ai-assistant/pull/3294#issuecomment-6312507866)). The dispatcher assigned 0343, and ratifies it under that delegation.
 - **Changes no contract.** No shared type changes, no Protocol changes, and nothing the wire carries or a record stores changes, so the protocol version does not move. It amends clauses of a contract-surface decision, so both review lenses run on it.
 - **Partially supersedes**, in the clauses §6's first table names: ADR-0332.
+- Partially superseded: 2026-10-25 by ADR-0349 — §2:1–§4:3, whole: ADR-0332's joining by code is replaced, so no join is taken pending a marking and no route out of running waits for one. A message is marked taken in by the activation that admitted it, and absorbing it marks nothing again (ADR-0349 §7, §8:8). Every other clause stands. This replacement takes effect on ratification of ADR-0349. This reciprocal header record accompanies the numbered draft under ADR-0070 and ADR-0082; the ratified body below is preserved.
 
 ## Context
 
