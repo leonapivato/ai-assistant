@@ -186,6 +186,61 @@ def _forwarded(name: str, account: int) -> EpisodicMemory:
     )
 
 
+#: The channel the record-order cases' episodes are on, so the store numbers them.
+_LINE: Final = ChannelIdentity(channel_type="telegram", instance_id="owner-line")
+
+
+def _on_line(name: str, *texts: str) -> EpisodicMemory:
+    """An episode on :data:`_LINE`, its trigger recording ``texts`` as the user's messages.
+
+    The store numbers it as it inserts it (ADR-0283 §1), so the episodes a case adds in
+    turn are in the record's order (ADR-0348 §3:2), whatever their clock readings say.
+    """
+    said = texts or (f"what was said in {name}",)
+    return EpisodicMemory(
+        id=_address(name),
+        content=" ".join(said),
+        occurred_at=_SAID_AT,
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=_SAID_AT),
+        processing_record=EpisodeProcessingRecord(
+            activation_id=name,
+            started_at=_SAID_AT,
+            ended_at=_SAID_AT,
+            trigger=RecordedChannelTrigger(
+                target=_LINE,
+                channel=_LINE,
+                payload=RecordedTextInput(text=said[-1]),
+                context=ChannelContext(),
+                reply=WholeTextReply(),
+                origin=InputOrigin.USER,
+                messages=tuple(RecordedInputMessage(text=one, sent_at=_SAID_AT) for one in said),
+            ),
+            status=ProcessingStatus.COMPLETED,
+            reason=ProcessingReason.RETURNED,
+            understanding_omitted=UnderstandingOmission.NOT_REACHED,
+            stages=ended_pass(_SAID_AT),
+        ),
+    )
+
+
+def _at_message(
+    name: str, message: int, *, direction: SupportDirection = SupportDirection.FOR
+) -> MemorySupport:
+    """A support pointing at one of ``name``'s recorded messages, the user's own."""
+    support = _said(name, direction=direction)
+    return support.model_copy(
+        update={"points_at": InputPart(episode=_address(name), message=message)}
+    )
+
+
+def _kept(name: str) -> MemorySupport:
+    """A person's request to keep a claim stated elsewhere: cited ``for``, backing nothing.
+
+    ADR-0348 §2:1: "remember that" is a part that only asks to keep a claim.
+    """
+    return _said(name).model_copy(update={"backs_as_worded": False})
+
+
 def _said(
     name: str,
     who: SupportHolder | None = None,
@@ -1108,10 +1163,10 @@ class PlacedWriterContract:
             InputPart(episode=_address("later")),
         )
 
-    async def test_an_answer_whose_relation_adds_no_support_leaves_the_question_open(
+    async def test_an_answer_the_memory_carries_no_backing_of_leaves_the_question_open(
         self, make_placed_writer: PlacedWriterFactory
     ) -> None:
-        """§5:9: resolved only citing a backing support the relation adds there."""
+        """ADR-0348 §4:3: open where the memory carries no backing support of the answer."""
         store = await self._world("page", "owner")
         asked = await self._asked(make_placed_writer, store)
 
@@ -1147,6 +1202,103 @@ class PlacedWriterContract:
 
         (question,) = (await _all(store))["m-page"].open_questions
         assert question.resolved_by == InputPart(episode=_address("owner"))
+
+    async def test_an_answer_closes_its_question_on_a_support_the_memory_already_carried(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """ADR-0348 §4:3: resolved citing a backing support the memory carries, added or not.
+
+        #3413: the owner's word already joined the memory, so the answering relation adds
+        nothing there, and the question still closes on it.
+        """
+        store = await self._world("page", "owner")
+        asked = await self._asked(make_placed_writer, store)
+        await self._write(
+            make_placed_writer,
+            store,
+            _placed(
+                memory("m-first", "Ana still works at Santa Maria", _said("owner")),
+                _pair(asked, PlacedRelation.SUPPORTS),
+            ),
+        )
+        carried = (await _all(store))["m-page"]
+        assert carried.support_at(InputPart(episode=_address("owner"))) is not None
+        assert not carried.open_questions[0].resolved
+
+        await self._write(
+            make_placed_writer,
+            store,
+            _placed(
+                memory("m-again", "Ana works at Santa Maria this winter", _said("owner")),
+                _pair(carried, PlacedRelation.SUPPORTS),
+                answers=PlacedAnswer(memory=carried.id, question="recheck-1"),
+            ),
+        )
+
+        after = (await _all(store))["m-page"]
+        assert after.supports == carried.supports, "the relation added nothing there"
+        (question,) = after.open_questions
+        assert question.resolved_by == InputPart(episode=_address("owner"))
+
+    async def test_a_recheck_on_a_memory_holding_an_open_one_writes_nothing_to_it(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """ADR-0348 §4:1: one open check per memory, so a second raises nothing (#3413)."""
+        store = await self._world("page", "owner")
+        asked = await self._asked(make_placed_writer, store)
+
+        result = await self._write(
+            make_placed_writer,
+            store,
+            _placed(
+                memory("m-pool", "The pool rebalances its winter slots", _said("owner")),
+                _pair(asked, PlacedRelation.RECHECK, "so this relation is not needed"),
+            ),
+        )
+
+        held = await _all(store)
+        assert held["m-page"] == asked
+        assert result.record_id == "m-pool", "the proposal is still installed"
+        await self._write(
+            make_placed_writer,
+            store,
+            _placed(
+                memory("m-confirm", "Ana still works at Santa Maria", _said("owner")),
+                _pair(asked, PlacedRelation.SUPPORTS),
+                answers=PlacedAnswer(memory=asked.id, question="recheck-1"),
+            ),
+        )
+        (question,) = (await _all(store))["m-page"].open_questions
+        assert question.resolved, "the one open check closes, and none is left behind"
+
+    async def test_a_recheck_on_a_memory_whose_check_was_answered_raises_one_again(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """ADR-0348 §4:1 reads an *open* question: a resolved one does not hold the next."""
+        store = await self._world("page", "owner", "later")
+        asked = await self._asked(make_placed_writer, store)
+        await self._write(
+            make_placed_writer,
+            store,
+            _placed(
+                memory("m-confirm", "Ana still works at Santa Maria", _said("owner")),
+                _pair(asked, PlacedRelation.SUPPORTS),
+                answers=PlacedAnswer(memory=asked.id, question="recheck-1"),
+            ),
+        )
+        answered = (await _all(store))["m-page"]
+
+        await self._write(
+            make_placed_writer,
+            store,
+            _placed(
+                memory("m-moved", "Ana is moving again", _said("later")),
+                _pair(answered, PlacedRelation.RECHECK, "a new move may change the hospital"),
+            ),
+        )
+
+        questions = (await _all(store))["m-page"].open_questions
+        assert [one.resolved for one in questions] == [True, False]
 
     async def _asked(self, make: PlacedWriterFactory, store: MemoryStore) -> Memory:
         """The page's memory carrying one open recheck question."""
@@ -1877,6 +2029,160 @@ class PlacedWriterContract:
 
         assert result.refused_labels == ("far",)
 
+    # --- ADR-0348 §3: a holder's newer word supersedes their older one -------------------
+
+    async def _line(self, *episodes: EpisodicMemory) -> FakeMemoryStore:
+        """A store holding ``episodes``, numbered in the order given (ADR-0283 §1)."""
+        store = FakeMemoryStore(now=lambda: _AT)
+        for one in episodes:
+            await store.add(one)
+        return store
+
+    async def test_a_correction_leaves_its_new_memory_undisputed_by_its_holder(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """ADR-0348 §3:1 (#3403): the owner's Monday, cited against Tuesday, stops counting.
+
+        The correction marks Monday wrong, and its own older statement, framed as
+        ``against`` the new memory, stops in the same write, citing the correction: the
+        new memory is not "disputed by the user", and the history keeps what was said.
+        """
+        store = await self._line(
+            _on_line("e-monday", "My next dentist appointment is Monday at 3pm."),
+            _on_line("e-tuesday", "No, it's Tuesday."),
+        )
+        monday = await self._hold(
+            make_placed_writer,
+            store,
+            memory("m-monday", "The user's dentist appointment is Monday", _said("e-monday")),
+        )
+
+        await self._write(
+            make_placed_writer,
+            store,
+            _placed(
+                memory(
+                    "m-tuesday",
+                    "The user's dentist appointment is Tuesday",
+                    _said("e-tuesday"),
+                    _said("e-monday", direction=SupportDirection.AGAINST),
+                ),
+                _pair(monday, PlacedRelation.NEVER_TRUE, "the user corrected the day"),
+            ),
+        )
+
+        held = await _all(store)
+        assert held["m-monday"].status is MemoryStatus.WRONG
+        tuesday = held["m-tuesday"]
+        older = InputPart(episode=_address("e-monday"))
+        assert tuesday.against_holders == ()
+        assert tuesday.holders == (_OWNER,)
+        assert tuesday.support_at(older) is not None, "stopped, not dropped"
+        assert older in tuesday.stopped
+        (stop,) = [one for one in tuesday.operations if one.stops == older]
+        assert (stop.kind, stop.cites) == (
+            MemoryOperationKind.STOP_COUNTING,
+            InputPart(episode=_address("e-tuesday")),
+        )
+
+    async def test_a_holders_newer_doubt_keeps_counting_against_their_memory(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """ADR-0348 §3:3: a part after the holder's backing part is evidence, and counts."""
+        store = await self._line(
+            _on_line("e-vegetarian", "I'm vegetarian."),
+            _on_line("e-chicken", "I had chicken yesterday."),
+        )
+
+        kept = await self._hold(
+            make_placed_writer,
+            store,
+            memory(
+                "m-vegetarian",
+                "The user is vegetarian",
+                _said("e-vegetarian"),
+                _said("e-chicken", direction=SupportDirection.AGAINST),
+            ),
+        )
+
+        assert kept.against_holders == (_OWNER,)
+        assert kept.stopped == frozenset()
+
+    async def test_within_one_episode_the_earlier_message_is_the_older_word(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """ADR-0348 §3:2: within an episode, an earlier part comes before a later one."""
+        store = await self._line(
+            _on_line("e-both", "My dentist is Monday.", "No, it's Tuesday, not Monday.")
+        )
+
+        corrected = await self._hold(
+            make_placed_writer,
+            store,
+            memory(
+                "m-tuesday",
+                "The user's dentist appointment is Tuesday",
+                _at_message("e-both", 1),
+                _at_message("e-both", 0, direction=SupportDirection.AGAINST),
+            ),
+        )
+        doubted = await self._hold(
+            make_placed_writer,
+            store,
+            memory(
+                "m-monday",
+                "The user said their dentist is Monday",
+                _at_message("e-both", 0),
+                _at_message("e-both", 1, direction=SupportDirection.AGAINST),
+            ),
+        )
+
+        assert corrected.against_holders == ()
+        assert corrected.stopped == frozenset({InputPart(episode=_address("e-both"), message=0)})
+        assert doubted.against_holders == (_OWNER,), "a later message is newer evidence"
+
+    async def test_another_holders_older_word_keeps_counting_on_the_install(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """ADR-0348 §3:1 binds a holder's own older word alone: Sam's dispute stands."""
+        store = await self._line(_on_line("e-sam"), _on_line("e-owner"))
+
+        installed = await self._hold(
+            make_placed_writer,
+            store,
+            memory(
+                "m-porto",
+                "Ana lives in Porto",
+                _said("e-owner"),
+                _said("e-sam", _SAM, direction=SupportDirection.AGAINST),
+            ),
+        )
+
+        assert installed.against_holders == (_SAM,)
+
+    async def test_parts_the_record_does_not_order_keep_counting(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """ADR-0348 §3:2: only the record's order stops a part; where it gives none, it counts.
+
+        Two episodes on no channel carry no number the writer reads, so nothing orders
+        them, and no clock reading may (ADR-0275 §4:9).
+        """
+        store = await self._world("earlier", "later")
+
+        installed = await self._hold(
+            make_placed_writer,
+            store,
+            memory(
+                "m-tuesday",
+                "The user's dentist appointment is Tuesday",
+                _said("later"),
+                _said("earlier", direction=SupportDirection.AGAINST),
+            ),
+        )
+
+        assert installed.against_holders == (_OWNER,)
+
     # --- §5's worked example ----------------------------------------------------------------
 
     async def test_the_worked_example_ends_in_its_table(
@@ -1902,15 +2208,17 @@ class PlacedWriterContract:
         m2 = (await _all(store))["M2"]
         assert (m4.holders, m2.partial_supporters) == ((_SAM,), (_SAM,))
 
-        # 3. The page and the owner's "remember that": M5, held by both, supports M3 and M2.
+        # 3. The page, and the owner's "remember that": M5, held by the page alone and
+        # citing the request (ADR-0348 §2:2), supports M3 and M2.
         m5 = await self._hold(
             make,
             store,
-            memory("M5", "Ana works at Santa Maria Hospital", _page("e3"), _said("e3")),
+            memory("M5", "Ana works at Santa Maria Hospital", _page("e3"), _kept("e3")),
             _pair(m3, PlacedRelation.SUPPORTS, "a nurse at a hospital"),
             _pair(m2, PlacedRelation.SUPPORTS, "Santa Maria is in Lisbon"),
         )
-        assert set(m5.holders) == {_PAGE, _OWNER}
+        assert m5.holders == (_PAGE,)
+        assert m5.support_at(InputPart(episode=_address("e3"))) is not None, "the request is cited"
         held = await _all(store)
         m2, m3 = held["M2"], held["M3"]
 

@@ -84,16 +84,18 @@ from ai_assistant.testing._operations import applied_operation
 from ai_assistant.testing._placed import (
     added_backing_fault,
     created_fault,
+    ordered_episodes,
     placed_fault,
     placed_write,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence, Set
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import Embedder, MemoryPolicy, MemoryStore
     from ai_assistant.core.types import (
+        ChannelIdentity,
         Embedding,
         LabelBounds,
         MemoryChange,
@@ -113,6 +115,9 @@ _DEFAULT_CONFLICT_LIMIT = 100
 
 #: Bound on the supersession re-mint loop, matching ``MemoryIngestor`` (ADR-0045 §4).
 _MAX_SUPERSEDE_ATTEMPTS = 5
+
+#: How many of a channel's episode numbers one read takes, matching ``MemoryIngestor``.
+_NUMBER_PAGE = 1000
 
 
 def _uuid() -> str:
@@ -404,6 +409,35 @@ def _contradicted(
         for c in conflicts
         if _asserted(c) and relations.get(c.id) is ConflictRelation.CONTRADICTS
     )
+
+
+async def _episode_numbers(
+    store: MemoryStore, episodes: Set[str], held: Mapping[str, MemoryRecord]
+) -> dict[str, int]:
+    """The number the store gave each of ``episodes``, read through its channel.
+
+    As ``MemoryIngestor`` reads them (ADR-0348 §3:2, ADR-0283 §1): an episode on no
+    channel has no number this reads, and is ordered against no other.
+    """
+    by_channel: dict[ChannelIdentity, set[str]] = {}
+    for episode in episodes:
+        found = held.get(episode)
+        record = found.processing_record if isinstance(found, EpisodicMemory) else None
+        if record is not None and record.trigger.channel is not None:
+            by_channel.setdefault(record.trigger.channel, set()).add(episode)
+    numbers: dict[str, int] = {}
+    for channel, wanted in by_channel.items():
+        after: int | None = None
+        while wanted:
+            page = await store.channel_episode_ids(channel, after=after, limit=_NUMBER_PAGE)
+            for one in page:
+                if one.episode_id in wanted:
+                    numbers[one.episode_id] = one.number
+                    wanted.discard(one.episode_id)
+            if len(page) < _NUMBER_PAGE:
+                break
+            after = page[-1].number
+    return numbers
 
 
 def _episode_of(support: MemorySupport, held: Mapping[str, MemoryRecord]) -> EpisodicMemory | None:
@@ -941,7 +975,7 @@ class FakeMemoryWriter:
         proposed, refused_labels = await self._labelled(proposed)
         observed = observed.model_copy(update={"proposed": proposed})
         if observed.placement is not None:
-            return await self._ingest_placed(observed, refused_labels)
+            return await self._ingest_placed(observed, refused_labels, held)
         retiring = self._retiring(observed, held)
         conflicts = await self._conflicts_for(
             observed.proposed,
@@ -976,7 +1010,10 @@ class FakeMemoryWriter:
         )
 
     async def _ingest_placed(
-        self, observed: MemoryUpdateProposal, refused_labels: tuple[str, ...]
+        self,
+        observed: MemoryUpdateProposal,
+        refused_labels: tuple[str, ...],
+        held: Mapping[str, MemoryRecord],
     ) -> MemoryIngestResult:
         """A placed proposal, as ``MemoryIngestor`` writes it (ADR-0345 §4, §5).
 
@@ -1022,8 +1059,9 @@ class FakeMemoryWriter:
                 f"by its floor and its rule on a confirmed proposal alone (ADR-0345 §4:5)"
             )
             raise MemoryStoreError(msg)
+        numbers = await _episode_numbers(self._store, ordered_episodes(observed.proposed), held)
         try:
-            placed = placed_write(observed, read, at=self._now_utc())
+            placed = placed_write(observed, read, at=self._now_utc(), numbers=numbers)
         except ValueError as exc:
             msg = f"refusing to write {observed.proposed.id!r}: {exc}"
             raise MemoryStoreError(msg) from exc

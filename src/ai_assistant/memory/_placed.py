@@ -4,8 +4,9 @@ A producer that retrieved the stored memories similar to its proposal names how 
 proposal stands to each (:class:`~ai_assistant.core.types.MemoryPlacement`), and the
 writer derives the write from those relations by rule, with no reconciler and no ranking
 across holders (§4, §5). This module is that rule: a pure function of the proposal, the
-memories its placement names as the writer read them, and the write's instant, so it is
-the subsystem's transition (ADR-0016 §2) and
+memories its placement names as the writer read them, the write's instant, and the
+numbers of the episodes whose order it reads (ADR-0348 §3), so it is the subsystem's
+transition (ADR-0016 §2) and
 :class:`~ai_assistant.memory.ingest.MemoryIngestor` only reads, rules and writes around
 it. The canonical fake carries its own copy, since no testing module imports
 ``memory``, and the shared placed-write suite holds both to the same records.
@@ -17,6 +18,20 @@ backing support, and retires it exactly where nothing then backs it as worded; a
 some other holder still holds stays current, and its remaining backing is added as
 ``against`` where the proposal lands, so the dispute is recorded on both (§3:5).
 ADR-0328 §6:5's refusal by standing does not bind (§3:6).
+
+**A holder's newer word supersedes their older one** (ADR-0348 §3). Where the write
+installs the proposal, each counted ``against`` support on it whose holder backs it, from
+a part before that holder's backing part in the record's order, stops counting in the same
+write, citing that backing support. The record's order alone decides it (§3:2): an
+earlier episode, by the store-wide number the store gave it (ADR-0283 §1), before a later
+one, and within one episode its input before what its rounds made, its messages and its
+digests' items by position. Where the record does not order two parts, the support keeps
+counting, as a part after the backing one does (§3:3).
+
+**One open check per memory** (ADR-0348 §4). A ``recheck`` on a memory already holding an
+open ``recheck`` question raises nothing and writes nothing to it, and an answered
+question is resolved citing a backing support of the proposal the memory carries once the
+write is applied, whether this write added it or not.
 
 **One disposition for the whole proposal** (§5:3): a ``claimed_too_much`` installs it;
 otherwise a ``restates`` that would not raise the stored memory's standing, or a
@@ -31,7 +46,10 @@ from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.types import (
     RETIRING_RELATIONS,
+    ConfirmationPart,
+    EvidenceItemPart,
     HolderKind,
+    InputPart,
     Memory,
     MemoryMark,
     MemoryOperation,
@@ -45,6 +63,7 @@ from ai_assistant.core.types import (
     SupportDirection,
     SupportOrigin,
     origin_standing,
+    part_episode,
     standing_rank,
 )
 from ai_assistant.memory._operations import applied_operation
@@ -63,10 +82,13 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "SUPERSEDED_NOTE",
     "PlacedWrite",
     "added_backing_fault",
     "backing_fault",
     "created_fault",
+    "holds_open_recheck",
+    "ordered_episodes",
     "placed_fault",
     "placed_write",
 ]
@@ -76,6 +98,9 @@ _NEVER_PLACED: Final = frozenset({SupportOrigin.OBSERVER_INFERENCE, SupportOrigi
 
 #: §2:4, §8:3: the marks a memory backed by the assistant's statement carries.
 _RECORD_OF_SAYING: Final = frozenset({MemoryMark.ASSISTANT_STATEMENT, MemoryMark.OCCASION})
+
+#: ADR-0348 §3: the note on a stop a holder's newer word makes on an installed memory.
+SUPERSEDED_NOTE: Final = "the same holder's later word on this claim supersedes this part"
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +308,103 @@ class _Write:
         return self.apply(memory, operation)
 
 
+def _within(part: SupportPart) -> tuple[int, tuple[int, ...] | None]:
+    """Where ``part`` stands in its episode: its rank, and its position among its kind.
+
+    An episode's input, and a yes, which is the input of the episode it was given in,
+    come before everything its rounds made: their messages, their remember calls and
+    their digests' evidence items (ADR-0348 §3:2). Among its kind, a recorded message
+    stands by its position, and an evidence item by its digest's and its own; any other
+    part has no position the record gives without the plan record, so it is unordered
+    among its rank.
+    """
+    if isinstance(part, InputPart):
+        return 0, None if part.message is None else (part.message,)
+    if isinstance(part, ConfirmationPart):
+        return 0, None
+    if isinstance(part, EvidenceItemPart):
+        return 1, (part.digest, part.item)
+    return 1, None
+
+
+def _before(earlier: SupportPart, later: SupportPart, numbers: Mapping[str, int]) -> bool:
+    """Whether the record's order puts ``earlier`` before ``later`` (ADR-0348 §3:2).
+
+    No clock reading decides it (ADR-0275 §4:9). Two episodes are ordered by the numbers
+    the store gave them (ADR-0283 §1), where ``numbers`` holds both; one episode's parts
+    by :func:`_within`. Where the record does not order them, neither is before the
+    other.
+    """
+    first, second = part_episode(earlier), part_episode(later)
+    if first is None or second is None:
+        return False
+    if first != second:
+        one, other = numbers.get(first), numbers.get(second)
+        return one is not None and other is not None and one < other
+    (rank, place), (other_rank, other_place) = _within(earlier), _within(later)
+    if rank != other_rank:
+        return rank < other_rank
+    return (
+        type(earlier) is type(later)
+        and place is not None
+        and other_place is not None
+        and place < other_place
+    )
+
+
+def _superseding(
+    against: MemorySupport, backing: Sequence[MemorySupport], numbers: Mapping[str, int]
+) -> SupportPart | None:
+    """The backing support of ``against``'s holder its part comes before, if any (§3:1)."""
+    holder = against.holder
+    if holder is None:
+        return None
+    return next(
+        (
+            one.points_at
+            for one in backing
+            if one.holder is not None
+            and one.holder.same_as(holder)
+            and _before(against.points_at, one.points_at, numbers)
+        ),
+        None,
+    )
+
+
+def ordered_episodes(proposed: Memory) -> frozenset[str]:
+    """The episodes whose order a placed write of ``proposed`` may read (ADR-0348 §3).
+
+    Those of each counted ``against`` support whose holder backs ``proposed`` from
+    another episode, and of that holder's backing supports: the writer reads the store's
+    numbers for these alone, so a write with no such pair reads none. A dispute the write
+    adds to the installed memory is never one of these, since its holder is no holder of
+    the proposal's backing supports (ADR-0345 §3:3).
+
+    Args:
+        proposed: The proposed memory, its supports carrying their holders.
+
+    Returns:
+        The episodes, by id.
+    """
+    backing = proposed.backing_supports
+    wanted: set[str] = set()
+    for against in proposed.counted_supports:
+        if against.direction is not SupportDirection.AGAINST or against.holder is None:
+            continue
+        episode = part_episode(against.points_at)
+        for one in backing:
+            other = part_episode(one.points_at)
+            if (
+                episode is not None
+                and other is not None
+                and other != episode
+                and one.holder is not None
+                and one.holder.same_as(against.holder)
+            ):
+                wanted.update((episode, other))
+    return frozenset(wanted)
+
+
 def _holder_cite(
     holder: SupportHolder | None, backing: Sequence[MemorySupport]
 ) -> SupportPart | None:
@@ -326,8 +448,22 @@ def _folds(placement: MemoryPlacement, named: Mapping[str, Memory], proposed: Me
     return folds
 
 
+def holds_open_recheck(memory: Memory) -> bool:
+    """Whether ``memory`` already holds an open ``recheck`` question (ADR-0348 §4:1)."""
+    return any(
+        question.kind is OpenQuestionKind.RECHECK and not question.resolved
+        for question in memory.open_questions
+    )
+
+
 def _recheck(write: _Write, stored: Memory, pair: PlacedPair) -> Memory:
-    """§5:9: a ``recheck`` question resting on the stored memory's own backing, adding none."""
+    """§5:9: a ``recheck`` question resting on the stored memory's own backing, adding none.
+
+    ADR-0348 §4:1: one open check per memory, so on a memory already holding an open
+    ``recheck`` question it raises nothing and writes nothing.
+    """
+    if holds_open_recheck(stored):
+        return stored
     rests_on = tuple(one.points_at for one in stored.backing_supports) or tuple(
         one.points_at for one in stored.supports
     )
@@ -468,14 +604,20 @@ def _relate(  # noqa: C901, PLR0911, PLR0913 — one arm per row of §5's table
 
 
 def _resolved(write: _Write, placement: MemoryPlacement, backing: Sequence[MemorySupport]) -> None:
-    """§5:5, §5:9: resolve the answered question, citing what its memory's relation added."""
+    """§5:5, §5:9: resolve the answered question, citing a backing support its memory carries.
+
+    ADR-0348 §4:3: a backing support of the proposal that the memory carries once the
+    write is applied, whether this write added it or the memory already carried it; the
+    question stays open where it carries none.
+    """
     answers = placement.answers
     if answers is None:
         return
     pair = placement.relation_to(answers.memory)
     target = write.records[answers.memory]
-    added = set(write.added.get(answers.memory, ()))
-    cites = next((one.points_at for one in backing if one.points_at in added), None)
+    cites = next(
+        (one.points_at for one in backing if target.support_at(one.points_at) is not None), None
+    )
     if pair is None or cites is None:
         return
     operation = MemoryOperation(
@@ -487,6 +629,55 @@ def _resolved(write: _Write, placement: MemoryPlacement, backing: Sequence[Memor
         question=answers.question,
     )
     write.records[answers.memory] = write.apply(target, operation)
+
+
+def _disputed(
+    write: _Write,
+    landing: Memory | None,
+    folds: Sequence[str],
+    disputes: Sequence[tuple[MemorySupport, str]],
+) -> Memory | None:
+    """§3:5: a memory left current records its backing as ``against`` where the proposal lands.
+
+    On the installed memory, ``landing``, where it is installed, and otherwise on each
+    memory it is folded into.
+
+    Returns:
+        The installed memory, with the disputes, or ``None`` where it is folded.
+    """
+    for support, note in disputes:
+        disputed = _as(
+            support,
+            direction=SupportDirection.AGAINST,
+            backs=False,
+            note=note,
+            at=write.at,
+            by=write.by,
+        )
+        if landing is not None:
+            landing = write.add(landing, disputed)
+        else:
+            for memory_id in folds:
+                write.records[memory_id] = write.add(write.records[memory_id], disputed)
+    return landing
+
+
+def _superseded(write: _Write, landing: Memory, numbers: Mapping[str, int]) -> Memory:
+    """ADR-0348 §3: a holder's newer word stops their own older ``against`` on the install.
+
+    Each counted ``against`` support on the installed memory whose holder backs it, from
+    a part before that holder's backing part in the record's order, stops counting,
+    citing that backing support. It stays on the memory (ADR-0328 §5:8), so the history
+    still shows what the holder said before, and that it no longer counts.
+    """
+    backing = landing.backing_supports
+    for one in landing.counted_supports:
+        if one.direction is not SupportDirection.AGAINST:
+            continue
+        cites = _superseding(one, backing, numbers)
+        if cites is not None:
+            landing = write.stop(landing, one.points_at, cites, SUPERSEDED_NOTE)
+    return landing
 
 
 def _installed(proposed: Memory, retired: Sequence[str]) -> Memory:
@@ -528,15 +719,22 @@ def _narrowed(write: _Write, folds: Sequence[str], proposed: Memory) -> None:
 
 
 def placed_write(
-    proposal: MemoryUpdateProposal, named: Mapping[str, Memory], *, at: datetime
+    proposal: MemoryUpdateProposal,
+    named: Mapping[str, Memory],
+    *,
+    at: datetime,
+    numbers: Mapping[str, int] | None = None,
 ) -> PlacedWrite:
-    """Everything one placed proposal writes (ADR-0345 §3, §5).
+    """Everything one placed proposal writes (ADR-0345 §3, §5, ADR-0348 §3, §4).
 
     Args:
         proposal: The placed proposal, its supports carrying their holders.
         named: Every memory its placement names, as the writer read it at the revision
             the placement records.
         at: The write's instant.
+        numbers: The number the store gave each episode of :func:`ordered_episodes`
+            that it numbered (ADR-0283 §1), by id: the record's order across episodes
+            (ADR-0348 §3:2). An episode it does not hold is ordered against no other.
 
     Returns:
         The write.
@@ -576,16 +774,9 @@ def placed_write(
         else:
             after = _relate(write, stored, pair, proposed, folds=folds, replacing=replacing)
         write.records[pair.memory] = after
-    landing = proposed if install else None
-    for support, note in disputes:
-        disputed = _as(
-            support, direction=SupportDirection.AGAINST, backs=False, note=note, at=at, by=by
-        )
-        if landing is not None:
-            landing = write.add(landing, disputed)
-        else:
-            for memory_id in folds:
-                write.records[memory_id] = write.add(write.records[memory_id], disputed)
+    landing = _disputed(write, proposed if install else None, folds, disputes)
+    if landing is not None:
+        landing = _superseded(write, landing, numbers or {})
     _narrowed(write, () if install else folds, proposed)
     _resolved(write, placement, backing)
     _refuse_assistant_backing(named, write)
