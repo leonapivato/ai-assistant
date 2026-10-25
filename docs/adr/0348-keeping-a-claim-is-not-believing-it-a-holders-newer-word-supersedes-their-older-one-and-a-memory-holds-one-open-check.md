@@ -91,15 +91,18 @@ the history still shows what the person said before, and that it no longer count
 ### 4. One open check per memory, closed by its answer
 
 > **Normative.** A `recheck` relation raises no question on a stored memory that already holds
-> an open `recheck` question, and writes nothing to that memory. The write reports the relation
-> and its note, and the producer records them on its outcome, as it records an `unclear`
-> (ADR-0346 §6:5).
+> an open `recheck` question, and writes nothing to that memory.
+
+> **Normative.** The producer sees a memory's open questions in what placement is shown
+> (ADR-0346 §6:2). Where it names such a `recheck`, it records the relation and its note in
+> its diagnostic entries (ADR-0333 §2), beside what it set aside. No type changes for it:
+> the ingest result lists what was written, and nothing was.
 
 > **Normative.** A question the placement names as answered is resolved citing a backing
 > support of the proposal that the memory carries once the write is applied, whether this write
 > added it or the memory already carried it. It stays open where the memory carries none.
 
-**Why one.** A `recheck` question rests on the memory's own backing (ADR-0345 §5:9), so two open on one memory rest on the same thing and ask the same question: is this still so? "Worth checking" is a state of the memory, not a list of concerns. The reason a later relation gives is kept on the outcome, where the viewer shows it.
+**Why one.** A `recheck` question rests on the memory's own backing (ADR-0345 §5:9), so two open on one memory rest on the same thing and ask the same question: is this still so? "Worth checking" is a state of the memory, not a list of concerns. The reason a later relation gives is kept in the diagnostic record, where the viewer shows it.
 
 ### 5. Relationship to earlier decisions
 
@@ -107,7 +110,7 @@ Superseded in part. Every clause the middle column does not name stands:
 
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
-| ADR-0345 | §3, in the addition alone: a holder's older `against` stops counting on an installed memory; §5's `recheck` row and §5:9, as to a memory already holding an open `recheck` question and as to an answer whose support the memory already carries; §8:1, in "kept or took on", which now reads "took on by agreeing or confirming"; §15:2's worked example, in step 3's holders, where M5 is held by the page alone and the owner's request is cited | §2–§4 |
+| ADR-0345 | §3, in the addition alone: a holder's older `against` stops counting on an installed memory; §5's `recheck` row and §5:9, as to a memory already holding an open `recheck` question and as to an answer whose support the memory already carries; §8:1, in "kept or took on", which now reads "took on by agreeing or confirming"; §15:2's worked example, in step 3's holders, where M5 is held by the page alone and the owner's request is cited; §15:2's case "an answer whose relation adds no support leaves the question open", which now leaves it open only where the memory carries no backing support of the answer | §2–§4 |
 | ADR-0346 | §7:7, in "asked to keep it": a request alone keeps a record of the saying, never the claim; §7:10, in "request … which backs it as worded": a request backs nothing, while agreement or confirmation backs it | §2 |
 
 ## Consequences
