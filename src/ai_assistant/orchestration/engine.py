@@ -118,6 +118,7 @@ from ai_assistant.core.types import (
     ProvisioningState,
     RecallOutcome,
     RecordedInputMessage,
+    RecordedTextInput,
     ReplyCapability,
     SpokenAudioFormat,
     SpokenRendering,
@@ -6937,7 +6938,7 @@ class Engine:
         trigger = None if state is None else state.trigger
         steps, linked = await self._lineage(task, activation_id)
         payload = None if trigger is None else trigger.payload
-        text = payload.text if isinstance(payload, TextChannelPayload) else task.instruction
+        text = payload.text if isinstance(payload, RecordedTextInput) else task.instruction
         resolved = ResolvedChannelInput(
             channel=SCHEDULE,
             text=text,

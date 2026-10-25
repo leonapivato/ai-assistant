@@ -7,6 +7,7 @@ canonical ``FakeAuditTrail`` holds, and what the policies were asked.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
@@ -781,6 +782,31 @@ async def test_the_message_goes_only_into_the_inputs_place() -> None:
     assert there.message.allowed is False
     assert there.message.effect_id is None
     assert silent.message is None
+
+
+async def test_a_scheduled_activations_message_goes_only_into_a_place_on_its_list() -> None:
+    """ADR-0350 §6:7, §13:3: the place it names, on its list; none, or one off it, refused."""
+    hub = _Hub()
+    places = ("conversation:c-1", "telegram:ref/42")
+
+    def scheduled(place: str | None) -> RoundToAuthorize:
+        return replace(
+            _round(message=RoundMessage("Time for the pills.", place)),
+            input_place=None,
+            places=places,
+        )
+
+    on_it = await hub.authorize(scheduled("telegram:ref/42"))
+    off_it = await hub.authorize(scheduled("conversation:gone"))
+    none = await hub.authorize(scheduled(None))
+
+    assert on_it.message is not None
+    assert on_it.message.allowed is True
+    assert on_it.message.effect_id is not None
+    for refused in (off_it, none):
+        assert refused.message is not None
+        assert refused.message.allowed is False
+        assert refused.message.effect_id is None
 
 
 # --- the record read back ---------------------------------------------------------------------
