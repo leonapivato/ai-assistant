@@ -48,6 +48,7 @@ from ai_assistant.core.types import (
     DeviceChange,
     DeviceConversation,
     DevicesChangedChange,
+    ExportedMessage,
     MessageAddedChange,
     MessageAuthor,
     MessageDeletedChange,
@@ -106,10 +107,24 @@ def _said(
     )
 
 
-def _answered(text: str, *, replies_to: int | None = None, cut_off: bool = False) -> NewMessage:
-    """An assistant's message through the chat's writer (ADR-0293 §6)."""
+def _answered(
+    text: str,
+    *,
+    replies_to: int | None = None,
+    cut_off: bool = False,
+    effect_id: str | None = None,
+) -> NewMessage:
+    """An assistant's message through the chat's writer (ADR-0293 §6).
+
+    ``effect_id`` is the effect record it was claimed under, where it was (ADR-0350
+    §12:9).
+    """
     return NewMessage(
-        author=MessageAuthor.ASSISTANT, text=text, replies_to=replies_to, cut_off=cut_off
+        author=MessageAuthor.ASSISTANT,
+        text=text,
+        replies_to=replies_to,
+        cut_off=cut_off,
+        effect_id=effect_id,
     )
 
 
@@ -805,6 +820,33 @@ class _TakenInOp(_ChatReadOp):
         return store.taken_in(self.right, positions=[1])
 
 
+class _EffectPositionOp(_ChatReadOp):
+    """``effect_position`` — ADR-0350 §12:9's read, its own lock site."""
+
+    name = "effect_position"
+
+    async def prepare(self, store: ConversationStore) -> None:
+        """Seed as the other chat reads do, with a claimed message in each."""
+        await super().prepare(store)
+        await store.append_message(self.left, _answered("left", effect_id="effect-left"))
+        await store.append_message(self.right, _answered("right", effect_id="effect-right"))
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Read the left claim — the call that is cancelled."""
+        return store.effect_position(self.left, "effect-left")
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Read the right one concurrently."""
+        return store.effect_position(self.right, "effect-right")
+
+    async def verify(self, store: ConversationStore) -> None:
+        """The reads still answer, the claim among them."""
+        right = await store.transcript(self.right)
+        assert right is not None
+        assert [one.position for one in right.entries] == [1, 2]
+        assert await store.effect_position(self.right, "effect-right") == 2
+
+
 class _DeviceChangesOp(_ChatReadOp):
     """``device_changes`` — ADR-0296 §4:5's read, its own lock site."""
 
@@ -893,6 +935,7 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _UntakenMessagesOp,
     _ConversationsAwaitingOp,
     _TakenInOp,
+    _EffectPositionOp,
     _DeviceChangesOp,
     _DeviceConversationsOp,
     _RemoveDeviceOp,
@@ -1752,7 +1795,7 @@ class ConversationStoreContract:
 
         assert [one.id for one in exported.conversations] == [second.id, first.id]
         assert exported.conversations[1].last_turn_at == _NOW + _MINUTE
-        assert exported.schema_version == 6
+        assert exported.schema_version == 7
         assert set(exported.model_dump()) == {
             "schema_version",
             "exported_at",
@@ -2745,6 +2788,173 @@ class ConversationStoreContract:
         assert await store.my_devices() == (_WATCH,)
         for conversation in await store.recent():
             assert await store.conversation_devices(conversation.id) == (_WATCH,)
+
+    # --- the chat space: the claim a message was written under (ADR-0350 §12:9) ---
+
+    async def test_an_assistants_message_records_the_claim_it_was_written_under(
+        self, store: ConversationStore
+    ) -> None:
+        """§12:9: the claim is recorded with the message, and the read answers for it.
+
+        A message written under no claim, and a user's message, answer for none, and a
+        claim the conversation never held is ``None``, never an error.
+        """
+        conversation = await _chat(store)
+        await store.append_message(conversation, _said("when is it?", message_id="m-1"))
+        claimed = await store.append_message(
+            conversation, _answered("Thursday at nine.", replies_to=1, effect_id="effect-1")
+        )
+        await store.append_message(conversation, _answered("Anything else?"))
+
+        assert (claimed.outcome, claimed.position) == (SendOutcome.RECORDED, 2)
+        assert await store.effect_position(conversation, "effect-1") == 2
+        assert await store.effect_position(conversation, "effect-never") is None
+
+    async def test_a_claimed_message_deleted_is_still_found_at_its_position(
+        self, store: ConversationStore
+    ) -> None:
+        """§12:9, ADR-0293 §5:12: a message the user deleted was still written.
+
+        The marker keeps the claim as it keeps a device's message id, and the position is
+        never reused, so the read answers with it while the transcript shows the marker.
+        """
+        conversation = await _chat(store)
+        await store.append_message(conversation, _answered("Time to call Mom.", effect_id="e-1"))
+        assert await store.delete_message(conversation, 1) is True
+
+        assert await store.effect_position(conversation, "e-1") == 1
+        page = await store.transcript(conversation)
+        assert page is not None
+        assert page.entries == (DeletedMessage(conversation_id=conversation, position=1),)
+
+    async def test_a_second_write_under_one_claim_is_that_message(
+        self, store: ConversationStore
+    ) -> None:
+        """§12:9: one claim is one message, so a repeat of it writes nothing, deleted or not."""
+        conversation = await _chat(store)
+        await store.append_message(conversation, _answered("On it.", effect_id="e-1"))
+        before = await store.changes(after=0)
+
+        again = await store.append_message(
+            conversation, _answered("On it, again.", effect_id="e-1")
+        )
+        assert await store.delete_message(conversation, 1) is True
+        after_deleting = await store.changes(after=0)
+        late = await store.append_message(conversation, _answered("On it.", effect_id="e-1"))
+
+        assert (again.outcome, again.position) == (SendOutcome.REPEATED, 1)
+        assert (late.outcome, late.position) == (SendOutcome.REPEATED, 1)
+        page = await store.transcript(conversation)
+        assert page is not None
+        assert page.entries == (DeletedMessage(conversation_id=conversation, position=1),)
+        assert _kinds(list((await store.changes(after=before.next_after)).changes)) == [
+            "message_deleted"
+        ]
+        assert (await store.changes(after=after_deleting.next_after)).changes == ()
+
+    async def test_a_claim_is_answered_for_in_its_own_conversation_alone(
+        self, store: ConversationStore
+    ) -> None:
+        """§12:9: the read is for a conversation and an id; another conversation's is not it.
+
+        The claim names one message of its conversation, so the same id written in a
+        second conversation is that conversation's own message.
+        """
+        conversation = await _chat(store)
+        other = (await store.start()).id
+        await store.append_message(conversation, _answered("here", effect_id="e-1"))
+
+        assert await store.effect_position(other, "e-1") is None
+        there = await store.append_message(other, _answered("there", effect_id="e-1"))
+        assert (there.outcome, there.position) == (SendOutcome.RECORDED, 1)
+        assert await store.effect_position(conversation, "e-1") == 1
+        assert await store.effect_position(other, "e-1") == 1
+
+    async def test_the_claim_read_refuses_a_gone_conversation_and_a_malformed_id(
+        self, store: ConversationStore
+    ) -> None:
+        """§8:11: a gone place is no answer that the message was not sent, so it raises.
+
+        ``None`` already says the conversation holds no such message; an absent or
+        stamped conversation is the narrow refusal instead, and a malformed id is
+        refused before any I/O.
+        """
+        stamped = await _chat(store)
+        await store.append_message(stamped, _answered("bye", effect_id="e-1"))
+        assert await store.stamp_deleted(stamped) is True
+        live = (await store.start()).id
+
+        for conversation_id in ("nobody", stamped):
+            with pytest.raises(UnknownConversationError):
+                await store.effect_position(conversation_id, "e-1")
+        for bad in ("", "   ", 3, None, b"e-1"):
+            with pytest.raises(ValueError, match="effect_id"):
+                await store.effect_position(live, cast("str", bad))
+
+    async def test_no_read_a_device_is_answered_from_carries_the_claim(
+        self, store: ConversationStore
+    ) -> None:
+        """§12:9: the id is shown on no message a device reads.
+
+        Not the transcript, not the change stream, not a device's own view and not its
+        snapshot: each carries the message as a ``TranscriptMessage``, which has no
+        member for it.
+        """
+        conversation = await _chat(store)
+        await store.append_message(conversation, _said("ping", message_id="m-1"))
+        await store.append_message(conversation, _answered("pong", effect_id="secret-effect"))
+        await store.set_conversation_devices(conversation, [_PHONE, _WATCH, _LAPTOP])
+
+        reads: list[Any] = [
+            await store.transcript(conversation),
+            await store.changes(after=0),
+            await store.device_changes("phone", after=0),
+            await store.device_changes("laptop", after=0),
+            await store.untaken_messages(conversation),
+        ]
+
+        for read in reads:
+            assert "secret-effect" not in repr(read)
+            assert "effect_id" not in repr(read)
+        page = reads[0]
+        assert page is not None
+        assert all(type(one) in {TranscriptMessage, DeletedMessage} for one in page.entries)
+
+    async def test_export_carries_each_messages_claim_with_it(
+        self, store: ConversationStore
+    ) -> None:
+        """§12:9, ADR-0004 §6: the export is the user's data, the claim with its message."""
+        conversation = await _chat(store)
+        await store.append_message(conversation, _said("ping", message_id="m-1"))
+        await store.append_message(conversation, _answered("pong", effect_id="e-1"))
+        await store.append_message(conversation, _answered("and another"))
+
+        exported = await store.export()
+
+        assert all(type(one) is ExportedMessage for one in exported.messages)
+        assert [(one.position, one.effect_id) for one in exported.messages] == [
+            (1, None),
+            (2, "e-1"),
+            (3, None),
+        ]
+
+    async def test_two_writes_under_one_claim_issued_together_record_it_once(
+        self, store: ConversationStore
+    ) -> None:
+        """The exclusion: two writes of one claim never both record it."""
+        conversation = await _chat(store)
+
+        receipts = await asyncio.gather(
+            store.append_message(conversation, _answered("a", effect_id="e-1")),
+            store.append_message(conversation, _answered("b", effect_id="e-1")),
+        )
+
+        outcomes = sorted(one.outcome.value for one in receipts)
+        assert outcomes == [SendOutcome.RECORDED.value, SendOutcome.REPEATED.value], _INTERLEAVED
+        assert {one.position for one in receipts} == {1}, _INTERLEAVED
+        page = await store.transcript(conversation)
+        assert page is not None
+        assert [one.position for one in page.entries] == [1], _INTERLEAVED
 
     # --- the chat space: export and serialisation (ADR-0293 §5:3) -----------------
 

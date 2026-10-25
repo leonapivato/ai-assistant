@@ -40,7 +40,7 @@ from ai_assistant.core.types import (
     SendOutcome,
 )
 from ai_assistant.memory import conversation_store
-from ai_assistant.memory._episode_format import EPISODE_RECORD_FORMAT
+from ai_assistant.memory._episode_format import CONVERSATION_RECORD_FORMAT
 from ai_assistant.memory.conversation_store import SqliteConversationStore, _run_to_completion
 from ai_assistant.testing.cancellation import (
     ResourceLog,
@@ -90,6 +90,7 @@ _SYNC_METHODS = {
     "device_changes": "_device_changes_sync",
     "device_conversations": "_device_conversations_sync",
     "remove_device": "_remove_device_sync",
+    "effect_position": "_effect_position_sync",
 }
 
 _NOW = datetime(2026, 6, 1, tzinfo=UTC)
@@ -1312,7 +1313,7 @@ _INCOMPATIBLE_SHAPES: dict[str, str] = {
     "format9": "UPDATE episode_record_format SET version = 9",
     "format10": "UPDATE episode_record_format SET version = 10",
     "format11": "UPDATE episode_record_format SET version = 11",
-    "newer": "UPDATE episode_record_format SET version = 13",
+    "newer": "UPDATE episode_record_format SET version = 14",
     "malformed": "ALTER TABLE episode_record_format RENAME COLUMN version TO invalid",
 }
 
@@ -1376,7 +1377,7 @@ def test_fresh_conversation_initialization_rolls_back_and_can_retry(
     SqliteConversationStore(path=path, now=_fixed_now).close()
     with sqlite3.connect(path) as raw:
         assert raw.execute("SELECT version FROM episode_record_format").fetchall() == [
-            (EPISODE_RECORD_FORMAT,)
+            (CONVERSATION_RECORD_FORMAT,)
         ]
 
 
@@ -1505,6 +1506,11 @@ async def test_a_file_written_before_the_chat_space_opens_with_empty_transcripts
         ("UPDATE chat_changes SET devices = NULL WHERE devices IS NOT NULL", "device_changes"),
         ("UPDATE chat_changes SET devices = NULL WHERE devices IS NOT NULL", "device_catch_up"),
         ("UPDATE chat_changes SET devices = NULL WHERE devices IS NOT NULL", "stamp_deleted"),
+        # ADR-0350 §12:9: a claim on a user's message, or a blank one, is no message
+        # this module wrote; nor is a claimed message at a position below 1.
+        ("UPDATE messages SET effect_id = 'e-1'", "export"),
+        ("UPDATE messages SET effect_id = ' '", "export"),
+        ("UPDATE messages SET effect_id = 'e-1', position = 0", "effect_position"),
     ],
 )
 async def test_a_corrupt_chat_row_is_a_store_fault_on_the_read(
@@ -1531,11 +1537,53 @@ async def test_a_corrupt_chat_row_is_a_store_fault_on_the_read(
             # under is read, never a set's own.
             "device_catch_up": lambda: store.device_changes("phone", after=2),
             "stamp_deleted": lambda: store.stamp_deleted(conversation),
+            "effect_position": lambda: store.effect_position(conversation, "e-1"),
         }
         with pytest.raises(ConversationStoreError):
             await reads[read]()
     finally:
         store.close()
+
+
+@pytest.mark.integration
+async def test_a_claim_survives_a_reopen_and_its_deletion(tmp_path: Path) -> None:
+    """ADR-0350 §12:9, §8:11: the claim is read back after a restart, deleted or not.
+
+    That is the whole of what the read is for: the sensor confirms, at start, whether a
+    message claimed before the restart was written.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        await store.set_my_devices([_PHONE])
+        conversation = (await store.start()).id
+        await store.append_message(
+            conversation,
+            NewMessage(author=MessageAuthor.ASSISTANT, text="Time to call Mom.", effect_id="e-1"),
+        )
+        await store.append_message(
+            conversation,
+            NewMessage(author=MessageAuthor.ASSISTANT, text="And the dentist.", effect_id="e-2"),
+        )
+        assert await store.delete_message(conversation, 2) is True
+    finally:
+        store.close()
+
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        assert await reopened.effect_position(conversation, "e-1") == 1
+        assert await reopened.effect_position(conversation, "e-2") == 2
+        exported = await reopened.export()
+        assert [(one.position, one.effect_id) for one in exported.messages] == [(1, "e-1")]
+    finally:
+        reopened.close()
+
+    raw = sqlite3.connect(path)
+    try:
+        rows = raw.execute("SELECT position, text, effect_id FROM messages").fetchall()
+    finally:
+        raw.close()
+    assert rows == [(1, "Time to call Mom.", "e-1"), (2, None, "e-2")]
 
 
 @pytest.mark.integration

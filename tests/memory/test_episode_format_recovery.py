@@ -84,15 +84,16 @@ def test_a_conversation_store_at_the_memory_label_is_rejected_without_recovery(
 ) -> None:
     """The memory store's label is not the conversation store's (ADR-0328 §16:8).
 
-    The memory store opens 12 and 13, the conversation store 12 alone, and the probe
-    admits only what the opener that runs it opens: a conversation file at 13 with a
-    hot journal is refused before a writable open could recover it.
+    The memory store opens 12 to 17, the conversation store 12 and 13 (ADR-0350
+    §12:9), and the probe admits only what the opener that runs it opens: a
+    conversation file at 14, a memory label alone, with a hot journal is refused before
+    a writable open could recover it.
     """
     path = tmp_path / "conversations.db"
     _seed(path)
     with contextlib.closing(sqlite3.connect(path, isolation_level=None)) as conn:
         conn.execute("CREATE TABLE episode_record_format(version INTEGER NOT NULL)")
-        conn.execute("INSERT INTO episode_record_format VALUES (13)")
+        conn.execute("INSERT INTO episode_record_format VALUES (14)")
     _crash(path)
     before = _snapshot(path)
     with pytest.raises(IncompatibleStateError, match="fresh M39 data directory"):

@@ -34,6 +34,7 @@ from ai_assistant.core.types import (
     DeviceChanges,
     DeviceRole,
     DevicesChangedChange,
+    ExportedMessage,
     MessageAddedChange,
     MessageAuthor,
     MessageReceipt,
@@ -125,7 +126,7 @@ def test_an_export_carries_no_episode() -> None:
         "conversations",
         "messages",
     }
-    assert exported.schema_version == 6
+    assert exported.schema_version == 7
     with pytest.raises(ValidationError):
         ConversationExport.model_validate({"exported_at": _NOW, "turns": ()})
 
@@ -141,18 +142,20 @@ def test_a_conversation_carries_no_observation_watermark() -> None:
         _conversation(observed_through=3)
 
 
-def test_the_export_version_moves_because_the_document_gained_the_transcripts() -> None:
-    """ADR-0293 §5:3: the document carries the transcripts it did not.
+def test_the_export_version_moves_because_its_messages_gained_their_claim() -> None:
+    """ADR-0350 §12:9: each message carries the effect record it was claimed under.
 
     That is exactly what the version exists to announce (ADR-0039 §10, ADR-0014 §5),
-    so the document reads 6 where it read 5 (and 5 where ADR-0285 §4:4 moved it from 4).
+    so the document reads 7 where it read 6 (and 6 where ADR-0293 §5:3 moved it from 5,
+    for the transcripts).
     """
-    assert ConversationExport(exported_at=_NOW).schema_version == 6
+    assert ConversationExport(exported_at=_NOW).schema_version == 7
+    assert ConversationExport.model_fields["messages"].annotation == tuple[ExportedMessage, ...]
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 7])
+@pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 8])
 def test_the_export_refuses_a_version_that_is_not_the_shape_it_carries(version: int) -> None:
-    """The export label describes the transcript-carrying ADR-0293 §5 shape exactly."""
+    """The export label describes the claim-carrying ADR-0350 §12:9 shape exactly."""
     with pytest.raises(ValidationError):
         ConversationExport.model_validate({"schema_version": version, "exported_at": _NOW})
 
@@ -172,6 +175,10 @@ def _message(position: int = 1, **overrides: object) -> TranscriptMessage:
     return TranscriptMessage.model_validate(fields)
 
 
+def _exported(position: int = 1, **overrides: object) -> ExportedMessage:
+    return ExportedMessage.model_validate(_message(position).model_dump() | overrides)
+
+
 @pytest.mark.parametrize(
     "fields",
     [
@@ -187,6 +194,14 @@ def _message(position: int = 1, **overrides: object) -> TranscriptMessage:
         {"author": "assistant", "text": "?", "options": ("x" * 201,)},
         {"author": "assistant", "text": "hi", "replies_to": 0},
         {"author": "assistant", "text": "hi", "cut_off": 1},
+        {
+            "author": "user",
+            "text": "hi",
+            "device_id": "phone",
+            "message_id": "m",
+            "effect_id": "effect-1",
+        },
+        {"author": "assistant", "text": "hi", "effect_id": " "},
     ],
 )
 def test_a_new_message_is_shaped_as_its_authors(fields: dict[str, object]) -> None:
@@ -209,6 +224,51 @@ def test_a_message_within_every_bound_is_constructed() -> None:
 
     assert len(question.options) == MESSAGE_OPTIONS_MAX
     assert said.cut_off is False
+    assert said.effect_id is None
+
+
+def test_only_the_assistants_message_is_claimed_under_an_effect_record() -> None:
+    """ADR-0350 §12:9: the claim is the assistant's alone, as the export carries it too."""
+    claimed = NewMessage(author=MessageAuthor.ASSISTANT, text="Time to call Mom.", effect_id="e-1")
+
+    assert claimed.effect_id == "e-1"
+    assert _exported(1, effect_id="e-1").effect_id == "e-1"
+    with pytest.raises(ValidationError):
+        _exported(1, author=MessageAuthor.USER, device_id="phone", message_id="m", effect_id="e-1")
+
+
+def test_an_unclaimed_message_dumps_as_it_did_before_the_claim() -> None:
+    """A message written under no claim leaves the member out of its dump.
+
+    So a dump spread into a ``TranscriptMessage``, which never carries the claim, still
+    builds one; a claimed message's dump carries it, and validates back to itself.
+    """
+    unclaimed = NewMessage(author=MessageAuthor.ASSISTANT, text="hi")
+    claimed = unclaimed.model_copy(update={"effect_id": "e-1"})
+
+    assert "effect_id" not in unclaimed.model_dump()
+    assert _message(1, **unclaimed.model_dump()).text == "hi"
+    assert claimed.model_dump()["effect_id"] == "e-1"
+    assert NewMessage.model_validate(claimed.model_dump()) == claimed
+
+
+def test_no_message_a_device_reads_carries_the_claim() -> None:
+    """ADR-0350 §12:9: the id is shown on no message a device reads.
+
+    ``TranscriptMessage`` is the message every device read and change carries, and it
+    has no such member; the export's message, built on it, serialises as it wherever a
+    field is declared as it.
+    """
+    assert "effect_id" not in TranscriptMessage.model_fields
+    with pytest.raises(ValidationError):
+        _message(1, effect_id="e-1")
+
+    exported = _exported(1, effect_id="e-1")
+    page = TranscriptPage(conversation_id="c-1", entries=(exported,), as_of=1)
+    added = MessageAddedChange(seq=1, message=exported)
+
+    assert "effect_id" not in page.model_dump_json()
+    assert "effect_id" not in added.model_dump_json()
 
 
 def test_a_recorded_message_replies_only_to_an_earlier_one() -> None:
@@ -374,10 +434,10 @@ def test_a_set_of_devices_is_checked_and_put_in_one_order() -> None:
 def test_an_export_carries_only_its_own_conversations_messages_once_each() -> None:
     """§5:3: a message's conversation is in the document, and no message is there twice."""
     with pytest.raises(ValidationError):
-        ConversationExport(exported_at=_NOW, conversations=(), messages=(_message(1),))
+        ConversationExport(exported_at=_NOW, conversations=(), messages=(_exported(1),))
     with pytest.raises(ValidationError):
         ConversationExport(
             exported_at=_NOW,
             conversations=(_conversation(),),
-            messages=(_message(1), _message(1, text="again")),
+            messages=(_exported(1), _exported(1, text="again")),
         )

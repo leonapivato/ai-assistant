@@ -11213,6 +11213,19 @@ def _check_message_shape(
         raise ValueError(msg)
 
 
+def _check_message_claim(author: MessageAuthor, effect_id: str | None) -> None:
+    """ADR-0350 §12:9: only the assistant's message is claimed under an effect record.
+
+    A user's message is no effect of an activation (ADR-0306 §5:4), so it carries none.
+
+    Raises:
+        ValueError: If a user's message carries an effect record's id.
+    """
+    if author is MessageAuthor.USER and effect_id is not None:
+        msg = "only the assistant's message is claimed under an effect record (ADR-0350 §12:9)"
+        raise ValueError(msg)
+
+
 class NewMessage(BaseModel):
     """A message to be written into a conversation's transcript (ADR-0293 §4, §6).
 
@@ -11223,6 +11236,15 @@ class NewMessage(BaseModel):
     **The size bound is on the type** (ADR-0293 §4:7): a message over
     :data:`TRANSCRIPT_MESSAGE_MAX_CHARS` cannot be constructed, so it is refused with
     the error on the send and nothing is recorded.
+
+    ``effect_id`` (ADR-0350 §12:9) is, for the assistant's message alone, the id of the
+    effect record the message was claimed under (ADR-0306 §5:4). The store records it
+    with the message, keeps it when the message is deleted, and answers for it through
+    ``ConversationStore.effect_position``, so whether a claimed message was sent is read
+    from the transcript after a restart rather than guessed (§8:11, §8:12). It is on
+    no message a device reads: :class:`TranscriptMessage` has no such member, and only
+    the store's export (:class:`ExportedMessage`) carries it. ``None`` on a user's
+    message, and on an assistant's message written under no claim.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -11251,6 +11273,17 @@ class NewMessage(BaseModel):
         default=None,
         description="The user's only: the id the device chose, unique per device (§4:1).",
     )
+    # Left out of a dump where it is absent, so an unclaimed message dumps exactly as it
+    # did before the member existed, and a caller spreading that dump into a
+    # ``TranscriptMessage`` — which never carries the claim — goes on building one.
+    effect_id: Identifier | None = Field(
+        default=None,
+        exclude_if=lambda held: held is None,
+        description=(
+            "The assistant's only: the effect record the message was claimed under "
+            "(ADR-0350 §12:9, ADR-0306 §5:4)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _the_shape_is_its_authors(self) -> Self:
@@ -11261,6 +11294,7 @@ class NewMessage(BaseModel):
             message_id=self.message_id,
             options=self.options,
         )
+        _check_message_claim(self.author, self.effect_id)
         return self
 
 
@@ -11272,6 +11306,11 @@ class TranscriptMessage(BaseModel):
     was written, which lets an activation tell that a message was written before the
     reply it follows (§6). A position is assigned once and never reused, so a reply's
     reference stays meaningful after what it names is deleted (§5:8).
+
+    **It never carries the effect record an assistant's message was claimed under**
+    (ADR-0350 §12:9, the row §15 adds to ADR-0293 §5:2's table): that id is shown on no
+    message a device reads, and this is the message every device read and change
+    carries. :class:`ExportedMessage`, the export's message, carries it.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -11299,6 +11338,27 @@ class TranscriptMessage(BaseModel):
         if self.replies_to is not None and self.replies_to >= self.position:
             msg = "a message replies only to an earlier message (ADR-0293 §4:5)"
             raise ValueError(msg)
+        return self
+
+
+class ExportedMessage(TranscriptMessage):
+    """A transcript message as the conversation store's export carries it (ADR-0004 §6).
+
+    The message every device reads, with the one property the store keeps that no
+    device is shown: ``effect_id``, for the assistant's message alone, the effect record
+    it was claimed under (ADR-0350 §12:9, ADR-0306 §5:4). The export is the user's data,
+    so it carries what the store holds of each message, that id with it.
+
+    A subclass, so every rule of :class:`TranscriptMessage` holds of it. Nothing builds
+    a device's read from one: the store's reads return :class:`TranscriptMessage`, and a
+    field declared as that type serialises only that type's members.
+    """
+
+    effect_id: Identifier | None = None
+
+    @model_validator(mode="after")
+    def _only_the_assistants_is_claimed(self) -> Self:
+        _check_message_claim(self.author, self.effect_id)
         return self
 
 
@@ -11353,7 +11413,9 @@ class SendOutcome(StrEnum):
         RECORDED: The conversation recorded it; the receipt's position is *received*.
         REPEATED: The same device had already sent a message with this id to this
             conversation, so this is that message (§4:2), deleted or not (§4:3), and
-            nothing was written.
+            nothing was written. Likewise for the assistant's message claimed under an
+            effect record the conversation already holds a message written under
+            (ADR-0350 §12:9).
         NOT_AN_END: The device is not one of the conversation's ends for writing, so
             nothing was written (§7:2).
         NO_SUCH_REPLY: The message names, as the one it replies to, a position the
@@ -11937,26 +11999,31 @@ class ConversationExport(BaseModel):
     rather than validated here, so that filtering an export down — which preserves
     order — stays a total operation.
 
-    ``schema_version`` is 6 because the document gains the transcripts (ADR-0293 §5,
-    ADR-0014 §5); it was 5 when the :class:`Conversation` it carries lost its
-    observation watermark (ADR-0285 §4), and 4 when the turns left the document
-    (ADR-0275 §7:9 as ADR-0283 §4:3 reads it). Exports have no import operation and
-    no historical conversion path, so an earlier document is not read here.
+    **Each message is an** :class:`ExportedMessage`: the message as a device reads it,
+    with, for the assistant's, the effect record it was claimed under (ADR-0350 §12:9),
+    which no device is shown and the export carries with its message.
+
+    ``schema_version`` is 7 because each message gains that id (ADR-0350 §12:9,
+    ADR-0014 §5); it was 6 when the document gained the transcripts (ADR-0293 §5), 5
+    when the :class:`Conversation` it carries lost its observation watermark (ADR-0285
+    §4), and 4 when the turns left the document (ADR-0275 §7:9 as ADR-0283 §4:3 reads
+    it). Exports have no import operation and no historical conversion path, so an
+    earlier document is not read here.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[6] = Field(
-        default=6,
+    schema_version: Literal[7] = Field(
+        default=7,
         description=(
-            "Shape of this export, pinned to exactly 6 (ADR-0039 §10, ADR-0014 §5, "
-            "ADR-0293 §5): an export outlives the code that wrote it, so the label must "
-            "be a fact about the document rather than a producer's unchecked claim."
+            "Shape of this export, pinned to exactly 7 (ADR-0039 §10, ADR-0014 §5, "
+            "ADR-0350 §12:9): an export outlives the code that wrote it, so the label "
+            "must be a fact about the document rather than a producer's unchecked claim."
         ),
     )
     exported_at: UtcInstant
     conversations: tuple[Conversation, ...] = ()
-    messages: tuple[TranscriptMessage, ...] = ()
+    messages: tuple[ExportedMessage, ...] = ()
 
     @model_validator(mode="after")
     def _the_snapshot_is_internally_consistent(self) -> ConversationExport:

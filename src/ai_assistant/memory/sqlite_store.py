@@ -89,6 +89,7 @@ from ai_assistant.memory._episode_format import (
     MEMORY_RECORD_FORMAT,
     MEMORY_RECORD_FORMATS,
     PINNED_RECORD_FORMAT,
+    PLACED_RECORD_FORMAT,
     inspect_existing,
     stored_format,
 )
@@ -582,6 +583,7 @@ class SqliteMemoryStore:
             self._upgrade_to_joined(conn, existing_format)
             self._upgrade_to_pinned(conn, existing_format)
             self._upgrade_to_placed(conn, existing_format)
+            self._upgrade_to_scheduled(conn, existing_format)
             self._index_channels(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
@@ -1176,7 +1178,7 @@ class SqliteMemoryStore:
             MemoryStoreError: If a stored memory cannot be upgraded. Nothing is
                 written, and the file is left as it was found.
         """
-        if found is None or found >= MEMORY_RECORD_FORMAT:
+        if found is None or found >= PLACED_RECORD_FORMAT:
             return
         now = self._now()
 
@@ -1214,6 +1216,32 @@ class SqliteMemoryStore:
                 "ORDER BY rowid LIMIT ?",
                 (MemoryKind.MEMORY.value, chunk[-1][0], _BACKFILL_CHUNK),
             ).fetchall()
+        conn.execute("UPDATE episode_record_format SET version = ?", (PLACED_RECORD_FORMAT,))
+
+    @staticmethod
+    def _upgrade_to_scheduled(conn: sqlite3.Connection, found: int | None) -> None:
+        """Upgrade a file at an earlier label to ADR-0350's episode record, in place.
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, after
+        :meth:`_upgrade_to_placed` has carried a file to 16, so the upgrades chain
+        (ADR-0326 §4:5), and it completes or rolls back with the transaction (§4:3).
+
+        **The label alone advances** (#3429). A record written at 16 validates
+        unchanged under this build: ``PlanningRound.place`` defaults to ``None``, which
+        is what every round a build at 16 wrote holds or omits (§12:8), and no stored
+        episode names ``InputOrigin.assistant``, which only this build admits (§12:7).
+        Nothing is rewritten, so nothing can be dropped (§4:4). What the label buys is
+        §5:3's refusal: an older build, which reads 12 to 16, refuses a file whose
+        episodes may carry a place or an origin it would not read, rather than failing
+        on the read.
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+        """
+        if found is None or found >= MEMORY_RECORD_FORMAT:
+            return
         conn.execute("UPDATE episode_record_format SET version = ?", (MEMORY_RECORD_FORMAT,))
 
     def _upgrade_row(

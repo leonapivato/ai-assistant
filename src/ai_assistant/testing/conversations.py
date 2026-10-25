@@ -67,6 +67,7 @@ from ai_assistant.core.types import (
     DeviceChanges,
     DeviceConversation,
     DevicesChangedChange,
+    ExportedMessage,
     Identifier,
     MessageAddedChange,
     MessageAuthor,
@@ -138,6 +139,10 @@ _DEFAULT_DEVICE_CONVERSATIONS_PAGE: Final = 50
 #: The device a device-scoped call names goes through the type a ``ChatDevice``
 #: holds its id in, exactly as the production store's does.
 _DEVICE_ID: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
+
+#: The effect record ``effect_position`` names goes through the type ``NewMessage``
+#: holds it in, exactly as the production store's does (ADR-0350 §12:9).
+_EFFECT_ID: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
 
 
 def _check_position(name: str, value: object) -> int:
@@ -235,6 +240,22 @@ def _checked_activation_id(activation_id: object) -> str:
         return _EPISODE_ID.validate_python(activation_id, strict=True)
     except ValidationError as exc:
         msg = f"activation_id must be a non-blank str, got {describe_untrusted(activation_id)}"
+        raise ValueError(msg) from exc
+
+
+def _checked_effect_id(effect_id: object) -> str:
+    """Check the effect record ``effect_position`` names, through ``core``'s type.
+
+    Duplicated from the production store rather than shared, for :data:`_PAGE_BOUND`'s
+    reason.
+
+    Raises:
+        ValueError: If ``effect_id`` is not a non-blank ``str``.
+    """
+    try:
+        return _EFFECT_ID.validate_python(effect_id, strict=True)
+    except ValidationError as exc:
+        msg = f"effect_id must be a non-blank str, got {describe_untrusted(effect_id)}"
         raise ValueError(msg) from exc
 
 
@@ -397,6 +418,10 @@ class FakeConversationStore:
         #: Per conversation, (device, message id) to position: what recognises a
         #: repeated send, deleted message or not (§4:2, §4:3).
         self._sent: dict[str, dict[tuple[str, str], int]] = {}
+        #: Per conversation, the effect record an assistant's message was claimed
+        #: under to its position, deleted message or not (ADR-0350 §12:9). Kept apart
+        #: from the message, which a device reads and which never carries it.
+        self._claimed: dict[str, dict[str, int]] = {}
         #: "My devices" (§3:1), and each conversation's devices (§3:3).
         self._my_devices: tuple[ChatDevice, ...] = ()
         self._devices: dict[str, tuple[ChatDevice, ...]] = {}
@@ -583,6 +608,7 @@ class FakeConversationStore:
         """Remove the transcript, devices and bookkeeping kept under a conversation."""
         self._messages.pop(conversation_id, None)
         self._sent.pop(conversation_id, None)
+        self._claimed.pop(conversation_id, None)
         self._devices.pop(conversation_id, None)
         self._taken.pop(conversation_id, None)
 
@@ -590,6 +616,16 @@ class FakeConversationStore:
         """The conversation's standing messages, ascending by position."""
         held = self._messages.get(conversation_id, {})
         return [one for _, one in sorted(held.items()) if isinstance(one, TranscriptMessage)]
+
+    def _exported(self, conversation_id: str) -> list[ExportedMessage]:
+        """The conversation's standing messages as the export carries them (§12:9)."""
+        claims = {
+            position: effect for effect, position in self._claimed.get(conversation_id, {}).items()
+        }
+        return [
+            ExportedMessage(**dict(one), effect_id=claims.get(one.position))
+            for one in self._standing(conversation_id)
+        ]
 
     def _untaken(self, conversation_id: str) -> list[TranscriptMessage]:
         """The standing user's messages no activation has taken in, ascending."""
@@ -642,6 +678,7 @@ class FakeConversationStore:
                 devices = self._my_devices
                 self._messages[conversation.id] = {}
                 self._sent[conversation.id] = {}
+                self._claimed[conversation.id] = {}
                 self._devices[conversation.id] = devices
                 self._taken[conversation.id] = {}
                 self._changes.append(
@@ -822,7 +859,7 @@ class FakeConversationStore:
             return ConversationExport(
                 exported_at=self._now(),
                 conversations=tuple(live),
-                messages=tuple(message for one in live for message in self._standing(one.id)),
+                messages=tuple(message for one in live for message in self._exported(one.id)),
             )
 
     # --- the chat space (ADR-0293) --------------------------------------------
@@ -856,6 +893,14 @@ class FakeConversationStore:
                     return MessageReceipt(
                         conversation_id=conversation_id, outcome=SendOutcome.NOT_AN_END
                     )
+            elif message.effect_id is not None:
+                claimed = self._claimed[conversation_id].get(message.effect_id)
+                if claimed is not None:
+                    return MessageReceipt(
+                        conversation_id=conversation_id,
+                        outcome=SendOutcome.REPEATED,
+                        position=claimed,
+                    )
             position = max(held, default=0) + 1
             if message.replies_to is not None and message.replies_to >= position:
                 return MessageReceipt(
@@ -865,11 +910,13 @@ class FakeConversationStore:
                 conversation_id=conversation_id,
                 position=position,
                 written_at=self._now(),
-                **message.model_dump(),
+                **message.model_dump(exclude={"effect_id"}),
             )
             held[position] = recorded
             if recorded.device_id is not None and recorded.message_id is not None:
                 self._sent[conversation_id][(recorded.device_id, recorded.message_id)] = position
+            if message.effect_id is not None:
+                self._claimed[conversation_id][message.effect_id] = position
             self._changes.append(MessageAddedChange(seq=self._next_seq(), message=recorded))
             return MessageReceipt(
                 conversation_id=conversation_id, outcome=SendOutcome.RECORDED, position=position
@@ -902,6 +949,19 @@ class FakeConversationStore:
             ]
             self._changes.append(MessageDeletedChange(seq=self._next_seq(), marker=marker))
             return True
+
+    async def effect_position(self, conversation_id: str, effect_id: str, /) -> int | None:
+        """Read where the message claimed under ``effect_id`` stands (ADR-0350 §12:9).
+
+        Raises:
+            ValueError: If ``effect_id`` is not a non-blank ``str``.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+        """
+        effect = _checked_effect_id(effect_id)
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            self._live(conversation_id)
+            return self._claimed[conversation_id].get(effect)
 
     async def transcript(
         self,
