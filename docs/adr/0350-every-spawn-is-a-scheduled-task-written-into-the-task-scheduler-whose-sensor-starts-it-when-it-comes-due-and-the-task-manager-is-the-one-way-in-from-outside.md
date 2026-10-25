@@ -6,8 +6,8 @@
 - Dependency: [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md), [ADR-0286](0286-an-episode-is-open-while-its-activation-runs-and-frozen-when-it-ends.md), [ADR-0295](0295-stopping-an-activation-is-a-command-that-starts-nothing-new-and-cuts-off-nothing-already-sent.md), [ADR-0297](0297-a-stop-is-marked-on-the-activation-and-recorded-where-claims-are-decided.md), [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md), [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md), [ADR-0321](0321-authority-at-the-deploy-is-your-yes-to-a-question-that-showed-the-call.md), [ADR-0332](0332-activations-run-side-by-side-across-places-and-one-at-a-time-within-one-a-new-input-joins-the-running-activation-until-it-acts-and-a-place-waits-a-moment-before-it-starts.md), [ADR-0338](0338-a-person-sets-their-profile-and-pins-what-aether-always-keeps-in-mind-their-style-is-learned-as-memories-and-each-reaches-the-models-for-that-persons-activations.md) and [ADR-0341](0341-a-pure-read-is-a-call-that-writes-nothing-and-does-not-leave-the-hub-so-looking-something-up-in-the-assistants-own-records-does-not-commit-an-activation.md), as their status lines leave them.
 - Authorization: the owner ruled every part in the design walk of 2026-10-21 to 2026-10-24, recorded in proposal #3384's §§6–11. On 2026-10-24 the owner asked "Should we make this an adr and implement it first before moving to modes?", and on the coordinator's recommendation, to convert both parts and implement this one first, said "Yes to the milestone, number it correctly". The dispatcher assigned 0350. Ratifying it is the owner's, after the owner's own review: "just finish adrs A and B. And dont ratify them. Ill review when they are done." (2026-10-25).
 - Milestone: [15, Task Scheduler: reminders and work that runs later](https://github.com/leonapivato/ai-assistant/milestone/15); acceptance [#3416](https://github.com/leonapivato/ai-assistant/issues/3416).
-- **Changes `core`, so it is a contract-surface decision and a breaking change under golden rule 5.** `PlanStore` gains the scheduled-task members and `PlanExport` the tasks (§12:3). `core/types.py` gains the scheduled task, its occurrence and their enumerations (§12:1), and `LabelKind` gains a member (§12:2). `core`'s register of channel types gains the Task Scheduler (§2:7), and `Settings` gains six fields (§12:5). `AssistantEngine` gains no member (§10:6). `PROTOCOL_VERSION` advances in the lane whose types first cross the wire (§12:6).
-- **Partially supersedes**, in the clauses §15's first table names: ADR-0292, ADR-0303, ADR-0306, ADR-0307, ADR-0323, ADR-0329 and ADR-0338.
+- **Changes `core`, so it is a contract-surface decision and a breaking change under golden rule 5.** `PlanStore` gains the scheduled-task members and `PlanExport` the tasks (§12:3). `core/types.py` gains the scheduled task, its occurrence and their enumerations (§12:1), `LabelKind` gains a member (§12:2), and `InputOrigin` gains `assistant` (§12:7). `core`'s register of channel types gains the Task Scheduler (§2:7), and `Settings` gains six fields (§12:5). `AssistantEngine` gains no member (§10:6). `PROTOCOL_VERSION` advances in the lane whose types first cross the wire (§12:6).
+- **Partially supersedes**, in the clauses §15's first table names: ADR-0284, ADR-0292, ADR-0303, ADR-0306, ADR-0307, ADR-0323, ADR-0328, ADR-0329 and ADR-0338.
 
 ## Context
 
@@ -206,7 +206,7 @@ covers it.
 > | Capability | What it does | Safe to repeat | `writes` | Result |
 > | --- | --- | --- | --- | --- |
 > | spawn | writes a scheduled task: what it carries, when (§5:1), where it may speak or none (§5:5) | No | the person's tier | no outside text |
-> | change a scheduled task | moves its next occurrence (§9:4) | Yes | the person's tier | no outside text |
+> | change a scheduled task | moves its next occurrence (§9:4) | No | the person's tier | no outside text |
 > | cancel a scheduled task | ends what of it is pending (§9:5) | Yes | the person's tier | no outside text |
 > | list scheduled tasks | the list pull (§4:6) | Yes | none | no outside text |
 >
@@ -224,8 +224,9 @@ covers it.
 So spawn, change and cancel each write, and so commit their activation (ADR-0332 §3:2,
 ADR-0341 §2:1). The list pull writes nothing and does not leave the hub, so it is a pure
 read (ADR-0341 §2:1), and planning may look before it acts. A spawn is not safe to repeat,
-so it gets an effect record (ADR-0306 §5:3) and the backstop refuses the same spawn twice in
-one matter unless planning marks it deliberate (ADR-0306 §5:9).
+and neither is a change, since a change on a task that has ended adds an occurrence (§9:4).
+So each gets an effect record (ADR-0306 §5:3), and the backstop refuses the same spawn or
+the same change twice in one matter unless planning marks it deliberate (ADR-0306 §5:9).
 
 > **Normative.** Change and cancel are offered to an activation whose input carries the
 > person's authority. Any other activation's change or cancel naming a task it did not
@@ -304,7 +305,9 @@ nothing (ADR-0292 §3:10).
 > (§8:9) or a second try (§8:6).
 
 > **Normative.** Its origin is `outside` where its task carries the outside-content mark, and
-> `user` otherwise (ADR-0284 §2:2).
+> `assistant` otherwise, a value `InputOrigin` gains (§12:7). Its text is the creator's
+> instruction as planning wrote it, never the person's own words, so it never takes `user`
+> (ADR-0284 §2:2), whoever set the task.
 
 > **Normative.** The activation is for the person its task is for.
 
@@ -345,6 +348,17 @@ their own beside it. The two never join and are never taken over. The schedule r
 side (§2:6), so ADR-0332 §3:3 joins nothing there. Two of the Task Scheduler's activations
 share one place, so neither is shown to the other under ADR-0332 §4:1. A person's
 activation and a task's never carry the same authority, so ADR-0332 §4:6 takes over neither.
+
+> **Normative.** A support that points at the input of an activation the Task Scheduler
+> started takes the origin `assistant_message` where that input's origin is `assistant`, and
+> `outside_input` where it is `outside` (ADR-0328 §4:2's origin table).
+
+> **Normative.** Every reader that attributes an input by its origin (ADR-0284 §2:3) attributes
+> one whose origin is `assistant` as written by the assistant, never as something the person
+> said.
+
+So a reminder's text, or a chain's next step, is never evidence that the person said it
+again when the observer reads the episode it started.
 
 ### 7. The sensor
 
@@ -394,16 +408,17 @@ messages, and so does one set twice by mistake.
 > **Normative.** Where its task states a place and a message the activation claimed into
 > that place is done (ADR-0306 §5:5), the occurrence ends *done*.
 
-> **Normative.** Where the activation claimed no effect, or only messages each *not done*,
-> the occurrence is pushed again. It is pushed at most §12:5's push limit of times in all,
-> and is then ended *interrupted*.
+> **Normative.** Where the occurrence was not itself a second try (§8:6), and the activation
+> claimed no effect, or only messages each *not done*, the occurrence is pushed again. It is
+> pushed at most §12:5's push limit of times in all, and is then ended *interrupted*.
 
-> **Normative.** Where the activation claimed only messages and any of them has an unknown
-> outcome or none written, the occurrence is pushed once more as a **second try**. Its input
+> **Normative.** Where the occurrence was not itself a second try, and the activation claimed
+> only messages and any of them has an unknown outcome or none written, the occurrence is
+> pushed once more as a **second try**, and the occurrence records that it is one. Its input
 > says so, and planning's instruction has its message say that it is sent in case the last
 > did not arrive. It is never tried a third time. After the second try's activation ends,
-> the occurrence takes §7:6's outcome, or ends *interrupted* where that activation is cut off
-> too.
+> the occurrence takes §7:6's outcome. Where a restart cuts that activation off too, §8:4
+> may still find it *done*, and §8:7 otherwise ends it *interrupted*.
 
 > **Normative.** Otherwise the occurrence ends *interrupted* and is never pushed again.
 > ADR-0306 §5:6 and §5:13 hold for every effect it claimed.
@@ -451,21 +466,26 @@ the reason (ADR-0307 §5:3).
 > reason, and writes nothing.
 
 > **Normative.** Whatever stops a chain stops its running step first (ADR-0295) and only then
-> cancels the tasks that step spawned.
+> cancels the tasks that step spawned. Where a task's push wins against that cancel (§7:5),
+> it stops the activation the push named, and treats it in turn as the chain's running step.
+> It is done once no activation of the chain is running and none of its tasks is pending.
 
-Once the stop has landed, the store refuses the stopped step's spawn (§3:3), so nothing
-slips through between the stop and the cancel. **Pausing** is stopping the running step and
+Once a stop has landed, the store refuses the stopped step's spawn (§3:3), so no new task
+appears after it. A task already spawned that the sensor pushes between the stop and the
+cancel is the race the rule's second sentence closes: its activation is stopped in turn,
+and the walk goes on down the parent pointers. **Pausing** is stopping the running step and
 moving its next task's time, two operations and no third.
 
 > **Normative.** A task's **chain length** is one where its parent was not started by the Task
 > Scheduler, and one more than the parent's task's otherwise. A spawn whose task's chain
 > length would exceed §12:5's chain limit is refused as *not done*, with the reason.
 
-> **Normative.** A spawn that would take the person's pending occurrences past §12:5's
-> pending limit is refused as *not done*, with the reason.
+> **Normative.** A spawn, or a change that adds an occurrence (§9:4), that would take the
+> person's pending occurrences past §12:5's pending limit is refused as *not done*, with the
+> reason, and writes nothing.
 
 > **Normative.** §9:7's and §9:8's checks are made in the plan-store step that writes the
-> task (§3:3), so two spawns of one round cannot pass them together.
+> task or the occurrence (§3:3), so two writes of one round cannot pass them together.
 
 Every activation the Task Scheduler starts also runs under ADR-0194's ceiling on what the
 world may cost, its own deadline and its round limit, as every activation does.
@@ -524,14 +544,16 @@ read-back says so ("I'll remind you on Telegram at 8").
 > **Normative.** `core/types.py` gains frozen pydantic models for the scheduled task and its
 > occurrence, holding §3:6's parts, and closed `StrEnum`s for a task's author (the person or
 > the assistant) and an occurrence's state: pending; pushed, naming its activation; done;
-> couldn't finish; stopped; interrupted; cancelled; skipped. Each enumeration is added to and
-> never renamed. Exact names, and how when and the marks are represented, are the lane's that
-> builds the triad (§13).
+> couldn't finish; stopped; interrupted; cancelled; skipped. An occurrence also records how
+> many times it has been pushed (§8:5) and whether it is a second try (§8:6). Each
+> enumeration is added to and never renamed. Exact names, and how when and the marks are
+> represented, are the lane's that builds the triad (§13).
 
 > **Normative.** `LabelKind` gains a member for the scheduled task, with the prefix `T`.
 
 > **Normative.** `PlanStore` gains members to: write a task with the spawn's effect claim and
-> §9:7–§9:8's checks in one step (§3:3, §9:9); change one (§9:4); cancel one (§9:5); cancel
+> §9:7–§9:8's checks in one step (§3:3, §9:9); change one, with §9:8's check in the same
+> step (§9:4); cancel one (§9:5); cancel
 > every pending task set to speak in a place (§5:9); read tasks by id, by person and state,
 > and by parent; read the occurrences due at an instant and the tasks whose waits have all
 > ended (§7:3, §5:4); mark an occurrence pushed (§7:5); and write an occurrence's outcome
@@ -552,12 +574,17 @@ read-back says so ("I'll remind you on Telegram at 8").
 > **Normative.** `PROTOCOL_VERSION` advances in the lane whose change first puts any type
 > this decision adds or changes on the wire (ADR-0124 §9).
 
+> **Normative.** `InputOrigin` gains `assistant` (§6:3), added under ADR-0284 §2:1's closed
+> enumeration, and every reader of `origin` (ADR-0284 §2:3) handles it in the lane that adds
+> it.
+
 ### 13. Delivery
 
 The lanes, each after this decision merges `Accepted`, held by milestone 15:
 
 1. **TS1, the triad with its primary implementation** (ADR-0137 §2:1): §12's types, the
-   `LabelKind` member, the register entry (§2:7), the six settings, the `PlanStore` members
+   `LabelKind` and `InputOrigin` members with every reader of `origin`, the register entry
+   (§2:7), the six settings, the `PlanStore` members
    and `PlanExport`, the conformance suite, the canonical fake, and the SQLite plan store in
    `planning/` with its upgrade.
 2. **TS2, the Task Scheduler in `orchestration/`:** its kind (§2:6), its sensor (§7, §8), the
@@ -573,9 +600,12 @@ The lanes, each after this decision merges `Accepted`, held by milestone 15:
 
 > **Normative.** TS2's tests include: two occurrences due at one instant, which start two
 > activations; a cancel and a push racing, where whichever lands first wins; each of
-> §8:2–§8:7 at start, a step that spawned its next never pushed again among them; a spawn
-> refused on a stop record, at the chain limit and at the pending limit; and a deleted
-> conversation's pending tasks cancelled.
+> §8:2–§8:7 at start, a step that spawned its next never pushed again among them; a second
+> try cut off by a second restart before it claimed anything, which ends *interrupted*; a
+> spawn refused on a stop record, at the chain limit and at the pending limit; a change of
+> an ended task refused at the pending limit, and a change and a spawn racing at it; a chain
+> stopped while its next task is pushed between the stop and the cancel, whose activation is
+> then stopped; and a deleted conversation's pending tasks cancelled.
 
 > **Normative.** TS2 adds synthetic prompt cases (ADR-0337 §3) for at least: a spawn to
 > start now; "snooze 10 minutes" right after a task's message; and a cancel whose words
@@ -605,11 +635,13 @@ Superseded in part. Every clause the middle column does not name stands:
 
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
+| ADR-0284 | §2:1, in the addition alone: `InputOrigin` gains `assistant`, the origin of a scheduled task's input that carries no outside-content mark | §6:3, §12:7 |
 | ADR-0292 | §5:6, in the addition alone: every scheduled task, whoever set it, informs the activation it starts and authorizes nothing; §6:8, in the addition alone: a scheduled task falling due starts an activation, though the assistant wrote it; §10:1, in the addition alone: the Task Scheduler's window holds its task's parent's and waited-on tasks' frozen episodes; §12:1's *setting a timer*: it is a spawn, written through the Task Scheduler's actuator | §3:9, §6:1, §6:5, §3:1, §4:3 |
 | ADR-0303 | §7:1, in the addition alone: an item an activation the Task Scheduler started wrote also links to its scheduled task | §9:1 |
 | ADR-0306 | §4:7, for an activation the Task Scheduler starts: its message goes into the place its task states, or nowhere; §5:6's *never resolved by guessing* and §5:13's *never retried, done another way*, for that activation's message alone: one second try | §6:7, §8:6, §8:8 |
 | ADR-0307 | §3:1, §3:7 and §3:8, for an activation the Task Scheduler starts: they read the place its task states; §5:1, in the addition alone: the label kind `T`; §5:6, in the addition alone: an item is shown with its scheduled task's label | §6:7, §9:2 |
 | ADR-0323 | §6:1's *the chat is the input's place*, for an activation the Task Scheduler starts: the chat is the place its task states, and the writer still refuses any chat but the one the settings name | §6:7 |
+| ADR-0328 | §4:2's origin table, in the addition alone: a support pointing at an input whose origin is `assistant` takes `assistant_message` | §6:11 |
 | ADR-0329 | §13:6, in the addition alone: an activation the Task Scheduler starts writes its messages into the place its task states, and no other background work messages the user | §6:7 |
 | ADR-0338 | §2:2, in the addition alone: an activation the Task Scheduler starts is for the person its task is for | §6:4 |
 
@@ -637,8 +669,8 @@ Read through and not superseded:
 | ADR-0194 | Nothing: its ceiling binds every activation the Task Scheduler starts |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
-> dated header note of ADR-0292, ADR-0303, ADR-0306, ADR-0307, ADR-0323, ADR-0329 and
-> ADR-0338, atomically with this ADR under ADR-0070 and ADR-0082, preserving their ratified
+> dated header note of ADR-0284, ADR-0292, ADR-0303, ADR-0306, ADR-0307, ADR-0323, ADR-0328,
+> ADR-0329 and ADR-0338, atomically with this ADR under ADR-0070 and ADR-0082, preserving their ratified
 > bodies. The replacements take effect on this ADR's ratification.
 
 ## Consequences
@@ -678,8 +710,8 @@ Read through and not superseded:
 - **A step that acted in the world and was cut off by a restart is not repeated** (§8:7),
   so the rest of its work waits for the person to ask again.
 - **Machinery and records.** A triad on `PlanStore` with an upgrade, a channel type in
-  `core`'s register, a label kind, a sensor loop, four capabilities, six settings, and header
-  records on seven ADRs.
+  `core`'s register, a label kind, an input origin, a sensor loop, four capabilities, six
+  settings, and header records on nine ADRs.
 
 **The cut, for the dispatcher.** §13's two lanes. TS1 is the `PlanStore` triad with its
 primary implementation, the SQLite plan store, as one lane under ADR-0137 §2:1. TS2 is every
