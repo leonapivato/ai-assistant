@@ -469,6 +469,15 @@ def test_no_label_reads_the_named_fields_anywhere_in_the_reply() -> None:
         ("observer_placement", json.dumps({"relations": ["M1"]})),
         ("observer_placement", json.dumps({"relations": []})),
         ("observer_placement", json.dumps({"relations": [{"relation": "restates"}]})),
+        ("observer_placement", json.dumps({"relations": [{"relation": "independent"}]})),
+        (
+            "observer_placement",
+            json.dumps({"relations": [{"memory": None, "relation": "restates", "note": "n"}]}),
+        ),
+        (
+            "observer_placement",
+            json.dumps({"relations": [{"memory": " ", "relation": "independent"}]}),
+        ),
         (
             "observer_placement",
             json.dumps({"relations": [{"memory": "M1", "relation": "contained"}]}),

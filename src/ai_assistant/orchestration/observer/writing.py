@@ -100,6 +100,7 @@ from ai_assistant.orchestration.observer.person import PIN_NOTE
 from ai_assistant.orchestration.observer.placement import (
     PlacementView,
     compacted,
+    labelled,
     narrows,
     retrieved,
 )
@@ -330,7 +331,9 @@ class FindingWriter:
                 # the call is made, so a call that fails narrows every later attempt.
                 record = record.model_copy(update={"memory": memory})
                 await keep(index, record)
-            view = PlacementView(framed=memory, texts=texts, retrieved=stored)
+            # #3402: labelled so no label stands in the data, and every one a note cites
+            # is a reference put in words.
+            view = labelled(PlacementView(framed=memory, texts=texts, retrieved=stored))
             placement = await place(view) if stored else MemoryPlacement()
             before = {one.memory.id: one.memory for one in stored}
             record = record.model_copy(

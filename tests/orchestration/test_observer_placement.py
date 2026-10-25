@@ -36,6 +36,7 @@ from ai_assistant.orchestration.observer.placement import (
     PlacementReply,
     PlacementView,
     Retrieved,
+    labelled,
     placement_of,
     retrieved,
 )
@@ -355,26 +356,50 @@ def test_no_label_of_the_call_reaches_a_note() -> None:
     )
 
 
-def test_a_label_standing_in_the_data_shown_is_the_datas_own_text() -> None:
-    """#3402: "an M1 Mac" or "Q1 sales" in what the call was shown is never replaced."""
-    view = _view(
-        _stored(content="The user works on an M1 Mac."),
-        _stored("m-sales", "The user reports Q1 sales to Dana."),
+def test_the_calls_labels_stand_nowhere_in_its_data_so_each_is_a_reference() -> None:
+    """#3402: "an M1 Mac" in a wording and "M1" as a label, in one note, each kept apart.
+
+    The memories are labelled past every label the data holds, so the note's own text
+    stays as written and every label of the call it cites is put in words.
+    """
+    question = OpenQuestion(
+        id="q-1",
+        kind=OpenQuestionKind.RECHECK,
+        asks="Who reports Q1 sales now?",
+        rests_on=(said_support(address("past")).points_at,),
+        raised_at=AT,
+        raised_by=MemoryWriterName.OBSERVER,
+    )
+    mac = _stored(content="The user works on an M1 Mac.")
+    sales = _stored("m-sales", "The user reports sales to Dana.").model_copy(
+        update={"open_questions": (question,)}
+    )
+    view = labelled(
+        PlacementView(
+            framed=_framed(),
+            texts={},
+            retrieved=(
+                Retrieved(handle="M1", memory=mac),
+                Retrieved(handle="M2", memory=sales, questions={"Q1": "q-1"}),
+            ),
+        )
     )
 
     placement = _placed(
         view,
         placing(
-            ("M1", "recheck", "Is the M1 Mac still the user's, given M2?"),
-            ("M2", "recheck", "Are Q1 sales still the user's to report?"),
+            ("M2", "recheck", "Is the M1 Mac still the user's, given M3 and Q2?"),
+            ("M3", "independent", ""),
         ),
     )
 
+    assert [one.handle for one in view.retrieved] == ["M2", "M3"]
+    assert view.retrieved[1].questions == {"Q2": "q-1"}
     assert placement is not None
-    assert [one.note for one in placement.pairs] == [
-        'Is the M1 Mac still the user\'s, given "The user reports Q1 sales to Dana."?',
-        "Are Q1 sales still the user's to report?",
-    ], "a label in the data stays; one that stands nowhere in it is a reference"
+    assert placement.pairs[0].note == (
+        'Is the M1 Mac still the user\'s, given "The user reports sales to Dana." and '
+        '"Who reports Q1 sales now?"?'
+    )
 
 
 def test_the_placement_call_is_shown_the_framed_memory_and_the_compact_forms() -> None:
