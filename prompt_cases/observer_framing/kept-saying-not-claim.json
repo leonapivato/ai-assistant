@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "{\"claim\": \"A splash of buttermilk in the batter makes pancakes fluffier.\", \"under_review\": \"E1\", \"parts\": [{\"part\": \"P1\", \"exchange\": \"E1\", \"occurred_at\": \"2026-09-20T09:41:00+00:00\", \"from\": \"the user\", \"outside\": false, \"at\": \"2026-09-20T09:41:00+00:00\", \"text\": \"Remember that.\", \"answers\": \"A splash of buttermilk in the batter makes the pancakes fluffier.\"}, {\"part\": \"P2\", \"exchange\": \"E2\", \"occurred_at\": \"2026-09-20T09:39:00+00:00\", \"from\": \"the assistant\", \"outside\": false, \"at\": \"2026-09-20T09:39:00+00:00\", \"text\": \"A splash of buttermilk in the batter makes the pancakes fluffier.\"}], \"subjects\": [], \"involved\": [], \"why\": \"The user asked to keep a cooking tip.\", \"situations\": [\"cooking breakfast\"], \"narrowing\": null}",
+      "name": null
+    }
+  ]
+}

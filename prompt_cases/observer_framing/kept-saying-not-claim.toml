@@ -1,0 +1,19 @@
+# The assistant gave a cooking tip with nothing recorded behind it, and the user said
+# "Remember that." A request to keep is not agreement: what the assistant said is kept as a
+# record of the saying, backed by its message and citing the request, never as the user's
+# claim or as a fact.
+prompt = "observer_framing"
+guards = "request_backs_memory"
+came_from = "#3400"
+set = "held_out"
+samples = 1
+
+[property]
+check = "read"
+read = """It keeps at least one memory. No support on P1 has backs_as_worded true. No memory \
+states as a fact, or as the user's, that buttermilk makes pancakes fluffier: every memory is \
+worded as what the assistant said, is marked both occasion and assistant_statement, and is \
+backed as worded by P2 alone."""
+
+[input]
+file = "kept-saying-not-claim.json"
