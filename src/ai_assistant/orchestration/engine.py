@@ -6661,7 +6661,8 @@ class Engine:
             plans=plans,
             memory=memory,
             running=lambda: (one.state for one in self._running if one.state is not None),
-            is_running=self._is_live,
+            # §7:8: a task is kept while its parent, the activation that spawned it, runs.
+            is_running=lambda one: self._running_state(one) is not None,
             stop_one=self._stop_one,
             wake=self._wake_sensor,
             limits=seams.limits,
@@ -6928,7 +6929,11 @@ class Engine:
         try:
             settled = await self._plans.settle_occurrence(activation_id, outcome)
         except PlanningError:
+            # Left pushed and running nowhere: the sensor settles it from its records
+            # before it pushes anything more (§8:1-§8:3 give the same outcome).
             _log.warning("task_outcome_unwritten", stage="task_scheduler", reason="store_failed")
+            if self._task_sensor is not None:
+                self._task_sensor.unsettled()
             return
         await self._occurrence_settled(settled)
 

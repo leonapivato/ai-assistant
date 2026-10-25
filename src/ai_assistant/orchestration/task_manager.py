@@ -254,12 +254,17 @@ class PlaceLists:
         return tuple(places)
 
     async def _held(self, channel: ChannelIdentity) -> bool:
-        """Whether a conversation is still held: one deleted is gone (§5:8)."""
+        """Whether a conversation is still held: one deleted is gone (§5:8).
+
+        A read that fails is no answer that it was deleted, so the conversation stays
+        listed: where it is gone, the message written into it is refused, and the
+        activation does not end as though it had spoken.
+        """
         try:
             return await self._conversations.get(channel.instance_id) is not None
         except ConversationStoreError:
             _log.warning("place_list_unread", stage="planning", reason="store_failed")
-            return False
+            return True
 
     async def _connected_line(self) -> ChannelIdentity | None:
         """The line's chat, where the line is connected (§5:11)."""

@@ -200,6 +200,11 @@ class TaskSchedulerSensor:
         """Wake the loop: a task was written, or an occurrence ended (§7:2, §7:7)."""
         self._woken.set()
 
+    def unsettled(self) -> None:
+        """An occurrence may be left pushed and running nowhere: settle before pushing."""
+        self._unsettled = True
+        self._woken.set()
+
     def close(self) -> None:
         """End the loop at its next look; an activation it admitted is the drain's."""
         self._stopped = True
@@ -214,14 +219,17 @@ class TaskSchedulerSensor:
         Raises:
             CancelledError: Where a shutdown cancelled it.
         """
-        self._unsettled = not await self.settle_restart()
+        self._unsettled = True
         while not self._done():
             self._woken.clear()
             if self._unsettled:
-                # §8:1: what a store failure left pushed and running nowhere is settled
-                # before anything more is pushed.
+                # §8:1: what a restart, or a store failure, left pushed and running
+                # nowhere is settled before anything is pushed; until it is, nothing is.
                 self._unsettled = not await self.settle_restart()
-            wait = await self.look()
+            if self._unsettled:
+                wait = min(self._limits.recheck.total_seconds(), _BACKOFF_SECONDS)
+            else:
+                wait = await self.look()
             if self._done():
                 return
             with contextlib.suppress(TimeoutError):
