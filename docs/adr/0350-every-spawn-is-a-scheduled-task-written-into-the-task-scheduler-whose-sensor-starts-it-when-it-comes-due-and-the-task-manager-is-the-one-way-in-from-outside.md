@@ -2,11 +2,11 @@
 
 - Status: Proposed
 - Date: 2026-10-25
-- Scope: how one activation sets up another, to start now, at an instant, on a rule or on a hub event; the **Task Scheduler**, the built-in channel every such spawn is written into (§2), the spawn and what a scheduled task holds (§3), the five capabilities planning is offered (§4), when a task falls due, the places it names and the place list planning names them from (§5), the activation it starts (§6), its sensor (§7), a restart and a miss (§8), finding, changing, cancelling and stopping scheduled work, with its limits (§9), and the **Task Manager**, the one way in from outside (§10). It is Part B (§§6–11) of proposal [#3384](https://github.com/leonapivato/ai-assistant/pull/3384), read at `86152e7a8`, with the B rows of its tables. Reminders are scheduled tasks (§11), and their own rules stay for the reminders decision. Part A, the operations between activations, is a separate decision, and this one stands on ADR-0332 as it is. §14 names what is not decided here.
+- Scope: how one activation sets up another, to start now, at an instant, on a rule or on a hub event; the **Task Scheduler**, the built-in channel every such spawn is written into (§2), the spawn and what a scheduled task holds (§3), the five capabilities planning is offered (§4), when a task falls due, the places it suggests and the place list planning names them from (§5), the activation it starts (§6), its sensor (§7), a restart and a miss (§8), finding, changing, cancelling and stopping scheduled work, with its limits (§9), and the **Task Manager**, the one way in from outside (§10). It is Part B (§§6–11) of proposal [#3384](https://github.com/leonapivato/ai-assistant/pull/3384), read at `86152e7a8`, with the B rows of its tables. Reminders are scheduled tasks (§11), and their own rules stay for the reminders decision. Part A, the operations between activations, is a separate decision, and this one stands on ADR-0332 as it is. §14 names what is not decided here.
 - Dependency: [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md), [ADR-0286](0286-an-episode-is-open-while-its-activation-runs-and-frozen-when-it-ends.md), [ADR-0295](0295-stopping-an-activation-is-a-command-that-starts-nothing-new-and-cuts-off-nothing-already-sent.md), [ADR-0297](0297-a-stop-is-marked-on-the-activation-and-recorded-where-claims-are-decided.md), [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md), [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md), [ADR-0321](0321-authority-at-the-deploy-is-your-yes-to-a-question-that-showed-the-call.md), [ADR-0332](0332-activations-run-side-by-side-across-places-and-one-at-a-time-within-one-a-new-input-joins-the-running-activation-until-it-acts-and-a-place-waits-a-moment-before-it-starts.md), [ADR-0338](0338-a-person-sets-their-profile-and-pins-what-aether-always-keeps-in-mind-their-style-is-learned-as-memories-and-each-reaches-the-models-for-that-persons-activations.md) and [ADR-0341](0341-a-pure-read-is-a-call-that-writes-nothing-and-does-not-leave-the-hub-so-looking-something-up-in-the-assistants-own-records-does-not-commit-an-activation.md), as their status lines leave them.
 - Authorization: the owner ruled every part in the design walk of 2026-10-21 to 2026-10-24, recorded in proposal #3384's §§6–11. On 2026-10-24 the owner asked "Should we make this an adr and implement it first before moving to modes?", and on the coordinator's recommendation, to convert both parts and implement this one first, said "Yes to the milestone, number it correctly". The dispatcher assigned 0350. Ratifying it is the owner's, after the owner's own review: "just finish adrs A and B. And dont ratify them. Ill review when they are done." (2026-10-25).
 - Milestone: [15, Task Scheduler: reminders and work that runs later](https://github.com/leonapivato/ai-assistant/milestone/15); acceptance [#3416](https://github.com/leonapivato/ai-assistant/issues/3416).
-- **Changes `core`, so it is a contract-surface decision and a breaking change under golden rule 5.** `PlanStore` gains the scheduled-task members and `PlanExport` the tasks (§12:3). `core/types.py` gains the scheduled task, its occurrence and their enumerations (§12:1), `LabelKind` gains two members (§12:2), and `InputOrigin` gains `assistant` (§12:7). `core`'s register of channel types gains the Task Scheduler (§2:7), and `Settings` gains six fields (§12:5). `AssistantEngine` gains no member (§10:6). `PROTOCOL_VERSION` advances in the lane whose types first cross the wire (§12:6).
+- **Changes `core`, so it is a contract-surface decision and a breaking change under golden rule 5.** `PlanStore` gains the scheduled-task members and `PlanExport` the tasks (§12:3). `core/types.py` gains the scheduled task, its occurrence and their enumerations (§12:1), `LabelKind` gains two members (§12:2), and `InputOrigin` gains `assistant` (§12:7), and `PlanningRound` gains its message's place (§12:8). `core`'s register of channel types gains the Task Scheduler (§2:7), and `Settings` gains six fields (§12:5). `AssistantEngine` gains no member (§10:6). `PROTOCOL_VERSION` advances in the lane whose types first cross the wire (§12:6).
 - **Partially supersedes**, in the clauses §15's first table names: ADR-0284, ADR-0292, ADR-0303, ADR-0306, ADR-0307, ADR-0323, ADR-0328, ADR-0329 and ADR-0338.
 
 ## Context
@@ -80,9 +80,10 @@ in `core`.
 
 We will make every spawn a call that writes a scheduled task into the Task Scheduler, a
 built-in channel whose sensor starts an ordinary activation when the task falls due. A task
-carries no authority, names zero or more places it may speak in, and points to the
-activation that spawned it and the tasks it waits for. Once nothing about it is left, it is
-removed, and what ran stays in the episodes. The sensor compares wall-clock
+carries no authority, suggests zero or more places, and points to the
+activation that spawned it and the tasks it waits for. Its activation speaks only into a
+place on its place list, where the suggestions are marked. Once nothing about it is left,
+the task is removed, and what ran stays in the episodes. The sensor compares wall-clock
 instants, pushes each due task on its own, and after a restart never runs a step again once
 it has spawned its next. The Task Manager is the one way in from outside, and planning uses
 the same operations.
@@ -164,7 +165,7 @@ people, the Task Manager's view would be called **Tasks** (§10).
 > - for whom (§3:5);
 > - its author (§3:7);
 > - when (§5:1);
-> - the places it names, zero or more (§5:5);
+> - the places its spawner suggests, zero or more (§5:5);
 > - what it carries: the creator's instruction, bounded in size;
 > - its **parent**, the activation that spawned it;
 > - the tasks it waits for, where its when is §5:4's;
@@ -184,8 +185,8 @@ people, the Task Manager's view would be called **Tasks** (§10).
 > activation it starts and authorizes nothing, as ADR-0292 §5:6 already rules of a reminder.
 > No approval given in the spawning activation carries over (ADR-0321 §4:1).
 
-> **Normative.** Where a task was set is recorded as data. No rule reads it for where the task
-> speaks or whom it is for.
+> **Normative.** Where a task was set is read for its activation's place list (§6:7) and for
+> nothing else. No rule reads it for whom the task is for.
 
 So a person's "remind me…" in the hub chat is the person's task, and the assistant's own
 follow-up ("I'll check back tomorrow"), and every step a chain spawns, is the assistant's.
@@ -196,7 +197,7 @@ of the yes that gave it, so a spawned step that needs one asks again.
 A spawn covers continuing work too long for one activation, breaking work into independent
 pieces, isolating work in a separate context, reminders and schedules, and the assistant's
 own follow-ups: a retry, a check back, a nudge. These vary only in when (§5:1) and in the
-places they name (§5:5). "Background task" is dropped as a concept: an activation spawning its own next step
+places they suggest (§5:5). "Background task" is dropped as a concept: an activation spawning its own next step
 covers it.
 
 ### 4. The capabilities
@@ -207,7 +208,7 @@ covers it.
 >
 > | Capability | What it does | Safe to repeat | `writes` | Result |
 > | --- | --- | --- | --- | --- |
-> | spawn | writes a scheduled task: what it carries, when (§5:1), and the places it names by label, zero or more (§5:5) | No | the person's tier | no outside text |
+> | spawn | writes a scheduled task: what it carries, when (§5:1), and the places it suggests by label, zero or more (§5:5) | No | the person's tier | no outside text |
 > | change a scheduled task | moves its next pending occurrence (§9:4) | Yes | the person's tier | no outside text |
 > | cancel a scheduled task | ends what of it is pending (§9:5) | Yes | the person's tier | no outside text |
 > | list scheduled tasks | the list pull (§4:6) | Yes | none | no outside text |
@@ -238,7 +239,7 @@ pending (§9:4), so the same change twice leaves what one leaves.
 
 > **Normative.** A spawn is refused as *not done*, with the reason, and writes nothing,
 > where its instant is earlier than now, where it waits on a task §5:4 does not allow, where
-> it names a place §5:6 does not allow or a label §5:13 refuses, or where §9:7 or §9:8
+> it suggests a place §5:6 does not allow or names a label §5:13 refuses, or where §9:7 or §9:8
 > refuses it.
 
 > **Normative.** The **list pull** answers, for the person the asking activation is for: the
@@ -253,9 +254,9 @@ pending (§9:4), so the same change twice leaves what one leaves.
 > withheld and their mark shown. That is how the result carries no outside text.
 
 > **Normative.** A spawn's result carries the new task's label and the hub's own rendering of
-> when it falls due and of the places it names, written from the stored record.
+> when it falls due and of the places it suggests, written from the stored record.
 
-### 5. When, and the places it names
+### 5. When, and the places it suggests
 
 > **Normative.** A task's **when** is one of: **now**; **an instant**; **a rule**; or **a hub
 > event** (§5:4). A spawn may state an instant as a delay from now, resolved to an instant
@@ -282,30 +283,32 @@ and no two wait on each other. "Compare these three apartments" is three tasks s
 and, in a later round that has their labels, a fourth timed after all three, which reads
 their episodes (§6:5).
 
-> **Normative.** A scheduled task names **zero or more places**, each one its spawner named
-> by its place label (§5:13). No place is filled in by default, and a task that names none
-> speaks nowhere.
+> **Normative.** A scheduled task carries **zero or more places its spawner suggests**, each
+> by its place label (§5:13). No place is suggested by default. A suggestion constrains
+> nothing: where the task's activation may speak is its place list (§6:7), on which the
+> suggested places are marked.
 
-> **Normative.** Until a decision on which places a spawner may name lands, a spawner may
-> name only: the place its own activation's input came from, where that place takes
+> **Normative.** Until a decision on which places a spawner may suggest lands, a spawner may
+> suggest only: the place its own activation's input came from, where that place takes
 > messages; the line's chat, where the line is connected; and, for an activation the Task
-> Scheduler started, the places its own task names.
+> Scheduler started, any place on its place list (§6:7).
 
-> **Normative.** A task that names no place may work, write records and spawn, and writes no
-> message (§6:7).
+> **Normative.** A task's activation whose place list is empty may work, write records and
+> spawn, and writes no message (§6:7).
 
-> **Normative.** Where a place a task names is gone when an occurrence falls due, the
-> occurrence goes on without it. Where every place the task names is gone, the task is
-> cancelled and nothing is pushed. A conversation is gone once deleted. The line's chat is
+> **Normative.** Where a place a task suggests is gone when an occurrence falls due, it is
+> dropped from the suggestions and the occurrence goes on. Where the task suggested places
+> and every one is gone, the task is cancelled and nothing is pushed. A conversation is gone once deleted. The line's chat is
 > gone once the line is disconnected, or once the settings name another chat.
 
-> **Normative.** Deleting a conversation removes it, in the same engine operation, from every
-> pending task that names it, and cancels each such task that then names no place still
-> there. §5:8 catches any that the deletion missed.
+> **Normative.** Deleting a conversation removes it, in the same engine operation, from the
+> suggestions of every pending task that suggests it, and cancels each such task that then
+> suggests no place still there. §5:8 catches any that the deletion missed.
 
-Some activations need no place and some need several: a chain's middle step speaks nowhere,
-and "remind me here and on Telegram" names two. A place is never an activation's home: it
-is where its task may speak, and nothing else. Deleting a conversation forgets nothing
+Some activations need no place and some need several: a chain's middle step suggests none,
+and "remind me here and on Telegram" suggests two. A suggestion is the spawner's word on
+where the matter belongs, and the activation that runs later, which knows more, decides
+among its place list. A place holds no activation: it is only where a message may go. Deleting a conversation forgets nothing
 (ADR-0292 §3:10).
 
 > **Normative.** Planning in an activation offered spawn (§3:4) is shown a short **place
@@ -315,7 +318,8 @@ is where its task may speak, and nothing else. Deleting a conversation forgets n
 
 > **Normative.** Beside those entries, the place list shows, each on its own under a place
 > label: the conversation this activation's input came from, if any; and, for an activation
-> the Task Scheduler started, each place its task names.
+> the Task Scheduler started, each place on its place list (§6:7), the suggested ones
+> marked as suggested.
 
 > **Normative.** Each entry carries a short description of what the place is. What a place
 > can do, such as whether it notifies, how it formats and who sees it, is a later decision's
@@ -331,6 +335,8 @@ is where its task may speak, and nothing else. Deleting a conversation forgets n
 > bounded by §12:5's listing bound. It is a pure read (ADR-0341 §2:1).
 
 The place list is the naming boundary: what it and the pull show is all a spawn can name.
+For an activation the Task Scheduler started, its place list (§6:7) is also the speaking
+boundary.
 The prefix `L` collides with no label kind planning has (`S`, `E`, `N`, `M`, `R`, `A`, and
 §9:2's `T`), with none understanding or the observer adds to those (`H`, `P`, `Q`, `C`), and
 with none ADR-0349's draft on #3384 adds: it labels in-progress entries with `R` for
@@ -368,20 +374,30 @@ An episode still open is never shown, as no open episode reaches a model (ADR-02
 and planning's episode window skips them today. "Remind me at 8 to call Mom about it"
 reaches its activation with its parent's episode, which says what "it" was.
 
-> **Normative.** An activation the Task Scheduler starts writes its messages only into the
-> places its task names. Where its task names none, it writes none, as ADR-0307 §3:8 keeps
-> the text of an input whose place takes no message. ADR-0306 §4:7, ADR-0307 §3:1, §3:7 and
-> §3:8 and ADR-0323 §6:1 read, for that activation, the places its task names in place of
-> the place its input came from.
+> **Normative.** An activation the Task Scheduler starts may write messages into any place on
+> its **place list**, and into none off it. Until the decision on speaking as a call in every
+> place widens it, its place list holds: the place its task was set from, where that place
+> takes messages; the line's chat, where the line is connected; and each place its task
+> suggests, marked as suggested. Each of its messages names, by its place label, the one
+> place on the list it goes into, and authorizing's message-place check (ADR-0306 §4:1)
+> refuses a message that names none or one off the list. With an empty list it writes none,
+> as ADR-0307 §3:8 keeps the text of an input whose place takes no message. ADR-0306 §4:7,
+> ADR-0307 §3:1 and §3:8 and ADR-0323 §6:1 read, for that activation, the places on its
+> place list in place of the place its input came from, and ADR-0307 §3:7's *couldn't
+> finish* goes into each suggested place on the list, or nowhere where its task suggests
+> none.
 
-> **Normative.** §6:7 holds until the decision on speaking as a call in every place lands. Milestone
-> 15 is not the milestone that ends ADR-0306's interim on ADR-0292 §7:2: planning still
-> chooses no place.
+> **Normative.** §6:7's list holds until the decision on speaking as a call in every place
+> widens it, and the rule that such an activation writes into no place off its list stays.
+> Milestone 15 is not the milestone that ends ADR-0306's interim on ADR-0292 §7:2: planning
+> in every other activation still chooses no place, and in an activation the Task Scheduler
+> starts it chooses only among its place list.
 
-> **Normative.** An activation the Task Scheduler starts is never the running activation of
-> any place its task names (ADR-0332 §2:3, ADR-0295 §1:2). Those places' admission does not
-> wait for it, their current state does not show it, and no "working…" or typing is shown for
-> it (ADR-0323 §6:8).
+> **Normative.** An activation the Task Scheduler starts is not one any conversation caused.
+> A conversation's current state, its "working…", its stop control and its admission cover
+> the activations that conversation caused (ADR-0332 §2:3, ADR-0295 §1:2), and so none of
+> them includes it, even where it writes into that conversation. The line shows no typing
+> for it (ADR-0323 §6:8).
 
 > **Normative.** Beyond §6:7, it is an ordinary activation. It is offered the capabilities
 > any activation is offered, and every call it makes is checked by rule as every call is
@@ -469,8 +485,8 @@ messages, and so does one set twice by mistake.
 > **Normative.** Where that activation's episode froze with any ending but ADR-0286 §7:2's
 > restart close, the occurrence takes the outcome §7:6 gives.
 
-> **Normative.** Where its task names a place and a message the activation claimed into one
-> of the places it names is done (ADR-0306 §5:5), the occurrence ends *done*.
+> **Normative.** Where a message the activation claimed into a place on its place list is
+> done (ADR-0306 §5:5), the occurrence ends *done*.
 
 > **Normative.** Where the occurrence was not itself a second try (§8:6), and the activation
 > claimed no effect, or only messages each *not done*, the occurrence is pushed again. It is
@@ -606,8 +622,8 @@ channel of its own; a reminder counting as its conversation's own activation (it
 which §6:9 replaces; the say-only limit (§3:7), since §6:10 applies the ordinary rules; the
 special report kind (§10), since a chain's last step says what it found; and grouping at the
 sensor (§6:4), since §7:4 groups nothing. Its question 2, whether a reminder set on the hub
-chat goes to the line, dissolves: the spawner names the places a task may speak in, the
-line's chat among them (§5:6), and the read-back says so ("I'll remind you on Telegram at
+chat goes to the line, dissolves: the spawner suggests the places, the line's chat among
+them (§5:6), and the line's chat is on every such activation's place list (§6:7), and the read-back says so ("I'll remind you on Telegram at
 8"). Snoozing is a new spawn (§9:3).
 
 ### 12. The code it binds
@@ -626,7 +642,8 @@ line's chat among them (§5:6), and the read-back says so ("I'll remind you on T
 
 > **Normative.** `PlanStore` gains members to: write a task with the spawn's effect claim and
 > §9:7–§9:8's checks in one step (§3:3, §9:9); change one (§9:4); cancel one (§9:5); remove
-> a place from every pending task naming it, cancelling those left naming none (§5:9); read
+> a place from the suggestions of every pending task, cancelling those left suggesting none
+> (§5:9); read
 > tasks by id, by person and state, and by parent; read the occurrences due at an instant
 > and the tasks whose waits have all ended (§7:3, §5:4); mark an occurrence pushed (§7:5);
 > write an occurrence's outcome (§7:6, §8); and remove a task once §7:8 holds. `PlanExport`
@@ -651,12 +668,17 @@ line's chat among them (§5:6), and the read-back says so ("I'll remind you on T
 > enumeration, and every reader of `origin` (ADR-0284 §2:3) handles it in the lane that adds
 > it.
 
+> **Normative.** `PlanningRound` gains the place its message goes into, for an activation the
+> Task Scheduler starts: the place its place label resolved to (§6:7), and nothing for any
+> other activation. Its exact shape is the triad's.
+
 ### 13. Delivery
 
 The lanes, each after this decision merges `Accepted`, held by milestone 15:
 
 1. **TS1, the triad with its primary implementation** (ADR-0137 §2:1): §12's types, the
-   `LabelKind` and `InputOrigin` members with every reader of `origin`, the register entry
+   `LabelKind` and `InputOrigin` members with every reader of `origin`, `PlanningRound`'s
+   place (§12:8), the register entry
    (§2:7), the six settings, the `PlanStore` members
    and `PlanExport`, the conformance suite, the canonical fake, and the SQLite plan store in
    `planning/` with its upgrade.
@@ -679,14 +701,15 @@ The lanes, each after this decision merges `Accepted`, held by milestone 15:
 > spawn refused on a stop record, at the chain limit and at the pending limit; a change of
 > a task with nothing pending refused; a task removed once §7:8 holds, and a restart after a
 > step's next task ran and was removed, which still never pushes that step again (§8:2); a
-> task naming two places, one of them deleted, which still speaks in the other (§5:8); a
+> task suggesting two places, one of them deleted, which still has the other on its list
+> (§5:8); a message of a task's activation naming a place off its list, refused (§6:7); a
 > spawn naming a channel's entry or a label never shown, refused (§5:13); a chain
 > stopped while its next task is pushed between the stop and the cancel, whose activation is
 > then stopped; and a deleted conversation's pending tasks cancelled.
 
 > **Normative.** TS2 adds synthetic prompt cases (ADR-0337 §3) for at least: a spawn to
 > start now; "snooze 10 minutes" right after a task's message, which is a new spawn;
-> "remind me on Telegram at 8", set on the hub chat, which names the line's chat; and a
+> "remind me on Telegram at 8", set on the hub chat, which suggests the line's chat; and a
 > cancel whose words could mean either of two tasks.
 
 ### 14. What this decision does not decide
@@ -718,11 +741,11 @@ Superseded in part. Every clause the middle column does not name stands:
 | ADR-0284 | §2:1, in the addition alone: `InputOrigin` gains `assistant`, the origin of a scheduled task's input that carries no outside-content mark | §6:3, §12:7 |
 | ADR-0292 | §5:6, in the addition alone: every scheduled task, whoever set it, informs the activation it starts and authorizes nothing; §6:8, in the addition alone: a scheduled task falling due starts an activation, though the assistant wrote it; §10:1, in the addition alone: the Task Scheduler's window holds its task's parent's and waited-on tasks' frozen episodes; §12:1's *setting a timer*: it is a spawn, written through the Task Scheduler's actuator | §3:9, §6:1, §6:5, §3:1, §4:3 |
 | ADR-0303 | §7:1, in the addition alone: an item an activation the Task Scheduler started wrote also links to its scheduled task, while the Task Scheduler holds it | §9:1 |
-| ADR-0306 | §4:7, for an activation the Task Scheduler starts: its messages go into the places its task names, or nowhere; §5:6's *never resolved by guessing* and §5:13's *never retried, done another way*, for that activation's message alone: one second try | §6:7, §8:6, §8:8 |
-| ADR-0307 | §3:1, §3:7 and §3:8, for an activation the Task Scheduler starts: they read the places its task names; §5:1, in the addition alone: the label kinds `T` and `L`; §5:6, in the addition alone: an item is shown with its scheduled task's label; §6:1, in the addition alone: planning in an activation offered spawn is given the place list | §5:10–§5:13, §6:7, §9:2 |
-| ADR-0323 | §6:1's *the chat is the input's place*, for an activation the Task Scheduler starts: the chat is one of the places its task names, and the writer still refuses any chat but the one the settings name | §6:7 |
+| ADR-0306 | §4:7, for an activation the Task Scheduler starts: each message goes into the place on its place list it names, and none goes off the list; §5:6's *never resolved by guessing* and §5:13's *never retried, done another way*, for that activation's message alone: one second try | §6:7, §8:6, §8:8 |
+| ADR-0307 | §3:1, §3:7 and §3:8, for an activation the Task Scheduler starts: they read the places on its place list, and *couldn't finish* goes into its suggested places on it; §5:1, in the addition alone: the label kinds `T` and `L`; §5:6, in the addition alone: an item is shown with its scheduled task's label; §6:1, in the addition alone: planning in an activation offered spawn is given the place list | §5:10–§5:13, §6:7, §9:2 |
+| ADR-0323 | §6:1's *the chat is the input's place*, for an activation the Task Scheduler starts: the chat is a place on its place list, and the writer still refuses any chat but the one the settings name | §6:7 |
 | ADR-0328 | §4:2, in the addition alone: no support points at an input whose origin is `assistant`, and the writer refuses one | §6:11 |
-| ADR-0329 | §13:6, in the addition alone: an activation the Task Scheduler starts writes its messages into the places its task names, and no other background work messages the user | §6:7 |
+| ADR-0329 | §13:6, in the addition alone: an activation the Task Scheduler starts writes its messages into places on its place list, and no other background work messages the user | §6:7 |
 | ADR-0338 | §2:2, in the addition alone: an activation the Task Scheduler starts is for the person its task is for | §6:4 |
 
 Read through and not superseded:
@@ -738,7 +761,7 @@ Read through and not superseded:
 | ADR-0293 §6:2, §10:4 | Nothing: a task's activation is not started from the conversation it speaks into, which the chat already permits |
 | ADR-0295, ADR-0297 | Nothing: the Task Manager's stop is their stop, and the store refuses a stopped activation's spawn (§3:3) |
 | ADR-0306 §2, §3:3, §4:1, §5:3–§5:4, §5:9 | Nothing: the five capabilities declare the five properties, run against the store each reaches, and are checked, claimed and matched as their declarations say |
-| ADR-0306 §4:7's interim on ADR-0292 §7:2 | Nothing for planning: it chooses no place, and milestone 15 does not end the interim (§6:8) |
+| ADR-0306 §4:7's interim on ADR-0292 §7:2 | Nothing for every other activation: planning chooses no place for it, and milestone 15 does not end the interim (§6:8) |
 | ADR-0317 | Nothing: it reaches activations started from a conversation, and a task's activation is not one |
 | ADR-0321 §4:1 | Nothing: an approval is used only by its yes's activation (§3:9) |
 | ADR-0332 §2:3, §3:3, §4:1, §4:6 | Nothing: the schedule runs side by side, and a task's activation never joins and is never taken over (§6) |
@@ -761,7 +784,7 @@ Read through and not superseded:
 
 - "Remind me at 8 to call Mom about it", once the reminders decision lands, is a task that
   speaks here at 8 and reads its parent's episode for what "it" was.
-- "Remind me on Telegram at 8", set on the hub chat, names the line's chat from the place
+- "Remind me on Telegram at 8", set on the hub chat, suggests the line's chat from the place
   list (§5:6, §5:10).
 - "Keep looking for apartments this week" is a step that spawns its next for tomorrow, and
   each step spawns the next until done or capped (§9:7).
@@ -840,6 +863,9 @@ contract under ADR-0137 §4:1. The reminders decision's own lanes follow both.
   ADR-0306 §5:13 forbids.
 - **A default place where a task speaks,** such as the place it was set. Rejected by the
   walk: the spawner names the places, and may name none.
+- **Suggested places as the only places a task's activation may speak in.** Rejected in the
+  owner's review of 2026-10-25: "I said it can take in a suggest place, I dont think that
+  means it should be constrained to that." The place list is the boundary (§6:7).
 - **Exactly one place per task, or none.** Rejected in the owner's review of 2026-10-25: it
   thought only of speaking. Some activations need no place and some need several, and
   "remind me on Telegram at 8", set on the hub chat, must work.
