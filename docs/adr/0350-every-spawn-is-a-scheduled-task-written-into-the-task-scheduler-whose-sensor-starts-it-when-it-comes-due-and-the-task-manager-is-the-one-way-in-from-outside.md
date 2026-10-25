@@ -132,8 +132,8 @@ the same operations.
 > **Normative.** Its kind is declared in code, as the line's is (`orchestration/channel_kinds.py`).
 > It declares that its place runs activations side by side and not one at a time (ADR-0332
 > §2:3), that it takes no message from a person or from the assistant, that it shows no
-> running work, that it expects no reply, and that it pushes and can be pulled (ADR-0292
-> §6:5).
+> running work, that it expects no reply, that it pushes and can be pulled (ADR-0292
+> §6:5), and that its place's window is empty (§6:5).
 
 > **Normative.** `core`'s register of channel types (`core/channel_validation.py`) gains the
 > Task Scheduler, which declares its origin per input (§6:3) and establishes no author as
@@ -359,8 +359,8 @@ understanding and with episode labels for planning. Preferences about places, su
 
 > **Normative.** Its input's author is the task's author, stated by the hub from the record
 > (ADR-0292 §5:1), and it carries no authority (§3:9). The input holds what the task carries,
-> when and where the task was set, the instant the occurrence was due, and whether it is late
-> (§8:9) or a second try (§8:6).
+> when and where the task was set, the instant the occurrence was due, whether it is late
+> (§8:9) or a second try (§8:6), and the links to the episodes §6:5 names.
 
 > **Normative.** Its origin is `outside` where its task carries the outside-content mark, and
 > `assistant` otherwise, a value `InputOrigin` gains (§12:7). Its text is the creator's
@@ -369,18 +369,25 @@ understanding and with episode labels for planning. Preferences about places, su
 
 > **Normative.** The activation is for the person its task is for.
 
-> **Normative.** Its window, which the Task Scheduler's kind declares (ADR-0292 §10:2), holds
-> its task's parent's episode and the episode of each task its task waited for. Each is
-> shown only where frozen, rendered through the episode window's projection (ADR-0276 §4:6)
-> under its disclosure predicate (ADR-0276 §4:9), and linked to the activation it records.
+> **Normative.** The schedule's place window is empty, which its kind declares (ADR-0292
+> §10:2): the schedule's truth is the stored task, and the task's own record reaches the
+> activation as its input (§6:2). The input links to its task's parent's episode and to the
+> episode of each task its task waited for. Each is shown only where frozen, rendered
+> through the episode window's projection (ADR-0276 §4:6) under its disclosure predicate
+> (ADR-0276 §4:9), labelled, and linked to the activation it records, as the episodes
+> recall finds are shown.
 
-> **Normative.** A task's parent and the tasks it waits for are read only as those finished
-> episodes. No running activation's state is read through them, and nothing is pushed back
-> along them.
+> **Normative.** Those linked episodes are pointers the task carries (§3:6), not anything
+> the schedule attests. A task's parent and the tasks it waits for are read only as those
+> finished episodes. No running activation's state is read through them, and nothing is
+> pushed back along them.
 
-An episode still open is never shown, as no open episode reaches a model (ADR-0286 §6:4),
+A place window is what the place itself attests. The schedule attests its stored tasks,
+and the task an activation runs is already its input, so the window adds nothing. An
+episode still open is never linked, as no open episode reaches a model (ADR-0286 §6:4),
 and planning's episode window skips them today. "Remind me at 8 to call Mom about it"
-reaches its activation with its parent's episode, which says what "it" was.
+reaches its activation with its parent's episode linked from its input, which says what
+"it" was.
 
 > **Normative.** An activation the Task Scheduler starts may write messages into any place on
 > its **place list**, and into none off it. Until the decision on speaking as a call in every
@@ -544,8 +551,9 @@ step that acted in the world and was cut off is not repeated.
 > written, the sensor asks the kind of the place it was claimed into whether it can confirm
 > delivery. Where the kind can, it confirms from its medium's own record, and the sensor
 > writes what it confirms onto the effect record (ADR-0306 §5:5): *done*, with its position,
-> where the medium recorded the message, and *not done* where it did not. Where the kind
-> cannot, or the place is gone (§5:8), the record is left as it was.
+> where the medium recorded the message, and *not done* where it did not, through §12:3's
+> settling member, since `finish_activation_effect` writes an outcome only once (ADR-0306
+> §6:4). Where the kind cannot, or the place is gone (§5:8), the record is left as it was.
 
 > **Normative.** Each kind declares whether it can confirm delivery, in
 > `orchestration/channel_kinds.py`'s shape, as it declares whether its places run one
@@ -686,7 +694,10 @@ them (§5:6), and the line's chat is on every such activation's place list (§6:
 > (§5:9); read
 > tasks by id, by person and state, and by parent; read the occurrences due at an instant
 > and the tasks whose waits have all ended (§7:3, §5:4); mark an occurrence pushed (§7:5);
-> write an occurrence's outcome (§7:6, §8); and remove a task once §7:8 holds. `PlanExport`
+> write an occurrence's outcome (§7:6, §8); settle a message's effect record whose outcome
+> is unknown or unwritten from its place's confirmation, once, to done with its position or
+> to not done, and refuse every other change to an outcome already written (§8:11); and
+> remove a task once §7:8 holds. `PlanExport`
 > gains the tasks the store holds and their occurrences, its `schema_version`
 > advances, and `PlanStore.clear` erases them (ADR-0004 §6, ADR-0292 §3:11). Exact signatures
 > are the triad's, within this list.
@@ -718,8 +729,9 @@ them (§5:6), and the line's chat is on every such activation's place list (§6:
 > record the message was claimed under (ADR-0306 §5:4), and `ConversationStore.append_message`
 > records it with the message. `ConversationStore` gains a read answering, for a
 > conversation and such an id, whether the conversation holds the message written under it,
-> deleted or not, and at what position. The id is shown on no message a device reads and
-> carried in no export. Exact names are that triad's (§13).
+> deleted or not, and at what position. The id is shown on no message a device reads. It is
+> carried in the conversations' export with its message (`ConversationExport`, ADR-0004
+> §6), whose `schema_version` advances. Exact names are that triad's (§13).
 
 ### 13. Delivery
 
@@ -803,10 +815,10 @@ Superseded in part. Every clause the middle column does not name stands:
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
 | ADR-0284 | §2:1, in the addition alone: `InputOrigin` gains `assistant`, the origin of a scheduled task's input that carries no outside-content mark | §6:3, §12:7 |
-| ADR-0292 | §5:6, in the addition alone: every scheduled task, whoever set it, informs the activation it starts and authorizes nothing; §6:8, in the addition alone: a scheduled task falling due starts an activation, though the assistant wrote it; §10:1, in the addition alone: the Task Scheduler's window holds its task's parent's and waited-on tasks' frozen episodes; §12:1's *setting a timer*: it is a spawn, written through the Task Scheduler's actuator | §3:9, §6:1, §6:5, §3:1, §4:3 |
+| ADR-0292 | §5:6, in the addition alone: every scheduled task, whoever set it, informs the activation it starts and authorizes nothing; §6:8, in the addition alone: a scheduled task falling due starts an activation, though the assistant wrote it; §10:1, for the schedule alone: its place window is empty, and its activation's input links to its task's parent's and waited-on tasks' frozen episodes; §12:1's *setting a timer*: it is a spawn, written through the Task Scheduler's actuator | §3:9, §6:1, §6:5, §3:1, §4:3 |
 | ADR-0293 | §5:2's table, in the addition alone: an assistant's message also records the effect record it was claimed under, kept for confirming delivery after a restart and shown on no device | §8:12, §12:9 |
 | ADR-0303 | §7:1, in the addition alone: an item an activation the Task Scheduler started wrote also links to its scheduled task, while the Task Scheduler holds it | §9:1 |
-| ADR-0306 | §4:7, for an activation the Task Scheduler starts: each message goes into the place on its place list it names, and none goes off the list; §5:6's *never resolved by guessing* and §5:13's *never retried, done another way*, for that activation's message alone: one second try, where its place's kind cannot confirm delivery | §6:7, §8:6, §8:8 |
+| ADR-0306 | §6:4, in the addition alone: a message's record whose outcome is unknown or unwritten is settled once more from its place's confirmation (§8:11, §12:3); §4:7, for an activation the Task Scheduler starts: each message goes into the place on its place list it names, and none goes off the list; §5:6's *never resolved by guessing* and §5:13's *never retried, done another way*, for that activation's message alone: one second try, where its place's kind cannot confirm delivery | §6:7, §8:6, §8:8, §8:11, §12:3 |
 | ADR-0307 | §3:1, §3:7 and §3:8, for an activation the Task Scheduler starts: they read the places on its place list, and *couldn't finish* goes into its suggested places on it; §5:1, in the addition alone: the label kinds `T` and `L`; §5:6, in the addition alone: an item is shown with its scheduled task's label; §6:1, in the addition alone: planning in an activation offered spawn is given the place list | §5:10–§5:13, §6:7, §9:2 |
 | ADR-0323 | §6:1's *the chat is the input's place*, for an activation the Task Scheduler starts: the chat is a place on its place list, and the writer still refuses any chat but the one the settings name | §6:7 |
 | ADR-0328 | §4:2, in the addition alone: no support points at an input whose origin is `assistant`, and the writer refuses one | §6:11 |
