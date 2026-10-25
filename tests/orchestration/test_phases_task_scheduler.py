@@ -23,6 +23,7 @@ from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ActivationStop,
     ChannelIdentity,
+    DueAfterTasks,
     DueAt,
     DueNow,
     EpisodicMemory,
@@ -52,7 +53,7 @@ if TYPE_CHECKING:
 
     from test_engine import Harness
 
-    from ai_assistant.core.types import Message, OfferedTool
+    from ai_assistant.core.types import Message, OfferedTool, ScheduledTask
 
 
 def _request(messages: Sequence[Message]) -> dict[str, Any]:
@@ -505,5 +506,78 @@ async def test_a_task_whose_conversation_was_deleted_speaks_on_the_line() -> Non
             return not held or held[0].occurrences[0].state is OccurrenceState.DONE
 
         await until(done, what="the occurrence to end done")
+    finally:
+        await harness.engine.aclose()
+
+
+class _OutcomeWriteFailsOnce(FakePlanStore):
+    """A plan store whose first write of an occurrence's outcome fails."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+        self.failed = False
+
+    async def settle_occurrence(
+        self, activation_id: str, state: OccurrenceState, /, *, second_try: bool = False
+    ) -> ScheduledTask:
+        if not self.failed and state is not OccurrenceState.PENDING:
+            self.failed = True
+            msg = "the plan store is busy"
+            raise PlanningError(msg)
+        return await super().settle_occurrence(activation_id, state, second_try=second_try)
+
+
+async def test_an_outcome_the_store_failed_to_take_is_settled_and_what_waits_runs() -> None:
+    """§7:6-§7:7: a task waiting on one whose outcome write failed still falls due."""
+    plans = _OutcomeWriteFailsOnce()
+    harness = phases_harness(_responder(_silent, _silent), task_scheduler=seams(), plans=plans)
+    parent = activation()
+    first = await write_task(plans, parent, instruction="the first step")
+    await write_task(
+        plans, parent, when=DueAfterTasks(tasks=(first.id,)), instruction="the gathering step"
+    )
+    await harness.engine.start()
+    try:
+        await _until_scheduled(harness, 2)
+        assert plans.failed
+        await _until_no_tasks(harness)
+    finally:
+        await harness.engine.aclose()
+
+
+async def test_a_child_that_ends_before_its_scheduled_parent_is_removed_with_it() -> None:
+    """§7:8: once the parent ends, nothing of it or below it is live, so all are removed."""
+    child_done = asyncio.Event()
+
+    class _Parent(FakeToolCallingCompleter):
+        async def respond(
+            self, messages: Sequence[Message], tools: Sequence[OfferedTool], **_: Any
+        ) -> RoundResponse:
+            request = _request(messages)
+            window = json.dumps(request["place_window"])
+            if "the child step" in window:
+                child_done.set()
+                return RoundResponse(text="")
+            if not request["rounds"]:
+                spawn = ProposedCall(
+                    call_id="spawn-1",
+                    name="spawn",
+                    arguments={"instruction": "the child step"},
+                )
+                return RoundResponse(calls=(spawn,))
+            # The parent's next round runs on until its child has ended.
+            await asyncio.wait_for(child_done.wait(), 5)
+            for _attempt in range(500):
+                if len(await _schedule_episodes(harness)) >= 1:
+                    break
+                await asyncio.sleep(0.002)
+            return RoundResponse(text="")
+
+    harness = phases_harness(_Parent(), task_scheduler=seams())
+    await write_task(harness.plans, activation(), instruction="the parent step")
+    await harness.engine.start()
+    try:
+        await _until_scheduled(harness, 2)
+        await _until_no_tasks(harness)
     finally:
         await harness.engine.aclose()

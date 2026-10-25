@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from task_support import AT, CHAT, LIMITS, LINE, activation, pushed, spawn_effect, write_task
 
-from ai_assistant.core.errors import ClaimStopped
+from ai_assistant.core.errors import ClaimStopped, ConversationStoreError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ActionRequest,
@@ -48,7 +48,7 @@ from ai_assistant.orchestration.task_scheduler import (
 from ai_assistant.testing import FakeConversationStore, FakeMemoryStore, FakePlanStore
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import FrozenJson, ToolDefinition
+    from ai_assistant.core.types import Conversation, FrozenJson, ToolDefinition
 
 
 class _World:
@@ -459,3 +459,22 @@ async def test_overlapping_waits_are_all_removed_whichever_order_the_walk_meets_
         await world.manager.tidy([gather.id])
 
         assert (await world.plans.export()).scheduled_tasks == ()
+
+
+class _GetFails(FakeConversationStore):
+    """A conversation store whose reads of a conversation fail."""
+
+    async def get(self, conversation_id: str) -> Conversation | None:
+        msg = "the conversation store is busy"
+        raise ConversationStoreError(msg)
+
+
+async def test_a_conversation_that_cannot_be_read_stays_on_the_list() -> None:
+    """§5:8: a failed read is no answer that the conversation was deleted."""
+    conversations = _GetFails(now=lambda: AT)
+
+    shown = await PlaceLists(conversations=conversations).shown(
+        input_place=None, suggested=["conversation:c-9"]
+    )
+
+    assert [(one.place, one.suggested) for one in shown] == [("conversation:c-9", True)]

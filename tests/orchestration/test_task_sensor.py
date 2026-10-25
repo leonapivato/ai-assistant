@@ -7,6 +7,7 @@ the first that applies deciding, after the confirmation §8:11 makes of each mes
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -382,3 +383,57 @@ async def test_a_transcript_that_cannot_be_read_settles_nothing_until_it_can() -
     assert await world.sensor.settle_restart() is True
     occurrence = await world.state(task)
     assert (occurrence.state, occurrence.second_try) == (OccurrenceState.DONE, False)
+
+
+class _Unreadable(FakeConversationStore):
+    """A transcript that cannot be read until a case lets it."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+        self.readable = False
+
+    async def effect_position(self, conversation_id: str, effect_id: str, /) -> int | None:
+        if not self.readable:
+            msg = "the transcript is busy"
+            raise ConversationStoreError(msg)
+        return await super().effect_position(conversation_id, effect_id)
+
+
+async def test_nothing_is_pushed_until_what_a_restart_left_is_settled() -> None:
+    """§8:1: settled before anything is pushed, however long the transcript stays unread."""
+    world = _World()
+    world.conversations = _Unreadable()
+    world.sensor = TaskSchedulerSensor(
+        plans=world.plans,
+        memory=world.memory,
+        conversations=world.conversations,
+        push=world._push,
+        is_running=lambda one: one in world.running,
+        settled=world._settled,
+        closing=lambda: False,
+        persons=(OWNER_PERSON_ID,),
+        limits=SensorLimits(recheck=timedelta(milliseconds=5), push_limit=3),
+        now=lambda: AT,
+    )
+    conversation = await world.conversations.start()
+    place = CHAT.model_copy(update={"instance_id": conversation.id})
+    cut_off = await write_task(world.plans, activation(), places=(place,))
+    await message(world.plans, await pushed(world.plans, cut_off), place)
+    due = await write_task(world.plans, activation())
+    running = asyncio.create_task(world.sensor.run())
+    try:
+        await asyncio.sleep(0.05)
+        assert world.pushes == []
+        assert (await world.state(cut_off)).state is OccurrenceState.PUSHED
+
+        world.conversations.readable = True
+        for _ in range(200):
+            if world.pushes:
+                break
+            await asyncio.sleep(0.005)
+        assert [one.task.id for one in world.pushes] == [cut_off.id, due.id] or [
+            one.task.id for one in world.pushes
+        ] == [due.id, cut_off.id]
+    finally:
+        world.sensor.close()
+        await asyncio.wait_for(running, 1)
