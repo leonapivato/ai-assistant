@@ -120,6 +120,8 @@ acted.
 >   place's start wait: it waits for the correction's activation, which absorbs it;
 > - an input names in `cancels` an activation that a middle one absorbs while the input's
 >   takeover waits: the cancel follows forward and stops the middle one;
+> - an activation that failed before its first round and wrote *couldn't finish*: a
+>   findings look-up shows that fixed line with its outcome, and nothing else it did;
 > - two older activations on different places, neither yet understood, and a newer input
 >   continuing one of them: the in-progress entries show each one's input, and only the
 >   one named is absorbed;
@@ -351,8 +353,9 @@ up.
 > - what it found: its rounds' episode notes (ADR-0307 §4) and its digests' answers with
 >   their evidence, each item with its mark (ADR-0308 §5:5);
 > - what it did: each of its effect records (ADR-0306 §5:3) whose outcome is done or
->   unknown, a call shown by its capability and a message by the message of the round the
->   record names, each with that outcome.
+>   unknown, each with that outcome: a call shown by its capability; a message by the
+>   message of the round the record names; and the *couldn't finish* message, whose record
+>   names no round (ADR-0307 §10), as a fixed line saying the activation could not finish.
 
 > **Normative.** The peer view never shows another activation's recall results, story
 > links, failed calls, drafts or approvals, nor anything that activation read from another:
