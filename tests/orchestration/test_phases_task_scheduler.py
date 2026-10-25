@@ -581,3 +581,37 @@ async def test_a_child_that_ends_before_its_scheduled_parent_is_removed_with_it(
         await _until_no_tasks(harness)
     finally:
         await harness.engine.aclose()
+
+
+async def test_a_known_outcome_the_store_failed_to_take_is_written_as_decided() -> None:
+    """§7:6: a step that spawned its next and completed ends done, never interrupted."""
+
+    def step(request: dict[str, Any]) -> RoundResponse:
+        if request["rounds"]:
+            return RoundResponse(text="")
+        spawn = ProposedCall(
+            call_id="spawn-1",
+            name="spawn",
+            arguments={"instruction": "the next step", "delay_minutes": 1440},
+        )
+        return RoundResponse(calls=(spawn,))
+
+    plans = _OutcomeWriteFailsOnce()
+    harness = phases_harness(_responder(_silent, step), task_scheduler=seams(), plans=plans)
+    first = await write_task(plans, activation(), instruction="the first step")
+    await harness.engine.start()
+    try:
+        (episode,) = await _until_scheduled(harness, 1)
+        assert episode.processing_record is not None
+        assert episode.processing_record.status is ProcessingStatus.COMPLETED
+
+        async def settled() -> bool:
+            held = await plans.scheduled_tasks([first.id])
+            return bool(held) and held[0].occurrences[0].state is OccurrenceState.DONE
+
+        await until(settled, what="the first step to end done")
+        assert plans.failed
+        (following,) = [one for one in (await plans.export()).scheduled_tasks if one.id != first.id]
+        assert following.pending
+    finally:
+        await harness.engine.aclose()

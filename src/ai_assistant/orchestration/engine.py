@@ -2187,6 +2187,9 @@ class Engine:
         #: Each activation the Task Scheduler started, from its admission until its
         #: occurrence's outcome is written (§7:6).
         self._admitted: set[str] = set()
+        #: Each such activation's outcome, by its id, where the store failed to take it
+        #: when the activation ended: written again at the sensor's next look (§7:6).
+        self._unwritten: dict[str, OccurrenceState] = {}
         if task_scheduler is not None:
             self._wire_task_scheduler(task_scheduler, plans=plans, memory=memory)
         # ADR-0298 §7: the engine's half of the change stream, over the same chat
@@ -6676,6 +6679,7 @@ class Engine:
             push=self._push_occurrence,
             is_running=self._is_live,
             settled=self._occurrence_settled,
+            retry=self._write_unwritten,
             closing=lambda: self._closing,
             persons=seams.persons,
             limits=SensorLimits(recheck=seams.recheck, push_limit=seams.push_limit),
@@ -6709,8 +6713,26 @@ class Engine:
         return (
             activation_id in self._pushed
             or activation_id in self._admitted
+            or activation_id in self._unwritten
             or self._running_state(activation_id) is not None
         )
+
+    async def _write_unwritten(self) -> None:
+        """Write again each outcome the store failed to take when its activation ended.
+
+        ADR-0350 §7:6: the outcome is how the activation ended, known when it ended, so
+        it is written as it was decided; a write that fails again is held for the next.
+        """
+        for activation_id, outcome in list(self._unwritten.items()):
+            try:
+                settled = await self._plans.settle_occurrence(activation_id, outcome)
+            except PlanningError:
+                _log.warning(
+                    "task_outcome_unwritten", stage="task_scheduler", reason="store_failed"
+                )
+                continue
+            self._unwritten.pop(activation_id, None)
+            await self._occurrence_settled(settled)
 
     def _wake_sensor(self) -> None:
         if self._task_sensor is not None:
@@ -6929,11 +6951,11 @@ class Engine:
         try:
             settled = await self._plans.settle_occurrence(activation_id, outcome)
         except PlanningError:
-            # Left pushed and running nowhere: the sensor settles it from its records
-            # before it pushes anything more (§8:1-§8:3 give the same outcome).
+            # The outcome is known: it is held, and written again at the sensor's next
+            # look, never classified again as a restart would (§7:6).
             _log.warning("task_outcome_unwritten", stage="task_scheduler", reason="store_failed")
-            if self._task_sensor is not None:
-                self._task_sensor.unsettled()
+            self._unwritten[activation_id] = outcome
+            self._wake_sensor()
             return
         await self._occurrence_settled(settled)
 

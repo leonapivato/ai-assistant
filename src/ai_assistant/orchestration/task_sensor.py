@@ -162,6 +162,7 @@ class TaskSchedulerSensor:
         persons: Sequence[str],
         limits: SensorLimits,
         now: Clock,
+        retry: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Wire the sensor.
 
@@ -178,6 +179,8 @@ class TaskSchedulerSensor:
             persons: The people whose pushed occurrences a restart settles.
             limits: §12:5's recheck interval and push limit.
             now: The wall clock, in UTC (§7:3).
+            retry: Writes again what the engine failed to write when an activation it
+                admitted ended, run before each look; ``None`` writes nothing.
         """
         self._plans = plans
         self._memory = memory
@@ -189,6 +192,7 @@ class TaskSchedulerSensor:
         self._persons = tuple(persons)
         self._limits = limits
         self._now = now
+        self._retry = retry
         self._woken = asyncio.Event()
         self._stopped = False
         #: Whether a pushed occurrence may be left unsettled: a restart's settlement that
@@ -198,11 +202,6 @@ class TaskSchedulerSensor:
 
     def wake(self) -> None:
         """Wake the loop: a task was written, or an occurrence ended (§7:2, §7:7)."""
-        self._woken.set()
-
-    def unsettled(self) -> None:
-        """An occurrence may be left pushed and running nowhere: settle before pushing."""
-        self._unsettled = True
         self._woken.set()
 
     def close(self) -> None:
@@ -222,10 +221,15 @@ class TaskSchedulerSensor:
         self._unsettled = True
         while not self._done():
             self._woken.clear()
+            if self._retry is not None:
+                await self._retry()
             if self._unsettled:
                 # §8:1: what a restart, or a store failure, left pushed and running
                 # nowhere is settled before anything is pushed; until it is, nothing is.
-                self._unsettled = not await self.settle_restart()
+                # The flag is taken before the pass, so a request made during it holds.
+                self._unsettled = False
+                if not await self.settle_restart():
+                    self._unsettled = True
             if self._unsettled:
                 wait = min(self._limits.recheck.total_seconds(), _BACKOFF_SECONDS)
             else:
