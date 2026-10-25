@@ -285,6 +285,7 @@ async def test_nothing_kept_says_why_in_framings_own_words() -> None:
         "failed": 0,
         "nothing": "said once, in passing",
         "placed": [],
+        "set_aside": [],
     }
 
 
@@ -319,6 +320,50 @@ async def test_an_unclear_placement_is_in_the_outcome_entry() -> None:
     assert placed["relations"] == [{"memory": "m-seat", "relation": "unclear"}]
     assert placed["unclear"] == [
         {"memory": "m-seat", "wording": _CLAIM, "note": "Which trip is not shown."}
+    ]
+
+
+async def test_what_code_set_aside_of_a_placement_reply_is_in_the_outcome_entry() -> None:
+    """#3398: a list of answers is read, and every entry not taken is shown, not lost."""
+    harness = Harness()
+    await harness.hold(
+        episode("past", at=SINCE - timedelta(days=1), text="Window seats."),
+        Memory.model_validate(memory("m-seat", _CLAIM, said_support(address("past"))).model_dump()),
+    )
+    await _three(harness)
+    sink = FakeDiagnosticSink()
+    observer = harness.observer(
+        scout=FakeModelProvider(reply=_scout("P1")),
+        commit=FakeModelProvider.scripted(
+            framing(framed(_CLAIM, "P1")),
+            json.dumps(
+                {
+                    "relations": [{"memory": "M1", "relation": "restates", "note": "Same."}],
+                    "answers": [{"memory": "M1", "question": "Q4"}],
+                }
+            ),
+        ),
+        diagnostics=sink,
+    )
+
+    await observer.run()
+
+    (outcome,) = [
+        one
+        for one in sink.recorded
+        if _body(one)["stage"] == "outcome" and one.activation_id == "one"
+    ]
+    assert _body(outcome)["outcome"]["writes"], "the attempt was not failed for the list"
+    assert _body(outcome)["decided"]["set_aside"] == [
+        {
+            "wording": _CLAIM,
+            "set_aside": [
+                {
+                    "answer": {"memory": "M1", "question": "Q4"},
+                    "why": "no open question shown under these labels",
+                }
+            ],
+        }
     ]
 
 

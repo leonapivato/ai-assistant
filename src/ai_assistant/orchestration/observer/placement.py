@@ -18,19 +18,38 @@ compact form is computed, never written by a model, and the call makes no furthe
 (§6:3); it changes nothing of the framed memory (§6:4). Where nothing is retrieved there
 is nothing to place, and no call is made.
 
-**What code holds of a reply.** A reply that names a memory it was not shown, leaves one
-unplaced, names one twice, names a relation outside the closed set, leaves out a note a
-relation needs, or answers a question it was not shown, is refused as a reply that does
-not parse is (ADR-0329 §16:4): a placement the writer would refuse is never sent to it.
+**What code holds of a reply** (#3398). A placement the writer would refuse is never sent
+to it, and a reply is read pair by pair rather than refused whole for one pair, so the same
+reply to the same input cannot fail an attempt every time it is retried:
+
+- a pair naming a relation outside the closed set, or leaving out a note its relation
+  needs, is read as ``unclear``, with a code-owned note saying the reply placed nothing
+  readable there (ADR-0345 §4:3): it writes nothing on the stored memory, and the outcome
+  keeps it (ADR-0346 §6:5);
+- a memory shown that the reply leaves unplaced, or names more than once, is ``unclear``
+  likewise, and a pair naming a memory it was not shown is set aside;
+- ``answers`` may be one object, a list or null: the first entry naming an open question
+  shown, on a memory shown, is the one answered (§6:2's at most one), and every other entry
+  is set aside, never failing the attempt.
+
+What code set aside goes to the diagnostic record. A reply placing no memory shown readably
+at all is no placement, and is refused as a reply that does not parse is (ADR-0329
+§16:4), to be retried.
+
+**No label of the call reaches stored text** (#3402). A relation's note is carried by
+every support and operation its write makes, and a ``recheck`` asks in its words
+(ADR-0345 §5:7, §5:9), so each label the call was shown that a note cites, ``M1`` or
+``Q1``, is put in words: a memory's label by its wording, a question's by what it asks.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Final, Self
 
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError, model_validator
 
 from ai_assistant.core.types import (
     EpisodicMemory,
@@ -59,7 +78,7 @@ from ai_assistant.orchestration.support_parts import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping, Sequence, Set
 
     from ai_assistant.core.prompts import RenderedPrompt
     from ai_assistant.core.protocols import MemoryStore, PlanStore
@@ -71,10 +90,13 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "UNREAD_NOTE",
+    "PlacementRead",
     "PlacementReply",
     "PlacementView",
     "Retrieved",
     "compacted",
+    "in_words",
     "narrows",
     "placement_messages",
     "placement_of",
@@ -82,35 +104,63 @@ __all__ = [
 ]
 
 
+#: The note code gives a pair the reply placed nothing readable on (ADR-0345 §4:3): its
+#: relation is ``unclear``, which writes nothing on the stored memory.
+UNREAD_NOTE: Final = "the placement call named no relation of the set, with its note, here"
+
+#: A label the placement call is shown, as a note may cite it: a memory's or a question's.
+_LABEL: Final = re.compile(r"\b[MQ][0-9]+\b")
+
+
 class _Relation(BaseModel):
-    """One relation as the placement call names it: of ADR-0345 §4's set, with its note."""
+    """One relation as the placement call names it, read as ``unclear`` where unreadable.
+
+    A relation outside ADR-0345 §4's set, or one left without the note it needs (§4:1),
+    is read as ``unclear`` with :data:`UNREAD_NOTE`, so what the stage reads of a reply is
+    what any reader of this shape reads of it.
+    """
 
     model_config = ConfigDict(frozen=True, extra="ignore")
-    memory: str
-    relation: str
-    note: str = ""
+    memory: str | None = None
+    relation: str | None = None
+    note: str | None = None
 
     @model_validator(mode="after")
     def _of_the_set_with_its_note(self) -> Self:
-        relation = PlacedRelation(self.relation.strip())
-        if relation is not PlacedRelation.INDEPENDENT and not self.note.strip():
-            msg = f"a {relation} relation says in words how the two relate (ADR-0345 §4:1)"
-            raise ValueError(msg)
+        named = (self.relation or "").strip()
+        note = (self.note or "").strip()
+        relation = next((one for one in PlacedRelation if one.value == named), None)
+        if relation is None or (relation is not PlacedRelation.INDEPENDENT and not note):
+            return self.model_copy(
+                update={"relation": PlacedRelation.UNCLEAR.value, "note": UNREAD_NOTE}
+            )
         return self
 
 
-class _Answer(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="ignore")
-    memory: str
-    question: str
-
-
 class PlacementReply(BaseModel):
-    """The placement call's whole reply: a relation for each memory shown (§6:2)."""
+    """The placement call's whole reply: a relation for each memory shown (§6:2).
+
+    ``answers`` is read by :func:`placement_of`, as one object, a list of them or null.
+    """
 
     model_config = ConfigDict(frozen=True, extra="ignore")
     relations: tuple[_Relation, ...] = ()
-    answers: _Answer | None = None
+    answers: JsonValue = None
+
+
+@dataclass(frozen=True, slots=True)
+class PlacementRead:
+    """The placement a reply states, and what code set aside of the reply to state it.
+
+    Attributes:
+        placement: The placement, every memory shown named once.
+        set_aside: Each piece of the reply code did not take as it stood, with why, for
+            the diagnostic record (ADR-0333 §2:5): a pair read as ``unclear``, a pair
+            naming a memory not shown, and every answer but the one taken.
+    """
+
+    placement: MemoryPlacement
+    set_aside: tuple[dict[str, FrozenJson], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +272,7 @@ async def retrieved(  # noqa: PLR0913 — the memory, the stores, and the root's
     threshold: float,
     bound: int,
     recent: int,
+    siblings: Set[str] = frozenset(),
 ) -> tuple[Retrieved, ...]:
     """The stored memories similar enough to ``framed``, in their compact forms (§6:1).
 
@@ -229,6 +280,10 @@ async def retrieved(  # noqa: PLR0913 — the memory, the stores, and the root's
     a person it names, in either field, each once, up to ``bound`` in all, as the store
     holds them now. Each person's are read by the store's person filter, bound before the
     ranking cut (ADR-0345 §9:6).
+
+    A memory framed from the same finding is a sibling, not prior knowledge, and is never
+    retrieved for it (#3401): siblings usually rest on the same part, so a fold onto one
+    adds nothing, and a wrong ``contained`` would lose the claim with no write to show it.
 
     Args:
         framed: The memory as framed.
@@ -238,6 +293,7 @@ async def retrieved(  # noqa: PLR0913 — the memory, the stores, and the root's
         threshold: The least relevance a memory is retrieved at by its wording alone.
         bound: The most memories retrieved.
         recent: The most recent supports each is shown with in full.
+        siblings: The ids of the memories framed from the same finding, as installed.
 
     Returns:
         The memories, labelled ``M1`` onward.
@@ -248,21 +304,24 @@ async def retrieved(  # noqa: PLR0913 — the memory, the stores, and the root's
     """
     if bound < 1:
         return ()
+    left_out = {framed.id, *siblings}
+    # Searched past the bound by as many siblings as may be left out, so the bound fills.
+    limit = bound + len(siblings)
     found: dict[str, Memory] = {}
-    relevant = await memory.search(framed.content, limit=bound, kinds=(MemoryKind.MEMORY,))
+    relevant = await memory.search(framed.content, limit=limit, kinds=(MemoryKind.MEMORY,))
     for one in relevant.records:
-        if isinstance(one, Memory) and (one.score or 0.0) >= threshold:
+        if isinstance(one, Memory) and one.id not in left_out and (one.score or 0.0) >= threshold:
             found.setdefault(one.id, one)
     for person in dict.fromkeys((*(framed.subjects or ()), *(framed.involved or ()))):
         if len(found) >= bound:
             break
         named = await memory.search(
-            framed.content, limit=bound, kinds=(MemoryKind.MEMORY,), person=person
+            framed.content, limit=limit, kinds=(MemoryKind.MEMORY,), person=person
         )
         for one in named.records:
-            if isinstance(one, Memory):
+            if isinstance(one, Memory) and one.id not in left_out:
                 found.setdefault(one.id, one)
-    memories = [one for one in found.values() if one.id != framed.id][:bound]
+    memories = list(found.values())[:bound]
     return await compacted(memories, memory=memory, plans=plans, recent=recent)
 
 
@@ -371,44 +430,128 @@ def placement_messages(view: PlacementView, instruction: RenderedPrompt) -> list
     ]
 
 
-def placement_of(reply: PlacementReply, view: PlacementView) -> MemoryPlacement | None:
-    """The placement a reply states, or ``None`` where it does not state one (§6:2).
+def placement_of(reply: PlacementReply, view: PlacementView) -> PlacementRead | None:
+    """The placement a reply states, or ``None`` where it places nothing shown (§6:2).
 
-    Each memory shown is named once, by a relation of ADR-0345 §4's set, with a note for
-    every relation but ``independent``; at most one open question it answers, on a memory
-    it names, by a label it was shown. The revision is the one each was read at (§6:6).
+    Each memory shown is named once, by the one pair the reply names it in where that pair
+    is readable, and as ``unclear`` with :data:`UNREAD_NOTE` where the reply leaves it
+    unplaced, names it twice, or names no relation of the set with its note there (ADR-0345
+    §4:3). A pair naming a memory not shown is set aside. The answer is the first entry of
+    ``answers`` naming a question shown, on a memory shown; every other is set aside. Each
+    note's labels are put in words (:func:`in_words`). The revision is the one each was read
+    at (§6:6).
 
     Args:
         reply: The placement call's parsed reply.
         view: What it was shown.
 
     Returns:
-        The placement, or ``None``, refused as a reply that does not parse.
+        The placement and what was set aside of the reply, or ``None``, refused as a reply
+        that does not parse, where no memory shown is placed readably.
     """
-    named: dict[str, _Relation] = {}
+    aside: list[dict[str, FrozenJson]] = []
+    named: dict[str, list[_Relation]] = {}
     for one in reply.relations:
-        if view.memory(one.memory) is None or one.memory in named:
-            return None
-        named[one.memory] = one
-    if set(named) != {one.handle for one in view.retrieved}:
-        return None
-    try:
-        pairs = tuple(
-            PlacedPair(
-                memory=one.memory.id,
-                revision=one.memory.revision,
-                relation=PlacedRelation(named[one.handle].relation.strip()),
-                note=named[one.handle].note.strip(),
+        label = (one.memory or "").strip()
+        if view.memory(label) is None:
+            aside.append({"memory": label, "why": "no memory was shown under this label"})
+            continue
+        named.setdefault(label, []).append(one)
+    pairs: list[PlacedPair] = []
+    readable = False
+    for shown in view.retrieved:
+        given = named.get(shown.handle, [])
+        relation, note = PlacedRelation.UNCLEAR, UNREAD_NOTE
+        if len(given) == 1 and given[0].note != UNREAD_NOTE:
+            relation = PlacedRelation((given[0].relation or "").strip())
+            note = in_words((given[0].note or "").strip(), view)
+            readable = True
+        elif given:
+            why = "named more than once" if len(given) > 1 else "no relation of the set"
+            aside.append({"memory": shown.handle, "why": why})
+        else:
+            aside.append({"memory": shown.handle, "why": "left unplaced"})
+        try:
+            pairs.append(
+                PlacedPair(
+                    memory=shown.memory.id,
+                    revision=shown.memory.revision,
+                    relation=relation,
+                    note=note,
+                )
             )
-            for one in view.retrieved
-        )
-        answers = None
-        if reply.answers is not None:
-            shown = view.memory(reply.answers.memory)
-            question = None if shown is None else shown.questions.get(reply.answers.question)
-            if shown is None or question is None:
-                return None
-            answers = PlacedAnswer(memory=shown.memory.id, question=question)
-        return MemoryPlacement(pairs=pairs, answers=answers)
-    except ValueError, ValidationError:
+        except ValidationError:
+            return None
+    if not readable:
         return None
+    answers, unanswered = _answered(reply.answers, view)
+    aside.extend(unanswered)
+    try:
+        placement = MemoryPlacement(pairs=tuple(pairs), answers=answers)
+    except ValidationError:
+        return None
+    return PlacementRead(placement=placement, set_aside=tuple(aside))
+
+
+def _answered(
+    answers: JsonValue, view: PlacementView
+) -> tuple[PlacedAnswer | None, list[dict[str, FrozenJson]]]:
+    """The one question a reply's ``answers`` names, and every other entry, set aside.
+
+    One object, a list of them or null (#3398): the first entry naming an open question
+    shown, on a memory shown, is taken, as ADR-0346 §6:2 allows one; the rest are set
+    aside with why, never refusing the reply.
+    """
+    entries = answers if isinstance(answers, list) else [] if answers is None else [answers]
+    taken: PlacedAnswer | None = None
+    aside: list[dict[str, FrozenJson]] = []
+    for entry in entries:
+        memory = entry.get("memory") if isinstance(entry, dict) else None
+        question = entry.get("question") if isinstance(entry, dict) else None
+        shown = view.memory(memory.strip()) if isinstance(memory, str) else None
+        asked = (
+            shown.questions.get(question.strip())
+            if shown is not None and isinstance(question, str)
+            else None
+        )
+        if shown is None or asked is None:
+            aside.append({"answer": entry, "why": "no open question shown under these labels"})
+        elif taken is not None:
+            aside.append({"answer": entry, "why": "a placement answers one question at most"})
+        else:
+            taken = PlacedAnswer(memory=shown.memory.id, question=asked)
+    return taken, aside
+
+
+def in_words(note: str, view: PlacementView) -> str:
+    """``note`` with every label the call was shown put in words (#3402).
+
+    A memory's label becomes its wording, quoted, and a question's what it asks, quoted:
+    the labels are the call's own, and mean nothing, or something else, once the note is
+    stored (ADR-0345 §5:7). A label the call was not shown is left as written, since it
+    names nothing the call was given and may be the person's own text.
+
+    Args:
+        note: A relation's note as the reply gives it.
+        view: What the call was shown.
+
+    Returns:
+        The note, citing no label of the call.
+    """
+    asks: dict[str, str] = {}
+    for one in view.retrieved:
+        wanted = {question: label for label, question in one.questions.items()}
+        for question in one.memory.open_questions:
+            if question.id in wanted:
+                asks[wanted[question.id]] = question.asks
+
+    def worded(match: re.Match[str]) -> str:
+        label = match.group(0)
+        shown = view.memory(label)
+        if shown is not None:
+            return json.dumps(shown.memory.content, ensure_ascii=False)
+        if label in asks:
+            return json.dumps(asks[label], ensure_ascii=False)
+        return label
+
+    return _LABEL.sub(worded, note)
