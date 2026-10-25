@@ -49,6 +49,14 @@ existing conversation's transcript empty; the episode-record format marker does 
 move, because no existing row changes shape. Every write to them, and the change it
 records, is in the one ``IMMEDIATE`` transaction of the act that makes it.
 
+**A message records the claim it was written under** (ADR-0350 §12:9): ``messages``
+holds ``effect_id``, the effect record an assistant's message was claimed under, kept
+when the message is deleted and selected by no read a device is answered from. A file
+written before the column, at the label 12, is upgraded in place when the store opens
+(ADR-0326 §4:1): the column is added, every message it holds keeps every byte and
+carries no effect id, and the label advances to the conversation store's own, which an
+older build refuses (§5:3).
+
 **There is no observation watermark** (ADR-0285 §4). The schema creates no
 ``observed_through`` column and nothing adds one to an existing file. Nothing drops
 it either: a file written by an earlier build that still carries the column is
@@ -93,6 +101,7 @@ from ai_assistant.core.types import (
     DeviceChanges,
     DeviceConversation,
     DevicesChangedChange,
+    ExportedMessage,
     Identifier,
     MessageAddedChange,
     MessageAuthor,
@@ -106,9 +115,10 @@ from ai_assistant.core.types import (
     describe_untrusted,
 )
 from ai_assistant.memory._episode_format import (
-    EPISODE_RECORD_FORMAT,
-    check_format,
+    CONVERSATION_RECORD_FORMAT,
+    CONVERSATION_RECORD_FORMATS,
     inspect_existing,
+    stored_format,
 )
 from ai_assistant.memory._transactions import transaction
 
@@ -238,6 +248,21 @@ _CHAT_SCHEMA: Final = (
     "PRIMARY KEY(conversation_id, position))",
 )
 
+#: ADR-0350 §12:9's column, held apart from :data:`_CHAT_SCHEMA`'s ``CREATE TABLE``:
+#: :meth:`SqliteConversationStore._upgrade_to_claimed` adds it to every file that lacks
+#: it, a fresh one and one written before it alike, so there is one path to the one
+#: shape. Nullable, so SQLite adds it in constant time without rewriting a row, and
+#: every message a file held before it carries no effect id (ADR-0326 §4:4).
+_EFFECT_COLUMN: Final = "effect_id TEXT"
+
+#: What makes an effect record name one message per conversation (ADR-0350 §12:9), and
+#: what :meth:`SqliteConversationStore.effect_position` reads through. Created after
+#: the column is there, so it is not in :data:`_CHAT_SCHEMA`.
+_EFFECT_INDEX: Final = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS messages_claimed "
+    "ON messages(conversation_id, effect_id) WHERE effect_id IS NOT NULL"
+)
+
 #: The most ids or positions one chat-space call takes: ``MemoryStore.channel_episodes``'
 #: page bound, so one page is one call. Duplicated in the canonical fake rather than
 #: shared, for :data:`_PAGE_BOUND`'s reason.
@@ -251,6 +276,10 @@ _DEFAULT_AWAITING_PAGE: Final = 100
 
 #: The activation id ``take_in`` records goes through ``core``'s identifier type.
 _ACTIVATION_ID: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
+
+#: The effect record ``effect_position`` names goes through the type ``NewMessage``
+#: holds it in, so an id no message could carry is refused before I/O.
+_EFFECT_ID: Final[TypeAdapter[str]] = TypeAdapter(Identifier)
 
 #: The device a device-scoped read or a removal names goes through the same type a
 #: ``ChatDevice`` holds its id in, so a name no set could hold is refused before I/O.
@@ -680,6 +709,39 @@ def _message_from(row: Sequence[Any]) -> TranscriptMessage | DeletedMessage:
         raise ConversationStoreError(msg) from exc
 
 
+def _exported_from(row: Sequence[Any]) -> ExportedMessage:
+    """Rebuild a standing message as the export carries it, with its effect id.
+
+    The columns are :func:`_message_from`'s, then ``effect_id`` (ADR-0350 §12:9).
+
+    Raises:
+        ConversationStoreError: If the stored row does not decode, or is a marker,
+            which the export does not carry.
+    """
+    message = _message_from(row[:11])
+    if not isinstance(message, TranscriptMessage):
+        msg = "a deleted message's marker was read as a standing message"
+        raise ConversationStoreError(msg)
+    try:
+        return ExportedMessage(**dict(message), effect_id=row[11])
+    except ValidationError as exc:
+        msg = f"a stored message's effect id could not be decoded: {exc}"
+        raise ConversationStoreError(msg) from exc
+
+
+def _checked_effect_id(effect_id: object) -> str:
+    """Check the effect record ``effect_position`` names, through ``core``'s type.
+
+    Raises:
+        ValueError: If ``effect_id`` is not a non-blank ``str``.
+    """
+    try:
+        return _EFFECT_ID.validate_python(effect_id, strict=True)
+    except ValidationError as exc:
+        msg = f"effect_id must be a non-blank str, got {describe_untrusted(effect_id)}"
+        raise ValueError(msg) from exc
+
+
 def _change_from(row: Sequence[Any]) -> ChatChange:
     """Rebuild one change from its row and, for an addition, the message it names.
 
@@ -899,7 +961,7 @@ class SqliteConversationStore:
     def _setup(self) -> sqlite3.Connection:
         """Open the connection and create the schema, or fail with the seam's error."""
         try:
-            inspect_existing(self._path)
+            inspect_existing(self._path, accepted=CONVERSATION_RECORD_FORMATS)
         except MemoryStoreError as exc:
             raise ConversationStoreError("cannot inspect conversation store format") from exc
         try:
@@ -931,14 +993,16 @@ class SqliteConversationStore:
             # Refuse incompatible state before chmod or a write transaction. The
             # format marker is the whole test: the turn table whose shape was
             # probed here is retired (ADR-0283 §6, §12).
-            check_format(conn, allow_empty=True)
+            stored_format(conn, allow_empty=True, accepted=CONVERSATION_RECORD_FORMATS)
             self._restrict_permissions()
             conn.execute("BEGIN IMMEDIATE")
-            existing_format = check_format(conn, allow_empty=True)
-            if not existing_format:
+            existing_format = stored_format(
+                conn, allow_empty=True, accepted=CONVERSATION_RECORD_FORMATS
+            )
+            if existing_format is None:
                 conn.execute("CREATE TABLE episode_record_format(version INTEGER NOT NULL)")
                 conn.execute(
-                    "INSERT INTO episode_record_format VALUES (?)", (EPISODE_RECORD_FORMAT,)
+                    "INSERT INTO episode_record_format VALUES (?)", (CONVERSATION_RECORD_FORMAT,)
                 )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS conversations("
@@ -958,6 +1022,8 @@ class SqliteConversationStore:
             # ADR-0293's chat space, beside the conversation it belongs to.
             for statement in _CHAT_SCHEMA:
                 conn.execute(statement)
+            self._upgrade_to_claimed(conn, existing_format)
+            conn.execute(_EFFECT_INDEX)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS conversations_activity "
                 "ON conversations(last_active_at DESC, id)"
@@ -1045,6 +1111,32 @@ class SqliteConversationStore:
         for column in _SEARCH_DRAW_COLUMNS.split(", "):
             if column.split(" ")[0] not in present:
                 conn.execute("ALTER TABLE conversations ADD COLUMN " + column)
+
+    @staticmethod
+    def _upgrade_to_claimed(conn: sqlite3.Connection, found: int | None) -> None:
+        """Upgrade a file at the label 12 to ADR-0350 §12:9's, in place (ADR-0326 §4:1).
+
+        Runs inside :meth:`_setup`'s ``BEGIN IMMEDIATE``, after :data:`_CHAT_SCHEMA`, so
+        it completes or rolls back with the transaction (§4:3). The ``messages`` table
+        gains :data:`_EFFECT_COLUMN` where it lacks it — read from ``PRAGMA table_info``,
+        as :meth:`_migrate_search_draw` reads its columns, so a fresh file, whose table
+        :data:`_CHAT_SCHEMA` has just created, gains it here too. No row is rewritten:
+        every message the file holds carries no effect id, since no build before this
+        one recorded a claim (§4:4). The label then advances, so an older build, which
+        reads 12 alone, refuses the file (§5:3).
+
+        Args:
+            conn: The connection, inside :meth:`_setup`'s transaction.
+            found: The label the file held when it was opened; ``None`` for a fresh
+                store, which is already written at the new label.
+        """
+        present = {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}
+        if _EFFECT_COLUMN.split(" ")[0] not in present:
+            conn.execute("ALTER TABLE messages ADD COLUMN " + _EFFECT_COLUMN)
+        if found is not None and found < CONVERSATION_RECORD_FORMAT:
+            conn.execute(
+                "UPDATE episode_record_format SET version = ?", (CONVERSATION_RECORD_FORMAT,)
+            )
 
     def _restrict_permissions(self) -> None:
         """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).
@@ -1673,14 +1765,12 @@ class SqliteConversationStore:
         conversations = tuple(self._decode_conversation(row) for row in conversation_rows)
         order = {one.id: index for index, one in enumerate(conversations)}
         messages = sorted(
-            (_message_from(row) for row in message_rows),
+            (_exported_from(row) for row in message_rows),
             key=lambda one: (order.get(one.conversation_id, len(order)), one.position),
         )
         try:
             return ConversationExport(
-                exported_at=exported_at,
-                conversations=conversations,
-                messages=tuple(one for one in messages if isinstance(one, TranscriptMessage)),
+                exported_at=exported_at, conversations=conversations, messages=tuple(messages)
             )
         except ValidationError as exc:
             msg = f"the stored conversations do not make a consistent export: {exc}"
@@ -1700,7 +1790,8 @@ class SqliteConversationStore:
                 conn,
                 "export transcripts",
                 "SELECT m.conversation_id, m.position, m.author, m.written_at, m.text, "
-                "m.replies_to, m.options, m.cut_off, m.device_id, m.message_id, m.deleted "
+                "m.replies_to, m.options, m.cut_off, m.device_id, m.message_id, m.deleted, "
+                "m.effect_id "
                 "FROM messages m JOIN conversations c ON c.id = m.conversation_id "
                 "WHERE c.deleted_at IS NULL AND m.deleted = 0 "
                 "ORDER BY m.conversation_id ASC, m.position ASC",
@@ -1752,6 +1843,14 @@ class SqliteConversationStore:
                     return MessageReceipt(
                         conversation_id=conversation_id, outcome=SendOutcome.NOT_AN_END
                     )
+            elif message.effect_id is not None:
+                claimed = self._claimed(conn, conversation_id, message.effect_id)
+                if claimed is not None:
+                    return MessageReceipt(
+                        conversation_id=conversation_id,
+                        outcome=SendOutcome.REPEATED,
+                        position=claimed,
+                    )
             last = self._fetch(
                 conn,
                 "read a transcript's last position",
@@ -1771,15 +1870,15 @@ class SqliteConversationStore:
                     conversation_id=conversation_id,
                     position=position,
                     written_at=self._now(),
-                    **message.model_dump(),
+                    **message.model_dump(exclude={"effect_id"}),
                 )
             except ValidationError as exc:
                 msg = f"the message could not be placed at position {position}: {exc}"
                 raise ConversationStoreError(msg) from exc
             conn.execute(
                 "INSERT INTO messages(conversation_id, position, author, written_at, text, "
-                "replies_to, options, cut_off, device_id, message_id, deleted) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                "replies_to, options, cut_off, device_id, message_id, deleted, effect_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
                 (
                     conversation_id,
                     position,
@@ -1791,6 +1890,7 @@ class SqliteConversationStore:
                     int(recorded.cut_off),
                     recorded.device_id,
                     recorded.message_id,
+                    message.effect_id,
                 ),
             )
             self._record_change(conn, "message_added", conversation_id, position=position)
@@ -1816,8 +1916,9 @@ class SqliteConversationStore:
             row = self._row_of(conn, conversation_id)
             if row is None or row[4] is not None:
                 raise self._unknown(conversation_id)
-            # The marker keeps the position and the device's message id (§4:3,
-            # §5:12); the text and every other property are cleared in place.
+            # The marker keeps the position, the device's message id (§4:3, §5:12)
+            # and the effect record an assistant's message was claimed under (ADR-0350
+            # §12:9); the text and every other property are cleared in place.
             deleted = conn.execute(
                 "UPDATE messages SET deleted = 1, author = NULL, written_at = NULL, "
                 "text = NULL, replies_to = NULL, options = NULL, cut_off = 0 "
@@ -1833,6 +1934,42 @@ class SqliteConversationStore:
             )
             self._record_change(conn, "message_deleted", conversation_id, position=position)
             return True
+
+    @classmethod
+    def _claimed(cls, conn: sqlite3.Connection, conversation_id: str, effect_id: str) -> int | None:
+        """The position of the message written under ``effect_id``, deleted or not.
+
+        Raises:
+            ConversationStoreError: If the store cannot be read, or the stored position
+                is corrupt.
+        """
+        rows = cls._fetch(
+            conn,
+            "read a claimed message",
+            "SELECT position FROM messages WHERE conversation_id = ? AND effect_id = ?",
+            (conversation_id, effect_id),
+        )
+        return _check_stored_position(rows[0][0]) if rows else None
+
+    async def effect_position(self, conversation_id: str, effect_id: str, /) -> int | None:
+        """Read where the message claimed under ``effect_id`` stands, in one reading.
+
+        Raises:
+            ValueError: If ``effect_id`` is not a non-blank ``str``.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+            ConversationStoreError: If the store cannot be read, or a row is corrupt.
+        """
+        effect = _checked_effect_id(effect_id)
+        async with self._lock:
+            return await _run_to_completion(self._effect_position_sync, conversation_id, effect)
+
+    def _effect_position_sync(self, conversation_id: str, effect_id: str) -> int | None:
+        with self._transaction("read a claimed message", immediate=False) as conn:
+            row = self._row_of(conn, conversation_id)
+            if row is None or row[4] is not None:
+                raise self._unknown(conversation_id)
+            return self._claimed(conn, conversation_id, effect_id)
 
     async def transcript(
         self,

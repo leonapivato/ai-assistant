@@ -6252,6 +6252,14 @@ class ConversationStore(Protocol):
     * **Deleting a message** removes its text and leaves its marker; the message's
       id stays recognised, so a late repeat of the send is that message and does not
       come back (§4:3, §5:12). A reply to it stays (§5:8).
+    * **The claim an assistant's message was written under** (ADR-0350 §12:9, the row
+      its §15 adds to ADR-0293 §5:2's table): the id of the effect record, where the
+      writer passes one, is recorded with the message, names one message of the
+      conversation, and stays when the message is deleted, so :meth:`effect_position`
+      answers whether the message was written, deleted or not (ADR-0350 §8:11,
+      §8:12). It is
+      shown on no message a device reads — no transcript read, no change, no
+      device's view carries it — and the export carries it with its message.
     * **Deleting a conversation** is :meth:`stamp_deleted`: its transcript, its
       devices and the reader's bookkeeping about it go in that step, the change is
       recorded, and nothing of memory is touched from here (§2:3, §5:6). Today's
@@ -6637,7 +6645,9 @@ class ConversationStore(Protocol):
         concerned.
 
         It carries **every transcript's standing messages** (ADR-0293 §5:3,
-        ADR-0292 §3:11) and **no episode** (ADR-0283 §4:3): a conversation's
+        ADR-0292 §3:11), each an ``ExportedMessage`` with the effect record an
+        assistant's message was claimed under (ADR-0350 §12:9, ADR-0004 §6), and
+        **no episode** (ADR-0283 §4:3): a conversation's
         episodes are ``MemoryStore`` records and that store's export already carries
         them. **No liveness filtering** either: this store has no way to ask
         whether a conversation's channel still holds an episode, and no business
@@ -6668,15 +6678,22 @@ class ConversationStore(Protocol):
            the same message id, deleted or not, and writes nothing (§4:2, §4:3) —
            checked first, so a repeat is that message even where the device has
            since stopped being an end;
-        2. answers ``NOT_AN_END`` and writes nothing where a user's message comes
+        2. answers ``REPEATED`` with the earlier message's position where an
+           assistant's message carries an ``effect_id`` and the conversation already
+           holds a message written under that effect record, deleted or not, and
+           writes nothing (ADR-0350 §12:9): one claim is one message, so a write
+           repeated under it is that message, as a device's repeat is;
+        3. answers ``NOT_AN_END`` and writes nothing where a user's message comes
            from a device that is not one of the conversation's ends for writing
            (§7:2);
-        3. answers ``NO_SUCH_REPLY`` and writes nothing where ``replies_to`` names a
+        4. answers ``NO_SUCH_REPLY`` and writes nothing where ``replies_to`` names a
            position the conversation never held (§4:5). A position whose message
            was deleted is one it held: a reply to it is recorded, naming it;
-        4. otherwise records the message at the next position, stamped with the
-           store's clock, records a ``MessageAddedChange``, and answers
-           ``RECORDED`` with the position, which is *received* (§4:4).
+        5. otherwise records the message at the next position, stamped with the
+           store's clock, with its ``effect_id`` where it carries one, records a
+           ``MessageAddedChange``, and answers ``RECORDED`` with the position, which
+           is *received* (§4:4). The change carries the message as a device reads
+           it, with no effect id.
 
         **The message's id is unique per conversation and device here.** ADR-0293
         §4:1 has a device choose an id unique per device; a repeat is a send of the
@@ -6708,7 +6725,9 @@ class ConversationStore(Protocol):
 
         The act in the medium the user takes on a message of either author. Under
         the per-conversation exclusion, in one step: the message's text and every
-        other property but its id are removed, its marker stands at its position,
+        other property but its id are removed — its id being, for a user's message,
+        its device and message id, and for an assistant's, the effect record it was
+        claimed under (ADR-0350 §12:9) — its marker stands at its position,
         its ``MessageAddedChange`` leaves the change stream, and a
         ``MessageDeletedChange`` is recorded. A reply to it is left as it stands
         (§5:8). Nothing else is reached: deleting does not forget (ADR-0292 §3:10).
@@ -6728,6 +6747,42 @@ class ConversationStore(Protocol):
             UnknownConversationError: If the id names nothing or names a
                 conversation stamped deleted.
             ConversationStoreError: If the store cannot be written.
+        """
+        ...
+
+    async def effect_position(self, conversation_id: str, effect_id: str, /) -> int | None:
+        """Answer whether a conversation holds the message claimed under ``effect_id``.
+
+        ADR-0350 §12:9's read, which the Task Scheduler's sensor asks after a restart
+        to confirm whether a message whose effect record has an unknown outcome, or
+        none written, was sent (ADR-0350 §8:11): for the hub chat a message is sent
+        once its transcript records it (ADR-0292 §7:4, ADR-0350 §8:12). It answers
+        from the transcript itself, so the answer is what the medium recorded, never a
+        guess.
+
+        A read, so it takes no exclusion.
+
+        Args:
+            conversation_id: The conversation the message was claimed into.
+            effect_id: The id of the effect record it was claimed under, as
+                :meth:`append_message` recorded it with the message.
+
+        Returns:
+            The position of the message written under ``effect_id``, **deleted or
+            not** — a message the user deleted was still sent, and its position is
+            never reused (ADR-0293 §5:12) — or ``None`` where the conversation holds
+            no message written under it.
+
+        Raises:
+            ValueError: Before any I/O, if ``effect_id`` is not a non-blank ``str``.
+            UnknownConversationError: If the id names nothing or names a
+                conversation stamped deleted. The place is gone, which is not an
+                answer that the message was not sent: a caller confirming delivery
+                leaves the record as it was (ADR-0350 §8:11). ``None`` is already this
+                read's answer that the conversation holds no such message, so absence
+                of the conversation is raised rather than spelled the same way.
+            ConversationStoreError: If the store cannot be read, or a stored row
+                is corrupt.
         """
         ...
 

@@ -1,6 +1,7 @@
 """Fresh-state memory format boundary for ADR-0275 §12.
 
-Advanced by ADRs 0276, 0280, 0281, 0283, 0284, 0286, 0307, 0308 and 0315.
+Advanced by ADRs 0276, 0280, 0281, 0283, 0284, 0286, 0307, 0308 and 0315; since then,
+each store's own label by ADRs 0328, 0332, 0338, 0345 and 0350.
 """
 
 from __future__ import annotations
@@ -47,10 +48,10 @@ EPISODE_RECORD_FORMAT: Final[int] = 12
 
 #: The memory store's label for ADR-0328's memory record, written into the same
 #: ``episode_record_format`` table of ``memory.db`` alone (ADR-0328 §16:8). ADR-0328
-#: advances it from :data:`EPISODE_RECORD_FORMAT`, which the conversation store keeps,
-#: to 13: a file at 12 is **upgraded** in place when the store opens, never refused
-#: (ADR-0326 §4:7), and an older build, which serves exactly 12, refuses a file at 13
-#: rather than misreading it (ADR-0326 §5:3).
+#: advances it from :data:`EPISODE_RECORD_FORMAT`, which the conversation store kept
+#: until :data:`CONVERSATION_RECORD_FORMAT`, to 13: a file at 12 is **upgraded** in
+#: place when the store opens, never refused (ADR-0326 §4:7), and an older build, which
+#: serves exactly 12, refuses a file at 13 rather than misreading it (ADR-0326 §5:3).
 MEMORIES_RECORD_FORMAT: Final[int] = 13
 
 #: The memory store's label for ADR-0332 §7:8's record. It advances to 14 for the
@@ -68,14 +69,23 @@ JOINED_RECORD_FORMAT: Final[int] = 14
 #: pinned supports it would not read (ADR-0326 §5:3).
 PINNED_RECORD_FORMAT: Final[int] = 15
 
-#: The memory store's own label, the one this build writes. ADR-0345 §13:3 advances it
-#: to 16 for its memory record: every support records its holder, and a memory carries
-#: labels, marks, ``subjects`` and ``involved`` in place of ``about_person`` and
-#: ``topics``. A file at 15 is upgraded in place (§13:1), every memory rewritten by
+#: The memory store's label for ADR-0345 §13:3's memory record. It advances to 16:
+#: every support records its holder, and a memory carries labels, marks, ``subjects``
+#: and ``involved`` in place of ``about_person`` and ``topics``. A file at 15 is upgraded
+#: in place (§13:1), every memory rewritten by
 #: :func:`~ai_assistant.memory._placed_upgrade.placed_memory`, and an older build, which
 #: serves 12 to 15, refuses a file at 16, whose memories it would not read (ADR-0326
 #: §5:3).
-MEMORY_RECORD_FORMAT: Final[int] = 16
+PLACED_RECORD_FORMAT: Final[int] = 16
+
+#: The memory store's own label, the one this build writes. It advances to 17 for
+#: ADR-0350's episode record: ``PlanningRound`` gains ``place`` (§12:8) and
+#: ``InputOrigin`` the member ``assistant`` (§12:7), a field of a ``core`` model the
+#: store serialises in every episode and a member of a closed enumeration a stored
+#: episode names (ADR-0326 §2:3). A file at 16 is upgraded in place by the label alone,
+#: since a record written at 16 validates unchanged, and an older build, which serves 12
+#: to 16, refuses a file at 17, whose episodes it would not read (ADR-0326 §5:3, #3429).
+MEMORY_RECORD_FORMAT: Final[int] = 17
 
 #: The memory store's labels a build opens: its own, and each it upgrades from, in
 #: order (ADR-0326 §4:5, §5:1).
@@ -85,8 +95,24 @@ MEMORY_RECORD_FORMATS: Final[frozenset[int]] = frozenset(
         MEMORIES_RECORD_FORMAT,
         JOINED_RECORD_FORMAT,
         PINNED_RECORD_FORMAT,
+        PLACED_RECORD_FORMAT,
         MEMORY_RECORD_FORMAT,
     }
+)
+
+#: The conversation store's own label, the one this build writes, in the
+#: ``episode_record_format`` table of ``conversations.db`` alone. It held
+#: :data:`EPISODE_RECORD_FORMAT` until ADR-0350 §12:9 advanced it to 13 for the
+#: ``effect_id`` column of its ``messages`` table, the effect record an assistant's
+#: message was claimed under (ADR-0326 §2:3). A file at 12 is upgraded in place by
+#: adding the column, every message it holds carried with no effect id (§4:1, §4:4), and
+#: an older build, which serves 12 alone, refuses a file at 13 (ADR-0326 §5:3).
+CONVERSATION_RECORD_FORMAT: Final[int] = 13
+
+#: The conversation store's labels a build opens: its own, and the one it upgrades
+#: from (ADR-0326 §4:5, §5:1).
+CONVERSATION_RECORD_FORMATS: Final[frozenset[int]] = frozenset(
+    {EPISODE_RECORD_FORMAT, CONVERSATION_RECORD_FORMAT}
 )
 
 
@@ -132,11 +158,6 @@ def stored_format(
     )
 
 
-def check_format(conn: sqlite3.Connection, *, allow_empty: bool = False) -> bool:
-    """Refuse pre-M39 state before mutation; return whether the current marker exists."""
-    return stored_format(conn, allow_empty=allow_empty) is not None
-
-
 def check_memory_format(conn: sqlite3.Connection, *, allow_empty: bool = False) -> bool:
     """Refuse a memory store at any marker but this build's own (ADR-0328 §16:8).
 
@@ -168,8 +189,8 @@ def inspect_existing(
 
     ``accepted`` is the opener's own set of markers, so a file the opener would then
     refuse is refused here, before a writable open could recover its journal: the
-    conversation store opens 12 alone, the memory store 12, 13 and 14 (ADR-0328 §16:8,
-    ADR-0332 §7:8, ADR-0326 §5).
+    conversation store opens :data:`CONVERSATION_RECORD_FORMATS`, the memory store
+    :data:`MEMORY_RECORD_FORMATS` (ADR-0328 §16:8, ADR-0350 §12:9, ADR-0326 §5).
 
     Args:
         path: The store's file, or ``":memory:"``.
