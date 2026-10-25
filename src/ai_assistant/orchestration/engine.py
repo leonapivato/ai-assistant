@@ -2974,10 +2974,20 @@ class Engine:
         reads the mark set here first, so nothing starts. A stop command's cascade record
         is written first (§9:6).
 
+        An activation that was admitted is not one of these, though its occurrence may
+        still read pushed while its outcome is written: it ran, so a stop naming it once
+        it has ended changes nothing (ADR-0295 §1:6), and this writes nothing for it.
+
         Returns:
-            Whether an occurrence was pushed to it.
+            Whether an occurrence was pushed to it, not yet admitted.
         """
         pending = activation_id in self._pushed
+        if not pending and (
+            activation_id in self._admitted
+            or activation_id in self._unwritten
+            or await self._memory.get(f"activation:{activation_id}") is not None
+        ):
+            return False
         if pending:
             self._pushed[activation_id] = True
         if cascade and pending:

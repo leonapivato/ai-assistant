@@ -615,3 +615,62 @@ async def test_a_known_outcome_the_store_failed_to_take_is_written_as_decided() 
         assert following.pending
     finally:
         await harness.engine.aclose()
+
+
+class _OutcomeWriteHeld(FakePlanStore):
+    """A plan store that fails every outcome write until a case lets it through."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+        self.refusing = True
+        self.refused = asyncio.Event()
+
+    async def settle_occurrence(
+        self, activation_id: str, state: OccurrenceState, /, *, second_try: bool = False
+    ) -> ScheduledTask:
+        if self.refusing and state is not OccurrenceState.PENDING:
+            self.refused.set()
+            msg = "the plan store is busy"
+            raise PlanningError(msg)
+        return await super().settle_occurrence(activation_id, state, second_try=second_try)
+
+
+async def test_a_stop_of_an_ended_activation_awaiting_its_outcome_changes_nothing() -> None:
+    """ADR-0295 §1:6, ADR-0350 §9:6: no cascade record, and its pending child is kept."""
+
+    def step(request: dict[str, Any]) -> RoundResponse:
+        if request["rounds"]:
+            return RoundResponse(text="")
+        spawn = ProposedCall(
+            call_id="spawn-1",
+            name="spawn",
+            arguments={"instruction": "the next step", "delay_minutes": 1440},
+        )
+        return RoundResponse(calls=(spawn,))
+
+    plans = _OutcomeWriteHeld()
+    harness = phases_harness(_responder(_silent, step), task_scheduler=seams(), plans=plans)
+    first = await write_task(plans, activation(), instruction="the first step")
+    await harness.engine.start()
+    try:
+        (episode,) = await _until_scheduled(harness, 1)
+        await asyncio.wait_for(plans.refused.wait(), 5)
+        assert episode.processing_record is not None
+        ended = episode.processing_record.activation_id
+
+        assert await harness.engine.stop_activation(ended) is ActivationStop.ALREADY_ENDED
+
+        held = await plans.export()
+        assert held.cascades == ()
+        assert ended not in held.stopped_activations
+        (following,) = [one for one in held.scheduled_tasks if one.id != first.id]
+        assert following.pending
+        plans.refusing = False
+
+        async def settled() -> bool:
+            found = await plans.scheduled_tasks([first.id])
+            return bool(found) and found[0].occurrences[0].state is OccurrenceState.DONE
+
+        await until(settled, what="the first step to end done")
+    finally:
+        await harness.engine.aclose()
