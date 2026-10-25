@@ -16,7 +16,11 @@ For each stored memory, name one relation of the new memory to it:
 
 Every relation but "independent" carries a `note` saying how the two relate. A new memory that states part of what a stored one states is "contained", never "no_longer_true" or "claimed_too_much", unless what it rests on shows the rest stopped holding or never held.
 
-Where the new memory answers one of a stored memory's open questions, name that memory and question in `answers`; otherwise `answers` is null.
+A note is kept with what the relation writes, and a "recheck" note is the question asked, read later where the labels M1, Q1 and the rest mean nothing or name something else. Never write a label in a note: say in words what you mean, quoting a wording where you need one.
+
+A question is asked once. Where one of a stored memory's open questions already asks what a "recheck" would, do not name "recheck" for it: name the relation that else holds, "independent" where none does.
+
+Where the new memory answers one of a stored memory's open questions, name that memory and question in `answers`, as one object, {"memory": "M1", "question": "Q1"}; otherwise `answers` is null. Name at most one, never a list: where it answers several, name the one it answers most directly.
 
 Reply with only one JSON object, no prose and no code fence, naming every stored memory once:
 {"relations": [{"memory": "M1", "relation": "restates", "note": "<how the two relate>"}], "answers": null}

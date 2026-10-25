@@ -1,0 +1,16 @@
+# A new memory bears on two stored ones, one with an open question it may answer. A note is
+# kept with what its relation writes, and a recheck's note is the question asked, read
+# later where M1 and Q1 mean nothing or name another memory: no note names a label.
+prompt = "observer_placement"
+guards = "label_in_text"
+came_from = "#3402"
+set = "development"
+samples = 3
+
+[property]
+check = "no_label"
+fields = ["note"]
+labels = ["M", "Q"]
+
+[input]
+file = "notes-name-no-label.json"

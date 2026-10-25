@@ -1,0 +1,17 @@
+# One message lists two allergies in one clause. Each could be true without the other, so
+# framing keeps two memories, each backed as worded by the one part that says both, and no
+# memory holds both: a later correction of one would otherwise end the other with it.
+prompt = "observer_framing"
+guards = "compound_backed_as_worded"
+came_from = "#3399"
+set = "development"
+samples = 3
+
+[property]
+check = "read"
+read = """Frames the sesame allergy and the kiwi allergy as two memories, each backed as \
+worded by P1, the one part that says both. No memory states both allergies, and P2, the \
+assistant's message, backs neither."""
+
+[input]
+file = "list-in-one-clause.json"

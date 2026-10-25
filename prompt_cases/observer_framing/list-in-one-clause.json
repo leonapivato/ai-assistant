@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "{\"claim\": \"The user is allergic to sesame and to kiwi.\", \"under_review\": \"E1\", \"parts\": [{\"part\": \"P1\", \"exchange\": \"E1\", \"occurred_at\": \"2026-06-03T18:12:00+00:00\", \"from\": \"the user\", \"outside\": false, \"at\": null, \"text\": \"please remember I'm allergic to sesame and kiwi, the reaction is bad\"}, {\"part\": \"P2\", \"exchange\": \"E1\", \"occurred_at\": \"2026-06-03T18:12:00+00:00\", \"from\": \"the assistant\", \"outside\": false, \"at\": \"2026-06-03T18:12:09+00:00\", \"text\": \"Noted. I will keep sesame and kiwi in mind when we look at food.\"}], \"subjects\": [\"the user\"], \"involved\": [], \"why\": \"Allergies shape every food choice the assistant helps with.\", \"situations\": [\"choosing a restaurant\", \"planning meals\"], \"narrowing\": null}",
+      "name": null
+    }
+  ]
+}
