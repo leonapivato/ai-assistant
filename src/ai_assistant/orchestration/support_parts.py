@@ -42,7 +42,11 @@ from ai_assistant.core.types import (
     part_episode,
 )
 from ai_assistant.orchestration.planning import DELIBERATE_REPEAT, LOOKING_FOR
-from ai_assistant.orchestration.remembering import FACT_ARGUMENT, REMEMBER, STATEMENT_ARGUMENT
+from ai_assistant.orchestration.remembering import (
+    FACT_ARGUMENT,
+    REMEMBER_CANDIDATE,
+    STATEMENT_ARGUMENT,
+)
 from ai_assistant.orchestration.stories import episode_address
 
 if TYPE_CHECKING:
@@ -239,7 +243,9 @@ def _approved(processing: EpisodeProcessingRecord | None, round_id: str, part: i
 #: The arguments a proposed remember call carries that never reach acting's digest: the
 #: two the hub fills (``system_supplied``, ADR-0254 §3), and the *looking for* argument
 #: and *deliberate repeat* mark, removed before the call reaches acting (ADR-0306 §2:10).
-_UNDIGESTED: Final = frozenset({*REMEMBER.system_supplied, LOOKING_FOR, DELIBERATE_REPEAT})
+_UNDIGESTED: Final = frozenset(
+    {*REMEMBER_CANDIDATE.system_supplied, LOOKING_FOR, DELIBERATE_REPEAT}
+)
 
 
 def _remembered(round_: PlanningRound | None, effect: ActivationEffect) -> str | None:

@@ -266,15 +266,10 @@ class PendingCandidatesContract:
 
     @pytest.fixture
     def pending_candidates_subject(self) -> PendingCandidatesSubject:
-        """Override with an implementation where ``remember`` records candidates.
+        """Override with an implementation of the panel's read.
 
         Built at :data:`PENDING_LIMIT`, with its stores clocked at :data:`PENDING_AT`.
         """
-        raise NotImplementedError
-
-    @pytest.fixture
-    def pending_candidates_off(self) -> PendingCandidatesSubject:
-        """Override with the same, where ``remember`` writes memories (the interim)."""
         raise NotImplementedError
 
     async def test_a_done_call_of_an_unprocessed_episode_is_pending(
@@ -331,19 +326,6 @@ class PendingCandidatesContract:
         """§3:3: a candidate is a call its effect record shows done."""
         subject = pending_candidates_subject
         await hold_episode(subject, "a1", "lives in Lisbon", done=False)
-
-        assert await subject.engine.pending_candidates() == ()
-
-    async def test_where_remember_writes_memories_none_is_pending(
-        self, pending_candidates_off: PendingCandidatesSubject
-    ) -> None:
-        """§19:3-§19:4: under the interim no recorded call is presented as pending.
-
-        The records are seeded exactly as a pending candidate's would be, so what
-        answers none here is the switch and nothing else.
-        """
-        subject = pending_candidates_off
-        await hold_episode(subject, "a1", "prefers window seats")
 
         assert await subject.engine.pending_candidates() == ()
 

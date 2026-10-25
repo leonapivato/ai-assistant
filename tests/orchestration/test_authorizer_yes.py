@@ -36,7 +36,6 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     Idempotency,
     InputOrigin,
-    MemoryDecisionKind,
     MemorySource,
     NewConversation,
     PermissionDecision,
@@ -87,14 +86,13 @@ from ai_assistant.orchestration.held_results import HeldResults
 from ai_assistant.orchestration.remembering import (
     EPISODE_ARGUMENT,
     OUTSIDE_CONTENT_ARGUMENT,
-    REMEMBER,
+    REMEMBER_CANDIDATE,
 )
 from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAuditTrail,
     FakeDiagnosticSink,
     FakeEgressBinder,
-    FakeMemoryPolicy,
     FakeMemoryStore,
     FakePlanStore,
     FakeStoryStore,
@@ -234,14 +232,12 @@ class _Hub:
         self,
         *tools: ToolDefinition,
         policy: FakeActionPolicy | None = None,
-        memory_policy: FakeMemoryPolicy | None = None,
         binder: FakeEgressBinder | None = None,
         plans: bool = True,
         diagnostics: FakeDiagnosticSink | None = None,
     ) -> None:
-        self.registry = FakeToolRegistry(tools or (_LOOKUP, _BOOK, REMEMBER))
+        self.registry = FakeToolRegistry(tools or (_LOOKUP, _BOOK, REMEMBER_CANDIDATE))
         self.policy = policy or FakeActionPolicy()
-        self.memory_policy = memory_policy or FakeMemoryPolicy()
         self.trail = FakeAuditTrail(now=_now)
         self.stories = FakeStoryStore(now=_now)
         self.memory = FakeMemoryStore(now=_now)
@@ -249,7 +245,6 @@ class _Hub:
         self.stage = AuthorizingStage(
             registry=self.registry,
             policy=self.policy,
-            memory_policy=self.memory_policy,
             trail=self.trail,
             stories=self.stories,
             memory=self.memory,
@@ -710,50 +705,6 @@ async def test_a_resolution_that_denies_refuses_the_call() -> None:
     assert decided.allowed == ()
 
 
-# --- remembering under an approval (§4:17, §5:2) ---------------------------------------------
-
-
-def _remember_asked(*, outside: bool) -> AskedCall:
-    return AskedCall(
-        part=1,
-        tool=REMEMBER,
-        values={
-            "statement": "likes tea",
-            EPISODE_ARGUMENT: f"activation:{_ASKING}",
-            OUTSIDE_CONTENT_ARGUMENT: outside,
-        },
-    )
-
-
-@pytest.mark.parametrize(
-    ("ruled", "outside", "verdict"),
-    [
-        # The fake asks about a statement resting on outside content (ADR-0106 §6).
-        (MemoryDecisionKind.ACCEPT, True, Verdict.ALLOWED),
-        (MemoryDecisionKind.ASK_USER, False, Verdict.ALLOWED),
-        (MemoryDecisionKind.REJECT, False, Verdict.NOT_DONE),
-    ],
-)
-async def test_an_approved_remember_lifts_the_ask_and_never_a_reject(
-    ruled: MemoryDecisionKind, outside: bool, verdict: Verdict
-) -> None:
-    hub = _Hub(memory_policy=FakeMemoryPolicy(ruled))
-    asked = _remember_asked(outside=outside)
-    await hub.asked(asked)
-
-    decided = await hub.authorize(
-        _round((_call("c1", "remember", statement="likes tea"), _PART), yes=_yes())
-    )
-
-    assert decided.verdicts[0].verdict is verdict
-    if verdict is Verdict.ALLOWED:
-        (allowed,) = decided.allowed
-        assert allowed.asked == asked
-        # The source the question showed is kept: the asking episode and its mark (§5:3).
-        assert dict(allowed.call.request.parameters) == dict(asked.values)
-        assert allowed.call.decision.approval is not None
-
-
 # --- egress: the shown binding, through rebind (§4:2, §4:16, #2847) --------------------------
 
 
@@ -1100,9 +1051,11 @@ def test_the_values_digest_is_actings() -> None:
         ActionRequest(tool=_BOOK, parameters={"q": "table"}),
         ActionRequest(tool=tool, parameters={"q": "x"}),
         ActionRequest(
-            tool=REMEMBER,
+            tool=REMEMBER_CANDIDATE,
             parameters={
-                "statement": "likes tea",
+                "fact": "likes tea",
+                "why": "a taste",
+                "rests_on_input": True,
                 EPISODE_ARGUMENT: "activation:a",
                 OUTSIDE_CONTENT_ARGUMENT: False,
             },
@@ -1137,12 +1090,12 @@ def _allowed(request: ActionRequest) -> PermissionDecision:
 def test_the_shown_values_leave_out_what_the_hub_fills() -> None:
     """§2:5: ``system_supplied`` is left out."""
     values: dict[str, FrozenJson] = {
-        "statement": "s",
+        "fact": "s",
         EPISODE_ARGUMENT: "activation:a",
         OUTSIDE_CONTENT_ARGUMENT: True,
     }
 
-    assert shown_values(REMEMBER, values) == {"statement": "s"}
+    assert shown_values(REMEMBER_CANDIDATE, values) == {"fact": "s"}
 
 
 # --- the input --------------------------------------------------------------------------------

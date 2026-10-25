@@ -33,11 +33,11 @@ is claimed with both marks, which is how the store admits §6:2's retry.
 
 **A call that comes back needing you** (ADR-0321 §5:5, #2845). A runner on the
 own-records seam may answer :class:`~ai_assistant.orchestration.remembering.NeedsYou`:
-nothing was written, and what the call would write needs the user's yes first, as a
-remember's does where the memory writer's own policy asks at write time. Acting
+nothing was written, and what the call would write needs the user's yes first. Acting
 finishes its record not done, with a code-owned reason, and reports it as
 ``needs_you``, carrying the assertions its question will show it replacing
-(:attr:`ActedCall.replaces`).
+(:attr:`ActedCall.replaces`). No runner answers it since ``remember``'s write-time ask
+retired with ADR-0328 §13's interim (#3407).
 
 **A call refused on the assistant's own records, with its reason** (ADR-0338 §8:7). A
 runner may answer :class:`~ai_assistant.orchestration.person_calls.NotDone`: it wrote
@@ -324,7 +324,7 @@ class OwnRecordsByCapability:
 
     ADR-0306 §3:3. Structurally :class:`OwnRecordsCalls`. The composition root hands
     it one runner per capability whose effect is the assistant's own records, such as
-    :class:`~ai_assistant.orchestration.remembering.RememberCalls`, and acting hands
+    :class:`~ai_assistant.orchestration.remembering.CandidateCalls`, and acting hands
     every such call to it. A call to a capability it holds no runner for is not done,
     and nothing runs.
     """

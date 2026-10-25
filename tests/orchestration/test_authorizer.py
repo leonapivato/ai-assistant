@@ -32,9 +32,7 @@ from ai_assistant.core.types import (
     InputOrigin,
     LabelKind,
     Memory,
-    MemoryDecisionKind,
     MemorySource,
-    MemoryStanding,
     NewConversation,
     PermissionOutcome,
     Placement,
@@ -53,13 +51,11 @@ from ai_assistant.core.types import (
     StoryMemberKind,
     StoryNote,
     StoryNoteAuthor,
-    SupportOrigin,
     ToolCall,
     ToolCost,
     ToolDefinition,
     ToolResult,
     WholeTextReply,
-    part_episode,
 )
 from ai_assistant.orchestration import acting
 from ai_assistant.orchestration.acting import (
@@ -85,18 +81,15 @@ from ai_assistant.orchestration.held_results import HeldResults
 from ai_assistant.orchestration.remembering import (
     EPISODE_ARGUMENT,
     OUTSIDE_CONTENT_ARGUMENT,
-    REMEMBER,
-    RememberCalls,
-    remembered_record_id,
+    REMEMBER_CANDIDATE,
+    CandidateCalls,
 )
 from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAuditTrail,
     FakeDiagnosticSink,
     FakeEgressBinder,
-    FakeMemoryPolicy,
     FakeMemoryStore,
-    FakeMemoryWriter,
     FakePlanStore,
     FakeStoryStore,
     FakeToolRegistry,
@@ -209,6 +202,11 @@ def _call(call_id: str, name: str, **arguments: Any) -> ProposedCall:
     return ProposedCall(call_id=call_id, name=name, arguments=arguments)
 
 
+def _fact(fact: str) -> dict[str, Any]:
+    """A candidate's arguments, as planning writes them (ADR-0329 §3:1)."""
+    return {"fact": fact, "why": "worth keeping", "rests_on_input": True}
+
+
 def _round(
     *calls: ProposedCall,
     deliberate: frozenset[str] = frozenset(),
@@ -251,19 +249,19 @@ class _Ids:
 class _Hub:
     """The stage and every fake it reads, wired once per test."""
 
-    def __init__(  # noqa: PLR0913 — one keyword per fake a case replaces, and the diagnostic sink
+    def __init__(
         self,
         *tools: ToolDefinition,
         policy: FakeActionPolicy | None = None,
-        memory_policy: FakeMemoryPolicy | None = None,
         binder: FakeEgressBinder | None = None,
         trail: FakeAuditTrail | None = None,
         episode: EpisodicMemory | None = None,
         diagnostics: FakeDiagnosticSink | None = None,
     ) -> None:
-        self.registry = FakeToolRegistry(tools or (_tool("lookup"), _tool("book"), REMEMBER))
+        self.registry = FakeToolRegistry(
+            tools or (_tool("lookup"), _tool("book"), REMEMBER_CANDIDATE)
+        )
         self.policy = policy or FakeActionPolicy()
-        self.memory_policy = memory_policy or FakeMemoryPolicy()
         self.trail = trail or FakeAuditTrail(now=_now)
         self.stories = FakeStoryStore(now=_now)
         self.memory = FakeMemoryStore(now=_now)
@@ -271,7 +269,6 @@ class _Hub:
         self.stage = AuthorizingStage(
             registry=self.registry,
             policy=self.policy,
-            memory_policy=self.memory_policy,
             trail=self.trail,
             stories=self.stories,
             memory=self.memory,
@@ -345,7 +342,7 @@ def test_which_calls_get_a_record_is_actings_rule() -> None:
     shapes = [
         _tool("lookup"),
         _tool("book"),
-        REMEMBER,
+        REMEMBER_CANDIDATE,
         _tool("lookup", safe_to_repeat=False),
         _tool(
             "book",
@@ -420,7 +417,7 @@ async def test_a_call_naming_an_argument_the_hub_fills_is_refused() -> None:
     hub = _Hub()
 
     decided = await hub.authorize(
-        _round(_call("c1", "remember", statement="tea", **{EPISODE_ARGUMENT: "activation:x"}))
+        _round(_call("c1", "remember", **_fact("tea"), **{EPISODE_ARGUMENT: "activation:x"}))
     )
 
     (verdict,) = decided.verdicts
@@ -691,7 +688,7 @@ async def test_a_note_the_owner_wrote_leaves_a_call_leaving_the_hub_and_a_rememb
     decided = await hub.authorize(
         _round(
             _call("c1", "lookup", q="x"),
-            _call("c2", "remember", statement="likes mornings"),
+            _call("c2", "remember", **_fact("likes mornings")),
             working=held,
         )
     )
@@ -720,58 +717,20 @@ async def test_an_activation_with_no_readable_record_has_read_outside_content() 
 # --- remembering --------------------------------------------------------------------------------
 
 
-async def test_remembering_is_filled_by_the_hub_and_passes_memory_policy() -> None:
-    """§4:3, ADR-0254 §3: the hub fills the episode and the mark; MemoryPolicy rules."""
-    hub = _Hub()
+async def test_a_candidate_after_outside_content_is_marked_and_allowed() -> None:
+    """ADR-0329 §3:4, §5:6: the hub marks it, and no MemoryPolicy stops it here.
 
-    decided = await hub.authorize(_round(_call("c1", "remember", statement="likes tea")))
-
-    (verdict,) = decided.verdicts
-    assert verdict.verdict is Verdict.ALLOWED
-    (allowed,) = decided.allowed
-    assert dict(allowed.call.request.parameters) == {
-        "statement": "likes tea",
-        EPISODE_ARGUMENT: _EPISODE,
-        OUTSIDE_CONTENT_ARGUMENT: False,
-    }
-    (asked,) = hub.memory_policy.calls
-    assert asked.proposal.proposed.id == remembered_record_id("effect:1")
-    assert asked.proposal.proposed.standing is MemoryStanding.INFERENCE
-    (support,) = asked.proposal.proposed.supports
-    assert support.origin is SupportOrigin.REMEMBERED
-    assert asked.conflicts == ()
-
-
-@pytest.mark.parametrize(
-    ("kind", "verdict"),
-    [
-        (MemoryDecisionKind.ASK_USER, Verdict.NEEDS_YOU),
-        (MemoryDecisionKind.REJECT, Verdict.NOT_DONE),
-        (MemoryDecisionKind.STORE_TEMPORARY, Verdict.ALLOWED),
-    ],
-)
-async def test_memory_policy_ask_needs_you_and_reject_is_not_done(
-    kind: MemoryDecisionKind, verdict: Verdict
-) -> None:
-    hub = _Hub(memory_policy=FakeMemoryPolicy(kind))
-
-    decided = await hub.authorize(_round(_call("c1", "remember", statement="likes tea")))
-
-    assert decided.verdicts[0].verdict is verdict
-    assert len(decided.allowed) == (1 if verdict is Verdict.ALLOWED else 0)
-
-
-async def test_remembering_after_outside_content_is_marked_and_needs_you() -> None:
-    """ADR-0106 §6: a tainted derived proposal is never committed unconfirmed."""
+    Under ADR-0328 §13's interim this needed the user, since a derived proposal resting
+    on outside content is never committed unconfirmed (ADR-0106 §6); a candidate writes
+    no memory, and the observer's writes carry that floor.
+    """
     hub = _Hub(episode=_episode(origin=InputOrigin.OUTSIDE))
 
-    decided = await hub.authorize(_round(_call("c1", "remember", statement="the 9:10 runs")))
+    decided = await hub.authorize(_round(_call("c1", "remember", **_fact("the 9:10 runs"))))
 
-    assert decided.verdicts[0].verdict is Verdict.NEEDS_YOU
-    (asked,) = hub.memory_policy.calls
-    assert asked.proposal.proposed.rests_on_outside_content is True
-    (support,) = asked.proposal.proposed.supports
-    assert support.origin is SupportOrigin.REMEMBERED_OVER_OUTSIDE
+    assert decided.verdicts[0].verdict is Verdict.ALLOWED
+    (allowed,) = decided.allowed
+    assert allowed.call.request.parameters[OUTSIDE_CONTENT_ARGUMENT] is True
 
 
 # --- the match and the message ----------------------------------------------------------------
@@ -878,32 +837,39 @@ def _for_acting(decided: RoundAuthorization) -> AuthorizedRound:
     )
 
 
-async def test_a_remembered_statement_is_written_once_through_actings_own_records_seam() -> None:
-    """ADR-0306 §3:2, §3:3, §5:9: written directly, and refused as already done again."""
+class _NoneSimilar:
+    """A candidate's lookup that finds nothing similar (ADR-0329 §4:1)."""
+
+    async def similar(self, fact: str, *, limit: int) -> tuple[Memory, ...]:
+        del fact, limit
+        return ()
+
+
+async def test_a_candidate_is_recorded_once_through_actings_own_records_seam() -> None:
+    """ADR-0306 §3:2, §3:3, §5:9: recorded directly, and refused as already done again."""
     hub = _Hub()
-    writer = FakeMemoryWriter(store=hub.memory, policy=FakeMemoryPolicy(), now=_now)
     plans = FakePlanStore()
     stage = ActingStage(
         plans=plans,
         invoker=_NoInvoker(),
-        own_records=OwnRecordsByCapability({"remember": RememberCalls(writer=writer, now=_now)}),
+        own_records=OwnRecordsByCapability(
+            {"remember": CandidateCalls(similar=_NoneSimilar(), limit=5)}
+        ),
         timeout=timedelta(seconds=5),
         now=_now,
     )
 
-    first = await hub.authorize(_round(_call("c1", "remember", statement="likes tea")))
+    first = await hub.authorize(_round(_call("c1", "remember", **_fact("likes tea"))))
     acted = await stage.act(_for_acting(first), held=HeldResults())
-    again = await hub.authorize(_round(_call("c1", "remember", statement="likes tea")))
+    again = await hub.authorize(_round(_call("c1", "remember", **_fact("likes tea"))))
     repeated = await stage.act(_for_acting(again), held=HeldResults())
 
     assert acted.calls[0].outcome is ActedOutcome.DONE
-    written = await hub.memory.get(remembered_record_id("effect:1"))
-    assert isinstance(written, Memory)
-    assert [part_episode(one.points_at) for one in written.supports] == [_EPISODE]
     (effect,) = await plans.activation_effects([_ACTIVATION])
     assert effect.decision_id == first.verdicts[0].decision_id
     assert repeated.calls[0].outcome is ActedOutcome.NOT_DONE
-    assert await hub.memory.get(remembered_record_id("effect:2")) is None
+    # A candidate writes no memory (ADR-0329 §3:3): the store holds the episode alone.
+    assert [one.id for one in await hub.memory.export()] == [hub.episode.id]
 
 
 class _NoInvoker:

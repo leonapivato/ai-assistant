@@ -64,7 +64,7 @@ from ai_assistant.orchestration.joining import (
     visible_running,
 )
 from ai_assistant.orchestration.lookups import LOOK_UPS, READ_STORY, SEARCH_MEMORY
-from ai_assistant.orchestration.remembering import REMEMBER
+from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.orchestration.story_calls import STORY_CALLS
 from ai_assistant.tools.web_search import WEB_SEARCH
 
@@ -205,7 +205,7 @@ def test_each_look_up_is_a_pure_read(declared: ToolDefinition) -> None:
 
 @pytest.mark.parametrize(
     "declared",
-    [*STORY_CALLS, REMEMBER, WEB_SEARCH, _BOOK],
+    [*STORY_CALLS, REMEMBER_CANDIDATE, WEB_SEARCH, _BOOK],
     ids=lambda one: str(one.capability),
 )
 def test_a_story_write_remember_the_web_search_and_a_call_in_the_world_are_not(

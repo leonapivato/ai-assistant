@@ -329,7 +329,6 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     conversation_store: FakeConversationStore | None = None,
     phases: Mapping[str, Any] | None = None,
     plans: FakePlanStore | None = None,
-    candidates: bool = False,
     person_blocks: PersonBlocks | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
@@ -476,7 +475,6 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         max_payload_bytes=max_payload_bytes,
         stories=stories,
         chat_reader=chat_reader,
-        candidates=candidates,
         person_blocks=person_blocks,
         # ADR-0309 §2:6: the phases plan what the chat's reader takes in and every event,
         # as they will on every deployment once the switch lane lands; they are wired
@@ -497,13 +495,11 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     )
 
 
-async def _pending(*, candidates: bool) -> AsyncIterator[PendingCandidatesSubject]:
+async def _pending() -> AsyncIterator[PendingCandidatesSubject]:
     """An engine at the pending candidates' bound, its stores injected and clocked there."""
     memory = FakeMemoryStore(now=lambda: PENDING_AT)
     plans = FakePlanStore(now=lambda: PENDING_AT)
-    built = _wire(
-        memory=memory, plans=plans, candidates=candidates, max_payload_bytes=PENDING_LIMIT
-    )
+    built = _wire(memory=memory, plans=plans, max_payload_bytes=PENDING_LIMIT)
     await built.start()
     try:
         yield PendingCandidatesSubject(engine=built, memory=memory, plans=plans)
@@ -582,14 +578,8 @@ class TestEngineContract(AssistantEngineContract):
 
     @pytest.fixture
     async def pending_candidates_subject(self) -> AsyncIterator[PendingCandidatesSubject]:
-        """The production engine built with candidates on, over injected stores."""
-        async for subject in _pending(candidates=True):
-            yield subject
-
-    @pytest.fixture
-    async def pending_candidates_off(self) -> AsyncIterator[PendingCandidatesSubject]:
-        """The production engine built as the composition root builds it, the switch off."""
-        async for subject in _pending(candidates=False):
+        """The production engine, over injected stores."""
+        async for subject in _pending():
             yield subject
 
     @pytest.fixture

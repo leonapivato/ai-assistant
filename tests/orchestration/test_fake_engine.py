@@ -172,14 +172,13 @@ def _binding() -> EgressBinding:
     )
 
 
-def _pending(*, candidates: bool) -> PendingCandidatesSubject:
+def _pending() -> PendingCandidatesSubject:
     """A fake at the pending candidates' bound, its stores injected and clocked there."""
     memory = FakeMemoryStore(now=lambda: PENDING_AT)
     plans = FakePlanStore(now=lambda: PENDING_AT)
     built = FakeAssistantEngine(max_payload_bytes=PENDING_LIMIT)
     built.episode_memory = memory
     built.plan_store = plans
-    built.candidates = candidates
     return PendingCandidatesSubject(engine=built, memory=memory, plans=plans)
 
 
@@ -230,13 +229,8 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
 
     @pytest.fixture
     def pending_candidates_subject(self) -> PendingCandidatesSubject:
-        """The canonical fake recording candidates, over injected stores, at the bound."""
-        return _pending(candidates=True)
-
-    @pytest.fixture
-    def pending_candidates_off(self) -> PendingCandidatesSubject:
-        """The same fake with its switch off, as the composition root's is."""
-        return _pending(candidates=False)
+        """The canonical fake, over injected stores, at the bound."""
+        return _pending()
 
     @pytest.fixture
     def person_model_subject(self) -> PersonModelSubject:

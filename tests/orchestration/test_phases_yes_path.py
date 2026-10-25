@@ -39,21 +39,15 @@ from ai_assistant.core.types import (
     ChannelIdentity,
     ChannelInput,
     ClaimedAuthor,
-    ConflictRelation,
     ControllerStage,
     CostBasis,
     DataTier,
     Idempotency,
     InputOrigin,
-    Memory,
-    MemoryStanding,
     MessageAuthor,
     NewMessage,
     PermissionOutcome,
     PermissionRuling,
-    Placement,
-    PlacementReach,
-    PlacementSetter,
     PlanningRound,
     ProposedCall,
     Reversibility,
@@ -63,7 +57,6 @@ from ai_assistant.core.types import (
     StoryActor,
     StoryMember,
     StoryMemberKind,
-    SupportOrigin,
     TelegramForwardKind,
     TelegramForwardOrigin,
     TelegramQuotedMessage,
@@ -78,13 +71,13 @@ from ai_assistant.core.types import (
     UnderstandingGround,
     UnderstandingProducer,
 )
-from ai_assistant.memory import DefaultMemoryPolicy
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.activation_state import active_state
 from ai_assistant.orchestration.authorizer import AuthorizingStage
 from ai_assistant.orchestration.chat import ChatWriter
 from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
+from ai_assistant.orchestration.lookups import LookUps
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import (
     Delivery,
@@ -96,7 +89,7 @@ from ai_assistant.orchestration.phase_path import (
     place_window,
 )
 from ai_assistant.orchestration.planning import APPROVED_ACTION_TOOL, PLANNING_PROMPT, PlaceAuthor
-from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls
+from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE, CandidateCalls
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
 from ai_assistant.orchestration.telegram import TelegramLineSeams, line_channel
 from ai_assistant.orchestration.understanding import (
@@ -109,7 +102,6 @@ from ai_assistant.orchestration.understanding import (
 )
 from ai_assistant.testing import (
     FakeMemoryStore,
-    FakeMemoryWriter,
     FakeModelProvider,
     FakePlanStore,
     FakeStoryStore,
@@ -120,8 +112,6 @@ from ai_assistant.testing import (
     FakeWebSearcher,
     default_prompt,
 )
-from ai_assistant.testing.memories import memory as memory_record
-from ai_assistant.testing.memories import said_support
 
 #: Understanding's shipped template, as the composition root hands it the stage.
 _UNDERSTANDING = default_prompt(UNDERSTANDING_PROMPT)
@@ -133,8 +123,6 @@ if TYPE_CHECKING:
         ActionRequest,
         EpisodicMemory,
         FrozenJson,
-        MemoryRecord,
-        MemoryUpdateProposal,
         Message,
         MessageReceipt,
         OfferedTool,
@@ -489,16 +477,11 @@ class _Hub:
         tools = PhaseTools(
             registry=harness.invoker,
             invoker=harness.invoker,
-            own_records=(REMEMBER,),
+            own_records=(REMEMBER_CANDIDATE,),
             searcher=self.searcher,
             search_query="query",
         )
-        memory_writer = FakeMemoryWriter(
-            store=harness.memory,
-            policy=DefaultMemoryPolicy(),
-            now=lambda: AT,
-            reconciler=_Negations(),
-        )
+        similar = LookUps(memory=harness.memory, views=None, search_limit=5)
         return PhasePath(
             planning_prompt=default_prompt(PLANNING_PROMPT),
             completer=self.planner,
@@ -506,7 +489,6 @@ class _Hub:
             authorizing=AuthorizingStage(
                 registry=tools,
                 policy=self.policy,
-                memory_policy=DefaultMemoryPolicy(),
                 trail=harness.trail,
                 stories=self.stories,
                 memory=harness.memory,
@@ -517,11 +499,7 @@ class _Hub:
                 plans=harness.plans,
                 invoker=tools,
                 own_records=OwnRecordsByCapability(
-                    {
-                        "remember": RememberCalls(
-                            writer=memory_writer, memory=harness.memory, now=lambda: AT
-                        )
-                    }
+                    {"remember": CandidateCalls(similar=similar, limit=5)}
                 ),
                 timeout=timedelta(seconds=5),
                 now=lambda: AT,
@@ -1009,137 +987,6 @@ async def test_a_bare_yes_with_nothing_to_connect_it_to_records_no_pointer() -> 
     assert processing(bare).understanding[-1].answers == ()
     assert "approved_actions" not in hub.planner.shown(0)
     assert hub.world.ran == []
-
-
-# --- memory (§8:5, §5:5) ------------------------------------------------------------------
-
-
-async def test_after_a_search_a_remember_asks_and_a_yes_saves_it_confirmed() -> None:
-    hub = _Hub()
-    statement = "The museum opens at nine."
-    hub.reader.nothing()
-    hub.planner.then(
-        RoundResponse(
-            calls=(_call("c1", "web_search", query="museum hours", looking_for="when it opens"),)
-        ),
-        RoundResponse(calls=(_call("c1", "remember", statement=statement),)),
-        _ask("It opens at nine. Shall I remember that?", "2.1"),
-    )
-    conversation, asking = await hub.turn("When does the museum open? Remember it.")
-
-    (asked,) = _asked_calls(asking)[2]
-    assert str(asked.tool.capability) == "remember"
-    said = await hub.said(conversation)
-    assert said[-1].text.endswith(f'remember — statement: "{statement}"')
-    assert await _beliefs(hub.memory, statement) == []
-
-    hub.reader.yes("Shall I remember that?")
-    hub.planner.then(_run_approved(), RoundResponse(text="Remembered."))
-    await hub.turn("Yes, keep that.", conversation=conversation, message_id="m-2")
-
-    (saved,) = await _beliefs(hub.memory, statement)
-    # ADR-0328 §13:3: it rests on the yes, so it stands at "you confirmed this wording"
-    # though the activation that asked had read outside content; and the decision that
-    # wrote it names the approval (ADR-0321 §5:3).
-    (support,) = saved.supports
-    assert support.origin is SupportOrigin.CONFIRMATION
-    assert saved.standing is MemoryStanding.CONFIRMED
-    (decided,) = [
-        one
-        for one in await hub.harness.trail.recent(limit=20)
-        if str(one.tool.capability) == "remember"
-        and one.approval is not None
-        and one.ruling.outcome is PermissionOutcome.ALLOW
-    ]
-    assert decided.approved_part is not None
-
-
-class _Negations:
-    """A stub reconciler labelling a stored ``never <statement>`` a contradiction.
-
-    Since ADR-0336 §4 a non-asserted proposal defers only where the writer labels an
-    assertion ``CONTRADICTS``, so the writer here holds the label a model would give
-    the fixture's negation, and nothing else.
-    """
-
-    async def reconcile(
-        self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
-    ) -> Mapping[str, ConflictRelation]:
-        """Label each member that negates the proposal ``CONTRADICTS``."""
-        negation = f"never {proposal.proposed.content}"
-        return {c.id: ConflictRelation.CONTRADICTS for c in conflicts if c.content == negation}
-
-
-async def _beliefs(memory: FakeMemoryStore, fact: str) -> list[Memory]:
-    """The live memories stating ``fact``."""
-    return [
-        one
-        for one in await memory.export()
-        if isinstance(one, Memory) and one.content == fact and one.validity.valid_until is None
-    ]
-
-
-async def test_a_conflict_at_write_time_asks_replacing_and_a_yes_retires_what_was_shown() -> None:
-    """§5:5, #2845: the writer's ask needs you, showing the assertion it replaces."""
-    hub = _Hub()
-    statement = "drinks coffee every morning"
-    old = f"never {statement}"
-    conversation, asking = await _replacing(hub, statement, old)
-
-    (asked,) = _asked_calls(asking)[1]
-    assert asked.replaces == ("assertion:1",)
-    said = await hub.said(conversation)
-    assert f'replacing "{old}"' in said[-1].text.splitlines()[-1]
-    assert await _beliefs(hub.memory, old)
-
-    hub.reader.yes("Shall I replace it?")
-    hub.planner.then(_run_approved(), RoundResponse(text="Updated."))
-    await hub.turn("Yes, replace it.", conversation=conversation, message_id="m-2")
-
-    assert await _beliefs(hub.memory, old) == []
-    assert await _beliefs(hub.memory, statement)
-
-
-async def _replacing(
-    hub: _Hub, statement: str, old: str, *, placement: Placement | None = None
-) -> tuple[str, EpisodicMemory]:
-    """The user's earlier assertion ``old``, and a remember of ``statement`` asked about."""
-    asserted = memory_record(
-        "assertion:1", old, said_support("episode:earlier", when=AT, added_at=AT)
-    )
-    if placement is not None:
-        asserted = asserted.model_copy(update={"placement": placement})
-    await hub.memory.add(asserted)
-    hub.reader.nothing()
-    hub.planner.then(
-        RoundResponse(calls=(_call("c1", "remember", statement=statement),)),
-        _ask("You told me otherwise before. Shall I replace it?"),
-    )
-    return await hub.turn("Remember that I drink coffee every morning.")
-
-
-async def test_owner_only_records_a_question_rests_on_place_what_follows_them() -> None:
-    """ADR-0309 §5:10: the assertions a question shows replaced, and the asking episode a
-    yes reads, are obtained, so the episodes and the belief they lead to are placed by
-    them.
-
-    The episode window is empty, so the yes's activation obtains the asking episode
-    only through the records its yes leads to.
-    """
-    hub = _Hub(aged_out=True)
-    statement = "drinks coffee every morning"
-    owner = Placement(reach=PlacementReach.OWNER, set_by=PlacementSetter.DERIVED, set_at=AT)
-    conversation, asking = await _replacing(hub, statement, f"never {statement}", placement=owner)
-
-    assert asking.placement.reach is PlacementReach.OWNER
-
-    hub.reader.yes("Shall I replace it?")
-    hub.planner.then(_run_approved(), RoundResponse(text="Updated."))
-    _, yes = await hub.turn("Yes, replace it.", conversation=conversation, message_id="m-2")
-
-    assert yes.placement.reach is PlacementReach.OWNER
-    (saved,) = await _beliefs(hub.memory, statement)
-    assert saved.placement.reach is PlacementReach.OWNER
 
 
 # --- a retry after an unknown outcome (§8:6, §6) ------------------------------------------

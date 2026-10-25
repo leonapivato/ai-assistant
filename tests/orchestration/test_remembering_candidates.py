@@ -1,8 +1,8 @@
-"""``remember`` recording a candidate, behind the composition root's switch (ADR-0329 §§3-5).
+"""``remember`` recording a candidate (ADR-0329 §§3-5).
 
 The candidate's declaration and what a call records, its runner over a lookup, and the
-lookup itself under the round's audience. The interim's ``remember`` (ADR-0328 §13) is
-``test_remembering``'s, untouched by this file.
+lookup itself under the round's audience. ADR-0328 §13's interim, under which a call
+wrote a memory, is retired with the composition root's switch.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from test_lookups import BOUNDED, UNBOUNDED, _Down, _fact, _Searched, _store
 
 from ai_assistant.core.types import (
     ActionRequest,
+    CapabilityEffect,
     CapabilityResult,
     LabelKind,
     Memory,
@@ -34,7 +35,6 @@ from ai_assistant.orchestration.remembering import (
     CONFIRM_ARGUMENT,
     EPISODE_ARGUMENT,
     OUTSIDE_CONTENT_ARGUMENT,
-    REMEMBER,
     REMEMBER_CANDIDATE,
     REMEMBER_CAPABILITY,
     SIMILAR_KEY,
@@ -87,16 +87,19 @@ class _Similar:
 # --- the declaration (§3:7, §4:3, §5:1) ---------------------------------------------------
 
 
-def test_the_candidates_declaration_keeps_rememberings_five_properties_but_its_result() -> None:
-    """§3:7: own records, not safe to repeat, never leaves the hub, never unknown.
+def test_the_candidates_declaration_is_as_ruled() -> None:
+    """ADR-0306 §3:2, §3:7: own records, not safe to repeat, never leaves the hub, never unknown.
 
-    §4:3: its result carries no outside text, so it goes to planning whole.
+    §4:3: its result carries no outside text, so it goes to planning whole. The hub
+    fills the episode and the outside mark (§3:4).
     """
-    for name in ("id", "capability", "effect", "leaves_hub", "outcome_can_be_unknown"):
-        assert getattr(REMEMBER_CANDIDATE, name) == getattr(REMEMBER, name)
+    assert REMEMBER_CANDIDATE.id == REMEMBER_CAPABILITY
+    assert REMEMBER_CANDIDATE.capability == REMEMBER_CAPABILITY
+    assert REMEMBER_CANDIDATE.effect is CapabilityEffect.OWN_RECORDS
+    assert REMEMBER_CANDIDATE.leaves_hub is False
+    assert REMEMBER_CANDIDATE.outcome_can_be_unknown is False
     assert REMEMBER_CANDIDATE.safe_to_repeat is False
-    assert REMEMBER_CANDIDATE.system_supplied == REMEMBER.system_supplied
-    assert REMEMBER.result is CapabilityResult.NONE
+    assert REMEMBER_CANDIDATE.system_supplied == (EPISODE_ARGUMENT, OUTSIDE_CONTENT_ARGUMENT)
     assert REMEMBER_CANDIDATE.result is CapabilityResult.NO_OUTSIDE_TEXT
 
 

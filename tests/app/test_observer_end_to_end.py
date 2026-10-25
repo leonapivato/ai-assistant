@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Any, Final
 
 from phases_composition_support import UNDERSTANDING_INSTRUCTIONS, build_phased, until
 
-from ai_assistant.app import composition
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     InputPart,
@@ -138,7 +137,6 @@ async def test_a_request_to_remember_is_pending_then_kept_once_it_leaves_the_win
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """§3, §7, §9, §11:1, §12, §16, §18:1, through the composed engine."""
-    assert composition.REMEMBER_RECORDS_CANDIDATES
     planning = _Planning()
     phased = build_phased(tmp_path, monkeypatch, completer=FakeToolCallingCompleter(planning))
     models = _Models()

@@ -3,9 +3,9 @@
 One orchestration-local phase module (ADR-0309 §2:2), of the kind
 :class:`~ai_assistant.orchestration.acting.ActingStage` is. It is named ``authorizer``
 and not ``authorizing``, which is the retiring old path's module (ADR-0312 §3, ADR-0309
-§5:3). It holds injected seams onto the tool registry, the permission policy, the memory
-policy, the audit trail, the story store, the memory store and the egress binder, and it
-is **not a Protocol**. It calls no model and runs nothing: each :meth:`AuthorizingStage.
+§5:3). It holds injected seams onto the tool registry, the permission policy, the audit
+trail, the story store, the memory store and the egress binder, and it is **not a
+Protocol**. It calls no model and runs nothing: each :meth:`AuthorizingStage.
 authorize` is one controller step over one recorded planning round (ADR-0309 §3:2), and
 what it hands on is the decision acting and planning's next round read.
 
@@ -17,11 +17,11 @@ that cannot be bound to exactly one tool is not done, with its reason, and no ru
 sought.
 
 **Then the checks, in order** (§4:1). The policy, ``ActionPolicy`` (§4:11). Then the
-outside-content stand-in (§4:4 to §4:6). Then, for
-remembering, ``MemoryPolicy`` (§4:3). A call runs only where every check that applies
-allows it. A deny, or a memory reject, is *not done* with the reason (§4:9); a confirm,
-a stand-in send to the user, or a memory ask is *needs you* (§4:8). Nothing parks and
-nothing resumes. The round's message is checked by its place alone (§4:7).
+outside-content stand-in (§4:4 to §4:6). Then, for a candidate or a person model's call,
+its rule below. A call runs only where every check that applies allows it. A deny is
+*not done* with the reason (§4:9); a confirm, or a stand-in send to the user, is *needs
+you* (§4:8). Nothing parks and nothing resumes. The round's message is checked by its
+place alone (§4:7).
 
 **Recorded and read back before anything runs** (§4:10, ADR-0037 §2 to §3). Every
 ruling is bound to its request, appended to the trail, and read back; a trail that hands
@@ -39,13 +39,12 @@ no binding to carry the fact gets the rule here, with no exception: it needs the
 allowed call's capability is not safe to repeat, the activations of the episodes in this
 activation's stories are read from the story store as they stand now, and handed on.
 
-**A candidate, behind the composition root's switch** (ADR-0329 §5, §19:3). Where the
-stage is built to have ``remember`` record candidates, a ``remember`` call passes no
+**A candidate** (ADR-0329 §5). A ``remember`` call records a candidate and passes no
 ``MemoryPolicy`` (§5:6): the observer's writes do. Authorizing rules by rule, with no
 model, that one with *confirm* set needs you (§5:2), and under a yes it runs as any
 approved call does, the policy's recorded allow its deciding decision (§5:3). A candidate
-it cannot read is not done. With the switch off, remembering passes ``MemoryPolicy`` as
-above (ADR-0328 §13).
+it cannot read is not done. ADR-0328 §13's interim, under which remembering passed
+``MemoryPolicy`` here, is retired with the composition root's switch.
 
 **The person model's calls** (ADR-0338 §8:5). Every ``set_profile``, ``pin`` and
 ``unpin`` call needs the person's yes, by rule and with no model: a source of *needs you*
@@ -103,7 +102,6 @@ from ai_assistant.core.types import (
     EgressBinding,
     EpisodicMemory,
     LabelKind,
-    MemoryDecisionKind,
     PermissionDecision,
     PermissionOutcome,
     PlanningLabel,
@@ -129,8 +127,6 @@ from ai_assistant.orchestration.remembering import (
     OUTSIDE_CONTENT_ARGUMENT,
     REMEMBER_CAPABILITY,
     candidate_of,
-    remembered_proposal,
-    remembered_record_id,
 )
 from ai_assistant.orchestration.selection import (
     Preference,
@@ -148,7 +144,6 @@ if TYPE_CHECKING:
         AuditTrail,
         DiagnosticSink,
         EgressBinder,
-        MemoryPolicy,
         MemoryStore,
         PlanStore,
         StoryStore,
@@ -200,8 +195,6 @@ _STAND_IN: Final = (
     "needs the user"
 )
 _UNCLAIMED_MEMORY: Final = "remembering is claimed under an effect record, and this is not"
-_MEMORY_ASK: Final = "the memory policy asks the user about remembering this"
-_MEMORY_REJECT: Final = "the memory policy rejects remembering this"
 #: ADR-0329 §5:2: a candidate whose wording planning asked the user to confirm.
 _CONFIRM_WORDING: Final = "the user is asked to confirm this wording before it is kept"
 #: ADR-0338 §8:5: a change to the person's profile or pins, which runs only on their yes.
@@ -993,7 +986,6 @@ class AuthorizingStage:
         *,
         registry: ToolRegistry,
         policy: ActionPolicy,
-        memory_policy: MemoryPolicy,
         trail: AuditTrail,
         stories: StoryStore,
         memory: MemoryStore,
@@ -1006,7 +998,6 @@ class AuthorizingStage:
         new_decision_id: Callable[[], str] = _new_decision_id,
         new_effect_id: Callable[[], str] = _new_effect_id,
         diagnostics: DiagnosticSink | None = None,
-        candidates: bool = False,
     ) -> None:
         """Wire the stage to its seams.
 
@@ -1014,7 +1005,6 @@ class AuthorizingStage:
             registry: The tool registry selection reads.
             policy: The permission policy, built without goal authorizations and goal
                 quotes (ADR-0306 §4:11).
-            memory_policy: The memory policy remembering also passes (§4:3).
             trail: The audit trail every ruling is recorded in and read back from.
             stories: The story store the backstop's match is collected from (§5:10).
             memory: The memory store the activation's record is read from.
@@ -1036,14 +1026,9 @@ class AuthorizingStage:
             new_effect_id: Mints an effect record's id, before the ruling.
             diagnostics: The diagnostic record's write seam (ADR-0314 §4:4), or
                 ``None`` where the record is off.
-            candidates: Whether ``remember`` records a candidate (ADR-0329 §3, §5),
-                the composition root's switch: it then passes no ``MemoryPolicy``, and
-                one with *confirm* set needs you. Off by default, which keeps
-                ADR-0328 §13's interim.
         """
         self._registry = registry
         self._policy = policy
-        self._memory_policy = memory_policy
         self._trail = trail
         self._stories = stories
         self._memory = memory
@@ -1056,7 +1041,6 @@ class AuthorizingStage:
         self._new_decision_id = new_decision_id
         self._new_effect_id = new_effect_id
         self._diagnostics = diagnostics
-        self._candidates = candidates
 
     async def authorize(self, given: RoundToAuthorize) -> RoundAuthorization:
         """Check every call of ``given`` in the round's order, and its message.
@@ -1403,7 +1387,7 @@ class AuthorizingStage:
     async def _after_the_policy(
         self, call: ProposedCall, ruled: _Ruled, state: _Round
     ) -> CallVerdict:
-        """The policy's ruling, the stand-in, then the person model's rule or ``MemoryPolicy``.
+        """The policy's ruling, the stand-in, then the person model's or a candidate's rule.
 
         ADR-0306 §4:1 to §4:9, and ADR-0338 §8:5's rule for the person model's calls.
         """
@@ -1439,11 +1423,7 @@ class AuthorizingStage:
             state.note(call, "person_model", Verdict.NEEDS_YOU.value, _PERSON_MODEL_YES)
             return verdict(Verdict.NEEDS_YOU, _PERSON_MODEL_YES)
         if tool.capability == REMEMBER_CAPABILITY:
-            remembered = (
-                self._candidate(ruled, call, state)
-                if self._candidates
-                else await self._remembering(ruled, call, state)
-            )
+            remembered = self._candidate(ruled, call, state)
             if remembered is not None:
                 kind, reason = remembered
                 return verdict(kind, reason)
@@ -1471,35 +1451,6 @@ class AuthorizingStage:
         if candidate.confirm and not approved:
             state.note(call, CONFIRM_ARGUMENT, Verdict.NEEDS_YOU.value, _CONFIRM_WORDING)
             return Verdict.NEEDS_YOU, _CONFIRM_WORDING
-        return None
-
-    async def _remembering(
-        self, ruled: _Ruled, call: ProposedCall, state: _Round
-    ) -> tuple[Verdict, str] | None:
-        """``MemoryPolicy``'s ruling on what the call would write, where it stops it (§4:3).
-
-        Ruled over the proposal alone. Its conflicts are the writer's to find, and the
-        writer rules again over them when the call runs, writing nothing on an ask or a
-        reject.
-        """
-        if ruled.effect_id is None:
-            state.note(call, "memory_policy", Verdict.NOT_DONE.value, _UNCLAIMED_MEMORY)
-            return Verdict.NOT_DONE, _UNCLAIMED_MEMORY
-        try:
-            proposal = remembered_proposal(
-                ruled.request.parameters,
-                record_id=remembered_record_id(ruled.effect_id),
-                at=ruled.decision.decided_at,
-            )
-        except ValueError:
-            state.note(call, "memory_policy", Verdict.NOT_DONE.value, _MALFORMED)
-            return Verdict.NOT_DONE, _MALFORMED
-        ruling = await self._memory_policy.decide(proposal, conflicts=(), relations=None)
-        state.note(call, "memory_policy", ruling.kind.value, ruling.reason)
-        if ruling.kind is MemoryDecisionKind.ASK_USER:
-            return Verdict.NEEDS_YOU, _MEMORY_ASK
-        if ruling.kind is MemoryDecisionKind.REJECT:
-            return Verdict.NOT_DONE, _MEMORY_REJECT
         return None
 
     # --- the yes path (ADR-0321 §4) ------------------------------------------------------
@@ -1731,9 +1682,9 @@ class AuthorizingStage:
         included, is resolved on route (a): the confirm is recorded naming the approval,
         ``ActionPolicy.resolve`` is asked with ``approved=True``, and the resolving
         decision records ``resolves`` naming it (§4:7). An allow is recorded naming the
-        approval. The approval then lifts the outside-content stand-in and reaches
-        ``MemoryPolicy`` at the write (§4:17, §5:2), and a deliberate repeat's claim
-        passes an unknown match (§6:2). Every call under an approval gets an effect
+        approval. The approval then lifts the outside-content stand-in and stands for a
+        candidate's *confirm* (ADR-0329 §5:3), and a deliberate repeat's claim passes an
+        unknown match (§6:2). Every call under an approval gets an effect
         record, its id minted before the ruling (§4:10).
         """
         call = one.call
@@ -1763,11 +1714,7 @@ class AuthorizingStage:
             state.note(call, "stand_in", "lifted", None)
         if tool.capability == REMEMBER_CAPABILITY:
             ruled = _Ruled(request=request, decision=decision, effect_id=effect_id)
-            remembered = (
-                self._candidate(ruled, call, state, approved=True)
-                if self._candidates
-                else await self._remembering(ruled, call, state)
-            )
+            remembered = self._candidate(ruled, call, state, approved=True)
             if remembered is not None and remembered[0] is Verdict.NOT_DONE:
                 state.verdicts.append(
                     _ruled_verdict(call, Verdict.NOT_DONE, remembered[1], decision)

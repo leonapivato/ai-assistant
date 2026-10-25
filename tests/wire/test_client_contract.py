@@ -214,14 +214,13 @@ async def serving(
 
 
 @contextlib.asynccontextmanager
-async def _pending(tmp_path: Path, *, candidates: bool) -> AsyncIterator[PendingCandidatesSubject]:
+async def _pending(tmp_path: Path) -> AsyncIterator[PendingCandidatesSubject]:
     """A client of a hub whose fake engine reads the injected stores at the bound."""
     memory = FakeMemoryStore(now=lambda: PENDING_AT)
     plans = FakePlanStore(now=lambda: PENDING_AT)
     backing = FakeAssistantEngine(max_payload_bytes=PENDING_LIMIT)
     backing.episode_memory = memory
     backing.plan_store = plans
-    backing.candidates = candidates
     async with serving(
         backing, tmp_path / "hub.sock", max_frame_bytes=PENDING_LIMIT + ENVELOPE_RESERVE_BYTES
     ) as client:
@@ -316,16 +315,8 @@ class TestHubEngineClientContract(AssistantEngineContract):
     async def pending_candidates_subject(
         self, tmp_path: Path
     ) -> AsyncIterator[PendingCandidatesSubject]:
-        """The panel's read over an authenticated local socket, candidates on."""
-        async with _pending(tmp_path, candidates=True) as subject:
-            yield subject
-
-    @pytest.fixture
-    async def pending_candidates_off(
-        self, tmp_path: Path
-    ) -> AsyncIterator[PendingCandidatesSubject]:
-        """The same, the hub's switch off: the client has no switch of its own."""
-        async with _pending(tmp_path, candidates=False) as subject:
+        """The panel's read over an authenticated local socket."""
+        async with _pending(tmp_path) as subject:
             yield subject
 
     @pytest.fixture

@@ -112,11 +112,9 @@ from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.reliance import NOTE_RELIANCE, RELIANCE_LABEL_ARGUMENTS
 from ai_assistant.orchestration.remembering import (
     CANDIDATE_LABEL_ARGUMENTS,
-    REMEMBER,
     REMEMBER_CANDIDATE,
     REMEMBER_CAPABILITY,
     CandidateCalls,
-    RememberCalls,
 )
 from ai_assistant.orchestration.selection import Preference
 from ai_assistant.orchestration.story_calls import (
@@ -187,7 +185,6 @@ if TYPE_CHECKING:
         Embedder,
         Forecaster,
         MemoryStore,
-        MemoryWriter,
         ModelProvider,
         NotificationPolicy,
         OutboundTransport,
@@ -481,14 +478,6 @@ PHASES_STORY_EPISODES: Final = STORY_SHORT_VIEW_EPISODES + 1
 #: routed by source (ADR-0307 §6:6, ADR-0306 §5:16). **Provisional (#2589).** As many as
 #: recall's second run keeps in all, so an asked-for search reaches no fewer than recall.
 PHASES_MEMORY_SEARCH_LIMIT: Final = RECALL_SECOND_RUN_CAP
-
-#: Whether planning's ``remember`` records a candidate for the observer (ADR-0329 §§3-6)
-#: rather than writing a memory through ``MemoryPolicy`` (ADR-0328 §13's interim). **A
-#: constant of this module, never a setting** (§19:3): no build in which ``remember``
-#: records candidates while the observer does not run is deployed to a person's hub, so
-#: nothing a hub reads can turn it. **On**, in the change that wires the observer below
-#: (§19:3), and the two go live in one deploy (§19:2).
-REMEMBER_RECORDS_CANDIDATES: Final = True
 
 #: How many similar memories a candidate's lookup returns at most (ADR-0329 §4:1).
 #: **Provisional (#2589).** A handful: enough to show planning a conflict that matters,
@@ -1833,7 +1822,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 trail=trail,
                 stories=stories,
                 memory=memory,
-                writer=writer,
                 binder=binder,
                 chat=conversations,
                 searcher=None if search is None else search.searcher,
@@ -2045,10 +2033,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # ADR-0323 §2:2: the line's spoke, where it is configured; the engine starts
             # its reader with the hub and stops it with it.
             telegram=telegram_line,
-            # ADR-0329 §18:2, §19:3: the same one switch the phases are built by, so the
-            # panel's read of the pending candidates answers none while `remember`
-            # writes memories under ADR-0328 §13's interim.
-            candidates=REMEMBER_RECORDS_CANDIDATES,
             # ADR-0329 §7:6, §15:1: the observer, run on each frozen episode and by the
             # scheduler's `observer` row.
             observer=observer,
@@ -2520,8 +2504,8 @@ class _PhaseSeams:
     Each is the **same** instance the rest of the composition holds, for that
     object's own reason:
     one trail every ruling is recorded in, one plan store every effect is claimed in,
-    one story store the backstop's match is read from, one memory store and writer,
-    one egress binder, one registry that is also the invoker, and one tidy-up, so at
+    one story store the backstop's match is read from, one memory store, one egress
+    binder, one registry that is also the invoker, and one tidy-up, so at
     most one run is on a story at a time (ADR-0300 §5:10).
     """
 
@@ -2531,7 +2515,6 @@ class _PhaseSeams:
     trail: AuditTrail
     stories: StoryStore
     memory: MemoryStore
-    writer: MemoryWriter
     binder: EgressBinder
     chat: ConversationStore
     searcher: WebSearcher | None
@@ -2572,18 +2555,16 @@ def _build_phase_path(
     beside the registry's capabilities as it offers the search, fills every argument it
     takes from the forecaster's own proposal and sends its call to ``Forecaster.read``.
 
-    **Candidates, behind one switch** (ADR-0329 §19:3): where
-    :data:`REMEMBER_RECORDS_CANDIDATES` is on, ``remember`` is offered recording a
-    candidate, run by a :class:`CandidateCalls` whose lookup is the look-ups' (§4:1),
-    authorizing and planning are built to treat it so (§5, §6), and noting reliance is
-    offered (§6:7). Off, as it is until the observer is wired, every one of them is as
-    ADR-0328 §13's interim has it.
+    **Candidates** (ADR-0329 §§3-6): ``remember`` is offered recording a candidate, run
+    by a :class:`CandidateCalls` whose lookup is the look-ups' (§4:1), and noting
+    reliance is offered beside it (§6:7). ADR-0328 §13's interim, under which
+    ``remember`` wrote a memory, is retired with the switch that kept it.
 
     **The policy is the deployment's thresholds and configured providers, with no
     goal authorizations, no goal quotes and no grant seam** (ADR-0306 §4:11, §6;
     ADR-0321 §7:1): a ``ThresholdActionPolicy`` built from the settings, so no ruling
-    a phase asks for reads the goal model or a standing grant. Remembering
-    also passes ``DefaultMemoryPolicy`` (§4:3).
+    a phase asks for reads the goal model or a standing grant. A candidate passes no
+    ``MemoryPolicy`` (ADR-0329 §5:6).
 
     **Planning** asks through pydantic-ai's native tool calling, on the deployment's
     default model (ADR-0307 §10); **a digest** is a plain completion on the routed
@@ -2636,14 +2617,12 @@ def _build_phase_path(
     look_ups = LookUps(
         memory=seams.memory, views=story_reads, search_limit=PHASES_MEMORY_SEARCH_LIMIT
     )
-    # ADR-0329 §19:3: one switch, off until the observer is wired, decides whether
-    # `remember` records candidates, with its lookup, its confirm and noting reliance.
-    candidates = REMEMBER_RECORDS_CANDIDATES
     tools = PhaseTools(
         registry=seams.registry,
         invoker=seams.registry,
-        own_records=(REMEMBER_CANDIDATE if candidates else REMEMBER, *STORY_CALLS, *LOOK_UPS),
-        reliance=NOTE_RELIANCE if candidates else None,
+        own_records=(REMEMBER_CANDIDATE, *STORY_CALLS, *LOOK_UPS),
+        # ADR-0329 §6:7: noting reliance, beside the candidate.
+        reliance=NOTE_RELIANCE,
         searcher=seams.searcher,
         # ADR-0324 §5:4: the weather pull, where a forecaster is configured.
         forecaster=seams.forecaster,
@@ -2668,7 +2647,6 @@ def _build_phase_path(
         authorizing=AuthorizingStage(
             registry=tools,
             policy=policy,
-            memory_policy=DefaultMemoryPolicy(),
             trail=seams.trail,
             stories=seams.stories,
             memory=seams.memory,
@@ -2685,20 +2663,15 @@ def _build_phase_path(
             ),
             now=_utcnow,
             diagnostics=seams.diagnostics,
-            candidates=candidates,
         ),
         acting=ActingStage(
             plans=seams.plans,
             invoker=tools,
             own_records=OwnRecordsByCapability(
                 {
-                    # ADR-0321 §5:5: the store the writer writes to, read for the
-                    # assertions a write-time conflict's question shows replaced.
-                    REMEMBER_CAPABILITY: (
-                        # ADR-0329 §4:1: a candidate's lookup, under the look-ups' scope.
-                        CandidateCalls(similar=look_ups, limit=CANDIDATE_LOOKUP_LIMIT)
-                        if candidates
-                        else RememberCalls(writer=seams.writer, memory=seams.memory, now=_utcnow)
+                    # ADR-0329 §4:1: a candidate's lookup, under the look-ups' scope.
+                    REMEMBER_CAPABILITY: CandidateCalls(
+                        similar=look_ups, limit=CANDIDATE_LOOKUP_LIMIT
                     ),
                     **dict.fromkeys(STORY_CALL_CAPABILITIES, story_calls),
                     **dict.fromkeys(LOOK_UP_CAPABILITIES, look_ups),
@@ -2713,7 +2686,8 @@ def _build_phase_path(
         label_arguments={
             **STORY_LABEL_ARGUMENTS,
             **LOOK_UP_LABEL_ARGUMENTS,
-            **({**CANDIDATE_LABEL_ARGUMENTS, **RELIANCE_LABEL_ARGUMENTS} if candidates else {}),
+            **CANDIDATE_LABEL_ARGUMENTS,
+            **RELIANCE_LABEL_ARGUMENTS,
         },
         # ADR-0307 §5:3-§5:4: the hub's check of a move or a split before authorizing,
         # against the stories as they stand then, by the same runner acting reaches.
@@ -2739,7 +2713,6 @@ def _build_phase_path(
         # the spend and notification policies read, validated at load.
         timezone=settings.timezone,
         diagnostics=seams.diagnostics,
-        candidates=candidates,
     )
 
 
