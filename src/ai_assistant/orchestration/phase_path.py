@@ -654,9 +654,13 @@ class _ConversationWriter:
         )
 
     async def deliver(self, fitted: Fitted, *, effect_id: str) -> Delivery:
-        del effect_id
+        # ADR-0350 §12:9: the transcript records with the message the effect record it was
+        # claimed under, so whether it was sent is read after a restart, never guessed.
         message = NewMessage(
-            author=MessageAuthor.ASSISTANT, text=fitted.text, cut_off=fitted.cut_off
+            author=MessageAuthor.ASSISTANT,
+            text=fitted.text,
+            cut_off=fitted.cut_off,
+            effect_id=effect_id,
         )
         try:
             receipt = await self.writer.send(self.conversation_id, message)

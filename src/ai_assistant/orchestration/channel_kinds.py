@@ -31,6 +31,16 @@ so a kind not yet declared in code (the hub chat's) declares it too, and
 :attr:`ChannelKind.one_at_a_time` reads it rather than restating it. On such a place an
 activation is admitted only where none started from it is running, and an input that
 arrives meanwhile joins the running one or waits (§2:4).
+
+**Whether a kind can confirm delivery** (ADR-0350 §8:12). A kind declares whether it can
+confirm, from its medium's own record, whether a message claimed into one of its places
+was sent, in the same shape as one at a time: :func:`confirms_delivery`'s register, keyed
+by channel type, which :attr:`ChannelKind.confirms_delivery` reads. The hub chat's
+conversations can: the hub hosts each one's transcript, a message is sent once that
+transcript records it (ADR-0292 §7:4), and the transcript records with each of the
+assistant's messages the effect record it was claimed under (§12:9). The line cannot: the
+Bot API gives a bot no way to read its chat's history (ADR-0323 §10). Every other kind
+declares that it cannot.
 """
 
 from __future__ import annotations
@@ -39,10 +49,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
+from pydantic import ValidationError
+
 from ai_assistant.core.channel_validation import establishes_the_user, input_origin
+from ai_assistant.core.types import ChannelIdentity
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import ApprovalGiver, ChannelIdentity, InputOrigin
+    from ai_assistant.core.types import ApprovalGiver, InputOrigin
 
 __all__ = [
     "Audience",
@@ -50,7 +63,9 @@ __all__ = [
     "Direction",
     "Reach",
     "WindowSource",
+    "confirms_delivery",
     "one_at_a_time",
+    "place_channel",
     "place_of",
     "users_place",
 ]
@@ -61,6 +76,10 @@ _PLACE_SEPARATOR: Final = ":"
 #: ADR-0332 §2:3: the channel types whose kind declares that each of its places runs one
 #: activation at a time. The hub chat's conversations and the Telegram line.
 _ONE_AT_A_TIME: Final = frozenset({"conversation", "telegram"})
+
+#: ADR-0350 §8:12: the channel types whose kind can confirm, from its medium's own record,
+#: whether a message claimed into one of its places was sent: the hub chat's alone.
+_CONFIRMS_DELIVERY: Final = frozenset({"conversation"})
 
 
 class Reach(StrEnum):
@@ -179,8 +198,23 @@ class ChannelKind:
         """Whether each of the kind's places runs one activation at a time (ADR-0332 §2:3)."""
         return self.channel_type in _ONE_AT_A_TIME
 
-    def input_origin(self, channel: ChannelIdentity, *, takes_in_forward: bool) -> InputOrigin:
+    @property
+    def confirms_delivery(self) -> bool:
+        """Whether the kind can confirm a claimed message's delivery (ADR-0350 §8:12)."""
+        return confirms_delivery(self.channel_type)
+
+    def input_origin(
+        self,
+        channel: ChannelIdentity,
+        *,
+        takes_in_forward: bool,
+        carries_outside_mark: bool = False,
+    ) -> InputOrigin:
         """The origin the kind declares for one input on ``channel`` (ADR-0284 §2:2).
+
+        A kind that declares its origin per input reads, for this one, whether it takes
+        in a forward (ADR-0323 §4:11) or carries the outside-content mark (ADR-0350
+        §6:3).
 
         Raises:
             ValueError: If ``channel`` is not of this kind, or the register declares no
@@ -189,7 +223,9 @@ class ChannelKind:
         if channel.channel_type != self.channel_type:
             msg = "a kind declares the origin of its own channels' input alone"
             raise ValueError(msg)
-        return input_origin(channel, takes_in_forward=takes_in_forward)
+        return input_origin(
+            channel, takes_in_forward=takes_in_forward, carries_outside_mark=carries_outside_mark
+        )
 
 
 def one_at_a_time(channel_type: str) -> bool:
@@ -201,6 +237,27 @@ def one_at_a_time(channel_type: str) -> bool:
     activations run side by side (§2:2).
     """
     return channel_type in _ONE_AT_A_TIME
+
+
+def confirms_delivery(channel_type: str) -> bool:
+    """Whether the kind of ``channel_type`` can confirm a claimed message's delivery.
+
+    ADR-0350 §8:11-§8:12: the hub chat's conversations can, from the transcript, which
+    records each assistant message with the effect record it was claimed under; the line
+    cannot, and every other kind declares that it cannot.
+    """
+    return channel_type in _CONFIRMS_DELIVERY
+
+
+def place_channel(place: str) -> ChannelIdentity | None:
+    """The channel a recorded place names, :func:`place_of`'s inverse, or ``None``."""
+    channel_type, separator, instance = place.partition(_PLACE_SEPARATOR)
+    if not (separator and channel_type and instance):
+        return None
+    try:
+        return ChannelIdentity(channel_type=channel_type, instance_id=instance)
+    except ValidationError:
+        return None
 
 
 def place_of(channel: ChannelIdentity) -> str:

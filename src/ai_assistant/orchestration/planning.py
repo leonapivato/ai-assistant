@@ -321,6 +321,8 @@ _THINGS: Final = {
     LabelKind.MEMORY: ("a memory", "memories"),
     LabelKind.RESULT: ("a result", "results"),
     LabelKind.APPROVED_ACTION: ("an approved action", "approved actions"),
+    LabelKind.SCHEDULED_TASK: ("a scheduled task", "scheduled tasks"),
+    LabelKind.PLACE: ("a place", "places"),
 }
 
 

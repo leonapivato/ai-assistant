@@ -396,12 +396,10 @@ def fitted_message(conversation_id: str, message: NewMessage, *, max_bytes: int)
         for one in records:
             check_payload(one, max_bytes=max_bytes, subject="the assistant's message")
         raise AssertionError("an oversized message was unexpectedly admitted")
-    return NewMessage(
-        author=message.author,
-        text=message.text[:low],
-        replies_to=message.replies_to,
-        options=message.options,
-        cut_off=True,
+    # Every property kept but the text and the cut, the claim it is written under among
+    # them (ADR-0350 §12:9): a message cut to fit is still the one its effect record names.
+    return NewMessage.model_validate(
+        {**message.model_dump(), "text": message.text[:low], "cut_off": True}
     )
 
 
