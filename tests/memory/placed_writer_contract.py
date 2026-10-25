@@ -2085,6 +2085,71 @@ class PlacedWriterContract:
             InputPart(episode=_address("e-tuesday")),
         )
 
+    async def test_a_restates_fold_stops_the_proposals_own_older_word_on_the_memory_it_leaves(
+        self, make_placed_writer: PlacedWriterFactory
+    ) -> None:
+        """ADR-0345 §3:7 on the memory the write leaves, ADR-0348 §3 (#3418).
+
+        A restatement that cites the holder's corrected word ``against`` folds that word
+        in, stopped, citing the restatement; one citing a later doubt of theirs folds it
+        in counted, since newer evidence counts.
+        """
+        store = await self._line(
+            _on_line("e-monday", "My dentist is Monday."),
+            _on_line("e-tuesday", "No, it's Tuesday."),
+            _on_line("e-again", "Yes, Tuesday, not Monday."),
+            _on_line("e-vegetarian", "I'm vegetarian."),
+            _on_line("e-still", "Still vegetarian."),
+            _on_line("e-chicken", "I had chicken yesterday."),
+        )
+        tuesday = await self._hold(
+            make_placed_writer,
+            store,
+            memory("m-tuesday", "The user's dentist appointment is Tuesday", _said("e-tuesday")),
+        )
+        vegetarian = await self._hold(
+            make_placed_writer,
+            store,
+            memory("m-vegetarian", "The user is vegetarian", _said("e-vegetarian")),
+        )
+
+        corrected = await self._write(
+            make_placed_writer,
+            store,
+            _placed(
+                memory(
+                    "m-again",
+                    "The user's dentist appointment is Tuesday",
+                    _said("e-again"),
+                    _said("e-monday", direction=SupportDirection.AGAINST),
+                ),
+                _pair(tuesday, PlacedRelation.RESTATES, "the same claim"),
+            ),
+        )
+        doubted = await self._write(
+            make_placed_writer,
+            store,
+            _placed(
+                memory(
+                    "m-still",
+                    "The user is vegetarian",
+                    _said("e-still"),
+                    _said("e-chicken", direction=SupportDirection.AGAINST),
+                ),
+                _pair(vegetarian, PlacedRelation.RESTATES, "the same claim"),
+            ),
+        )
+
+        assert (corrected.folded, doubted.folded) == (("m-tuesday",), ("m-vegetarian",))
+        held = await _all(store)
+        folded = held["m-tuesday"]
+        older = InputPart(episode=_address("e-monday"))
+        assert folded.support_at(older) is not None, "folded in, stopped, not dropped"
+        assert folded.against_holders == ()
+        (stop,) = [one for one in folded.operations if one.stops == older]
+        assert stop.cites == InputPart(episode=_address("e-again"))
+        assert held["m-vegetarian"].against_holders == (_OWNER,), "a later doubt counts"
+
     async def test_a_holders_newer_doubt_keeps_counting_against_their_memory(
         self, make_placed_writer: PlacedWriterFactory
     ) -> None:

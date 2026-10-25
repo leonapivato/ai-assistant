@@ -20,7 +20,9 @@ write, citing that backing support. The record's order alone decides it (§3:2):
 earlier episode, by the store-wide number the store gave it (ADR-0283 §1), before a later
 one, and within one episode its input before what its rounds made, its messages and its
 digests' items by position. Where the record does not order two parts, the support keeps
-counting, as a part after the backing one does (§3:3).
+counting, as a part after the backing one does (§3:3). A ``restates`` fold does the same
+on the memory it leaves (ADR-0345 §3:7): a proposal's own older ``against`` it brings in
+stops there too, beside the holder's disputes the memory carried before.
 
 **One open check per memory** (ADR-0348 §4). A ``recheck`` on a memory already holding an
 open ``recheck`` question raises nothing and writes nothing to it, and an answered
@@ -544,8 +546,12 @@ def _relate(  # noqa: C901, PLR0911, PLR0913 — one arm per row of §5's table
     *,
     folds: Sequence[str],
     replacing: bool,
+    numbers: Mapping[str, int],
 ) -> Memory:
-    """What §5's table writes to one stored memory, for every relation but a retiring one."""
+    """What §5's table writes to one stored memory, for every relation but a retiring one.
+
+    ``numbers`` order the episodes a fold's superseded supports are read in (ADR-0348 §3).
+    """
     backing = proposed.backing_supports
 
     def each(
@@ -578,16 +584,24 @@ def _relate(  # noqa: C901, PLR0911, PLR0913 — one arm per row of §5's table
         case PlacedRelation.RECHECK:
             return _recheck(write, stored, pair)
         case PlacedRelation.RESTATES if pair.memory in folds:
-            # §3:7: a holder's new word on the whole claim ends their own dispute with
-            # it, so their `against` supports it carried before this write stop.
+            # §3:7, on the memory the write leaves: a holder's new word on the whole
+            # claim ends their own dispute with it. Their `against` supports it carried
+            # before this write stop; and so does each the fold brings in from the
+            # proposal whose part comes before that holder's backing part, as on an
+            # install (ADR-0348 §3:1), while a later one keeps counting (§3:3).
             carried = {one.points_at for one in stored.supports}
             stored = each(proposed.counted_supports, None, backs=True)
             for one in stored.counted_supports:
-                if one.direction is not SupportDirection.AGAINST or one.points_at not in carried:
+                if one.direction is not SupportDirection.AGAINST:
                     continue
-                cites = _holder_cite(one.holder, backing)
+                if one.points_at in carried:
+                    cites = _holder_cite(one.holder, backing)
+                    note = pair.note
+                else:
+                    cites = _superseding(one, backing, numbers)
+                    note = SUPERSEDED_NOTE
                 if cites is not None and cites != one.points_at:
-                    stored = write.stop(stored, one.points_at, cites, pair.note)
+                    stored = write.stop(stored, one.points_at, cites, note)
             return stored
         case PlacedRelation.CONTAINED if not replacing:
             if pair.memory in folds:
@@ -766,7 +780,15 @@ def placed_write(
             else:
                 disputes.extend((one, pair.note) for one in after.backing_supports)
         else:
-            after = _relate(write, stored, pair, proposed, folds=folds, replacing=replacing)
+            after = _relate(
+                write,
+                stored,
+                pair,
+                proposed,
+                folds=folds,
+                replacing=replacing,
+                numbers=numbers or {},
+            )
         write.records[pair.memory] = after
     landing = _disputed(write, proposed if install else None, folds, disputes)
     if landing is not None:
