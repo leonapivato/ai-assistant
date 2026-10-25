@@ -140,12 +140,21 @@ class _Relation(BaseModel):
 class PlacementReply(BaseModel):
     """The placement call's whole reply: a relation for each memory shown (§6:2).
 
-    ``answers`` is read by :func:`placement_of`, as one object, a list of them or null.
+    ``answers`` is read by :func:`placement_of`, as one object, a list of them or null. A
+    reply naming no relation readably is no placement, and does not parse, so any reader
+    of this shape refuses it as the stage does (ADR-0329 §16:4).
     """
 
     model_config = ConfigDict(frozen=True, extra="ignore")
     relations: tuple[_Relation, ...] = ()
     answers: JsonValue = None
+
+    @model_validator(mode="after")
+    def _places_something(self) -> Self:
+        if all(one.note == UNREAD_NOTE for one in self.relations):
+            msg = "a placement names some relation of the set, with its note (ADR-0346 §6:2)"
+            raise ValueError(msg)
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -529,7 +538,10 @@ def in_words(note: str, view: PlacementView) -> str:
     A memory's label becomes its wording, quoted, and a question's what it asks, quoted:
     the labels are the call's own, and mean nothing, or something else, once the note is
     stored (ADR-0345 §5:7). A label the call was not shown is left as written, since it
-    names nothing the call was given and may be the person's own text.
+    names nothing the call was given. So is one that stands, as a word, in the text the
+    call was shown, a wording, a support's text or a question: "an M1 Mac" or "Q3 sales"
+    there is the data's own text, which a note may quote, and putting a memory in its place
+    would corrupt it.
 
     Args:
         note: A relation's note as the reply gives it.
@@ -544,10 +556,13 @@ def in_words(note: str, view: PlacementView) -> str:
         for question in one.memory.open_questions:
             if question.id in wanted:
                 asks[wanted[question.id]] = question.asks
+    quoted = {match.group(0) for text in _shown_texts(view) for match in _LABEL.finditer(text)}
 
     def worded(match: re.Match[str]) -> str:
         label = match.group(0)
         shown = view.memory(label)
+        if label in quoted:
+            return label
         if shown is not None:
             return json.dumps(shown.memory.content, ensure_ascii=False)
         if label in asks:
@@ -555,3 +570,13 @@ def in_words(note: str, view: PlacementView) -> str:
         return label
 
     return _LABEL.sub(worded, note)
+
+
+def _shown_texts(view: PlacementView) -> list[str]:
+    """Every text the call is shown as data: wordings, supports' texts and questions."""
+    texts = [view.framed.content, *view.texts.values()]
+    for one in view.retrieved:
+        texts.append(one.memory.content)
+        texts.extend(question.asks for question in one.memory.open_questions)
+        texts.extend(text for _, text in one.recent if text is not None)
+    return texts

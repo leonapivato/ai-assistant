@@ -257,13 +257,22 @@ def test_a_pair_the_reply_does_not_place_readably_is_unclear_and_the_rest_stand(
 
 def test_the_reply_shape_reads_an_unreadable_relation_as_unclear() -> None:
     """What any reader of the shape reads is what the stage reads (prompt_cases)."""
-    read = parsed(placing(("M1", "contradicts", "No."), ("M2", "weakens", " ")), PlacementReply)
+    read = parsed(
+        placing(("M1", "contradicts", "No."), ("M2", "weakens", " "), ("M3", "restates", "Same.")),
+        PlacementReply,
+    )
+    unreadable = parsed(
+        placing(("M1", "contradicts", "No."), ("M2", "weakens", " ")), PlacementReply
+    )
 
     assert read is not None
     assert [(one.relation, one.note) for one in read.relations] == [
         ("unclear", UNREAD_NOTE),
         ("unclear", UNREAD_NOTE),
+        ("restates", "Same."),
     ]
+    assert unreadable is None, "a reply placing nothing readably is refused by any reader"
+    assert parsed(reply(relations=[]), PlacementReply) is None
 
 
 def test_an_answered_question_is_named_on_a_memory_shown() -> None:
@@ -344,6 +353,28 @@ def test_no_label_of_the_call_reaches_a_note() -> None:
         'Bears on "Aisle, please." and on "The user prefers window seats."\'s open question '
         '"Is it still true?", not on M12 or Q3.'
     )
+
+
+def test_a_label_standing_in_the_data_shown_is_the_datas_own_text() -> None:
+    """#3402: "an M1 Mac" or "Q1 sales" in what the call was shown is never replaced."""
+    view = _view(
+        _stored(content="The user works on an M1 Mac."),
+        _stored("m-sales", "The user reports Q1 sales to Dana."),
+    )
+
+    placement = _placed(
+        view,
+        placing(
+            ("M1", "recheck", "Is the M1 Mac still the user's, given M2?"),
+            ("M2", "recheck", "Are Q1 sales still the user's to report?"),
+        ),
+    )
+
+    assert placement is not None
+    assert [one.note for one in placement.pairs] == [
+        'Is the M1 Mac still the user\'s, given "The user reports Q1 sales to Dana."?',
+        "Are Q1 sales still the user's to report?",
+    ], "a label in the data stays; one that stands nowhere in it is a reference"
 
 
 def test_the_placement_call_is_shown_the_framed_memory_and_the_compact_forms() -> None:

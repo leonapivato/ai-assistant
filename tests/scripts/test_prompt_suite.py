@@ -467,6 +467,20 @@ def test_no_label_reads_the_named_fields_anywhere_in_the_reply() -> None:
         ("observer_framing", json.dumps({"memories": [], "nothing": " "})),
         ("observer_placement", json.dumps({"relations": "M1"})),
         ("observer_placement", json.dumps({"relations": ["M1"]})),
+        ("observer_placement", json.dumps({"relations": []})),
+        ("observer_placement", json.dumps({"relations": [{"relation": "restates"}]})),
+        (
+            "observer_placement",
+            json.dumps({"relations": [{"memory": "M1", "relation": "contained"}]}),
+        ),
+        (
+            "observer_placement",
+            json.dumps({"relations": [{"memory": "M1", "relation": "contained", "note": " "}]}),
+        ),
+        (
+            "observer_placement",
+            json.dumps({"relations": [{"memory": "M1", "relation": "alike", "note": "n"}]}),
+        ),
     ],
 )
 def test_a_reply_its_stage_would_refuse_passes_no_check(prompt: str, text: str) -> None:
@@ -494,9 +508,14 @@ def test_a_reply_its_stage_would_refuse_passes_no_check(prompt: str, text: str) 
 def test_a_pair_the_stage_reads_as_unclear_is_read_so_by_the_check(
     relation: dict[str, str],
 ) -> None:
-    """#3398: the stage reads an unreadable pair as ``unclear``, and so does the check."""
+    """#3398: beside a readable pair, the stage reads an unreadable one as ``unclear``.
+
+    And so does the check; a reply with no readable pair the stage refuses, and so every
+    check fails it (above).
+    """
     params: dict[str, object] = {"memory": "M1", "relations": ["contained"]}
-    text = json.dumps({"relations": [relation]})
+    readable = {"memory": "M2", "relation": "restates", "note": "Same."}
+    text = json.dumps({"relations": [relation, readable]})
 
     assert _judge("relation_in", params, "observer_placement", text) == (
         "the reply names another relation"
