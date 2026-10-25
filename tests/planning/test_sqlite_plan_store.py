@@ -24,6 +24,8 @@ from ai_assistant.core.errors import ClaimStopped, PlanningError
 from ai_assistant.core.types import (
     ActivationEffect,
     ActivationEffectClaim,
+    ChannelIdentity,
+    DueNow,
     InputPart,
     ObservationAttempt,
     ObservationAttemptEnd,
@@ -32,7 +34,12 @@ from ai_assistant.core.types import (
     ObservationState,
     ObserverCall,
     ObserverStep,
+    OccurrencePush,
+    OccurrenceState,
     QuestionPart,
+    ScheduledTaskAuthor,
+    TaskSpawn,
+    TaskWriteAnswer,
     ToolOutcome,
 )
 from ai_assistant.planning import SqlitePlanStore, sqlite_store
@@ -59,7 +66,15 @@ def _fixed_now() -> datetime:
 #: The instant every effect record this suite claims was claimed at.
 _AT = datetime(2026, 1, 1, tzinfo=UTC)
 #: The record tables this store creates. A refused open creates neither.
-_RECORD_TABLES: Final = frozenset({"stopped_activations", "activation_effects", "observations"})
+_RECORD_TABLES: Final = frozenset(
+    {
+        "stopped_activations",
+        "activation_effects",
+        "observations",
+        "scheduled_tasks",
+        "cascade_records",
+    }
+)
 
 
 def _journal_mode(database: Path) -> int | None:
@@ -87,6 +102,22 @@ _SYNC_METHODS = {
     "write_observation": "_write_observation_sync",
     "observations": "_observations_sync",
     "observer_calls_since": "_calls_since_sync",
+    # ADR-0350 §12:3's fifteen members, each its own lock site.
+    "write_scheduled_task": "_write_scheduled_task_sync",
+    "cancel_scheduled_task": "_cancel_scheduled_task_sync",
+    "mark_occurrence_pushed": "_mark_occurrence_pushed_sync",
+    "settle_occurrence": "_settle_occurrence_sync",
+    "stop_pushed_activation": "_stop_pushed_activation_sync",
+    "record_cascade": "_record_cascade_sync",
+    "confirm_message_effect": "_confirm_message_effect_sync",
+    "remove_scheduled_task": "_remove_scheduled_task_sync",
+    "scheduled_tasks": "_scheduled_tasks_sync",
+    "person_scheduled_tasks": "_person_scheduled_tasks_sync",
+    "spawned_tasks": "_spawned_tasks_sync",
+    "scheduled_lineage": "_scheduled_lineage_sync",
+    "live_below": "_live_below_sync",
+    "due_occurrences": "_due_occurrences_sync",
+    "stopped_activations": "_stopped_activations_sync",
 }
 
 
@@ -630,21 +661,21 @@ async def test_a_newer_on_disk_schema_is_refused(tmp_path: Path) -> None:
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
-async def test_a_fresh_file_is_labelled_version_13_and_holds_only_its_three_tables(
+async def test_a_fresh_file_is_labelled_version_16_and_holds_only_its_five_tables(
     tmp_path: Path,
 ) -> None:
-    """The absolute figure's home, and the shape it labels (ADR-0329 §16).
+    """The absolute figure's home, and the shape it labels (ADR-0350 §12:3).
 
-    Version 14 is the store ADR-0309 §5 leaves, its effect records carrying the question
-    part ADR-0321 §4:9 promotes, with the observation records ADR-0329 §16 adds, whose
-    findings carry their supply and their writes before an outcome (#3205): three record
-    tables beside ``meta``, and no table of the old path.
+    Version 16 is the store ADR-0309 §5 leaves, its effect records carrying the question
+    part ADR-0321 §4:9 promotes, with the observation records ADR-0329 §16 and ADR-0346
+    add, and the Task Scheduler's scheduled tasks and cascade records ADR-0350 adds:
+    five record tables beside ``meta``, and no table of the old path.
     """
     path = tmp_path / "plans.db"
     SqlitePlanStore(path=path, now=_fixed_now).close()
 
-    assert sqlite_store._SCHEMA_VERSION == 15
-    assert _meta(path, "schema_version") == "15"
+    assert sqlite_store._SCHEMA_VERSION == 16
+    assert _meta(path, "schema_version") == "16"
     assert _tables(path) == {"meta", *_RECORD_TABLES}
 
 
@@ -1729,3 +1760,122 @@ async def test_an_issuer_no_store_could_have_written_refuses_the_write(
         assert _meta(path, "observation_revision") == issuer
     finally:
         store.close()
+
+
+# --- the Task Scheduler's scheduled tasks (ADR-0350 §12:3) ------------------------------
+
+
+def _spawned(task_id: str) -> TaskSpawn:
+    """A spawn due now, set in a conversation."""
+    return TaskSpawn(
+        id=task_id,
+        person="person:owner",
+        author=ScheduledTaskAuthor.ASSISTANT,
+        when=DueNow(),
+        instruction="check back on it",
+        set_in=ChannelIdentity(channel_type="conversation", instance_id="c-1"),
+        set_at=_AT,
+    )
+
+
+async def _spawn_into(store: SqlitePlanStore, task_id: str, *, spawner: str = "act-1") -> None:
+    """Write one task, its effect record a spawn's call."""
+    answer = await store.write_scheduled_task(
+        _spawned(task_id),
+        _acted(f"spawn-{task_id}", activation=spawner).model_copy(update={"capability": "spawn"}),
+        match=None,
+        chain_limit=10,
+        pending_limit=50,
+    )
+    assert answer.answer is TaskWriteAnswer.WRITTEN
+
+
+async def test_a_scheduled_task_and_a_cascade_record_survive_a_restart(tmp_path: Path) -> None:
+    """§7:8, §8:1: a pushed occurrence and a cascade record outlive the process.
+
+    After a restart the sensor settles each occurrence marked pushed, and the push step
+    still refuses every occurrence below a cascade record, so both are on disk.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await _spawn_into(store, "t1", spawner="act-0")
+        assert await store.mark_occurrence_pushed("t1", 1, "act-1") is OccurrencePush.PUSHED
+        await _spawn_into(store, "t2", spawner="act-1")
+        await store.record_cascade("act-0")
+        held = await store.scheduled_tasks(["t1", "t2"])
+    finally:
+        store.close()
+
+    reopened = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        assert await reopened.scheduled_tasks(["t1", "t2"]) == held
+        assert [one.id for one in await reopened.scheduled_lineage("act-1")] == ["t1"]
+        assert await reopened.mark_occurrence_pushed("t2", 1, "act-2") is (
+            OccurrencePush.CASCADE_CANCELLED
+        )
+        (occurrence,) = (await reopened.scheduled_tasks(["t2"]))[0].occurrences
+        assert occurrence.state is OccurrenceState.CANCELLED
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "UPDATE scheduled_tasks SET person = 'person:guest'",
+        "UPDATE scheduled_tasks SET parent = 'act-other'",
+        "UPDATE scheduled_tasks SET id = 't-other'",
+        "UPDATE scheduled_tasks SET data = '{}'",
+    ],
+    ids=["another-person", "another-parent", "another-id", "no-record"],
+)
+async def test_a_scheduled_task_whose_columns_disagree_with_its_record_is_refused(
+    tmp_path: Path, tamper: str
+) -> None:
+    """A promoted column an outside writer changed is corruption, refused at every read."""
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await _spawn_into(store, "t1")
+        with sqlite3.connect(path) as conn:
+            conn.execute(tamper)
+        with pytest.raises(PlanningError):
+            await store.scheduled_tasks(["t1"])
+        with pytest.raises(PlanningError):
+            await store.export()
+        with pytest.raises(PlanningError):
+            await _spawn_into(store, "t2", spawner="act-2")
+    finally:
+        store.close()
+
+
+async def test_a_blanked_cascade_record_is_refused_as_planning_s_own_error(
+    tmp_path: Path,
+) -> None:
+    """A cascade record is an activation id, so a blanked one is corruption."""
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.record_cascade("act-1")
+        with sqlite3.connect(path) as conn:
+            conn.execute("UPDATE cascade_records SET activation_id = '  '")
+        with pytest.raises(PlanningError):
+            await store.export()
+    finally:
+        store.close()
+
+
+async def test_a_scheduled_task_table_of_another_shape_is_refused_at_open(
+    tmp_path: Path,
+) -> None:
+    """#373's check reaches the new tables: a lexical ``written_seq`` loses write order."""
+    path = tmp_path / "plans.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE scheduled_tasks(id TEXT PRIMARY KEY, person TEXT NOT NULL, "
+            "parent TEXT NOT NULL, written_seq TEXT NOT NULL, data TEXT NOT NULL)"
+        )
+
+    with pytest.raises(PlanningError, match="written_seq"):
+        SqlitePlanStore(path=path, now=_fixed_now)

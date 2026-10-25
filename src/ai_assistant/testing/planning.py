@@ -41,14 +41,49 @@ from ai_assistant.core.types import (
     ObservationRecord,
     PlanExport,
     QuestionPart,
+    ScheduledTaskWrite,
+    TaskWriteAnswer,
     ToolOutcome,
     UtcInstant,
     encodable_text,
+)
+from ai_assistant.testing._scheduled_tasks import (
+    Schedule,
+    by_person,
+    checked_id,
+    checked_instant,
+    checked_limit,
+    checked_number,
+    checked_optional_id,
+    checked_person,
+    checked_spawn,
+    checked_spawn_effect,
+    checked_state,
+    decide_cancel,
+    decide_push,
+    decide_removal,
+    decide_settle,
+    decide_task_write,
+    due,
+    is_pushed,
+    lineage,
+    live_below,
+    requested_ids,
+    requested_states,
+    spawned_by,
 )
 from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
+    from ai_assistant.core.types import (
+        OccurrencePush,
+        OccurrenceState,
+        ScheduledDue,
+        ScheduledTask,
+        ScheduledTaskCancel,
+        TaskSpawn,
+    )
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 
@@ -236,6 +271,51 @@ def _finished_effect(
         raise PlanningError(msg) from exc
 
 
+#: Mirror of :data:`ai_assistant.planning.activation_effects.CONFIRMED_ABSENT`.
+_CONFIRMED_ABSENT: Final = "its place's medium has no record of it (ADR-0350 §8:11)"
+
+
+def _confirmed_effect(
+    held: ActivationEffect | None, effect_id: str, *, delivered: object, position: object
+) -> ActivationEffect:
+    """Return the record a place's confirmation settles, or refuse it (ADR-0350 §8:11).
+
+    Re-implemented here rather than imported from ``ai_assistant.planning``, for the
+    reason this module's docstring gives.
+
+    Raises:
+        PlanningError: If no record is held, it is a call, its outcome is done or not
+            done, ``delivered`` is not a ``bool``, or the position does not match it.
+    """
+    if held is None:
+        msg = f"the plan store holds no activation effect {effect_id!r} to confirm"
+        raise PlanningError(msg)
+    if held.is_call:
+        msg = f"activation effect {held.id} is a call; only a message's delivery is confirmed"
+        raise PlanningError(msg)
+    if held.outcome in {ToolOutcome.SUCCEEDED, ToolOutcome.FAILED}:
+        msg = f"activation effect {held.id} is already settled"
+        raise PlanningError(msg)
+    if not isinstance(delivered, bool):
+        msg = f"a confirmation says whether the message was recorded, not {delivered!r}"
+        raise PlanningError(msg)
+    if delivered != (position is not None):
+        msg = "a message confirmed recorded carries its position, and one confirmed absent none"
+        raise PlanningError(msg)
+    try:
+        return ActivationEffect.model_validate(
+            {
+                **held.model_dump(),
+                "outcome": ToolOutcome.SUCCEEDED if delivered else ToolOutcome.FAILED,
+                "reason": None if delivered else _CONFIRMED_ABSENT,
+                "position": position,
+            }
+        )
+    except ValidationError as exc:
+        msg = f"the confirmed activation effect {held.id} does not validate: {exc}"
+        raise PlanningError(msg) from exc
+
+
 def _written_observation(record: object, expected: object) -> tuple[ObservationRecord, int]:
     """Return the fake's own copy of a record to write and its expectation, or refuse them.
 
@@ -313,6 +393,10 @@ class FakePlanStore:
         # issued, which `clear` never resets.
         self._observations: dict[str, ObservationRecord] = {}
         self._issued = 0
+        # ADR-0350 §12:3: the Task Scheduler's tasks by id, in the order written, and the
+        # activation ids a stop command's cascade record names.
+        self._tasks: dict[str, ScheduledTask] = {}
+        self._cascades: set[str] = set()
         self._clock = checked_clock(now, owner="FakePlanStore")
         self._resource = SuspendableResource()
 
@@ -385,24 +469,37 @@ class FakePlanStore:
         record = _claimable_effect(effect)
         named = _named_activations(match)
         async with self._resource.held():
-            if record.activation_id in self._stopped:
-                msg = f"activation {record.activation_id} was stopped (ADR-0306 §5:2)"
-                raise ClaimStopped(msg)
-            if record.id in self._activation_effects:
-                msg = f"the plan store already holds activation effect {record.id}"
-                raise PlanningError(msg)
-            if record.part is not None and any(
-                held.part == record.part for held in self._activation_effects.values()
-            ):
-                return ActivationEffectClaim.ALREADY_USED
-            if named is not None and any(
-                _refuses_as_done(held, record, deliberate=deliberate_repeat)
-                for held in self._activation_effects.values()
-                if held.activation_id in named
-            ):
-                return ActivationEffectClaim.ALREADY_DONE
-            self._activation_effects[record.id] = record
-            return ActivationEffectClaim.CLAIMED
+            answer = self._decided_claim(record, named, deliberate_repeat=deliberate_repeat)
+            if answer is ActivationEffectClaim.CLAIMED:
+                self._activation_effects[record.id] = record
+            return answer
+
+    def _decided_claim(
+        self, record: ActivationEffect, named: tuple[str, ...] | None, *, deliberate_repeat: bool
+    ) -> ActivationEffectClaim:
+        """Decide one claim, inside the caller's step: the claim's, or a spawn's (§3:3).
+
+        Raises:
+            ClaimStopped: If the store holds a stop record for the activation.
+            PlanningError: If the id is already held.
+        """
+        if record.activation_id in self._stopped:
+            msg = f"activation {record.activation_id} was stopped (ADR-0306 §5:2)"
+            raise ClaimStopped(msg)
+        if record.id in self._activation_effects:
+            msg = f"the plan store already holds activation effect {record.id}"
+            raise PlanningError(msg)
+        if record.part is not None and any(
+            held.part == record.part for held in self._activation_effects.values()
+        ):
+            return ActivationEffectClaim.ALREADY_USED
+        if named is not None and any(
+            _refuses_as_done(held, record, deliberate=deliberate_repeat)
+            for held in self._activation_effects.values()
+            if held.activation_id in named
+        ):
+            return ActivationEffectClaim.ALREADY_DONE
+        return ActivationEffectClaim.CLAIMED
 
     async def finish_activation_effect(
         self,
@@ -521,6 +618,244 @@ class FakePlanStore:
         async with self._resource.held():
             return sum(record.call_count(start) for record in self._observations.values())
 
+    # --- the Task Scheduler's scheduled tasks (ADR-0350 §12:3) -------------
+
+    def _schedule(self) -> Schedule:
+        """A copy of the schedule one step decides over, reading the clock once for it."""
+        return Schedule(tasks=dict(self._tasks), cascades=self._cascades, now=self._now())
+
+    async def write_scheduled_task(  # noqa: PLR0913 — the Protocol's signature
+        self,
+        spawn: TaskSpawn,
+        effect: ActivationEffect,
+        /,
+        *,
+        match: tuple[str, ...] | None,
+        deliberate_repeat: bool = False,
+        replace_any: bool = False,
+        chain_limit: int,
+        pending_limit: int,
+    ) -> ScheduledTaskWrite:
+        """Write a scheduled task with its spawn's effect claim, in one step (§3:3).
+
+        The claim, the replace, the wait, the limits and both writes are decided under
+        the modelled resource, with no ``await`` between.
+
+        Raises:
+            ClaimStopped: If the store holds a stop record for the spawning activation.
+            PlanningError: If the spawn, the effect or a limit is not valid, or an id is
+                already held.
+        """
+        asked = checked_spawn(spawn)
+        record = checked_spawn_effect(_claimable_effect(effect))
+        named = _named_activations(match)
+        chain = checked_limit(chain_limit, "chain limit")
+        pending = checked_limit(pending_limit, "pending limit")
+        async with self._resource.held():
+            answer = self._decided_claim(record, named, deliberate_repeat=deliberate_repeat)
+            if answer is not ActivationEffectClaim.CLAIMED:
+                return ScheduledTaskWrite(answer=TaskWriteAnswer(answer.value))
+            schedule = self._schedule()
+            written = decide_task_write(
+                schedule,
+                asked,
+                record.activation_id,
+                replace_any=replace_any,
+                chain_limit=chain,
+                pending_limit=pending,
+            )
+            if written.answer is TaskWriteAnswer.WRITTEN:
+                self._tasks = schedule.tasks
+                self._activation_effects[record.id] = record
+            return written.model_copy(deep=True)
+
+    async def cancel_scheduled_task(
+        self, task_id: str, /, *, person: str | None = None, spawned_by: str | None = None
+    ) -> ScheduledTaskCancel:
+        """End every pending occurrence of a task as cancelled (§9:5).
+
+        Raises:
+            PlanningError: If an id is not an identifier.
+        """
+        named = checked_id(task_id, "scheduled task")
+        whose = None if person is None else checked_person(person)
+        by = checked_optional_id(spawned_by, "spawning activation")
+        async with self._resource.held():
+            schedule = self._schedule()
+            answer = decide_cancel(schedule, named, person=whose, spawned_by=by)
+            self._tasks = schedule.tasks
+            return answer.model_copy(deep=True)
+
+    async def scheduled_tasks(self, task_ids: Sequence[str], /) -> tuple[ScheduledTask, ...]:
+        """Return the named tasks the store holds, in the order named (§12:3).
+
+        Raises:
+            PlanningError: If ``task_ids`` is not a sequence of encodable strings.
+        """
+        named = requested_ids(task_ids, "scheduled tasks")
+        async with self._resource.held():
+            return tuple(
+                self._tasks[one].model_copy(deep=True) for one in named if one in self._tasks
+            )
+
+    async def person_scheduled_tasks(
+        self, person: str, states: Sequence[OccurrenceState], /
+    ) -> tuple[ScheduledTask, ...]:
+        """Return a person's tasks with an occurrence in any of ``states`` (§4:6).
+
+        Raises:
+            PlanningError: If ``person`` or ``states`` is not valid.
+        """
+        whose = checked_person(person)
+        wanted = requested_states(states)
+        async with self._resource.held():
+            return tuple(one.model_copy(deep=True) for one in by_person(self._tasks, whose, wanted))
+
+    async def spawned_tasks(self, activation_ids: Sequence[str], /) -> tuple[ScheduledTask, ...]:
+        """Return the tasks whose parent is any of the named activations (§9:6).
+
+        Raises:
+            PlanningError: If ``activation_ids`` is not a sequence of encodable strings.
+        """
+        named = requested_ids(activation_ids, "spawned tasks")
+        async with self._resource.held():
+            return tuple(one.model_copy(deep=True) for one in spawned_by(self._tasks, named))
+
+    async def scheduled_lineage(self, activation_id: str, /) -> tuple[ScheduledTask, ...]:
+        """Return the lineage of the task pushed to ``activation_id`` (§6:5).
+
+        Raises:
+            PlanningError: If ``activation_id`` is not an identifier.
+        """
+        named = checked_id(activation_id, "activation")
+        async with self._resource.held():
+            return tuple(one.model_copy(deep=True) for one in lineage(self._tasks, named))
+
+    async def live_below(self, task_id: str, /) -> bool:
+        """Whether anything below a task is pending, pushed or running (§7:8, §9:6).
+
+        Raises:
+            PlanningError: If ``task_id`` is not an identifier.
+        """
+        named = checked_id(task_id, "scheduled task")
+        async with self._resource.held():
+            return live_below(self._tasks, named)
+
+    async def due_occurrences(self, at: datetime, /) -> ScheduledDue:
+        """Return the occurrences due at or before ``at``, and the next due after (§7:3).
+
+        Raises:
+            PlanningError: If ``at`` is not a timezone-aware instant.
+        """
+        instant = checked_instant(at)
+        async with self._resource.held():
+            return due(self._tasks, instant).model_copy(deep=True)
+
+    async def mark_occurrence_pushed(
+        self, task_id: str, number: int, activation_id: str, /
+    ) -> OccurrencePush:
+        """Mark a pending occurrence pushed, with its cascade check, in one step (§7:5).
+
+        Raises:
+            PlanningError: If an argument is not valid, the task holds no such
+                occurrence, or the activation was already pushed to.
+        """
+        named = checked_id(task_id, "scheduled task")
+        which = checked_number(number)
+        pushed = checked_id(activation_id, "activation")
+        async with self._resource.held():
+            schedule = self._schedule()
+            answer = decide_push(schedule, named, which, pushed)
+            self._tasks = schedule.tasks
+            return answer
+
+    async def settle_occurrence(
+        self, activation_id: str, state: OccurrenceState, /, *, second_try: bool = False
+    ) -> ScheduledTask:
+        """Write the outcome of the occurrence pushed to an activation (§7:6, §8).
+
+        Raises:
+            PlanningError: If no occurrence is pushed to it, or the outcome is refused.
+        """
+        named = checked_id(activation_id, "activation")
+        outcome = checked_state(state)
+        async with self._resource.held():
+            schedule = self._schedule()
+            task = decide_settle(
+                schedule,
+                named,
+                outcome,
+                second_try=second_try is True,
+                stopped=named in self._stopped,
+            )
+            self._tasks = schedule.tasks
+            return task.model_copy(deep=True)
+
+    async def stop_pushed_activation(self, activation_id: str, /) -> bool:
+        """Write a stop record for an activation pushed and not yet admitted (§9:10).
+
+        Raises:
+            PlanningError: If ``activation_id`` is not an identifier.
+        """
+        named = _revalidated_activation_id(activation_id)
+        async with self._resource.held():
+            if not is_pushed(self._tasks, named):
+                return False
+            self._stopped.add(named)
+            return True
+
+    async def stopped_activations(self, activation_ids: Sequence[str], /) -> tuple[str, ...]:
+        """Return which of the named activations the store holds a stop record for.
+
+        Raises:
+            PlanningError: If ``activation_ids`` is not a sequence of encodable strings.
+        """
+        named = requested_ids(activation_ids, "stop records")
+        async with self._resource.held():
+            return tuple(one for one in named if one in self._stopped)
+
+    async def record_cascade(self, activation_id: str, /) -> None:
+        """Write a cascade record naming an activation, idempotently (§9:6).
+
+        Raises:
+            PlanningError: If ``activation_id`` is not an identifier.
+        """
+        named = _revalidated_activation_id(activation_id)
+        async with self._resource.held():
+            self._cascades.add(named)
+
+    async def confirm_message_effect(
+        self, effect_id: str, /, *, delivered: bool, position: int | None = None
+    ) -> None:
+        """Settle a message's effect record from its place's confirmation, once (§8:11).
+
+        Raises:
+            PlanningError: If the record is not held, is a call, is already settled, or
+                the position does not match ``delivered``.
+        """
+        try:
+            named = _ACTIVATION_ID.validate_python(effect_id)
+        except ValidationError as exc:
+            msg = f"an activation effect is named by an identifier, not {effect_id!r}"
+            raise PlanningError(msg) from exc
+        async with self._resource.held():
+            self._activation_effects[named] = _confirmed_effect(
+                self._activation_effects.get(named), named, delivered=delivered, position=position
+            )
+
+    async def remove_scheduled_task(self, task_id: str, /) -> bool:
+        """Remove a task once nothing of it or below it is live (§7:8).
+
+        Raises:
+            PlanningError: If ``task_id`` is not an identifier.
+        """
+        named = checked_id(task_id, "scheduled task")
+        async with self._resource.held():
+            schedule = self._schedule()
+            removed = decide_removal(schedule, named)
+            self._tasks = schedule.tasks
+            return removed
+
     async def export(self) -> PlanExport:
         """Return a portable, internally consistent snapshot — under the resource (#397).
 
@@ -541,19 +876,31 @@ class FakePlanStore:
                     self._observations[one].model_copy(deep=True)
                     for one in sorted(self._observations)
                 ),
+                # ADR-0350 §12:3: every scheduled task, in the order written, and every
+                # cascade record.
+                scheduled_tasks=tuple(one.model_copy(deep=True) for one in self._tasks.values()),
+                cascades=tuple(sorted(self._cascades)),
             )
 
     async def clear(self) -> int:
-        """Delete every stop, effect and observation record, returning the number removed.
+        """Delete every record, the Task Scheduler's included, returning the number removed.
 
         This store holds no execution, so no step is ever live and nothing refuses
         the erase. The revision issuer is kept (ADR-0329 §16:9).
         """
         async with self._resource.held():
-            removed = len(self._stopped) + len(self._activation_effects) + len(self._observations)
+            removed = (
+                len(self._stopped)
+                + len(self._activation_effects)
+                + len(self._observations)
+                + len(self._tasks)
+                + len(self._cascades)
+            )
             self._stopped.clear()
             self._activation_effects.clear()
             self._observations.clear()
+            self._tasks.clear()
+            self._cascades.clear()
         return removed
 
 

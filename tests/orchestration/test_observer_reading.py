@@ -13,6 +13,7 @@ import json
 from datetime import timedelta
 from typing import NoReturn
 
+import pytest
 from observer_support import (
     AT,
     Harness,
@@ -67,7 +68,12 @@ from ai_assistant.core.types import (
     UnderstandingReferent,
     Validity,
 )
-from ai_assistant.orchestration.observer.reading import EpisodeReader, Reading, memory_then
+from ai_assistant.orchestration.observer.reading import (
+    EpisodeReader,
+    Reading,
+    input_origin,
+    memory_then,
+)
 from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.testing.memories import memory, said_support
 
@@ -121,6 +127,30 @@ async def test_an_outside_input_is_outside_and_its_when_is_the_occurrence() -> N
     (part,) = reading.leaving.parts
     assert part.part == InputPart(episode=address("one"))
     assert (part.origin, part.when) == (SupportOrigin.OUTSIDE_INPUT, AT)
+
+
+async def test_an_input_whose_origin_is_assistant_is_no_part_a_support_points_at() -> None:
+    """ADR-0350 §6:11: a scheduled task's instruction is not offered; its round's message is."""
+    harness = Harness()
+    await harness.hold(
+        episode(
+            "step",
+            origin=InputOrigin.ASSISTANT,
+            text="Check whether the apartment listing is still up.",
+            rounds=(said("r1", "It is still listed.", at=AT + timedelta(seconds=5)),),
+        )
+    )
+
+    reading = await _read(harness, "step")
+
+    (part,) = reading.leaving.parts
+    assert part.part == RoundMessagePart(episode=address("step"), round="r1")
+    assert part.origin is SupportOrigin.ASSISTANT_MESSAGE
+    record = reading.leaving.record
+    assert record is not None
+    assert record.processing_record is not None
+    with pytest.raises(ValueError, match="origin is assistant"):
+        input_origin(record.processing_record.trigger, None)
 
 
 async def test_a_round_message_is_outside_where_the_activation_read_outside_content() -> None:

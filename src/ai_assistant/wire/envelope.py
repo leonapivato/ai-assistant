@@ -2702,7 +2702,15 @@ from ai_assistant.wire.overlay import MAX_OVERLAY_IDENTITY_BYTES
 #:     new fields as extra and the new members as unknown (ADR-0124 §9:2). The method
 #:     set does not move: ``MemoryStore.search``'s person filter and ``MemoryWriter``'s
 #:     label write are on no engine method.
-PROTOCOL_VERSION: Final[int] = 117
+#: 118: ADR-0350 §12:6 advances the version once for the Task Scheduler's contract, on
+#:     these grounds: the wire-carried ``EpisodicMemory.processing_record`` holds
+#:     ``PlanningRound.place``, the place a message of an activation the Task Scheduler
+#:     started goes into (§12:8), ``InputOrigin`` gains ``assistant`` (§12:7) on its
+#:     trigger, and ``LabelKind`` gains ``scheduled_task`` and ``place`` (§12:2) on its
+#:     labels. A peer at 117 refuses the new field as extra and the new members as
+#:     unknown (ADR-0124 §9:2). The method set does not move: ``AssistantEngine`` gains no
+#:     member (§10:6), and ``PlanExport`` and the scheduled task cross no frame.
+PROTOCOL_VERSION: Final[int] = 118
 
 #: ADR-0298 §7:11: the hub writes a heartbeat on a change stream whenever this long
 #: passes without a chunk. **A protocol constant, not a setting**: hub and client

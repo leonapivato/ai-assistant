@@ -179,6 +179,8 @@ if TYPE_CHECKING:
         NotificationEnqueue,
         NotificationPreferences,
         ObservationRecord,
+        OccurrencePush,
+        OccurrenceState,
         OfferedTool,
         PendingCandidate,
         PermissionDecision,
@@ -200,6 +202,10 @@ if TYPE_CHECKING:
         RecordChunk,
         RecordedInvocation,
         RoundResponse,
+        ScheduledDue,
+        ScheduledTask,
+        ScheduledTaskCancel,
+        ScheduledTaskWrite,
         SearchOutcome,
         SecretName,
         SecretValue,
@@ -233,6 +239,7 @@ if TYPE_CHECKING:
         StorySummaryView,
         StoryView,
         StoryViewPage,
+        TaskSpawn,
         TelegramCallRecord,
         TelegramIntake,
         TelegramIntakeExport,
@@ -3228,7 +3235,7 @@ class Forecaster(Protocol):
 
 @runtime_checkable
 class PlanStore(Protocol):
-    """Durable planning state: stop records, effect records, observation records.
+    """Durable planning state: stop, effect and observation records, and scheduled tasks.
 
     Planning owns this rather than the wiring layer, because plan state is
     personal data and carries ADR-0004's obligations (ADR-0014 §5). Implementations
@@ -3253,6 +3260,24 @@ class PlanStore(Protocol):
     episode rather than a fact another member decides; it is written **conditionally
     on the revision the writer read**, so two writers cannot both land a record
     computed from one state (ADR-0329 §16:6's backstop, in ADR-0219 §2's shape).
+
+    **Fifteen more hold the Task Scheduler's content** (ADR-0350 §12:3): the scheduled
+    tasks every spawn writes, with their occurrences, and a stop command's cascade
+    records. :meth:`write_scheduled_task` writes a task with its spawn's effect claim and
+    the limits' checks in one step, cancelling a task it replaces in that step;
+    :meth:`cancel_scheduled_task` cancels one; :meth:`scheduled_tasks`,
+    :meth:`person_scheduled_tasks`, :meth:`spawned_tasks` and :meth:`scheduled_lineage`
+    read them by id, by person and state, by parent and by lineage; :meth:`live_below`
+    reads whether anything below a task is live; :meth:`due_occurrences` reads what is
+    due; :meth:`mark_occurrence_pushed` and :meth:`settle_occurrence` move an occurrence
+    from pending to pushed to its outcome; :meth:`stop_pushed_activation` and
+    :meth:`stopped_activations` write and read the stop record of a pushed id;
+    :meth:`record_cascade` writes a cascade record; :meth:`confirm_message_effect`
+    settles a message's record from its place's confirmation after a restart; and
+    :meth:`remove_scheduled_task` removes a task once nothing of it or below it is live.
+    Each write is one indivisible step, so a cancel and a push, or two spawns of one
+    round, are totally ordered (§7:5, §9:9). The Task Scheduler is a medium the hub
+    hosts, and none of it is the assistant's memory (§2:3, §4:2).
 
     **The stop record lives here and in no other store** (ADR-0297 §1, §2, §6):
     :meth:`record_stop` writes a record naming one activation, and an effect claim
@@ -3503,6 +3528,323 @@ class PlanStore(Protocol):
         """
         ...
 
+    # --- the Task Scheduler's scheduled tasks (ADR-0350 §12:3) ---------------
+
+    async def write_scheduled_task(  # noqa: PLR0913 — the spawn, its effect claim's three, the replace's rule and §9:7-§9:8's two limits
+        self,
+        spawn: TaskSpawn,
+        effect: ActivationEffect,
+        /,
+        *,
+        match: tuple[str, ...] | None,
+        deliberate_repeat: bool = False,
+        replace_any: bool = False,
+        chain_limit: int,
+        pending_limit: int,
+    ) -> ScheduledTaskWrite:
+        """Write a scheduled task with its spawn's effect claim, in one step (ADR-0350 §3:3).
+
+        **One indivisible step**, which decides the claim, the replace and the limits and
+        writes the task and the effect record together, or writes nothing (§3:3, §9:4,
+        §9:9). In this order:
+
+        1. **The claim**, exactly as :meth:`claim_activation_effect` decides it: where
+           the store holds a stop record for ``effect.activation_id``, the spawning
+           activation, it raises ``ClaimStopped``; a held effect id, or a held task id,
+           raises ``PlanningError``; a spent part answers ``ALREADY_USED`` and the
+           backstop ``ALREADY_DONE``. Each writes nothing.
+        2. **The replace** (§9:4), where ``spawn.replaces`` names a task. It is refused
+           as not done where the store holds no such task, where it is for another
+           person than ``spawn.person``, where ``replace_any`` is false and the spawning
+           activation did not spawn it (§4:4), or where nothing of it is pending.
+        3. **The wait** (§5:4), where ``spawn.when`` waits on named tasks: each must be
+           a task the store holds for ``spawn.person``.
+        4. **The chain limit** (§9:7): the task's chain length, ``1`` where its parent
+           was not started by the Task Scheduler and one more than that activation's
+           task's otherwise, may not exceed ``chain_limit``.
+        5. **The pending limit** (§9:8): the person's pending occurrences, counted after
+           the replace's cancel, with the new task's, may not exceed ``pending_limit``.
+        6. Otherwise it cancels the replaced task's pending occurrences as
+           :meth:`cancel_scheduled_task` does, writes the task, and writes ``effect`` as
+           a claim, with no outcome, which acting then finishes (ADR-0306 §5:5).
+
+        **The store authors what the spawn does not state.** The task's parent is the
+        spawning activation, or the replaced task's parent on a replace, which also
+        gives it the replaced task's suggested places in place of the spawn's, and so
+        its chain length (§9:4). Its one occurrence is pending, due at ``spawn.set_at``
+        for a task due now, at its instant for one due at an instant, and, for one
+        waiting on named tasks, at the instant the last of them ended where all have,
+        and otherwise once they all have (§5:4).
+
+        Args:
+            spawn: What the spawn states.
+            effect: The spawn's effect record, a call claimed with no outcome, made by
+                the spawning activation.
+            match: The activations the claim is matched against, or ``None``, as for
+                :meth:`claim_activation_effect`.
+            deliberate_repeat: Whether planning marked the spawn a deliberate repeat.
+            replace_any: Whether the spawning activation's input carries the person's
+                authority, so it may replace any of the person's tasks rather than only
+                one it spawned (§4:4).
+            chain_limit: §12:5's chain limit, at least ``1``.
+            pending_limit: §12:5's pending limit, per person, at least ``1``.
+
+        Returns:
+            ``WRITTEN`` with the task as written; ``ALREADY_USED`` or ``ALREADY_DONE``
+            from the claim; or ``REFUSED`` with its reason. Only ``WRITTEN`` wrote.
+
+        Raises:
+            ClaimStopped: If the store holds a stop record for the spawning activation.
+            PlanningError: If the spawn or the effect is not valid, the effect is not a
+                call or carries an outcome, a limit is not a positive integer, the store
+                already holds the effect's id or the task's, or the backend fails.
+                Nothing is written.
+        """
+        ...
+
+    async def cancel_scheduled_task(
+        self, task_id: str, /, *, person: str | None = None, spawned_by: str | None = None
+    ) -> ScheduledTaskCancel:
+        """End every pending occurrence of a task as cancelled (ADR-0350 §9:5).
+
+        **One indivisible step.** It stops no running activation. It is refused as not
+        done, writing nothing, where the store holds no such task, where ``person`` is
+        given and the task is for another, where ``spawned_by`` is given and that
+        activation did not spawn it (§4:4), or where nothing of it is pending. A task
+        waiting on the cancelled one falls due once all it waits on have ended (§5:4).
+
+        Args:
+            task_id: The task to cancel.
+            person: The person the asking activation is for, or ``None`` for the Task
+                Manager's command and a stop's cascade (§9:6, §10:2).
+            spawned_by: The asking activation, where its input does not carry the
+                person's authority, so it may cancel only a task it spawned; ``None``
+                otherwise.
+
+        Returns:
+            The task as left, or the reason it was refused.
+
+        Raises:
+            PlanningError: If an id is not an identifier, or the backend fails.
+        """
+        ...
+
+    async def scheduled_tasks(self, task_ids: Sequence[str], /) -> tuple[ScheduledTask, ...]:
+        """Return the named tasks the store holds, in the order named, each once (§12:3).
+
+        A task the store does not hold contributes nothing.
+
+        Raises:
+            PlanningError: If ``task_ids`` is a bare string or not a sequence of strings,
+                names an id with no UTF-8 encoding, or the backend fails.
+        """
+        ...
+
+    async def person_scheduled_tasks(
+        self, person: str, states: Sequence[OccurrenceState], /
+    ) -> tuple[ScheduledTask, ...]:
+        """Return a person's tasks with an occurrence in any of ``states`` (§4:6, §10:2).
+
+        In the order they were written. The list pull and the Task Manager's queries read
+        the pending ones, and the reader bounds what it shows (§12:5).
+
+        Raises:
+            PlanningError: If ``person`` is blank or has no UTF-8 encoding, ``states``
+                holds anything but an ``OccurrenceState``, or the backend fails.
+        """
+        ...
+
+    async def spawned_tasks(self, activation_ids: Sequence[str], /) -> tuple[ScheduledTask, ...]:
+        """Return the tasks whose parent is any of the named activations (§9:6, §12:3).
+
+        In the order they were written. A stop's cascade walks down through these, from
+        the stopped activation to the tasks its descendants' occurrences spawned.
+
+        Raises:
+            PlanningError: If ``activation_ids`` is a bare string or not a sequence of
+                strings, names an id with no UTF-8 encoding, or the backend fails.
+        """
+        ...
+
+    async def scheduled_lineage(self, activation_id: str, /) -> tuple[ScheduledTask, ...]:
+        """Return the lineage of the task whose occurrence was pushed to an activation (§6:5).
+
+        The task an occurrence of which was pushed to ``activation_id``, last, and each
+        task above it before it, first the one at the start: a task is above another
+        where an occurrence of it was pushed to the other's parent. The first task's
+        parent is the activation that began the lineage, which no task records. Empty
+        where no task the store holds was pushed to ``activation_id``, so it also
+        answers whether the Task Scheduler started that activation, while its task is
+        held (§9:1). §7:8 keeps every ancestor of live work, so the walk needs no task
+        that was removed.
+
+        Raises:
+            PlanningError: If ``activation_id`` is not an identifier, or the backend
+                fails.
+        """
+        ...
+
+    async def live_below(self, task_id: str, /) -> bool:
+        """Whether anything below a task is pending, pushed or running (§7:8, §9:6).
+
+        Below a task are the tasks its occurrences' activations spawned, and theirs in
+        turn. An occurrence is pushed from its push until its outcome is written, which
+        covers its activation's running, so this reads the store alone.
+
+        Raises:
+            PlanningError: If ``task_id`` is not an identifier, or the backend fails.
+        """
+        ...
+
+    async def due_occurrences(self, at: datetime, /) -> ScheduledDue:
+        """Return the pending occurrences due at or before ``at``, and the next due after.
+
+        Each due occurrence on its own, earliest first (§7:3-§7:4), a task whose waits
+        have all ended among them (§5:4); and the earliest instant a pending occurrence
+        not yet due falls due, which the sensor sleeps until (§7:2). Instants are
+        compared in UTC, never as elapsed time.
+
+        Raises:
+            PlanningError: If ``at`` is not a timezone-aware instant, or the backend
+                fails.
+        """
+        ...
+
+    async def mark_occurrence_pushed(
+        self, task_id: str, number: int, activation_id: str, /
+    ) -> OccurrencePush:
+        """Mark a pending occurrence pushed, naming its activation, before it is admitted.
+
+        **One indivisible step** (§7:5), so a cancel and a push are totally ordered and
+        whichever lands first wins. Where the task is not held, or the occurrence is not
+        pending, it answers ``NOT_PENDING`` and writes nothing. Where an activation in
+        the task's lineage carries a cascade record — the task's parent, or the parent
+        of any task above it — it ends the occurrence cancelled and answers
+        ``CASCADE_CANCELLED``. Otherwise it marks the occurrence pushed to
+        ``activation_id``, counting the push (§8:5), and answers ``PUSHED``.
+
+        Raises:
+            PlanningError: If an id is not an identifier, ``number`` is not a positive
+                integer, the task holds no such occurrence, an occurrence the store holds
+                was already pushed to ``activation_id``, or the backend fails.
+        """
+        ...
+
+    async def settle_occurrence(
+        self, activation_id: str, state: OccurrenceState, /, *, second_try: bool = False
+    ) -> ScheduledTask:
+        """Write the outcome of the occurrence pushed to an activation (§7:6, §8).
+
+        **One indivisible step.** ``state`` is the outcome the occurrence takes —
+        ``done``, ``couldnt_finish``, ``stopped`` or ``interrupted`` — written with the
+        instant it ended; a task waiting on its task falls due once all it waits on
+        have ended (§5:4, §7:7). Or it is ``pending``, which pushes the occurrence
+        again after a restart (§8:5), as a **second try** where ``second_try`` is set
+        (§8:6). An occurrence that is a second try is never pushed again, and nor is
+        one whose activation carries a stop record (§8:1).
+
+        Args:
+            activation_id: The activation the occurrence was pushed to.
+            state: The outcome, or ``pending`` to push it again.
+            second_try: With ``pending`` alone: whether it is pushed as a second try.
+
+        Returns:
+            The task as written.
+
+        Raises:
+            PlanningError: If ``activation_id`` is not an identifier, no occurrence is
+                pushed to it, ``state`` is none of those, ``second_try`` rides on an
+                outcome, the occurrence is a second try or its activation carries a stop
+                record and ``state`` is ``pending``, or the backend fails. Nothing is
+                written.
+        """
+        ...
+
+    async def stop_pushed_activation(self, activation_id: str, /) -> bool:
+        """Write a stop record for an activation pushed and not yet admitted (§9:10).
+
+        **One indivisible step**: where an occurrence is pushed to ``activation_id``,
+        it writes the stop record :meth:`record_stop` writes, so the sensor's admission
+        refuses that id and the occurrence ends stopped; otherwise it writes nothing.
+
+        Returns:
+            Whether an occurrence was pushed to it, so a stop record was written.
+
+        Raises:
+            PlanningError: If ``activation_id`` is not an identifier, or the backend
+                fails.
+        """
+        ...
+
+    async def stopped_activations(self, activation_ids: Sequence[str], /) -> tuple[str, ...]:
+        """Return which of the named activations the store holds a stop record for.
+
+        In the order named, each once. The read the Task Scheduler's admission makes of
+        a pushed id (§9:10), and its restart's settling of a pushed occurrence whose
+        activation is not running (§8:1): a stop record is the store's, and only the
+        store answers whether one is held (ADR-0297 §1).
+
+        Raises:
+            PlanningError: If ``activation_ids`` is a bare string or not a sequence of
+                strings, names an id with no UTF-8 encoding, or the backend fails.
+        """
+        ...
+
+    async def record_cascade(self, activation_id: str, /) -> None:
+        """Write a stop command's cascade record naming an activation (ADR-0350 §9:6).
+
+        **Idempotent, carrying the id alone**, as a stop record is. From then on
+        :meth:`mark_occurrence_pushed` refuses every occurrence below it and ends it
+        cancelled (§7:5), whatever a restart or a failure leaves of the stop's walk. Only
+        :meth:`clear` removes one.
+
+        Raises:
+            PlanningError: If ``activation_id`` is not an identifier, or the backend
+                fails.
+        """
+        ...
+
+    async def confirm_message_effect(
+        self, effect_id: str, /, *, delivered: bool, position: int | None = None
+    ) -> None:
+        """Settle a message's effect record from its place's confirmation, once (§8:11).
+
+        Where a message's record has an unknown outcome or none written, the kind of its
+        place confirmed from its medium's own record whether it was sent: ``delivered``
+        writes it done, with the position the medium recorded it at; otherwise it is
+        written not done. **Every other change to an outcome already written is
+        refused**, as :meth:`finish_activation_effect` refuses it (ADR-0306 §6:4).
+
+        Args:
+            effect_id: The message's record.
+            delivered: Whether the medium recorded the message.
+            position: Where it recorded it; required where it did, and only then.
+
+        Raises:
+            PlanningError: If ``effect_id`` is not an identifier, the store holds no
+                record under it, the record is a call, its outcome is done or not done,
+                the position does not match ``delivered``, or the backend fails.
+                Nothing is written.
+        """
+        ...
+
+    async def remove_scheduled_task(self, task_id: str, /) -> bool:
+        """Remove a task once nothing of it or below it is live (ADR-0350 §7:8).
+
+        **One indivisible step**, which removes the task only where nothing of it is
+        pending, none of its occurrences is pushed, no task below it is pending or
+        pushed, and no task the store holds waits on it. The fifth condition, that its
+        parent is no longer running, is the engine's state and never the store's: the
+        caller removes no task whose parent is still running.
+
+        Returns:
+            Whether the task was removed. A task not held, or kept, is not.
+
+        Raises:
+            PlanningError: If ``task_id`` is not an identifier, or the backend fails.
+        """
+        ...
+
     async def export(self) -> PlanExport:
         """Return a portable snapshot of all planning state (ADR-0004 §6).
 
@@ -3514,6 +3856,9 @@ class PlanStore(Protocol):
 
         **And its observation records** (ADR-0329 §16:9), each with its revision,
         ordered by episode id.
+
+        **And the Task Scheduler's content** (ADR-0350 §12:3): every scheduled task it
+        holds, with its occurrences, in the order written, and every cascade record.
         """
         ...
 
@@ -3523,7 +3868,8 @@ class PlanStore(Protocol):
         **Every stop record goes with the rest** (ADR-0297 §1), and is counted among
         the records removed. **So does every observation record** (ADR-0329 §16:9),
         each counted once; the revision issuer is kept, so no revision is issued
-        twice.
+        twice. **So do every scheduled task and every cascade record** (ADR-0350
+        §12:3), each counted once.
 
         Raises:
             PlanningError: If the backend fails.

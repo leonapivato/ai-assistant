@@ -988,6 +988,14 @@ def test_every_integer_setting_is_discovered() -> None:
         # argument again: ``follow_up_daily_calls=True`` is one follow-up a day while it
         # reads as the follow-up on. Zero is admitted and asks none.
         "follow_up_daily_calls",
+        # ADR-0350 §12:5's four bounds on the Task Scheduler, each at least one, and
+        # the ``bool`` argument once more: ``task_scheduler_chain_limit=True`` is a chain
+        # of one step while it reads as chains on, and ``task_scheduler_pending_limit``
+        # one reminder at a time.
+        "task_scheduler_chain_limit",
+        "task_scheduler_pending_limit",
+        "task_scheduler_push_limit",
+        "task_scheduler_listing_bound",
     }
 
 
@@ -1362,6 +1370,12 @@ def test_every_duration_setting_is_discovered() -> None:
         "chat_composing_lapse",
         "chat_composing_cap",
         "telegram_start_wait",
+        # ADR-0350 §12:5's two durations, neither nullable: the sensor's recheck is
+        # strictly positive and at most a day, and the lateness grace at least zero and
+        # at most a year, so neither added to a due instant leaves the representable
+        # range.
+        "task_scheduler_recheck_interval",
+        "task_scheduler_lateness_grace",
     }
 
 

@@ -1807,11 +1807,14 @@ class _ProjectedEpisode:
 
     def described(self, marks: _Marks) -> dict[str, object]:
         """The episode with no label, attributed from its origin, as a short view shows it."""
-        report = self.projection.origin is InputOrigin.OUTSIDE
+        origin = self.projection.origin
         return {
             "item": (
                 f"a report received on {self.source}, never something the user said"
-                if report
+                if origin is InputOrigin.OUTSIDE
+                else f"earlier work the assistant scheduled, run on {self.source}; its "
+                "input was the assistant's own instruction, never something the user said"
+                if origin is InputOrigin.ASSISTANT
                 else f"an earlier exchange on {self.source}"
             ),
             **self.parts(marks),
@@ -2638,10 +2641,17 @@ def _input_rendering(
     declaration admission recorded on the trigger, ``origin`` where the pass hands it
     — and never a test of the channel type, so a second outside channel is attributed
     as a report too (§2:3), and a Telegram input that takes in a forward is a report
-    (ADR-0323 §4:11).
+    (ADR-0323 §4:11). A scheduled task's input is the assistant's own instruction, written
+    when the task was set, and never something the user said (ADR-0350 §6:3, §6:12).
     """
-    if (input_origin(channel) if origin is None else origin) is InputOrigin.OUTSIDE:
+    declared = input_origin(channel) if origin is None else origin
+    if declared is InputOrigin.OUTSIDE:
         received = f"a report received on {_channel_text(channel)}, never something the user said"
+    elif declared is InputOrigin.ASSISTANT:
+        received = (
+            f"an instruction the assistant wrote for itself when it scheduled this work, "
+            f"pushed on {_channel_text(channel)}; never something the user said"
+        )
     else:
         received = f"the message the user just sent on {_channel_text(channel)}"
     return {"received_as": received, "text": text}

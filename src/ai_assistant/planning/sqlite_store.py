@@ -37,10 +37,14 @@ from ai_assistant.core.types import (
     ActivationEffectClaim,
     ObservationRecord,
     PlanExport,
+    ScheduledTask,
+    ScheduledTaskWrite,
+    TaskWriteAnswer,
 )
 from ai_assistant.planning._transactions import transaction
 from ai_assistant.planning.activation_effects import (
     checked_effect_id,
+    confirmed,
     decide_activation_claim,
     finished,
     matched_activations,
@@ -56,6 +60,31 @@ from ai_assistant.planning.observations import (
     requested_episodes,
     stamped,
 )
+from ai_assistant.planning.scheduled_tasks import (
+    Schedule,
+    by_person,
+    checked_id,
+    checked_instant,
+    checked_limit,
+    checked_number,
+    checked_optional_id,
+    checked_person,
+    checked_spawn,
+    checked_spawn_effect,
+    checked_state,
+    decide_cancel,
+    decide_push,
+    decide_removal,
+    decide_settle,
+    decide_task_write,
+    due,
+    is_pushed,
+    lineage,
+    live_below,
+    requested_ids,
+    requested_states,
+    spawned_by,
+)
 from ai_assistant.planning.stops import revalidated_activation_id
 
 if TYPE_CHECKING:
@@ -63,7 +92,15 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.types import QuestionPart, ToolOutcome
+    from ai_assistant.core.types import (
+        OccurrencePush,
+        OccurrenceState,
+        QuestionPart,
+        ScheduledDue,
+        ScheduledTaskCancel,
+        TaskSpawn,
+        ToolOutcome,
+    )
 
 _OWNER_ONLY = 0o600
 
@@ -127,13 +164,22 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: build reading 14 refuses the fields as extra (ADR-0326 §5:3). **A version 14 file is
 #: upgraded in place** (§4:1), and every record it holds reads back with the new fields
 #: empty, which is what they are on a record written before them.
-_SCHEMA_VERSION = 15
+#:
+#: **Version 16 is ADR-0350 §12:3's**: the store gains ``scheduled_tasks``, the Task
+#: Scheduler's tasks, each its record as a blob with its person, parent and write order
+#: promoted, and ``cascade_records``, a stop command's cascade records, each the
+#: activation id alone. **A version 15 file is upgraded in place** (ADR-0326 §4:1, §12:4
+#: of ADR-0350): the open's ``CREATE TABLE IF NOT EXISTS`` adds both tables, empty, in its
+#: one transaction, every stop, effect and observation record is carried as it stands
+#: (§4:4), and the step is the label alone. A build reading 15 refuses a file at 16, whose
+#: tables it would leave outside export and clear (ADR-0326 §5:3).
+_SCHEMA_VERSION = 16
 
 #: The labels :meth:`SqlitePlanStore._verify_or_init_meta` upgrades from, each to the
 #: next, in order (ADR-0326 §4:5). Every label from ADR-0309 §6:1's deploy to the one
 #: before :data:`_SCHEMA_VERSION` is here, and none is removed without the owner's
 #: ruling (§4:6).
-_UPGRADABLE: tuple[int, ...] = (12, 13, 14)
+_UPGRADABLE: tuple[int, ...] = (12, 13, 14, 15)
 
 #: The ``meta`` key holding the last observation revision issued (ADR-0329 §16:9). It
 #: lives beside the records rather than being derived from them, because a revision is
@@ -176,6 +222,16 @@ _RECORD_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS observations("
     "episode_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, last_call_us INTEGER, "
     "data TEXT NOT NULL)",
+    # ADR-0350 §12:3's scheduled tasks. The record is the blob; `person` and `parent` are
+    # promoted because they name whom the task is for and what spawned it, and
+    # `written_seq` because every read answers in the order the tasks were written. Each
+    # is reconciled with the blob on every read. No foreign key: a task names
+    # activations, which this store does not hold.
+    "CREATE TABLE IF NOT EXISTS scheduled_tasks("
+    "id TEXT PRIMARY KEY, person TEXT NOT NULL, parent TEXT NOT NULL, "
+    "written_seq INTEGER NOT NULL, data TEXT NOT NULL)",
+    # ADR-0350 §9:6's cascade records, the activation id alone, as a stop record is.
+    "CREATE TABLE IF NOT EXISTS cascade_records(activation_id TEXT PRIMARY KEY)",
 )
 
 #: Each record column's ``(affinity, required NOT NULL)``. ``CREATE TABLE IF NOT
@@ -226,7 +282,21 @@ _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
         "last_call_us": ("INTEGER", False),
         "data": ("TEXT", True),
     },
+    "scheduled_tasks": {
+        "id": ("TEXT", False),
+        "person": ("TEXT", True),
+        "parent": ("TEXT", True),
+        "written_seq": ("INTEGER", True),
+        "data": ("TEXT", True),
+    },
+    "cascade_records": {
+        "activation_id": ("TEXT", False),
+    },
 }
+
+#: The columns every read of a scheduled task selects, in the order
+#: :func:`_checked_task` reconciles them with the record.
+_TASK_COLUMNS = "id, person, parent, data"
 
 #: The columns every read of an observation record selects, in the order
 #: :func:`_checked_observation` reconciles them with the record.
@@ -254,6 +324,8 @@ _RECORD_PRIMARY_KEY: dict[str, tuple[str, ...]] = {
     "stopped_activations": ("activation_id",),
     "activation_effects": ("id",),
     "observations": ("episode_id",),
+    "scheduled_tasks": ("id",),
+    "cascade_records": ("activation_id",),
 }
 
 
@@ -554,6 +626,11 @@ class SqlitePlanStore:
         a record ``declines`` and an outcome ``unclear`` and ``asked``, each with an
         empty default, so every record reads back as it was with them empty, and the
         step is the label alone once more.
+
+        **15 → 16** (ADR-0350 §12:3): the store gains ``scheduled_tasks`` and
+        ``cascade_records``, which the open's ``CREATE TABLE IF NOT EXISTS`` creates,
+        empty, in this same transaction. No record changes, so the step is the label
+        alone.
         """
         for step in range(held, _SCHEMA_VERSION):
             conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(step + 1),))
@@ -918,52 +995,57 @@ class SqlitePlanStore:
         deliberate_repeat: bool,
     ) -> ActivationEffectClaim:
         with self._transaction(f"claim activation effect {record.id!r}") as conn:
-            held = conn.execute(
-                "SELECT 1 FROM activation_effects WHERE id = ?", (record.id,)
-            ).fetchone()
-            # Every row carrying the part, by its promoted columns or by its record, and
-            # each reconciled: a column an outside writer changed or cleared would
-            # otherwise hide a spent part and let a second yes run (ADR-0321 §4:9).
-            spent = record.part is not None and bool(
-                [
-                    _checked_activation_effect(str(self._path), row)
-                    for row in conn.execute(
-                        _PART_ROWS.format(keys="(?, ?)", seq=""),
-                        (record.part.round, record.part.part) * 2,
-                    ).fetchall()
-                ]
-            )
-            # Read in slices on this transaction's own connection, so a match past
-            # SQLite's bound is still read whole under the write lock (issue #3296).
-            matched = [
-                _checked_activation_effect(str(self._path), row)
-                for row in _effect_rows(conn, named or ())
-            ]
-            answer = decide_activation_claim(
-                record,
-                match=named,
-                deliberate_repeat=deliberate_repeat,
-                stopped=_is_stopped(conn, record.activation_id),
-                held_ids=() if held is None else (record.id,),
-                matched=matched,
-                spent=spent,
-            )
+            answer = self._decided_claim(conn, record, named, deliberate_repeat)
             if answer is ActivationEffectClaim.CLAIMED:
-                part = record.part
-                conn.execute(
-                    "INSERT INTO activation_effects(id, activation_id, claimed_seq, data, "
-                    "part_round, part_number) "
-                    "VALUES (?, ?, (SELECT COALESCE(MAX(claimed_seq), 0) + 1 "
-                    "FROM activation_effects), ?, ?, ?)",
-                    (
-                        record.id,
-                        record.activation_id,
-                        record.model_dump_json(),
-                        None if part is None else part.round,
-                        None if part is None else part.part,
-                    ),
-                )
+                _insert_effect(conn, record)
         return answer
+
+    def _decided_claim(
+        self,
+        conn: sqlite3.Connection,
+        record: ActivationEffect,
+        named: tuple[str, ...] | None,
+        deliberate_repeat: bool,
+    ) -> ActivationEffectClaim:
+        """Decide one claim on ``conn``, inside the caller's write transaction.
+
+        The stop, the held id, the spend and the backstop, read on the transaction's own
+        connection: the claim's step, and the first half of a spawn's (ADR-0350 §3:3).
+
+        Raises:
+            ClaimStopped: If the store holds a stop record for the activation.
+            PlanningError: If the store already holds a record under the id.
+        """
+        held = conn.execute(
+            "SELECT 1 FROM activation_effects WHERE id = ?", (record.id,)
+        ).fetchone()
+        # Every row carrying the part, by its promoted columns or by its record, and
+        # each reconciled: a column an outside writer changed or cleared would
+        # otherwise hide a spent part and let a second yes run (ADR-0321 §4:9).
+        spent = record.part is not None and bool(
+            [
+                _checked_activation_effect(str(self._path), row)
+                for row in conn.execute(
+                    _PART_ROWS.format(keys="(?, ?)", seq=""),
+                    (record.part.round, record.part.part) * 2,
+                ).fetchall()
+            ]
+        )
+        # Read in slices on this transaction's own connection, so a match past
+        # SQLite's bound is still read whole under the write lock (issue #3296).
+        matched = [
+            _checked_activation_effect(str(self._path), row)
+            for row in _effect_rows(conn, named or ())
+        ]
+        return decide_activation_claim(
+            record,
+            match=named,
+            deliberate_repeat=deliberate_repeat,
+            stopped=_is_stopped(conn, record.activation_id),
+            held_ids=() if held is None else (record.id,),
+            matched=matched,
+            spent=spent,
+        )
 
     async def finish_activation_effect(
         self,
@@ -1196,6 +1278,423 @@ class SqlitePlanStore:
         except sqlite3.Error as exc:
             raise _wrap("count the observer's model calls", "", exc) from exc
 
+    # --- the Task Scheduler's scheduled tasks (ADR-0350 §12:3) -------------
+    #
+    # Every member reads the whole schedule on its own transaction's connection, runs
+    # one decision of `planning.scheduled_tasks` over it, and writes back what the
+    # decision changed, so each is one indivisible step (§3:3, §7:5, §9:9). The writes
+    # take `BEGIN IMMEDIATE`, and the reads a deferred transaction, which sees one
+    # snapshot of both tables.
+
+    def _schedule(self, conn: sqlite3.Connection, now: datetime) -> Schedule:
+        """Read the whole schedule on ``conn``, inside the caller's transaction."""
+        tasks = {
+            task.id: task
+            for task in (
+                _checked_task(str(self._path), row)
+                for row in conn.execute(
+                    "SELECT " + _TASK_COLUMNS + " FROM scheduled_tasks "  # noqa: S608 — only a constant is interpolated
+                    "ORDER BY written_seq ASC"
+                ).fetchall()
+            )
+        }
+        cascades = {
+            revalidated_activation_id(row[0])
+            for row in conn.execute("SELECT activation_id FROM cascade_records").fetchall()
+        }
+        return Schedule(tasks=tasks, cascades=cascades, now=now)
+
+    def _persist(self, conn: sqlite3.Connection, schedule: Schedule) -> None:
+        """Write back the tasks a decision changed and delete those it removed."""
+        for task_id in schedule.changed:
+            task = schedule.tasks[task_id]
+            updated = conn.execute(
+                "UPDATE scheduled_tasks SET data = ? WHERE id = ?",
+                (task.model_dump_json(), task.id),
+            ).rowcount
+            if not updated:
+                conn.execute(
+                    "INSERT INTO scheduled_tasks(id, person, parent, written_seq, data) "
+                    "VALUES (?, ?, ?, (SELECT COALESCE(MAX(written_seq), 0) + 1 "
+                    "FROM scheduled_tasks), ?)",
+                    (task.id, task.person, task.parent, task.model_dump_json()),
+                )
+        for task_id in schedule.removed:
+            conn.execute("DELETE FROM scheduled_tasks WHERE id = ?", (task_id,))
+
+    async def write_scheduled_task(  # noqa: PLR0913 — the Protocol's signature
+        self,
+        spawn: TaskSpawn,
+        effect: ActivationEffect,
+        /,
+        *,
+        match: tuple[str, ...] | None,
+        deliberate_repeat: bool = False,
+        replace_any: bool = False,
+        chain_limit: int,
+        pending_limit: int,
+    ) -> ScheduledTaskWrite:
+        """Write a scheduled task with its spawn's effect claim, in one step (§3:3).
+
+        The claim, the replace, the wait, the limits and both writes are read and
+        decided inside one ``BEGIN IMMEDIATE`` transaction, so two spawns of one round
+        cannot pass the limits together (§9:9). A refusal writes neither row.
+
+        Raises:
+            ClaimStopped: If the store holds a stop record for the spawning activation.
+            PlanningError: If the spawn, the effect or a limit is not valid, an id is
+                already held, or the backend fails.
+        """
+        asked = checked_spawn(spawn)
+        record = checked_spawn_effect(revalidated_claim(effect))
+        named = matched_activations(match)
+        limits = (
+            checked_limit(chain_limit, "chain limit"),
+            checked_limit(pending_limit, "pending limit"),
+        )
+        now = self._now()
+        async with self._lock:
+            return await _run_to_completion(
+                self._write_scheduled_task_sync,
+                asked,
+                record,
+                named,
+                (deliberate_repeat, replace_any),
+                limits,
+                now,
+            )
+
+    def _write_scheduled_task_sync(  # noqa: PLR0913 — the spawn, its claim and its step's facts
+        self,
+        spawn: TaskSpawn,
+        record: ActivationEffect,
+        named: tuple[str, ...] | None,
+        flags: tuple[bool, bool],
+        limits: tuple[int, int],
+        now: datetime,
+    ) -> ScheduledTaskWrite:
+        deliberate_repeat, replace_any = flags
+        chain_limit, pending_limit = limits
+        with self._transaction(f"write scheduled task {spawn.id!r}") as conn:
+            answer = self._decided_claim(conn, record, named, deliberate_repeat)
+            if answer is not ActivationEffectClaim.CLAIMED:
+                return ScheduledTaskWrite(answer=TaskWriteAnswer(answer.value))
+            schedule = self._schedule(conn, now)
+            written = decide_task_write(
+                schedule,
+                spawn,
+                record.activation_id,
+                replace_any=replace_any,
+                chain_limit=chain_limit,
+                pending_limit=pending_limit,
+            )
+            if written.answer is TaskWriteAnswer.WRITTEN:
+                self._persist(conn, schedule)
+                _insert_effect(conn, record)
+        return written
+
+    async def cancel_scheduled_task(
+        self, task_id: str, /, *, person: str | None = None, spawned_by: str | None = None
+    ) -> ScheduledTaskCancel:
+        """End every pending occurrence of a task as cancelled, in one step (§9:5).
+
+        Raises:
+            PlanningError: If an id is not an identifier, or the backend fails.
+        """
+        named = checked_id(task_id, "scheduled task")
+        whose = None if person is None else checked_person(person)
+        by = checked_optional_id(spawned_by, "spawning activation")
+        now = self._now()
+        async with self._lock:
+            return await _run_to_completion(self._cancel_scheduled_task_sync, named, whose, by, now)
+
+    def _cancel_scheduled_task_sync(
+        self, task_id: str, person: str | None, spawned_by: str | None, now: datetime
+    ) -> ScheduledTaskCancel:
+        with self._transaction(f"cancel scheduled task {task_id!r}") as conn:
+            schedule = self._schedule(conn, now)
+            answer = decide_cancel(schedule, task_id, person=person, spawned_by=spawned_by)
+            self._persist(conn, schedule)
+        return answer
+
+    async def scheduled_tasks(self, task_ids: Sequence[str], /) -> tuple[ScheduledTask, ...]:
+        """Return the named tasks the store holds, in the order named (§12:3).
+
+        Raises:
+            PlanningError: If ``task_ids`` is not a sequence of encodable strings, or
+                the backend fails.
+        """
+        named = requested_ids(task_ids, "scheduled tasks")
+        async with self._lock:
+            held = await _run_to_completion(self._scheduled_tasks_sync)
+        return tuple(held[one] for one in named if one in held)
+
+    def _read_schedule(self, what: str) -> Schedule:
+        """The whole schedule, read under one deferred transaction."""
+        with transaction(self._conn, what, error=PlanningError, immediate=False) as conn:
+            return self._schedule(conn, _EPOCH)
+
+    def _scheduled_tasks_sync(self) -> dict[str, ScheduledTask]:
+        return self._read_schedule("read scheduled tasks").tasks
+
+    async def person_scheduled_tasks(
+        self, person: str, states: Sequence[OccurrenceState], /
+    ) -> tuple[ScheduledTask, ...]:
+        """Return a person's tasks with an occurrence in any of ``states`` (§4:6).
+
+        Raises:
+            PlanningError: If ``person`` or ``states`` is not valid, or the backend
+                fails.
+        """
+        whose = checked_person(person)
+        wanted = requested_states(states)
+        async with self._lock:
+            held = await _run_to_completion(self._person_scheduled_tasks_sync)
+        return by_person(held, whose, wanted)
+
+    def _person_scheduled_tasks_sync(self) -> dict[str, ScheduledTask]:
+        return self._read_schedule("read a person's scheduled tasks").tasks
+
+    async def spawned_tasks(self, activation_ids: Sequence[str], /) -> tuple[ScheduledTask, ...]:
+        """Return the tasks whose parent is any of the named activations (§9:6).
+
+        Raises:
+            PlanningError: If ``activation_ids`` is not a sequence of encodable
+                strings, or the backend fails.
+        """
+        named = requested_ids(activation_ids, "spawned tasks")
+        async with self._lock:
+            held = await _run_to_completion(self._spawned_tasks_sync)
+        return spawned_by(held, named)
+
+    def _spawned_tasks_sync(self) -> dict[str, ScheduledTask]:
+        return self._read_schedule("read spawned tasks").tasks
+
+    async def scheduled_lineage(self, activation_id: str, /) -> tuple[ScheduledTask, ...]:
+        """Return the lineage of the task pushed to ``activation_id`` (§6:5).
+
+        Raises:
+            PlanningError: If ``activation_id`` is not an identifier, or the backend
+                fails.
+        """
+        named = checked_id(activation_id, "activation")
+        async with self._lock:
+            held = await _run_to_completion(self._scheduled_lineage_sync)
+        return lineage(held, named)
+
+    def _scheduled_lineage_sync(self) -> dict[str, ScheduledTask]:
+        return self._read_schedule("read a scheduled task's lineage").tasks
+
+    async def live_below(self, task_id: str, /) -> bool:
+        """Whether anything below a task is pending, pushed or running (§7:8, §9:6).
+
+        Raises:
+            PlanningError: If ``task_id`` is not an identifier, or the backend fails.
+        """
+        named = checked_id(task_id, "scheduled task")
+        async with self._lock:
+            held = await _run_to_completion(self._live_below_sync)
+        return live_below(held, named)
+
+    def _live_below_sync(self) -> dict[str, ScheduledTask]:
+        return self._read_schedule("read what is live below a scheduled task").tasks
+
+    async def due_occurrences(self, at: datetime, /) -> ScheduledDue:
+        """Return the occurrences due at or before ``at``, and the next due after (§7:3).
+
+        Raises:
+            PlanningError: If ``at`` is not a timezone-aware instant, or the backend
+                fails.
+        """
+        instant = checked_instant(at)
+        async with self._lock:
+            held = await _run_to_completion(self._due_occurrences_sync)
+        return due(held, instant)
+
+    def _due_occurrences_sync(self) -> dict[str, ScheduledTask]:
+        return self._read_schedule("read the scheduled occurrences due").tasks
+
+    async def mark_occurrence_pushed(
+        self, task_id: str, number: int, activation_id: str, /
+    ) -> OccurrencePush:
+        """Mark a pending occurrence pushed, with its cascade check, in one step (§7:5).
+
+        Raises:
+            PlanningError: If an argument is not valid, the task holds no such
+                occurrence, the activation was already pushed to, or the backend fails.
+        """
+        named = checked_id(task_id, "scheduled task")
+        which = checked_number(number)
+        pushed = checked_id(activation_id, "activation")
+        now = self._now()
+        async with self._lock:
+            return await _run_to_completion(
+                self._mark_occurrence_pushed_sync, named, which, pushed, now
+            )
+
+    def _mark_occurrence_pushed_sync(
+        self, task_id: str, number: int, activation_id: str, now: datetime
+    ) -> OccurrencePush:
+        with self._transaction(f"push occurrence {number} of {task_id!r}") as conn:
+            schedule = self._schedule(conn, now)
+            answer = decide_push(schedule, task_id, number, activation_id)
+            self._persist(conn, schedule)
+        return answer
+
+    async def settle_occurrence(
+        self, activation_id: str, state: OccurrenceState, /, *, second_try: bool = False
+    ) -> ScheduledTask:
+        """Write the outcome of the occurrence pushed to an activation (§7:6, §8).
+
+        The stop record it reads and the write are one ``BEGIN IMMEDIATE`` step.
+
+        Raises:
+            PlanningError: If no occurrence is pushed to it, the outcome is refused, or
+                the backend fails.
+        """
+        named = checked_id(activation_id, "activation")
+        outcome = checked_state(state)
+        now = self._now()
+        async with self._lock:
+            return await _run_to_completion(
+                self._settle_occurrence_sync, named, outcome, second_try is True, now
+            )
+
+    def _settle_occurrence_sync(
+        self, activation_id: str, state: OccurrenceState, second_try: bool, now: datetime
+    ) -> ScheduledTask:
+        with self._transaction(f"settle the occurrence of {activation_id!r}") as conn:
+            schedule = self._schedule(conn, now)
+            task = decide_settle(
+                schedule,
+                activation_id,
+                state,
+                second_try=second_try,
+                stopped=_is_stopped(conn, activation_id),
+            )
+            self._persist(conn, schedule)
+        return task
+
+    async def stop_pushed_activation(self, activation_id: str, /) -> bool:
+        """Write a stop record for an activation pushed and not yet admitted (§9:10).
+
+        Raises:
+            PlanningError: If ``activation_id`` is not an identifier, or the backend
+                fails.
+        """
+        named = revalidated_activation_id(activation_id)
+        async with self._lock:
+            return await _run_to_completion(self._stop_pushed_activation_sync, named)
+
+    def _stop_pushed_activation_sync(self, activation_id: str) -> bool:
+        with self._transaction(f"stop pushed activation {activation_id!r}") as conn:
+            if not is_pushed(self._schedule(conn, _EPOCH).tasks, activation_id):
+                return False
+            conn.execute(
+                "INSERT INTO stopped_activations(activation_id) VALUES (?) "
+                "ON CONFLICT(activation_id) DO NOTHING",
+                (activation_id,),
+            )
+        return True
+
+    async def stopped_activations(self, activation_ids: Sequence[str], /) -> tuple[str, ...]:
+        """Return which of the named activations the store holds a stop record for.
+
+        Raises:
+            PlanningError: If ``activation_ids`` is not a sequence of encodable
+                strings, or the backend fails.
+        """
+        named = requested_ids(activation_ids, "stop records")
+        if not named:
+            return ()
+        async with self._lock:
+            held = await _run_to_completion(self._stopped_activations_sync, named)
+        return tuple(one for one in named if one in held)
+
+    def _stopped_activations_sync(self, named: tuple[str, ...]) -> set[str]:
+        held: set[str] = set()
+        with transaction(
+            self._conn, "read stop records", error=PlanningError, immediate=False
+        ) as conn:
+            for start in range(0, len(named), _IN_SLICE):
+                part = named[start : start + _IN_SLICE]
+                marks = ", ".join("?" for _ in part)
+                held.update(
+                    revalidated_activation_id(row[0])
+                    for row in conn.execute(
+                        "SELECT activation_id FROM stopped_activations "  # noqa: S608 — only placeholders are interpolated
+                        f"WHERE activation_id IN ({marks})",
+                        part,
+                    ).fetchall()
+                )
+        return held
+
+    async def record_cascade(self, activation_id: str, /) -> None:
+        """Write a cascade record naming an activation, idempotently (§9:6).
+
+        Raises:
+            PlanningError: If ``activation_id`` is not an identifier, or the backend
+                fails.
+        """
+        named = revalidated_activation_id(activation_id)
+        async with self._lock:
+            await _run_to_completion(self._record_cascade_sync, named)
+
+    def _record_cascade_sync(self, activation_id: str) -> None:
+        with self._transaction(f"record a cascade below activation {activation_id!r}") as conn:
+            conn.execute(
+                "INSERT INTO cascade_records(activation_id) VALUES (?) "
+                "ON CONFLICT(activation_id) DO NOTHING",
+                (activation_id,),
+            )
+
+    async def confirm_message_effect(
+        self, effect_id: str, /, *, delivered: bool, position: int | None = None
+    ) -> None:
+        """Settle a message's effect record from its place's confirmation, once (§8:11).
+
+        The read of the held record and the write are one ``BEGIN IMMEDIATE`` step.
+
+        Raises:
+            PlanningError: If the record is not held, is a call, is already settled,
+                the position does not match ``delivered``, or the backend fails.
+        """
+        named = checked_effect_id(effect_id)
+        async with self._lock:
+            await _run_to_completion(self._confirm_message_effect_sync, named, delivered, position)
+
+    def _confirm_message_effect_sync(
+        self, effect_id: str, delivered: object, position: object
+    ) -> None:
+        with self._transaction(f"confirm activation effect {effect_id!r}") as conn:
+            row = conn.execute(
+                "SELECT " + _EFFECT_COLUMNS + " FROM activation_effects WHERE id = ?",  # noqa: S608 — only a constant is interpolated
+                (effect_id,),
+            ).fetchone()
+            held = None if row is None else _checked_activation_effect(str(self._path), row)
+            record = confirmed(held, effect_id, delivered=delivered, position=position)
+            conn.execute(
+                "UPDATE activation_effects SET data = ? WHERE id = ?",
+                (record.model_dump_json(), effect_id),
+            )
+
+    async def remove_scheduled_task(self, task_id: str, /) -> bool:
+        """Remove a task once nothing of it or below it is live, in one step (§7:8).
+
+        Raises:
+            PlanningError: If ``task_id`` is not an identifier, or the backend fails.
+        """
+        named = checked_id(task_id, "scheduled task")
+        async with self._lock:
+            return await _run_to_completion(self._remove_scheduled_task_sync, named)
+
+    def _remove_scheduled_task_sync(self, task_id: str) -> bool:
+        with self._transaction(f"remove scheduled task {task_id!r}") as conn:
+            schedule = self._schedule(conn, _EPOCH)
+            removed = decide_removal(schedule, task_id)
+            self._persist(conn, schedule)
+        return removed
+
     # --- data rights (ADR-0004) -------------------------------------------
 
     async def export(self) -> PlanExport:
@@ -1209,7 +1708,7 @@ class SqlitePlanStore:
         """
         exported_at = self._now()
         async with self._lock:
-            stopped, acted, observed = await _run_to_completion(self._export_sync)
+            stopped, acted, observed, schedule = await _run_to_completion(self._export_sync)
         return PlanExport(
             exported_at=exported_at,
             # ADR-0297 §1: every stop record, in a deterministic order.
@@ -1218,11 +1717,15 @@ class SqlitePlanStore:
             activation_effects=tuple(acted),
             # ADR-0329 §16:9: every observation record, by episode id.
             observations=tuple(observed),
+            # ADR-0350 §12:3: every scheduled task, in the order written, and every
+            # cascade record, in a deterministic order.
+            scheduled_tasks=tuple(schedule.tasks.values()),
+            cascades=tuple(sorted(schedule.cascades)),
         )
 
     def _export_sync(
         self,
-    ) -> tuple[list[str], list[ActivationEffect], list[ObservationRecord]]:
+    ) -> tuple[list[str], list[ActivationEffect], list[ObservationRecord], Schedule]:
         # Both reads inside one transaction, so the export is a single database
         # snapshot. The write form, not the deferred one a read would otherwise take:
         # the write lock excludes a writer outright rather than leaving the reads to a
@@ -1251,10 +1754,11 @@ class SqlitePlanStore:
                     "ORDER BY episode_id ASC"
                 ).fetchall()
             ]
-        return stopped, acted, observed
+            schedule = self._schedule(conn, _EPOCH)
+        return stopped, acted, observed, schedule
 
     async def clear(self) -> int:
-        """Delete every stop, effect and observation record, returning the count.
+        """Delete every record, the Task Scheduler's included, returning the count.
 
         The store holds no execution, so no live step can refuse the erase. The
         observation issuer in ``meta`` is kept, so no revision is issued twice
@@ -1272,6 +1776,9 @@ class SqlitePlanStore:
             # ADR-0329 §16:9: and every observation record. `meta`, which holds the
             # observation issuer, is untouched.
             removed += conn.execute("DELETE FROM observations").rowcount
+            # ADR-0350 §12:3: and every scheduled task and cascade record.
+            removed += conn.execute("DELETE FROM scheduled_tasks").rowcount
+            removed += conn.execute("DELETE FROM cascade_records").rowcount
         return removed
 
     def close(self) -> None:
@@ -1289,6 +1796,56 @@ def _is_stopped(conn: sqlite3.Connection, activation_id: str) -> bool:
         "SELECT 1 FROM stopped_activations WHERE activation_id = ?", (activation_id,)
     ).fetchone()
     return row is not None
+
+
+def _insert_effect(conn: sqlite3.Connection, record: ActivationEffect) -> None:
+    """Write a claimed effect record on ``conn``, inside the caller's transaction."""
+    part = record.part
+    conn.execute(
+        "INSERT INTO activation_effects(id, activation_id, claimed_seq, data, "
+        "part_round, part_number) "
+        "VALUES (?, ?, (SELECT COALESCE(MAX(claimed_seq), 0) + 1 "
+        "FROM activation_effects), ?, ?, ?)",
+        (
+            record.id,
+            record.activation_id,
+            record.model_dump_json(),
+            None if part is None else part.round,
+            None if part is None else part.part,
+        ),
+    )
+
+
+def _checked_task(path: str, row: Sequence[Any]) -> ScheduledTask:
+    """Decode one scheduled task and refuse a blob that disagrees with its columns.
+
+    The id, the person and the parent are promoted, so each is reconciled with the
+    record a tampered file could answer with (ADR-0350 §12:3).
+
+    Args:
+        path: The store's path, for the message.
+        row: ``(id, person, parent, data)``.
+
+    Returns:
+        The reconciled task.
+
+    Raises:
+        PlanningError: If the blob does not validate, or disagrees with its columns.
+    """
+    try:
+        task = ScheduledTask.model_validate_json(str(row[3]))
+    except ValidationError as exc:
+        msg = f"the plan store holds a scheduled task that no longer validates: {exc}"
+        raise PlanningError(msg) from exc
+    promoted = (row[0], row[1], row[2])
+    held = (task.id, task.person, task.parent)
+    if promoted != held:
+        msg = (
+            f"the plan store at {path!r} holds a scheduled task indexed at {promoted} "
+            f"whose record names {held}; the store is corrupt"
+        )
+        raise PlanningError(msg)
+    return task
 
 
 def _micros(instant: datetime) -> int:

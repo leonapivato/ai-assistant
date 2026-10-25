@@ -491,6 +491,35 @@ async def test_an_outside_episodes_excerpt_never_carries_its_raw_input() -> None
     }
 
 
+async def test_a_scheduled_steps_episode_is_never_the_users_and_never_shows_its_instruction() -> (
+    None
+):
+    """ADR-0350 §6:12: a task's instruction is the assistant's words, never the user's."""
+    schedule = ChannelIdentity(channel_type="task_scheduler", instance_id="schedule")
+    understood = _episode(
+        "understood",
+        processing=_processing(
+            _text_trigger("INSTRUCTION-SENTINEL", schedule, origin=InputOrigin.ASSISTANT),
+            understanding=(_understood("Checking the listing again."),),
+        ),
+    )
+    bare = _episode(
+        "bare",
+        processing=_processing(
+            _text_trigger("INSTRUCTION-SENTINEL", schedule, origin=InputOrigin.ASSISTANT)
+        ),
+    )
+    recalled = await _recall(_stage(await _store(understood, bare)))
+    items = {item.id: (item.provenance, item.excerpt) for item in recalled.result.items}
+    assert items == {
+        "understood": (RecallProvenance.OUTSIDE, "Checking the listing again."),
+        "bare": (
+            RecallProvenance.OUTSIDE,
+            "work the assistant scheduled on task_scheduler:schedule",
+        ),
+    }
+
+
 async def test_another_episodes_excerpt_is_its_input_text_or_its_content() -> None:
     speech = RecordedChannelTrigger(
         target=NewConversation(),

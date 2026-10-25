@@ -2787,6 +2787,11 @@ class InputOrigin(StrEnum):
     OUTSIDE = "outside"
     """Something the world reported, never something the user said."""
 
+    ASSISTANT = "assistant"
+    """The assistant's own words: a scheduled task's instruction as planning wrote it,
+    which the Task Scheduler pushes when it falls due (ADR-0350 §6:3). Never something
+    the user said, whoever set the task, and no outside trigger (§6:12-§6:13)."""
+
 
 #: The bound a medium's own identifier is read below, where a recorded input carries
 #: one: the 64-bit signed ceiling, which bounds it without guessing at any medium's own.
@@ -4123,10 +4128,17 @@ class LabelKind(StrEnum):
     APPROVED_ACTION = "approved_action"
     """An action the activation's yes approved, which planning proposes by this label and
     whose values code fills in (ADR-0321 §4:2)."""
+    SCHEDULED_TASK = "scheduled_task"
+    """A scheduled task the Task Scheduler holds, which a replace or a cancel names
+    (ADR-0350 §9:2)."""
+    PLACE = "place"
+    """A place on the activation's place list, which a spawn suggests and a message of an
+    activation the Task Scheduler started goes into (ADR-0350 §5:13). A channel heading
+    takes no label."""
 
 
-#: Each kind's label prefix (ADR-0307 §5:1, ADR-0321 §4:2): S1…, E1…, N1…, M1…, R1…
-#: and A1….
+#: Each kind's label prefix (ADR-0307 §5:1, ADR-0321 §4:2, ADR-0350 §12:2): S1…, E1…,
+#: N1…, M1…, R1…, A1…, T1… and L1….
 _LABEL_PREFIXES: Final[dict[LabelKind, str]] = {
     LabelKind.STORY: "S",
     LabelKind.EPISODE: "E",
@@ -4134,19 +4146,21 @@ _LABEL_PREFIXES: Final[dict[LabelKind, str]] = {
     LabelKind.MEMORY: "M",
     LabelKind.RESULT: "R",
     LabelKind.APPROVED_ACTION: "A",
+    LabelKind.SCHEDULED_TASK: "T",
+    LabelKind.PLACE: "L",
 }
 
-_LABEL_SHAPE: Final = re.compile(r"[SENMRA][1-9][0-9]{0,8}")
+_LABEL_SHAPE: Final = re.compile(r"[SENMRATL][1-9][0-9]{0,8}")
 
 
 def label_prefix(kind: LabelKind) -> str:
-    """The prefix a label of ``kind`` carries (ADR-0307 §5:1).
+    """The prefix a label of ``kind`` carries (ADR-0307 §5:1, ADR-0350 §12:2).
 
     Args:
         kind: What the label names.
 
     Returns:
-        ``S``, ``E``, ``N``, ``M``, ``R`` or ``A``.
+        ``S``, ``E``, ``N``, ``M``, ``R``, ``A``, ``T`` or ``L``.
     """
     return _LABEL_PREFIXES[kind]
 
@@ -4197,10 +4211,16 @@ class PlanningRound(BaseModel):
     the number asked about, in that order (§2:6). A round written before the field
     validates unchanged.
 
+    ``place`` (ADR-0350 §12:8) is the place the round's message goes into, for an
+    activation the Task Scheduler started: the place its message's place label resolved
+    to on the activation's place list (§6:7). It is ``None`` for every other activation,
+    whose message goes into the place its input came from, and on a round with no
+    message. A round written before the field validates unchanged.
+
     Raises:
         ValueError: If it follows itself, marks notes it does not carry, carries two
-            calls under one id, or its asked calls are not parts ``1`` to ``n`` in
-            order.
+            calls under one id, its asked calls are not parts ``1`` to ``n`` in order,
+            or it names a place for a message it does not carry.
     """
 
     # The values the round keeps, its proposed calls' arguments and its asked calls'
@@ -4218,11 +4238,15 @@ class PlanningRound(BaseModel):
     # A forward reference, resolved by the `model_rebuild` beside `AskedCall`, which
     # says why this one type reaches forward.
     asked: tuple[AskedCall, ...] = ()
+    place: ChannelIdentity | None = None
 
     @model_validator(mode="after")
     def _well_formed(self) -> Self:
         if self.follows == self.id:
             msg = "a round follows the round before it, never itself"
+            raise ValueError(msg)
+        if self.place is not None and not self.text:
+            msg = "only a round carrying a message names the place it goes into (ADR-0350 §12:8)"
             raise ValueError(msg)
         if self.notes_marked and self.notes is None:
             msg = "only a round carrying notes marks them"
@@ -5584,6 +5608,12 @@ def support_holder(support: MemorySupport, episode: EpisodicMemory | None) -> Su
     return SupportHolder.unknown() if sender is None else SupportHolder.source(sender, claimed=True)
 
 
+def _assistant_input(episode: EpisodicMemory | None) -> bool:
+    """Whether ``episode``'s input is the assistant's own words (ADR-0350 §6:3, §6:11)."""
+    processing = None if episode is None else episode.processing_record
+    return processing is not None and processing.trigger.origin is InputOrigin.ASSISTANT
+
+
 def stamped_support(support: MemorySupport, episode: EpisodicMemory | None) -> MemorySupport:
     """``support`` carrying the holder §2's table gives it (ADR-0345 §2:2).
 
@@ -5600,9 +5630,17 @@ def stamped_support(support: MemorySupport, episode: EpisodicMemory | None) -> M
     Returns:
         The support with its holder.
 
+    **No support points at an input whose origin is** ``assistant`` (ADR-0350 §6:11): such
+    an input is a scheduled task's instruction, the assistant's own words, never a holder
+    §2's table has a kind for, so the stamp refuses it whichever writer built it.
+
     Raises:
-        ValueError: If the support carries a holder §2's table does not give its part.
+        ValueError: If the support carries a holder §2's table does not give its part, or
+            points at an input whose origin is ``assistant``.
     """
+    if isinstance(support.points_at, InputPart) and _assistant_input(episode):
+        msg = "no support points at an input whose origin is assistant (ADR-0350 §6:11)"
+        raise ValueError(msg)
     computed = support_holder(support, episode)
     recorded = support.holder
     if recorded is None:
@@ -10070,6 +10108,474 @@ class ObservationRecord(BaseModel):
         return self.next_attempt_at is None or self.next_attempt_at <= now
 
 
+# --- the Task Scheduler's scheduled tasks (ADR-0350 §3, §5, §7, §12:1) -------------
+#
+# The Task Scheduler is a built-in channel whose one place, the schedule, holds
+# scheduled tasks: each an activation waiting to be started, or one whose work has
+# ended but that is kept while anything below it is live (§2:5, §7:8). The plan store
+# holds them, because a task, the spawn's effect claim and the stop that refuses it are
+# decided in one step (§3:3). What ran is kept in episodes, never here (§7:9).
+
+#: The bound, in characters, on what a scheduled task carries: the creator's instruction,
+#: "bounded in size" (ADR-0350 §3:6). Planning writes it, so it is short; the bound is the
+#: ceiling a hand-built or runaway instruction meets, well above any reminder or step.
+SCHEDULED_TASK_INSTRUCTION_MAX_CHARS: Final = 4_000
+
+#: The bound on a scheduled task's occurrence numbers and chain length, which no store's
+#: count need reach and every store's integer column holds.
+_SCHEDULE_INT_BOUND: Final = 2**31
+
+
+class ScheduledTaskAuthor(StrEnum):
+    """Who a scheduled task's author is (ADR-0350 §3:7, §12:1).
+
+    Closed, **added to and never renamed**. The person, established as the spawning
+    activation's input's author was, where that input carries the person's authority;
+    the assistant otherwise. Written when the task is set, and an occurrence's input is
+    stated by the hub as the task's author (§6:2). Neither authorizes anything (§3:9).
+    """
+
+    PERSON = "person"
+    ASSISTANT = "assistant"
+
+
+class OccurrenceState(StrEnum):
+    """Where one occurrence of a scheduled task stands (ADR-0350 §7:5-§7:6, §8, §12:1).
+
+    Closed, **added to and never renamed**. ``pending`` until the sensor pushes it;
+    ``pushed``, naming the activation it will be or was admitted under, until that
+    activation's outcome is written; then one of the outcomes. ``cancelled`` ends a
+    pending occurrence (§9:5, §7:5's cascade), and ``skipped`` an earlier missed
+    occurrence of a rule (§8:10).
+    """
+
+    PENDING = "pending"
+    PUSHED = "pushed"
+    DONE = "done"
+    """Its activation's episode froze completed (§7:6), or its message was confirmed
+    done after a restart (§8:4)."""
+    COULDNT_FINISH = "couldnt_finish"
+    """Its activation's episode froze failed (§7:6)."""
+    STOPPED = "stopped"
+    """A stop ended its activation, or refused its admission (§7:6, §8:1, §9:10)."""
+    INTERRUPTED = "interrupted"
+    """Its activation ended any other way, or a restart left it unsettled (§7:6, §8)."""
+    CANCELLED = "cancelled"
+    SKIPPED = "skipped"
+
+
+#: The states an occurrence ends in (ADR-0350 §7:6): every one but pending and pushed.
+ENDED_OCCURRENCE_STATES: Final[frozenset[OccurrenceState]] = frozenset(
+    {
+        OccurrenceState.DONE,
+        OccurrenceState.COULDNT_FINISH,
+        OccurrenceState.STOPPED,
+        OccurrenceState.INTERRUPTED,
+        OccurrenceState.CANCELLED,
+        OccurrenceState.SKIPPED,
+    }
+)
+
+#: The outcomes a pushed occurrence takes from how its activation ended, or from a
+#: restart's settling (ADR-0350 §7:6, §8:1-§8:7). Cancelled and skipped end only an
+#: occurrence never pushed, or pushed again and not yet re-pushed.
+PUSHED_OUTCOMES: Final[frozenset[OccurrenceState]] = frozenset(
+    {
+        OccurrenceState.DONE,
+        OccurrenceState.COULDNT_FINISH,
+        OccurrenceState.STOPPED,
+        OccurrenceState.INTERRUPTED,
+    }
+)
+
+
+class DueNow(BaseModel):
+    """A task's when: now, so its occurrence falls due the instant it is set (§5:1)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["now"] = "now"
+
+
+class DueAt(BaseModel):
+    """A task's when: an instant, stored in UTC and compared as one (ADR-0350 §5:1-§5:2).
+
+    A spawn that states a delay states it from now; the hub resolves it to this instant
+    when the task is set.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["instant"] = "instant"
+    at: UtcInstant
+
+
+class DueAfterTasks(BaseModel):
+    """A task's when: the hub event *named tasks ending* (ADR-0350 §5:4).
+
+    It falls due at the instant the last of ``tasks`` ends, however each ends, and at
+    once where all of them have ended when it is written. It names one-off tasks for the
+    same person that exist when it is written, which the store checks in the write's own
+    step, and what it waits for never changes.
+
+    Raises:
+        ValueError: If it names a task twice.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["tasks_ending"] = "tasks_ending"
+    tasks: tuple[Identifier, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _each_once(self) -> Self:
+        if len(set(self.tasks)) != len(self.tasks):
+            msg = "a task waits on each task it names once (ADR-0350 §5:4)"
+            raise ValueError(msg)
+        return self
+
+
+#: A scheduled task's when (ADR-0350 §5:1). A **rule** is not among them: until the
+#: decision on its vocabulary lands, no task holds one (§5:3).
+TaskWhen = Annotated[DueNow | DueAt | DueAfterTasks, Field(discriminator="kind")]
+
+
+class ScheduledOccurrence(BaseModel):
+    """One occurrence of a scheduled task, with its state and outcome (ADR-0350 §12:1).
+
+    ``due_at`` is the instant it falls due, ``None`` only while it waits on named tasks
+    that have not all ended (§5:4). ``activations`` names, in order, every activation it
+    was pushed to: the last is the one a ``pushed`` occurrence names (§7:5), and their
+    count is how many times it has been pushed (§8:5). ``second_try`` records that it was
+    pushed again as a second try (§8:6), which is never tried a third time. ``ended_at``
+    is when it ended, set exactly when its state is an ending one.
+
+    Raises:
+        ValueError: If its ending and its state disagree, it is pushed or ran with no
+            activation named or no instant due, it names an activation twice, it is a
+            second try never pushed, or it was skipped and yet pushed.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    number: int = Field(strict=True, ge=1, lt=_SCHEDULE_INT_BOUND)
+    due_at: UtcInstant | None = None
+    state: OccurrenceState = OccurrenceState.PENDING
+    activations: tuple[Identifier, ...] = ()
+    second_try: bool = False
+    ended_at: UtcInstant | None = None
+
+    @property
+    def pushes(self) -> int:
+        """How many times it has been pushed (ADR-0350 §8:5)."""
+        return len(self.activations)
+
+    @property
+    def pushed_to(self) -> str | None:
+        """The activation a ``pushed`` occurrence names, or ``None`` (§7:5)."""
+        return self.activations[-1] if self.state is OccurrenceState.PUSHED else None
+
+    @property
+    def ended(self) -> bool:
+        """Whether it has ended (§7:6)."""
+        return self.state in ENDED_OCCURRENCE_STATES
+
+    @model_validator(mode="after")
+    def _well_formed(self) -> Self:
+        fault = _occurrence_fault(self)
+        if fault is not None:
+            raise ValueError(fault)
+        return self
+
+
+def _occurrence_fault(occurrence: ScheduledOccurrence) -> str | None:
+    """Which of :class:`ScheduledOccurrence`'s rules ``occurrence`` breaks, if any."""
+    ran = occurrence.state is OccurrenceState.PUSHED or occurrence.state in PUSHED_OUTCOMES
+    clauses = (
+        (
+            occurrence.ended != (occurrence.ended_at is not None),
+            "an occurrence records when it ended exactly when it has ended",
+        ),
+        (
+            ran and not occurrence.activations,
+            "a pushed occurrence, and one that ran, names its activation (ADR-0350 §7:5)",
+        ),
+        (
+            ran and occurrence.due_at is None,
+            "an occurrence pushed fell due at an instant (ADR-0350 §5:4)",
+        ),
+        (
+            len(set(occurrence.activations)) != len(occurrence.activations),
+            "an occurrence is pushed to each activation once",
+        ),
+        (
+            occurrence.second_try and not occurrence.activations,
+            "a second try is an occurrence pushed again (ADR-0350 §8:6)",
+        ),
+        (
+            occurrence.state is OccurrenceState.SKIPPED and bool(occurrence.activations),
+            "a skipped occurrence was never pushed (ADR-0350 §8:10)",
+        ),
+    )
+    return next((fault for broken, fault in clauses if broken), None)
+
+
+class ScheduledTask(BaseModel):
+    """One scheduled task, as the Task Scheduler holds it (ADR-0350 §3:6, §12:1).
+
+    Its ``id``; ``person``, for whom (§3:5); ``author`` (§3:7); ``when`` (§5:1);
+    ``places``, the places its spawner suggests, zero or more (§5:5); ``instruction``,
+    what it carries; ``parent``, the activation that spawned it, or on a replace the
+    replaced task's (§9:4); ``set_in`` and ``set_at``, where and when it was set, data it
+    carries that puts no place on any list (§3:10); ``outside_content``, its
+    outside-content mark (§3:8); ``chain_length`` (§9:7), recorded when it is written;
+    and its occurrences, numbered from one. **It carries no authority**, whoever set it
+    (§3:9).
+
+    A task is one-off: a rule, which would give it further occurrences, is a later
+    decision's (§5:3). A task due now or at an instant falls due when its when says,
+    and one waiting on named tasks once they have all ended.
+
+    Raises:
+        ValueError: If its occurrences are not numbered from one in order, it is not
+            one-off, it suggests a place twice, it waits on itself, or an occurrence's
+            due instant disagrees with its when.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: Identifier
+    person: NonBlankEncodableText
+    author: ScheduledTaskAuthor
+    when: TaskWhen
+    places: tuple[ChannelIdentity, ...] = ()
+    instruction: NonBlankEncodableText = Field(max_length=SCHEDULED_TASK_INSTRUCTION_MAX_CHARS)
+    parent: Identifier
+    set_in: ChannelIdentity
+    set_at: UtcInstant
+    outside_content: bool = False
+    chain_length: int = Field(strict=True, ge=1, lt=_SCHEDULE_INT_BOUND)
+    occurrences: tuple[ScheduledOccurrence, ...] = Field(min_length=1, max_length=1)
+
+    @property
+    def pending(self) -> bool:
+        """Whether something of it is pending (ADR-0350 §7:8)."""
+        return any(one.state is OccurrenceState.PENDING for one in self.occurrences)
+
+    @property
+    def ended(self) -> bool:
+        """Whether it has ended: every occurrence has (ADR-0350 §5:4)."""
+        return all(one.ended for one in self.occurrences)
+
+    @property
+    def ended_at(self) -> datetime | None:
+        """When it ended, the last of its occurrences' endings, or ``None`` (§5:4)."""
+        if not self.ended:
+            return None
+        return max(one.ended_at for one in self.occurrences if one.ended_at is not None)
+
+    @property
+    def activations(self) -> tuple[str, ...]:
+        """Every activation its occurrences were pushed to, in push order per occurrence."""
+        return tuple(one_id for one in self.occurrences for one_id in one.activations)
+
+    def occurrence(self, number: int) -> ScheduledOccurrence | None:
+        """The occurrence numbered ``number``, or ``None``."""
+        return next((one for one in self.occurrences if one.number == number), None)
+
+    @model_validator(mode="after")
+    def _well_formed(self) -> Self:
+        fault = _scheduled_task_fault(self)
+        if fault is not None:
+            raise ValueError(fault)
+        return self
+
+
+def _scheduled_task_fault(task: ScheduledTask) -> str | None:
+    """Which of :class:`ScheduledTask`'s rules ``task`` breaks, if any."""
+    when = task.when
+    due = {one.due_at for one in task.occurrences}
+    clauses = (
+        (
+            [one.number for one in task.occurrences] != list(range(1, len(task.occurrences) + 1)),
+            "a task's occurrences are numbered from one, in order",
+        ),
+        (
+            len(set(task.places)) != len(task.places),
+            "a task suggests each place once (ADR-0350 §5:5)",
+        ),
+        (
+            isinstance(when, DueAfterTasks) and task.id in when.tasks,
+            "a task never waits on itself (ADR-0350 §5:4)",
+        ),
+        (
+            isinstance(when, DueNow) and due != {task.set_at},
+            "a task due now falls due the instant it is set (ADR-0350 §5:1)",
+        ),
+        (
+            isinstance(when, DueAt) and due != {when.at},
+            "a task due at an instant falls due at it (ADR-0350 §5:2)",
+        ),
+    )
+    return next((fault for broken, fault in clauses if broken), None)
+
+
+class TaskSpawn(BaseModel):
+    """What a spawn asks the plan store to write (ADR-0350 §3:3, §3:6, §4:1).
+
+    The task's own parts, as the actuator states them. The store authors the rest when
+    it writes the task (``PlanStore.write_scheduled_task``): its parent, the spawning
+    activation, which the spawn's effect record names, or the replaced task's parent on
+    a replace; its suggested places too, on a replace (§9:4); its chain length (§9:7);
+    and its occurrence. ``replaces`` names the pending task it replaces, or ``None``.
+
+    Raises:
+        ValueError: If it suggests a place twice, waits on itself, or replaces itself.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    id: Identifier
+    person: NonBlankEncodableText
+    author: ScheduledTaskAuthor
+    when: TaskWhen
+    places: tuple[ChannelIdentity, ...] = ()
+    instruction: NonBlankEncodableText = Field(max_length=SCHEDULED_TASK_INSTRUCTION_MAX_CHARS)
+    set_in: ChannelIdentity
+    set_at: UtcInstant
+    outside_content: bool = False
+    replaces: Identifier | None = None
+
+    @model_validator(mode="after")
+    def _well_formed(self) -> Self:
+        if len(set(self.places)) != len(self.places):
+            msg = "a task suggests each place once (ADR-0350 §5:5)"
+            raise ValueError(msg)
+        if isinstance(self.when, DueAfterTasks) and self.id in self.when.tasks:
+            msg = "a task never waits on itself (ADR-0350 §5:4)"
+            raise ValueError(msg)
+        if self.replaces == self.id:
+            msg = "a spawn replaces another task, never the one it writes (ADR-0350 §9:4)"
+            raise ValueError(msg)
+        return self
+
+
+class TaskRefusal(StrEnum):
+    """Why the plan store refused a spawn or a cancel as *not done* (ADR-0350 §4:4-§4:5).
+
+    Closed, **added to and never renamed**. Each refusal writes nothing, and the caller
+    reports it with its reason.
+    """
+
+    UNKNOWN_TASK = "unknown_task"
+    """The task named, to replace or to cancel, is not one the Task Scheduler holds."""
+    ANOTHER_PERSONS = "another_persons"
+    """The task named is for another person than the one asking (§3:5)."""
+    NOT_ITS_SPAWN = "not_its_spawn"
+    """An activation without the person's authority named a task it did not spawn (§4:4)."""
+    NOTHING_PENDING = "nothing_pending"
+    """Nothing of the task named is pending (§9:4, §9:5)."""
+    INVALID_WAIT = "invalid_wait"
+    """It waits on a task §5:4 does not allow: one not held, or another person's."""
+    CHAIN_LIMIT = "chain_limit"
+    """Its chain length would exceed the chain limit (§9:7)."""
+    PENDING_LIMIT = "pending_limit"
+    """It would take the person's pending occurrences past the pending limit (§9:8)."""
+
+
+class TaskWriteAnswer(StrEnum):
+    """What the plan store answered a spawn (ADR-0350 §3:3, §4:5; ADR-0306 §6:2).
+
+    Closed, **added to and never renamed**. A stopped spawner is not an answer: the
+    write raises ``ClaimStopped`` instead, as a claim does.
+    """
+
+    WRITTEN = "written"
+    """The task and the spawn's effect record were written together."""
+    ALREADY_DONE = "already_done"
+    """The duplicate backstop refused the spawn's effect, so nothing was written."""
+    ALREADY_USED = "already_used"
+    """The question part the spawn would spend is spent, so nothing was written."""
+    REFUSED = "refused"
+    """The spawn was refused as not done, with its reason, and nothing was written."""
+
+
+class ScheduledTaskWrite(BaseModel):
+    """What a spawn's write came to (ADR-0350 §3:3, §9:4, §9:9).
+
+    The task as written, where it was; the refusal's reason, where it was refused; and
+    neither on an answer of the backstop or the spend.
+
+    Raises:
+        ValueError: If the task or the reason does not match the answer.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    answer: TaskWriteAnswer
+    task: ScheduledTask | None = None
+    reason: TaskRefusal | None = None
+
+    @model_validator(mode="after")
+    def _matches(self) -> Self:
+        if (self.task is not None) != (self.answer is TaskWriteAnswer.WRITTEN):
+            msg = "a spawn's write carries its task exactly where it was written"
+            raise ValueError(msg)
+        if (self.reason is not None) != (self.answer is TaskWriteAnswer.REFUSED):
+            msg = "a spawn's write carries a reason exactly where it was refused"
+            raise ValueError(msg)
+        return self
+
+
+class ScheduledTaskCancel(BaseModel):
+    """What a cancel came to (ADR-0350 §9:5): the task as left, or why it was refused.
+
+    Raises:
+        ValueError: If it carries both or neither.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    task: ScheduledTask | None = None
+    reason: TaskRefusal | None = None
+
+    @model_validator(mode="after")
+    def _one(self) -> Self:
+        if (self.task is None) == (self.reason is None):
+            msg = "a cancel carries the task it cancelled or the reason it was refused"
+            raise ValueError(msg)
+        return self
+
+
+class OccurrencePush(StrEnum):
+    """What the plan store answered the sensor marking an occurrence pushed (§7:5).
+
+    Closed, **added to and never renamed**. Only ``pushed`` lets the activation be
+    admitted; on either refusal nothing is pushed.
+    """
+
+    PUSHED = "pushed"
+    """The occurrence is marked pushed, naming the activation it will be admitted under."""
+    NOT_PENDING = "not_pending"
+    """The occurrence is no longer pending, or the task is no longer held."""
+    CASCADE_CANCELLED = "cascade_cancelled"
+    """An activation in its task's lineage carries a cascade record, so the occurrence
+    ended cancelled (§7:5, §9:6)."""
+
+
+class DueOccurrence(BaseModel):
+    """One pending occurrence due at the instant the sensor asked about (§7:3)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    task: ScheduledTask
+    number: int = Field(strict=True, ge=1, lt=_SCHEDULE_INT_BOUND)
+
+
+class ScheduledDue(BaseModel):
+    """The occurrences due at an instant, and when the next one falls due (§7:2-§7:3).
+
+    ``due`` is every pending occurrence due at or before the instant, each on its own
+    (§7:4), earliest first; ``next_due_at`` the earliest instant a pending occurrence not
+    yet due falls due, or ``None`` where none is set to, which the sensor sleeps until.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    due: tuple[DueOccurrence, ...] = ()
+    next_due_at: UtcInstant | None = None
+
+
 # --- planning: the write path, deletion, export (ADR-0014 §5, ADR-0004 §6) ---
 # A transition is a command rather than a caller-built state, which is what
 # keeps the transition graph authoritative. `PlanExport` is the portable
@@ -10079,7 +10585,16 @@ class ObservationRecord(BaseModel):
 class PlanExport(BaseModel):
     """A portable snapshot of planning state (see ADR-0014 §5, ADR-0004 §6).
 
-    **``schema_version`` is 23 because the observation record gained what ADR-0346 has
+    **``schema_version`` is 24 because the document gained the Task Scheduler's
+    content** (ADR-0350 §12:3): ``scheduled_tasks``, each with its occurrences, in the
+    order they were written, and ``cascades``, the activation ids a stop command's cascade
+    record names (§9:6). A task names its parent, the tasks it waits for and the
+    activations its occurrences were pushed to, and none of them is checked against the
+    document: an activation is not a record it carries, so ADR-0014 §5's closure rule is
+    **extended by nothing**, and the only constraints stated over the members are that no
+    task id and no cascade id appears twice. A reader of 23 refuses the members as extra.
+
+    **It was 23 because the observation record gained what ADR-0346 has
     the observer keep**: each finding's ``annotations`` (§4:5), the
     ``further_candidates`` it accounts for beside its first (§4:6) and the memories
     framing kept of it while it is pending (``framed``, §5-§6), the record's ``declines``
@@ -10143,12 +10658,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[23] = Field(
-        default=23,
+    schema_version: Literal[24] = Field(
+        default=24,
         description=(
-            "Shape of this export, pinned to exactly 23 (ADR-0039 §10, ADR-0346 §4:5): an "
+            "Shape of this export, pinned to exactly 24 (ADR-0039 §10, ADR-0350 §12:3): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[23]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[24]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -10177,6 +10692,39 @@ class PlanExport(BaseModel):
             "episode id (ADR-0329 §16:9)."
         ),
     )
+    scheduled_tasks: tuple[ScheduledTask, ...] = Field(
+        default=(),
+        description=(
+            "The scheduled tasks the Task Scheduler holds, each with its occurrences, in "
+            "the order they were written (ADR-0350 §12:3)."
+        ),
+    )
+    cascades: tuple[Identifier, ...] = Field(
+        default=(),
+        description=(
+            "The activation ids a stop command's cascade record names (ADR-0350 §9:6). A "
+            "record carries the id alone."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _a_scheduled_task_and_a_cascade_appear_once(self) -> PlanExport:
+        """Refuse a document carrying one task id or one cascade record twice (§12:3).
+
+        A store holds one task per id and one cascade record per activation, so a
+        duplicate states a record the store cannot hold.
+
+        Raises:
+            ValueError: If a task id or a cascade's activation id appears more than once.
+        """
+        ids = [task.id for task in self.scheduled_tasks]
+        if len(set(ids)) != len(ids):
+            msg = "export contains duplicate scheduled task ids"
+            raise ValueError(msg)
+        if len(set(self.cascades)) != len(self.cascades):
+            msg = "export contains duplicate cascade records"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _an_observation_appears_once(self) -> PlanExport:
