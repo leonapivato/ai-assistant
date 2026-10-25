@@ -1939,17 +1939,34 @@ class SqliteConversationStore:
     def _claimed(cls, conn: sqlite3.Connection, conversation_id: str, effect_id: str) -> int | None:
         """The position of the message written under ``effect_id``, deleted or not.
 
+        **The row must be one this module wrote under a claim**, an assistant's message
+        or its marker, before its position is taken as the answer: a claim confirms
+        delivery (ADR-0350 §8:11), so a claim on any other row — a user's message, or
+        its marker, which keeps the device and its message id (ADR-0293 §5:12) — is
+        corruption and never a message sent.
+
         Raises:
-            ConversationStoreError: If the store cannot be read, or the stored position
-                is corrupt.
+            ConversationStoreError: If the store cannot be read, or the stored row is
+                not an assistant's message or its marker, or its position is corrupt.
         """
         rows = cls._fetch(
             conn,
             "read a claimed message",
-            "SELECT position FROM messages WHERE conversation_id = ? AND effect_id = ?",
+            "SELECT position, author, deleted, device_id, message_id FROM messages "
+            "WHERE conversation_id = ? AND effect_id = ?",
             (conversation_id, effect_id),
         )
-        return _check_stored_position(rows[0][0]) if rows else None
+        if not rows:
+            return None
+        position, author, deleted, device_id, message_id = rows[0]
+        written_by = None if _bool_of(deleted) else MessageAuthor.ASSISTANT.value
+        if author != written_by or device_id is not None or message_id is not None:
+            msg = (
+                "a stored claim names a row that is not an assistant's message: "
+                f"{describe_untrusted(author)}"
+            )
+            raise ConversationStoreError(msg)
+        return _check_stored_position(position)
 
     async def effect_position(self, conversation_id: str, effect_id: str, /) -> int | None:
         """Read where the message claimed under ``effect_id`` stands, in one reading.

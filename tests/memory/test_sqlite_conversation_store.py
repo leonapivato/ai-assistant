@@ -1506,11 +1506,29 @@ async def test_a_file_written_before_the_chat_space_opens_with_empty_transcripts
         ("UPDATE chat_changes SET devices = NULL WHERE devices IS NOT NULL", "device_changes"),
         ("UPDATE chat_changes SET devices = NULL WHERE devices IS NOT NULL", "device_catch_up"),
         ("UPDATE chat_changes SET devices = NULL WHERE devices IS NOT NULL", "stamp_deleted"),
-        # ADR-0350 §12:9: a claim on a user's message, or a blank one, is no message
-        # this module wrote; nor is a claimed message at a position below 1.
+        # ADR-0350 §12:9: a claim on a user's message or on its marker, or a blank one,
+        # is no message this module wrote, and confirms nothing sent (§8:11) — on the
+        # read, and on a write repeating the claim; nor is a claimed message at a
+        # position below 1, or one whose deleted flag is neither.
         ("UPDATE messages SET effect_id = 'e-1'", "export"),
         ("UPDATE messages SET effect_id = ' '", "export"),
-        ("UPDATE messages SET effect_id = 'e-1', position = 0", "effect_position"),
+        ("UPDATE messages SET effect_id = 'e-1'", "effect_position"),
+        ("UPDATE messages SET effect_id = 'e-1'", "repeated_claim"),
+        (
+            "UPDATE messages SET effect_id = 'e-1', deleted = 1, author = NULL, "
+            "written_at = NULL, text = NULL, options = NULL",
+            "effect_position",
+        ),
+        (
+            "UPDATE messages SET effect_id = 'e-1', author = 'assistant', device_id = NULL, "
+            "message_id = NULL, position = 0",
+            "effect_position",
+        ),
+        (
+            "UPDATE messages SET effect_id = 'e-1', author = 'assistant', device_id = NULL, "
+            "message_id = NULL, deleted = 7",
+            "effect_position",
+        ),
     ],
 )
 async def test_a_corrupt_chat_row_is_a_store_fault_on_the_read(
@@ -1538,6 +1556,10 @@ async def test_a_corrupt_chat_row_is_a_store_fault_on_the_read(
             "device_catch_up": lambda: store.device_changes("phone", after=2),
             "stamp_deleted": lambda: store.stamp_deleted(conversation),
             "effect_position": lambda: store.effect_position(conversation, "e-1"),
+            "repeated_claim": lambda: store.append_message(
+                conversation,
+                NewMessage(author=MessageAuthor.ASSISTANT, text="again", effect_id="e-1"),
+            ),
         }
         with pytest.raises(ConversationStoreError):
             await reads[read]()
