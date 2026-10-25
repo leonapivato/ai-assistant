@@ -118,6 +118,11 @@ acted.
 >   recorded its understanding: it waits, the newer absorbs it, and it dispatches nothing;
 > - an older activation reaches its first act while the correction is still held in its
 >   place's start wait: it waits for the correction's activation, which absorbs it;
+> - an input names in `cancels` an activation that a middle one absorbs while the input's
+>   takeover waits: the cancel follows forward and stops the middle one;
+> - two older activations on different places, neither yet understood, and a newer input
+>   continuing one of them: the in-progress entries show each one's input, and only the
+>   one named is absorbed;
 > - an input naming a committed activation in `cancels` stops it, and the same input without
 >   the user's authority stops nothing;
 > - in a conversation, a message while nothing running has committed starts its own
@@ -202,12 +207,11 @@ activation has booked.
 > **Normative.** Understanding's reply may name, in `cancels`, shown running activations
 > whose work its input asks to stop.
 
-> **Normative.** The takeover stage stops each activation the latest understanding version
-> names in `cancels` where all of these hold, read in one step with no await between the
-> reading and the stop's mark:
-> - the named activation is running and its stop mark is unset;
+> **Normative.** In the takeover stage's one step (§7:4), the stage stops each activation it
+> reached from the latest understanding version's `cancels` where all of these hold:
+> - the activation reached is running and its stop mark is unset;
 > - this activation's input carries the user's authority (ADR-0292 §5:5);
-> - the named activation is running for the person this input's author is established as
+> - the activation reached is running for the person this input's author is established as
 >   (§5:3).
 >
 > It stops it whether or not it has committed.
@@ -331,18 +335,24 @@ up.
 > view (§6:8–§6:10). Recall's rendering keeps its projection, as ADR-0284 §8:1 and ADR-0308
 > §3:1 rule it.
 
-> **Normative.** The peer view reads an episode as stored, open or frozen. Of an open
-> episode it shows only what its stages appended when they ended (ADR-0286 §3:1): never a
-> stage or round in progress, and never a call or message not yet finished.
+> **Normative.** The peer view is computed from two records alone: the activation's episode
+> as stored, open or frozen, and its effect records, which orchestration reads from the
+> plan store (`PlanStore.activation_effects`, ADR-0306 §6) and hands to the pure function.
+> Of an open episode it shows only what its stages appended when they ended (ADR-0286
+> §3:1), and of the effect records only those whose outcome is written: never a stage or
+> round in progress, and never a call or message not yet finished.
 
 > **Normative.** Of another activation's work, the peer view shows only that activation's
 > own work:
+> - what it took in: its input, as `project_episode` renders it with `admit_outside_input`
+>   false, cut to its excerpt bound, so that outside input is withheld (ADR-0284 §8:1);
 > - what it is doing: its latest understanding's meaning, rendered as provisional
->   (ADR-0276 §4:6);
+>   (ADR-0276 §4:6), where one is recorded;
 > - what it found: its rounds' episode notes (ADR-0307 §4) and its digests' answers with
 >   their evidence, each item with its mark (ADR-0308 §5:5);
-> - what it did: each call and message of it whose effect record (ADR-0306 §5:3) carries
->   the outcome done or unknown, with that outcome.
+> - what it did: each of its effect records (ADR-0306 §5:3) whose outcome is done or
+>   unknown, a call shown by its capability and a message by the message of the round the
+>   record names, each with that outcome.
 
 > **Normative.** The peer view never shows another activation's recall results, story
 > links, failed calls, drafts or approvals, nor anything that activation read from another:
@@ -388,11 +398,13 @@ its own, a failure stays contained, each reply lands where it was asked, and the
 see each other in the section.
 
 > **Normative.** The takeover stage, once for each understanding version that names any
-> activation in `continues` or `cancels` (§10:9), first follows each activation named in
-> `continues` forward: while it has been absorbed, to the activation that absorbed it.
+> activation in `continues` or `cancels` (§10:9), first waits as §7:15 states. Then, in one
+> step with no await between, it follows each activation named in either forward, while it
+> has been absorbed, to the activation that absorbed it; absorbs those it reached from
+> `continues` under §7:5–§7:7; and stops those it reached from `cancels` under §4:6.
 
-> **Normative.** The stage then, in one step with no await between, absorbs each activation
-> it reached where all of these hold:
+> **Normative.** In that step the stage absorbs each activation it reached from `continues`
+> where all of these hold:
 > - it started before this one;
 > - it is running, it has not committed, and its stop mark is unset;
 > - its input's author is this input's author, established in the same way, and its input
@@ -458,7 +470,7 @@ older one, and the newest may finish its understanding first. Were it to absorb 
 middle one would follow forward to an activation newer than itself, which it cannot
 absorb, and both would go on to act on one matter.
 
-> **Normative.** Before its step (§7:5), the takeover stage waits, once, for each older
+> **Normative.** Before its step (§7:4), the takeover stage waits, once, for each older
 > activation running for the same person whose input has this input's author, authority
 > and origin, until each has ended, or has recorded its first understanding version or its
 > omission and, where that version names any activation in `continues` or `cancels`, the
