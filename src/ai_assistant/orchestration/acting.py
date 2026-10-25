@@ -288,11 +288,56 @@ class NamedResult:
     result_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class Unwritten:
+    """A claiming runner's refusal: nothing was written, its effect record included.
+
+    What :class:`ClaimingOwnRecordsCalls` answers where the store refused the call in the
+    step that would have claimed it (ADR-0350 §3:3, §4:5): no record exists to finish,
+    and the call is not done with the reason.
+
+    Attributes:
+        reason: Why, in code-owned words.
+    """
+
+    reason: str
+
+
 #: What a runner on the own-records seam answers: the store's answer as a result; for a
 #: read routed record by record or a follow-up, what acting holds or offers again;
 #: where nothing was written because it needs the user's yes first, :class:`NeedsYou`;
 #: or, where nothing was written and planning is owed why, :class:`NotDone`.
 type OwnRecordsAnswer = ToolResult | HeldByIds | NamedResult | NeedsYou | NotDone
+
+#: What a claiming runner answers: as :data:`OwnRecordsAnswer`, the claim's own answer
+#: where its backstop or its spend refused it, or :class:`Unwritten`.
+type ClaimingAnswer = OwnRecordsAnswer | ActivationEffectClaim | Unwritten
+
+
+@runtime_checkable
+class ClaimingOwnRecordsCalls(Protocol):
+    """An own-records runner whose write claims the call's effect record in its own step.
+
+    ADR-0350 §3:3: a spawn's write is one plan-store step that writes the task and claims
+    the spawn's effect record together, so acting does not claim it first. Acting hands
+    the runner the record it would have claimed and the backstop's match, and finishes
+    the record from the runner's answer, as it finishes any claimed call's.
+    """
+
+    async def run_claiming(
+        self,
+        call: ToolCall,
+        effect: ActivationEffect,
+        *,
+        match: tuple[str, ...] | None,
+        deliberate_repeat: bool,
+    ) -> ClaimingAnswer:
+        """Run ``call``, claiming ``effect`` in the write's own step.
+
+        Raises:
+            ClaimStopped: If the store holds a stop record for the calling activation.
+        """
+        ...
 
 
 class OwnRecordsCalls(Protocol):
@@ -377,6 +422,18 @@ class OwnRecordsByCapability:
             return await runner.run_approved(call, asked)
         return await self.run(call)
 
+    def claiming(self, capability: str) -> ClaimingOwnRecordsCalls | None:
+        """The runner of ``capability`` where it claims its own effect record, or ``None``."""
+        runner: object = self._runners.get(capability)
+        return runner if isinstance(runner, ClaimingOwnRecordsCalls) else None
+
+
+def _claiming(seam: object, capability: str) -> ClaimingOwnRecordsCalls | None:
+    """The claiming runner a seam holds for ``capability``, where it holds one."""
+    if isinstance(seam, OwnRecordsByCapability | _Beside):
+        return seam.claiming(capability)
+    return None
+
 
 class _Beside:
     """Further own-records runners, by capability, beside the seam a stage was built with.
@@ -401,6 +458,13 @@ class _Beside:
         if isinstance(runner, ApprovedOwnRecordsCalls):
             return await runner.run_approved(call, asked)
         return await self._runner(call).run(call)
+
+    def claiming(self, capability: str) -> ClaimingOwnRecordsCalls | None:
+        """The claiming runner of ``capability``, here or in the seam beside."""
+        runner: object = self._runners.get(capability)
+        if runner is not None:
+            return runner if isinstance(runner, ClaimingOwnRecordsCalls) else None
+        return _claiming(self._beside, capability)
 
 
 @runtime_checkable
@@ -698,7 +762,7 @@ class ActingStage:
             raise ExceptionGroup(msg, errors)
         return ActedRound(round_id=round_id, calls=tuple(acted))
 
-    async def _act(
+    async def _act(  # noqa: PLR0911 — each way a call ends before it runs, and the two routes it runs by
         self,
         activation_id: str,
         round_id: str,
@@ -730,6 +794,20 @@ class ActingStage:
                 claimed_at=self._now(),
                 part=call.decision.approved_part,
             )
+            claiming = (
+                _claiming(self._own_records, str(tool.capability))
+                if tool.effect is CapabilityEffect.OWN_RECORDS
+                else None
+            )
+            if claiming is not None:
+                # ADR-0350 §3:3: the runner's write claims the record in its own step,
+                # awaited to its end as every call on the assistant's own records is.
+                work = asyncio.ensure_future(
+                    self._claimed_by_runner(
+                        claiming, one, record, None if tool.safe_to_repeat else match, held
+                    )
+                )
+                return await drain_registered(work, cancel_on_interrupt=False)
             try:
                 answer = await self._plans.claim_activation_effect(
                     record,
@@ -750,6 +828,49 @@ class ActingStage:
             work = asyncio.ensure_future(self._on_own_records(one, effect_id, round_id, held))
             return await drain_registered(work, cancel_on_interrupt=False)
         return await self._through_invoker(one, effect_id, round_id, held)
+
+    async def _claimed_by_runner(  # noqa: PLR0911 — each answer a claiming runner gives
+        self,
+        runner: ClaimingOwnRecordsCalls,
+        one: AuthorizedCall,
+        record: ActivationEffect,
+        match: tuple[str, ...] | None,
+        held: HeldResults,
+    ) -> ActedCall:
+        """Run a call whose runner claims its record, then finish the record it wrote.
+
+        A stopped activation's claim, the backstop's and the spend's answers and a store
+        refusal each wrote nothing, so nothing is finished: the call is not done with
+        the reason (ADR-0350 §3:3, §4:5).
+        """
+        try:
+            answer = await runner.run_claiming(
+                one.call, record, match=match, deliberate_repeat=one.deliberate_repeat
+            )
+        except ClaimStopped:
+            _log.info("acting_call_not_done", stage="acting", reason="stopped")
+            return ActedCall(one, ActedOutcome.NOT_DONE, reason=_STOPPED)
+        if answer is ActivationEffectClaim.ALREADY_USED:
+            _log.info("acting_call_not_done", stage="acting", reason="already_used")
+            return ActedCall(one, ActedOutcome.NOT_DONE, reason=_ALREADY_USED)
+        if answer is ActivationEffectClaim.ALREADY_DONE:
+            _log.info("acting_call_not_done", stage="acting", reason="already_done")
+            return ActedCall(one, ActedOutcome.NOT_DONE, reason=_ALREADY_DONE)
+        if isinstance(answer, Unwritten):
+            _log.info("acting_call_not_done", stage="acting", reason="refused_unwritten")
+            return ActedCall(one, ActedOutcome.NOT_DONE, reason=answer.reason)
+        if isinstance(answer, ActivationEffectClaim | NeedsYou | NamedResult | HeldByIds):
+            # No claiming runner answers these: the record was written, so it is finished
+            # not done, and nothing is reported as having happened.
+            await self._plans.finish_activation_effect(
+                record.id, ToolOutcome.FAILED, reason=_REFUSED
+            )
+            return ActedCall(one, ActedOutcome.NOT_DONE, reason=_REFUSED, effect_id=record.id)
+        if isinstance(answer, NotDone):
+            return await self._refused(one, answer, record.id)
+        result = _detached_result(answer)
+        await self._finish(record.id, result)
+        return self._acted(one, result, record.id, record.round or "", held)
 
     async def _on_own_records(
         self, one: AuthorizedCall, effect_id: str | None, round_id: str, held: HeldResults

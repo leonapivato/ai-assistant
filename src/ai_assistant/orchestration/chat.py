@@ -310,6 +310,7 @@ class ChatReader:
         written: Callable[[str, Sequence[str], Sequence[int]], Awaitable[Mapping[int, WrittenBy]]]
         | None = None,
         join: Callable[[JoiningInput], tuple[JoinCheck, PendingJoin | None]] | None = None,
+        writers: Callable[[], Awaitable[Sequence[str]]] | None = None,
         start_wait: timedelta | None = None,
         composing_lapse: timedelta = DEFAULT_CHAT_COMPOSING_LAPSE,
         composing_cap: timedelta = DEFAULT_CHAT_COMPOSING_CAP,
@@ -344,6 +345,10 @@ class ChatReader:
                 activation, which the reader then confirms or withdraws. ``None``, the
                 default, joins nothing: every message written while an activation runs
                 waits.
+            writers: The activations started from no conversation that may have
+                written into one, the Task Scheduler's (ADR-0350 §9:1), read as further
+                candidates for what wrote an assistant message of the window; ``None``
+                reads none.
             start_wait: ``Settings.chat_start_wait`` (ADR-0332 §5:1): how long after
                 the latest waiting message the reader waits, where nothing is running,
                 before it takes them in. ``None``, the default, waits for nothing, and
@@ -388,6 +393,7 @@ class ChatReader:
         # between two of its readings (ADR-0296 §4:9).
         self._turns: dict[str, int] = {}
         self._join = join
+        self._writers = writers
         self._start_wait = None if start_wait is None else start_wait.total_seconds()
         self._composing_lapse = composing_lapse.total_seconds()
         self._composing_cap = composing_cap.total_seconds()
@@ -819,7 +825,10 @@ class ChatReader:
             }
         )
         before = await self._taken_in(conversation_id, looked)
-        candidates = list(dict.fromkeys((*links.values(), *before.values())))
+        # ADR-0350 §9:1: a scheduled task's activation took nothing in here, so it is
+        # read as a candidate writer of its own.
+        elsewhere = () if self._writers is None else await self._writers()
+        candidates = list(dict.fromkeys((*links.values(), *before.values(), *elsewhere)))
         if not candidates:
             return links, asked
         written = await self._written(conversation_id, candidates, writes)

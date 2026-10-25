@@ -64,6 +64,7 @@ from ai_assistant.orchestration import (
     joining,
     person_block,
     story_links,
+    task_scheduler,
     understanding,
 )
 from ai_assistant.orchestration.digesting import DigestingStage, DigestRecorder
@@ -127,6 +128,7 @@ _NAMES: dict[str, Any] = (
     | vars(joining)
     | vars(person_block)
     | vars(story_links)
+    | vars(task_scheduler)
 )
 
 
@@ -507,6 +509,13 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "PinPart",
         "PlaceItem",
         "PlaceWindow",
+        # ADR-0350 §4:6-§4:8, §5:10: the Task Scheduler's listing and the place list carry
+        # ids, the hub's own renderings and a task's instruction as planning wrote it; a
+        # text resting on outside content is withheld, and no credential reaches them.
+        "ActivationEntry",
+        "ListedPlace",
+        "TaskEntry",
+        "TaskListing",
         "Placement",
         "PlannedCall",
         "PlannedRound",

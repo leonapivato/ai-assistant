@@ -29,6 +29,7 @@ from ai_assistant.app.composition import (
 )
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import RECALLED_ITEMS_MAX, ProposedCall, ToolDefinition
+from ai_assistant.orchestration.acting import _Beside
 from ai_assistant.orchestration.lookups import (
     LOOK_UP_CAPABILITIES,
     LOOK_UP_LABEL_ARGUMENTS,
@@ -41,6 +42,10 @@ from ai_assistant.orchestration.story_calls import (
     STORY_CALL_CAPABILITIES,
     STORY_LABEL_ARGUMENTS,
     StoryCalls,
+)
+from ai_assistant.orchestration.task_scheduler import (
+    TASK_SCHEDULER_CAPABILITIES,
+    TASK_SCHEDULER_LABEL_ARGUMENTS,
 )
 
 if TYPE_CHECKING:
@@ -103,12 +108,16 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(
         assert [str(one.id) for one in clock] == ["current_time"]
         # ADR-0329 §3:1, §6:7: `remember` records a candidate, whose labels and the
         # reliance call's are filled like any other's.
+        # ADR-0350 §4: and the Task Scheduler's, attached on every deployment, which name
+        # tasks and places by label.
         assert phases._label_arguments == {
             **STORY_LABEL_ARGUMENTS,
             **LOOK_UP_LABEL_ARGUMENTS,
             **CANDIDATE_LABEL_ARGUMENTS,
             **RELIANCE_LABEL_ARGUMENTS,
+            **TASK_SCHEDULER_LABEL_ARGUMENTS,
         }
+        assert phases._task_calls is not None
         # One look-ups runner behind every look-up, over the root's own memory store and
         # the story views' reads, whose scope the path opens around acting.
         look_ups = phases._look_ups
@@ -119,7 +128,11 @@ async def test_every_deployment_wires_the_path_over_the_roots_own_stores(
         # Each story call runs through acting's own-records seam, over the root's own
         # stores and the one tidy-up, so at most one run is on a story at a time
         # (ADR-0300 §5:10).
-        runners = phases._acting._own_records._runners  # type: ignore[attr-defined]
+        # The Task Scheduler's runners sit beside the root's seam (ADR-0350 §4:3).
+        seam = phases._acting._own_records
+        assert isinstance(seam, _Beside)
+        assert set(seam._runners) == TASK_SCHEDULER_CAPABILITIES
+        runners = seam._beside._runners  # type: ignore[attr-defined]
         held = {id(runners[name]): runners[name] for name in STORY_CALL_CAPABILITIES}
         (story_calls,) = held.values()
         assert isinstance(story_calls, StoryCalls)

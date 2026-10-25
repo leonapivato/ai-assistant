@@ -35,6 +35,7 @@ from ai_assistant.core.errors import ConfigurationError, ModelError
 from ai_assistant.core.prompts import PROMPT_OVERRIDE_DIRECTORY, PromptOrigin, PromptTemplate
 from ai_assistant.core.types import (
     DELIVERY_RESERVE_BYTES,
+    OWNER_PERSON_ID,
     CanonicalDestination,
     DestinationProtocol,
     LabelBounds,
@@ -125,6 +126,7 @@ from ai_assistant.orchestration.story_calls import (
 )
 from ai_assistant.orchestration.story_links import StoryCandidates, StoryLinksStage
 from ai_assistant.orchestration.story_tidy_up import STORY_TIDY_UP_PROMPT, StoryTidyUp
+from ai_assistant.orchestration.task_manager import TaskManagerLimits, TaskSchedulerSeams
 from ai_assistant.orchestration.telegram import TelegramLineSeams
 from ai_assistant.orchestration.understanding import (
     UNDERSTANDING_PROMPT,
@@ -2033,6 +2035,22 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # ADR-0323 §2:2: the line's spoke, where it is configured; the engine starts
             # its reader with the hub and stops it with it.
             telegram=telegram_line,
+            # ADR-0350 §7:1, §12:5: the Task Scheduler, on every deployment: its sensor
+            # starts with the hub and stops with it, and its six settings bound it. A
+            # restart settles the pushed occurrences of the hub's one person, the owner
+            # (ADR-0338 §2:2).
+            task_scheduler=TaskSchedulerSeams(
+                limits=TaskManagerLimits(
+                    chain_limit=settings.task_scheduler_chain_limit,
+                    pending_limit=settings.task_scheduler_pending_limit,
+                    listing_bound=settings.task_scheduler_listing_bound,
+                ),
+                recheck=settings.task_scheduler_recheck_interval,
+                lateness_grace=settings.task_scheduler_lateness_grace,
+                push_limit=settings.task_scheduler_push_limit,
+                zone=settings.timezone,
+                persons=(OWNER_PERSON_ID,),
+            ),
             # ADR-0329 §7:6, §15:1: the observer, run on each frozen episode and by the
             # scheduler's `observer` row.
             observer=observer,

@@ -181,6 +181,7 @@ from ai_assistant.core.types import (
     label_prefix,
     statement_citations,
 )
+from ai_assistant.orchestration.channel_kinds import place_channel
 from ai_assistant.orchestration.person_block import person_zone
 from ai_assistant.orchestration.reliance import NOTE_RELIANCE_CAPABILITY
 from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY
@@ -189,6 +190,7 @@ from ai_assistant.orchestration.story_calls import (
     STORY_CALL_CAPABILITIES,
     TIDY_STORY_CAPABILITY,
 )
+from ai_assistant.orchestration.task_scheduler import SPAWN_CAPABILITY
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -198,6 +200,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ActionRequest,
         ActivationUnderstanding,
+        ChannelIdentity,
         EpisodeProjection,
         FrozenJsonValue,
         Memory,
@@ -214,6 +217,12 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.person_block import KeptInMind, PersonBlock, ShownSuggestion
     from ai_assistant.orchestration.story_links import ShortView
+    from ai_assistant.orchestration.task_scheduler import (
+        ActivationEntry,
+        ListedPlace,
+        TaskEntry,
+        TaskListing,
+    )
 
 __all__ = [
     "APPROVED_ACTION_ARGUMENT",
@@ -338,6 +347,10 @@ class PlaceAuthor(StrEnum):
     """Someone other than the user or the assistant: raw outside content, which planning
     is never shown (ADR-0307 §9:2)."""
 
+    TASK_SCHEDULER = "task_scheduler"
+    """The Task Scheduler, whose place window is a task's lineage, each step stated by the
+    hub from the tasks it keeps (ADR-0350 §6:5)."""
+
 
 @dataclass(frozen=True, slots=True)
 class PlaceItem:
@@ -353,6 +366,9 @@ class PlaceItem:
         referent_id: The id understanding's referent names this item by, where the
             glue that builds the window knows it: a ``channel_item`` referent with this
             id is shown as this item (ADR-0307 §5:6) and never by its words.
+        task_id: The scheduled task the item links to, where an activation the Task
+            Scheduler started wrote it and the Task Scheduler still holds its task: it is
+            shown with that task's ``T`` label beside its episode label (ADR-0350 §9:1-§9:2).
     """
 
     author: PlaceAuthor
@@ -361,6 +377,7 @@ class PlaceItem:
     is_input: bool = False
     episode_id: str | None = None
     referent_id: str | None = None
+    task_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,6 +473,10 @@ class CallOutcome:
             ``pin``, each such argument with the memory's wording as the store held it
             when this round was planned, which its exact line shows in place of the id
             (ADR-0338 §8:6). The asked call records the id.
+        tasks: For a call on the Task Scheduler, a spawn, a cancel or a list pull, what
+            it came back with, its tasks shown under ``T`` labels, its activations under
+            their episodes' ``E`` labels and its places under ``L`` labels (ADR-0350
+            §4:6-§4:8); ``None`` for any other call.
 
     Raises:
         ValueError: If it carries a result, or says one was digested, without the
@@ -479,6 +500,7 @@ class CallOutcome:
     already_asked: QuestionPart | None = None
     replaces: tuple[Memory, ...] = ()
     worded: tuple[tuple[str, str], ...] = ()
+    tasks: TaskListing | None = None
 
     def __post_init__(self) -> None:
         """A result is shown under its label, so it carries the id the label names."""
@@ -498,7 +520,12 @@ class CallOutcome:
         if self.worded and self.request is None:
             msg = "the wording a question shows a memory by rides the request it shows"
             raise ValueError(msg)
-        looked_up = self.records is not None or self.story is not None or self.candidate is not None
+        looked_up = (
+            self.records is not None
+            or self.story is not None
+            or self.candidate is not None
+            or self.tasks is not None
+        )
         if (self.result is not None or self.digested or looked_up) and self.result_id is None:
             msg = "a call's result carries the id acting minted for it (ADR-0308 §6:1)"
             raise ValueError(msg)
@@ -699,6 +726,12 @@ class PlanningInputs:
             and the pending suggestions it admits, shown first in the request. ``None``
             for an activation that is no person's or where no person-model store is
             wired, which shows none and leaves the instruction as it was.
+        places: The activation's place list, as built for this round (ADR-0350
+            §5:10-§5:12): each place under its channel's heading and its own ``L``
+            label. ``None`` for an activation not offered spawn, which is shown none.
+        speaks_by_label: Whether the activation was started by the Task Scheduler, so
+            its message names, by its place label, the one place on its list it goes
+            into (§6:7).
     """
 
     activation_id: str
@@ -721,6 +754,8 @@ class PlanningInputs:
     pending: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     overtaken: frozenset[str] = frozenset()
     person: PersonBlock | None = None
+    places: tuple[ListedPlace, ...] | None = None
+    speaks_by_label: bool = False
 
 
 # --- the round's decision ----------------------------------------------------------------
@@ -968,6 +1003,10 @@ _NEEDS_YOUR_YES: Final = "Needs your yes:"
 #: - ``person``: the activation is a person's and its person block is shown (ADR-0338
 #:   §7:3); a round with none keeps the instruction it had.
 #: - ``suggestions``: the person block shows a pending suggestion (§7:3, §7:8).
+#: - ``spawn``: spawn is offered, with the place list it suggests from (ADR-0350 §3:4,
+#:   §5:10).
+#: - ``scheduled``: the activation was started by the Task Scheduler, so its message
+#:   names the place it goes into by its place label (ADR-0350 §6:7).
 #:
 #: **Values**, which code owns: ``approved_action_tool``, the approved-action tool's name;
 #: ``note_reliance_capability``, the reliance capability's name; and ``needs_your_yes``,
@@ -993,7 +1032,9 @@ _NEEDS_YOUR_YES: Final = "Needs your yes:"
 #: no preference, pin or field changes what is true, what is judged best or any rule, and
 #: that Aether never claims to be human (§5:6), with, under ``suggestions``, that a
 #: suggestion is raised only where it bears on what is being done, and only by asking
-#: with a ``set_profile`` or ``pin`` call (§7:8).
+#: with a ``set_profile`` or ``pin`` call (§7:8); under ``spawn``, ADR-0350 §9:3's four
+#: points and that a spawn is for work that runs later or separately; and, under
+#: ``scheduled``, that the message names its one place by its place label (§6:7).
 #: For the rest — the role and the quoted data, the labels, the calls, the message written
 #: whole before any call (#2851) and a story read's older notes (#2893, #2944) — the
 #: constants cited no clause.
@@ -1010,6 +1051,8 @@ PLANNING_PROMPT: Final = PromptDeclaration(
             "reliance",
             "person",
             "suggestions",
+            "spawn",
+            "scheduled",
         }
     ),
     values=frozenset({"approved_action_tool", "note_reliance_capability", "needs_your_yes"}),
@@ -1218,10 +1261,16 @@ def _instant_or_unknown(instant: datetime | None) -> str:
     return _UNKNOWN_INSTANT if instant is None else instant.isoformat()
 
 
+#: The authors whose items show nothing of an episode's own exchange (ADR-0276 §3): one
+#: someone else wrote is never shown, and a lineage step is the hub's statement of a
+#: step, never its messages (ADR-0350 §6:5).
+_NOT_AN_EXCHANGE: Final = frozenset({PlaceAuthor.OTHER, PlaceAuthor.TASK_SCHEDULER})
+
 _AUTHOR_TEXT: Final = {
     PlaceAuthor.USER: "the user",
     PlaceAuthor.ASSISTANT: "the assistant",
     PlaceAuthor.OTHER: "someone else",
+    PlaceAuthor.TASK_SCHEDULER: "the Task Scheduler",
 }
 
 _OUTCOME_TEXT: Final = {
@@ -1347,7 +1396,7 @@ class _Request:
                     alike[_looks(item)],
                 )
         for item in inputs.place.items:
-            if item.episode_id is None or item.author is PlaceAuthor.OTHER:
+            if item.episode_id is None or item.author in _NOT_AN_EXCHANGE:
                 continue
             texts = self._in_place.setdefault(item.episode_id, _PlaceTexts())
             (texts.user if item.author is PlaceAuthor.USER else texts.assistant).append(item.text)
@@ -1370,6 +1419,9 @@ class _Request:
             "place": self._place(),
             "understanding": self._understanding(),
         }
+        if inputs.places is not None:
+            # ADR-0350 §5:10: the place list, places grouped under channel headings.
+            document["places"] = self._places(inputs.places)
         if inputs.approved:
             document["approved_actions"] = [self._approved(one) for one in inputs.approved]
         document |= {
@@ -1490,6 +1542,74 @@ class _Request:
         shown["text"] = _WITHHELD_ITEM if item.author is PlaceAuthor.OTHER else item.text
         if item.episode_id is not None:
             shown["episode"] = self._book.label(LabelKind.EPISODE, item.episode_id)
+        if item.task_id is not None:
+            # ADR-0350 §9:2: the scheduled task it links to, beside its episode label.
+            shown["scheduled_task"] = self._book.label(LabelKind.SCHEDULED_TASK, item.task_id)
+        return shown
+
+    def _places(self, places: Sequence[ListedPlace]) -> list[dict[str, object]]:
+        """The place list: each channel's heading, never named, with its places (§5:10)."""
+        grouped: dict[str, list[dict[str, object]]] = {}
+        for one in places:
+            shown: dict[str, object] = {
+                "label": self._book.label(LabelKind.PLACE, one.place),
+                "is": one.description,
+            }
+            if one.suggested:
+                shown["suggested"] = True
+            grouped.setdefault(one.heading, []).append(shown)
+        return [{"channel": heading, "places": held} for heading, held in grouped.items()]
+
+    def _place_named(self, place: str) -> str:
+        """A place by its ``L`` label where it is on the list, and in words otherwise."""
+        held = self._book.held(LabelKind.PLACE, place)
+        if held is not None:
+            return held
+        channel = place_channel(place)
+        kind = "a place" if channel is None else f"a place of the {channel.channel_type} channel"
+        return f"{kind} not on your place list"
+
+    def _task(self, entry: TaskEntry) -> dict[str, object]:
+        """A scheduled task, as the Task Scheduler's calls show it (ADR-0350 §4:6-§4:8)."""
+        shown: dict[str, object] = {
+            "label": self._book.label(LabelKind.SCHEDULED_TASK, entry.task_id),
+            "state": entry.state,
+            "falls_due": entry.falls_due,
+        }
+        if entry.waits_on:
+            shown["waits_on"] = [
+                self._book.label(LabelKind.SCHEDULED_TASK, one) for one in entry.waits_on
+            ]
+        shown["carries"] = _OUTSIDE if entry.instruction is None else entry.instruction
+        shown["set_by"] = entry.author
+        shown["suggests"] = [self._place_named(one) for one in entry.places] or _NONE_FOUND
+        shown["parent"] = {
+            "episode": self._book.label(LabelKind.EPISODE, f"activation:{entry.parent}"),
+            "is": entry.parent_text,
+        }
+        return shown
+
+    def _activation(self, entry: ActivationEntry) -> dict[str, object]:
+        """A running or ended activation, as the list pull shows it (ADR-0350 §4:6-§4:7)."""
+        return {
+            "episode": self._book.label(LabelKind.EPISODE, f"activation:{entry.activation_id}"),
+            "started": entry.started,
+            "place": entry.place,
+            "status": entry.status,
+            "input": _OUTSIDE if entry.outside or entry.input is None else entry.input,
+        }
+
+    def _listing(self, listing: TaskListing) -> dict[str, object]:
+        """What a call on the Task Scheduler came back with, labelled (ADR-0350 §4:6-§4:8)."""
+        shown: dict[str, object] = {}
+        if listing.spawned is not None:
+            shown["spawned"] = self._task(listing.spawned)
+        if listing.cancelled is not None:
+            shown["cancelled"] = self._task(listing.cancelled)
+        if listing.listed:
+            shown["running"] = [self._activation(one) for one in listing.running] or _NONE_FOUND
+            shown["scheduled"] = [self._task(one) for one in listing.scheduled] or _NONE_FOUND
+            shown["ended_lately"] = [self._activation(one) for one in listing.recent] or _NONE_FOUND
         return shown
 
     def _episodes(self) -> list[dict[str, object]]:
@@ -1959,6 +2079,11 @@ class _Request:
                 where = _OVERTAKEN
             shown["text"] = one.text
             shown["text_was"] = where
+            if one.place is not None:
+                # ADR-0350 §12:8: the place its message went into, by its place label.
+                shown["into"] = self._place_named(
+                    f"{one.place.channel_type}:{one.place.instance_id}"
+                )
         shown["calls"] = [
             self._call(call, outcomes.get(call.call_id), reference=f"{number}.{index}")
             for index, call in enumerate(one.calls, 1)
@@ -2001,6 +2126,8 @@ class _Request:
             result["value"] = self._searched(outcome)
         elif outcome.candidate is not None:
             result["value"] = self._candidate(outcome.candidate)
+        elif outcome.tasks is not None:
+            result["value"] = self._listing(outcome.tasks)
         else:
             result["value"] = _DIGESTED_RESULT if outcome.digested else _thawed(outcome.result)
         shown["result"] = result
@@ -2811,6 +2938,9 @@ class PlanningStage:
                 "reliance": any(tool.name == NOTE_RELIANCE_CAPABILITY for tool in offered),
                 "person": inputs.person is not None,
                 "suggestions": inputs.person is not None and bool(inputs.person.suggestions),
+                "spawn": inputs.places is not None
+                and any(tool.name == SPAWN_CAPABILITY for tool in offered),
+                "scheduled": inputs.speaks_by_label,
             },
             values=_PLANNING_VALUES,
         )
@@ -2828,11 +2958,17 @@ class PlanningStage:
         # line appended to the message and recorded with the round. Where the place
         # takes no message nothing is askable, so every name is dropped (§7:3).
         asked = _asked_calls(response.asks, request.askable)
+        # ADR-0350 §6:7, §12:8: a message of an activation the Task Scheduler started
+        # names, by its place label, the one place on its list it goes into.
+        text, place = (
+            _named_place(response.text, book) if inputs.speaks_by_label else (response.text, None)
+        )
         planning_round = PlanningRound(
             id=self._new_id(),
             follows=inputs.rounds[-1].id if inputs.rounds else None,
             recorded_at=self._now(),
-            text=_with_questions(response.text, asked, inputs.capabilities),
+            text=_with_questions(text, asked, inputs.capabilities),
+            place=place if text.strip() else None,
             calls=response.calls,
             notes=response.notes,
             notes_marked=response.notes is not None and read_outside,
@@ -2911,6 +3047,30 @@ class PlanningStage:
             _log.warning("activation_capture_degraded", stage="planning", reason="append_failed")
             return False
         return True
+
+
+#: A message's leading place label, as planning is told to write it: ``L1: …``.
+_PLACE_LABEL: Final = re.compile(r"\A\s*\[?(L[1-9][0-9]{0,8})\]?\s*[:\u2014\u2013-]\s*")
+
+
+def _named_place(text: str, book: _LabelBook) -> tuple[str, ChannelIdentity | None]:
+    """The message without its leading place label, and the place the label names.
+
+    ADR-0350 §6:7: each message of an activation the Task Scheduler started names, by its
+    place label, the one place on its list it goes into. A label naming no place
+    planning was shown, or none at all, names no place, and authorizing refuses the
+    message; the text is then kept as written.
+    """
+    found = _PLACE_LABEL.match(text)
+    if found is None:
+        return text, None
+    named = book.resolve(found.group(1))
+    if named is None or named.kind is not LabelKind.PLACE:
+        return text, None
+    channel = place_channel(named.id)
+    if channel is None:
+        return text, None
+    return text[found.end() :], channel
 
 
 def _offered_declarations(

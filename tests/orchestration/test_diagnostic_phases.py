@@ -329,6 +329,8 @@ async def test_planning_writes_its_rendered_request_and_offered_tools_before_the
                 "reliance": False,
                 "story_calls": False,
                 "story_reads": False,
+                "scheduled": False,
+                "spawn": False,
                 "suggestions": False,
                 "takes_message": True,
             },
