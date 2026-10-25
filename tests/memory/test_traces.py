@@ -55,7 +55,13 @@ from ai_assistant.memory.ingest import _WRITE_DISPOSITIONS
 from ai_assistant.memory.sqlite_store import SqliteMemoryStore
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.testing import FakeMemoryPolicy, FakeTraceSink
-from ai_assistant.testing.memories import memory, memory_in_band, remembered_support, said_support
+from ai_assistant.testing.memories import (
+    derived_from,
+    memory,
+    memory_in_band,
+    remembered_support,
+    said_support,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -606,8 +612,8 @@ async def _store() -> InMemoryMemoryStore:
 
 
 def _preference(record_id: str, content: str) -> Memory:
-    """An inference, resting on a remember call of its own."""
-    return memory(record_id, content, remembered_support(_EPISODE, effect=f"effect-{record_id}"))
+    """An inference, resting on a derived stand-in of its own."""
+    return memory(record_id, content, *derived_from(_EPISODE, key=record_id))
 
 
 def _asserted(record_id: str, content: str) -> Memory:

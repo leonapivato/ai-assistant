@@ -86,7 +86,12 @@ from ai_assistant.memory._observer_writes import (
     retirement_fault,
 )
 from ai_assistant.memory._operations import applied_operation
-from ai_assistant.memory._placed import created_fault, placed_fault, placed_write
+from ai_assistant.memory._placed import (
+    added_backing_fault,
+    created_fault,
+    placed_fault,
+    placed_write,
+)
 from ai_assistant.memory._reconciler import ReconcilerOutcome
 
 # `memory`'s own policy module, for its floor predicate alone (ADR-0159 §2, §10). The
@@ -788,7 +793,7 @@ def _stamped(memory: Memory, held: Mapping[str, MemoryRecord]) -> Memory:
 
 
 def _refuse_creating(decision: MemoryDecision, proposal: MemoryUpdateProposal) -> None:
-    """Refuse a ruling that would create a memory ADR-0345 §6:1, §8:3 or §8:4 refuses.
+    """Refuse a ruling that would create a memory ADR-0345 §2:4, §6:1, §8:3 or §8:4 refuses.
 
     An ``ACCEPT`` creates the proposed memory as it is, and a ``SUPERSEDE`` creates it
     afresh with an open window (ADR-0045 §4); a fold creates nothing, so no rule on a
@@ -811,7 +816,7 @@ def _refuse_creating(decision: MemoryDecision, proposal: MemoryUpdateProposal) -
 
 
 def _refuse_created(memory: Memory, held: Mapping[str, MemoryRecord]) -> None:
-    """Refuse a memory a write creates that ADR-0345 §6:1, §8:3, §8:4 or §9:3 refuses.
+    """Refuse a memory a write creates that ADR-0345 §2:4, §6:1, §8:3, §8:4 or §9:3 refuses.
 
     Raises:
         MemoryStoreError: If it breaks one of them.
@@ -882,7 +887,7 @@ def _reinforced(target: MemoryRecord, incoming: Memory, *, now: datetime) -> Mem
 
     Raises:
         MemoryStoreError: If ``target`` is not a memory, the supports it would add
-            break §9:7, or an add support is refused.
+            break §9:7 or ADR-0345 §2:4, or an add support is refused.
     """
     if not isinstance(target, Memory):
         msg = f"cannot reinforce {target.id!r}: a reinforcement adds supports to a memory only"
@@ -920,6 +925,10 @@ def _reinforced(target: MemoryRecord, incoming: Memory, *, now: datetime) -> Mem
         except ValueError as exc:
             msg = f"cannot reinforce {target.id!r}: {exc}"
             raise MemoryStoreError(msg) from exc
+    fault = added_backing_fault(target, folded)
+    if fault is not None:
+        msg = f"cannot reinforce {target.id!r}: {fault}"
+        raise MemoryStoreError(msg)
     return folded.model_copy(update={"placement": target.placement.folded_with(incoming.placement)})
 
 
@@ -1309,12 +1318,15 @@ class MemoryIngestor:
         store does not hold (ADR-0328 §4:7, ``UnresolvedEvidenceError``); more conflicts
         than one ingest resolves (ADR-0079 §1); after the ruling, a write-producing
         ruling on secret-tier data (ADR-0078 §5b), a ``STORE_TEMPORARY`` ruling
-        (ADR-0328 §10:3), and a write landing at an id the proposal's supports point at
-        (ADR-0081 §1); at the fold, a fold onto an ``ASSERTED`` target no exception admits
-        (ADR-0045 §5, ADR-0078 §5b, ADR-0121 §5) and a ``SUPERSEDE`` naming a conflict
-        this writer holds a ``RESTATES`` or ``ADDS`` relation for (ADR-0159 §5); and an
-        end §5:10, §5:11 or §6:5 refuses, or a retired memory already carrying the part
-        the new memory's first support points at (§11:7).
+        (ADR-0328 §10:3), a write landing at an id the proposal's supports point at
+        (ADR-0081 §1), and a memory the ruling creates that ADR-0345 §2:4, §6:1, §8:3 or
+        §8:4 refuses; at the fold, a fold onto an ``ASSERTED`` target no exception admits
+        (ADR-0045 §5, ADR-0078 §5b, ADR-0121 §5), a ``SUPERSEDE`` naming a conflict this
+        writer holds a ``RESTATES`` or ``ADDS`` relation for (ADR-0159 §5), and a
+        ``REINFORCE`` adding a support the assistant's statement holds backing the target
+        as worded (ADR-0345 §2:4); and an end §5:10, §5:11 or §6:5 refuses, or a retired
+        memory already carrying the part the new memory's first support points at
+        (§11:7).
 
         Args:
             proposal: The memory to rule on and persist.
@@ -1358,7 +1370,7 @@ class MemoryIngestor:
                 successor, points at an episode the store does not hold (§4:7).
             MemoryStoreStaleError: If the stored memory is not the one read.
             MemoryStoreConflictError: If the successor's id names a stored record.
-            MemoryStoreError: If §4, §5 or §6:5 refuses the operation, or a store
+            MemoryStoreError: If §4, §5, §6:5 or ADR-0345 §2:4 refuses the operation, or a store
                 failure. Nothing is written.
         """
         observed = change.model_copy(deep=True)
@@ -1597,6 +1609,11 @@ class MemoryIngestor:
         except ValueError as exc:
             msg = f"refusing to apply a {change.operation.kind} to {memory.id!r}: {exc}"
             raise MemoryStoreError(msg) from exc
+        # ADR-0345 §2:4, §8:3: on what the operation adds, never on what the memory carries.
+        fault = added_backing_fault(memory, after)
+        if fault is not None:
+            msg = f"refusing to apply a {change.operation.kind} to {memory.id!r}: {fault}"
+            raise MemoryStoreError(msg)
         if after is memory:
             return
         batch = [

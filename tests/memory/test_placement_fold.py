@@ -52,7 +52,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import InMemoryMemoryStore, MemoryIngestor
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryWriter, FakeTraceSink
-from ai_assistant.testing.memories import memory, memory_in_band, remembered_support
+from ai_assistant.testing.memories import derived_support, memory, memory_in_band
 
 if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
@@ -159,7 +159,7 @@ def _target(*, placement: Placement, arm: str, content: str = _CONTENT) -> Memor
 
 
 def _incoming(*, placement: Placement, record_id: str = "incoming") -> Memory:
-    """The proposed memory: always ``DERIVED``, on its own remember call.
+    """The proposed memory: always ``DERIVED``, on a derived stand-in of its own.
 
     Its wording is always :data:`_CONTENT`; what the supersession case varies is the
     **target's** wording, because a proposal that agrees with its target *restates*
@@ -168,7 +168,7 @@ def _incoming(*, placement: Placement, record_id: str = "incoming") -> Memory:
     return memory(
         record_id,
         _CONTENT,
-        remembered_support(_EPISODE, effect=f"effect-{record_id}"),
+        derived_support(f"legacy-{record_id}"),
         placement=placement,
     )
 

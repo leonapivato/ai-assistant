@@ -39,7 +39,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import InMemoryMemoryStore, MemoryIngestor
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryWriter, FakeTraceSink
-from ai_assistant.testing.memories import memory, message_support, remembered_support, said_support
+from ai_assistant.testing.memories import derived_support, memory, message_support, said_support
 
 if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
@@ -125,7 +125,8 @@ def _target(*, confirmed: datetime | None, band: BeliefBand) -> Memory:
     """The stored memory the ruling folds into, its one support confirmed at ``confirmed``.
 
     Each support takes its confirming instant from its ``when`` (§7:3): a said one,
-    a round's message (``ATTESTED``, carrying no source details), or a remember call.
+    a round's message (``ATTESTED``, carrying no source details), or the tests' derived
+    stand-in, a legacy record.
     """
     support: MemorySupport
     match band:
@@ -134,20 +135,16 @@ def _target(*, confirmed: datetime | None, band: BeliefBand) -> Memory:
         case BeliefBand.ATTESTED:
             support = message_support(_EPISODE, when=confirmed, added_at=_TARGET_ADDED)
         case BeliefBand.DERIVED:
-            support = remembered_support(
-                _EPISODE, effect="effect-target", when=confirmed, added_at=_TARGET_ADDED
-            )
+            support = derived_support("legacy-target", when=confirmed, added_at=_TARGET_ADDED)
     return memory("target", _CONTENT, support)
 
 
 def _incoming(*, confirmed: datetime | None, record_id: str = "incoming") -> Memory:
-    """The proposed memory: always ``DERIVED``, on its own remember call."""
+    """The proposed memory: always ``DERIVED``, on the tests' derived stand-in of its own."""
     return memory(
         record_id,
         _CONTENT,
-        remembered_support(
-            _EPISODE, effect=f"effect-{record_id}", when=confirmed, added_at=_INCOMING_ADDED
-        ),
+        derived_support(f"legacy-{record_id}", when=confirmed, added_at=_INCOMING_ADDED),
     )
 
 
@@ -302,7 +299,7 @@ async def test_a_supersede_carries_the_correction_and_inherits_nothing(
     stale = memory(
         "stale",
         "user prefers morning meetings",
-        remembered_support(_EPISODE, effect="effect-stale", when=_JANUARY),
+        derived_support("legacy-stale", when=_JANUARY),
     )
     store = await _seeded(stale)
     # The ruling is injected: `DefaultMemoryPolicy` supersedes only a member the

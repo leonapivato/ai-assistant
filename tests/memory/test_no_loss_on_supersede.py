@@ -47,9 +47,9 @@ from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, Memory
 from ai_assistant.memory._reconciler import ReconcilerOutcome, ReconcilerReport
 from ai_assistant.testing import FakeMemoryWriter, FakeTraceSink
 from ai_assistant.testing.memories import (
+    derived_from,
     legacy_support,
     memory,
-    remembered_support,
     said_support,
     sourced_support,
 )
@@ -262,14 +262,10 @@ _AFTERNOON = "the user prefers afternoon meetings"
 
 
 async def _derived(store: InMemoryMemoryStore, *record_ids: str, content: str = _MORNING) -> None:
-    """Inferences on one topic, each on a remember call of its own."""
+    """Inferences on one topic, each on a derived stand-in of its own."""
     for record_id in record_ids:
         await store.add(
-            memory(
-                record_id,
-                content,
-                remembered_support("said-before", effect=f"effect-{record_id}", when=_WHEN),
-            )
+            memory(record_id, content, *derived_from("said-before", key=record_id, when=_WHEN))
         )
 
 
@@ -427,9 +423,7 @@ async def test_an_inference_beside_an_assertion_asks_only_on_a_contradiction(
     store = await _store("said-before", "watched")
     await store.add(_said("theirs", _MORNING, "said-before").proposed)
     inference = MemoryUpdateProposal(
-        proposed=memory(
-            "noticed", _AFTERNOON, remembered_support("watched", effect="effect-n", when=_WHEN)
-        ),
+        proposed=memory("noticed", _AFTERNOON, *derived_from("watched", key="n", when=_WHEN)),
         rationale="the observer worked it out",
     )
 

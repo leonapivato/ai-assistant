@@ -58,7 +58,7 @@ from ai_assistant.testing import (
     FakeTraceSink,
     default_prompt,
 )
-from ai_assistant.testing.memories import memory, remembered_support, said_support
+from ai_assistant.testing.memories import derived_from, memory, remembered_support, said_support
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -112,13 +112,9 @@ async def _plant_episode(store: MemoryStore) -> None:
 
 
 def _belief(record_id: str, content: str, *, asserted: bool = False) -> Memory:
-    """An inference on a remember call of its own, or, where ``asserted``, a said memory."""
-    support = (
-        said_support(_EPISODE)
-        if asserted
-        else remembered_support(_EPISODE, effect=f"effect-{record_id}")
-    )
-    return memory(record_id, content, support)
+    """An inference on a derived stand-in of its own, or, where ``asserted``, a said memory."""
+    supports = (said_support(_EPISODE),) if asserted else derived_from(_EPISODE, key=record_id)
+    return memory(record_id, content, *supports)
 
 
 def _proposal(record: Memory) -> MemoryUpdateProposal:
