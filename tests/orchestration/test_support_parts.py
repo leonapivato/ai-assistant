@@ -16,6 +16,7 @@ from ai_assistant.core.types import (
     ActivationDigest,
     ActivationEffect,
     AskedCall,
+    CapabilityResult,
     ConfirmationPart,
     DigestOutcome,
     EpisodicMemory,
@@ -39,9 +40,9 @@ from ai_assistant.orchestration.planning import LOOKING_FOR
 from ai_assistant.orchestration.remembering import (
     EPISODE_ARGUMENT,
     OUTSIDE_CONTENT_ARGUMENT,
-    REMEMBER,
     REMEMBER_CANDIDATE,
     REMEMBER_CAPABILITY,
+    STATEMENT_ARGUMENT,
 )
 from ai_assistant.orchestration.support_parts import (
     INFERENCE_CONTENT,
@@ -81,6 +82,25 @@ def _remember_call(call_id: str, statement: str) -> ProposedCall:
         name=REMEMBER_CAPABILITY,
         arguments={"statement": statement, LOOKING_FOR: "to keep it"},
     )
+
+
+#: ``remember`` as ADR-0328 §13's interim declared it, which no hub offers now: the records
+#: its calls left still carry it, and a support pointing at one reads the statement it took.
+REMEMBER = REMEMBER_CANDIDATE.model_copy(
+    update={
+        "result": CapabilityResult.NONE,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                STATEMENT_ARGUMENT: {"type": "string", "minLength": 1},
+                EPISODE_ARGUMENT: {"type": "string", "minLength": 1},
+                OUTSIDE_CONTENT_ARGUMENT: {"type": "boolean"},
+            },
+            "required": [STATEMENT_ARGUMENT, EPISODE_ARGUMENT, OUTSIDE_CONTENT_ARGUMENT],
+            "additionalProperties": False,
+        },
+    }
+)
 
 
 def _ran_digest(statement: str) -> str:

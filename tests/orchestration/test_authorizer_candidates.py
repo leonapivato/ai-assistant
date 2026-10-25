@@ -1,70 +1,38 @@
 """Authorizing a ``remember`` that records a candidate (ADR-0329 §5:2-§5:4, §5:6).
 
-With the composition root's switch on: no ``MemoryPolicy``, *confirm* needs you by
-rule, and under a yes the call runs as any approved call does. With it off, remembering
-passes ``MemoryPolicy`` as ``test_authorizer`` and ``test_authorizer_yes`` show,
-untouched by this file.
+No ``MemoryPolicy``, which the stage no longer holds: *confirm* needs you by rule, and
+under a yes the call runs as any approved call does. ADR-0328 §13's interim, under which
+remembering passed ``MemoryPolicy`` here, is retired with the composition root's switch.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pytest
 import test_authorizer as plain
 import test_authorizer_yes as yes
 
-from ai_assistant.core.types import AskedCall, MemoryDecisionKind, PermissionOutcome, RiskLevel
-from ai_assistant.orchestration.authorizer import AuthorizingStage, Verdict
+from ai_assistant.core.types import AskedCall, PermissionOutcome, RiskLevel
+from ai_assistant.orchestration.authorizer import Verdict
 from ai_assistant.orchestration.remembering import (
     EPISODE_ARGUMENT,
     OUTSIDE_CONTENT_ARGUMENT,
     REMEMBER_CANDIDATE,
 )
-from ai_assistant.testing import FakeActionPolicy, FakeMemoryPolicy
-
-if TYPE_CHECKING:
-    from ai_assistant.core.types import MemoryUpdateProposal
-
-
-class _Unasked(FakeMemoryPolicy):
-    """A memory policy no candidate may reach (§5:6)."""
-
-    async def decide(self, proposal: MemoryUpdateProposal, **kwargs: Any) -> Any:
-        del proposal, kwargs
-        msg = "no remember call passes MemoryPolicy once it records a candidate (§5:6)"
-        raise AssertionError(msg)
+from ai_assistant.testing import FakeActionPolicy
 
 
 def _candidate(**fields: Any) -> dict[str, Any]:
     return {"fact": "likes window seats", "why": "travel", "rests_on_input": True, **fields}
 
 
-def _switched(stage: AuthorizingStage) -> AuthorizingStage:
-    """The same stage, built with the switch on, over the same seams."""
-    return AuthorizingStage(
-        registry=stage._registry,
-        policy=stage._policy,
-        memory_policy=stage._memory_policy,
-        trail=stage._trail,
-        stories=stage._stories,
-        memory=stage._memory,
-        plans=stage._plans,
-        now=plain._now,
-        new_decision_id=plain._Ids("decision"),
-        new_effect_id=plain._Ids("effect"),
-        candidates=True,
-    )
-
-
 def _hub(**knobs: Any) -> plain._Hub:
-    hub = plain._Hub(REMEMBER_CANDIDATE, memory_policy=_Unasked(), **knobs)
-    hub.stage = _switched(hub.stage)
-    return hub
+    return plain._Hub(REMEMBER_CANDIDATE, **knobs)
 
 
-async def test_a_candidate_is_filled_by_the_hub_and_passes_no_memory_policy() -> None:
-    """§3:4: the hub fills the episode and the mark as today; §5:6: no MemoryPolicy."""
+async def test_a_candidate_is_filled_by_the_hub() -> None:
+    """§3:4: the hub fills the episode and the mark; §5:6: no MemoryPolicy rules on it."""
     hub = _hub()
 
     decided = await hub.authorize(plain._round(plain._call("c1", "remember", **_candidate())))
@@ -130,18 +98,6 @@ async def test_a_candidate_resting_on_nothing_is_not_done() -> None:
     assert decided.allowed == ()
 
 
-async def test_with_the_switch_off_remember_still_passes_memory_policy() -> None:
-    """ADR-0328 §13: the interim governs until the switch is turned on."""
-    hub = plain._Hub(memory_policy=FakeMemoryPolicy(MemoryDecisionKind.ASK_USER))
-
-    decided = await hub.authorize(
-        plain._round(plain._call("c1", "remember", statement="likes tea"))
-    )
-
-    assert decided.verdicts[0].verdict is Verdict.NEEDS_YOU
-    assert len(hub.memory_policy.calls) == 1
-
-
 # --- under a yes (§5:3) ------------------------------------------------------------------
 
 
@@ -158,37 +114,20 @@ def _asked_candidate(**fields: Any) -> AskedCall:
 
 
 def _yes_hub(policy: FakeActionPolicy | None = None) -> yes._Hub:
-    hub = yes._Hub(
-        yes._LOOKUP, yes._BOOK, REMEMBER_CANDIDATE, policy=policy, memory_policy=_Unasked()
-    )
-    stage = hub.stage
-    hub.stage = AuthorizingStage(
-        registry=stage._registry,
-        policy=stage._policy,
-        memory_policy=stage._memory_policy,
-        trail=stage._trail,
-        stories=stage._stories,
-        memory=stage._memory,
-        plans=stage._plans,
-        now=yes._now,
-        new_decision_id=yes._Ids("decision"),
-        new_effect_id=yes._Ids("effect"),
-        candidates=True,
-    )
-    return hub
+    return yes._Hub(yes._LOOKUP, yes._BOOK, REMEMBER_CANDIDATE, policy=policy)
 
 
 @pytest.mark.parametrize(
     "outcome", [PermissionOutcome.ALLOW, PermissionOutcome.CONFIRM], ids=["allow", "confirm"]
 )
-async def test_a_confirmed_candidate_runs_under_the_yes_and_passes_no_memory_policy(
+async def test_a_confirmed_candidate_runs_under_the_yes(
     outcome: PermissionOutcome,
 ) -> None:
     """§5:3: confirm is a source of *needs you* the yes answers; the policy's allow decides.
 
     An allow is recorded naming the approval, and a confirm is resolved on route (a)
-    (ADR-0321 §4:7, §4:17); either way no MemoryPolicy is asked and an effect record
-    is claimed, which the candidate is joined to (§3:3).
+    (ADR-0321 §4:7, §4:17); either way an effect record is claimed, which the
+    candidate is joined to (§3:3).
     """
     hub = _yes_hub(
         FakeActionPolicy(confirm_at=RiskLevel.LOW if outcome is PermissionOutcome.CONFIRM else None)

@@ -358,10 +358,6 @@ class FakeAssistantEngine:
         #: effect records from, public so a consumer can seed or inspect it; the
         #: episodes it joins are :attr:`episode_memory`'s (ADR-0329 §3:3).
         self.plan_store = FakePlanStore(now=lambda: _AT)
-        #: Whether ``remember`` records candidates (ADR-0329 §19:3), as the engine's
-        #: ``candidates`` says the same: off, the composition root's value until the
-        #: observer is wired, and :meth:`pending_candidates` then answers none.
-        self.candidates = False
         #: The person-block assembly the eight person-model members answer from
         #: (ADR-0338 §8:1), as the engine's ``person_blocks`` is: ``None``, the default,
         #: is a hub with ``Settings.person_model`` off, where each member raises
@@ -1114,13 +1110,9 @@ class FakeAssistantEngine:
 
         The engine's own reading, over :attr:`episode_memory` and :attr:`plan_store`
         (:func:`~ai_assistant.orchestration.candidates.held_candidates`), so the suite
-        compares two implementations of the surface rather than two of the join. With
-        :attr:`candidates` off, as it is by default and as the engine's switch is, it
-        answers none and reads nothing.
+        compares two implementations of the surface rather than two of the join.
         """
         self.calls.append(("pending_candidates", {}))
-        if not self.candidates:
-            return self._checked((), "pending_candidates")
         held = await held_candidates(self.episode_memory, self.plan_store)
         return self._checked(held, "pending_candidates")
 

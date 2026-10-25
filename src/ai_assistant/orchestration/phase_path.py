@@ -183,20 +183,17 @@ records, the episodes of the candidate stories understanding was shown, what eit
 recall run kept, what a call returned, a web search's records and a digest's included,
 and what a story view shows. The value is taken once, at the freeze, over every round,
 the windows' records left out on a pass of unbounded audience, and the episode is placed
-for the owner alone where it is ``True``. Before each round is planned the value over
-what planning has been given so far is set on the activation's state, so a belief that
-round remembers is placed by the supply it was produced over.
+for the owner alone where it is ``True``.
 
-**Candidates, behind the composition root's switch** (ADR-0329 §§3-6, §19:3). Where the
-path is built to have ``remember`` record candidates, a candidate's result lists the
-memories similar to its fact by id, which are fetched by id before the next round as a
-memory search's are, the audience predicate applied again, and handed planning with the
-outcome (§4:1); one whose lookup failed is handed on saying so (§4:4). Before the first
-round, the episode window's episodes the observer has not processed are read with
-:func:`~ai_assistant.orchestration.candidates.pending_candidates`, and each one's
-pending candidates are handed planning by its fact (§6:9). A call noting reliance has no
-effect, so it reaches :class:`PhaseTools`, which answers it done and reaches nothing
-(§6:7). With the switch off, none of this is reached.
+**Candidates** (ADR-0329 §§3-6). A ``remember`` call records a candidate, and a
+candidate's result lists the memories similar to its fact by id, which are fetched by id
+before the next round as a memory search's are, the audience predicate applied again,
+and handed planning with the outcome (§4:1); one whose lookup failed is handed on saying
+so (§4:4). Before the first round, the episode window's episodes the observer has not
+processed are read with :func:`~ai_assistant.orchestration.candidates.pending_candidates`,
+and each one's pending candidates are handed planning by its fact (§6:9). A call noting
+reliance has no effect, so it reaches :class:`PhaseTools`, which answers it done and
+reaches nothing (§6:7).
 
 **The person model's calls, where a store is wired** (ADR-0338 §8:4-§8:8, §11:2). The
 engine attaches the person block's assembly with :meth:`PhasePath.attach_person_model`
@@ -2616,7 +2613,6 @@ class PhasePath:
         timezone: str = "UTC",
         new_effect_id: Callable[[], str] = _new_effect_id,
         diagnostics: DiagnosticSink | None = None,
-        candidates: bool = False,
     ) -> None:
         """Wire the path.
 
@@ -2670,10 +2666,6 @@ class PhasePath:
             diagnostics: The diagnostic record's write seam, handed on to planning
                 and digesting, which this path builds (ADR-0314 §4:4); ``None`` where
                 the record is off. The path itself writes no entry (§4:2).
-            candidates: Whether ``remember`` records a candidate (ADR-0329 §§3-6), the
-                composition root's switch, handed on to planning: the episode window's
-                pending candidates are then read and shown (§6:9). Off by default, which
-                keeps ADR-0328 §13's interim.
 
         Raises:
             ValueError: If ``round_limit`` is below 1, ``round_wait`` or
@@ -2702,9 +2694,7 @@ class PhasePath:
             now=now,
             timezone=timezone,
             diagnostics=diagnostics,
-            candidates=candidates,
         )
-        self._candidates = candidates
         self._digesting = DigestingStage(
             provider=provider,
             recorder=_DigestRecorder(self),
@@ -3256,10 +3246,6 @@ class PhasePath:
         if stories is not None:
             working.notes.update((one.note_id, one) for one in _shown_notes(stories))
         _hold_given(given, working, active_state())
-        if (state := active_state()) is not None:
-            # ADR-0217 §3:12: a belief this round remembers is produced over what
-            # planning has been given so far, so it is placed by that supply.
-            state.planned_over_withheld = working.supplied.withheld(given.supply)
         inputs = PlanningInputs(
             activation_id=working.activation_id,
             place=working.place,
@@ -3325,13 +3311,11 @@ class PhasePath:
     ) -> Mapping[str, tuple[str, ...]]:
         """The episode window's pending candidates, read once (ADR-0329 §6:9).
 
-        Only where candidates are recorded: each episode the window shows that the
-        observer has not processed, with the facts of the candidates its own rounds
-        recorded, read from the plan store as it stands before the first round. A plan
-        store that cannot be read shows none, and planning goes on.
+        Each episode the window shows that the observer has not processed, with the facts
+        of the candidates its own rounds recorded, read from the plan store as it stands
+        before the first round. A plan store that cannot be read shows none, and planning
+        goes on.
         """
-        if not self._candidates:
-            return {}
         if working.pending is None:
             fetched = given.understanding_fetch
             episodes = () if fetched is None or fetched.episodes is None else fetched.episodes

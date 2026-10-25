@@ -119,7 +119,6 @@ from ai_assistant.core.types import (
     TranscriptMessage,
     UserMessage,
     band_of,
-    part_episode,
 )
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.authorizer import AuthorizingStage, Verdict
@@ -145,7 +144,7 @@ from ai_assistant.orchestration.phase_path import (
 )
 from ai_assistant.orchestration.planning import PLANNING_PROMPT, PlannedRound
 from ai_assistant.orchestration.recall import Recalled
-from ai_assistant.orchestration.remembering import REMEMBER, RememberCalls, remembered_record_id
+from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE, CandidateCalls
 from ai_assistant.orchestration.story_calls import (
     STORY_CALL_CAPABILITIES,
     STORY_CALLS,
@@ -172,9 +171,7 @@ from ai_assistant.testing import (
     FakeDiagnosticSink,
     FakeEgressBinder,
     FakeForecaster,
-    FakeMemoryPolicy,
     FakeMemoryStore,
-    FakeMemoryWriter,
     FakeModelProvider,
     FakeStoryStore,
     FakeToolCallingCompleter,
@@ -395,7 +392,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             registry=harness.invoker,
             invoker=harness.invoker,
             own_records=(
-                REMEMBER,
+                REMEMBER_CANDIDATE,
                 *(STORY_CALLS if calls is not None else ()),
                 *(LOOK_UPS if looking is not None else ()),
             ),
@@ -403,9 +400,8 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             forecaster=forecaster,
             search_query="query",
         )
-        memory_writer = FakeMemoryWriter(
-            store=harness.memory, policy=FakeMemoryPolicy(), now=lambda: AT
-        )
+        # ADR-0329 §4:1: a candidate's lookup, over the same store.
+        similar = LookUps(memory=harness.memory, views=reads, search_limit=5)
         chat = ChatWriter(
             conversations=harness.conversation_store, max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES
         )
@@ -418,7 +414,6 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
             authorizing=authorizing(
                 registry=tools,
                 policy=policy if policy is not None else _Policy(),
-                memory_policy=FakeMemoryPolicy(),
                 trail=harness.trail,
                 stories=(
                     stories
@@ -437,7 +432,7 @@ def _phases(  # noqa: PLR0913 — one knob per seam a case varies
                 invoker=tools,
                 own_records=OwnRecordsByCapability(
                     {
-                        "remember": RememberCalls(writer=memory_writer, now=lambda: AT),
+                        "remember": CandidateCalls(similar=similar, limit=5),
                         **(
                             dict.fromkeys(STORY_CALL_CAPABILITIES, calls)
                             if calls is not None
@@ -557,6 +552,11 @@ def _stages(episode: EpisodicMemory) -> list[tuple[ControllerStage, ControllerRu
 
 def _call(call_id: str, name: str, **arguments: object) -> ProposedCall:
     return ProposedCall(call_id=call_id, name=name, arguments=arguments)  # type: ignore[arg-type]  # JSON values
+
+
+def _remember(call_id: str, fact: str) -> ProposedCall:
+    """A ``remember`` recording a candidate resting on the input (ADR-0329 §3:1)."""
+    return _call(call_id, "remember", fact=fact, why="worth keeping", rests_on_input=True)
 
 
 # --- the five cases ---------------------------------------------------------------------
@@ -873,17 +873,16 @@ async def test_without_the_registration_the_real_policy_does_not_run_the_forecas
     assert all(one.ruling.outcome is not PermissionOutcome.ALLOW for one in decisions)
 
 
-async def test_a_remember_is_written_once_through_the_assistants_own_records() -> None:
-    """ADR-0306 §3:2-§3:3: remembering is claimed, run directly and ends the round.
+async def test_a_remember_records_a_candidate_through_the_assistants_own_records() -> None:
+    """ADR-0306 §3:2-§3:3, ADR-0329 §3:3: claimed, run directly, and no memory is written.
 
-    It brings another round, though it brought nothing back (ADR-0315 §2:1); that round,
-    with nothing new to say, writes no message (§4:2) and makes no call, so the activation
-    ends after it.
+    It brings another round (ADR-0315 §2:1); that round, with nothing new to say, writes
+    no message (§4:2) and makes no call, so the activation ends after it.
     """
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             text="I'll remember that.",
-            calls=(_call("c1", "remember", statement="The user likes green tea."),),
+            calls=(_remember("c1", "The user likes green tea."),),
         ),
         RoundResponse(),
     )
@@ -899,13 +898,9 @@ async def test_a_remember_is_written_once_through_the_assistants_own_records() -
     effects = await harness.plans.activation_effects([episode.id.removeprefix("activation:")])
     (remembered,) = [one for one in effects if one.capability == "remember"]
     assert remembered.outcome is ToolOutcome.SUCCEEDED
-    written = await harness.memory.get(remembered_record_id(remembered.id))
-    assert isinstance(written, Memory)
-    assert written.content == "The user likes green tea."
-    assert [part_episode(one.points_at) for one in written.supports] == [episode.id]
-    # ADR-0328 §13:2: dated at the episode's `occurred_at`.
-    assert [one.when for one in written.supports] == [episode.occurred_at]
-    # Done with nothing brought back: a second round, shown it done, and then the end.
+    # A candidate is the call joined to its effect record; it writes no memory (§3:3).
+    assert [one for one in await harness.memory.export() if isinstance(one, Memory)] == []
+    # Done: a second round, shown it done, and then the end.
     assert episode.processing_record is not None
     assert len(episode.processing_record.rounds) == 2
     (call,) = json.loads(completer.calls[1].messages[1].content)["rounds"][0]["calls"]
@@ -1068,7 +1063,7 @@ async def test_a_message_that_fails_beside_a_remember_still_lists_what_was_remem
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             text="I'll remember that.",
-            calls=(_call("c1", "remember", statement="The user likes green tea."),),
+            calls=(_remember("c1", "The user likes green tea."),),
         )
     )
     harness = _harness(completer, wrap=_FailsOnce)
@@ -2530,7 +2525,7 @@ def _look_and_remember() -> FakeToolCallingCompleter:
         RoundResponse(
             calls=(
                 _call("c1", "lookup", place="Riverside"),
-                _call("c2", "remember", statement="The user prefers the morning."),
+                _remember("c2", "The user prefers the morning."),
             ),
             notes="checking the weather",
         )
@@ -2550,9 +2545,10 @@ async def test_a_story_note_counts_as_outside_content_by_its_mark(
 ) -> None:
     """#2875, ADR-0306 §4:5, ADR-0303 §3:1: a marked note is read; the owner's is not.
 
-    An activation shown only the owner's note has a call that leaves the hub and a
-    remember allowed exactly as without the note, and remembers the statement
-    unmarked (ADR-0106 §1); one shown a marked note has both come back *needs you*.
+    An activation shown only the owner's note has a call that leaves the hub allowed
+    exactly as without the note, and records its candidate unmarked (ADR-0106 §1); one
+    shown a marked note has the call come back *needs you*, and the candidate, which
+    passes no ``MemoryPolicy`` (ADR-0329 §5:6), recorded marked.
     """
     stories = FakeStoryStore(now=lambda: AT)
     trip = (
@@ -2581,13 +2577,12 @@ async def test_a_story_note_counts_as_outside_content_by_its_mark(
         assert shown_note["label"] == "N1"
     decided = working.latest.authorization
     assert decided is not None
-    assert [one.verdict for one in decided.verdicts] == [verdict, verdict]
+    assert [one.verdict for one in decided.verdicts] == [verdict, Verdict.ALLOWED]
     marked = verdict is Verdict.NEEDS_YOU
     assert decided.read_outside_content is marked
     assert working.latest.planned.round.notes_marked is marked
-    if not marked:
-        (_, remembered) = decided.allowed
-        assert remembered.call.request.parameters["rests_on_outside_content"] is False
+    remembered = decided.allowed[-1]
+    assert remembered.call.request.parameters["rests_on_outside_content"] is marked
 
 
 def _from_outside(episode_id: str) -> EpisodicMemory:
@@ -2611,7 +2606,9 @@ async def test_an_outside_episode_in_the_episode_window_marks_the_rounds_notes()
     decided = working.latest.authorization
     assert decided is not None
     assert decided.read_outside_content
-    assert [one.verdict for one in decided.verdicts] == [Verdict.NEEDS_YOU] * 2
+    assert [one.verdict for one in decided.verdicts] == [Verdict.NEEDS_YOU, Verdict.ALLOWED]
+    (remembered,) = decided.allowed
+    assert remembered.call.request.parameters["rests_on_outside_content"] is True
 
 
 async def test_an_outside_episode_recall_found_marks_the_rounds_notes() -> None:
@@ -2629,7 +2626,9 @@ async def test_an_outside_episode_recall_found_marks_the_rounds_notes() -> None:
     decided = working.latest.authorization
     assert decided is not None
     assert decided.read_outside_content
-    assert [one.verdict for one in decided.verdicts] == [Verdict.NEEDS_YOU] * 2
+    assert [one.verdict for one in decided.verdicts] == [Verdict.NEEDS_YOU, Verdict.ALLOWED]
+    (remembered,) = decided.allowed
+    assert remembered.call.request.parameters["rests_on_outside_content"] is True
 
 
 # --- planning's story calls that write (ADR-0300 §10, ADR-0303 §9) ---------------------
@@ -3436,9 +3435,7 @@ async def test_with_the_record_on_each_source_writes_for_the_one_activation() ->
     """
     sink = FakeDiagnosticSink()
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(
-            text="Noted.", calls=(_call("c1", "remember", statement="The user likes tea."),)
-        ),
+        RoundResponse(text="Noted.", calls=(_remember("c1", "The user likes tea."),)),
         RoundResponse(),
     )
     harness = Harness(
@@ -3577,15 +3574,15 @@ async def test_an_event_runs_the_phases_in_a_place_that_takes_no_message() -> No
 async def test_an_event_remembers_starts_a_story_and_notes_it() -> None:
     """ADR-0309 §5:5: an event's planning still remembers and keeps its stories.
 
-    The event is an outside report, so what it would remember is derived from outside
-    material, which the memory policy never commits unasked (ADR-0106 §6): the call is
-    offered, authorized and ruled *needs you*, as on any activation that read outside
-    content, and the next round is told so. The story calls run.
+    The event is an outside report, so the candidate it records is marked as resting on
+    outside content (ADR-0329 §3:4). A candidate writes no memory and passes no
+    ``MemoryPolicy`` (§5:6), so it is recorded, done, as on any activation: the observer's
+    writes carry ADR-0106 §6's floor. The story calls run.
     """
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             calls=(
-                _call("c1", "remember", statement="The thermostat goes to eco mode at 18:00."),
+                _remember("c1", "The thermostat goes to eco mode at 18:00."),
                 _call("c2", "start_story", notes=["The thermostat's schedule."]),
             ),
         ),
@@ -3605,21 +3602,19 @@ async def test_an_event_remembers_starts_a_story_and_notes_it() -> None:
     assert record is not None
     activation = record.activation_id
     shown = json.loads(completer.calls[1].messages[1].content)["rounds"][0]["calls"]
-    # An event's activation writes no message, so the remember is not asked about and
-    # will not run (ADR-0321 §7:3).
     assert [(one["capability"], one["outcome"].split(":")[0]) for one in shown] == [
-        (
-            "remember",
-            "needs the user, and this activation cannot message them, so it will not run "
-            "and is not asked about",
-        ),
+        ("remember", "done"),
         ("start_story", "done"),
     ]
-    assert "the memory policy asks the user" in shown[0]["because"]
     effects = await harness.plans.activation_effects([activation])
     assert [(one.capability, one.outcome) for one in effects] == [
-        ("start_story", ToolOutcome.SUCCEEDED)
+        ("remember", ToolOutcome.SUCCEEDED),
+        ("start_story", ToolOutcome.SUCCEEDED),
     ]
+    # The candidate is the call as its round recorded it (ADR-0329 §3:3).
+    assert record.rounds[0].calls[0].arguments["fact"] == (
+        "The thermostat goes to eco mode at 18:00."
+    )
     story = await _the_story(stories, activation)
     page = await stories.notes(story)
     assert page is not None
@@ -3737,7 +3732,7 @@ async def test_a_stopped_event_returns_stopped() -> None:
     """§4:4, ADR-0295 §3:4: a stop lands after the current round, and is a result."""
     completer = _GatedCompleter(
         RoundResponse(
-            calls=(_call("c1", "remember", statement="The thermostat is in eco mode."),),
+            calls=(_remember("c1", "The thermostat is in eco mode."),),
         ),
         RoundResponse(text="Done."),
         gated=2,

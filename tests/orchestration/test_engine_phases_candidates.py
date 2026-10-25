@@ -1,11 +1,10 @@
-"""Planning's side of the observer end to end, with the switch on (ADR-0329 §§3-6).
+"""Planning's side of the observer end to end (ADR-0329 §§3-6).
 
-The phases as the composition root builds them where ``remember`` records candidates,
+The phases as the composition root builds them, ``remember`` recording candidates,
 through the engine over fakes: a candidate recorded with nothing written and its lookup
 shown in the next round, a *confirm* that needs you, reliance noted with nothing
 recorded but the round, and the episode window's pending candidates read from the plan
-store until the observer has processed the episode. The interim's path is
-``test_engine_phases``', untouched by this file.
+store until the observer has processed the episode.
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ from understanding_support import understanding_stage
 from ai_assistant.core.types import (
     EpisodicMemory,
     Memory,
-    MemoryDecisionKind,
     ObservationRecord,
     ObservationState,
     RoundResponse,
@@ -43,7 +41,6 @@ from ai_assistant.orchestration.remembering import (
     CandidateCalls,
 )
 from ai_assistant.testing import (
-    FakeMemoryPolicy,
     FakeModelProvider,
     FakeStoryStore,
     FakeToolCallingCompleter,
@@ -55,24 +52,14 @@ from ai_assistant.testing.memories import said_support
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ai_assistant.core.types import MemoryUpdateProposal
 
 _FACT: Final = "The user prefers window seats."
-
-
-class _Unasked(FakeMemoryPolicy):
-    """A memory policy no candidate may reach (§5:6)."""
-
-    async def decide(self, proposal: MemoryUpdateProposal, **kwargs: Any) -> Any:
-        del proposal, kwargs
-        msg = "no remember call passes MemoryPolicy once it records a candidate (§5:6)"
-        raise AssertionError(msg)
 
 
 def _phases(
     completer: FakeToolCallingCompleter, stories: FakeStoryStore
 ) -> Callable[[Harness], PhasePath]:
-    """The thin path as the composition root builds it with the switch on."""
+    """The thin path as the composition root builds it."""
 
     def build(harness: Harness) -> PhasePath:
         looking = LookUps(memory=harness.memory, views=None, search_limit=5)
@@ -90,13 +77,11 @@ def _phases(
             authorizing=AuthorizingStage(
                 registry=tools,
                 policy=_Policy(),
-                memory_policy=_Unasked(MemoryDecisionKind.ACCEPT),
                 trail=harness.trail,
                 stories=stories,
                 memory=harness.memory,
                 plans=harness.plans,
                 now=lambda: AT,
-                candidates=True,
             ),
             acting=ActingStage(
                 plans=harness.plans,
@@ -124,14 +109,13 @@ def _phases(
             recall_cap=6,
             recall_digest_wait=timedelta(seconds=5),
             now=lambda: AT,
-            candidates=True,
         )
 
     return build
 
 
 class _Harness(Harness):
-    """The engine harness, its phases built with the switch on."""
+    """The engine harness, its phases built as the composition root builds them."""
 
     def __init__(self, completer: FakeToolCallingCompleter) -> None:
         super().__init__(

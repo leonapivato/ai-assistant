@@ -13,8 +13,7 @@ arguments name things by label (:data:`RELIANCE_LABEL_ARGUMENTS`), and its answe
 to the own-records seam (ADR-0306 §3:3, §5:7), and the phases' invoker answers it done
 with :func:`noted`, reaching nothing.
 
-It is declared only where the composition root's switch has planning record candidates
-(ADR-0329 §19:3), since nothing reads a reliance before the observer runs.
+It is offered beside ``remember``, which records a candidate (ADR-0329 §6:7).
 """
 
 from __future__ import annotations

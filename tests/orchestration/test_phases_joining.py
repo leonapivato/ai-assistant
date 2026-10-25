@@ -50,7 +50,6 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     Idempotency,
     InputOrigin,
-    Memory,
     Message,
     MessageAuthor,
     ProposedCall,
@@ -60,6 +59,7 @@ from ai_assistant.core.types import (
     RoundResponse,
     StageOutcome,
     ToolDefinition,
+    ToolOutcome,
 )
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.joining import JoiningInput, input_standing
@@ -182,8 +182,18 @@ def _shown(completer: FakeToolCallingCompleter, index: int) -> str:
     return completer.calls[index].messages[-1].content
 
 
-async def _remembered(harness: Harness) -> list[Memory]:
-    return [one for one in await harness.memory.export() if isinstance(one, Memory)]
+async def _remembered(harness: Harness, episode: EpisodicMemory) -> list[str]:
+    """The candidates ``episode``'s activation recorded: its done remember calls.
+
+    A candidate is the call joined to the effect record that shows it done (ADR-0329
+    §3:3), and it writes no memory.
+    """
+    activation = episode.id.removeprefix("activation:")
+    return [
+        one.id
+        for one in await harness.plans.activation_effects([activation])
+        if one.capability == "remember" and one.outcome is ToolOutcome.SUCCEEDED
+    ]
 
 
 def _held_message(entered: asyncio.Event, release: asyncio.Event) -> type[PhasePath]:
@@ -532,7 +542,13 @@ async def test_a_set_aside_round_runs_none_of_its_calls_a_look_up_and_a_write_al
         RoundResponse(
             calls=(
                 _call("c1", "search_memory", query="dentist", looking_for="when it is"),
-                _call("c2", "remember", statement="The user likes green tea."),
+                _call(
+                    "c2",
+                    "remember",
+                    fact="The user likes green tea.",
+                    why="a taste",
+                    rests_on_input=True,
+                ),
             )
         ),
         RoundResponse(text="Noted."),
@@ -549,7 +565,7 @@ async def test_a_set_aside_round_runs_none_of_its_calls_a_look_up_and_a_write_al
     release.set()
     (episode,) = await _all_frozen(harness, 1)
 
-    assert await _remembered(harness) == []
+    assert await _remembered(harness, episode) == []
     assert [one.is_call for one in await harness.plans.activation_effects([running])] == [False]
     assert _shown(completer, 1).count("new input joined before this round acted") == 2
     record = processing(episode)
@@ -561,7 +577,17 @@ async def test_a_round_of_writes_commits_so_an_input_after_it_waits() -> None:
     """§3:2: a write to the hub's own records commits, with no message beside it."""
     entered, release = asyncio.Event(), asyncio.Event()
     completer = FakeToolCallingCompleter.scripted(
-        RoundResponse(calls=(_call("c1", "remember", statement="The user likes green tea."),)),
+        RoundResponse(
+            calls=(
+                _call(
+                    "c1",
+                    "remember",
+                    fact="The user likes green tea.",
+                    why="a taste",
+                    rests_on_input=True,
+                ),
+            )
+        ),
         RoundResponse(text="Noted."),
     )
     harness = phases_harness(completer, phases={"path": _held_after_acting(entered, release)})
@@ -575,7 +601,7 @@ async def test_a_round_of_writes_commits_so_an_input_after_it_waits() -> None:
 
     assert joined is None
     assert processing(episode).joined == ()
-    assert len(await _remembered(harness)) == 1
+    assert len(await _remembered(harness, episode)) == 1
     assert await _assistant(harness, conversation) == ["Noted."]
 
 

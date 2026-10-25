@@ -1486,7 +1486,6 @@ class Engine:
         diagnostic_retention: DiagnosticRetention | None = None,
         diagnostic_window: timedelta | None = None,
         telegram: TelegramLineSeams | None = None,
-        candidates: bool = False,
         observer: Observer | None = None,
         person_blocks: PersonBlocks | None = None,
     ) -> None:
@@ -1851,12 +1850,6 @@ class Engine:
                 which is a directly built engine's and never the composition root's.
             diagnostic_window: ``Settings.diagnostic_retention``, the window the sweep
                 measures back from the engine's clock (§7:1).
-            candidates: Whether ``remember`` records a candidate for the observer
-                (ADR-0329 §§3-6), which the composition root hands on from the one
-                switch the phases are built by (§19:3). Only then does
-                :meth:`pending_candidates` read anything: off, the default, it answers
-                none, since ``remember`` then writes a memory under ADR-0328 §13's
-                interim and no call it recorded is a candidate.
             observer: ADR-0329's observer, memory's one writer, or ``None``. Wired, a
                 run starts each time an activation's episode is frozen, without the
                 activation waiting on it, and :meth:`observe_episodes` runs it for the
@@ -1904,7 +1897,6 @@ class Engine:
         # is not a laxer contract limit but no contract limit at all (#1686).
         _check_positive_int(max_payload_bytes, name="max_payload_bytes")
         self._plans = plans
-        self._candidates = candidates
         # ADR-0329 §7:6, §16:6: the observer, and the one run a frozen episode starts in
         # the background — never a second while it runs, and once more after it where an
         # episode froze in the meantime.
@@ -3451,11 +3443,6 @@ class Engine:
         panel has no question to show in, and leaves out an episode the observer has
         settled (§16:2).
 
-        **The switch decides before any read** (§19:3): where this engine was built
-        with ``candidates`` off, ``remember`` writes a memory under ADR-0328 §13's
-        interim and none of its calls is a candidate, so the answer is empty and no
-        store is touched.
-
         Returns:
             The pending candidates, the most recent episode's first.
 
@@ -3468,8 +3455,6 @@ class Engine:
         return await self._tracked(self._pending_candidates(), "pending_candidates", checked=True)
 
     async def _pending_candidates(self) -> tuple[PendingCandidate, ...]:
-        if not self._candidates:
-            return ()
         return await held_candidates(self._memory, self._plans)
 
     # --- the person model, for the panels (ADR-0338 §8:1-§8:3) -------------

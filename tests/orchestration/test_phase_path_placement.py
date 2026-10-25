@@ -1,10 +1,12 @@
-"""A phases episode's placement, and a remembered belief's (ADR-0309 §5:10, ADR-0217 §3:12).
+"""A phases episode's placement (ADR-0309 §5:10).
 
 ADR-0204 §2's two terms are evaluated over every memory record the activation was given
 or obtained — its windows' records, what either recall run kept, what its calls
 returned, digested ones included, and what its story views showed — once, at the freeze,
 over every round, the windows left out on a pass of unbounded audience. A belief a round
-remembers is placed by what planning had been given when it planned that round.
+remembered was placed by what planning had been given when it planned that round
+(ADR-0217 §3:12) until ADR-0328 §13's interim retired; ``remember`` now records a
+candidate and writes no belief.
 """
 
 from __future__ import annotations
@@ -65,7 +67,6 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.conversations import conversation_channel
 from ai_assistant.orchestration.disclosure import UnboundedAudienceSupply
 from ai_assistant.orchestration.recall import Recalled
-from ai_assistant.orchestration.remembering import remembered_record_id
 from ai_assistant.orchestration.story_links import Candidates, ShortView
 from ai_assistant.orchestration.understanding import Fetched, TranscriptWindow
 from ai_assistant.testing import FakeMemoryStore, FakeStoryStore, FakeToolCallingCompleter
@@ -399,7 +400,7 @@ async def test_a_story_reads_view_is_held_though_a_call_beside_it_fails_the_roun
         RoundResponse(
             calls=(
                 _call("c1", "read_story", story="S1"),
-                _call("c2", "remember", statement="The trip is on."),
+                _call("c2", "remember", fact="The trip is on.", why="a plan", rests_on_input=True),
             )
         ),
     )
@@ -434,28 +435,41 @@ async def test_a_story_reads_view_is_held_though_a_call_beside_it_fails_the_roun
     assert working.supplied.withheld(_BOUNDED)
 
 
-# --- over every round, and the belief a round remembers ----------------------------------
+# --- over every round -------------------------------------------------------------------
 
 
-async def test_the_value_is_taken_over_every_round_and_a_belief_by_its_own_round() -> None:
-    """ADR-0309 §5:10 for the episode; ADR-0217 §3:12 for each belief.
+async def test_the_value_is_taken_over_every_round() -> None:
+    """ADR-0309 §5:10: taken once, at the freeze, over every round.
 
-    Round 1 remembers before anything withheld has been given, and searches; its search
-    returns a stamped fact, which round 2 is shown. Round 2 remembers again. The first
-    belief was produced over a clean supply and is written for anyone; the second over
-    one holding the stamped fact, and is written for the owner alone; the episode, taken
-    once at the freeze over both rounds, is placed for the owner alone.
+    Round 1 records a candidate before anything withheld has been given, and searches;
+    its search returns a stamped fact, which round 2 is shown. Round 2 records another.
+    The episode, taken once at the freeze over both rounds, is placed for the owner
+    alone, and neither candidate writes a belief (ADR-0329 §3:3).
     """
     completer = FakeToolCallingCompleter.scripted(
         RoundResponse(
             calls=(
-                _call("c1", "remember", statement="The user sees a dentist."),
+                _call(
+                    "c1",
+                    "remember",
+                    fact="The user sees a dentist.",
+                    why="health",
+                    rests_on_input=True,
+                ),
                 _call("c2", "search_memory", query="dentist", looking_for="when"),
             ),
         ),
         RoundResponse(
             text="Noted.",
-            calls=(_call("c3", "remember", statement="The dentist is Dr Rao."),),
+            calls=(
+                _call(
+                    "c3",
+                    "remember",
+                    fact="The dentist is Dr Rao.",
+                    why="health",
+                    rests_on_results=["R1"],
+                ),
+            ),
         ),
     )
     stamped = _stamped(_remembered("said", MemorySource.USER_ASSERTED, f"{_DENTIST} with Dr Rao"))
@@ -466,13 +480,9 @@ async def test_the_value_is_taken_over_every_round_and_a_belief_by_its_own_round
     frozen = await _settled(harness, conversation, seeded=frozenset({"said"}))
 
     effects = await harness.plans.activation_effects([frozen.id.removeprefix("activation:")])
-    remembered = {one.round: one for one in effects if one.capability == "remember"}
     assert frozen.processing_record is not None
-    first, second = (one.id for one in frozen.processing_record.rounds)
-    written_first = await harness.memory.get(remembered_record_id(remembered[first].id))
-    written_second = await harness.memory.get(remembered_record_id(remembered[second].id))
-    assert written_first is not None
-    assert written_second is not None
-    assert written_first.placement == Placement()
-    assert written_second.placement == _STAMPED
+    rounds = [one.id for one in frozen.processing_record.rounds]
+    remembered = [one.round for one in effects if one.capability == "remember"]
+    assert remembered == rounds
+    assert [one.id for one in await harness.memory.export() if isinstance(one, Memory)] == ["said"]
     assert frozen.placement == _STAMPED

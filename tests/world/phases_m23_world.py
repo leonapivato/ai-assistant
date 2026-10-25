@@ -29,11 +29,12 @@ default, the real ``ThresholdActionPolicy``.
   sends, arm (a)'s scenario cannot reach the gate at all; so this world offers
   ``send_email``, and the arm measures the gate and the stand-in at the posture's worst
   case: a capability that leaves the hub, offered to a planner that obeys the injection.
-* **``remember`` is wired, and offered for arm (b) alone.** Its runner holds the real
-  writer through acting's own-records seam, as the composition root wires it. Since
-  the consolidation stage retired (ADR-0328 §14:2) it is the one production path left
-  that proposes a ``DERIVED`` belief, so arm (b)'s cycles run an activation whose
-  planner obeys the injection by remembering it (:class:`RememberingPlanner`).
+* **``remember`` is wired, and offered for arm (b) alone.** Its runner records a
+  candidate through acting's own-records seam, as the composition root wires it, and
+  writes no belief (ADR-0329 §3:3): ADR-0328 §13's interim, under which it proposed a
+  ``DERIVED`` belief, is retired. Arm (b)'s cycles still run an activation whose
+  planner obeys the injection by remembering it (:class:`RememberingPlanner`), so the
+  route a hostile entry once had to a derived belief is driven and shown closed.
 * **Nothing parks** (ADR-0306 §4:8). A call the policy asks the user about is *needs
   you*, recorded in the trail and run by nothing; the parked confirmation card arm (a)
   asserts on the old path has no counterpart here.
@@ -67,7 +68,7 @@ from ai_assistant.core.types import (
     RoundResponse,
     UserMessage,
 )
-from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
+from ai_assistant.memory import InMemoryMemoryStore
 from ai_assistant.orchestration import Engine
 from ai_assistant.orchestration.acting import ActingStage, OwnRecordsByCapability
 from ai_assistant.orchestration.authorizer import AuthorizingStage
@@ -76,15 +77,18 @@ from ai_assistant.orchestration.connections import ConnectionOperations
 from ai_assistant.orchestration.conversations import ConversationLifecycle
 from ai_assistant.orchestration.digesting import DIGESTING_PROMPT
 from ai_assistant.orchestration.grants import GrantOperations
+from ai_assistant.orchestration.lookups import LookUps
 from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.phase_path import PhasePath, PhaseTools
 from ai_assistant.orchestration.planning import PLANNING_PROMPT
 from ai_assistant.orchestration.recall import RecallStage
 from ai_assistant.orchestration.remembering import (
-    REMEMBER,
+    FACT_ARGUMENT,
+    INPUT_ARGUMENT,
+    REMEMBER_CANDIDATE,
     REMEMBER_CAPABILITY,
-    STATEMENT_ARGUMENT,
-    RememberCalls,
+    WHY_ARGUMENT,
+    CandidateCalls,
 )
 from ai_assistant.orchestration.understanding import (
     UNDERSTANDING_PROMPT,
@@ -188,12 +192,13 @@ class ObeyingPlanner(FakeToolCallingCompleter):
 class RememberingPlanner(FakeToolCallingCompleter):
     """Planning that obeys the injection by remembering it, once per activation.
 
-    Arm (b)'s producer on the phases: ``remember`` is the one production path left
-    that proposes a ``DERIVED`` belief, since the consolidation stage retired
-    (ADR-0328 §14:2). Each activation's first round, the one shown no earlier round,
-    proposes remembering ``statement``; every later round, which the phases run after
-    a round's calls (ADR-0315), writes :data:`AFTER`. The hub, not this double, fills
-    whether the activation read outside content (ADR-0306 §4:5).
+    Arm (b)'s producer on the phases: ``remember`` was the one production path that
+    proposed a ``DERIVED`` belief once the consolidation stage retired (ADR-0328
+    §14:2), until ADR-0328 §13's interim retired too and it came to record a candidate
+    (ADR-0329 §3). Each activation's first round, the one shown no earlier round,
+    proposes remembering ``statement`` as a candidate's fact; every later round, which
+    the phases run after a round's calls (ADR-0315), writes :data:`AFTER`. The hub,
+    not this double, fills whether the activation read outside content (ADR-0306 §4:5).
     """
 
     def __init__(self, *, statement: str) -> None:
@@ -209,7 +214,11 @@ class RememberingPlanner(FakeToolCallingCompleter):
                     ProposedCall(
                         call_id=f"remember-{next(proposed)}",
                         name=REMEMBER_CAPABILITY,
-                        arguments={STATEMENT_ARGUMENT: statement},
+                        arguments={
+                            FACT_ARGUMENT: statement,
+                            WHY_ARGUMENT: "the user should be kept in the loop",
+                            INPUT_ARGUMENT: True,
+                        },
                     ),
                 )
             )
@@ -285,9 +294,6 @@ def build_phases_world(
         The assembled world, not yet started.
     """
     store = InMemoryMemoryStore(now=lambda: NOW)
-    writer = MemoryIngestor(
-        store=store, policy=DefaultMemoryPolicy(), traces_sink=FakeTraceSink(), now=lambda: NOW
-    )
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     source = tmp_path / "calendar.ics"
@@ -320,8 +326,8 @@ def build_phases_world(
     )
     digests = FakeModelProvider(reply=_DIGESTED)
     # ``remember`` is the assistant's own records, reached through acting's own-records
-    # seam over the real writer (ADR-0306 §3:3), as the composition root wires it.
-    tools = PhaseTools(registry=registry, invoker=registry, own_records=(REMEMBER,))
+    # seam (ADR-0306 §3:3), recording a candidate as the composition root wires it.
+    tools = PhaseTools(registry=registry, invoker=registry, own_records=(REMEMBER_CANDIDATE,))
     phases = PhasePath(
         planning_prompt=default_prompt(PLANNING_PROMPT),
         completer=planner,
@@ -329,7 +335,6 @@ def build_phases_world(
         authorizing=AuthorizingStage(
             registry=tools,
             policy=gate,
-            memory_policy=DefaultMemoryPolicy(),
             trail=trail,
             stories=stories,
             memory=store,
@@ -340,7 +345,11 @@ def build_phases_world(
             plans=plans,
             invoker=tools,
             own_records=OwnRecordsByCapability(
-                {REMEMBER_CAPABILITY: RememberCalls(writer=writer, memory=store, now=lambda: NOW)}
+                {
+                    REMEMBER_CAPABILITY: CandidateCalls(
+                        similar=LookUps(memory=store, views=None, search_limit=5), limit=5
+                    )
+                }
             ),
             timeout=timedelta(seconds=5),
             now=lambda: NOW,

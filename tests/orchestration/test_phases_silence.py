@@ -93,7 +93,11 @@ _LISTED = couldnt_finish(("the tool remember ran",)).text
 
 def _remember() -> RoundResponse:
     """A call that brings a round (ADR-0315 §2:1), its text set by the case."""
-    return RoundResponse(calls=(_call("c1", "remember", statement="The user likes tea."),))
+    return RoundResponse(
+        calls=(
+            _call("c1", "remember", fact="The user likes tea.", why="a taste", rests_on_input=True),
+        )
+    )
 
 
 def _filler() -> RoundResponse:

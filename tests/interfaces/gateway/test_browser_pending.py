@@ -45,13 +45,14 @@ _LONG_FACT = (
 )
 
 
-async def _seed(drive: Drive, *, candidates: bool) -> None:
-    """Give the drive's engine two episodes with three candidates between them."""
+async def _seed(drive: Drive, *, candidates: bool = True) -> None:
+    """Give the drive's engine two episodes with three candidates between them, or none."""
     memory = FakeMemoryStore(now=lambda: PENDING_AT)
     plans = FakePlanStore(now=lambda: PENDING_AT)
     drive.engine.episode_memory = memory
     drive.engine.plan_store = plans
-    drive.engine.candidates = candidates
+    if not candidates:
+        return
     subject = PendingCandidatesSubject(engine=drive.engine, memory=memory, plans=plans)
     await hold_episode(subject, "older", "lives in Lisbon", age=timedelta(days=1))
     await hold_episode(subject, "newer", "has a dog", _LONG_FACT)
@@ -85,10 +86,10 @@ async def test_the_belief_panel_shows_each_pending_candidate_by_its_fact_marked_
         assert overflow <= 0
 
 
-async def test_a_hub_whose_remember_writes_memories_shows_no_pending_section(
+async def test_a_hub_holding_no_pending_candidate_shows_no_pending_section(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """§19:3: the records are the same, the switch is off, and nothing is shown."""
+    """§18:1: with none pending, the section is not shown."""
     async with driving(gateway_browser, tmp_path, viewport=PHONE) as drive:
         await _seed(drive, candidates=False)
 

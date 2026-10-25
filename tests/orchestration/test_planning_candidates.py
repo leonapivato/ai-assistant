@@ -3,8 +3,8 @@
 Driven directly over the planning stage, each outcome built by hand as the phases' glue
 hands it over: the instruction's flags (§6:1-§6:5, §6:8), a candidate's result (§4:1,
 §4:4, §6:5), open questions beside a memory (§6:6) and an unprocessed episode's pending
-candidates in the episode window (§6:9). With the switch off neither flag is set, so the
-instruction is the interim's.
+candidates in the episode window (§6:9). ADR-0328 §13's interim, and the switch that
+kept its instruction, are retired.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ from ai_assistant.orchestration.planning import (
     RecordedCandidate,
 )
 from ai_assistant.orchestration.reliance import NOTE_RELIANCE
-from ai_assistant.orchestration.remembering import REMEMBER, REMEMBER_CANDIDATE
+from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.testing import FakeDiagnosticSink, FakeToolCallingCompleter, default_prompt
 
 if TYPE_CHECKING:
@@ -67,7 +67,6 @@ _OTHERS: Final = tuple(one for one in _TOOLS if one.capability != "remember")
 
 def _stage(
     *responses: RoundResponse,
-    candidates: bool = True,
     prompt: PromptTemplate | None = None,
     diagnostics: FakeDiagnosticSink | None = None,
 ) -> tuple[PlanningStage, FakeToolCallingCompleter]:
@@ -80,7 +79,6 @@ def _stage(
         excerpt_chars=200,
         now=_now,
         new_id=lambda: next(ids),
-        candidates=candidates,
         diagnostics=diagnostics,
     )
     return stage, completer
@@ -90,25 +88,21 @@ def _stage(
 
 
 @pytest.mark.parametrize(
-    ("switch", "offered", "handed"),
+    ("offered", "handed"),
     [
-        (True, (REMEMBER_CANDIDATE, NOTE_RELIANCE), {"candidates", "reliance"}),
-        (True, (REMEMBER_CANDIDATE,), {"candidates"}),
-        (True, (NOTE_RELIANCE,), {"reliance"}),
-        (False, (REMEMBER, NOTE_RELIANCE), set()),
+        ((REMEMBER_CANDIDATE, NOTE_RELIANCE), {"candidates", "reliance"}),
+        ((REMEMBER_CANDIDATE,), {"candidates"}),
+        ((NOTE_RELIANCE,), {"reliance"}),
+        ((), set()),
     ],
-    ids=["both", "candidates", "reliance", "switch-off"],
+    ids=["both", "candidates", "reliance", "neither"],
 )
 async def test_the_template_is_handed_candidates_and_reliance_where_each_is_offered(
-    switch: bool, offered: tuple[ToolDefinition, ...], handed: set[str]
+    offered: tuple[ToolDefinition, ...], handed: set[str]
 ) -> None:
-    """ADR-0334 §4:2; §6:1-§6:5, §6:8: each flag where its capability is offered.
-
-    With the switch off neither is set, whatever is offered, so the instruction is the
-    interim's (ADR-0328 §13:6).
-    """
+    """ADR-0334 §4:2; §6:1-§6:5, §6:8: each flag where its capability is offered."""
     sink = FakeDiagnosticSink()
-    stage, completer = _stage(candidates=switch, prompt=FLAG_ECHO, diagnostics=sink)
+    stage, completer = _stage(prompt=FLAG_ECHO, diagnostics=sink)
 
     flags = await _echoed(stage, completer, sink, _inputs(capabilities=(*_OTHERS, *offered)))
 
@@ -260,14 +254,9 @@ def _questioned() -> Any:
     )
 
 
-@pytest.mark.parametrize("candidates", [True, False], ids=["switch-on", "switch-off"])
-async def test_each_unresolved_open_question_goes_beside_its_memory(candidates: bool) -> None:
-    """§6:6: in words, wherever the memory reaches planning; a resolved one does not.
-
-    Nothing raises one before the observer runs, so on today's data this shows nothing,
-    and it reads the same with the switch either way.
-    """
-    stage, completer = _stage(candidates=candidates)
+async def test_each_unresolved_open_question_goes_beside_its_memory() -> None:
+    """§6:6: in words, wherever the memory reaches planning; a resolved one does not."""
+    stage, completer = _stage()
 
     await stage.plan(_inputs(recalled=(_questioned(),)))
 

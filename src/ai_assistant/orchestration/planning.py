@@ -110,10 +110,10 @@ in the values recorded with the question and names the part in
 :attr:`PlannedCall.approved_part`, so nothing planning sends beside the label changes
 them.
 
-**Candidates, behind the composition root's switch** (ADR-0329 §6). Where the stage is
-built to have ``remember`` record candidates, the instruction says what a candidate is
-for, how eager to be, when to name a memory, when to ask, and how to reply (§6:1-§6:5),
-and how to note reliance where that capability is offered (§6:8). A candidate's result
+**Candidates** (ADR-0329 §6). Where ``remember`` is offered, it records a candidate,
+and the instruction says what a candidate is for, how eager to be, when to name a
+memory, when to ask, and how to reply (§6:1-§6:5), and how to note reliance where that
+capability is offered (§6:8). A candidate's result
 says it is recorded and pending, with the memories similar to its fact each under its
 own M label, or that they could not be read (§4:1, §4:4, §6:5). An episode of the
 episode window the observer has not processed is shown with its pending candidates,
@@ -686,8 +686,7 @@ class PlanningInputs:
             nothing.
         pending: For an episode of the episode window the observer has not processed,
             by its id, the facts of the candidates its own rounds recorded, in order
-            (ADR-0329 §6:9); none where nothing is pending or candidates are not
-            recorded.
+            (ADR-0329 §6:9); none where nothing is pending.
         overtaken: The ids of earlier rounds that new input overtook before they acted
             (ADR-0332 §3:7, §3:12-§3:13): planned from an earlier understanding version,
             so their message was never written and nothing they asked about was shown.
@@ -963,7 +962,7 @@ _NEEDS_YOUR_YES: Final = "Needs your yes:"
 #: - ``story_reads``: a story read is offered, so its older notes can be read (#2893, #2944).
 #: - ``approved``: the approved-action tool is offered (ADR-0321 §4:2).
 #: - ``candidates``: ``remember`` is offered recording candidates (ADR-0329 §6:1-§6:5).
-#: - ``reliance``: noting reliance is offered, with candidates on (ADR-0329 §6:8).
+#: - ``reliance``: noting reliance is offered (ADR-0329 §6:8).
 #: - ``person``: the activation is a person's and its person block is shown (ADR-0338
 #:   §7:3); a round with none keeps the instruction it had.
 #: - ``suggestions``: the person block shows a pending suggestion (§7:3, §7:8).
@@ -2698,7 +2697,6 @@ class PlanningStage:
         timezone: str = "UTC",
         new_id: Callable[[], str] = _new_round_id,
         diagnostics: DiagnosticSink | None = None,
-        candidates: bool = False,
     ) -> None:
         """Wire the stage to its seams.
 
@@ -2720,11 +2718,6 @@ class PlanningStage:
                 rendered request and the offered tools before each round, and the
                 returned entry where no response came back (§5:2); ``None`` where the
                 record is off.
-            candidates: Whether ``remember`` records a candidate (ADR-0329 §6), the
-                composition root's switch: the template's ``candidates`` and
-                ``reliance`` flags are set only where it is on, each where its
-                capability is offered. Off by default, which keeps the instruction
-                the interim has (ADR-0328 §13:6).
 
         Raises:
             ValueError: If ``excerpt_chars`` is below 1, or ``prompt`` is not a template
@@ -2748,7 +2741,6 @@ class PlanningStage:
         self._now = checked_clock(now, owner="PlanningStage")
         self._new_id = new_id
         self._diagnostics = diagnostics
-        self._candidates = candidates
 
     def _zone_for(self, person: PersonBlock | None) -> ZoneInfo:
         """The zone the round tells the current time in (ADR-0338 §3:6, ADR-0307 §6:1).
@@ -2798,10 +2790,8 @@ class PlanningStage:
                 "story_calls": any(tool.name in STORY_CALL_CAPABILITIES for tool in offered),
                 "story_reads": _offers_story_reads(offered),
                 "approved": approved_tool is not None,
-                "candidates": self._candidates
-                and any(tool.name == REMEMBER_CAPABILITY for tool in offered),
-                "reliance": self._candidates
-                and any(tool.name == NOTE_RELIANCE_CAPABILITY for tool in offered),
+                "candidates": any(tool.name == REMEMBER_CAPABILITY for tool in offered),
+                "reliance": any(tool.name == NOTE_RELIANCE_CAPABILITY for tool in offered),
                 "person": inputs.person is not None,
                 "suggestions": inputs.person is not None and bool(inputs.person.suggestions),
             },

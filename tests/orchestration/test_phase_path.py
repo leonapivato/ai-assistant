@@ -52,7 +52,7 @@ from ai_assistant.orchestration.planning import (
     PlannedRound,
     RefusedCall,
 )
-from ai_assistant.orchestration.remembering import REMEMBER
+from ai_assistant.orchestration.remembering import REMEMBER_CANDIDATE
 from ai_assistant.orchestration.story_calls import TIDY_STORY_CAPABILITY
 from ai_assistant.orchestration.supplied_records import SuppliedRecords
 from ai_assistant.orchestration.understanding import TranscriptWindow, _channel_items
@@ -209,7 +209,7 @@ async def test_the_tools_add_remembering_and_the_search_and_fill_the_searchs_ori
     registry = FakeToolInvoker([], ledger=trail, gate=trail)
     searcher = FakeWebSearcher()
     tools = PhaseTools(
-        registry=registry, invoker=registry, own_records=(REMEMBER,), searcher=searcher
+        registry=registry, invoker=registry, own_records=(REMEMBER_CANDIDATE,), searcher=searcher
     )
     assert await tools.capabilities() == ("remember", "web_search")
     (offered_search,) = [
