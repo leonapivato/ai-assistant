@@ -4376,7 +4376,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    # --- Several inputs at once: the start wait and joining (ADR-0332 §5, §6) ---
+    # --- Several inputs at once: the start wait (ADR-0332 §5, §6), and merging ---
     # **Each has a working default**, which #2589 tunes by measurement without a new
     # decision (§6:6): the starting values are guesses. The three hub-chat durations
     # bound one another, which the model validator below refuses at load where they do
@@ -4420,19 +4420,9 @@ class Settings(BaseSettings):
             "Strictly positive."
         ),
     )
-    join_limit: _IntegerSetting = Field(
-        default=3,
-        ge=0,
-        lt=2**31,
-        description=(
-            "The most inputs one activation takes in after its trigger, by joining on "
-            "its place or by a takeover from another (ADR-0332 §3:3, §4:6). 0 turns "
-            "joining off, and takeover with it."
-        ),
-    )
-    # ADR-0349 §9:2-§9:3's two bounds, each at least one. ``join_limit`` stays beside
-    # them until §1:4's step 2 removes joining by code with it (§9:1); until then
-    # nothing reads these two.
+    # ADR-0349 §9:2-§9:3's two bounds, each at least one, in place of ADR-0332 §6:5's
+    # ``join_limit``, which §9:1 removes with joining by code. A configuration that
+    # still names it loads, the name ignored as any unknown one is.
     held_input_limit: _IntegerSetting = Field(
         default=4,
         ge=1,

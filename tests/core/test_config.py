@@ -980,10 +980,6 @@ def test_every_integer_setting_is_discovered() -> None:
         # call a day, so the observer scouts one episode and then holds every other
         # while it looks configured. Zero is admitted and means no call at all.
         "observer_daily_calls",
-        # ADR-0332 §6:5's bound on an activation's joins, and the ``bool`` argument
-        # again: ``join_limit=True`` is one join while it reads as joining on. Zero is
-        # admitted and turns joining and takeover off.
-        "join_limit",
         # ADR-0349 §9:2-§9:3's two bounds, each at least one, and the ``bool`` argument
         # again: ``held_input_limit=True`` is one input, which turns absorbing off while
         # it reads as on, and ``in_progress_limit=True`` a section of one entry.

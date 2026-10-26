@@ -1,4 +1,4 @@
-"""ADR-0332 §6's settings: the start waits, the composing signal and the join limit.
+"""ADR-0332 §6's settings: the start waits and the composing signal.
 
 The per-field guards a duration or an ``int`` setting inherits from its type — a flag is
 not a count, a foreign scalar is not a duration — are ``tests/core/test_config.py``'s,
@@ -23,14 +23,13 @@ def _settings(**fields: Any) -> Settings:
 
 
 def test_the_defaults_are_the_decisions_starting_values() -> None:
-    """§6:1 to §6:5: 1.5 s, 3 s, 10 s, 2 s and three joins."""
+    """§6:1 to §6:4: 1.5 s, 3 s, 10 s and 2 s."""
     settings = _settings()
 
     assert settings.chat_start_wait == timedelta(seconds=1.5)
     assert settings.chat_composing_lapse == timedelta(seconds=3)
     assert settings.chat_composing_cap == timedelta(seconds=10)
     assert settings.telegram_start_wait == timedelta(seconds=2)
-    assert settings.join_limit == 3
 
 
 @pytest.mark.parametrize(
@@ -41,17 +40,6 @@ def test_every_wait_is_strictly_positive(name: str, value: timedelta) -> None:
     """§6:1 to §6:4: a wait of nothing, or less, is refused at load."""
     with pytest.raises(ValidationError, match=name):
         _settings(**{name: value})
-
-
-def test_a_join_limit_of_zero_turns_joining_off() -> None:
-    """§6:5: 0 is admitted, and means no join and no takeover."""
-    assert _settings(join_limit=0).join_limit == 0
-
-
-def test_a_negative_join_limit_is_refused() -> None:
-    """§6:5: at least 0."""
-    with pytest.raises(ValidationError, match="join_limit"):
-        _settings(join_limit=-1)
 
 
 @pytest.mark.parametrize(
