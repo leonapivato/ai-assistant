@@ -27,7 +27,9 @@ This module is what the rest of the package shares of it, and runs nothing:
 - **The listing** (:class:`TaskListing`), the shape a list pull, a spawn and a cancel
   answer in, which the phases render to planning under ``T``, ``E`` and ``L`` labels.
 - **The hub's renderings**: of when a task falls due, of a task's parent (§4:6), of the
-  input a due occurrence's activation is given (§6:2) and of its lineage window (§6:5).
+  input a due occurrence's activation is given (§6:2) and of its lineage window (§6:5),
+  each in the person's zone, or a rule's own (ADR-0340 §6:1); and the **read-back**, a
+  spawn's rendering of the task it wrote (ADR-0340 §6:2).
 
 **Names** (§2:8): the channel is the *Task Scheduler* in full, its items *scheduled
 tasks*; "the scheduler" stays ADR-0083 §7's housekeeping loop.
@@ -39,6 +41,7 @@ import contextlib
 import contextvars
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING, Final, cast
 
 from ai_assistant.core.channel_validation import TASK_SCHEDULER
@@ -52,6 +55,7 @@ from ai_assistant.core.types import (
     DueAfterTasks,
     DueAt,
     DueNow,
+    DueOnRule,
     Idempotency,
     InputOrigin,
     LabelKind,
@@ -60,7 +64,9 @@ from ai_assistant.core.types import (
     ProcessingStatus,
     Reversibility,
     RiskLevel,
+    RuleDay,
     ScheduledTaskAuthor,
+    TaskRuleKind,
     ToolCost,
     ToolDefinition,
 )
@@ -72,6 +78,7 @@ from ai_assistant.orchestration.channel_kinds import (
     WindowSource,
     place_of,
 )
+from ai_assistant.orchestration.task_rules import clock_text, day_text, rule_text, task_zone
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -110,11 +117,14 @@ __all__ = [
     "current_spawner",
     "decode_listing",
     "encode_listing",
+    "lineage_occurrence",
     "lineage_steps",
     "local_time",
     "occurrence_outcome",
     "outcome_text",
     "place_description",
+    "read_back",
+    "shown_occurrence",
     "spawning",
     "task_input",
     "when_text",
@@ -180,6 +190,15 @@ DELAY_ARGUMENT: Final = "delay_minutes"
 AFTER_ARGUMENT: Final = "after"
 PLACES_ARGUMENT: Final = "places"
 REPLACES_ARGUMENT: Final = "replaces"
+#: ADR-0340 §8:1's two: a rule, and the zone a local time or a rule is read in.
+RULE_ARGUMENT: Final = "rule"
+ZONE_ARGUMENT: Final = "zone"
+#: A rule's parts.
+REPEATS_PART: Final = "repeats"
+DAYS_PART: Final = "days"
+TIME_PART: Final = "time"
+FROM_PART: Final = "from"
+UNTIL_PART: Final = "until"
 #: Cancel's one argument.
 TASK_ARGUMENT: Final = "task"
 
@@ -236,7 +255,7 @@ SPAWN: Final = _declared(
     (
         "Set up work that runs later or separately: a scheduled task, which starts an "
         "activation of its own when it falls due, reading what it carries. Give at most "
-        "one of at, delay_minutes and after; with none it falls due now."
+        "one of at, delay_minutes, after and rule; with none it falls due now."
     ),
     {
         "type": "object",
@@ -251,8 +270,9 @@ SPAWN: Final = _declared(
                 "type": "string",
                 "minLength": 1,
                 "description": (
-                    "When it falls due: an ISO 8601 instant with its UTC offset, such as "
-                    "2026-10-25T20:00:00-04:00."
+                    "When it falls due: an ISO 8601 local date and time with no offset, "
+                    "such as 2026-10-25T20:00, read in the person's zone, or in zone; or "
+                    "an instant with its UTC offset, such as 2026-10-25T20:00:00-04:00."
                 ),
             },
             DELAY_ARGUMENT: {
@@ -272,6 +292,51 @@ SPAWN: Final = _declared(
                 "type": "string",
                 "minLength": 1,
                 "description": "A pending task this one replaces, by T label.",
+            },
+            RULE_ARGUMENT: {
+                "type": "object",
+                "description": (
+                    "When it falls due, again and again: a rule, at a local time of day in "
+                    "the person's zone, or in zone. Only for a task the person asked for."
+                ),
+                "properties": {
+                    REPEATS_PART: {
+                        "type": "string",
+                        "enum": [one.value for one in TaskRuleKind],
+                        "description": "Every day, Monday to Friday, or weekly on days.",
+                    },
+                    DAYS_PART: {
+                        "type": "array",
+                        "items": {"type": "string", "enum": [one.value for one in RuleDay]},
+                        "minItems": 1,
+                        "description": "The days of the week a weekly rule falls on.",
+                    },
+                    TIME_PART: {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The local time of day, 24-hour, such as 07:00.",
+                    },
+                    FROM_PART: {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "A local date, such as 2026-10-27, before which none falls.",
+                    },
+                    UNTIL_PART: {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The last local date one may fall on, such as 2026-11-30.",
+                    },
+                },
+                "required": [REPEATS_PART, TIME_PART],
+                "additionalProperties": False,
+            },
+            ZONE_ARGUMENT: {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "The IANA zone at or rule is read in, such as Europe/Lisbon, only where "
+                    "the person named one."
+                ),
             },
         },
         "required": [INSTRUCTION_ARGUMENT],
@@ -453,6 +518,10 @@ class TaskEntry:
             ``E`` label, so tasks spawned together read together (§4:6).
         parent_text: The hub's short description of that parent, from the record.
         author: Who set it: the person or the assistant.
+        repeats: For a task with a rule, its rule in words (ADR-0340 §8:2); ``None``
+            for any other.
+        read_back: For the task a spawn wrote, the hub's read-back of it (ADR-0340
+            §6:2); ``None`` in every other listing.
     """
 
     task_id: str
@@ -465,6 +534,8 @@ class TaskEntry:
     parent_text: str
     author: str
     waits_on: tuple[str, ...] = ()
+    repeats: str | None = None
+    read_back: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,6 +598,8 @@ def _task_json(entry: TaskEntry) -> dict[str, FrozenJson]:
         "parent": entry.parent,
         "parent_text": entry.parent_text,
         "author": entry.author,
+        "repeats": entry.repeats,
+        "read_back": entry.read_back,
     }
 
 
@@ -575,6 +648,11 @@ def _optional_str(held: Mapping[str, object], key: str) -> str | None:
     return None if value is None else _str(held, key)
 
 
+def _later_str(held: Mapping[str, object], key: str) -> str | None:
+    """A key added after a listing may have been recorded, which reads as ``None``."""
+    return _optional_str(held, key) if key in held else None
+
+
 def _task_of(value: object) -> TaskEntry:
     held = cast("Mapping[str, object]", value)
     return TaskEntry(
@@ -588,6 +666,8 @@ def _task_of(value: object) -> TaskEntry:
         parent=_str(held, "parent"),
         parent_text=_str(held, "parent_text"),
         author=_str(held, "author"),
+        repeats=_later_str(held, "repeats"),
+        read_back=_later_str(held, "read_back"),
     )
 
 
@@ -639,18 +719,117 @@ def local_time(instant: datetime, zone: ZoneInfo) -> str:
     return f"{local:%a %d %b %Y %H:%M} ({zone.key})"
 
 
-def when_text(task: ScheduledTask, zone: ZoneInfo) -> str:
-    """The hub's rendering of when ``task`` falls due, from its record (ADR-0350 §4:8)."""
+def shown_occurrence(task: ScheduledTask) -> ScheduledOccurrence:
+    """The occurrence a rendering of ``task`` gives: its next, or the one that stands.
+
+    A one-off task's one occurrence. For a task with a rule (ADR-0340 §4:6), the earliest
+    still pending, its next; where none is, one running; otherwise its last.
+    """
+    occurrences = task.occurrences
+    pending = [one for one in occurrences if one.state is OccurrenceState.PENDING]
+    if pending:
+        return min(pending, key=lambda one: (one.due_at is None, one.due_at, one.number))
+    running = [one for one in occurrences if one.state is OccurrenceState.PUSHED]
+    return running[-1] if running else occurrences[-1]
+
+
+def when_text(task: ScheduledTask, zone: ZoneInfo, *, now: datetime) -> str:
+    """The hub's rendering of when ``task`` falls due, from its record (ADR-0350 §4:8).
+
+    In the person's zone ``zone``, or a rule's own where it names one (ADR-0340 §6:1);
+    for a rule, its next occurrence, or that nothing more of it is pending (§8:2).
+    """
+    shown = task_zone(task, zone)
     when = task.when
     if isinstance(when, DueNow):
-        return f"now: set to start at once, {local_time(task.set_at, zone)}"
+        return f"now: set to start at once, {local_time(task.set_at, shown)}"
     if isinstance(when, DueAt):
-        return f"at {local_time(when.at, zone)}"
-    assert isinstance(when, DueAfterTasks)  # noqa: S101 — the when's three members
-    due = task.occurrences[0].due_at
+        return f"at {local_time(when.at, shown)}"
+    occurrence = shown_occurrence(task)
+    if isinstance(when, DueOnRule):
+        words = rule_text(when, today=now.astimezone(shown).date())
+        if occurrence.state is not OccurrenceState.PENDING or occurrence.due_at is None:
+            return f"{words}; nothing more of it is pending"
+        return f"{words}; next at {local_time(occurrence.due_at, shown)}"
+    due = occurrence.due_at
     if due is not None:
-        return f"once the tasks it waits on ended, at {local_time(due, zone)}"
+        return f"once the tasks it waits on ended, at {local_time(due, shown)}"
     return "once every task it waits on has ended"
+
+
+#: Past this local hour, a time today is said to fall tonight.
+_EVENING: Final = 18
+
+
+def _moment(instant: datetime, zone: ZoneInfo, *, now: datetime, named: bool) -> str:
+    """An instant as the read-back says it: ``Tonight, Tuesday 21 October, at 8:00 PM``.
+
+    With a relative word where it falls today or tomorrow, in ``zone``, and the zone's
+    name where ``named``, for a rule naming its zone (ADR-0340 §6:1).
+    """
+    local = instant.astimezone(zone)
+    today = now.astimezone(zone).date()
+    day = local.date()
+    told = f"{day_text(day, today=today)}, at {clock_text(local.time())}"
+    if named:
+        told += f" {zone.key} time"
+    if day == today:
+        return f"{'Tonight' if local.hour >= _EVENING else 'Today'}, {told}"
+    if day == today + timedelta(days=1):
+        return f"Tomorrow, {told}"
+    return told
+
+
+def _place_said(channel: ChannelIdentity, here: ChannelIdentity) -> str:
+    """A suggested place as the read-back says it, with where it was set as *here*."""
+    if channel == here:
+        return "here"
+    if channel.channel_type == "telegram":
+        return "on Telegram"
+    if channel.channel_type == "conversation":
+        return "in another conversation in the hub's chat"
+    return f"in {place_description(channel)}"
+
+
+def read_back(task: ScheduledTask, zone: ZoneInfo, *, now: datetime, line: bool) -> str:
+    """The read-back: the hub's rendering of the task a spawn wrote, from the record.
+
+    ADR-0340 §6:2. The next occurrence's weekday, date and local time, with a relative
+    word where it falls today or tomorrow; for a task waiting on named tasks, that it
+    falls due when they end, and no time; for a rule, the rule in words with its from
+    and until; and each place it suggests, the place it was set in as *here*, or that it
+    suggests none, adding, where ``line`` says the line is connected, that it may still
+    message the person there.
+
+    Args:
+        task: The task as written.
+        zone: The person's zone; a rule naming a zone is said in its own.
+        now: The instant it is said at, from which today and tomorrow are read.
+        line: Whether the line's chat is on the spawner's place list, so connected.
+    """
+    shown = task_zone(task, zone)
+    when = task.when
+    occurrence = shown_occurrence(task)
+    due = occurrence.due_at
+    if isinstance(when, DueAfterTasks):
+        said = (
+            "When the tasks it waits on have all ended"
+            if due is None
+            else "Now, since the tasks it waits on have all ended"
+        )
+    elif isinstance(when, DueNow) or due is None or due <= now:
+        said = "Now"
+    else:
+        said = _moment(due, shown, now=now, named=isinstance(when, DueOnRule) and bool(when.zone))
+    if isinstance(when, DueOnRule):
+        words = rule_text(when, today=now.astimezone(shown).date())
+        said = f"{words[:1].upper()}{words[1:]}; next: {said}"
+    if task.places:
+        places = " and ".join(_place_said(one, task.set_in) for one in task.places)
+        return f"{said}, {places}."
+    if line:
+        return f"{said}. It suggests no place, and may still message the person on Telegram."
+    return f"{said}. It suggests no place."
 
 
 def place_description(channel: ChannelIdentity | None) -> str:
@@ -717,36 +896,53 @@ def _brief(text: str) -> str:
     return flat if len(flat) <= _STEP_CHARS else f"{flat[: _STEP_CHARS - 1]}…"
 
 
-def task_input(
+def task_input(  # noqa: PLR0913 — the task, the occurrence's two facts, the zone, and the three the push decides
     task: ScheduledTask,
-    occurrence: ScheduledOccurrence,
-    zone: ZoneInfo,
     *,
+    due_at: datetime | None,
+    second_try: bool,
+    zone: ZoneInfo,
     late_at: datetime | None,
+    skipped: int = 0,
+    now: datetime | None = None,
 ) -> str:
     """The input an occurrence's activation is given, stated by the hub (ADR-0350 §6:2).
 
     What the task carries, the creator's instruction as planning wrote it (§6:3); when
     and where it was set; the instant it was due; and whether it is late (§8:9) or a
-    second try (§8:6). Whether and how its messages mention either is the activation's
-    judgment.
+    second try (§8:6). For a task with a rule, its rule in words and how many
+    occurrences it skipped, where it skipped any (ADR-0340 §7:1). Whether and how its
+    messages mention any of it is the activation's judgment (ADR-0340 §7:2).
 
     Args:
         task: The task.
-        occurrence: The occurrence pushed.
-        zone: The zone local times are told in.
+        due_at: The instant the occurrence pushed was due.
+        second_try: Whether it is pushed again as a second try.
+        zone: The person's zone, which local times are told in; a rule naming a zone
+            is told in its own (ADR-0340 §6:1).
         late_at: When it was pushed, where that was past the lateness grace; ``None``
             where it is not late.
+        skipped: How many earlier occurrences of its rule were recorded skipped as it
+            was pushed (ADR-0340 §4:8).
+        now: The instant it is told at, from which a rule's from is read; the due
+            instant where ``None``.
     """
+    shown = task_zone(task, zone)
     who = "the person" if task.author is ScheduledTaskAuthor.PERSON else "the assistant"
     facts = [
-        f"set by {who} in {place_description(task.set_in)}, {local_time(task.set_at, zone)}",
+        f"set by {who} in {place_description(task.set_in)}, {local_time(task.set_at, shown)}",
     ]
-    if occurrence.due_at is not None:
-        facts.append(f"due {local_time(occurrence.due_at, zone)}")
+    if isinstance(task.when, DueOnRule):
+        told = now or due_at or task.set_at
+        facts.append(f"it repeats {rule_text(task.when, today=told.astimezone(shown).date())}")
+    if due_at is not None:
+        facts.append(f"due {local_time(due_at, shown)}")
+    if skipped:
+        missed = "occurrence" if skipped == 1 else "occurrences"
+        facts.append(f"it skipped {skipped} earlier {missed}, missed while it was not pushed")
     if late_at is not None:
-        facts.append(f"late: it was started only {local_time(late_at, zone)}")
-    if occurrence.second_try:
+        facts.append(f"late: it was started only {local_time(late_at, shown)}")
+    if second_try:
         facts.append(
             "a second try: a run cut off by a restart may already have sent its message, "
             "and whether it arrived is not known"
@@ -777,6 +973,18 @@ def _frozen(episodes: Mapping[str, EpisodicMemory], activation_id: str) -> Episo
     return None if processing is None or processing.is_open else record
 
 
+def lineage_occurrence(task: ScheduledTask, below: ScheduledTask) -> ScheduledOccurrence:
+    """The occurrence of ``task`` whose activation spawned ``below``, its next step.
+
+    A one-off task's one occurrence; for a task with a rule, the one of its occurrences
+    pushed to ``below``'s parent (ADR-0340 §4:10), or its first where none names it.
+    """
+    return next(
+        (one for one in task.occurrences if below.parent in one.activations),
+        task.occurrences[0],
+    )
+
+
 def lineage_steps(
     lineage: Sequence[ScheduledTask],
     episodes: Mapping[str, EpisodicMemory],
@@ -793,7 +1001,8 @@ def lineage_steps(
     Args:
         lineage: The current task last, and each task above it before it.
         episodes: The lineage's activations' episodes, by address, as read.
-        zone: The zone local times are told in.
+        zone: The person's zone, which local times are told in; a step with a rule
+            naming a zone is told in its own (ADR-0340 §6:1).
     """
     if not lineage:
         return ()
@@ -828,11 +1037,11 @@ def lineage_steps(
         if number == len(lineage):
             steps.append(LineageStep(text=f"Step {number}, current: {what}", current=True))
             break
-        occurrence = task.occurrences[0]
+        occurrence = lineage_occurrence(task, lineage[number])
         ran = None if not occurrence.activations else _frozen(episodes, occurrence.activations[-1])
         record = None if ran is None else ran.processing_record
         when = occurrence.ended_at if record is None else record.started_at
-        told = "" if when is None else f", {local_time(when, zone)}"
+        told = "" if when is None else f", {local_time(when, task_zone(task, zone))}"
         steps.append(
             LineageStep(
                 text=f"Step {number}{told}, {outcome_text(occurrence)}: {what}",

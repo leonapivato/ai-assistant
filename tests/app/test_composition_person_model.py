@@ -208,6 +208,34 @@ async def test_a_later_start_with_another_timezone_does_not_seed_again(tmp_path:
     assert len(model.changes) == 1
 
 
+async def test_the_task_scheduler_reads_the_owners_profile_zone_not_settings(
+    tmp_path: Path,
+) -> None:
+    """ADR-0340 §3:3, §6:1: a profile zone that differs from ``Settings.timezone`` governs
+    every scheduled task's times; with the person model off, ``Settings.timezone`` does."""
+    first = build_engine(
+        Settings(embedder=EmbedderKind.HASHING, person_model=True, timezone="Europe/Lisbon"),
+        data_dir=tmp_path / "on",
+    )
+    await first.aclose()
+    again = build_engine(
+        Settings(embedder=EmbedderKind.HASHING, person_model=True, timezone="Asia/Tokyo"),
+        data_dir=tmp_path / "on",
+    )
+    off = build_engine(
+        Settings(embedder=EmbedderKind.HASHING, timezone="Asia/Tokyo"),
+        data_dir=tmp_path / "off",
+    )
+    try:
+        assert again.task_manager is not None
+        assert off.task_manager is not None
+        assert await again.task_manager.zone_of(OWNER_PERSON_ID) == ZoneInfo("Europe/Lisbon")
+        assert await off.task_manager.zone_of(OWNER_PERSON_ID) == ZoneInfo("Asia/Tokyo")
+    finally:
+        await again.aclose()
+        await off.aclose()
+
+
 def test_the_seed_reads_the_variable_through_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ASSISTANT_TIMEZONE", raising=False)
     assert seeded_time_zone(load_settings()) is None

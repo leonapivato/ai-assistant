@@ -28,14 +28,22 @@ for every other activation, the conversation its input came from. A conversation
 once deleted, and the line's chat once the line is disconnected or the settings name
 another chat (§5:8). Nothing is cancelled because a place is gone (§5:9).
 
+**Tasks the person sets** (ADR-0340). A spawn may state a local date and time with no
+offset, read in the zone it names or in the person's zone (§3:2-§3:4), or a rule, which
+only a task the person set holds (§4); its refusals are each *not done*, with the reason
+(§3:5, §4:4). Every rendering of a scheduled task's times, the queries' included, is in
+the person's zone, read for the person each is for (§6:1), and a spawn's result carries
+the read-back (§6:2).
+
 **It logs stage and code-owned reason only** (ADR-0275 §8).
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -49,10 +57,13 @@ from ai_assistant.core.types import (
     DueAfterTasks,
     DueAt,
     DueNow,
+    DueOnRule,
     InputOrigin,
     OccurrenceState,
+    RuleDay,
     ScheduledTaskAuthor,
     TaskRefusal,
+    TaskRuleKind,
     TaskSpawn,
     TaskWriteAnswer,
     ToolOutcome,
@@ -63,18 +74,33 @@ from ai_assistant.orchestration.channel_kinds import place_channel, place_of
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
 from ai_assistant.orchestration.person_block import activation_person
 from ai_assistant.orchestration.person_calls import NotDone
+from ai_assistant.orchestration.task_rules import (
+    PersonZones,
+    first_occurrence,
+    local_instant,
+    resolve_zone,
+    rule_text,
+    task_zone,
+)
 from ai_assistant.orchestration.task_scheduler import (
     AFTER_ARGUMENT,
     AT_ARGUMENT,
     CANCEL_TASK_CAPABILITY,
+    DAYS_PART,
     DELAY_ARGUMENT,
+    FROM_PART,
     INSTRUCTION_ARGUMENT,
     LIST_TASKS_CAPABILITY,
     PLACES_ARGUMENT,
+    REPEATS_PART,
     REPLACES_ARGUMENT,
+    RULE_ARGUMENT,
     SCHEDULE,
     SPAWN_CAPABILITY,
     TASK_ARGUMENT,
+    TIME_PART,
+    UNTIL_PART,
+    ZONE_ARGUMENT,
     ActivationEntry,
     ListedPlace,
     Spawner,
@@ -85,11 +111,13 @@ from ai_assistant.orchestration.task_scheduler import (
     local_time,
     outcome_text,
     place_description,
+    read_back,
+    shown_occurrence,
     when_text,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Iterable, Sequence
     from zoneinfo import ZoneInfo
 
     from ai_assistant.core.clock import Clock
@@ -111,6 +139,7 @@ if TYPE_CHECKING:
 __all__ = [
     "PlaceLists",
     "ScheduledTaskCalls",
+    "StatedWhen",
     "TaskManager",
     "TaskManagerLimits",
     "TaskSchedulerSeams",
@@ -143,6 +172,10 @@ _REFUSAL_TEXT: Final = {
     TaskRefusal.PENDING_LIMIT: (
         "not done: it would take the person's pending scheduled tasks past the pending limit"
     ),
+    TaskRefusal.ASSISTANTS_RULE: (
+        "not done: only a task the person asked for may repeat on a rule, and this "
+        "activation's input does not carry the person's authority"
+    ),
 }
 _NOT_OFFERED: Final = (
     "not done: the Task Scheduler's calls are offered only to a person's activation started "
@@ -150,7 +183,20 @@ _NOT_OFFERED: Final = (
 )
 _EARLIER_THAN_NOW: Final = "not done: the instant it would fall due is earlier than now"
 _NO_OFFSET: Final = "not done: an instant states its UTC offset, such as 2026-10-25T20:00:00-04:00"
-_ONE_WHEN: Final = "not done: give at most one of at, delay_minutes and after"
+_ONE_WHEN: Final = "not done: give at most one of at, delay_minutes, after and rule"
+#: ADR-0340 §3:5 and §4:4's refusals, each made before the store is reached.
+_OFFSET_AND_ZONE: Final = (
+    "not done: an instant states a UTC offset or names a zone, never both; a local time "
+    "with no offset is read in the zone"
+)
+_UNKNOWN_ZONE: Final = "not done: the zone is not an IANA zone name, such as Europe/Lisbon"
+_ZONE_ALONE: Final = "not done: a zone is named only with at or rule, which it is read in"
+_UNTIL_BEFORE_FROM: Final = "not done: the rule's until is earlier than its from"
+_NO_OCCURRENCE: Final = "not done: the rule yields no occurrence later than now before its until"
+_RULE_DAYS: Final = (
+    "not done: a weekly rule names one or more days of the week, and no other rule names any"
+)
+_RULE_TIME: Final = "not done: a rule's time is a local time of day to the minute, such as 07:00"
 _OFF_THE_LIST: Final = "not done: it suggests a place that is not on this activation's place list"
 _MALFORMED: Final = "not done: the call's arguments are malformed"
 _STORE_FAULT: Final = "not done: the Task Scheduler could not be read or written"
@@ -279,58 +325,206 @@ class PlaceLists:
             return self._line
 
 
-def spawn_when(arguments: Mapping[str, FrozenJson], *, now: datetime) -> TaskWhen | str:
-    """A spawn's when, from its arguments, or why it is refused (ADR-0350 §5:1-§5:2).
+@dataclass(frozen=True, slots=True)
+class StatedWhen:
+    """A spawn's when, as its arguments state it, resolved when the task is set.
 
-    An instant states its offset, a delay is resolved to an instant now, and a spawn
-    naming none falls due now; an instant earlier than now is refused (§4:5).
+    Attributes:
+        when: The when the task holds.
+        first_due_at: For a rule, the instant of its first occurrence, computed in the
+            zone it is read in (ADR-0340 §4:5, §9:1); ``None`` for any other when.
     """
-    stated = [name for name in (AT_ARGUMENT, DELAY_ARGUMENT, AFTER_ARGUMENT) if name in arguments]
+
+    when: TaskWhen
+    first_due_at: datetime | None = None
+
+
+_WHENS: Final = (AT_ARGUMENT, DELAY_ARGUMENT, AFTER_ARGUMENT, RULE_ARGUMENT)
+
+
+def spawn_when(  # noqa: PLR0911 — each of the when's forms and refusals is a return of its own
+    arguments: Mapping[str, FrozenJson], *, now: datetime, zone: ZoneInfo
+) -> StatedWhen | str:
+    """A spawn's when, from its arguments, or why it is refused (ADR-0350 §5, ADR-0340 §3-§4).
+
+    A delay is resolved to an instant now, and a spawn naming no when falls due now. An
+    instant states its UTC offset, or is a local date and time with none, read in the
+    zone the spawn names and in ``zone`` where it names none (ADR-0340 §3:2). A rule
+    names its zone, or follows the person's, and its first occurrence is computed here
+    (§4:3, §4:5). Each is refused as *not done*, with the reason: an instant earlier than
+    now (ADR-0350 §4:5); an offset with a zone, or a zone ``zoneinfo`` does not resolve
+    (§3:5); a zone with no instant or rule to read in it; and a rule malformed, whose
+    until is earlier than its from, or that yields no occurrence later than now (§4:4).
+
+    Args:
+        arguments: The spawn's arguments.
+        now: The instant it is set at.
+        zone: The person's zone (ADR-0340 §3:3).
+    """
+    stated = [name for name in _WHENS if name in arguments]
     if len(stated) > 1:
         return _ONE_WHEN
+    named = arguments.get(ZONE_ARGUMENT)
+    read_in = zone
+    if named is not None:
+        if not isinstance(named, str):
+            return _MALFORMED
+        if stated not in ([AT_ARGUMENT], [RULE_ARGUMENT]):
+            return _ZONE_ALONE
+        found = resolve_zone(named)
+        if found is None:
+            return _UNKNOWN_ZONE
+        read_in = found
     if not stated:
-        return DueNow()
+        return StatedWhen(DueNow())
     if AT_ARGUMENT in arguments:
-        return _instant(arguments[AT_ARGUMENT], now=now)
+        return _instant(arguments[AT_ARGUMENT], now=now, zone=read_in, named=named is not None)
+    if RULE_ARGUMENT in arguments:
+        return _rule(arguments[RULE_ARGUMENT], now=now, zone=read_in, named=named)
     if DELAY_ARGUMENT in arguments:
         return _delay(arguments[DELAY_ARGUMENT], now=now)
     return _after(arguments[AFTER_ARGUMENT])
 
 
-def _instant(text: FrozenJson, *, now: datetime) -> TaskWhen | str:
-    """An instant stated with its UTC offset, not earlier than now (§5:2, §4:5)."""
+def _instant(  # noqa: PLR0911 — each refusal is a return of its own
+    text: FrozenJson, *, now: datetime, zone: ZoneInfo, named: bool
+) -> StatedWhen | str:
+    """An instant, with its UTC offset or read in ``zone``, not earlier than now.
+
+    ADR-0350 §5:2 and §4:5, ADR-0340 §3:2-§3:5: an offset and a named zone together are
+    refused; a local time with no offset resolves in ``zone``, a gap to the first instant
+    after it and a repeated hour to the earlier of the two.
+    """
     if not isinstance(text, str):
         return _MALFORMED
     try:
         at = datetime.fromisoformat(text)
     except ValueError:
         return _MALFORMED
-    if at.tzinfo is None or at.utcoffset() is None:
+    if at.tzinfo is None:
+        at = local_instant(at, zone)
+    elif at.utcoffset() is None:
         return _NO_OFFSET
+    elif named:
+        return _OFFSET_AND_ZONE
     if at < now:
         return _EARLIER_THAN_NOW
     try:
-        return DueAt(at=at)
+        return StatedWhen(DueAt(at=at))
     except ValueError:
         return _MALFORMED
 
 
-def _delay(minutes: FrozenJson, *, now: datetime) -> TaskWhen | str:
+def _rule(
+    stated: FrozenJson, *, now: datetime, zone: ZoneInfo, named: str | None
+) -> StatedWhen | str:
+    """A rule, from its parts, with its first occurrence computed in ``zone`` (ADR-0340 §4).
+
+    Its zone is ``named``, the one the spawn names, or none, so it follows the person's
+    (§4:3). Refused, as not done with the reason, where its parts are malformed, a
+    weekly rule names no day or another names any, its until is earlier than its from,
+    or it yields no occurrence later than now (§4:4).
+    """
+    rule = _rule_of(stated, named=named)
+    if isinstance(rule, str):
+        return rule
+    first = first_occurrence(rule, zone, now=now)
+    if first is None:
+        return _NO_OCCURRENCE
+    return StatedWhen(rule, first_due_at=first)
+
+
+def _rule_of(stated: FrozenJson, *, named: str | None) -> DueOnRule | str:  # noqa: PLR0911 — each refusal is a return of its own
+    """The rule a spawn's ``rule`` argument states, or why it is refused (§4:2, §4:4)."""
+    if not isinstance(stated, Mapping) or not set(stated) <= _RULE_PARTS:
+        return _MALFORMED
+    kind = _rule_kind(stated.get(REPEATS_PART), stated.get(DAYS_PART, []))
+    if isinstance(kind, str):
+        return kind
+    clock = _clock(stated.get(TIME_PART))
+    if clock is None:
+        return _RULE_TIME
+    since = _day(stated.get(FROM_PART))
+    until = _day(stated.get(UNTIL_PART))
+    if isinstance(since, str) or isinstance(until, str):
+        return _MALFORMED
+    if since is not None and until is not None and until < since:
+        return _UNTIL_BEFORE_FROM
+    try:
+        return DueOnRule(
+            repeats=kind[0],
+            days=kind[1],
+            time_of_day=clock,
+            zone=named,
+            from_date=since,
+            until_date=until,
+        )
+    except ValueError:
+        return _MALFORMED
+
+
+#: A rule argument's parts.
+_RULE_PARTS: Final = frozenset({REPEATS_PART, DAYS_PART, TIME_PART, FROM_PART, UNTIL_PART})
+
+
+def _rule_kind(
+    repeats: FrozenJson, days: FrozenJson
+) -> tuple[TaskRuleKind, tuple[RuleDay, ...]] | str:
+    """A rule's kind and its days, or why they are refused (§4:2)."""
+    kinds = {one.value: one for one in TaskRuleKind}
+    week = {one.value: one for one in RuleDay}
+    if not isinstance(repeats, str) or repeats not in kinds or not isinstance(days, list | tuple):
+        return _MALFORMED
+    if not all(isinstance(one, str) and one in week for one in days):
+        return _MALFORMED
+    named = tuple(week[str(one)] for one in days)
+    kind = kinds[repeats]
+    if (kind is TaskRuleKind.WEEKLY) != bool(named) or len(set(named)) != len(named):
+        return _RULE_DAYS
+    return kind, named
+
+
+def _clock(text: FrozenJson) -> time | None:
+    """A rule's local time of day, to the minute, or ``None`` where it is not one (§4:2)."""
+    if not isinstance(text, str):
+        return None
+    try:
+        clock = time.fromisoformat(text)
+    except ValueError:
+        return None
+    if clock.tzinfo is not None or clock.second or clock.microsecond:
+        return None
+    return clock
+
+
+def _day(text: FrozenJson) -> date | None | str:
+    """A rule's from or until, a local date; ``None`` where it is not given (§4:4)."""
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        return _MALFORMED
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return _MALFORMED
+
+
+def _delay(minutes: FrozenJson, *, now: datetime) -> StatedWhen | str:
     """A delay from now, resolved to an instant when the task is set (§5:1)."""
     if isinstance(minutes, bool) or not isinstance(minutes, int | float) or not minutes > 0:
         return _MALFORMED
     try:
-        return DueAt(at=now + timedelta(minutes=float(minutes)))
+        return StatedWhen(DueAt(at=now + timedelta(minutes=float(minutes))))
     except OverflowError, ValueError:
         return _MALFORMED
 
 
-def _after(named: FrozenJson) -> TaskWhen | str:
+def _after(named: FrozenJson) -> StatedWhen | str:
     """The hub event named tasks ending, by the tasks' ids (§5:4)."""
     if not isinstance(named, list | tuple) or not all(isinstance(one, str) for one in named):
         return _MALFORMED
     try:
-        return DueAfterTasks(tasks=tuple(str(one) for one in named))
+        return StatedWhen(DueAfterTasks(tasks=tuple(str(one) for one in named)))
     except ValueError:
         return _MALFORMED
 
@@ -342,7 +536,7 @@ class TaskManager:
     are read from, and its own account of what runs; its stop is the engine's.
     """
 
-    def __init__(  # noqa: PLR0913 — the two stores, the engine's three seams, the sensor's wake, the bounds, the zone, the clock and the id source
+    def __init__(  # noqa: PLR0913 — the two stores, the engine's three seams, the sensor's wake, the bounds, the zones, the clock and the id source
         self,
         *,
         plans: PlanStore,
@@ -352,7 +546,7 @@ class TaskManager:
         stop_one: Callable[[str], Awaitable[ActivationStop]],
         wake: Callable[[], None],
         limits: TaskManagerLimits,
-        zone: ZoneInfo,
+        zones: PersonZones,
         now: Clock,
         new_task_id: Callable[[], str] | None = None,
     ) -> None:
@@ -367,7 +561,8 @@ class TaskManager:
                 does, without the cascade: the cascade's walk stops each it finds.
             wake: Wakes the sensor, which every write to a task does (§7:2).
             limits: §12:5's chain, pending and listing bounds.
-            zone: The zone the hub's renderings tell local time in.
+            zones: The person's zone, read for the person each task and query is for,
+                which the hub's renderings tell local time in (ADR-0340 §6:1).
             now: The clock a spawn's now is read from.
             new_task_id: Mints a scheduled task's id.
         """
@@ -378,11 +573,15 @@ class TaskManager:
         self._stop_one = stop_one
         self._wake = wake
         self._limits = limits
-        self._zone = zone
+        self._zones = zones
         self._now = now
         self._new_task_id = new_task_id or (lambda: f"task:{uuid.uuid4().hex}")
 
     # --- the queries (§10:2) ---
+
+    async def zone_of(self, person: str) -> ZoneInfo:
+        """``person``'s zone, which their tasks' times are read and rendered in (§3:3)."""
+        return await self._zones.of(person)
 
     async def listing(self, spawner: Spawner) -> TaskListing:
         """The list pull: the three queries, for the person ``spawner`` is for (§4:6).
@@ -391,30 +590,40 @@ class TaskManager:
             PlanningError: If the plan store cannot be read.
             MemoryStoreError: If the schedule's episodes cannot be read.
         """
+        zone = await self.zone_of(spawner.person)
         return TaskListing(
             running=self.running(
                 spawner.person,
                 asker=spawner.activation_id,
                 supply=spawner.supply,
                 shown=spawner.sees_running,
+                zone=zone,
             ),
-            scheduled=await self.scheduled(spawner.person),
-            recent=await self.recent(spawner.person, supply=spawner.supply),
+            scheduled=await self.scheduled(spawner.person, zone=zone),
+            recent=await self.recent(spawner.person, supply=spawner.supply, zone=zone),
             listed=True,
         )
 
     def running(
-        self, person: str, *, asker: str | None, supply: TurnSupply | None, shown: bool = True
+        self,
+        person: str,
+        *,
+        asker: str | None,
+        supply: TurnSupply | None,
+        shown: bool = True,
+        zone: ZoneInfo | None = None,
     ) -> tuple[ActivationEntry, ...]:
         """What is running for ``person``, live from the engine (§4:6, §10:2).
 
         Each as ADR-0332 §4:1 shows one: its input, under §4:2's predicate where an
         audience is given, and nothing to a viewer whose author is not established
         (§4:3, ``shown``). One whose input's origin is outside is shown with its text
-        withheld (§4:7). Bounded by the listing bound, oldest first.
+        withheld (§4:7). Bounded by the listing bound, oldest first. Its times are told
+        in ``zone``, the person's (ADR-0340 §6:1), and in the hub's where it is ``None``.
         """
         if not shown:
             return ()
+        told = self._zones.default if zone is None else zone
         entries: list[tuple[datetime, ActivationEntry]] = []
         for one in self._running():
             episode = None if one.capture is None else one.capture.written
@@ -435,7 +644,7 @@ class TaskManager:
                     one.started_at,
                     ActivationEntry(
                         activation_id=one.activation_id,
-                        started=local_time(one.started_at, self._zone),
+                        started=local_time(one.started_at, told),
                         place=place_description(one.place),
                         status="running",
                         input=None if outside or not text else _brief(text),
@@ -446,25 +655,33 @@ class TaskManager:
         entries.sort(key=lambda item: item[0])
         return tuple(entry for _, entry in entries[: self._limits.listing_bound])
 
-    async def scheduled(self, person: str) -> tuple[TaskEntry, ...]:
+    async def scheduled(
+        self, person: str, *, zone: ZoneInfo | None = None
+    ) -> tuple[TaskEntry, ...]:
         """``person``'s pending scheduled tasks, each with its parent (§4:6, §10:2).
+
+        Their times are told in ``zone``, or in ``person``'s, read here, where it is
+        ``None`` (ADR-0340 §6:1).
 
         Raises:
             PlanningError: If the plan store cannot be read.
         """
         held = await self._plans.person_scheduled_tasks(person, [OccurrenceState.PENDING])
-        return tuple(self.entry(one) for one in held[: self._limits.listing_bound])
+        told = await self.zone_of(person) if zone is None else zone
+        return tuple(self.entry(one, told) for one in held[: self._limits.listing_bound])
 
     async def recent(
-        self, person: str, *, supply: TurnSupply | None
+        self, person: str, *, supply: TurnSupply | None, zone: ZoneInfo | None = None
     ) -> tuple[ActivationEntry, ...]:
         """The activations the Task Scheduler started for ``person`` that ended last (§7:9).
 
-        Read from the schedule's episodes, newest first, bounded by the listing bound.
+        Read from the schedule's episodes, newest first, bounded by the listing bound,
+        their times told in ``zone``, or ``person``'s where it is ``None``.
 
         Raises:
             MemoryStoreError: If the episodes cannot be read.
         """
+        told = await self.zone_of(person) if zone is None else zone
         page = await self._memory.channel_episodes(SCHEDULE, limit=self._limits.listing_bound)
         shown: list[ActivationEntry] = []
         for row in reversed(page.entries):
@@ -483,7 +700,7 @@ class TaskManager:
             shown.append(
                 ActivationEntry(
                     activation_id=processing.activation_id,
-                    started=local_time(processing.started_at, self._zone),
+                    started=local_time(processing.started_at, told),
                     place=place_description(SCHEDULE),
                     status=status,
                     input=None if outside or not isinstance(text, str) else _brief(text),
@@ -492,9 +709,19 @@ class TaskManager:
             )
         return tuple(shown)
 
-    def entry(self, task: ScheduledTask) -> TaskEntry:
-        """``task`` as a listing shows it, with the hub's renderings from its record."""
-        occurrence = task.occurrences[0]
+    def entry(
+        self, task: ScheduledTask, zone: ZoneInfo, *, spawner: Spawner | None = None
+    ) -> TaskEntry:
+        """``task`` as a listing shows it, with the hub's renderings from its record.
+
+        Its times in ``zone``, the person's, or its rule's own (ADR-0340 §6:1); for a
+        rule, the rule in words (§8:2). For the task ``spawner``'s spawn wrote, the
+        read-back too (§6:2), which says the line may still message the person where the
+        line's chat is on the spawner's place list.
+        """
+        occurrence = shown_occurrence(task)
+        now = self._now()
+        shown = task_zone(task, zone)
         who = (
             "a scheduled step"
             if task.set_in.channel_type == SCHEDULE.channel_type
@@ -502,10 +729,14 @@ class TaskManager:
             if task.author is ScheduledTaskAuthor.PERSON
             else "the assistant"
         )
+        line = spawner is not None and any(
+            (channel := place_channel(one)) is not None and channel.channel_type == "telegram"
+            for one in spawner.places
+        )
         return TaskEntry(
             task_id=task.id,
             state=outcome_text(occurrence),
-            falls_due=when_text(task, self._zone),
+            falls_due=when_text(task, zone, now=now),
             waits_on=task.when.tasks if isinstance(task.when, DueAfterTasks) else (),
             instruction=None if task.outside_content else _brief(task.instruction),
             outside=task.outside_content,
@@ -513,9 +744,15 @@ class TaskManager:
             parent=task.parent,
             parent_text=(
                 f"spawned by {who} in {place_description(task.set_in)}, "
-                f"{local_time(task.set_at, self._zone)}"
+                f"{local_time(task.set_at, shown)}"
             ),
             author=task.author.value,
+            repeats=(
+                rule_text(task.when, today=now.astimezone(shown).date())
+                if isinstance(task.when, DueOnRule)
+                else None
+            ),
+            read_back=(None if spawner is None else read_back(task, zone, now=now, line=line)),
         )
 
     # --- the commands (§10:2) ---
@@ -531,8 +768,12 @@ class TaskManager:
         effect: ActivationEffect,
         match: tuple[str, ...] | None,
         deliberate_repeat: bool,
+        first_due_at: datetime | None = None,
     ) -> ScheduledTaskWrite:
         """Write a spawn's task, claiming its effect record in the one step (§3:3).
+
+        ``first_due_at`` is a rule's first occurrence, as :func:`spawn_when` computed it
+        in the zone the rule is read in (ADR-0340 §4:5, §9:5).
 
         Raises:
             ClaimStopped: If the store holds a stop record for the spawner.
@@ -549,6 +790,7 @@ class TaskManager:
             set_at=self._now(),
             outside_content=spawner.read_outside_content,
             replaces=replaces,
+            first_due_at=first_due_at,
         )
         written = await self._plans.write_scheduled_task(
             spawn,
@@ -591,16 +833,27 @@ class TaskManager:
 
         A structured act naming one operation (§10:5): it writes the new task, which takes
         the replaced task's parent, suggested places and chain length, claimed under an
-        effect record of the command's own, and is the person's act.
+        effect record of the command's own, and is the person's act. A rule's first
+        occurrence is computed in its own zone or the person's (ADR-0340 §4:5).
 
         Raises:
-            PlanningError: If the store fails, or the task is not held.
+            PlanningError: If the store fails, the task is not held, or a rule yields
+                no occurrence later than now (ADR-0340 §4:4).
         """
         held = await self._plans.scheduled_tasks([task_id])
         if not held:
             msg = f"the Task Scheduler holds no task {task_id}"
             raise PlanningError(msg)
         replaced = held[0]
+        first = None
+        if isinstance(when, DueOnRule):
+            named = None if when.zone is None else resolve_zone(when.zone)
+            first = first_occurrence(
+                when, named or await self.zone_of(replaced.person), now=self._now()
+            )
+            if first is None:
+                msg = "the rule yields no occurrence later than now (ADR-0340 §4:4)"
+                raise PlanningError(msg)
         command = str(uuid.uuid4())
         effect = _command_effect(command, self._now())
         spawner = Spawner(
@@ -618,6 +871,7 @@ class TaskManager:
             effect=effect,
             match=None,
             deliberate_repeat=False,
+            first_due_at=first,
         )
         if written.answer is TaskWriteAnswer.WRITTEN:
             await self._plans.finish_activation_effect(effect.id, ToolOutcome.SUCCEEDED)
@@ -731,10 +985,15 @@ def _payload_text(state: ActivationState) -> str:
 
 
 def _command_effect(command: str, at: datetime) -> ActivationEffect:
-    """The effect record a Task Manager's replace is claimed under (§10:2)."""
+    """The effect record a Task Manager's replace is claimed under (§10:2).
+
+    A call's effect names the round that proposed it (ADR-0307 §10); the command's is
+    its own, named for it.
+    """
     return ActivationEffect(
         id=f"effect:{uuid.uuid4().hex}",
         activation_id=command,
+        round=f"command:{command}",
         capability=SPAWN_CAPABILITY,
         values_digest="0" * 64,
         decision_id=f"command:{command}",
@@ -793,7 +1052,8 @@ class ScheduledTaskCalls:
             reason = TaskRefusal.UNKNOWN_TASK if cancelled.reason is None else cancelled.reason
             _log.info("task_call_not_done", stage="acting", reason=reason.value)
             return NotDone(reason=_REFUSAL_TEXT[reason])
-        listing = TaskListing(cancelled=self._manager.entry(cancelled.task))
+        zone = await self._manager.zone_of(spawner.person)
+        listing = TaskListing(cancelled=self._manager.entry(cancelled.task, zone))
         return ToolResult(outcome=ToolOutcome.SUCCEEDED, output=encode_listing(listing))
 
     async def run_claiming(  # noqa: PLR0911 — each of §4:5's refusals is a return of its own
@@ -807,7 +1067,9 @@ class ScheduledTaskCalls:
         """Run a spawn, its task and its effect claim written in one step (§3:3).
 
         Refused, writing nothing, where its instant is earlier than now, it suggests a
-        place off its activation's list, or the store refuses it (§4:5).
+        place off its activation's list, or the store refuses it (§4:5); and on ADR-0340
+        §3:5's and §4:4's grounds. A local time and a rule are read in the person's zone,
+        or the one the spawn names, and the result carries the read-back (§6:2).
 
         Raises:
             ClaimStopped: If the store holds a stop record for the spawning activation.
@@ -819,9 +1081,10 @@ class ScheduledTaskCalls:
         instruction = arguments.get(INSTRUCTION_ARGUMENT)
         if not isinstance(instruction, str) or not instruction.strip():
             return Unwritten(reason=_MALFORMED)
-        when = spawn_when(arguments, now=self._now())
-        if isinstance(when, str):
-            return Unwritten(reason=when)
+        zone = await self._manager.zone_of(spawner.person)
+        stated = spawn_when(arguments, now=self._now(), zone=zone)
+        if isinstance(stated, str):
+            return Unwritten(reason=stated)
         places = _suggested(spawner, arguments)
         if isinstance(places, str):
             return Unwritten(reason=places)
@@ -832,12 +1095,13 @@ class ScheduledTaskCalls:
             written = await self._manager.spawn(
                 spawner,
                 instruction=instruction,
-                when=when,
+                when=stated.when,
                 places=places,
                 replaces=replaces,
                 effect=effect,
                 match=match,
                 deliberate_repeat=deliberate_repeat,
+                first_due_at=stated.first_due_at,
             )
         except ValueError:
             return Unwritten(reason=_MALFORMED)
@@ -849,7 +1113,7 @@ class ScheduledTaskCalls:
             reason = TaskRefusal.UNKNOWN_TASK if written.reason is None else written.reason
             _log.info("task_call_not_done", stage="acting", reason=reason.value)
             return Unwritten(reason=_REFUSAL_TEXT[reason])
-        listing = TaskListing(spawned=self._manager.entry(written.task))
+        listing = TaskListing(spawned=self._manager.entry(written.task, zone, spawner=spawner))
         return ToolResult(outcome=ToolOutcome.SUCCEEDED, output=encode_listing(listing))
 
 
@@ -889,7 +1153,8 @@ class TaskSchedulerSeams:
         lateness_grace: How long after it was due an occurrence may be pushed before its
             input says it is late (§8:9).
         push_limit: The most times one occurrence is pushed (§8:5).
-        zone: The IANA name of the zone the hub's renderings tell local time in.
+        zone: The IANA name of ``Settings.timezone``, the zone a person's times are read
+            and rendered in where their profile sets none (ADR-0340 §3:3).
         persons: The people whose pushed occurrences a restart settles (§8:1).
     """
 

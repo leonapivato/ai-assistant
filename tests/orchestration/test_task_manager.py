@@ -36,6 +36,7 @@ from ai_assistant.orchestration.task_manager import (
     TaskManager,
     TaskManagerLimits,
 )
+from ai_assistant.orchestration.task_rules import PersonZones
 from ai_assistant.orchestration.task_scheduler import (
     CANCEL_TASK,
     LIST_TASKS,
@@ -68,7 +69,7 @@ class _World:
             stop_one=self._stop_one,
             wake=self._wake,
             limits=limits,
-            zone=ZoneInfo("UTC"),
+            zones=PersonZones(default=ZoneInfo("UTC")),
             now=lambda: AT,
         )
         self.calls = ScheduledTaskCalls(manager=self.manager, now=lambda: AT)
