@@ -547,9 +547,11 @@ class ActivationEntry:
         started: When it started, in local time.
         place: The place it was started from, described.
         status: ``running``, or how it ended.
-        input: Its input in brief, or ``None`` where it rests on outside content, whose
-            text is withheld with its mark shown (§4:7).
+        input: Its input in brief, or ``None`` where it is withheld: an outside one, with
+            its mark shown (§4:7), or a scheduled task's own instruction.
         outside: Whether its input's origin is outside.
+        acted: For a running one, whether it has acted (ADR-0349 §5:6, §6:2).
+        origin: Who its input came from, which says why a withheld input is withheld.
     """
 
     activation_id: str
@@ -558,6 +560,8 @@ class ActivationEntry:
     status: str
     input: str | None
     outside: bool
+    acted: bool = False
+    origin: InputOrigin = InputOrigin.USER
 
 
 @dataclass(frozen=True, slots=True)
@@ -611,6 +615,8 @@ def _activation_json(entry: ActivationEntry) -> dict[str, FrozenJson]:
         "status": entry.status,
         "input": entry.input,
         "outside": entry.outside,
+        "acted": entry.acted,
+        "origin": entry.origin.value,
     }
 
 
@@ -680,7 +686,17 @@ def _activation_of(value: object) -> ActivationEntry:
         status=_str(held, "status"),
         input=_optional_str(held, "input"),
         outside=bool(held["outside"]),
+        acted=bool(held.get("acted", False)),
+        origin=_origin(held),
     )
+
+
+def _origin(held: Mapping[str, object]) -> InputOrigin:
+    """An entry's origin, a key added after a listing may have been recorded."""
+    value = held.get("origin")
+    if not isinstance(value, str):
+        return InputOrigin.OUTSIDE if held.get("outside") else InputOrigin.USER
+    return InputOrigin(value)
 
 
 def decode_listing(output: FrozenJsonValue) -> TaskListing | None:

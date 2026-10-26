@@ -82,6 +82,7 @@ class _Phases:
     latest_acted: bool = False
     latest_digests_due: bool = False
     latest_calls_beyond_tidy_ups: bool = False
+    latest_brings_another: bool = False
 
 
 #: The controller's mechanism cases' own table: the rows of §3's table that answer

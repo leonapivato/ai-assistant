@@ -99,8 +99,9 @@ class PassFacts(Protocol):
     def understanding_decided(self) -> bool:
         """An understanding decision covers every input the activation holds.
 
-        ADR-0332 §3:9: the trigger's input and every one that joined it, a takeover's
-        included, so a join makes understanding due again.
+        ADR-0332 §3:9: the trigger's input and every one a merge brought, each of which
+        the version that named its activation or its offer's meaning covers (ADR-0349
+        §7:9), so a merge never makes understanding due again.
         """
 
     @property
@@ -216,6 +217,14 @@ class PhaseFacts(Protocol):
         back; a tidy-up never brings one (ADR-0315 §2:1, §2:2).
         """
 
+    @property
+    def latest_brings_another(self) -> bool:
+        """The latest round brings another whatever it called (ADR-0349 §7:14, §7:26).
+
+        A waiting round, which never ends the activation, and a round whose acts were
+        held back for an offer it was not shown.
+        """
+
 
 @dataclass(frozen=True)
 class Rule:
@@ -264,8 +273,11 @@ def _round_finished(phases: PhaseFacts) -> bool:
     """Every call of the latest round has finished, digests included (ADR-0315 §2:1).
 
     The round's authorizing decision is made, and where it allowed anything, the step
-    that ran it, acting with its digests beside it, has ended.
+    that ran it, acting with its digests beside it, has ended. A round with neither a
+    call nor text has nothing to authorize, and is finished as it is planned.
     """
+    if not phases.latest_has_calls and not phases.latest_has_text:
+        return True
     return phases.latest_authorized and (phases.latest_acted or not phases.latest_allows)
 
 
@@ -275,17 +287,23 @@ def _another_round_called_for(facts: PassFacts) -> bool:
     The latest round proposed a call other than a tidy-up, and every call of it has
     finished, whatever its calls brought back (§2:1). A round whose only calls are
     tidy-ups, like a round with no calls, ends the activation after its message (§2:2,
-    §2:3); the round limit ends every loop this makes (§2:4).
+    §2:3); the round limit ends every loop this makes (§2:4). ADR-0349 §7:14, §7:26: a
+    waiting round, and a round whose acts were held back for an offer, bring another
+    whatever they called, once they have finished.
     """
     phases = _phases(facts)
-    return phases.rounds > 0 and phases.latest_calls_beyond_tidy_ups and _round_finished(phases)
+    return (
+        phases.rounds > 0
+        and (phases.latest_calls_beyond_tidy_ups or phases.latest_brings_another)
+        and _round_finished(phases)
+    )
 
 
 def _inputs_held(facts: PassFacts) -> object:
     """The loop guard's scope for understanding: the inputs the activation holds.
 
-    ADR-0332 §3:9: understanding runs at most once for each, so a join makes it due
-    again, and ADR-0280 §4:6's guard ends a pass that would run it twice for one count.
+    ADR-0332 §3:9: understanding runs at most once for each count, and ADR-0280 §4:6's
+    guard ends a pass that would run it twice for one count.
     """
     return facts.inputs_held
 

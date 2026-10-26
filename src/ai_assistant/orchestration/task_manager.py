@@ -77,6 +77,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.acting import Unwritten
 from ai_assistant.orchestration.channel_kinds import place_channel, place_of
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
+from ai_assistant.orchestration.matters import in_progress
 from ai_assistant.orchestration.person_block import activation_person
 from ai_assistant.orchestration.person_calls import NotDone
 from ai_assistant.orchestration.task_rules import (
@@ -621,45 +622,34 @@ class TaskManager:
     ) -> tuple[ActivationEntry, ...]:
         """What is running for ``person``, live from the engine (§4:6, §10:2).
 
-        Each as ADR-0332 §4:1 shows one: its input, under §4:2's predicate where an
-        audience is given, and nothing to a viewer whose author is not established
-        (§4:3, ``shown``). One whose input's origin is outside is shown with its text
-        withheld (§4:7). Bounded by the listing bound, oldest first. Its times are told
-        in ``zone``, the person's (ADR-0340 §6:1), and in the hub's where it is ``None``.
+        ADR-0349 §6:2: each activation understanding's in-progress section would enter
+        (§5:2-§5:5), as its entry shows it (§5:6), its input read through the peer view,
+        so an outside one is withheld with its mark shown (§4:7); nothing to a viewer
+        whose author is not established (``shown``). Newest first, bounded by the
+        listing bound. Its times are told in ``zone``, the person's (ADR-0340 §6:1), and
+        in the hub's where it is ``None``.
         """
         if not shown:
             return ()
         told = self._zones.default if zone is None else zone
-        entries: list[tuple[datetime, ActivationEntry]] = []
-        for one in self._running():
-            episode = None if one.capture is None else one.capture.written
-            if (
-                one.activation_id is None
-                or one.activation_id == asker
-                or one.started_at is None
-                or one.ended
-                or activation_person(one.trigger) != person
-                or episode is None
-                or (supply is not None and not admitted_to_understanding(supply, (episode,)))
-            ):
-                continue
-            outside = one.trigger.origin is InputOrigin.OUTSIDE
-            text = " ".join(message.text for message in one.whole_input) or _payload_text(one)
+        states = {one.activation_id: one for one in self._running()}
+        entries: list[ActivationEntry] = []
+        for entry in in_progress(states.values(), viewer=asker, person=person, supply=supply):
+            state = states.get(entry.activation_id)
+            started = None if state is None else state.started_at
             entries.append(
-                (
-                    one.started_at,
-                    ActivationEntry(
-                        activation_id=one.activation_id,
-                        started=local_time(one.started_at, told),
-                        place=place_description(one.place),
-                        status="running",
-                        input=None if outside or not text else _brief(text),
-                        outside=outside,
-                    ),
+                ActivationEntry(
+                    activation_id=entry.activation_id,
+                    started="" if started is None else local_time(started, told),
+                    place=place_description(entry.channel),
+                    status="running",
+                    input=entry.input,
+                    outside=entry.origin is InputOrigin.OUTSIDE,
+                    acted=entry.acted,
+                    origin=entry.origin,
                 )
             )
-        entries.sort(key=lambda item: item[0])
-        return tuple(entry for _, entry in entries[: self._limits.listing_bound])
+        return tuple(entries[: self._limits.listing_bound])
 
     async def scheduled(
         self, person: str, *, zone: ZoneInfo | None = None
@@ -991,11 +981,6 @@ def _ended_text(status: ProcessingStatus | None, reason: ProcessingReason | None
     if status is None:
         return "ended"
     return status.value if reason is None else f"{status.value} ({reason.value})"
-
-
-def _payload_text(state: ActivationState) -> str:
-    text = getattr(state.trigger.payload, "text", None)
-    return text if isinstance(text, str) else ""
 
 
 def _command_effect(command: str, at: datetime) -> ActivationEffect:

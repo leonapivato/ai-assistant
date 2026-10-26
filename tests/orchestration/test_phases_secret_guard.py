@@ -61,7 +61,7 @@ from ai_assistant.orchestration import (
     digesting,
     disclosure,
     held_results,
-    joining,
+    matters,
     person_block,
     story_links,
     task_scheduler,
@@ -125,7 +125,7 @@ _NAMES: dict[str, Any] = (
     | vars(core_protocols)
     | vars(disclosure)
     | vars(held_results)
-    | vars(joining)
+    | vars(matters)
     | vars(person_block)
     | vars(story_links)
     | vars(task_scheduler)
@@ -407,13 +407,19 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
     a time, an author, the text and what it replies to; and its trigger records each
     message it took in as ``RecordedInputMessage``, with a forward's original sender as
     ``ClaimedAuthor`` — a name and an id Telegram reported (§4:10, §5:4). The bot's
-    token never reaches any of them: the client binds it in ``tools/`` (§11:8). A joined
-    input (ADR-0332 §3:16) is a time, the ``ChannelIdentity`` it came from, its
-    ``RecordedInputMessage``s and the identifier of an activation a takeover stopped:
-    the user's words and identifiers, with no carrier. A running activation shown
-    beside the windows (ADR-0332 §4:1), ``RunningActivation``, is its identifier, the
-    ``ChannelIdentity`` it was started from, when it began, its ``RecordedInputMessage``s
-    and whether it has committed: the same person's words and identifiers, no carrier.
+    token never reaches any of them: the client binds it in ``tools/`` (§11:8). An input
+    a merge brought (ADR-0349 §7:7, §7:21), a ``JoinedInput``, is a time, the
+    ``ChannelIdentity`` it came from, its ``RecordedInputMessage``s and the identifier of
+    the activation it was taken from: the user's words and identifiers, with no carrier.
+    An in-progress entry (ADR-0349 §5:6), ``InProgressEntry``, and its planning-side
+    ``RunningShown``, are an identifier, the ``ChannelIdentity`` that caused it, its input
+    in brief read through the peer view, a flag and a closed origin; an offer shown,
+    ``OfferShown``, is an identifier, that brief input and the meaning understanding
+    wrote. Another activation's own work, ``PeerView`` with ``PeerNotes``,
+    ``PeerEffect``, ``ProjectedText`` and ``ProjectedEvidence``, held for planning as
+    ``PeerShown`` (§6:7-§6:10), is that activation's input, its meaning, its notes and
+    evidence as projected, and its effects by capability or message: what the same
+    person's activations read and wrote, with no carrier.
 
     **The audience** (ADR-0203, ADR-0204). ``UnboundedAudienceSupply`` and
     ``BoundedAudienceSupply`` filter what is rendered and are never rendered: a set of
@@ -543,7 +549,17 @@ def test_the_phases_model_supply_is_enumerated_so_a_new_type_must_be_judged() ->
         "ReportedExtent",
         "RoundMessagePart",
         "RoundResponse",
-        "RunningActivation",
+        # ADR-0349 §5:6, §6:7-§6:10, §7:19: in-progress entries, an offer and another
+        # activation's own work, judged in the docstring above.
+        "InProgressEntry",
+        "OfferShown",
+        "PeerEffect",
+        "PeerNotes",
+        "PeerShown",
+        "PeerView",
+        "ProjectedEvidence",
+        "ProjectedText",
+        "RunningShown",
         "ShortView",
         "ShownSuggestion",
         "SpokenReply",

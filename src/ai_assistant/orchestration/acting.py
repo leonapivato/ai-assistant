@@ -629,10 +629,11 @@ class ActedRound:
     Attributes:
         round_id: The planning round.
         calls: What came of each call.
-        set_aside: A join set the round aside (ADR-0332 §3:7, §7:6): acting's commitment
-            step found joined input the understanding the round was planned from does
-            not cover, so none of its calls ran and its message was not written, by any
-            path. Each call is then not done, with the reason.
+        set_aside: The round was held back (ADR-0349 §7:14): acting's commitment step
+            found an offer open to the activation that the round's planning was not
+            shown, so none of its calls ran and its message was not written, by any
+            path, and planning runs a round again. Each call is then not done, with the
+            reason.
     """
 
     round_id: str

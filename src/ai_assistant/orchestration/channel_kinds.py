@@ -30,7 +30,8 @@ declaration is :func:`one_at_a_time`'s register, keyed by channel type as ``core
 so a kind not yet declared in code (the hub chat's) declares it too, and
 :attr:`ChannelKind.one_at_a_time` reads it rather than restating it. On such a place an
 activation is admitted only where none started from it is running, and an input that
-arrives meanwhile joins the running one or waits (§2:4).
+arrives meanwhile waits (§2:4); nothing joins by code (ADR-0349 §1:4's step 2), and
+ADR-0349 §8 retires the holding with the readers' own step.
 
 **Whether a kind can confirm delivery** (ADR-0350 §8:12). A kind declares whether it can
 confirm, from its medium's own record, whether a message claimed into one of its places
@@ -233,8 +234,8 @@ def one_at_a_time(channel_type: str) -> bool:
 
     ADR-0332 §2:3: the conversation kind and the line declare that they do, so on one of
     their places an activation is admitted only where none started from it is running,
-    and an input arriving meanwhile joins it or waits (§2:4). Every other kind's
-    activations run side by side (§2:2).
+    and an input arriving meanwhile waits (§2:4). Every other kind's activations run
+    side by side (§2:2).
     """
     return channel_type in _ONE_AT_A_TIME
 

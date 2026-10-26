@@ -153,6 +153,7 @@ from ai_assistant.core.prompts import PromptDeclaration
 from ai_assistant.core.types import (
     DEFAULT_ASSISTANT_NAME,
     OWNER_PERSON_ID,
+    PEER_COULDNT_FINISH_LINE,
     AskedCall,
     BeliefBand,
     CapabilityResult,
@@ -178,10 +179,15 @@ from ai_assistant.core.types import (
     StoryNoteAuthor,
     StoryRelation,
     SupportHolder,
+    ToolOutcome,
     label_prefix,
     statement_citations,
 )
 from ai_assistant.orchestration.channel_kinds import place_channel
+from ai_assistant.orchestration.matters import (
+    LOOK_UP_ACTIVATION_CAPABILITY,
+    STOP_ACTIVATION_CAPABILITY,
+)
 from ai_assistant.orchestration.person_block import person_zone
 from ai_assistant.orchestration.reliance import NOTE_RELIANCE_CAPABILITY
 from ai_assistant.orchestration.remembering import REMEMBER_CAPABILITY
@@ -204,6 +210,8 @@ if TYPE_CHECKING:
         EpisodeProjection,
         FrozenJsonValue,
         Memory,
+        PeerEffect,
+        PeerView,
         ProjectedRound,
         ProjectedText,
         QuestionPart,
@@ -236,6 +244,8 @@ __all__ = [
     "CallOutcomeKind",
     "DigestItem",
     "DigestedEvidence",
+    "OfferShown",
+    "PeerShown",
     "PlaceAuthor",
     "PlaceItem",
     "PlaceWindow",
@@ -248,6 +258,7 @@ __all__ = [
     "RecordedCandidate",
     "RefusedCall",
     "RoundRecorder",
+    "RunningShown",
     "exact_line",
     "offered_tools",
 ]
@@ -477,6 +488,9 @@ class CallOutcome:
             it came back with, its tasks shown under ``T`` labels, its activations under
             their episodes' ``E`` labels and its places under ``L`` labels (ADR-0350
             §4:6-§4:8); ``None`` for any other call.
+        peer: For a stop call, a look-up or an answer, the activation it named and
+            what came of it, under that activation's ``E`` label (ADR-0349 §4:9,
+            §4:11, §6:5-§6:6); ``None`` for any other call.
 
     Raises:
         ValueError: If it carries a result, or says one was digested, without the
@@ -501,6 +515,7 @@ class CallOutcome:
     replaces: tuple[Memory, ...] = ()
     worded: tuple[tuple[str, str], ...] = ()
     tasks: TaskListing | None = None
+    peer: PeerShown | None = None
 
     def __post_init__(self) -> None:
         """A result is shown under its label, so it carries the id the label names."""
@@ -682,6 +697,69 @@ class ApprovedAction:
 
 
 @dataclass(frozen=True, slots=True)
+class RunningShown:
+    """A running activation, as an in-progress entry shows it (ADR-0349 §5:6, §7:26).
+
+    Planning's own shape, filled by the phases from what crosses activations, and shown
+    under the activation's episode label (§5:7).
+
+    Attributes:
+        activation_id: The activation, which its episode's ``E`` label names.
+        place: What caused it: its channel and its place.
+        input: What it took in, in brief; ``None`` where it is withheld.
+        acted: Whether it has acted.
+        origin: Who its input came from, which says why a withheld input is withheld.
+    """
+
+    activation_id: str
+    place: ChannelIdentity
+    input: str | None
+    acted: bool
+    origin: InputOrigin
+
+
+@dataclass(frozen=True, slots=True)
+class OfferShown:
+    """An offer open to this activation, as its planning is shown it (ADR-0349 §7:19).
+
+    Attributes:
+        activation_id: The offering activation, whose episode's ``E`` label names it.
+        input: The offered input, in brief, as an in-progress entry shows input.
+        meaning: The meaning the offering activation's understanding recorded.
+    """
+
+    activation_id: str
+    input: str | None
+    meaning: str
+
+
+@dataclass(frozen=True, slots=True)
+class PeerShown:
+    """Another activation's own work, as planning is shown it (ADR-0349 §6:7-§6:10).
+
+    The peer view of an activation this one absorbed, took input from or waited on, read
+    fresh at each round (§7:10, §7:27), or what a stop call, a look-up or an answer came
+    back with (§4:11, §6:5-§6:6, §7:20).
+
+    Attributes:
+        activation_id: The activation, which its episode's ``E`` label names.
+        view: Its peer view; ``None`` where its episode could not be read.
+        ended: Whether it has ended, a stop included (§4:10, §6:6).
+        stopped: For a stop call, whether this call stopped it; ``None`` otherwise.
+        absorbed_by: For a refused stop call, the activation that absorbed it (§4:9).
+        answered: For an answer call, what it came to: ``taken``, ``declined`` or
+            ``withdrawn``.
+    """
+
+    activation_id: str
+    view: PeerView | None = None
+    ended: bool = False
+    stopped: bool | None = None
+    absorbed_by: str | None = None
+    answered: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class PlanningInputs:
     """Everything one round is given (ADR-0307 §6, ADR-0312 §4).
 
@@ -732,6 +810,15 @@ class PlanningInputs:
         speaks_by_label: Whether the activation was started by the Task Scheduler, so
             its message names, by its place label, the one place on its list it goes
             into (§6:7).
+        offers: The offers open to this activation, shown at the start of each of its
+            rounds (ADR-0349 §7:19).
+        waiting: Where this round is a waiting round, each activation it waits on, as an
+            in-progress entry shows it (§7:26); empty otherwise.
+        declined: Each decline of this activation's offer, by the older that declined
+            it, with its reason, shown to its waiting round (§7:23).
+        earlier_work: The finished work of each activation this one absorbed or took
+            input from, and, after a wait, of each it waited on, read fresh (§7:10,
+            §7:27).
     """
 
     activation_id: str
@@ -756,6 +843,10 @@ class PlanningInputs:
     person: PersonBlock | None = None
     places: tuple[ListedPlace, ...] | None = None
     speaks_by_label: bool = False
+    offers: tuple[OfferShown, ...] = ()
+    waiting: tuple[RunningShown, ...] = ()
+    declined: tuple[tuple[str, str], ...] = ()
+    earlier_work: tuple[PeerShown, ...] = ()
 
 
 # --- the round's decision ----------------------------------------------------------------
@@ -1007,6 +1098,12 @@ _NEEDS_YOUR_YES: Final = "Needs your yes:"
 #:   §5:10).
 #: - ``scheduled``: the activation was started by the Task Scheduler, so its message
 #:   names the place it goes into by its place label (ADR-0350 §6:7).
+#: - ``running_work``: the stop call or the findings look-up is offered (ADR-0349 §4:6,
+#:   §6:1).
+#: - ``offers``: an offer is open to this activation and shown (§7:19).
+#: - ``waiting``: the round is a waiting round (§7:26).
+#: - ``earlier_work``: the finished work of what this activation took over or waited on
+#:   is shown (§7:10, §7:27).
 #:
 #: **Values**, which code owns: ``approved_action_tool``, the approved-action tool's name;
 #: ``note_reliance_capability``, the reliance capability's name; and ``needs_your_yes``,
@@ -1053,10 +1150,17 @@ PLANNING_PROMPT: Final = PromptDeclaration(
             "suggestions",
             "spawn",
             "scheduled",
+            "running_work",
+            "offers",
+            "waiting",
+            "earlier_work",
         }
     ),
     values=frozenset({"approved_action_tool", "note_reliance_capability", "needs_your_yes"}),
 )
+
+#: The calls on running work whose instruction the ``running_work`` flag carries.
+_RUNNING_WORK_CALLS: Final = frozenset({STOP_ACTIVATION_CAPABILITY, LOOK_UP_ACTIVATION_CAPABILITY})
 
 #: The values the stage hands planning's template, every one it declares (ADR-0334 §4:2).
 _PLANNING_VALUES: Final = {
@@ -1424,6 +1528,15 @@ class _Request:
             document["places"] = self._places(inputs.places)
         if inputs.approved:
             document["approved_actions"] = [self._approved(one) for one in inputs.approved]
+        if inputs.offers:
+            # ADR-0349 §7:19: each offer open to this work, at the start of every round.
+            document["offers"] = [self._offer(one) for one in inputs.offers]
+        if inputs.waiting:
+            # §7:26: the work this round waits on, and why an offer was declined.
+            document["waiting_on"] = [self._waited_on(one) for one in inputs.waiting]
+        if inputs.earlier_work:
+            # §7:10, §7:27: the finished work this one took over or waited on.
+            document["earlier_work"] = [self._peer(one) for one in inputs.earlier_work]
         document |= {
             "place_window": [self._item(item) for item in inputs.place.items],
             "episode_window": self._episodes(),
@@ -1605,6 +1718,92 @@ class _Request:
             "input": _OUTSIDE if entry.outside or entry.input is None else entry.input,
         }
 
+    def _running(self, entry: ActivationEntry) -> dict[str, object]:
+        """A running activation, as the list pull's running part shows it (ADR-0349 §6:2).
+
+        As an in-progress entry shows it (§5:6), under its episode label (§5:7): what
+        caused it, what it took in, in brief, and whether it has acted.
+        """
+        return {
+            "episode": self._book.label(LabelKind.EPISODE, f"activation:{entry.activation_id}"),
+            "place": entry.place,
+            "input": _withheld(entry.origin) if entry.input is None else entry.input,
+            "has_acted": entry.acted,
+        }
+
+    def _offer(self, one: OfferShown) -> dict[str, object]:
+        """An offer open to this work, under the offering activation's label (§7:19)."""
+        return {
+            "offer": self._book.label(LabelKind.EPISODE, episode_address(one.activation_id)),
+            "input": _withheld(InputOrigin.USER) if one.input is None else one.input,
+            "understood_as": one.meaning,
+        }
+
+    def _waited_on(self, one: RunningShown) -> dict[str, object]:
+        """Work this round waits on, as an in-progress entry shows it (§7:26)."""
+        shown: dict[str, object] = {
+            "episode": self._book.label(LabelKind.EPISODE, episode_address(one.activation_id)),
+            "place": _place_text(one.place),
+            "input": _withheld(one.origin) if one.input is None else one.input,
+            "has_acted": one.acted,
+        }
+        reasons = [why for older, why in self._inputs.declined if older == one.activation_id]
+        if reasons:
+            shown["declined_this_input"] = reasons[-1]
+        return shown
+
+    def _peer(self, one: PeerShown) -> dict[str, object]:
+        """Another activation's own work, read through the peer view (§6:7-§6:10).
+
+        What it took in, what it is doing, read as provisional, what it found, each with
+        its mark, and what it did. An outside episode shown here counts as any episode
+        shown under its label does (§6:13), and marked notes or evidence it shows mark
+        this round's notes, as any outside content read does.
+        """
+        shown: dict[str, object] = {
+            "episode": self._book.label(LabelKind.EPISODE, episode_address(one.activation_id))
+        }
+        if one.stopped is not None:
+            shown["stopped_by_this_call"] = one.stopped
+        if one.answered is not None:
+            shown["answer"] = one.answered
+            return shown
+        shown["status"] = "ended" if one.ended else "running"
+        view = one.view
+        if view is None:
+            shown["work"] = _PEER_UNREAD
+            return shown
+        return shown | self._peer_work(view)
+
+    def _peer_work(self, view: PeerView) -> dict[str, object]:
+        """What a peer view shows of an activation's own work (§6:9)."""
+        shown: dict[str, object] = {}
+        if view.input is not None:
+            shown["input"] = _text(view.input)
+            if view.joined:
+                shown["also_took_in"] = [_text(text) for text in view.joined]
+        else:
+            shown["input"] = _withheld(view.origin)
+        if view.meaning is not None:
+            shown["doing"] = f"{_PROVISIONAL}{view.meaning}"
+        found: list[object] = []
+        for notes in view.notes:
+            item: dict[str, object] = {"notes": _text(notes.notes)}
+            if notes.marked:
+                item["outside_content"] = _OUTSIDE
+                self.shown.marked = True
+            found.append(item)
+        for evidence in view.evidence:
+            found.append({"evidence": _text(evidence.text), "outside_content": _OUTSIDE})
+            self.shown.marked = True
+        if found:
+            shown["found"] = found
+        shown["did"] = [_effect_text(effect) for effect in view.did] or _NOTHING_DONE
+        if view.derived_from_external:
+            shown["outside_content"] = _OUTSIDE
+            self.shown.marked = True
+        return shown
+
     def _listing(self, listing: TaskListing) -> dict[str, object]:
         """What a call on the Task Scheduler came back with, labelled (ADR-0350 §4:6-§4:8)."""
         shown: dict[str, object] = {}
@@ -1613,7 +1812,7 @@ class _Request:
         if listing.cancelled is not None:
             shown["cancelled"] = self._task(listing.cancelled)
         if listing.listed:
-            shown["running"] = [self._activation(one) for one in listing.running] or _NONE_FOUND
+            shown["running"] = [self._running(one) for one in listing.running] or _NONE_FOUND
             shown["scheduled"] = [self._task(one) for one in listing.scheduled] or _NONE_FOUND
             shown["ended_lately"] = [self._activation(one) for one in listing.recent] or _NONE_FOUND
         return shown
@@ -2121,6 +2320,7 @@ class _Request:
         if outcome.reason is not None:
             text = f"{text}: {outcome.reason}"
         shown["outcome"] = text
+        shown |= self._absorbed_by(outcome.peer)
         if outcome.kind is not CallOutcomeKind.DONE or outcome.result_id is None:
             return shown
         result: dict[str, object] = {"label": self._book.label(LabelKind.RESULT, outcome.result_id)}
@@ -2134,10 +2334,20 @@ class _Request:
             result["value"] = self._candidate(outcome.candidate)
         elif outcome.tasks is not None:
             result["value"] = self._listing(outcome.tasks)
+        elif outcome.peer is not None:
+            result["value"] = self._peer(outcome.peer)
         else:
             result["value"] = _DIGESTED_RESULT if outcome.digested else _thawed(outcome.result)
         shown["result"] = result
         return shown
+
+    def _absorbed_by(self, peer: PeerShown | None) -> dict[str, object]:
+        """ADR-0349 §4:9: the absorber a refused stop names, by its label, where one did."""
+        if peer is None or peer.absorbed_by is None:
+            return {}
+        return {
+            "absorbed_by": self._book.label(LabelKind.EPISODE, episode_address(peer.absorbed_by))
+        }
 
     def _needs_you(self, outcome: CallOutcome, reference: str) -> dict[str, object]:
         """Which case of needing the user applies to a call (ADR-0321 §2:10).
@@ -2279,6 +2489,39 @@ def _text(projected: ProjectedText) -> str:
     if projected.cut:
         return f"{projected.text}… (cut: {len(projected.text)} of {projected.full_chars} chars)"
     return projected.text
+
+
+#: What a peer view's reader is told where the episode could not be read (§6:7).
+_PEER_UNREAD: Final = "could not be read"
+#: What a peer's meaning is, read as provisional (ADR-0276 §4:6, ADR-0349 §6:9).
+_PROVISIONAL: Final = "provisional, as understood so far: "
+
+
+def _withheld(origin: InputOrigin) -> str:
+    """Why an activation's input is not shown, by its origin (ADR-0284 §8:1)."""
+    if origin is InputOrigin.OUTSIDE:
+        return "an outside report, not shown: " + _OUTSIDE
+    if origin is InputOrigin.ASSISTANT:
+        return "the assistant's own instruction for work it scheduled, not shown"
+    return "not shown"
+
+
+def _effect_text(effect: PeerEffect) -> str:
+    """One effect another activation made, as its peer view shows it (§6:9)."""
+    if effect.couldnt_finish:
+        return PEER_COULDNT_FINISH_LINE
+    unknown = effect.outcome is ToolOutcome.INDETERMINATE
+    if effect.capability is not None:
+        if unknown:
+            return f"the tool {effect.capability} may have run; whether it did is not known"
+        return f"the tool {effect.capability} ran"
+    message = "a message" if effect.message is None else f"the message: {_text(effect.message)}"
+    return f"may have sent {message}" if unknown else f"sent {message}"
+
+
+def _place_text(channel: ChannelIdentity) -> str:
+    """A place, as planning is shown what caused an activation: channel and place."""
+    return f"{channel.channel_type}:{channel.instance_id}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -2947,6 +3190,10 @@ class PlanningStage:
                 "spawn": inputs.places is not None
                 and any(tool.name == SPAWN_CAPABILITY for tool in offered),
                 "scheduled": inputs.speaks_by_label,
+                "running_work": any(tool.name in _RUNNING_WORK_CALLS for tool in offered),
+                "offers": bool(inputs.offers),
+                "waiting": bool(inputs.waiting),
+                "earlier_work": bool(inputs.earlier_work),
             },
             values=_PLANNING_VALUES,
         )
