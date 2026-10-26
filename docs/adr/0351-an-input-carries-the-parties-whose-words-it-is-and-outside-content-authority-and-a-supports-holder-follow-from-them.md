@@ -6,7 +6,7 @@
 - Dependency: [ADR-0276](0276-an-activation-is-understood-before-it-is-associated-and-the-understanding-is-retained-with-its-episode.md), [ADR-0284](0284-an-episode-is-the-experience-of-processing-its-activation.md), [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md), [ADR-0323](0323-a-telegram-chat-with-the-owners-bot-is-a-line-to-the-assistant-and-connecting-it-approves-what-the-line-carries.md), [ADR-0328](0328-a-memory-is-a-statement-resting-on-supports-its-standing-is-computed-from-them-and-every-change-to-it-is-an-operation-citing-one.md), [ADR-0332](0332-activations-run-side-by-side-across-places-and-one-at-a-time-within-one-a-new-input-joins-the-running-activation-until-it-acts-and-a-place-waits-a-moment-before-it-starts.md), [ADR-0345](0345-a-memory-records-who-holds-it-when-it-lapses-what-it-is-for-and-whom-it-is-about-and-its-producer-places-it-among-what-is-stored.md), [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md), [ADR-0349](0349-a-place-is-only-what-caused-an-activation-a-stop-is-reached-three-ways-running-work-is-shared-by-reading-it-and-the-newest-absorbs-what-it-continues.md) and [ADR-0326](0326-a-persons-memory-carries-across-every-upgrade-each-schema-change-ships-its-migration-and-a-fresh-data-directory-is-the-owners-ruling.md), as their status lines leave them; and [ADR-0350](0350-every-spawn-is-a-scheduled-task-written-into-the-task-scheduler-whose-sensor-starts-it-when-it-comes-due-and-the-task-manager-is-the-one-way-in-from-outside.md), the Task Scheduler, whose `assistant` origin is this decision's stand-in, as their status lines leave them.
 - Authorization: the owner decided the design in the controller walk of 2026-10-25. Their words, verbatim: "lets make it a seperate ADR. I agree that the axes are diffrent because hearing mom say something is different than mom emialing something because moms email could have been compramised. I just want to fully understand the cut between the axes. I also think that the origin users set should match the belief holders set very similarly, since that will inform the other set right?" and "observer coordinator is done, start drafting it." This decision writes that design down and settles only what it leaves open, each such point named where it is settled. The owner then reviewed this draft. They added understanding's relay mark: "One thing that could help the pasted content is to allow understanding to decrease authority in some scenarios" (§5:6–§5:13). They kept authority all or nothing per input for now: "for now I think all or nothing is fine, but eventually I think there can be levels to authority" (§6:1, §12). They confirmed the same class for a join and a takeover (§8:5), and asked "the attribution is fully mechanical and done by the sensor, right?", which it is (§2:8, §5:8). The dispatcher assigned 0351. Ratifying it is the owner's, after the owner's own review (§1:1).
 - **Contract-surface decision, and a breaking change under golden rule 5.** It changes `core/types.py`: `InputOrigin` retires (§8:1); `RecordedChannelTrigger` and `RecordedInputMessage` gain their parties (§2:1, §2:6); `EpisodeProjection` carries the parties and the relay mark in place of the origin (§8:4); `StatementPart` gains one member (§3:7); `ProposedActivationUnderstanding` and `ActivationUnderstanding` gain the relay mark, `JoinedInput` its record of one a takeover brought, and `EpisodeProcessingRecord` its validators (§5:10, §5:14, §10:4). It changes `core/channel_validation.py`'s declarations (§3:1) and `support_holder`'s rule (§7). No `Protocol` member changes. The episode store ships an upgrade (§9), and `PROTOCOL_VERSION` advances (§10:3).
-- **Partially supersedes**, in the clauses §13's first table names: ADR-0276, ADR-0284, ADR-0292, ADR-0306, ADR-0323, ADR-0328, ADR-0332, ADR-0345, ADR-0349 and ADR-0350.
+- **Partially supersedes**, in the clauses §13's first table names: ADR-0098, ADR-0276, ADR-0284, ADR-0292, ADR-0306, ADR-0323, ADR-0328, ADR-0332, ADR-0345, ADR-0349 and ADR-0350.
 
 ## Context
 
@@ -330,9 +330,12 @@ follows from them, never raise it.
 > absorption or a take appended to the activation (ADR-0349 §7:7, §7:21) carries its own
 > relay mark (§5:14).
 
-> **Normative.** A relayed input is outside, and neither the person's own nor the
-> assistant's, whatever its parties. Every clause of this decision that reads §5:1–§5:5, and
-> every reader those clauses bind, reads a relayed input so.
+> **Normative.** A relay mark counts only on an input whose parties are the person's own or
+> the assistant's. Such a relayed input is outside, and neither the person's own nor the
+> assistant's. Every clause of this decision that reads §5:1–§5:5, and every reader those
+> clauses bind, reads it so. On an input whose parties are already outside, or are `None`
+> or empty, a relay mark changes nothing: the parties already record whose the words are,
+> so a forward keeps its sender's claimed holder and your note beside it keeps yours (§7:1).
 
 > **Normative.** The relay mark changes no party. An input's parties stay what code set at
 > admission (§2:8), and the relay mark is a separate fact, recorded on the understanding
@@ -469,15 +472,17 @@ authority whole or not at all, and §6:5 takes it away whole. Levels of authorit
 > output sets one (ADR-0345 §2:1). Understanding's relay mark, which code reads from the
 > episode, can make a holder unknown and nothing else (§7:6).
 
-> **Normative.** A support pointing at a relayed input (§5:6), or one of its messages, takes
-> `outside_input` and is held by unknown, whatever their parties, where §7:3 does not refuse
-> it: a part whose parties are empty or include the assistant's statement is still no
-> support. A round's message and a remember call of an activation holding a relayed input
-> take ADR-0328 §4:2's rows for an activation that has read outside content (§5:13).
-> ADR-0328 §4's part table, which this decision leaves as it is, addresses only the
-> trigger's input and the trigger's recorded messages, so this clause binds where the
-> trigger's input is relayed. A joined input is no part a support points at, before this
-> decision or after it, and a relay mark on one reaches what is learned through §5:13 alone.
+> **Normative.** A support pointing at a relayed input whose relay mark counts (§5:7), or
+> one of its messages, takes `outside_input` and is held by unknown, where §7:3 does not
+> refuse it. This holds for text the person pasted into a message of their own, in place of
+> ADR-0328 §4:4's `user_message` for it: a part whose parties are empty or include the
+> assistant's statement is still no support. A round's message and a remember call of an
+> activation holding a relayed input take ADR-0328 §4:2's rows for an activation that has
+> read outside content (§5:13). ADR-0328 §4's part table, which this decision leaves as it
+> is, addresses only the trigger's input and the trigger's recorded messages, so this clause
+> binds where the trigger's input is relayed. A joined input is no part a support points at,
+> before this decision or after it, and a relay mark on one reaches what is learned through
+> §5:13 alone.
 
 **What this changes for what you typed beside a forward.** It was `outside_input`, held by
 unknown, because the whole input was `outside`. It is now `user_message`, held by you,
@@ -664,7 +669,9 @@ The lanes, each after this decision merges `Accepted`:
 > include: a support pointing at an input the latest understanding version marks relayed, or
 > at a message of it, takes `outside_input` and is held by unknown, while one pointing at an
 > unmarked message you typed is held by you and takes `user_message`; a relay mark on a Task
-> Scheduler input leaves its support refused; a record in which a later version drops a
+> Scheduler input leaves its support refused; a relay mark on an input carrying a forward
+> changes nothing, so the forward's support is still held by its sender, claimed, and the
+> one on your note beside it by you; a record in which a later version drops a
 > relay mark an earlier one recorded is refused; and an understanding version, and a joined
 > input, stored before the fields validate unchanged and mark nothing.
 
@@ -718,7 +725,8 @@ Superseded in part. Every clause the middle column does not name stands:
 | ADR-0292 | §5:5, in the addition alone: the input's parties are the user alone, and understanding has not marked it relayed | §6:1, §6:5 |
 | ADR-0306 | §4:5, in the addition alone: an input understanding marks relayed is also a record that the activation has read outside content; §4:6's *never from a value a model, a tool or a plan emits*, for the relay mark alone, which can only set that fact | §5:13 |
 | ADR-0323 | §4:2, in *a forward's original sender*: it is a party, claimed, not an author; §4:7, in the addition alone: the parties are the user alone, and the input is not relayed; §4:10's *its author is its original sender, claimed*: its author is the person who forwarded it; §4:11, whole: the kind declares parties per message | §2:7, §4:2, §6:3, §6:5, §3:1 |
-| ADR-0328 | §4:2's origin table, its first two rows: keyed on the part's parties and the relay mark | §7:2, §7:3, §7:6 |
+| ADR-0328 | §4:2's origin table, its first two rows: keyed on the part's parties and the relay mark; §4:4's *text the user pasted into a message of their own takes `user_message`*, for an input understanding marks relayed: it takes `outside_input`, held by unknown | §7:2, §7:3, §7:6 |
+| ADR-0098 | §1:2's *decided by recorded origin, never by inspecting the text*, in the addition alone: understanding's relay mark, a reading of the text that is then recorded and only lowers, also makes an input of the person's own outside | §5:6–§5:8 |
 | ADR-0332 | §7:1's `JoinedInput` fields, in the addition alone: `relayed` | §5:14 |
 | ADR-0349 | §7:5's third condition, §7:12 and §7:15, each in *origin* alone: the class of §8:5, each input read with its relay mark, and an input not yet understood read both ways in a wait; §7:7 and §7:21, in the addition alone: an absorption and a take set `relayed` on each joined input that was relayed where it came from; §10:7's *`JoinedInput` keeps its shape*, in the addition alone: `JoinedInput` gains `relayed` | §5:14, §8:5 |
 | ADR-0345 | §2's table, its first and fourth rows, and its limit on an `outside_input` support's holder: keyed on the part's party; §2:2, in the addition alone: `StatementPart` gains the scheduled task's instruction; §2:1 and §2:8, in the addition alone: a part understanding marks relayed is held by unknown | §3:7, §7:1, §7:4, §7:5, §7:6 |
@@ -742,9 +750,10 @@ Read through and not superseded:
 | ADR-0339 | Nothing: it holds no reading of `None` that this relies on |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
-> dated header note of ADR-0276, ADR-0284, ADR-0292, ADR-0306, ADR-0323, ADR-0328, ADR-0332,
-> ADR-0349, ADR-0345 and ADR-0350, atomically with this ADR under ADR-0070 and ADR-0082,
-> preserving their ratified bodies. The replacements take effect on this ADR's ratification.
+> dated header note of ADR-0098, ADR-0276, ADR-0284, ADR-0292, ADR-0306, ADR-0323, ADR-0328,
+> ADR-0332, ADR-0349, ADR-0345 and ADR-0350, atomically with this ADR under ADR-0070 and
+> ADR-0082, preserving their ratified bodies. The replacements take effect on this ADR's
+> ratification.
 
 ## Consequences
 
