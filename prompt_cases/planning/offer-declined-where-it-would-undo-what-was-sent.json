@@ -96,7 +96,7 @@
     },
     {
       "name": "stop_activation",
-      "description": "Stop running work you were shown as running, and what it set up to run later. Nothing new starts, and nothing it already did is undone.",
+      "description": "Stop running work you were shown as running, and that work alone. Nothing it already did is undone, and what it set up stays. The result shows what it had finished and what it set up that is still live.",
       "parameters": {
         "type": "object",
         "properties": {

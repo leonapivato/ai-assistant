@@ -1,0 +1,34 @@
+# ADR-0352 §7:8, §3:8: "never mind all the blender stuff" after the blender work split
+# itself into a reviews step running now and a price comparison due at six, and also set a
+# reminder to check the project notes. The round before stopped the research; its result
+# lists the comparison and the reminder by T label, and the running reviews step by E
+# label. This round stops the reviews step and cancels the comparison, and keeps the
+# project-notes reminder, which is not blender work.
+prompt = "planning"
+guards = "stop_missed"
+came_from = "2026-10-26"
+set = "development"
+samples = 2
+
+[flags]
+takes_message = true
+story_calls = false
+story_reads = false
+approved = false
+candidates = false
+reliance = false
+person = false
+suggestions = false
+spawn = true
+scheduled = false
+running_work = true
+offers = false
+waiting = false
+earlier_work = false
+
+[property]
+check = "read"
+read = """The round proposes stop_activation naming E2 and cancel_task naming T2, and no call naming T1, so the reminder to check the project notes stays. Any message it writes says nothing is done yet and uses no T, E or R label."""
+
+[input]
+file = "never-mind-all-the-blender-stuff-cancels-what-it-set-up.json"
