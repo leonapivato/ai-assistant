@@ -1909,10 +1909,9 @@ class PhaseWorking:
                     self.given_at = message.sent_at
         if sent:
             # The window is oldest first, and a renewed offer brings the absorber's own
-            # input before what it absorbed, so the messages go in the order sent.
-            sent.sort(key=lambda pair: pair[0])
-            items = tuple(item for _, item in sent)
-            self.place = replace(self.place, items=(*self.place.items, *items))
+            # input before what it absorbed, and a later take an earlier message, so
+            # each message goes into the window in the order sent (ADR-0293 §6:4).
+            self.place = replace(self.place, items=_in_order(self.place.items, sent))
 
     @property
     def undelivered(self) -> bool:
@@ -2460,6 +2459,39 @@ _HELD_BACK: Final = (
     "not run: newer input was offered to this work before this round acted, so the round "
     "is planned again with the offer shown"
 )
+
+
+def _position(item: PlaceItem) -> int | None:
+    """A place-window item's position in its medium, where its referent names one."""
+    referent = item.referent_id
+    if referent is None or not referent.startswith("message:"):
+        return None
+    held = referent.removeprefix("message:")
+    return int(held) if held.isdigit() else None
+
+
+def _in_order(
+    items: Sequence[PlaceItem], sent: Sequence[tuple[datetime, PlaceItem]]
+) -> tuple[PlaceItem, ...]:
+    """``items`` with each of ``sent`` placed where its time, then position, puts it.
+
+    The window keeps its own order, oldest first; each new item goes after every item
+    sent before it, or at its time but earlier in the medium, so a take brought in a
+    later round still lands among the messages it came between.
+    """
+    merged = list(items)
+    for at, item in sorted(sent, key=lambda pair: (pair[0], _position(pair[1]) or 0)):
+        position = _position(item)
+        index = len(merged)
+        while index > 0:
+            before = merged[index - 1]
+            if before.at is None or before.at < at:
+                break
+            if before.at == at and (position is None or (_position(before) or 0) <= position):
+                break
+            index -= 1
+        merged.insert(index, item)
+    return tuple(merged)
 
 
 def _held_back(one: _Round) -> bool:

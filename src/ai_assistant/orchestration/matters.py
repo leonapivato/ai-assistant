@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
-from ai_assistant.core.channel_validation import TASK_SCHEDULER
+from ai_assistant.core.channel_validation import TASK_SCHEDULER, establishes_the_user
 from ai_assistant.core.episode_encoding import project_episode
 from ai_assistant.core.types import (
     CapabilityEffect,
@@ -241,6 +241,30 @@ def _same_matter(one: ActivationState, other: ActivationState) -> bool:
     if one.standing is None or other.standing is None:
         return False
     return one.standing.meets(other.standing) and person_of(one) == person_of(other)
+
+
+def _may_share(one: ActivationState, other: ActivationState) -> bool:
+    """Whether ``one`` is, or may yet show itself to be, of ``other``'s standing (§7:5).
+
+    It is where its standing meets ``other``'s; and it may yet be where its pass has not
+    set its standing, on a place whose kind establishes an author.
+    """
+    if one.standing is not None:
+        return _same_matter(one, other)
+    place = one.place
+    return (
+        other.standing is not None
+        and place is not None
+        and establishes_the_user(place.channel_type)
+    )
+
+
+def _waited_out(one: ActivationState, other: ActivationState) -> bool:
+    """Whether a wait of ``other``'s need wait for ``one`` no longer (§7:12, §7:15).
+
+    It has settled, or its standing, now set, shows it is not of ``other``'s.
+    """
+    return settled(one) or (one.standing is not None and not _same_matter(one, other))
 
 
 def settled(state: ActivationState) -> bool:
@@ -579,7 +603,9 @@ class Matters:
 
         Before it has committed, each activation started after it, running for the same
         person with its standing, on any place; after, each such activation caused by its
-        own place.
+        own place. One admitted on a place whose kind establishes its author, whose pass
+        has not yet set its standing, may be such an activation, so it is waited for until
+        its standing shows it is not (:func:`_waited_out`).
         """
         return [
             one
@@ -587,7 +613,7 @@ class Matters:
             if one is not state
             and one.order > state.order
             and _running(one)
-            and _same_matter(one, state)
+            and _may_share(one, state)
             and (not state.committed or one.place == state.place)
         ]
 
@@ -599,7 +625,7 @@ class Matters:
             if one is not state
             and one.order < state.order
             and _running(one)
-            and _same_matter(one, state)
+            and _may_share(one, state)
         ]
 
     async def before_act(self, state: ActivationState, deadline: float) -> bool:
@@ -612,7 +638,7 @@ class Matters:
             Whether each settled before the deadline.
         """
         waited = self._newer(state)
-        return await self._until(lambda: all(settled(one) for one in waited), deadline)
+        return await self._until(lambda: all(_waited_out(one, state) for one in waited), deadline)
 
     async def before_takeover(self, state: ActivationState, deadline: float) -> bool:
         """§7:15-§7:16: wait once for each older activation's takeover decision.
@@ -621,7 +647,7 @@ class Matters:
             Whether each settled before the deadline.
         """
         waited = self._older(state)
-        return await self._until(lambda: all(settled(one) for one in waited), deadline)
+        return await self._until(lambda: all(_waited_out(one, state) for one in waited), deadline)
 
     async def offer_answered(self, state: ActivationState) -> None:
         """Wait while ``state``'s own offer is open and it is not stopped (§7:25)."""

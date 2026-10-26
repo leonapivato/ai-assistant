@@ -722,7 +722,7 @@ def decode_listing(output: FrozenJsonValue) -> TaskListing | None:
             cancelled=None if cancelled is None else _task_of(cancelled),
             listed=bool(held["listed"]),
         )
-    except KeyError, TypeError, AttributeError:
+    except KeyError, TypeError, AttributeError, ValueError:
         return None
 
 

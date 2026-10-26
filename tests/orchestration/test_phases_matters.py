@@ -534,28 +534,30 @@ async def test_an_activation_that_has_acted_waits_for_nothing_on_another_place()
             ),
         ),
     )
-    planner.hold("what's the weather there?")
+    planner.hold("book Riverside", from_round=2)
+    weather = "what's the weather there?"
+    understanding.hold(weather)
     harness = _harness(understanding, planner)
     await open_conversation(harness)
     first, older = await _start(harness, "book Riverside", message_id="a-1")
+    await asyncio.wait_for(planner.hold("book Riverside")[0].wait(), SETTLE)
+    _, newer = await _start(harness, weather, message_id="b-1")
+    await asyncio.wait_for(understanding.hold(weather)[0].wait(), SETTLE)
 
-    async def acted() -> bool:
-        return any(
-            one.state is not None and one.state.activation_id == older and one.state.committed
-            for one in harness.engine._running
-        )
-
-    await until(acted, what="the older to act")
-    understanding.hold("what's the weather there?")
-    await _start(harness, "what's the weather there?", message_id="b-1")
+    # The older has acted, and its second round's act comes while the newer input
+    # elsewhere is running and has not been understood.
+    planner.hold("book Riverside")[1].set()
     found = await _frozen(harness, 1)
 
     assert [processing(one).activation_id for one in found] == [older], (
         "its second act did not wait on the newer input elsewhere"
     )
     assert await _assistant(harness, first) == ["Looking.", "done: book Riverside"]
-    understanding.hold("what's the weather there?")[1].set()
-    planner.hold("what's the weather there?")[1].set()
+    assert any(
+        one.state is not None and one.state.activation_id == newer
+        for one in harness.engine._running
+    ), "the newer one was running, unsettled, the whole time"
+    understanding.hold(weather)[1].set()
     await _frozen(harness, 2)
 
 
@@ -616,7 +618,7 @@ async def test_input_continuing_work_that_acted_elsewhere_waits_on_it_with_no_of
     planner.script(newer_text, RoundResponse(text="I'll filter to two bedrooms once it ends."))
     harness = _harness(understanding, planner)
     await open_conversation(harness)
-    first, older = await _start(harness, "search apartments", message_id="a-1")
+    first, _ = await _start(harness, "search apartments", message_id="a-1")
     await until(_has(planner, "search apartments", 2), what="the older to act and plan again")
     monkeypatch.setattr(harness.engine, "_chat_turn_budget", timedelta(seconds=0.3))
     second, newer = await _start(harness, newer_text, message_id="b-1")
@@ -638,10 +640,14 @@ async def test_input_continuing_work_that_acted_elsewhere_waits_on_it_with_no_of
     (waited,) = first_round["waiting_on"]
     assert waited["has_acted"] is True
     assert planner.offered[newer_text][0] == ["stop_activation"], "only the stop call"
-    assert "earlier_work" in second_round, "the rounds after the wait are shown its work"
-    assert older in json.dumps(second_round) or "episode" in json.dumps(
-        second_round["earlier_work"]
-    )
+    (work,) = second_round["earlier_work"]
+    assert work["status"] == "ended"
+    assert work["input"] == "search apartments"
+    assert work["did"] == [
+        "sent the message: Searching.",
+        "the tool remember ran",
+        "sent the message: done: search apartments",
+    ], "its finished work, the message it wrote during the wait included"
     assert await _assistant(harness, first) == ["Searching.", "done: search apartments"]
     assert await _assistant(harness, second) == [
         "I'll filter to two bedrooms once it ends.",
@@ -796,7 +802,10 @@ async def test_an_offer_declined_sends_the_newer_one_to_wait_with_the_reason(
     rounds = planner.requests[newer_text]
     (waited,) = rounds[0]["waiting_on"]
     assert waited["declined_this_input"] == "already booked"
-    assert "earlier_work" in rounds[-1], "it plans from the older's finished work"
+    (work,) = rounds[-1]["earlier_work"]
+    assert work["input"] == older_text
+    assert "the tool remember ran" in work["did"], "it plans from the older's finished work"
+    assert "sent the message: done: book Saturday" in work["did"]
     assert _of(found, newer).joined == ()
     assert _of(found, older).joined == ()
 
@@ -844,6 +853,8 @@ async def test_an_older_one_ending_without_answering_has_declined(
     found = await _frozen(harness, 2)
 
     assert _of(found, newer).joined == ()
+    (work,) = planner.requests[newer_text][-1]["earlier_work"]
+    assert "sent the message: Booked." in work["did"]
     assert any("earlier_work" in one for one in planner.requests[newer_text]), (
         "it plans from the older's finished work"
     )

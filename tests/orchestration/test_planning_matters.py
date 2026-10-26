@@ -270,3 +270,36 @@ async def test_the_sections_appear_only_where_they_apply() -> None:
     stage, completer, _ = _stage(RoundResponse(text=""), prompt=FLAG_ECHO)
     await stage.plan(_inputs())
     assert not {"running_work", "offers", "waiting", "earlier_work"} & _flags(completer)
+
+
+def test_a_running_entry_round_trips_its_acted_mark_and_origin() -> None:
+    """§6:2: the listing carries both; an unknown origin reads as no listing, and one
+    recorded before the key reads from its outside mark."""
+    from ai_assistant.orchestration.task_scheduler import (  # noqa: PLC0415 — this case's
+        decode_listing,
+        encode_listing,
+    )
+
+    entry = ActivationEntry(
+        activation_id=_A,
+        started="",
+        place="the schedule",
+        status="running",
+        input=None,
+        outside=False,
+        acted=True,
+        origin=InputOrigin.ASSISTANT,
+    )
+    encoded = encode_listing(TaskListing(running=(entry,), listed=True))
+    decoded = decode_listing(encoded)
+    assert decoded is not None
+    assert decoded.running == (entry,)
+
+    assert isinstance(encoded, dict)
+    running = dict(encoded["running"][0])
+    unknown = {**encoded, "running": [{**running, "origin": "unexpected"}]}
+    assert decode_listing(unknown) is None
+    legacy = {k: v for k, v in running.items() if k not in {"origin", "acted"}}
+    older = decode_listing({**encoded, "running": [{**legacy, "outside": True}]})
+    assert older is not None
+    assert (older.running[0].origin, older.running[0].acted) == (InputOrigin.OUTSIDE, False)
