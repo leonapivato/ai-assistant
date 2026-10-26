@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterable
 
     from ai_assistant.orchestration.activation_state import ActivationState
+    from ai_assistant.orchestration.matters import Matters
 
 #: How long a case waits for the reader before it fails rather than hangs.
 _SETTLE: Final = 5.0
@@ -584,45 +585,15 @@ async def test_messages_during_every_read_past_the_cap_postpone_nothing() -> Non
     await chat.idle()
 
 
-async def test_an_act_waits_for_a_message_its_wait_found_held_wherever_it_moves() -> None:
-    """ADR-0349 §7:12, with the engine's own account: a correction noticed while what
-    waits was read, at the cap, is held when an older act's wait begins. The read takes
-    in what it read without it, and the correction waits in a start wait of its own,
-    which the act still waits for, until the correction's activation has settled."""
-    from test_matters import _IDS, _matters, _running, _understood  # noqa: PLC0415
-
-    store = _HeldAfterQuery()
-    states: list[ActivationState] = []
-    matters = _matters(states)
-    chat = _Reader(store=store, hold=matters.hold, ids=_IDS[1:])
-    chat.gate = asyncio.Event()
-    conversation = await chat.conversation()
-    older = _running(conversation, _IDS[0], order=1)
-    states.append(older)
-    _understood(older)
-
-    await chat.say(conversation, "and what's the weather?")
-    await asyncio.wait_for(chat.clock.sleeping.wait(), _SETTLE)
-    store.hold = True
-    chat.clock.now = _CAP.total_seconds()
-    await chat.clock.wake()
-    await asyncio.wait_for(store.held.wait(), _SETTLE)
-    await chat.say(conversation, "actually Sunday")
-    waiting = asyncio.ensure_future(
-        matters.before_act(older, asyncio.get_running_loop().time() + _SETTLE)
-    )
-    await asyncio.sleep(0.01)
-    assert not waiting.done(), "the correction is held"
-
-    store.release.set()
-    await chat.until(lambda: len(chat.inputs) == 1, what="what was read was taken in")
-    assert _texts(chat.inputs[0]) == ["and what's the weather?"]
-    weather = _running(conversation, _IDS[1], order=2)
-    states.append(weather)
-    _understood(weather)
-    matters.changed()
-    await asyncio.sleep(0.01)
-    assert not waiting.done(), "the correction, held when the wait began, waits elsewhere"
+async def _the_correction_settles(
+    chat: _Reader,
+    conversation: str,
+    states: list[ActivationState],
+    matters: Matters,
+    waiting: asyncio.Future[bool],
+) -> None:
+    """The correction's own start wait passes, and its activation runs, then settles."""
+    from test_matters import _IDS, _running, _understood  # noqa: PLC0415
 
     await chat.clock.wake()
     await chat.until(lambda: len(chat.inputs) == 2, what="the correction was taken in")
@@ -633,7 +604,80 @@ async def test_an_act_waits_for_a_message_its_wait_found_held_wherever_it_moves(
     assert not waiting.done(), "its activation runs, not yet understood"
     _understood(correction)
     matters.changed()
-    assert await asyncio.wait_for(waiting, 1), "settled"
+
+
+#: Where an older act's wait begins against the read of what waits, at the cap.
+_BEFORE_THE_READ: Final = "the wait begins in the start wait, the correction during the read"
+_WAIT_THEN_CORRECTION: Final = "during the read, the wait begins, then the correction"
+_CORRECTION_THEN_WAIT: Final = "during the read, the correction, then the wait begins"
+
+
+@pytest.mark.parametrize(
+    ("order", "waits_for_it"),
+    [
+        (_BEFORE_THE_READ, False),
+        (_WAIT_THEN_CORRECTION, False),
+        (_CORRECTION_THEN_WAIT, True),
+    ],
+)
+async def test_an_act_waits_for_a_correction_exactly_when_it_was_held_as_the_wait_began(
+    order: str, *, waits_for_it: bool
+) -> None:
+    """ADR-0349 §7:12, through the reader and the engine's own account.
+
+    At the cap, the read of what waits takes in what it read, and a correction noticed
+    during that read waits in a start wait of its own. An older act waits for the
+    correction exactly where the correction was held when its wait began, there or
+    wherever it moved; and an input arriving during the wait is not waited for.
+    """
+    from test_matters import _IDS, _matters, _running, _understood  # noqa: PLC0415
+
+    store = _HeldAfterQuery()
+    states: list[ActivationState] = []
+    matters = _matters(states)
+    chat = _Reader(store=store, hold=matters.hold, ids=_IDS[1:])
+    chat.gate = asyncio.Event()
+    conversation = await chat.conversation()
+    older = _running(conversation, _IDS[0], order=1)
+    states.append(older)
+    waiting: list[asyncio.Future[bool]] = []
+
+    async def begin() -> None:
+        deadline = asyncio.get_running_loop().time() + _SETTLE
+        waiting.append(asyncio.ensure_future(matters.before_act(older, deadline)))
+        await asyncio.sleep(0.01)
+        assert not waiting[0].done(), "what is held is waited for"
+
+    await chat.say(conversation, "and what's the weather?")
+    await asyncio.wait_for(chat.clock.sleeping.wait(), _SETTLE)
+    if order == _BEFORE_THE_READ:
+        await begin()
+    store.hold = True
+    chat.clock.now = _CAP.total_seconds()
+    await chat.clock.wake()
+    await asyncio.wait_for(store.held.wait(), _SETTLE)
+    if order == _WAIT_THEN_CORRECTION:
+        await begin()
+    await chat.say(conversation, "actually Sunday")
+    if order == _CORRECTION_THEN_WAIT:
+        await begin()
+    store.release.set()
+    await chat.until(lambda: len(chat.inputs) == 1, what="what was read was taken in")
+    assert _texts(chat.inputs[0]) == ["and what's the weather?"]
+
+    weather = _running(conversation, _IDS[1], order=2)
+    states.append(weather)
+    _understood(weather)
+    matters.changed()
+    if waits_for_it:
+        await asyncio.sleep(0.01)
+        assert not waiting[0].done(), "held when the wait began, so waited for where it went"
+        await _the_correction_settles(chat, conversation, states, matters, waiting[0])
+    assert await asyncio.wait_for(waiting[0], 1), "settled"
+    if not waits_for_it:
+        assert len(chat.inputs) == 1, "the correction was not waited for: it came after"
 
     chat.gate.set()
+    chat.closing = True
+    chat.reader.close()
     await chat.idle()
