@@ -28,12 +28,19 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 sys.path.insert(0, str(Path(__file__).parent))
 from _activation_record import (
     HOSTILE,
+    KEPT_FACTS,
+    READING,
+    ROUND_2_MESSAGE,
     ROUND_TOOL_DESCRIPTION,
+    SEARCH_RESULT,
+    WALKED,
+    WALKED_TITLES,
     at,
     iso,
     serving,
     viewer,
     write_record,
+    write_walked,
 )
 from _follow_up_record import ACT_A as FOLLOWED_A
 from _follow_up_record import ACT_F as FOLLOWED_F
@@ -799,3 +806,98 @@ async def test_a_follow_up_file_is_not_in_the_list(followed: Any, gateway_browse
         await page.goto(f"http://127.0.0.1:{followed.port}/")
         await expect(page.locator("#list li")).to_have_count(2, timeout=_SHOWN)
         await expect(page.locator("#list")).not_to_contain_text("followup")
+
+
+# --- walk mode: one activation, a step at a time ---------------------------------------
+
+
+@pytest.fixture
+def walked(tmp_path: Path) -> Iterator[Any]:
+    """The viewer over the walked activation, beside the record and the observer's files."""
+    with serving(write_learning(write_walked(write_record(tmp_path)))) as bound:
+        yield bound
+
+
+async def _sideways(page: Page) -> float:
+    return float(
+        await page.evaluate(
+            "document.documentElement.scrollWidth - document.documentElement.clientWidth"
+        )
+    )
+
+
+@pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "phone"])
+async def test_walk_mode_steps_through_an_activation_in_its_own_order(
+    walked: Any, gateway_browser: Browser, width: int
+) -> None:
+    async with _page(gateway_browser, width=width) as page:
+        await page.goto(f"http://127.0.0.1:{walked.port}/#{WALKED}/walk/1")
+        count = page.locator("#walk-count")
+        title = page.locator(".walk-head h2")
+        await expect(count).to_have_text(f"step 1 of {len(WALKED_TITLES)}", timeout=_SHOWN)
+        await expect(page.locator(".walk-pill")).to_have_count(len(WALKED_TITLES))
+        await expect(page.locator("#overview")).to_be_hidden()
+        await expect(page.locator("#walk-prev")).to_be_disabled()
+        # The input is raw outside text, and reaches the page as text.
+        await expect(page.locator("#walk-step")).to_contain_text(HOSTILE)
+        assert await page.locator("img").count() == 0
+        for number, expected in enumerate(WALKED_TITLES, 1):
+            await expect(title).to_have_text(expected)
+            await expect(count).to_have_text(f"step {number} of {len(WALKED_TITLES)}")
+            assert page.url.endswith(f"#{WALKED}/walk/{number}")
+            assert await _sideways(page) <= 0
+            if number < len(WALKED_TITLES):
+                await page.locator("#walk-next").click()
+        await expect(page.locator("#walk-next")).to_be_disabled()
+        await expect(title).to_have_text("The end")
+        await expect(page.locator("#walk-step")).to_contain_text("Ended: finished")
+
+
+async def test_the_arrow_keys_move_and_a_step_opens_its_call_readable(
+    walked: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser) as page:
+        await page.goto(f"http://127.0.0.1:{walked.port}/#{WALKED}/walk/2")
+        step = page.locator("#walk-step")
+        await expect(step.locator(".walk-head h2")).to_have_text(
+            "Recall · first run", timeout=_SHOWN
+        )
+        await expect(step).to_contain_text(KEPT_FACTS[0])
+        await expect(step).to_contain_text("The record does not say why a find was not kept.")
+        await page.keyboard.press("ArrowRight")
+        await expect(step.locator(".walk-head h2")).to_have_text("Understanding")
+        await expect(step).to_contain_text(READING["meaning"])
+        await expect(step).to_contain_text("Which date in May")
+        await expect(step.locator(".walk-label", has_text="S1")).to_contain_text("Trip to Lisbon")
+        await page.keyboard.press("ArrowLeft")
+        await expect(step.locator(".walk-head h2")).to_have_text("Recall · first run")
+        await page.keyboard.press("ArrowRight")
+        await step.locator(".jump", has_text="The call, readable").click()
+        await expect(page.locator("#drawer-read .call-head h2")).to_have_text(
+            "Understanding", timeout=_SHOWN
+        )
+
+
+async def test_a_deep_link_opens_its_step_and_the_overview_is_a_click_away(
+    walked: Any, gateway_browser: Browser
+) -> None:
+    async with _page(gateway_browser) as page:
+        await page.goto(f"http://127.0.0.1:{walked.port}/#{WALKED}/walk/9")
+        step = page.locator("#walk-step")
+        await expect(step.locator(".walk-head h2")).to_have_text(
+            "Planning · round 2", timeout=_SHOWN
+        )
+        await expect(step).to_contain_text("What came back from round 1")
+        await expect(step).to_contain_text(SEARCH_RESULT)
+        await expect(step).to_contain_text(ROUND_2_MESSAGE)
+        await page.locator("#mode-overview").click()
+        await expect(page.locator("#timeline-card")).to_be_visible()
+        await expect(page.locator("#walk-card")).to_be_hidden()
+        assert page.url.endswith(f"#{WALKED}")
+        await page.locator("#mode-walk").click()
+        await expect(step.locator(".walk-head h2")).to_have_text("Input")
+        await page.goto(f"http://127.0.0.1:{walked.port}/#a-retried/walk/99")
+        await expect(step.locator(".walk-head h2")).to_have_text(
+            "Learning · attempt 2", timeout=_SHOWN
+        )
+        await expect(step.locator(".ov-finding")).to_contain_text(EVIDENCE_CLAIM)
