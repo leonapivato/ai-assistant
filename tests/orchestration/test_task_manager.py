@@ -250,6 +250,39 @@ async def test_tasks_across_levels_are_listed_in_the_order_written() -> None:
     assert left.more_tasks == 1, f"{later.id} is counted, past the bound"
 
 
+async def test_a_step_that_runs_and_spawns_while_the_walk_reads_is_walked_too() -> None:
+    """§3:1-§3:2: a pending child pushed, spawning a grandchild and ending between reads."""
+
+    class _Moving(FakePlanStore):
+        def __init__(self) -> None:
+            super().__init__(now=lambda: AT)
+            self.reads = 0
+            self.child: ScheduledTask | None = None
+            self.grandchild: ScheduledTask | None = None
+
+        async def spawned_tasks(
+            self, activation_ids: Sequence[str], /
+        ) -> tuple[ScheduledTask, ...]:
+            self.reads += 1
+            if self.reads == 2 and self.child is not None:
+                ran = await pushed(self, self.child)
+                self.grandchild = await write_task(self, ran, when=DueAt(at=AT + timedelta(days=1)))
+                await self.settle_occurrence(ran, OccurrenceState.DONE)
+            return await super().spawned_tasks(activation_ids)
+
+    plans = _Moving()
+    world = _World(plans=plans)
+    step = activation()
+    plans.child = await write_task(plans, step)
+    plans.reads = 0
+
+    left = await _still_live(world, step)
+
+    assert plans.grandchild is not None
+    assert [one.task_id for one in left.tasks] == [plans.grandchild.id]
+    assert not left.nothing
+
+
 async def test_a_marked_task_is_shown_with_its_text_withheld() -> None:
     """§3:5: a task carrying the outside-content mark shows its mark and no text."""
     world = _World()
