@@ -172,6 +172,8 @@ _READ_FLAGS: Final = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
 #: What reading a line's JSON raises where it is not JSON, or nests too deep. Held as a
 #: tuple so the file still parses on an interpreter older than the one it targets.
 _UNPARSABLE: Final = (ValueError, RecursionError)
+#: The largest whole number a browser's number holds exactly.
+_SAFE_INTEGER: Final = 2**53 - 1
 
 #: What reading an instant raises where a string is not one, or names no real instant.
 _NO_INSTANT: Final = (ValueError, OverflowError, OSError)
@@ -393,7 +395,7 @@ def arrival_of(lines: Sequence[Line]) -> dict[str, object] | None:
     """The activation's input as it arrived, read from the first request that shows it.
 
     The record keeps no entry of its own for the input, so this is read back from what a
-    model was given: understanding's ``input``, or else the item of planning's place
+    model was given: understanding's ``input``, or else the items of planning's place
     window marked as the input. The rendering is a hint (ADR-0316 §5:2): where neither is
     found, nothing is.
 
@@ -417,11 +419,12 @@ def arrival_of(lines: Sequence[Line]) -> dict[str, object] | None:
                 continue
             messages = [
                 {
-                    "position": shown.get("position"),
+                    "position": _position(shown.get("position")),
                     "at": _ms(instant(shown.get("written_at"))),
-                    "text": _text(shown.get("text")),
+                    "text": said,
                 }
                 for shown in map(_mapping, _sequence(received.get("messages")))
+                if (said := _text(shown.get("text"))) is not None
             ]
             return {
                 "from": "understanding",
@@ -431,19 +434,34 @@ def arrival_of(lines: Sequence[Line]) -> dict[str, object] | None:
                 "messages": messages,
             }
         if line.source == "planning":
-            for item in map(_mapping, _sequence(document.get("place_window"))):
-                text = _text(item.get("text"))
-                if item.get("is_the_input") is True and text is not None:
-                    return {
-                        "from": "planning",
-                        "line": line.line,
-                        "text": text,
-                        "received_as": _text(_mapping(document.get("place")).get("description")),
-                        "messages": [
-                            {"position": 1, "at": _ms(instant(item.get("at"))), "text": text}
-                        ],
-                    }
+            # Each message of the input is marked, a joined input's too: all of them, in
+            # the window's order. The window shows no position, so none is shown.
+            marked = [
+                {"position": None, "at": _ms(instant(item.get("at"))), "text": said}
+                for item in map(_mapping, _sequence(document.get("place_window")))
+                if item.get("is_the_input") is True
+                and (said := _text(item.get("text"))) is not None
+            ]
+            if marked:
+                return {
+                    "from": "planning",
+                    "line": line.line,
+                    "text": "\n".join(str(one["text"]) for one in marked),
+                    "received_as": _text(_mapping(document.get("place")).get("description")),
+                    "messages": marked,
+                }
     return None
+
+
+def _position(value: object) -> int | None:
+    """A message's position where it is a whole number the page holds exactly, else none.
+
+    Anything else is a hint not recognised (ADR-0316 §5:2): ``1e400`` decodes as an
+    infinity, which no JSON response may carry. So it is dropped, and the message stays.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if abs(value) <= _SAFE_INTEGER else None
 
 
 def _short(text: str, limit: int = INPUT_CHARS) -> str:
@@ -3618,7 +3636,10 @@ SCRIPT: Final = r"""
     if (!a) return;
     const read = a.from === "understanding" ? "understanding's input" : "planning's place window";
     kv(root, [["where", a.received_as], ["read from", read + ", line " + a.line]]);
-    for (const m of a.messages || []) {
+    const rows = a.messages || [];
+    // Understanding shows the input's messages only where it has them: else, its text.
+    if (!rows.length) root.appendChild(el("div", "part-text arrival-text", a.text));
+    for (const m of rows) {
       const row = el("div", "arrival-message");
       const at = clock(m.at, true);
       row.appendChild(el("div", "m", m.position === null ? at : "#" + m.position + " · " + at));

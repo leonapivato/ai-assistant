@@ -1129,6 +1129,87 @@ def test_without_understanding_the_input_is_planning_place_windows_marked_item()
     assert [one["text"] for one in arrival["messages"]] == ["Remind me at 6"]
 
 
+def test_planning_shows_each_marked_item_of_a_joined_input_in_the_windows_order() -> None:
+    document = {
+        "place": {"description": "The hub's chat."},
+        "place_window": [
+            {"from": "the user", "at": iso(1_000), "is_the_input": True, "text": "Remind me"},
+            {"from": "the assistant", "at": iso(1_500), "text": "Between them."},
+            {"from": "the user", "at": iso(2_000), "is_the_input": True, "text": "at 6"},
+            {"from": "the user", "at": iso(2_500), "is_the_input": True, "text": 3},
+        ],
+    }
+    lines: list[Any] = [viewer.Entry(0, "planning", "given", 2.0, "", _rendered(document))]
+    arrival = viewer.timeline("a", lines)["arrival"]
+    assert arrival["text"] == "Remind me\nat 6"
+    assert arrival["messages"] == [
+        {"position": None, "at": at(1_000).timestamp() * 1000, "text": "Remind me"},
+        {"position": None, "at": at(2_000).timestamp() * 1000, "text": "at 6"},
+    ]
+
+
+def test_an_input_understanding_shows_no_messages_of_keeps_its_text() -> None:
+    received = {"received_as": "scheduled work", "text": "Scheduled instruction"}
+    lines: list[Any] = [
+        viewer.Entry(0, "understanding", "given", 1.0, "", _rendered({"input": received}))
+    ]
+    arrival = viewer.timeline("a", lines)["arrival"]
+    assert (arrival["text"], arrival["messages"]) == ("Scheduled instruction", [])
+
+
+@pytest.mark.parametrize(
+    "position", ["1e400", "-1e400", "NaN", "1.5", "true", '"1"', "[1]", str(2**53), "null"]
+)
+def test_a_position_not_a_safe_whole_number_is_dropped_and_its_message_stays(
+    position: str,
+) -> None:
+    # Written as the request's own JSON text, since that is where an odd number is decoded.
+    content = (
+        f'{{"input":{{"text":"hello","messages":[{{"position":{position},"text":"hello"}}]}}}}'
+    )
+    body = {"messages": [{"role": "user", "content": content}]}
+    lines: list[Any] = [viewer.Entry(0, "understanding", "given", 1.0, "", body)]
+    shown = viewer.timeline("a", lines)
+    json.dumps(shown, allow_nan=False)
+    assert shown["arrival"]["messages"] == [{"position": None, "at": None, "text": "hello"}]
+
+
+def test_a_message_row_with_no_text_is_dropped() -> None:
+    received = {"text": "hello", "messages": [3, {"position": 1}, {"position": 2, "text": "hi"}]}
+    lines: list[Any] = [
+        viewer.Entry(0, "understanding", "given", 1.0, "", _rendered({"input": received}))
+    ]
+    arrival = viewer.timeline("a", lines)["arrival"]
+    assert arrival["messages"] == [{"position": 2, "at": None, "text": "hi"}]
+
+
+def _strict(raw: bytes) -> Any:
+    def refuse(name: str) -> object:
+        raise AssertionError(name)
+
+    return json.loads(raw, parse_constant=refuse)
+
+
+def test_an_infinite_position_leaves_the_activation_response_valid_json(
+    server: Any, record: Path
+) -> None:
+    # The input as understanding's request carries it: JSON inside a message's content.
+    content = '{"input":{"text":"hello","messages":[{"position":1e400,"text":"hello"}]}}'
+    line = {
+        "activation_id": "infinite",
+        "source": "understanding",
+        "kind": "given",
+        "recorded_at": iso(300_000),
+        "body": {"messages": [{"role": "user", "content": content}]},
+    }
+    (record / "infinite.jsonl").write_text(json.dumps(line) + "\n")
+    status, _, body = _request(server.port, "/api/activation?id=infinite")
+    assert status == 200, body
+    arrival = _strict(body)["arrival"]
+    assert arrival["text"] == "hello"
+    assert arrival["messages"] == [{"position": None, "at": None, "text": "hello"}]
+
+
 @pytest.mark.parametrize(
     "body",
     [
