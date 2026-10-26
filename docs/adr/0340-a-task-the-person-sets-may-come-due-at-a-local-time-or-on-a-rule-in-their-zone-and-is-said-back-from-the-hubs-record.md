@@ -6,7 +6,7 @@
 - Dependency: [ADR-0350](0350-every-spawn-is-a-scheduled-task-written-into-the-task-scheduler-whose-sensor-starts-it-when-it-comes-due-and-the-task-manager-is-the-one-way-in-from-outside.md), [ADR-0338](0338-a-person-sets-their-profile-and-pins-what-aether-always-keeps-in-mind-their-style-is-learned-as-memories-and-each-reaches-the-models-for-that-persons-activations.md), [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md), [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md), [ADR-0317](0317-an-activation-that-chose-to-say-nothing-has-finished.md) and [ADR-0337](0337-a-prompt-change-is-judged-on-a-regression-suite-with-repeated-samples-each-recorded-call-is-asked-what-it-had-to-guess-and-a-candidate-is-promoted-after-three-clean-days.md), as their status lines leave them.
 - Authorization: the coordinator walked proposal [#3271](https://github.com/leonapivato/ai-assistant/pull/3271) on 2026-10-21, and the owner's walk of ADR-0350 from 2026-10-21 to 2026-10-25 replaced its channel with the Task Scheduler and listed what this rewrite keeps and drops (ADR-0350 §11). The owner ruled on 2026-10-25 that nothing is cancelled when a place is gone. The owner reviewed this rewrite on 2026-10-25 and ruled: there is no reminder mark, and a rule goes to any task the person set (§2, §4:1); there is no fixed fallback line, and a task that cannot finish is [#3435](https://github.com/leonapivato/ai-assistant/issues/3435)'s (§11); a task need not suggest a place (§6:2); every scheduled task's times render in the person's zone (§6:1); skipping a one-off is a cancel (§5:1), "usually it's just replacing it the next day unless it's already scheduled for the next day, which is just a cancel"; and quiet hours are no rule here, "nothing mechanical… it's something in the person model" (§7:3). The dispatcher assigned 0340. Ratification is the owner's, after their review.
 - Milestone: [15, Task Scheduler: reminders and work that runs later](https://github.com/leonapivato/ai-assistant/milestone/15).
-- **Changes `core`, so it is a contract-surface decision and a breaking change under golden rule 5.** `core/types.py`'s `TaskWhen` gains a rule, a scheduled task holds more than one occurrence where it has one, and a spawn carries a rule's first occurrence (§9:1). `TaskRefusal` gains this decision's refusal (§9:2). `PlanStore`'s member that writes a task writes a rule's first occurrence, and its members that settle, push and cancel an occurrence take a rule's next occurrence, its skipped ones and its end (§9:3). No capability is added (§8:1), and `Settings` gains no field.
+- **Changes `core`, so it is a contract-surface decision and a breaking change under golden rule 5.** `core/types.py`'s `TaskWhen` gains a rule, a scheduled task holds more than one occurrence where it has one, and a spawn carries a rule's first occurrence (§9:1). `TaskRefusal` gains this decision's refusal (§9:2). `PlanStore`'s member that writes a task writes a rule's first occurrence, its member that pushes an occurrence takes a rule's next occurrence and its skipped ones, and its cancel ends a rule (§9:3). No capability is added (§8:1), and `Settings` gains no field.
 - **Partially supersedes**, in the clauses §12's first table names: ADR-0338 and ADR-0350.
 
 ## Context
@@ -156,13 +156,16 @@ refuses an instant earlier than now (ADR-0350 §4:5).
 > **Normative.** A rule's first occurrence is the first instant its rule yields that is later
 > than now and on or after its from, computed when the task is written.
 
-> **Normative.** When a pushed occurrence of a rule takes its outcome (ADR-0350 §7:6,
-> §8:1–§8:7), its next occurrence is the **successor** of the instant it was due: the first
-> instant the rule yields on a local date later than that instant's own, both read in the
-> zone the rule is computed in then. It is computed then, even where it has passed. The
-> plan store writes the ended one's outcome and the next pending occurrence in one step, so a
-> rule is never without a pending occurrence until it ends. A next occurrence that has passed
-> is a missed one, which §4:8 pushes.
+> **Normative.** When an occurrence of a rule is first marked pushed (ADR-0350 §7:5), its
+> next occurrence is the **successor** of the instant it was due: the first instant the rule
+> yields on a local date later than that instant's own, both read in the zone the rule is
+> computed in then. The plan store writes the mark and the next pending occurrence in that
+> one step, so a rule holds a pending occurrence until it ends, and a cancel, a replace or a
+> skip (§5) reaches it while the occurrence before it still runs. Where the successor would
+> fall after the rule's until, none is written. A push again after a restart (ADR-0350
+> §8:5–§8:6) writes none, and nor does an occurrence's outcome (ADR-0350 §7:6–§7:7). A
+> pending occurrence whose instant passes unpushed, as while the hub is down, is a missed
+> one, which §4:8 pushes.
 
 > **Normative.** A rule **ends** when the next instant it would yield falls after its until,
 > or when its pending occurrence ends *cancelled*, by a cancel (ADR-0350 §9:5) or by a
@@ -174,10 +177,11 @@ refuses an instant earlier than now (ADR-0350 §4:5).
 > now. Where it finds none, the pending occurrence is pushed. Where it finds
 > any, the rule missed more than one occurrence (ADR-0350 §8:10): in the step that marks the
 > latest pushed (ADR-0350 §7:5), the plan store records the pending one and each other
-> earlier one *skipped*, each with the instant it was due, as the sensor gave them. An
+> earlier one *skipped*, each with the instant it was due, as the sensor gave them. Either
+> way, that step writes the pushed one's successor (§4:6), which the sensor gives too. An
 > occurrence pushed again after a restart (ADR-0350 §8:5–§8:6) is pushed itself, its second
-> try and its pushes kept, and the rule reaches its successors after its outcome, by §4:6 and
-> then this clause.
+> try and its pushes kept. The successor its first push wrote stays pending, and this clause
+> pushes it, or the latest missed one, once it is due, beside the one pushed again.
 
 So no zone change gives one local day two occurrences: after a move west,
 Monday's 8:00 in New York is followed by Tuesday's 8:00 in Los Angeles.
@@ -199,9 +203,10 @@ for is proactivity's.
 "Every day at 8" means 8 wherever the person is: a rule follows their zone from the
 occurrence after the zone changes. The occurrence already pending was computed in the old
 zone and keeps its instant, so after a move one occurrence may come at the old zone's 8.
-"Every weekday at 9:30, New York time" names its zone and stays in it. A rule holds one
-pending occurrence at a time, so it counts one toward the pending limit (ADR-0350 §9:8), and
-it stays in the Task Scheduler until it ends.
+"Every weekday at 9:30, New York time" names its zone and stays in it. A rule holds its
+next occurrence pending, even while the one before it runs, so it counts one toward the
+pending limit (ADR-0350 §9:8), or two while an occurrence of it waits to be pushed again
+after a restart. It stays in the Task Scheduler until it ends.
 
 ### 5. Skipping, changing, and the plain words
 
@@ -213,7 +218,8 @@ it stays in the Task Scheduler until it ends.
 
 > **Normative.** Of a rule, only its next occurrence can be skipped. Changing one occurrence
 > of a rule, "tomorrow at 9 instead", is skipping it (§5:1) and a one-off task for the new
-> time, two spawns in one round.
+> time, in one round: two spawns, or, where the skip is a cancel because the skipped
+> occurrence is the rule's last, a cancel and a spawn.
 
 > **Normative.** Changing a task, "make it 9", is a spawn replacing it (ADR-0350 §9:4): for
 > a one-off, at the new instant; for a rule, the same rule at the new time of day.
@@ -237,9 +243,9 @@ Skipping a rule's occurrence is a replace, not a cancel of one occurrence alone,
 reasons. A cancel then keeps one meaning, the whole task, and ADR-0350 §9:5 and the
 cancel's arguments are untouched. The replace's result is a read-back of the whole new
 schedule ("every day at 8:00 PM, from Thursday 23 October"), so the person hears what is now
-set. And a rule holds one pending occurrence, so there is no later occurrence a cancel could
-name. A replace takes the replaced task's suggested places (ADR-0350 §9:4), so "make it 9 on
-Telegram" is a cancel and a new task.
+set. And a rule holds only its next occurrence pending, so there is no later occurrence a
+cancel could name. A replace takes the replaced task's suggested places (ADR-0350 §9:4), so
+"make it 9 on Telegram" is a cancel and a new task.
 
 ### 6. The read-back, and the renderings
 
@@ -318,11 +324,13 @@ hours are not decided here (§11): the asked time wins.
 > the task and its effect claim (ADR-0350 §3:3). It refuses, writing nothing, a rule spawn
 > carrying no first instant and a spawn of any other when carrying one: each is the
 > caller's error, raised as a `PlanningError`, and no `TaskRefusal`.
-> `PlanStore.settle_occurrence`, for a task with a rule, takes the next occurrence's
-> instant, or none where the rule has ended, and writes it with the outcome in one step
-> (§4:6). `PlanStore.mark_occurrence_pushed` takes, for a missed occurrence of a rule, the
-> instants of the occurrences it records skipped and of the one it pushes, written in that
-> one step (§4:8). `PlanStore.cancel_scheduled_task` ends a rule (§4:7). Occurrences are kept as §4:10 rules. `PlanExport` carries the new
+> `PlanStore.mark_occurrence_pushed`, for an occurrence of a rule first pushed, takes the
+> next occurrence's instant, or none where the rule has ended (§4:7), and writes it pending
+> in the step that marks the occurrence pushed (§4:6); for a missed occurrence of a rule, it
+> also takes the instants of the occurrences it records skipped and of the one it pushes,
+> written in that one step (§4:8). A push again after a restart takes and writes no next
+> occurrence. `PlanStore.settle_occurrence` writes no next occurrence.
+> `PlanStore.cancel_scheduled_task` ends a rule (§4:7). Occurrences are kept as §4:10 rules. `PlanExport` carries the new
 > fields and its `schema_version` advances. Exact signatures are the triad's.
 
 > **Normative.** The plan store is a store under ADR-0326: the lane that changes its schema
@@ -373,12 +381,13 @@ The lanes, each after this decision merges `Accepted`, held by milestone 15:
 > task and its effect claim in one step; a rule spawn carrying no first instant, and a
 > spawn of another when carrying one, each refused with nothing written; a cancel of a
 > rule, after which no occurrence is computed; a skip, whose replace's from is the day after;
-> an occurrence's outcome and the next occurrence written in one step, with no instant at
-> which the task has nothing pending; a rule missed for three days, which pushes one late
+> an occurrence's first push and the next occurrence written in one step, with no instant
+> before the rule ends at which it has nothing pending; a cancel while a rule's occurrence
+> runs, which cancels the next and ends the rule; a skip while it runs, which replaces it; a rule missed for three days, which pushes one late
 > occurrence stating that it skipped two; a pending occurrence due under the old zone, found
 > after the person's zone changed, which is still pushed; a rule's occurrence pushed again
 > after a restart days later, once with no effect claimed and once as a second try, each
-> pushed itself and followed by the latest missed one; a restart days after a rule's pushed
+> pushed itself with no next occurrence written, beside the latest missed one; a restart days after a rule's pushed
 > occurrence whose message is confirmed done, which settles it and then pushes the latest
 > missed one late; a skip of a bounded rule's last occurrence, which is a cancel; "make it 9"
 > on a rule whose from has passed, which replaces it; a rule spawned from an activation whose
@@ -395,8 +404,10 @@ The lanes, each after this decision merges `Accepted`, held by milestone 15:
 > cancel; "snooze 10 minutes" right after a task's message, which is a one-off task ten
 > minutes from now with the same instruction; "done" right after a task's message, which is
 > no call; "make it 9" for a daily task not yet said, which replaces it with the same rule at
-> the new time; and a reminder's activation, which writes one message into its suggested
-> place.
+> the new time; "tomorrow at 9 instead" for a daily task, which is a replace from the day
+> after tomorrow and a one-off task at 09:00 tomorrow; the same for a daily task whose until
+> is tomorrow, which is its cancel and that one-off task; and a reminder's activation, which
+> writes one message into its suggested place.
 
 ### 11. What this decision does not decide
 
@@ -422,7 +433,7 @@ Superseded in part. Every clause the middle column does not name stands:
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
 | ADR-0338 | §3:6, for a zone a spawn names: a local time the spawn states is read in that zone, and a rule naming a zone is computed and rendered in it, not in the person's zone | §3:2, §4:3, §6:1 |
-| ADR-0350 | §3:6, §4:1 and §12:1, in the addition alone: a rule as a when, with more than one occurrence, which a spawn states with a zone name; §11:1, in the addition alone: a rule may be the when of any task the person set, not of a reminder alone, and of none the assistant set; §6:2, in the addition alone: a task with a rule has its input state its rule and its skipped count; §4:5, in the addition alone: a spawn is also refused on §3:5's and §4's grounds; §5:2, in the addition alone: a spawn may state a local date and time with no offset, read in a named zone or the person's; §7:7, for a task with a rule: its next occurrence is written with the ended one's outcome in one step, and none after its until or a cancel; §12:3, in the addition alone: the members §9:3 changes | §3:2, §3:5, §4, §7:1, §8:1, §9:1–§9:3 |
+| ADR-0350 | §3:6, §4:1 and §12:1, in the addition alone: a rule as a when, with more than one occurrence, which a spawn states with a zone name; §11:1, in the addition alone: a rule may be the when of any task the person set, not of a reminder alone, and of none the assistant set; §6:2, in the addition alone: a task with a rule has its input state its rule and its skipped count; §4:5, in the addition alone: a spawn is also refused on §3:5's and §4's grounds; §5:2, in the addition alone: a spawn may state a local date and time with no offset, read in a named zone or the person's; §7:5 and §7:7, for a task with a rule: its next occurrence is written in the step that first marks the one before it pushed, not when that one ends, and none after its until or a cancel; §12:3, in the addition alone: the members §9:3 changes | §3:2, §3:5, §4, §7:1, §8:1, §9:1–§9:3 |
 
 Read through and not superseded:
 
@@ -435,7 +446,7 @@ Read through and not superseded:
 | ADR-0350 §6:3 | Nothing: a task's instruction is planning's instruction to the activation it starts |
 | ADR-0350 §8:6, §8:9–§8:10 | Nothing: a task's second try and lateness are those clauses, and §4:8 finds the latest missed occurrence for §8:10 |
 | ADR-0350 §9:3–§9:5, §4:4 | Nothing: snooze is a new spawn, a change and a rule's skip are replaces, a one-off's skip is a cancel, a cancel ends what is pending, each under §4:4's authority |
-| ADR-0350 §9:8 | Nothing: a rule holds one pending occurrence, which counts once |
+| ADR-0350 §9:8 | Nothing: a rule holds its next occurrence pending, which counts once, and twice only while an occurrence is pushed again after a restart |
 | ADR-0306 §5:9 | Nothing: the backstop refuses the same task twice in one matter unless planning marks it deliberate |
 | ADR-0317 §3 | Nothing: a task's activation that does not finish writes *couldn't finish* as it rules |
 | ADR-0130 | Nothing: a scheduled task is no notification candidate, and its quiet windows reach none |
@@ -474,7 +485,7 @@ Read through and not superseded:
   §9:1 keeps, so it waits for a decision that supersedes that clause, if the size ever
   matters.
 - **Of a rule, only the next occurrence can be skipped**, and "tomorrow at 9 instead" is two
-  spawns (§5:2).
+  calls (§5:2).
 - **A task that cannot finish says only *couldn't finish***, as every task's activation does
   (ADR-0350 §6:7), until #3435.
 - **Machinery and records.** A change to the `PlanStore` triad with an upgrade, a rule type,
