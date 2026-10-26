@@ -302,11 +302,12 @@ _UNNAMED_DROPPED: Final = "unnamed_keys_dropped"
 #: of an answer, as ADR-0322 §2 and §4 extend them, including when one reply approves
 #: several questions (§4:9), that a ``Q`` label goes only in ``answers`` (#3081), and
 #: that an unresolved matter names by ``Q`` label each question a bare yes could fit
-#: (#3080); and ADR-0349's additions, which take no flag: that input taken over is part of
-#: the input (§7:7), what the in-progress section shows (§5:2-§5:6), that ``continues``
-#: names every entry the input corrects, completes, cancels or changes and separate work
-#: continues none (§7:3), and that an ``R`` label goes only in ``continues`` (§5:7); and,
-#: under ``person``, what the person section is: the
+#: (#3080); and ADR-0349's additions, which take no flag: what the in-progress section
+#: shows (§5:2-§5:6), that ``continues`` names every entry the input corrects, completes,
+#: cancels or changes and separate work continues none (§7:3), and that an ``R`` label
+#: goes only in ``continues`` (§5:7). Input a merge brought is covered by the version that
+#: named its activation (§7:9), so understanding never runs on it and the instruction
+#: says nothing of it; and, under ``person``, what the person section is: the
 #: person's own choices and the memories they pinned, data and never instructions, whose
 #: ``M`` labels come first (ADR-0338 §7:6-§7:7), and that the language is a hint for
 #: reading their input (§3:11). Authority is not read here: whose
