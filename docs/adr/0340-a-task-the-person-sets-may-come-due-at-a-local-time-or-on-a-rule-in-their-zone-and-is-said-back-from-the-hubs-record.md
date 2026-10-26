@@ -6,7 +6,7 @@
 - Dependency: [ADR-0350](0350-every-spawn-is-a-scheduled-task-written-into-the-task-scheduler-whose-sensor-starts-it-when-it-comes-due-and-the-task-manager-is-the-one-way-in-from-outside.md), [ADR-0338](0338-a-person-sets-their-profile-and-pins-what-aether-always-keeps-in-mind-their-style-is-learned-as-memories-and-each-reaches-the-models-for-that-persons-activations.md), [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md), [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md), [ADR-0317](0317-an-activation-that-chose-to-say-nothing-has-finished.md) and [ADR-0337](0337-a-prompt-change-is-judged-on-a-regression-suite-with-repeated-samples-each-recorded-call-is-asked-what-it-had-to-guess-and-a-candidate-is-promoted-after-three-clean-days.md), as their status lines leave them.
 - Authorization: the coordinator walked proposal [#3271](https://github.com/leonapivato/ai-assistant/pull/3271) on 2026-10-21, and the owner's walk of ADR-0350 from 2026-10-21 to 2026-10-25 replaced its channel with the Task Scheduler and listed what this rewrite keeps and drops (ADR-0350 §11). The owner ruled on 2026-10-25 that nothing is cancelled when a place is gone. The owner reviewed this rewrite on 2026-10-25 and ruled: there is no reminder mark, and a rule goes to any task the person set (§2, §4:1); there is no fixed fallback line, and a task that cannot finish is [#3435](https://github.com/leonapivato/ai-assistant/issues/3435)'s (§11); a task need not suggest a place (§6:2); every scheduled task's times render in the person's zone (§6:1); skipping a one-off is a cancel (§5:1), "usually it's just replacing it the next day unless it's already scheduled for the next day, which is just a cancel"; and quiet hours are no rule here, "nothing mechanical… it's something in the person model" (§7:3). The dispatcher assigned 0340. Ratification is the owner's, after their review.
 - Milestone: [15, Task Scheduler: reminders and work that runs later](https://github.com/leonapivato/ai-assistant/milestone/15).
-- **Changes `core`, so it is a contract-surface decision and a breaking change under golden rule 5.** `core/types.py`'s `TaskWhen` gains a rule, and a scheduled task holds more than one occurrence where it has one (§9:1). `TaskRefusal` gains this decision's refusal (§9:2). `PlanStore`'s members that settle, push and cancel an occurrence take a rule's next occurrence, its skipped ones and its end (§9:3). No capability is added (§8:1), and `Settings` gains no field.
+- **Changes `core`, so it is a contract-surface decision and a breaking change under golden rule 5.** `core/types.py`'s `TaskWhen` gains a rule, a scheduled task holds more than one occurrence where it has one, and a spawn carries a rule's first occurrence (§9:1). `TaskRefusal` gains this decision's refusal (§9:2). `PlanStore`'s member that writes a task writes a rule's first occurrence, and its members that settle, push and cancel an occurrence take a rule's next occurrence, its skipped ones and its end (§9:3). No capability is added (§8:1), and `Settings` gains no field.
 - **Partially supersedes**, in the clauses §12's first table names: ADR-0338 and ADR-0350.
 
 ## Context
@@ -67,8 +67,8 @@ no mark of its own. Any task the person set may come due at a fixed instant, or 
 weekday or weekly rule at a local time that follows the person's current zone; no task the
 assistant set holds a rule. Every scheduled task's times are read and rendered in the
 person's zone. The spawn's result says the task back from the stored record, with the places
-it will speak in or that it will speak in none. "Done", "snooze" and "skip tomorrow's" are
-ADR-0350's cancel and spawn.
+it suggests or that it suggests none. "Done", "snooze" and "skip tomorrow's" are ADR-0350's
+cancel and spawn.
 
 ### 1. Status, scope and delivery
 
@@ -100,11 +100,11 @@ ADR-0350's cancel and spawn.
 So "remind me at 8 to call Mom" and "every morning at 7, check the weather and tell me" are
 the same kind of thing: tasks the person set, whose instructions differ. A task's
 instruction is planning's instruction to the activation it starts, as ADR-0350 §6:3 has it.
-A task may suggest no place: "at 5, add milk to my shopping list" works and messages no one,
+A task may suggest no place: "at 5, add milk to my shopping list" works with none suggested,
 and its read-back says so (§6:2). Its activation still chooses among its whole place list
-(ADR-0350 §6:7), the line's chat included where the line is connected. The assistant's own
-follow-up ("I'll check back tomorrow") and every step a chain spawns are tasks the assistant
-set, as ADR-0350 has them.
+(ADR-0350 §6:7), the line's chat included where the line is connected, so the read-back
+says that too. The assistant's own follow-up ("I'll check back tomorrow") and every step a
+chain spawns are tasks the assistant set, as ADR-0350 has them.
 
 ### 3. One-off times, and local times
 
@@ -212,8 +212,8 @@ it stays in the Task Scheduler until it ends.
 > (ADR-0350 §9:5).
 
 > **Normative.** Of a rule, only its next occurrence can be skipped. Changing one occurrence
-> of a rule, "tomorrow at 9 instead", is skipping it and a one-off task for the new time, two
-> spawns in one round.
+> of a rule, "tomorrow at 9 instead", is skipping it (§5:1) and a one-off task for the new
+> time, two spawns in one round.
 
 > **Normative.** Changing a task, "make it 9", is a spawn replacing it (ADR-0350 §9:4): for
 > a one-off, at the new instant; for a rule, the same rule at the new time of day.
@@ -250,11 +250,13 @@ Telegram" is a cancel and a new task.
 
 > **Normative.** The **read-back** is the hub's rendering in a spawn's result of the task it
 > wrote, from the stored record. It gives the next occurrence's weekday, date and local
-> time, with a relative word where it falls today or tomorrow; for a rule, the rule in words
-> with its from and until; and each place it suggests, by its description, with the place
-> the task was set in as *here* ("Tonight, Tuesday 21 October, at 8:00 PM, on Telegram"), or,
-> where it suggests none, that it will not message the person. Its exact words are the
-> lane's (§10).
+> time, with a relative word where it falls today or tomorrow, or, for a task waiting on
+> named tasks (ADR-0350 §5:4), that it falls due when they end, and no time; for a rule, the
+> rule in words with its from and until; and each place it suggests, by its description,
+> with the place the task was set in as *here* ("Tonight, Tuesday 21 October, at 8:00 PM, on
+> Telegram"), or, where it suggests none, that it suggests no place, adding, where the line
+> is connected, that it may still message the person on the line (ADR-0350 §5:11, §6:7).
+> Its exact words are the lane's (§10).
 
 > **Normative.** Planning's instruction says that a task the person set is said back from
 > the read-back, and never from planning's own reckoning of the time.
@@ -303,18 +305,24 @@ hours are not decided here (§11): the asked time wins.
 > its zone, its from and its until. A task with a rule holds more than one occurrence over
 > its life, numbered from one. Validators refuse a rule on a task whose author is not the
 > person (§4:1), a weekly rule with no day, and an until earlier than a from (§4:4).
-> `ScheduledTask` and `TaskSpawn` gain no other field. Exact names are the triad's.
+> `TaskSpawn` carries, for a rule, the instant of its first occurrence (§4:5), as the caller
+> computed it (§9:5), and none for any other when. `ScheduledTask` and `TaskSpawn` gain no
+> other field. Exact names are the triad's.
 
 > **Normative.** `TaskRefusal` gains a member for §4:1's refusal where the plan store makes
 > it, added and never renamed. The refusals of §3:5 and §4:4 are the spawn's, made before
 > the store is reached, each *not done* with its reason.
 
-> **Normative.** `PlanStore` changes as follows. `PlanStore.settle_occurrence`, for a task
-> with a rule, takes the next occurrence's instant, or none where the rule has ended, and
-> writes it with the outcome in one step (§4:6). `PlanStore.mark_occurrence_pushed` takes,
-> for a missed occurrence of a rule, the instants of the occurrences it records skipped and
-> of the one it pushes, written in that one step (§4:8). `PlanStore.cancel_scheduled_task`
-> ends a rule (§4:7). Occurrences are kept as §4:10 rules. `PlanExport` carries the new
+> **Normative.** `PlanStore` changes as follows. `PlanStore.write_scheduled_task`, for a
+> rule, writes the first occurrence at the instant its spawn carries, in its one step with
+> the task and its effect claim (ADR-0350 §3:3). It refuses, writing nothing, a rule spawn
+> carrying no first instant and a spawn of any other when carrying one: each is the
+> caller's error, raised as a `PlanningError`, and no `TaskRefusal`.
+> `PlanStore.settle_occurrence`, for a task with a rule, takes the next occurrence's
+> instant, or none where the rule has ended, and writes it with the outcome in one step
+> (§4:6). `PlanStore.mark_occurrence_pushed` takes, for a missed occurrence of a rule, the
+> instants of the occurrences it records skipped and of the one it pushes, written in that
+> one step (§4:8). `PlanStore.cancel_scheduled_task` ends a rule (§4:7). Occurrences are kept as §4:10 rules. `PlanExport` carries the new
 > fields and its `schema_version` advances. Exact signatures are the triad's.
 
 > **Normative.** The plan store is a store under ADR-0326: the lane that changes its schema
@@ -358,7 +366,12 @@ The lanes, each after this decision merges `Accepted`, held by milestone 15:
 > local time, a rule and every rendering follow; a task the assistant set, rendered in a
 > profile zone that differs from `Settings.timezone`, in its spawn's result, the list pull,
 > its activation's input, the schedule's window and the Task Manager's queries; a task
-> suggesting no place, whose read-back says it will not message the person; a cancel of a
+> suggesting no place, whose read-back says it suggests none, with the line connected and
+> without it, adding only with it that the task may still message the person on the line;
+> a task waiting on named tasks, whose read-back says it falls due when they end and gives
+> no time; a rule's first occurrence, written at the instant its spawn carries with the
+> task and its effect claim in one step; a rule spawn carrying no first instant, and a
+> spawn of another when carrying one, each refused with nothing written; a cancel of a
 > rule, after which no occurrence is computed; a skip, whose replace's from is the day after;
 > an occurrence's outcome and the next occurrence written in one step, with no instant at
 > which the task has nothing pending; a rule missed for three days, which pushes one late
@@ -443,7 +456,7 @@ Read through and not superseded:
 | "Remind me on Telegram at 8", on the hub chat | It suggests the line's chat, and the read-back says "on Telegram" |
 | "Every weekday at 7, the bins" | A weekdays rule at 07:00 in the person's zone (§4) |
 | "Every morning at 7, check the weather and tell me" | A daily rule on a task the person set, whose activation looks the weather up and says it (§4:1) |
-| "At 5, add milk to my shopping list" | A task suggesting no place, said back as messaging no one (§6:2) |
+| "At 5, add milk to my shopping list" | A task suggesting no place, said back as suggesting none, and, where the line is connected, as one that may still message the person there (§6:2) |
 | The person flies to Lisbon | A one-off keeps its instant; a rule follows from its next occurrence (§3:1, §4:3); every task's times read in the new zone (§6:1) |
 | "Skip tomorrow's" | For a rule, a replace from the day after, said back whole; for a one-off, a cancel (§5:1) |
 | "I already took it", before 8 | A cancel of the one-off, or a skip of the rule's (§5:5) |
@@ -497,8 +510,8 @@ contract.
   is no reminder to give it to. Saying what a task was when it cannot finish is #3435's, for
   every task.
 - **A reminder that must suggest a place.** Dropped by the owner on 2026-10-25: some tasks
-  the person sets speak nowhere ("at 5, add milk to my shopping list"), and the read-back
-  says so (§6:2).
+  the person sets need no place ("at 5, add milk to my shopping list"), and the read-back
+  says it suggests none (§6:2).
 - **Deleting a conversation cancelling its reminders,** the old walk's answer 9. Reversed by
   the owner on 2026-10-25: nothing is cancelled when a place is gone (ADR-0350 §5:9).
 - **"Skip tomorrow's" as a cancel of the next occurrence alone.** Rejected: it gives cancel
