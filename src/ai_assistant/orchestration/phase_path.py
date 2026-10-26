@@ -2034,12 +2034,17 @@ class PhaseWorking:
     def running_shown(self) -> frozenset[str]:
         """Each activation planning was shown as running (ADR-0349 §4:6, §6:1).
 
-        In a list pull's running part this activation made, an offer or a wait.
+        In a list pull's running part this activation made, an offer or a wait; and, by
+        ADR-0352 §3:7, in what a stop call's result listed of what the stopped activation
+        set up.
         """
         shown = set(self.shown_running)
         for outcome in self.outcomes():
             if outcome.tasks is not None and outcome.tasks.listed:
                 shown.update(one.activation_id for one in outcome.tasks.running)
+            set_up = None if outcome.peer is None else outcome.peer.set_up
+            if set_up is not None:
+                shown.update(set_up.running)
         return frozenset(shown)
 
     def _looked_up(self, outcome: CallOutcome, capability: str | None) -> CallOutcome:
@@ -4410,7 +4415,7 @@ class PhasePath:
             What acting made of the round, and what the message's write raised, each an
             exception where it raised, as the gather of an ordinary round returns them.
         """
-        caller = self._caller(working)
+        caller = self._caller(given, working)
         answered = await self._calls(given, working, answering.first, caller=caller)
         state = active_state()
         if state is not None and state.stopped:
@@ -4493,7 +4498,7 @@ class PhasePath:
             return ActedRound(round_id=decided.round_id)
         authorized = authorized_round(replace(decided, allowed=rest))
         if caller is None:
-            caller = self._caller(working)
+            caller = self._caller(given, working)
         with (
             spawning(self._spawner(given, working)),
             calling(caller),
@@ -4518,7 +4523,7 @@ class PhasePath:
         self._peers(working, acted, caller)
         return acted
 
-    def _caller(self, working: PhaseWorking) -> MatterCaller | None:
+    def _caller(self, given: PhasePass, working: PhaseWorking) -> MatterCaller | None:
         """Who calls on running work in this round, read from the working set (§4:6)."""
         state = active_state()
         if self._matters is None or state is None:
@@ -4530,6 +4535,7 @@ class PhasePath:
             owner_records=working.owner_records,
             running=working.running_shown(),
             waiting=frozenset(state.waits_on) if latest.waiting else None,
+            supply=given.supply,
         )
 
     @staticmethod

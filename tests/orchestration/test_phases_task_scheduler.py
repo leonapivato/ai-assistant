@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 from phases_support import open_conversation, phases_harness, said, until, working, written
@@ -317,23 +317,37 @@ async def test_a_stop_of_a_pushed_id_with_admission_held_starts_nothing() -> Non
         await harness.engine.aclose()
 
 
-async def test_a_stop_command_cascades_to_what_its_activation_spawned() -> None:
-    """§9:6: its cascade record first, then the stop, then the walk cancels the child."""
+class _Clock:
+    """A clock a case steps forward, so a task it set comes due without a wait."""
+
+    def __init__(self) -> None:
+        self.now = AT
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+async def test_a_stop_command_leaves_what_its_activation_spawned_and_it_still_falls_due() -> None:
+    """ADR-0352 §2:1-§2:4, §7:7: the stop cancels nothing below, and the reminder runs."""
     entered = asyncio.Event()
     release = asyncio.Event()
+    reminded: list[str] = []
 
     class _Held(FakeToolCallingCompleter):
         async def respond(
             self, messages: Sequence[Message], tools: Sequence[OfferedTool], **_: Any
         ) -> RoundResponse:
             request = _request(messages)
+            if _started_by_a_task(request):
+                reminded.append("ran")
+                return RoundResponse(text="")
             if not request["rounds"]:
                 return RoundResponse(
                     calls=(
                         ProposedCall(
                             call_id="spawn-1",
                             name="spawn",
-                            arguments={"instruction": "check tomorrow", "delay_minutes": 1440},
+                            arguments={"instruction": "check the notes", "delay_minutes": 40},
                         ),
                     )
                 )
@@ -341,41 +355,33 @@ async def test_a_stop_command_cascades_to_what_its_activation_spawned() -> None:
             await release.wait()
             return RoundResponse(text="")
 
-    harness = phases_harness(_Held(), task_scheduler=seams())
+    clock = _Clock()
+    harness = phases_harness(_Held(), task_scheduler=seams(), now=clock)
     await harness.engine.start()
     try:
         conversation = await open_conversation(harness)
-        await harness.engine.write_message(conversation, message=said("m-1", "check tomorrow"))
+        await harness.engine.write_message(conversation, message=said("m-1", "remind me"))
         await asyncio.wait_for(entered.wait(), 5)
         running = await working(harness, conversation)
-        (child,) = (await harness.plans.export()).scheduled_tasks
+        (reminder,) = (await harness.plans.export()).scheduled_tasks
 
         assert await harness.engine.stop_activation(running) is ActivationStop.STOPPED
         release.set()
 
         held = await harness.plans.export()
-        assert running in held.cascades
-        assert all(task.id != child.id or not task.pending for task in held.scheduled_tasks)
-        await _until_no_tasks(harness)
-    finally:
-        await harness.engine.aclose()
+        assert held.cascades == (), "no stop writes a cascade record (§2:2)"
+        assert running in held.stopped_activations
+        (kept,) = held.scheduled_tasks
+        assert kept.id == reminder.id
+        assert kept.pending, "the reminder stays pending (§2:4)"
 
+        clock.now = AT + timedelta(minutes=41)
 
-async def test_after_a_restart_a_cascaded_child_is_never_pushed() -> None:
-    """§7:5, §13:3: a crash after the cascade record, before its walk cancelled the child."""
-    harness = phases_harness(_responder(_silent, _silent), task_scheduler=seams())
-    stopped = activation()
-    child = await write_task(harness.plans, stopped)
-    await harness.plans.record_cascade(stopped)
-    await harness.engine.start()
-    try:
+        async def ran() -> bool:
+            return bool(reminded)
 
-        async def cancelled() -> bool:
-            held = await harness.plans.scheduled_tasks([child.id])
-            return not held or held[0].occurrences[0].state is OccurrenceState.CANCELLED
-
-        await until(cancelled, what="the child to end cancelled")
-        assert await _schedule_episodes(harness) == []
+        await until(ran, what="the reminder to fall due and run")
+        await _until_scheduled(harness, 1)
     finally:
         await harness.engine.aclose()
 

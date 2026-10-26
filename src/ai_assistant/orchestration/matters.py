@@ -52,7 +52,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
@@ -84,6 +84,7 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.activation_state import ActivationState
     from ai_assistant.orchestration.disclosure import TurnSupply
+    from ai_assistant.orchestration.task_scheduler import StillLive
 
 __all__ = [
     "ANSWER_OFFER_CAPABILITY",
@@ -101,6 +102,7 @@ __all__ = [
     "Matters",
     "Named",
     "Offer",
+    "SetUpRead",
     "TakeAnswer",
     "in_progress",
     "input_standing",
@@ -526,6 +528,26 @@ _LIMIT_REACHED: Final = "it already holds as much input as it may"
 _ENDED_UNANSWERED: Final = "it ended without answering"
 
 
+class SetUpRead(Protocol):
+    """Reads what an activation set up that is still live below it (ADR-0352 §3:1-§3:2).
+
+    The engine's, over its Task Manager; it answers ``None`` where no Task Scheduler is
+    wired, so nothing can have been set up.
+    """
+
+    def __call__(
+        self,
+        activation_id: str,
+        /,
+        *,
+        person: str,
+        viewer: str | None,
+        supply: TurnSupply | None,
+    ) -> Awaitable[StillLive | None]:
+        """What ``activation_id`` set up that is still live, as ``viewer`` is shown it."""
+        ...
+
+
 class Matters:
     """What crosses activations while they run, and the waits and steps over it (§5-§7).
 
@@ -535,7 +557,7 @@ class Matters:
     on an older activation, and the answer call for a take or a decline.
     """
 
-    def __init__(  # noqa: PLR0913 — the engine's account, the two stores, the stop, the two limits
+    def __init__(  # noqa: PLR0913 — the engine's account, the two stores, the stop and its read, the two limits
         self,
         *,
         running: Callable[[], Iterable[ActivationState]],
@@ -544,6 +566,7 @@ class Matters:
         stop: Callable[[str], Awaitable[ActivationStop]],
         held_input_limit: int,
         in_progress_limit: int,
+        set_up: SetUpRead | None = None,
     ) -> None:
         """Wire the coordinator.
 
@@ -552,10 +575,13 @@ class Matters:
             plans: The plan store an absorbed or handed-over activation's stop record is
                 written in, and the effect records a peer view reads.
             memory: The store a peer view reads an activation's episode from.
-            stop: The Task Manager's stop, with its cascade, which planning's stop call
-                runs (§4:7): ``stop_activation``'s one implementation.
+            stop: The Task Manager's stop, which planning's stop call runs (§4:7):
+                ``stop_activation``'s one implementation, which stops only the activation
+                it names (ADR-0352 §2:1).
             held_input_limit: ``Settings.held_input_limit`` (§9:2).
             in_progress_limit: ``Settings.in_progress_limit`` (§9:3).
+            set_up: What a stopped activation set up that is still live, which the stop
+                call's result shows (ADR-0352 §3:1); ``None`` shows nothing of it.
 
         Raises:
             ValueError: If a limit is below 1.
@@ -567,6 +593,7 @@ class Matters:
         self._plans = plans
         self._memory = memory
         self._stop = stop
+        self._set_up = set_up
         self.held_input_limit = held_input_limit
         self.in_progress_limit = in_progress_limit
         # Who absorbed each absorbed activation, and who took each handed-over one's
@@ -1055,9 +1082,10 @@ class Matters:
     async def record_stop(self, activation_id: str, *, deadline: float | None, stage: str) -> None:
         """Write a merge's stop record, after its step, inside ``deadline`` (§4:5).
 
-        Internal: no cascade record and no walk (ADR-0350 §9:6). A record that cannot be
-        written is logged: the marks are set, so the other activation runs no further
-        stage and commits nothing. ``None`` writes it to its end.
+        Internal: it stops only that activation, as every stop does (ADR-0352 §2:1). A
+        record that cannot be written is logged: the marks are set, so the other
+        activation runs no further stage and commits nothing. ``None`` writes it to its
+        end.
         """
         try:
             async with asyncio.timeout_at(deadline):
@@ -1069,8 +1097,25 @@ class Matters:
                 _log.warning("merge_stop_unrecorded", stage=stage, reason="store_failed")
 
     async def stop(self, activation_id: str) -> ActivationStop:
-        """The Task Manager's stop, with its cascade, for planning's stop call (§4:7)."""
+        """The Task Manager's stop, for planning's stop call (§4:7, ADR-0352 §2:1)."""
         return await self._stop(activation_id)
+
+    async def still_live(
+        self, activation_id: str, *, viewer: ActivationState, supply: TurnSupply | None
+    ) -> StillLive | None:
+        """What ``activation_id`` set up that is still live, as ``viewer`` is shown it.
+
+        ADR-0352 §3:1-§3:6, for the stop call's result: read once the stop's record is
+        written, or the activation was found ended or stopped. ``None`` where nothing is
+        wired to read it, or the viewer is no person's, whom running work is never shown
+        (§5:5).
+        """
+        person = _viewer_person(viewer)
+        if self._set_up is None or person is None:
+            return None
+        return await self._set_up(
+            activation_id, person=person, viewer=viewer.activation_id, supply=supply
+        )
 
     async def peer(self, activation_id: str, *, owner_records: bool) -> PeerView | None:
         """``activation_id``'s own work through the peer view, read fresh (§6:7-§6:10).

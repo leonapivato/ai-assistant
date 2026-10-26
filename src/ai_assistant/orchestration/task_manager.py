@@ -4,15 +4,20 @@
 scheduled tasks: a surface of commands and queries the assistant does not perceive
 (ADR-0292 §1:3), not a spoke on a channel. Its queries are what is running, live from the
 engine; what is scheduled, from the Task Scheduler; and what ran lately, from the
-schedule's episodes (§10:2). Its commands are the stop, with its cascade (§9:6), which is
-the one stop ``AssistantEngine.stop_activation`` runs (§10:3); cancel (§9:5); and replace
-(§9:4). No operation reaches the local API (§10:6): the engine holds this object, and the
-hub chat's stop control and the line's ``/stop`` reach its stop through the engine's.
+schedule's episodes (§10:2). Its commands are the stop, which is the one stop
+``AssistantEngine.stop_activation`` runs (§10:3) and stops only the activation it names
+(ADR-0352 §2:1); cancel (§9:5); and replace (§9:4). No operation reaches the local API
+(§10:6): the engine holds this object, and the hub chat's stop control and the line's
+``/stop`` reach its stop through the engine's.
 
 **Inside, the same operations serve** (§10:4): planning's list pull is its queries, and
 planning's cancel and its spawn that replaces a task are its commands under §4:4's checks,
 each with one implementation here. :class:`ScheduledTaskCalls` is acting's runner for the
 three capabilities, over this one :class:`TaskManager`.
+
+**What a stopped activation set up** (ADR-0352 §3:1-§3:6). No stop reaches below the
+activation it names, so a stop call's result shows what is still live below it:
+:meth:`TaskManager.still_live` reads, and changes nothing.
 
 **What keeps the schedule tidy** (§7:8). A task is kept while anything of it or below it
 is live, while a task the Task Scheduler holds waits on it, and while its parent still
@@ -57,7 +62,6 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     ActivationEffect,
     ActivationEffectClaim,
-    ActivationStop,
     ChannelIdentity,
     DueAfterTasks,
     DueAt,
@@ -112,6 +116,8 @@ from ai_assistant.orchestration.task_scheduler import (
     ActivationEntry,
     ListedPlace,
     Spawner,
+    StartingEntry,
+    StillLive,
     TaskEntry,
     TaskListing,
     current_spawner,
@@ -564,7 +570,7 @@ class TaskManager:
         memory: MemoryStore,
         running: Callable[[], Iterable[ActivationState]],
         is_running: Callable[[str], bool],
-        stop_one: Callable[[str], Awaitable[ActivationStop]],
+        starting: Callable[[str], bool],
         wake: Callable[[], None],
         limits: TaskManagerLimits,
         zones: PersonZones,
@@ -578,8 +584,9 @@ class TaskManager:
             memory: The memory store the schedule's episodes are read from (§7:9).
             running: The activations the engine holds as running.
             is_running: Whether an activation is running, admitted or pushed.
-            stop_one: Stops one running or pushed activation, as ``stop_activation``
-                does, without the cascade: the cascade's walk stops each it finds.
+            starting: Whether an occurrence was pushed to an activation that is not yet
+                admitted and that no stop has named, so it is about to start
+                (ADR-0352 §3:4).
             wake: Wakes the sensor, which every write to a task does (§7:2).
             limits: §12:5's chain, pending and listing bounds.
             zones: The person's zone, read for the person each task and query is for,
@@ -591,7 +598,7 @@ class TaskManager:
         self._memory = memory
         self._running = running
         self._is_running = is_running
-        self._stop_one = stop_one
+        self._starting = starting
         self._wake = wake
         self._limits = limits
         self._zones = zones
@@ -646,7 +653,22 @@ class TaskManager:
         if not shown:
             return ()
         told = self._zones.default if zone is None else zone
-        states = {one.activation_id: one for one in self._running()}
+        entries = self._running_entries(
+            self._running(), asker=asker, person=person, supply=supply, zone=told
+        )
+        return tuple(entries[: self._limits.listing_bound])
+
+    @staticmethod
+    def _running_entries(
+        running: Iterable[ActivationState],
+        *,
+        asker: str | None,
+        person: str,
+        supply: TurnSupply | None,
+        zone: ZoneInfo,
+    ) -> list[ActivationEntry]:
+        """Each of ``running`` the list pull's running part would show, newest first."""
+        states = {one.activation_id: one for one in running}
         entries: list[ActivationEntry] = []
         for entry in in_progress(states.values(), viewer=asker, person=person, supply=supply):
             state = states.get(entry.activation_id)
@@ -654,7 +676,7 @@ class TaskManager:
             entries.append(
                 ActivationEntry(
                     activation_id=entry.activation_id,
-                    started="" if started is None else local_time(started, told),
+                    started="" if started is None else local_time(started, zone),
                     place=place_description(entry.channel),
                     status="running",
                     input=entry.input,
@@ -663,7 +685,7 @@ class TaskManager:
                     origin=entry.origin,
                 )
             )
-        return tuple(entries[: self._limits.listing_bound])
+        return entries
 
     async def scheduled(
         self, person: str, *, zone: ZoneInfo | None = None
@@ -681,6 +703,82 @@ class TaskManager:
         shown = held[: self._limits.listing_bound]
         parents = await self.parents(shown)
         return tuple(self.entry(one, told, parent=parents.get(one.parent)) for one in shown)
+
+    async def still_live(
+        self,
+        activation_id: str,
+        *,
+        person: str,
+        viewer: str | None,
+        supply: TurnSupply | None,
+    ) -> StillLive:
+        """What ``activation_id`` set up that is still live below it (ADR-0352 §3:1-§3:6).
+
+        *Below* is ADR-0350 §9:6's walk, made as a read (§3:2): the tasks it spawned, and
+        the tasks spawned by those tasks' activations in turn, whether or not those
+        activations have ended. Each task with an occurrence pending is shown as the list
+        pull shows one, with its parent's description (§3:3), in the order written; each
+        activation running from a task below as the list pull's running part shows one,
+        and one pushed and not yet admitted as starting under its task (§3:4), oldest
+        first. A marked task and an outside input are withheld with their mark (§3:5).
+        Each part shows at most the listing bound and counts the rest (§3:6). It reads
+        only, and is called once the stop's record is written, or the activation was
+        found ended or stopped. ``viewer``, the stop call's own activation, is never
+        shown, and a running one ``supply`` does not admit is not shown, as the list pull
+        shows neither.
+
+        Never raises but for a cancellation: where the tasks or the person's zone cannot
+        be read, what it answers says it was not read.
+        """
+        try:
+            below = await self._below(activation_id)
+            zone = await self.zone_of(person)
+        except PlanningError, PersonModelStoreError:
+            _log.warning("stop_set_up_unread", stage="acting", reason="store_failed")
+            return StillLive(read=False)
+        pending = [task for task in below if task.pending]
+        bound = self._limits.listing_bound
+        shown = pending[:bound]
+        parents = await self.parents(shown)
+        tasks = tuple(self.entry(one, zone, parent=parents.get(one.parent)) for one in shown)
+        from_task = {one: task.id for task in below for one in task.activations}
+        live = [one for one in self._running() if one.activation_id in from_task]
+        running = self._running_entries(live, asker=viewer, person=person, supply=supply, zone=zone)
+        held = {one.activation_id for one in live if not one.ended}
+        starting = [
+            StartingEntry(task_id=task)
+            for one, task in from_task.items()
+            if one not in held and one != viewer and self._starting(one)
+        ]
+        activations: list[ActivationEntry | StartingEntry] = [*reversed(running), *starting]
+        return StillLive(
+            tasks=tasks,
+            more_tasks=len(pending) - len(shown),
+            activations=tuple(activations[:bound]),
+            more_activations=max(0, len(activations) - bound),
+        )
+
+    async def _below(self, activation_id: str) -> list[ScheduledTask]:
+        """Every task below ``activation_id``, in the order written, each once (§3:2).
+
+        Raises:
+            PlanningError: If the plan store cannot be read.
+        """
+        found: dict[str, ScheduledTask] = {}
+        walked = {activation_id}
+        frontier = [activation_id]
+        while frontier:
+            below = await self._plans.spawned_tasks(frontier)
+            frontier = []
+            for task in below:
+                if task.id in found:
+                    continue
+                found[task.id] = task
+                for one in task.activations:
+                    if one not in walked:
+                        walked.add(one)
+                        frontier.append(one)
+        return list(found.values())
 
     async def parents(self, tasks: Sequence[ScheduledTask]) -> dict[str, TaskParent]:
         """Where and when each of ``tasks``' parents started, from the record (§4:6, §9:4).
@@ -908,7 +1006,7 @@ class TaskManager:
         """Cancel what is pending of a task (§9:5); it stops nothing running.
 
         ``person`` and ``spawned_by`` are §4:4's checks for planning's cancel; the Task
-        Manager's command and the cascade give neither.
+        Manager's command gives neither.
 
         Raises:
             PlanningError: If the store fails.
@@ -979,58 +1077,6 @@ class TaskManager:
         if written.answer is TaskWriteAnswer.WRITTEN:
             await self._plans.finish_activation_effect(effect.id, ToolOutcome.SUCCEEDED)
         return written
-
-    async def cascade(self, activation_id: str) -> None:
-        """Stop what is still live below a stopped activation (ADR-0350 §9:6).
-
-        The walk runs down through the tasks the activation spawned, and the tasks their
-        activations spawned in turn, whether or not those activations have ended: it
-        cancels every pending occurrence, stops every activation pushed or running, and
-        acts on nothing that has ended. Where a push won against its cancel (§7:5), the
-        activation it names is stopped in turn. Whatever a failure leaves of the walk,
-        the cascade record already written keeps everything below from being pushed.
-        """
-        frontier = [activation_id]
-        seen: set[str] = set()
-        while frontier:
-            try:
-                below = await self._plans.spawned_tasks(frontier)
-            except PlanningError:
-                _log.warning("task_cascade_cut_short", stage="stop", reason="store_failed")
-                return
-            frontier = []
-            for task in below:
-                if task.id in seen:
-                    continue
-                seen.add(task.id)
-                current = await self._cancel_below(task)
-                for one in current.occurrences:
-                    if one.pushed_to is not None:
-                        await self._stop_below(one.pushed_to)
-                frontier.extend(current.activations)
-
-    async def _cancel_below(self, task: ScheduledTask) -> ScheduledTask:
-        """Cancel ``task``'s pending occurrences in a cascade, and read it as it stands."""
-        if task.pending:
-            try:
-                cancelled = await self.cancel(task.id)
-            except PlanningError:
-                _log.warning("task_cascade_cancel_failed", stage="stop", reason="store_failed")
-                return task
-            if cancelled.task is not None:
-                return cancelled.task
-        try:
-            held = await self._plans.scheduled_tasks([task.id])
-        except PlanningError:
-            return task
-        return held[0] if held else task
-
-    async def _stop_below(self, activation_id: str) -> None:
-        try:
-            await self._stop_one(activation_id)
-        except PlanningError:
-            # The mark is set where it runs, and the cascade record holds the rest.
-            _log.warning("task_cascade_stop_unrecorded", stage="stop", reason="store_failed")
 
     # --- keeping the schedule (§7:8) ---
 

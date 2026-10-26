@@ -26,15 +26,19 @@ meaning.
   declined; and an offer made while the older plans holds its round back (§7:14,
   §7:17-§7:24).
 - Planning's stop call stops committed work it was shown in the list pull's running
-  part, with the Task Manager's cascade, and its result shows what had finished; a
+  part, and that work alone (ADR-0352 §2:1); its result shows what had finished and what
+  the work set up that is still live, which the next round may name (ADR-0352 §3); a
   look-up shows what running work has found (§4:6-§4:11, §6:1-§6:6).
+- A conversation never shows the ending of an activation whose matter was taken over:
+  within one place it shows the taker's, and across places it keeps what it showed
+  before (ADR-0352 §5).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
@@ -51,13 +55,12 @@ from phases_support import (
     working,
     written,
 )
-from task_support import seams
+from task_support import AT, seams
 
 from ai_assistant.core.types import (
     ControllerRule,
     ControllerStage,
     MessageAuthor,
-    OccurrenceState,
     ProposedCall,
     RoundResponse,
 )
@@ -140,11 +143,20 @@ class _Planner(FakeToolCallingCompleter):
         self._scripts: dict[str, list[_Reply]] = {}
         self._gates: dict[str, tuple[asyncio.Event, asyncio.Event]] = {}
         self._from: dict[str, int] = {}
+        self._within: list[str] = []
         self.requests: dict[str, list[dict[str, Any]]] = {}
         self.offered: dict[str, list[list[str]]] = {}
 
     def script(self, text: str, *replies: _Reply) -> None:
         self._scripts.setdefault(text, []).extend(replies)
+
+    def route_within(self, fragment: str) -> None:
+        """Route every input whose meaning holds ``fragment`` as ``fragment``.
+
+        An activation the Task Scheduler started means the hub's statement of its task,
+        which holds the task's instruction among the rest.
+        """
+        self._within.append(fragment)
 
     def hold(self, text: str, *, from_round: int = 1) -> tuple[asyncio.Event, asyncio.Event]:
         """The (entered, release) pair holding ``text``'s rounds from ``from_round`` on."""
@@ -162,6 +174,7 @@ class _Planner(FakeToolCallingCompleter):
         request: dict[str, Any] = json.loads(messages[-1].content)
         understanding = request.get("understanding")
         key = str(understanding["meaning"]) if isinstance(understanding, dict) else ""
+        key = next((one for one in self._within if one in key), key)
         self.requests.setdefault(key, []).append(request)
         self.offered.setdefault(key, []).append([one.name for one in tools])
         gate = self._gates.get(key)
@@ -929,10 +942,21 @@ async def test_an_offer_made_while_the_older_plans_holds_its_round_back(
 # --- §4:6-§4:11, §6:1-§6:6: the stop call and the look-up --------------------------------
 
 
-async def test_the_stop_call_stops_committed_work_and_the_cascade_cancels_its_task() -> None:
-    """§4:6-§4:11, §1:5's case: shown in the list pull, stopped with ADR-0350 §9:6's cascade."""
+def _stop_result(request: dict[str, Any], round_number: int) -> dict[str, Any]:
+    """What a stop call a round made came back with, as a later round is shown it."""
+    (call,) = [
+        one
+        for one in request["rounds"][round_number - 1]["calls"]
+        if one["capability"] == "stop_activation"
+    ]
+    value: dict[str, Any] = call["result"]["value"]
+    return value
+
+
+async def test_the_stop_call_stops_committed_work_and_its_task_stays_and_is_listed() -> None:
+    """ADR-0352 §2:1, §3:1-§3:3, §7:7, and ADR-0349 §1:5's case as ADR-0352 leaves it."""
     understanding, planner = _Understanding(), _Planner()
-    older_text, newer_text = "remind me hourly to stretch", "never mind the reminders"
+    older_text, newer_text = "remind me hourly to stretch", "never mind the research"
     planner.script(
         older_text,
         RoundResponse(
@@ -947,7 +971,7 @@ async def test_the_stop_call_stops_committed_work_and_the_cascade_cancels_its_ta
         lambda request: RoundResponse(
             calls=(_call("c2", "stop_activation", activation=_label_of(request, newer_text)),)
         ),
-        RoundResponse(text="Stopped."),
+        RoundResponse(text="Stopped; the reminder is still set."),
     )
     harness = _harness(understanding, planner, task_scheduler=seams())
     await harness.engine.start()
@@ -965,16 +989,148 @@ async def test_the_stop_call_stops_committed_work_and_the_cascade_cancels_its_ta
 
     held = await harness.plans.export()
     assert older in held.stopped_activations
-    assert older in held.cascades, "the Task Manager's stop writes its cascade record"
-    tasks = await harness.plans.spawned_tasks([older])
-    assert tasks
-    assert all(
-        one.state is OccurrenceState.CANCELLED for task in tasks for one in task.occurrences
-    ), "the cascade cancelled what it spawned"
-    result = planner.requests[newer_text][2]["rounds"][1]["calls"][0]["result"]["value"]
+    assert held.cascades == (), "no stop writes a cascade record (ADR-0352 §2:2)"
+    (task,) = await harness.plans.spawned_tasks([older])
+    assert task.pending, "what the stopped work set up stays (ADR-0352 §2:4)"
+    result = _stop_result(planner.requests[newer_text][2], 2)
     assert result["stopped_by_this_call"] is True
     assert any("spawn" in one for one in result["did"]), "its result shows what had finished"
+    left = result["set_up_still_live"]
+    (shown,) = left["scheduled"]
+    assert shown["label"].startswith("T")
+    assert shown["state"] == "pending"
+    assert shown["falls_due"]
+    assert shown["set_by"] == "person"
+    assert shown["carries"] == "Remind them to stretch."
+    assert left["running"] == "none"
     await harness.engine.aclose()
+
+
+async def test_a_stop_call_naming_work_that_set_up_nothing_says_nothing_is_still_live() -> None:
+    """ADR-0352 §3:1, §7:7: where there is none, the result says so."""
+    understanding, planner = _Understanding(), _Planner()
+    older_text, newer_text = "find a hotel", "never mind the hotel"
+    planner.script(
+        older_text,
+        RoundResponse(
+            calls=(_call("c1", "search_memory", query="hotels", looking_for="past stays"),)
+        ),
+    )
+    planner.hold(older_text, from_round=2)
+    planner.script(
+        newer_text,
+        RoundResponse(calls=(_call("c1", "list_tasks"),)),
+        lambda request: RoundResponse(
+            calls=(_call("c2", "stop_activation", activation=_label_of(request, newer_text)),)
+        ),
+        RoundResponse(text="Stopped."),
+    )
+    harness = _harness(understanding, planner, task_scheduler=seams(), phases={"look_ups": True})
+    await harness.engine.start()
+    await open_conversation(harness)
+    _, _older = await _start(harness, older_text, message_id="a-1")
+    await until(_has(planner, older_text, 2), what="the look-up to run and the next round wait")
+    _, _newer = await _start(harness, newer_text, message_id="b-1")
+    await _frozen(harness, 1)
+    planner.hold(older_text)[1].set()
+    await _frozen(harness, 2)
+
+    result = _stop_result(planner.requests[newer_text][2], 2)
+    assert result["stopped_by_this_call"] is True
+    assert result["set_up_still_live"] == "nothing it set up is still live"
+    await harness.engine.aclose()
+
+
+async def test_a_stop_calls_result_lists_running_work_below_which_the_next_round_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0352 §3:4, §3:7, §7:7: a step running from a task below, shown by its label."""
+    understanding, planner = _Understanding(), _Planner()
+    older_text, newer_text, step = (
+        "research blenders",
+        "never mind all the blender stuff",
+        "Read blender reviews.",
+    )
+    planner.route_within(step)
+    planner.script(
+        older_text,
+        RoundResponse(
+            text="Researching.",
+            calls=(_call("c1", "spawn", instruction=step, delay_minutes=5),),
+        ),
+    )
+    planner.hold(older_text, from_round=2)
+    planner.hold(step)
+
+    def stop_below(request: dict[str, Any]) -> RoundResponse:
+        listed = _stop_result(request, 2)["set_up_still_live"]["running"]
+        return RoundResponse(
+            calls=(_call("c3", "stop_activation", activation=listed[0]["episode"]),)
+        )
+
+    planner.script(
+        newer_text,
+        RoundResponse(calls=(_call("c1", "list_tasks"),)),
+        lambda request: RoundResponse(
+            calls=(_call("c2", "stop_activation", activation=_label_of(request, newer_text)),)
+        ),
+        stop_below,
+        RoundResponse(text="Stopped the research and its reading."),
+    )
+    planner.hold(newer_text, from_round=2)
+    clock = _Clock()
+    harness = _harness(understanding, planner, task_scheduler=seams(), now=clock)
+    phases = harness.engine._phases
+    assert phases is not None
+    monkeypatch.setattr(phases, "_round_limit", 6)
+    await harness.engine.start()
+    await open_conversation(harness)
+    _, older = await _start(harness, older_text, message_id="a-1")
+    await until(_has(planner, older_text, 2), what="the spawn to run and its next round wait")
+    _, _newer = await _start(harness, newer_text, message_id="b-1")
+    await asyncio.wait_for(planner.hold(newer_text)[0].wait(), SETTLE)
+    # Only now does the step fall due, so the list pull showed the older alone.
+    clock.now += timedelta(minutes=6)
+    await asyncio.wait_for(planner.hold(step)[0].wait(), SETTLE)
+    (task,) = await harness.plans.spawned_tasks([older])
+    (running_step,) = task.activations
+    planner.hold(newer_text)[1].set()
+    await _until_stopped(harness, running_step)
+    planner.hold(older_text)[1].set()
+    planner.hold(step)[1].set()
+    found = await _frozen(harness, 3)
+
+    listing = planner.requests[newer_text][0]["rounds"]
+    assert listing == [], "the list pull's round was planned before the step started"
+    first = _stop_result(planner.requests[newer_text][2], 2)
+    (listed,) = first["set_up_still_live"]["running"]
+    assert listed["input"], "shown as the list pull's running part shows one"
+    assert first["set_up_still_live"]["scheduled"] == "none"
+    second = _stop_result(planner.requests[newer_text][3], 3)
+    assert second["stopped_by_this_call"] is True
+    stopped(_episode(found, older))
+    stopped(_episode(found, running_step))
+    held = await harness.plans.export()
+    assert {older, running_step} <= set(held.stopped_activations)
+    assert held.cascades == ()
+    await harness.engine.aclose()
+
+
+class _Clock:
+    """A clock a case steps forward, so a task comes due without a wait."""
+
+    def __init__(self) -> None:
+        self.now = AT
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+async def _until_stopped(harness: Harness, activation_id: str) -> None:
+    async def recorded() -> bool:
+        return activation_id in (await harness.plans.export()).stopped_activations
+
+    await until(recorded, what="the stop record to be written")
 
 
 async def test_a_look_up_shows_what_running_work_has_found_so_far() -> None:

@@ -1,16 +1,18 @@
 """Planning's three calls on running work: the stop, the look-up, and the answer (ADR-0349).
 
-- **The stop call** (§4:6-§4:12), :data:`STOP_ACTIVATION`: the Task Manager's stop, with
-  ADR-0350 §9:6's cascade, by the one implementation ``AssistantEngine.stop_activation``
-  runs. Offered where the activation's input carries the user's authority. It names one
+- **The stop call** (§4:6-§4:12), :data:`STOP_ACTIVATION`: the Task Manager's stop, by the
+  one implementation ``AssistantEngine.stop_activation`` runs, which stops exactly the
+  activation it names and nothing below it (ADR-0352 §2:1). Offered where the
+  activation's input carries the user's authority. It names one
   running activation by the label planning was shown it under as running: in a list
   pull's running part, an offer or a wait. It is refused whole, as *not done* with the
   reason, and stops nothing, where the input does not carry the user's authority, where
   the label was not shown for a running activation, and where the activation named was
   absorbed since it was shown, naming its absorber. Where it stopped the activation, or
-  found it ended, its result shows that activation's finished work through the peer view.
-  It writes the plan store's stop and cascade records, so it is an act, and commits its
-  activation.
+  found it ended, its result shows that activation's finished work through the peer view,
+  and what that activation set up that is still live below it, or that nothing is
+  (ADR-0352 §3:1-§3:6). It writes the plan store's stop record, so it is an act, and
+  commits its activation.
 - **The findings look-up** (§6:1, §6:4-§6:6), :data:`LOOK_UP_ACTIVATION`: a pure read of
   a running activation's findings, by the same label, through the peer view; where it has
   ended since, its finished work, saying so.
@@ -29,8 +31,9 @@ and never through ``ToolInvoker``. Who calls, and what it was shown, is read fro
 carries.
 
 What a call came back with reaches planning under labels: the peer view of the activation
-it named, read fresh (:class:`PeerShown`), held by the call's decision in the caller's
-scope for the phases to show under the call's result.
+it named, read fresh (:class:`PeerShown`), with, for a stop, what it set up that is still
+live, held by the call's decision in the caller's scope for the phases to show under the
+call's result.
 """
 
 from __future__ import annotations
@@ -73,6 +76,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import FrozenJson, ToolCall
     from ai_assistant.orchestration.acting import OwnRecordsAnswer
     from ai_assistant.orchestration.activation_state import ActivationState
+    from ai_assistant.orchestration.disclosure import TurnSupply
     from ai_assistant.orchestration.matters import Matters
 
 __all__ = [
@@ -153,13 +157,16 @@ def _naming(description: str) -> dict[str, FrozenJson]:
 STOP_ACTIVATION: Final = _declared(
     STOP_ACTIVATION_CAPABILITY,
     (
-        "Stop running work you were shown as running, and what it set up to run later. "
-        "Nothing new starts, and nothing it already did is undone."
+        "Stop running work you were shown as running, and that work alone. Nothing it "
+        "already did is undone, and what it set up stays. The result shows what it had "
+        "finished and what it set up that is still live."
     ),
     _naming("The running work, by its E label."),
     writes=True,
 )
-"""``stop_activation``: planning's stop call (ADR-0349 §4:6-§4:7)."""
+"""``stop_activation``: planning's stop call (ADR-0349 §4:6-§4:7, ADR-0352 §3:9).
+
+Its description is the prompts front's words, as routed for ADR-0352 §3:10."""
 
 LOOK_UP_ACTIVATION: Final = _declared(
     LOOK_UP_ACTIVATION_CAPABILITY,
@@ -222,8 +229,7 @@ _MALFORMED: Final = "the call's arguments are malformed"
 _STORE_FAULT: Final = "the hub's records could not be read or written"
 _NOT_OFFERED: Final = "this call is not offered to this activation"
 _STOP_UNRECORDED: Final = (
-    "only in part: the work is stopped, but its stop could not be recorded, so what it "
-    "set up to run later may still run; asking again records it"
+    "only in part: the work is stopped, but its stop could not be recorded; asking again records it"
 )
 
 
@@ -240,6 +246,8 @@ class MatterCaller:
             part, an offer or a wait (§4:6, §6:1).
         waiting: Where its round is a waiting round, the activations it waits on, the
             only ones its stop call may name (§7:26); ``None`` otherwise.
+        supply: Its audience posture, which what a stopped activation set up that is
+            running is shown under, as the list pull's running part is (ADR-0352 §3:4).
         shown: What each call came back with, by its decision's id, for the phases to
             show under its result.
         as_asked: Each answer call that came to what it asked, by its decision's id: a
@@ -252,6 +260,7 @@ class MatterCaller:
     owner_records: bool
     running: frozenset[str]
     waiting: frozenset[str] | None = None
+    supply: TurnSupply | None = None
     shown: dict[str, PeerShown] = field(default_factory=dict)
     as_asked: set[str] = field(default_factory=set)
 
@@ -341,8 +350,8 @@ class MatterCalls:
             await self._show(caller, decision, named, stopped=False)
             return ToolResult(outcome=ToolOutcome.SUCCEEDED, output={"kind": "matter_stop"})
         # One stopped since it was shown is stopped again all the same, which stops
-        # nothing new but writes its stop and cascade records where an earlier stop's
-        # writes failed (ADR-0297 §3:7); its result says this call did not stop it.
+        # nothing new but writes its stop record where an earlier stop's write failed
+        # (ADR-0297 §3:7); its result says this call did not stop it.
         already = running.stopped
         try:
             stopped = await self._matters.stop(named)
@@ -431,6 +440,10 @@ class MatterCalls:
         After a stop, a read that fails leaves the stop done, its work shown as not read:
         what the call did happened, whatever the read after it found (§4:11). For a
         look-up the read is the call, so its failure is the call's.
+
+        After a stop, what the activation set up that is still live is read too, once
+        the stop's record is written or the activation was found ended (ADR-0352 §3:1-
+        §3:2); a read of it that fails is shown as not read, and the stop stands.
         """
         try:
             view = await self._matters.peer(named, owner_records=caller.owner_records)
@@ -439,10 +452,16 @@ class MatterCalls:
                 raise
             _log.warning("matter_stop_work_unread", stage="acting", reason="store_failed")
             view = None
+        left = (
+            None
+            if stopped is None
+            else await self._matters.still_live(named, viewer=caller.state, supply=caller.supply)
+        )
         running = self._matters.state_of(named)
         caller.shown[decision] = PeerShown(
             activation_id=named,
             view=view,
             ended=running is None or running.stopped,
             stopped=stopped,
+            set_up=left,
         )
