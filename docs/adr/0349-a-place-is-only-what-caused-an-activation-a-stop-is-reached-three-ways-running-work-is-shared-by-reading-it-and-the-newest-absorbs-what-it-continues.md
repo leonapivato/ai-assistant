@@ -2,11 +2,11 @@
 
 - Status: Proposed
 - Date: 2026-10-25
-- Scope: the operations between activations that run at the same time. A place is only what caused an activation (§2). The operations are spawn, stop, share and merge (§3). A stop is reached by a command from outside, by a merge, or by words on another place (§4). Running work is shared through an in-progress section, a look-up of one activation's findings and ADR-0350's list pull, which read open episodes through one read function (§5, §6). The newest activation absorbs the older ones its input continues, until they act (§7), and a conversation waits only once something running in it has acted (§8). This is Part A (§§1–5) of proposal [#3384](https://github.com/leonapivato/ai-assistant/pull/3384) at `86152e7a8`, converted. Its Part B, the Task Scheduler and the Task Manager, is ADR-0350's, and spawning is decided there (§3).
-- Dependency: [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md), [ADR-0295](0295-stopping-an-activation-is-a-command-that-starts-nothing-new-and-cuts-off-nothing-already-sent.md), [ADR-0297](0297-a-stop-is-marked-on-the-activation-and-recorded-where-claims-are-decided.md), [ADR-0332](0332-activations-run-side-by-side-across-places-and-one-at-a-time-within-one-a-new-input-joins-the-running-activation-until-it-acts-and-a-place-waits-a-moment-before-it-starts.md), [ADR-0341](0341-a-pure-read-is-a-call-that-writes-nothing-and-does-not-leave-the-hub-so-looking-something-up-in-the-assistants-own-records-does-not-commit-an-activation.md), [ADR-0343](0343-a-join-is-taken-pending-its-readers-marking-and-every-route-by-which-an-activation-leaves-running-settles-it-first.md), [ADR-0286](0286-an-episode-is-open-while-its-activation-runs-and-frozen-when-it-ends.md), [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md) and [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md), as their status lines leave them; and ADR-0350 (Proposed, #3419), the Task Scheduler and the Task Manager, which merges first (§1:3).
-- Authorization: the owner ruled every part of this decision in the design walk of 2026-10-21 to 2026-10-24, recorded in proposal #3384's Part A, which this converts. On the two ADRs the walk produced, the owner's words, verbatim: "just finish adrs A and B. And dont ratify them. Ill review when they are done." Ratification is the owner's, after their own review. The dispatcher assigned 0349.
-- **Changes `core`, so it is a contract-surface decision. No `Protocol` changes.** `ProposedActivationUnderstanding` and `ActivationUnderstanding` gain `cancels`, and their `continues` becomes a sequence. `ConversationState` names every running activation, not one. `Settings` loses `join_limit` and gains `held_input_limit` and `in_progress_limit` (§9, §10). Understanding is stored with the episode, and the episode and the conversation's state both cross the wire, so the episode store ships an upgrade and `PROTOCOL_VERSION` advances.
-- **Partially supersedes**, in the clauses §12's first table names: ADR-0276, ADR-0286, ADR-0292, ADR-0295, ADR-0307, ADR-0332 and ADR-0343.
+- Scope: the operations between activations that run at the same time. A place is only what caused an activation (§2). The operations are spawn, stop, share and merge (§3). A stop is reached by a command from outside, by a merge, or by planning's call to the Task Manager's stop (§4). Running work is shared through an in-progress section, a look-up of one activation's findings and ADR-0350's list pull, which read open episodes through one read function (§5, §6). The newest activation absorbs the older ones its input continues, until they act (§7), and a conversation waits only once something running in it has acted (§8). This is Part A (§§1–5) of proposal [#3384](https://github.com/leonapivato/ai-assistant/pull/3384) at `86152e7a8`, converted. Its Part B, the Task Scheduler and the Task Manager, is ADR-0350's, and spawning is decided there (§3).
+- Dependency: [ADR-0292](0292-a-channel-is-the-spokes-facing-one-thing-and-the-assistants-edge-is-its-own.md), [ADR-0295](0295-stopping-an-activation-is-a-command-that-starts-nothing-new-and-cuts-off-nothing-already-sent.md), [ADR-0297](0297-a-stop-is-marked-on-the-activation-and-recorded-where-claims-are-decided.md), [ADR-0332](0332-activations-run-side-by-side-across-places-and-one-at-a-time-within-one-a-new-input-joins-the-running-activation-until-it-acts-and-a-place-waits-a-moment-before-it-starts.md), [ADR-0341](0341-a-pure-read-is-a-call-that-writes-nothing-and-does-not-leave-the-hub-so-looking-something-up-in-the-assistants-own-records-does-not-commit-an-activation.md), [ADR-0343](0343-a-join-is-taken-pending-its-readers-marking-and-every-route-by-which-an-activation-leaves-running-settles-it-first.md), [ADR-0286](0286-an-episode-is-open-while-its-activation-runs-and-frozen-when-it-ends.md), [ADR-0306](0306-a-capability-declares-what-its-calls-do-every-call-is-checked-by-rule-and-acting-claims-and-records-what-it-does.md), [ADR-0307](0307-a-planning-round-is-one-model-response-that-writes-its-own-message-keeps-episode-notes-and-names-what-it-was-shown-by-label.md) and [ADR-0350](0350-every-spawn-is-a-scheduled-task-written-into-the-task-scheduler-whose-sensor-starts-it-when-it-comes-due-and-the-task-manager-is-the-one-way-in-from-outside.md), the Task Scheduler and the Task Manager, merged `Accepted` (§1:3), as their status lines leave them.
+- Authorization: the owner ruled every part of this decision in the design walk of 2026-10-21 to 2026-10-24, recorded in proposal #3384's Part A, which this converts. On the two ADRs the walk produced, the owner's words, verbatim: "just finish adrs A and B. And dont ratify them. Ill review when they are done." The owner reviewed this draft on 2026-10-25 and directed three changes, verbatim: "drop understandings, cancel, and give planning the task manager stop instead, yes" (§4:6–§4:12); "The outside content mark will be reviewed further. The privacy, audience, and security front." (§11); and, on a section that is often full, "when the assistant gets to be really busy and it's constantly handling tasks at the same time … it might be worth rethinking this" (Consequences). Ratification is the owner's, after their own review. The dispatcher assigned 0349.
+- **Changes `core`, so it is a contract-surface decision. No `Protocol` changes.** `ProposedActivationUnderstanding`'s and `ActivationUnderstanding`'s `continues` becomes a sequence. `ConversationState` names every running activation, not one. `Settings` loses `join_limit` and gains `held_input_limit` and `in_progress_limit` (§9, §10). Understanding is stored with the episode, and the episode and the conversation's state both cross the wire, so the episode store ships an upgrade and `PROTOCOL_VERSION` advances.
+- **Partially supersedes**, in the clauses §12's first table names: ADR-0286, ADR-0292, ADR-0295, ADR-0307, ADR-0332, ADR-0343 and ADR-0350.
 
 ## Context
 
@@ -36,7 +36,8 @@ are other designs, and this decision assumes they work. Whatever crosses between
 carries its author, its authority and its marks. The gaps those designs must close are named
 in §11. The owner: *"Just note that the gaps need to be closed."*
 
-**What the code does today, at `82d03b61`.**
+**What the code does today, at `77ac3671`,** with ADR-0350's lanes TS1, TS1b and TS2
+merged.
 
 - **One activation at a time within a place, with joining** (ADR-0332 §2:3–§2:5, §3). A new
   input on a place joins the activation running there until it commits
@@ -46,13 +47,20 @@ in §11. The owner: *"Just note that the gaps need to be closed."*
   running activations on their *other* places, under `R` labels, and may name one it
   `continues`. The takeover stage (`Engine._takeover_stage`) stops that one and takes
   its input, where it has not committed.
-- **One stop** (ADR-0295, ADR-0297). The hub chat's stop control reaches
-  `AssistantEngine.stop_activation`, and the line's `/stop` reaches the same engine step
-  through its reader (`orchestration/telegram.py`). A conversation's current state names one
-  running activation (`ConversationState.activation_id`).
-- **Planning never sees running work.** Its episode window skips every open episode
-  (`orchestration/planning.py`, `_Request._episodes`), and no model reads an open episode
-  (ADR-0286 §6:4).
+- **One stop** (ADR-0295, ADR-0297), the Task Manager's (ADR-0350 §10:3). The hub chat's
+  stop control reaches `AssistantEngine.stop_activation`, and the line's `/stop` reaches the
+  same engine step through its reader (`orchestration/telegram.py`). That step writes the
+  cascade record and stops what is live below the activation (ADR-0350 §9:6,
+  `TaskManager.cascade` in `orchestration/task_manager.py`). A conversation's current state
+  names one running activation (`ConversationState.activation_id`).
+- **Planning has the Task Manager's cancel and replace, and no stop** (ADR-0350 §4:1,
+  §10:4). Its three calls on the Task Scheduler are spawn, cancel and the list pull
+  (`ScheduledTaskCalls`).
+- **Planning sees running work only in the list pull.** Its running part
+  (`TaskManager.running`) shows each activation running for the person, other than the
+  asker, by its input in brief, oldest first, under the listing bound (ADR-0350 §4:6).
+  Planning's episode window skips every open episode (`orchestration/planning.py`,
+  `_Request._episodes`), and no model reads an open episode (ADR-0286 §6:4).
 
 **What this reverses.** The controller walk's answer 1 on #3257, which ADR-0332 converted,
 chose one activation at a time within a place. The owner reverses it here: a conversation
@@ -71,8 +79,8 @@ activation could act on "book Saturday" before the newer "actually Sunday" was u
 
 We will treat a place as only what caused an activation. Activations act on each other by
 four operations: spawn, which ADR-0350 decides; stop; share; and merge, which is a share and
-a stop in one step. A stop is reached from outside, by a merge, or by words on another place
-that understanding reads as cancelling running work. Every running activation for a person
+a stop in one step. A stop is reached from outside, by a merge, or by planning, which is
+given the Task Manager's stop beside its cancel and replace. Every running activation for a person
 is shown to understanding and, fresh at every round, to planning. Planning can look up a
 running activation's findings, and ADR-0350's list pull lists what is running. Each of these
 reads open episodes through one read function. Every message starts its own activation, the newest absorbs the older
@@ -89,19 +97,22 @@ acted.
 
 > **Normative.** No lane implements this decision before it merges `Accepted`.
 
-> **Normative.** This decision merges only after ADR-0350 has merged.
+> **Normative.** This decision stands on ADR-0350 as merged `Accepted` (#3419), and §1:4's
+> steps build on ADR-0350's lanes as they merged: the Task Manager, its stop's cascade and
+> planning's calls on the Task Scheduler (#3432).
 
 > **Normative.** The implementation ships as separate pull requests in this order.
 >
 > 1. **`core`, `wire`, `testing` and `memory`, permitted expressly here as one unit.** §10's
 >    types and §9's settings; the one read function (§6:7) in `core/episode_encoding.py`;
 >    the `PROTOCOL_VERSION` advance with the wire surface and type closure; and the episode
->    store's upgrade under ADR-0326 §4:1–§4:2 for §10:7's change.
-> 2. **`orchestration`, the activation:** understanding's `continues` and `cancels`; the
->    in-progress section for understanding and planning (§5); the findings look-up and its
->    declaration, and the running part of ADR-0350's list pull (§6); the takeover stage as
->    §4:6 and §7 restate it; the waits before a takeover and before the first act, and the
->    commitment step (§7:12–§7:16); and the removal of joining by code.
+>    store's upgrade under ADR-0326 §4:1–§4:2 for §10:6's change.
+> 2. **`orchestration`, the activation:** understanding's `continues`; the in-progress
+>    section for understanding and planning (§5); the findings look-up and its declaration,
+>    and the running part of ADR-0350's list pull (§6); planning's stop call, its
+>    declaration and its result (§4:6–§4:12); the takeover stage as §7 restates it; the
+>    waits before a takeover and before the first act, and the commitment step
+>    (§7:12–§7:16); and the removal of joining by code.
 > 3. **`orchestration`, the readers:** the conversation's rule (§8) in `ChatReader` and
 >    `TelegramReader`, the start wait as §8:7 places it, what the readers hold in it for the
 >    first act's wait (§7:12), and the line's `/stop` for every running activation (§4:3).
@@ -118,15 +129,22 @@ acted.
 >   recorded its understanding: it waits, the newer absorbs it, and it dispatches nothing;
 > - an older activation reaches its first act while the correction is still held in its
 >   place's start wait: it waits for the correction's activation, which absorbs it;
-> - an input names in `cancels` an activation that a middle one absorbs while the input's
->   takeover waits: the cancel follows forward and stops the middle one;
+> - planning's stop call naming a committed activation that spawned a task still pending:
+>   the activation is stopped, the cascade cancels the task, and the result shows the
+>   stopped activation's finished work;
+> - the same call from an activation whose input does not carry the user's authority, which
+>   is refused and stops nothing;
+> - a stop call naming a label planning was never shown, and one naming a label shown for
+>   no running activation, each refused whole;
+> - a stop call naming an activation absorbed since it was shown, which is refused, stops
+>   nothing and names its absorber;
+> - a stop call whose activation then waits before its first act (§7:12), while a newer
+>   input continues it: the newer absorbs it, and nothing is stopped;
 > - an activation that failed before its first round and wrote *couldn't finish*: a
 >   findings look-up shows that fixed line with its outcome, and nothing else it did;
 > - two older activations on different places, neither yet understood, and a newer input
 >   continuing one of them: the in-progress entries show each one's input, and only the
 >   one named is absorbed;
-> - an input naming a committed activation in `cancels` stops it, and the same input without
->   the user's authority stops nothing;
 > - in a conversation, a message while nothing running has committed starts its own
 >   activation, and a message while one has committed waits until it ends;
 > - an absorption refused at `held_input_limit`, at a limit of 1 and at an exhausted one;
@@ -143,7 +161,7 @@ acted.
 > place (ADR-0292 §6:3), where the place's kind declares one; this decision declares none.
 
 > **Normative.** Whether a place shows running work and offers a stop is its kind's
-> declaration (§4:10), and not part of the general model.
+> declaration (§4:13), and not part of the general model.
 
 > **Normative.** Admission, waiting and the reply a conversation expects stay the rules of
 > the kind of the place that caused the activation (§8).
@@ -199,40 +217,86 @@ and "kill" were considered and are not operations (Alternatives).
 > stop.
 
 > **Normative.** A conversation's current state names every running activation started
-> from it whose id is known (§10:4).
+> from it whose id is known (§10:3).
 
-**By a merge.** The older activation is stopped (§7:7, ADR-0295 §5:1).
+**By a merge.**
 
-**By words, across places.** "Never mind the booking," said on Telegram after the web
-activation has booked.
+> **Normative.** An absorbed activation is stopped as a taken-over one is (§7:7, ADR-0295
+> §5:1). That stop stays internal: it is not the Task Manager's stop command, writes no
+> cascade record and walks nothing (ADR-0350 §9:6).
 
-> **Normative.** Understanding's reply may name, in `cancels`, shown running activations
-> whose work its input asks to stop.
+An absorbed activation has spawned nothing. Only an uncommitted activation is absorbed
+(§7:5), and a spawn commits its activation (ADR-0350 §4), so there is nothing below it to
+cascade to.
 
-> **Normative.** In the takeover stage's one step (§7:4), the stage stops each activation it
-> reached from the latest understanding version's `cancels` where all of these hold:
-> - the activation reached is running and its stop mark is unset;
-> - this activation's input carries the user's authority (ADR-0292 §5:5);
-> - the activation reached is running for the person this input's author is established as
->   (§5:3).
->
-> It stops it whether or not it has committed.
+**By planning.** "Never mind the booking," said on Telegram after the web activation has
+booked.
 
-> **Normative.** An activation named in both `cancels` and `continues` that §7 absorbs is
-> stopped by the absorption, once.
+> **Normative.** Planning is offered the Task Manager's stop (ADR-0350 §10:2) as a call
+> of its own, the **stop call**, where its activation's input carries the user's authority
+> (ADR-0292 §5:5). The call names one running activation by the label planning was shown it
+> under as running: an in-progress entry's (§5:7), or a running entry's in a list pull this
+> activation made (§6:2). Its exact name and arguments are the lane's that builds it
+> (§1:4's step 2).
 
-> **Normative.** Where a condition of §4:6 fails, nothing is stopped, and the stage records
-> that it did not stop that activation.
+> **Normative.** The stop call is declared as ADR-0350 §4:1 declares the cancel of a
+> scheduled task: the assistant's own records, never leaving the hub, an outcome never
+> unknown, safe to repeat, the person's tier in `writes`, and a result with no outside
+> text. It is checked by rule as every call is (ADR-0306 §4). Acting runs it directly,
+> awaited to its end and never through `ToolInvoker`, as the Task Manager's stop with
+> ADR-0350 §9:6's cascade, by the one implementation `AssistantEngine.stop_activation` runs
+> (ADR-0350 §10:3–§10:4).
 
-> **Normative.** Planning of an activation whose `cancels` stopped another is shown that
-> activation's finished work through §6's read function, so that its message can say what
-> had finished.
+> **Normative.** A stop call is refused whole as *not done*, with the reason, and stops
+> nothing, where its activation's input does not carry the user's authority; where it names
+> a label planning was never shown (ADR-0307 §5:3); and where the label it names was not
+> shown for a running activation in the section or a list pull.
 
-The message stays input, and becomes no command (ADR-0292 §12:5–§12:6 hold). The stop is
-ADR-0292 §11:2's rule acting on understanding's judgment, which is what a rule acting on
-`continues` already does. A forward, a reminder or a message whose author is not established
-carries no user's authority, so it cancels nothing. "Go on" afterwards takes it back, because
-a stop abandons no goal (ADR-0295 §4:1). This is the item ADR-0332 §9 left to #2515.
+> **Normative.** Where the activation named was absorbed since it was shown, the call is
+> refused as *not done* and stops nothing, and its reason says that it was absorbed, and
+> by which activation, under that activation's label. It is not followed forward.
+
+> **Normative.** Where the activation named has otherwise ended or been stopped since it
+> was shown, the call stops nothing, and its result says so (ADR-0295 §1:6).
+
+> **Normative.** Where the stop call stopped the activation, or found it ended or stopped
+> under §4:10, its result shows that activation's finished work through §6's peer view
+> (§6:7–§6:10), so that the round's message can say what had finished.
+
+> **Normative.** A stop call is an act (§3:5). It commits its activation, so §7:12–§7:14's
+> wait and commitment step come before it, and from then until its activation ends §8:3
+> holds on its place.
+
+The message stays input, and becomes no command (ADR-0292 §12:5–§12:6, ADR-0350 §10:5):
+planning chooses the call, authorizing checks it, acting runs it and the record keeps it, as
+ADR-0292 §12:2 has every inside action. ADR-0350 §10:4 already has planning use the Task
+Manager's cancel and replace, and the stop was the one command missing. A forward, a reminder
+or a message whose author is not established carries no user's authority, so it stops
+nothing. "Go on" afterwards takes it back, because a stop abandons no goal (ADR-0295 §4:1).
+This is the item ADR-0332 §9 left to #2515.
+
+Where the work named has not acted, the newest usually absorbs it instead, since an input
+that cancels work continues it (§7:3). The stop call is for work that has acted, and for work
+no input of the person's can absorb, such as a step the Task Scheduler started. "Stop the
+apartment search" while a step runs is one stop call, and the cascade cancels the step's next
+task, so a running step that would spawn again after its next task was cancelled in words is
+stopped first (ADR-0350 §14).
+
+**An activation absorbed since it was shown is refused, not followed.** The takeover stage
+follows an absorbed activation forward because it runs in code on the newest's own
+understanding, oldest first (§7:15). Planning's call was judged on what planning was shown,
+and the absorber holds newer input, which may be the user's correction after the words. The
+newest decides (§7), so the call is refused, and the next round, which reads the section fresh
+(§5:8), shows the absorber with its input. Planning stops it by its label if the words still
+mean it.
+
+**Committing the stopping activation.** The stop writes the plan store's stop and cascade
+records, so it is not a pure read (ADR-0341 §2:1), and it is not undone. Committed, the
+stopping activation can no longer be absorbed, so no newer input takes over a matter after
+part of it was cut. Before the call, §7:12's wait gives a newer input the chance to absorb
+it: "never mind the booking", then "no, keep it" a second later, and nothing is stopped.
+After the call, its place holds the next message until it ends (§8:3), as after any act, and
+what waited is taken in then.
 
 Within one conversation, words after something has acted wait (§8:3), so they stop nothing.
 The stop control stops it there.
@@ -259,7 +323,7 @@ from what exists.
 
 > **Normative.** No rule pushes one activation's findings into another's. One activation
 > learns of another's work only through §5's section, §6's look-up and list pull, and what
-> §4:9 and §7:10 show.
+> a stop call's result (§4:11) and §7:10 show.
 
 > **Normative.** Understanding and planning are each shown, beside their windows, an
 > **in-progress section**: one entry for each activation running for the same person whose
@@ -295,7 +359,7 @@ from what exists.
 > the part a prompt cache can hold (#3084).
 
 > **Normative.** The section shows at most `in_progress_limit` entries (§9:3), newest first,
-> and says how many more are running. ADR-0350's list pull (§6:2) lists the rest.
+> and says how many more are running. ADR-0350's list pull (§6:2) lists more of them.
 
 A running activation learns of a newer one at its next round. "My budget's $400 now," said on
 Telegram, reaches the running flight search before its next round, and the search adapts.
@@ -311,7 +375,8 @@ up.
 
 > **Normative.** The list of what is running is ADR-0350's list pull: "what are you doing
 > right now?" Its running part lists each activation the section would enter (§5:2–§5:5),
-> each as §5:6's entry shows it, without §5:10's limit.
+> each as §5:6's entry shows it and under its episode label (§5:7), bounded by ADR-0350's
+> listing bound (ADR-0350 §12:5) in place of §5:10's limit.
 
 > **Normative.** What is scheduled and what ran lately reach planning as ADR-0350's list
 > pull decides, and this decision adds nothing to them.
@@ -333,8 +398,8 @@ up.
 > **Normative.** One read function renders every model-facing read of an episode: it is
 > `project_episode` in `core/episode_encoding.py` (ADR-0284 §8:1), extended with a **peer
 > view**. The in-progress entries, the findings look-up, the running part of ADR-0350's list
-> pull, an absorbed activation's findings (§7:10) and a cancelled one's (§4:9) read the peer
-> view (§6:8–§6:10). Recall's rendering keeps its projection, as ADR-0284 §8:1 and ADR-0308
+> pull, an absorbed activation's findings (§7:10) and a stop call's result (§4:11) read the
+> peer view (§6:8–§6:10). Recall's rendering keeps its projection, as ADR-0284 §8:1 and ADR-0308
 > §3:1 rule it.
 
 > **Normative.** The peer view is computed from two records alone: the activation's episode
@@ -360,7 +425,7 @@ up.
 > **Normative.** The peer view never shows another activation's recall results, story
 > links, failed calls, drafts or approvals, nor anything that activation read from another:
 > its own in-progress section, its look-ups and list pulls of others, and the findings it
-> absorbed or a cancel showed it.
+> absorbed or a stop call's result showed it.
 
 > **Normative.** No call's result is added to an episode for a share. A result that was not
 > digested reaches another activation only as the episode notes of the activation that
@@ -401,10 +466,9 @@ its own, a failure stays contained, each reply lands where it was asked, and the
 see each other in the section.
 
 > **Normative.** The takeover stage, once for each understanding version that names any
-> activation in `continues` or `cancels` (§10:9), first waits as §7:15 states. Then, in one
-> step with no await between, it follows each activation named in either forward, while it
-> has been absorbed, to the activation that absorbed it; absorbs those it reached from
-> `continues` under §7:5–§7:7; and stops those it reached from `cancels` under §4:6.
+> activation in `continues` (§10:8), first waits as §7:15 states. Then, in one step with no
+> await between, it follows each activation named forward, while it has been absorbed, to
+> the activation that absorbed it, and absorbs those it reached under §7:5–§7:7.
 
 > **Normative.** In that step the stage absorbs each activation it reached from `continues`
 > where all of these hold:
@@ -451,9 +515,8 @@ first.
 > input's author, authority and origin, and for each such input that a reader of one of
 > that person's places holds in its start wait. It waits until each activation, and each
 > held input's activation once admitted, has ended, or has recorded its first understanding
-> version or its omission and, where that version names any activation in `continues` or
-> `cancels`, the takeover stage's decision for it; and until each held input not taken in
-> is released. What it waits for is what runs, and what is held, when the wait begins.
+> version or its omission and, where that version names any activation in `continues`, the
+> takeover stage's decision for it; and until each held input not taken in is released. What it waits for is what runs, and what is held, when the wait begins.
 
 > **Normative.** That wait is bounded by the pass's deadline. Where it reaches the deadline,
 > acting dispatches none of the round's calls and not its message, and ends as a stage whose
@@ -476,8 +539,8 @@ absorb, and both would go on to act on one matter.
 > **Normative.** Before its step (§7:4), the takeover stage waits, once, for each older
 > activation running for the same person whose input has this input's author, authority
 > and origin, until each has ended, or has recorded its first understanding version or its
-> omission and, where that version names any activation in `continues` or `cancels`, the
-> takeover stage's decision for it. What it waits for is what runs when the wait begins.
+> omission and, where that version names any activation in `continues`, the takeover
+> stage's decision for it. What it waits for is what runs when the wait begins.
 
 > **Normative.** That wait is bounded by the pass's deadline. Where it reaches the deadline,
 > nothing is absorbed or stopped, and the stage ends as a stage whose deadline expired
@@ -518,7 +581,7 @@ first act. A first act waits only on newer ones. A takeover never waits on an ac
 Running beside work that has acted would mean acting on a half-finished picture, such as
 rebooking while the first booking is still in flight. Waiting there, the next activation sees
 the finished result in the records. Across places, a newer related activation sees "has
-acted" in the section, and can cancel the older (§4:6) or carry on after it. A true race
+acted" in the section, and its planning can stop the older (§4:6) or carry on after it. A true race
 between two acts on one thing is the lock and recheck's (#2586).
 
 **Replies out of order.** With several activations in one conversation, replies arrive in the
@@ -548,44 +611,39 @@ ADR-0332 §6's four waits stand as they are. The starting values are guesses, to
 > `tuple[EncodableText, ...] = ()`, each element the `R` label of an in-progress entry
 > (ADR-0332 §7:3).
 
-> **Normative.** `ProposedActivationUnderstanding` gains `cancels:
-> tuple[EncodableText, ...] = ()`, each element the `R` label of an in-progress entry.
-
-> **Normative.** `ActivationUnderstanding.continues` becomes `tuple[Identifier, ...] = ()`,
-> and `ActivationUnderstanding` gains `cancels: tuple[Identifier, ...] = ()`: the activations
-> the proposal's labels resolved to, in the proposal's order, each once. A label that
-> resolves to no shown activation is dropped as a grounding defect (ADR-0276 §6), never a
-> parse failure.
+> **Normative.** `ActivationUnderstanding.continues` becomes `tuple[Identifier, ...] = ()`:
+> the activations the proposal's labels resolved to, in the proposal's order, each once. A
+> label that resolves to no shown activation is dropped as a grounding defect (ADR-0276
+> §6), never a parse failure.
 
 > **Normative.** `ConversationState.activation_id` becomes `activation_ids:
 > tuple[Identifier, ...] = ()`: every running activation started from the conversation whose
 > id is known, and empty unless the state is working.
 
 > **Normative.** The working set's takeover decision, per understanding version (ADR-0332
-> §7:6), records each activation named in `continues` or `cancels`, and whether it was
-> absorbed, stopped, or neither.
+> §7:6), records each activation named in `continues`, and whether it was absorbed.
 
 > **Normative.** Each change that alters a shape the wire carries advances
 > `PROTOCOL_VERSION` in that change, under ADR-0124 §9:2, with the wire surface and type
 > closure, and the memory and engine conformance suites, extended to the shape.
 
-> **Normative.** §10:3's change to the stored understanding is a schema change under
+> **Normative.** §10:2's change to the stored understanding is a schema change under
 > ADR-0326 §2:3, and ships ADR-0326 §4:1–§4:2's upgrade and its test in the same pull
-> request. A stored `continues` naming one activation becomes a one-element sequence, an
-> absent one an empty sequence, and `cancels` is empty.
+> request. A stored `continues` naming one activation becomes a one-element sequence, and
+> an absent one an empty sequence.
 
 > **Normative.** `JoinedInput` keeps its shape. Each one this decision appends names, in
 > `taken_over_from`, the activation it was absorbed from.
 
 > **Normative.** `ControllerRule.TAKEOVER_UNDECIDED` answers where the latest understanding
-> version names any activation in `continues` or `cancels` and there is no takeover decision
-> for that version, and makes the takeover stage due, which absorbs (§7) and cancels (§4:6).
+> version names any activation in `continues` and there is no takeover decision for that
+> version, and makes the takeover stage due, which absorbs (§7).
 
 > **Normative.** `ControllerStage.TAKEOVER` and `ControllerRule.TAKEOVER_UNDECIDED` keep
 > their names, and the rule keeps its row (ADR-0332 §4:5).
 
 No `Protocol` changes: `AssistantEngine.stop_activation` is the one stop every route
-reaches.
+reaches, planning's stop call included, and no field in `core` carries a stop.
 
 ### 11. What this decision does not decide
 
@@ -594,7 +652,7 @@ reaches.
 | The Task Scheduler, scheduled tasks, spawning, the sensor, and the Task Manager's operations and view | ADR-0350 |
 | **Decision C, calls onto channels:** every channel the same shape; speaking as a say-call into any place; *in reply to* and replies out of order; a conversation's expected reply as its kind's requirement; and its supersession of ADR-0170 ([#2593](https://github.com/leonapivato/ai-assistant/issues/2593)) | Its own track |
 | **Modes:** quick, normal, deliberate, "just blurt" | Its own decision, next on this front |
-| **The gap for outside content:** marks travelling on every read of another activation's episode, through the one read function (§6:7), beyond authorizing's count (§6:13): to understanding's in-progress section, and to what a reader's own notes and messages then rest on | The outside-content design |
+| **The gap for outside content:** marks travelling on every read of another activation's episode, through the one read function (§6:7), beyond authorizing's count (§6:13): to understanding's in-progress section, and to what a reader's own notes and messages then rest on. And a question for that front: should an in-progress entry, which carries no outside text (§5:6), mark its reader at all? Under §6:13 as written it does, so one running activation that has read outside content marks every activation it is shown to | The outside-content design: the privacy, audience and security front, which reviews the mark further |
 | **The gap for privacy:** shares and merges stay within one person (§5:3, §7:5) until the household design | The household design |
 | **The gap for forgetting:** every read is fresh each round, so a forget or a deletion is honored (cf. [#3319](https://github.com/leonapivato/ai-assistant/issues/3319)) | The privacy and forgetting design |
 | **The gap for the audience:** the audience where a message lands ([#2590](https://github.com/leonapivato/ai-assistant/issues/2590)) | The audience design |
@@ -613,13 +671,13 @@ Superseded in part; every clause the middle column does not name stands:
 
 | Earlier decision | What it replaces | By |
 | --- | --- | --- |
-| ADR-0332 | §2:3, for the conversation kind and the line, and §2:4–§2:5, whole: they declare §8's rule in place of one activation at a time; §3:3–§3:8, §3:15 and §3:18, whole: no input joins by code, and before its first act an activation waits once for newer input to be understood (§7:12–§7:14); §3:9, in the addition alone: a version covers the inputs its absorption brought; §4:1–§4:4, whole: the in-progress section on every place, spawned activations included, and `continues` narrowed and joined by `cancels`; §4:5, in the addition alone: `takeover_undecided` also answers for `cancels`; §4:6, whole: the newest absorbs, following forward, under the held-inputs limit; §4:8, in the addition alone: a committed activation named in `cancels` is stopped; §5:1, §5:3 and §5:5, each in the addition alone: the start wait runs whether or not something runs on the place; §6:5, whole: `held_input_limit` replaces `join_limit`; §7:3 and §7:4, whole; §7:6, in the takeover decision's content; §8:4, in the addition alone: `/stop` stops every running activation started from the chat | §4:3, §4:6, §5:2–§5:7, §7:3–§7:7, §7:9, §7:12–§7:16, §8:1–§8:8, §9:1–§9:2, §10:1–§10:5, §10:9–§10:10 |
+| ADR-0332 | §2:3, for the conversation kind and the line, and §2:4–§2:5, whole: they declare §8's rule in place of one activation at a time; §3:3–§3:8, §3:15 and §3:18, whole: no input joins by code, and before its first act an activation waits once for newer input to be understood (§7:12–§7:14); §3:9, in the addition alone: a version covers the inputs its absorption brought; §4:1–§4:4, whole: the in-progress section on every place, spawned activations included, and `continues` a sequence, narrowed so that separate work continues none; §4:6, whole: the newest absorbs, following forward, under the held-inputs limit; §5:1, §5:3 and §5:5, each in the addition alone: the start wait runs whether or not something runs on the place; §6:5, whole: `held_input_limit` replaces `join_limit`; §7:3 and §7:4, whole; §7:6, in the takeover decision's content; §8:4, in the addition alone: `/stop` stops every running activation started from the chat | §4:3, §5:2–§5:7, §7:3–§7:7, §7:9, §7:12–§7:16, §8:1–§8:8, §9:1–§9:2, §10:1–§10:4, §10:8–§10:9 |
 | ADR-0343 | §2:1–§4:3, whole: no join is taken by code, so none is pending, and no route waits for one | §7:12–§7:14, §8:8 |
-| ADR-0292 | §11:2, as ADR-0332 left it, in two parts: input that adds separate work to running work stops nothing, and an activation named in `cancels` is stopped whether or not it has committed; §11:7, in the addition alone: running work is shown only where the place's kind declares it, and only for the activations it caused | §4:6, §4:10–§4:11, §7:3 |
-| ADR-0295 | §1:1, §1:4 and §1:5, each in the addition alone: a stop is also reached by understanding's `cancels` and §4:6's rule; §1:2, in the addition alone: the conversation's state names every running activation, and its stop control stops each | §4:3–§4:6, §10:4 |
-| ADR-0286 | §6:4, in the addition alone: the in-progress section, the findings look-up, the running part of ADR-0350's list pull, and the reads of absorbed and cancelled work read another activation's open episode through the one read function | §5:6, §6:7–§6:8 |
-| ADR-0276 | §2:1's `ProposedActivationUnderstanding` and `ActivationUnderstanding` field sets, in the additions alone: `cancels`, and `continues` as a sequence | §10:1–§10:3 |
+| ADR-0292 | §11:2, as ADR-0332 left it: input that adds separate work to running work stops nothing; §11:7, in the addition alone: running work is shown only where the place's kind declares it, and only for the activations it caused | §4:13–§4:14, §7:3 |
+| ADR-0295 | §1:1, §1:4 and §1:5, each in the addition alone: a stop is also reached by planning's stop call, an act it chooses and authorizing checks, where its input carries the user's authority, so words planning reads may lead to a stop, though they stay a message; §1:2, in the addition alone: the conversation's state names every running activation, and its stop control stops each | §4:3–§4:4, §4:6–§4:8, §10:3 |
+| ADR-0286 | §6:4, in the addition alone: the in-progress section, the findings look-up, the running part of ADR-0350's list pull, the reads of absorbed work and a stop call's result read another activation's open episode through the one read function | §4:11, §5:6, §6:7–§6:8 |
 | ADR-0307 | §6:1, in the addition alone: planning is given the in-progress section and absorbed findings, read fresh each round; §6:6, in the addition alone: planning may look up a running activation's findings | §5:2, §5:8, §6:1, §7:10 |
+| ADR-0350 | §4:1's capability set and §10:4, each in the addition alone: planning is also offered the Task Manager's stop, as its stop call, where its activation's input carries the user's authority, naming a running activation it was shown, with §9:6's cascade and one implementation | §4:6–§4:12 |
 
 Read through and not superseded:
 
@@ -627,12 +685,13 @@ Read through and not superseded:
 | --- | --- |
 | ADR-0292 §11:1, §11:5 | Nothing on their lines: ADR-0332 replaced §11:1 within a place and §11:5 whole, and this decision replaces ADR-0332's clauses. A conversation now starts every message's activation until something in it acts (§8:2), by §8's rule and not by reviving §11:1 |
 | ADR-0292 §11:4 | Nothing: §7:12 builds its wait once before an action, and ADR-0295 §3:3 its stopped activation writing nothing; its lock and recheck stays #2586's, as ADR-0332 §9 left it |
-| ADR-0292 §10:4, §12:5–§12:6 | Nothing: a running activation on the place is shown beside the window, in the section, and a message never becomes a command, `cancels` being §11:2's rule |
+| ADR-0292 §10:4, §12:2, §12:5–§12:6 | Nothing: a running activation on the place is shown beside the window, in the section, and a message never becomes a command: planning's stop call is an inside action that planning chooses, authorizing checks and acting runs |
+| ADR-0292 §11:2's stopping of the older, as ADR-0332 left it | Nothing: the rule acting on understanding's judgment still stops only an older one not yet committed, by absorbing it (§7). Planning's stop call is not that rule but an act, so a committed one it stops leaves ADR-0332's narrowing as it stands |
 | ADR-0295 §§2–5, ADR-0297 | Nothing: every route reaches the one stop, and the stop mark is read and set as before. A stop holds no waiting message back (ADR-0295 §3:6): what waits is taken in once §8:4 holds |
 | ADR-0306 §4:7, §5:2 | Nothing: the round's message goes only into the input's place until decision C, and everything claimed finishes |
 | ADR-0321 §4:1 | Nothing: an approval is used only by its yes's activation, and no share shows one |
 | ADR-0341 | Nothing: a pure read is as it defines it, and the findings look-up is one |
-| ADR-0350 | Nothing in its words: its list pull showed a running activation as ADR-0332 §4:1–§4:3 did, which §5:2–§5:6 replace, so its running part shows the in-progress entries (§6:2); and its stop shortcuts send the Task Manager's stop for each activation their place shows (§4:3, §4:11) |
+| ADR-0350 §4:6, §10:3, §14 | Nothing in their words beyond the row above: its list pull showed a running activation as ADR-0332 §4:1–§4:3 did, which §5:2–§5:6 replace, so its running part shows the in-progress entries (§6:2); its stop shortcuts send the Task Manager's stop for each activation their place shows (§4:3, §4:14); and §14's stopping in words, with the running step that spawns again, is decided here by the stop call (§4:6) |
 | ADR-0276 §4, ADR-0286 §6:1 | Nothing: the episode window holds what it held, and no search returns an open episode; the in-progress section is beside the window, not in it |
 | ADR-0303 §7 | Nothing: a place-window item links to the activation that took it in, an absorbed one included |
 | ADR-0284 §8:1, ADR-0308 §3:1, §5:5 | Nothing: recall's projection stays as they rule it, and the peer view is a second view of the same function, whose evidence carries its marks as recall's does |
@@ -640,8 +699,8 @@ Read through and not superseded:
 | ADR-0332 §2:1–§2:2, §2:6, §3:1–§3:2, §3:10–§3:14, §3:16–§3:17, §4:7, §5:2, §5:4, §5:6–§5:11, §6:1–§6:4, §6:6, §7:1–§7:2, §7:5, §7:7–§7:10, the rest of §8 | Nothing in their words: an absorption's inputs are recorded as `JoinedInput`s naming their activation, an absorbed activation is stopped as a taken-over one was, and the waits and `/stop` stand |
 
 > **Normative.** This numbered draft records its replacements on the status lines and in a
-> dated header note of ADR-0276, ADR-0286, ADR-0292, ADR-0295, ADR-0307, ADR-0332 and
-> ADR-0343, atomically with this ADR under ADR-0070 and ADR-0082, preserving their ratified
+> dated header note of ADR-0286, ADR-0292, ADR-0295, ADR-0307, ADR-0332, ADR-0343 and
+> ADR-0350, atomically with this ADR under ADR-0070 and ADR-0082, preserving their ratified
 > bodies. The replacements take effect on this ADR's ratification.
 
 ## Situations
@@ -652,7 +711,9 @@ Read through and not superseded:
 | "Actually Sunday," a second after "book Saturday," before it acts | The older waits for the newer's understanding, and the newest absorbs it: Saturday is never booked |
 | "Actually Sunday" after it booked Saturday | It waits for that activation to end, sees the booking, and changes it as a new request |
 | "Actually Sunday" on Telegram, before the web booking acts | The newest absorbs across places: one Sunday booking, and the reply comes on Telegram |
-| "Never mind the booking" on Telegram, after the web one acted | Understanding names what it cancels, a rule stops it, and the reply says what finished |
+| "Never mind the booking" on Telegram, after the web one acted | Planning stops it through the Task Manager's stop, whose cascade cancels what it spawned, and the reply says what had finished |
+| "Never mind the booking," then "no, keep it" a second later | The stop call waits for the newer input to be understood, the newer absorbs the stopping activation, and nothing is stopped |
+| "Stop the apartment search" while one of its steps runs | Planning stops the step, and the cascade cancels its next task |
 | "Also, what's the weather there?" while a hotel search runs | Separate activations: the weather answers first |
 | "My budget's $400 now" while a flight search runs | The search sees it in the in-progress section at its next round and adapts |
 | "What's the cheapest so far?" from another device | Planning looks up the search's findings and answers |
@@ -665,7 +726,8 @@ Read through and not superseded:
 
 - A correction a second after a request changes the first answer, on any of the person's
   places, before the first acts.
-- "Never mind" on another device stops work that has already acted.
+- "Never mind" on another device stops work that has already acted, and what it spawned,
+  through the same stop the Task Manager runs.
 - Every running activation sees the others' finished work each round, and can fetch more.
 - A burst of messages gets one reply, and separate questions get separate ones.
 - Joining and takeover become one mechanism, and the record names, on each absorbed input,
@@ -675,6 +737,8 @@ Read through and not superseded:
 
 - Fields in `core/types.py`, a schema change to the episode store with its upgrade, and a
   `PROTOCOL_VERSION` advance.
+- A stop in words costs planning a round, and commits its activation, so its conversation
+  holds the next message until that activation ends.
 - Two settings in place of one.
 - Every message in a conversation where nothing has acted pays its own understanding, where
   joining paid one for a burst past the start wait.
@@ -690,13 +754,21 @@ Read through and not superseded:
 - A takeover decision may wait for an older one's understanding, and a call result planning
   did not digest or note reaches no other activation.
 
-**The cut, for the dispatcher.** Four lanes, in §1:4's order, after ADR-0350 and this
-decision merge. Step 2 removes ADR-0332's joining by code and ADR-0343's pending join with
+**The cut, for the dispatcher.** Four lanes, in §1:4's order, after this decision merges.
+ADR-0350 and its lanes TS1, TS1b and TS2 have merged. Step 2 removes ADR-0332's joining by code and ADR-0343's pending join with
 it. ADR-0340 (#3271) is rewritten on top of ADR-0350, and is no lane of this decision.
 
-**What would reopen it.** The household design, for shares and merges across people. The
-outside-content design, for marks on peer reads. #2589's measurements, if a message's own
-understanding costs too much where nothing has acted.
+**What would reopen it.**
+
+- **The household design**, for shares and merges across people.
+- **The outside-content design**, for marks on peer reads.
+- **#2589's measurements**, if a message's own understanding costs too much where nothing
+  has acted.
+- **A section that is often full.** When the assistant is very busy and constantly handling
+  tasks at the same time, the newest `in_progress_limit` entries (§5:10) may not be the ones
+  that matter.
+  The likely fix is relevance over recency: for example, understanding sees the whole list,
+  and planning is shown only the entries understanding says relate.
 
 ## Alternatives considered
 
@@ -724,3 +796,8 @@ understanding costs too much where nothing has acted.
   (ADR-0292 §11:4).
 - **A new planning label kind for running activations.** Rejected: each has an open episode,
   and its episode label holds once it ends.
+- **Understanding's `cancels`**, a field naming the running work its input asks to stop, on
+  which a rule in the takeover stage stopped it. Dropped by the owner on 2026-10-25, in favour
+  of planning's stop call (§4:6): planning already had the Task Manager's cancel and
+  replace, and the stop was the one command missing (ADR-0350 §10:4). One stop, with its
+  cascade, serves every route, and nothing new in `core` carries it.
