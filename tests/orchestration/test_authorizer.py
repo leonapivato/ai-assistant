@@ -809,6 +809,31 @@ async def test_a_scheduled_activations_message_goes_only_into_a_place_on_its_lis
         assert refused.message.effect_id is None
 
 
+async def test_a_scheduled_activations_message_to_a_place_gone_since_its_list_is_refused() -> None:
+    """ADR-0350 §5:9, §6:7, #3448: refused by rule, with nothing claimed, saying it is gone."""
+    hub = _Hub()
+    places = ("conversation:c-1", "telegram:ref/42")
+    given = replace(
+        _round(message=RoundMessage("Time to move the car.", "conversation:c-1")),
+        input_place=None,
+        places=places,
+        gone=("conversation:c-1",),
+    )
+
+    gone = await hub.authorize(given)
+    other = await hub.authorize(
+        replace(given, message=RoundMessage("Time to move the car.", "telegram:ref/42"))
+    )
+
+    assert gone.message is not None
+    assert gone.message.allowed is False
+    assert gone.message.effect_id is None
+    assert gone.message.reason is not None
+    assert "gone since its place list was built" in gone.message.reason
+    assert other.message is not None
+    assert other.message.allowed is True
+
+
 # --- the record read back ---------------------------------------------------------------------
 
 

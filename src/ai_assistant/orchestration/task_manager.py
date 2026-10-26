@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Final
 
@@ -63,6 +63,7 @@ from ai_assistant.core.types import (
     DueAt,
     DueNow,
     DueOnRule,
+    EpisodicMemory,
     InputOrigin,
     OccurrenceState,
     RuleDay,
@@ -77,6 +78,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.acting import Unwritten
 from ai_assistant.orchestration.channel_kinds import place_channel, place_of
 from ai_assistant.orchestration.disclosure import admitted_to_understanding
+from ai_assistant.orchestration.episode_reads import without_open_episodes
 from ai_assistant.orchestration.matters import in_progress
 from ai_assistant.orchestration.person_block import activation_person
 from ai_assistant.orchestration.person_calls import NotDone
@@ -148,6 +150,7 @@ __all__ = [
     "StatedWhen",
     "TaskManager",
     "TaskManagerLimits",
+    "TaskParent",
     "TaskSchedulerSeams",
     "spawn_when",
 ]
@@ -163,50 +166,48 @@ _TELEGRAM: Final = "Telegram"
 
 #: The code-owned reasons a call is refused, each as planning is shown it (§4:4-§4:5).
 _REFUSAL_TEXT: Final = {
-    TaskRefusal.UNKNOWN_TASK: "not done: the Task Scheduler holds no such task",
-    TaskRefusal.ANOTHER_PERSONS: "not done: that task is another person's",
+    TaskRefusal.UNKNOWN_TASK: "the Task Scheduler holds no such task",
+    TaskRefusal.ANOTHER_PERSONS: "that task is another person's",
     TaskRefusal.NOT_ITS_SPAWN: (
-        "not done: this activation may cancel or replace only a task it spawned, since its "
+        "this activation may cancel or replace only a task it spawned, since its "
         "input does not carry the person's authority"
     ),
-    TaskRefusal.NOTHING_PENDING: "not done: nothing of that task is pending",
+    TaskRefusal.NOTHING_PENDING: "nothing of that task is pending",
     TaskRefusal.INVALID_WAIT: (
-        "not done: it waits on a task that is not the person's or not held, or it replaces a "
+        "it waits on a task that is not the person's or not held, or it replaces a "
         "task without waiting on each task that one still waits on"
     ),
-    TaskRefusal.CHAIN_LIMIT: "not done: the chain of steps would exceed the chain limit",
+    TaskRefusal.CHAIN_LIMIT: "the chain of steps would exceed the chain limit",
     TaskRefusal.PENDING_LIMIT: (
-        "not done: it would take the person's pending scheduled tasks past the pending limit"
+        "it would take the person's pending scheduled tasks past the pending limit"
     ),
     TaskRefusal.ASSISTANTS_RULE: (
-        "not done: only a task the person asked for may repeat on a rule, and this "
+        "only a task the person asked for may repeat on a rule, and this "
         "activation's input does not carry the person's authority"
     ),
 }
 _NOT_OFFERED: Final = (
-    "not done: the Task Scheduler's calls are offered only to a person's activation started "
+    "the Task Scheduler's calls are offered only to a person's activation started "
     "from a conversation, the line or the Task Scheduler"
 )
-_EARLIER_THAN_NOW: Final = "not done: the instant it would fall due is earlier than now"
-_NO_OFFSET: Final = "not done: an instant states its UTC offset, such as 2026-10-25T20:00:00-04:00"
-_ONE_WHEN: Final = "not done: give at most one of at, delay_minutes, after and rule"
+_EARLIER_THAN_NOW: Final = "the instant it would fall due is earlier than now"
+_NO_OFFSET: Final = "an instant states its UTC offset, such as 2026-10-25T20:00:00-04:00"
+_ONE_WHEN: Final = "give at most one of at, delay_minutes, after and rule"
 #: ADR-0340 §3:5 and §4:4's refusals, each made before the store is reached.
 _OFFSET_AND_ZONE: Final = (
-    "not done: an instant states a UTC offset or names a zone, never both; a local time "
+    "an instant states a UTC offset or names a zone, never both; a local time "
     "with no offset is read in the zone"
 )
-_UNKNOWN_ZONE: Final = "not done: the zone is not an IANA zone name, such as Europe/Lisbon"
-_ZONE_ALONE: Final = "not done: a zone is named only with at or rule, which it is read in"
-_UNTIL_BEFORE_FROM: Final = "not done: the rule's until is earlier than its from"
-_NO_OCCURRENCE: Final = "not done: the rule yields no occurrence later than now before its until"
-_RULE_DAYS: Final = (
-    "not done: a weekly rule names one or more days of the week, and no other rule names any"
-)
-_RULE_TIME: Final = "not done: a rule's time is a local time of day to the minute, such as 07:00"
-_OFF_THE_LIST: Final = "not done: it suggests a place that is not on this activation's place list"
-_MALFORMED: Final = "not done: the call's arguments are malformed"
-_STORE_FAULT: Final = "not done: the Task Scheduler could not be read or written"
-_ZONE_UNREAD: Final = "not done: the person's zone could not be read, so no time was read in it"
+_UNKNOWN_ZONE: Final = "the zone is not an IANA zone name, such as Europe/Lisbon"
+_ZONE_ALONE: Final = "a zone is named only with at or rule, which it is read in"
+_UNTIL_BEFORE_FROM: Final = "the rule's until is earlier than its from"
+_NO_OCCURRENCE: Final = "the rule yields no occurrence later than now before its until"
+_RULE_DAYS: Final = "a weekly rule names one or more days of the week, and no other rule names any"
+_RULE_TIME: Final = "a rule's time is a local time of day to the minute, such as 07:00"
+_OFF_THE_LIST: Final = "it suggests a place that is not on this activation's place list"
+_MALFORMED: Final = "the call's arguments are malformed"
+_STORE_FAULT: Final = "the Task Scheduler could not be read or written"
+_ZONE_UNREAD: Final = "the person's zone could not be read, so no time was read in it"
 
 
 def _brief(text: str) -> str:
@@ -536,6 +537,19 @@ def _after(named: FrozenJson) -> StatedWhen | str:
         return _MALFORMED
 
 
+@dataclass(frozen=True, slots=True)
+class TaskParent:
+    """Where and when a task's parent, the activation that spawned it, started (§4:6).
+
+    Attributes:
+        channel: The place its input came from.
+        started_at: When it started.
+    """
+
+    channel: ChannelIdentity
+    started_at: datetime
+
+
 class TaskManager:
     """The Task Manager's queries and commands, with one implementation each (§10:4).
 
@@ -664,7 +678,50 @@ class TaskManager:
         """
         held = await self._plans.person_scheduled_tasks(person, [OccurrenceState.PENDING])
         told = await self.zone_of(person) if zone is None else zone
-        return tuple(self.entry(one, told) for one in held[: self._limits.listing_bound])
+        shown = held[: self._limits.listing_bound]
+        parents = await self.parents(shown)
+        return tuple(self.entry(one, told, parent=parents.get(one.parent)) for one in shown)
+
+    async def parents(self, tasks: Sequence[ScheduledTask]) -> dict[str, TaskParent]:
+        """Where and when each of ``tasks``' parents started, from the record (§4:6, §9:4).
+
+        A task's parent is the activation that spawned it, or on a replace the replaced
+        task's, so where and when the task was set may describe the replacing spawn
+        instead. Each is read live from the engine where it runs, and from its frozen
+        episode otherwise: an open episode reaches no model (ADR-0286 §6:4). A parent
+        neither gives, or that came from no place, is left out, as is every one where the
+        episodes cannot be read, and its task is then described from where and when it
+        was set.
+        """
+        wanted = {one.parent for one in tasks}
+        found: dict[str, TaskParent] = {}
+        for state in self._running():
+            one, channel = state.activation_id, state.trigger.channel
+            if one in wanted and channel is not None and state.started_at is not None:
+                found[one] = TaskParent(channel, state.started_at)
+        rest = sorted(wanted - found.keys())
+        if not rest:
+            return found
+        try:
+            read = without_open_episodes(
+                await self._memory.get_many([f"activation:{one}" for one in rest])
+            )
+        except MemoryStoreError:
+            _log.warning("task_parent_unread", stage="task_scheduler", reason="store_failed")
+            return found
+        for one in rest:
+            record = read.get(f"activation:{one}")
+            processing = record.processing_record if isinstance(record, EpisodicMemory) else None
+            if processing is not None and processing.trigger.channel is not None:
+                found[one] = TaskParent(processing.trigger.channel, processing.started_at)
+        return found
+
+    async def described(
+        self, task: ScheduledTask, zone: ZoneInfo, *, spawner: Spawner | None = None
+    ) -> TaskEntry:
+        """``task`` as :meth:`entry` shows it, its parent read from the record (§4:6)."""
+        parents = await self.parents((task,))
+        return self.entry(task, zone, spawner=spawner, parent=parents.get(task.parent))
 
     async def recent(
         self, person: str, *, supply: TurnSupply | None, zone: ZoneInfo | None = None
@@ -672,7 +729,9 @@ class TaskManager:
         """The activations the Task Scheduler started for ``person`` that ended last (§7:9).
 
         Read from the schedule's episodes, newest first, bounded by the listing bound,
-        their times told in ``zone``, or ``person``'s where it is ``None``.
+        their times told in ``zone``, or ``person``'s where it is ``None``. Each says
+        where its messages went, read from their effect records (ADR-0350 §12:8), or
+        nothing of it where those cannot be read.
 
         Raises:
             MemoryStoreError: If the episodes cannot be read.
@@ -703,24 +762,68 @@ class TaskManager:
                     outside=outside,
                 )
             )
-        return tuple(shown)
+        return await self._where_written(shown)
+
+    async def _where_written(
+        self, entries: Sequence[ActivationEntry]
+    ) -> tuple[ActivationEntry, ...]:
+        """``entries``, each with where its messages went, from their effect records.
+
+        A message done went into its place; one whose outcome is not known, unfinished or
+        unknown, may have; one not done went nowhere (ADR-0306 §5:5). Where the records
+        cannot be read, nothing is said of where any spoke.
+        """
+        if not entries:
+            return ()
+        try:
+            effects = await self._plans.activation_effects([one.activation_id for one in entries])
+        except PlanningError:
+            _log.warning("task_messages_unread", stage="task_scheduler", reason="store_failed")
+            return tuple(entries)
+        wrote: dict[str, dict[str, None]] = {}
+        unknown: dict[str, dict[str, None]] = {}
+        for effect in effects:
+            if effect.is_call or effect.place is None:
+                continue
+            if effect.outcome is ToolOutcome.SUCCEEDED:
+                wrote.setdefault(effect.activation_id, {})[effect.place] = None
+            elif effect.outcome is not ToolOutcome.FAILED:
+                unknown.setdefault(effect.activation_id, {})[effect.place] = None
+        told: list[ActivationEntry] = []
+        for one in entries:
+            done = tuple(wrote.get(one.activation_id, {}))
+            maybe = tuple(
+                place for place in unknown.get(one.activation_id, {}) if place not in done
+            )
+            told.append(replace(one, wrote_into=done, may_have_written_into=maybe))
+        return tuple(told)
 
     def entry(
-        self, task: ScheduledTask, zone: ZoneInfo, *, spawner: Spawner | None = None
+        self,
+        task: ScheduledTask,
+        zone: ZoneInfo,
+        *,
+        spawner: Spawner | None = None,
+        parent: TaskParent | None = None,
     ) -> TaskEntry:
         """``task`` as a listing shows it, with the hub's renderings from its record.
 
         Its times in ``zone``, the person's, or its rule's own (ADR-0340 §6:1); for a
         rule, the rule in words (§8:2). For the task ``spawner``'s spawn wrote, the
         read-back too (§6:2), which says the line may still message the person where the
-        line's chat is on the spawner's place list.
+        line's chat is on the spawner's place list. Its parent is described from
+        ``parent``, as :meth:`parents` read it, and from where and when the task was set
+        where that is ``None`` (ADR-0350 §4:6).
         """
         occurrence = shown_occurrence(task)
         now = self._now()
         shown = task_zone(task, zone)
+        started_in, started_at = (
+            (task.set_in, task.set_at) if parent is None else (parent.channel, parent.started_at)
+        )
         who = (
             "a scheduled step"
-            if task.set_in.channel_type == SCHEDULE.channel_type
+            if started_in.channel_type == SCHEDULE.channel_type
             else "the person's message"
             if task.author is ScheduledTaskAuthor.PERSON
             else "the assistant"
@@ -739,12 +842,12 @@ class TaskManager:
             places=tuple(place_of(one) for one in task.places),
             parent=task.parent,
             parent_text=(
-                f"spawned by {who} in {place_description(task.set_in)}, "
-                f"{local_time(task.set_at, shown)}"
+                f"spawned by {who} in {place_description(started_in)}, "
+                f"{local_time(started_at, shown)}"
             ),
             author=task.author.value,
             repeats=(
-                rule_text(task.when, today=now.astimezone(shown).date())
+                rule_text(task.when, today=now.astimezone(shown).date(), zone=shown)
                 if isinstance(task.when, DueOnRule)
                 else None
             ),
@@ -1055,7 +1158,7 @@ class ScheduledTaskCalls:
             reason = TaskRefusal.UNKNOWN_TASK if cancelled.reason is None else cancelled.reason
             _log.info("task_call_not_done", stage="acting", reason=reason.value)
             return NotDone(reason=_REFUSAL_TEXT[reason])
-        listing = TaskListing(cancelled=self._manager.entry(cancelled.task, zone))
+        listing = TaskListing(cancelled=await self._manager.described(cancelled.task, zone))
         return ToolResult(outcome=ToolOutcome.SUCCEEDED, output=encode_listing(listing))
 
     async def _stated(
@@ -1127,7 +1230,9 @@ class ScheduledTaskCalls:
             reason = TaskRefusal.UNKNOWN_TASK if written.reason is None else written.reason
             _log.info("task_call_not_done", stage="acting", reason=reason.value)
             return Unwritten(reason=_REFUSAL_TEXT[reason])
-        listing = TaskListing(spawned=self._manager.entry(written.task, zone, spawner=spawner))
+        listing = TaskListing(
+            spawned=await self._manager.described(written.task, zone, spawner=spawner)
+        )
         return ToolResult(outcome=ToolOutcome.SUCCEEDED, output=encode_listing(listing))
 
 

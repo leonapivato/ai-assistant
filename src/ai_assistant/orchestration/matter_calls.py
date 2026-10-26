@@ -209,20 +209,18 @@ MATTER_LABEL_ARGUMENTS: Final[Mapping[str, Mapping[str, LabelKind]]] = {
 }
 
 #: The code-owned reasons a call is not done for.
-_NO_AUTHORITY: Final = (
-    "not done: this input does not carry the person's authority, so it stops nothing"
-)
+_NO_AUTHORITY: Final = "this input does not carry the person's authority, so it stops nothing"
 _NOT_SHOWN_RUNNING: Final = (
-    "not done: that label was not shown as running work, in a list, an offer or a wait"
+    "that label was not shown as running work, in a list, an offer or a wait"
 )
-_NOT_WAITED_ON: Final = "not done: this round may stop only the work it waits on"
-_ABSORBED: Final = "not done: newer work absorbed it since it was shown, so nothing was stopped"
-_NO_OFFER: Final = "not done: that label names no offer open to this work"
-_MALFORMED: Final = "not done: the call's arguments are malformed"
-_STORE_FAULT: Final = "not done: the hub's records could not be read or written"
-_NOT_OFFERED: Final = "not done: this call is not offered to this activation"
+_NOT_WAITED_ON: Final = "this round may stop only the work it waits on"
+_ABSORBED: Final = "newer work absorbed it since it was shown, so nothing was stopped"
+_NO_OFFER: Final = "that label names no offer open to this work"
+_MALFORMED: Final = "the call's arguments are malformed"
+_STORE_FAULT: Final = "the hub's records could not be read or written"
+_NOT_OFFERED: Final = "this call is not offered to this activation"
 _STOP_UNRECORDED: Final = (
-    "not done in full: the work is stopped, but its stop could not be recorded, so what it "
+    "only in part: the work is stopped, but its stop could not be recorded, so what it "
     "set up to run later may still run; asking again records it"
 )
 

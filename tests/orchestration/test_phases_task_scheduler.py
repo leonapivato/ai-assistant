@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from phases_support import open_conversation, phases_harness, said, until, working, written
 from task_support import AT, activation, seams, spawn_effect, write_task
@@ -53,7 +53,9 @@ if TYPE_CHECKING:
 
     from test_engine import Harness
 
-    from ai_assistant.core.types import Message, OfferedTool, ScheduledTask
+    from ai_assistant.core.protocols import ConversationStore
+    from ai_assistant.core.types import Conversation, Message, OfferedTool, ScheduledTask
+    from ai_assistant.testing import FakeConversationStore
 
 
 def _request(messages: Sequence[Message]) -> dict[str, Any]:
@@ -227,6 +229,49 @@ async def test_a_deleted_conversation_cancels_nothing_and_with_no_line_nothing_i
         (request,) = spoken
         assert request["places"] == []
         assert request["place"]["takes_message"] is False
+    finally:
+        await harness.engine.aclose()
+
+
+class _DeletedWhilePlanning:
+    """The chat space as the place list reads it: its conversation is deleted once planning
+    has written the round's message, at the next read, so the list built for the round
+    still held it."""
+
+    def __init__(self, store: FakeConversationStore, conversation_id: str) -> None:
+        self._store = store
+        self._id = conversation_id
+        self.planned = False
+
+    async def get(self, conversation_id: str) -> Conversation | None:
+        if self.planned and conversation_id == self._id:
+            await self._store.stamp_deleted(self._id)
+        return await self._store.get(conversation_id)
+
+
+async def test_a_message_to_a_place_deleted_after_its_list_was_built_is_refused_by_rule() -> None:
+    """§5:9, §6:7, #3448: authorizing refuses it, so no message of the round is claimed."""
+    space: list[_DeletedWhilePlanning] = []
+
+    def task(request: dict[str, Any]) -> RoundResponse:
+        space[0].planned = True
+        return RoundResponse(text=f"{_first_place(request)}: time to move the car")
+
+    harness = phases_harness(_responder(_silent, task), task_scheduler=seams())
+    gone = await harness.conversation_store.start()
+    space.append(_DeletedWhilePlanning(harness.conversation_store, gone.id))
+    harness.engine._place_lists = PlaceLists(conversations=cast("ConversationStore", space[0]))
+    place = ChannelIdentity(channel_type="conversation", instance_id=gone.id)
+    await write_task(harness.plans, activation(), places=(place,))
+    await harness.engine.start()
+    try:
+        (episode,) = await _until_scheduled(harness, 1)
+        record = episode.processing_record
+        assert record is not None
+        (round_,) = record.rounds
+        assert round_.place == place
+        effects = await harness.plans.activation_effects([record.activation_id])
+        assert [one for one in effects if not one.is_call and one.round is not None] == []
     finally:
         await harness.engine.aclose()
 

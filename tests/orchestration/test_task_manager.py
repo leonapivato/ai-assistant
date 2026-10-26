@@ -11,9 +11,21 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import pytest
-from task_support import AT, CHAT, LIMITS, LINE, activation, pushed, spawn_effect, write_task
+from channel_episodes import conversation_episode
+from task_support import (
+    AT,
+    CHAT,
+    LIMITS,
+    LINE,
+    activation,
+    message,
+    pushed,
+    schedule_episode,
+    spawn_effect,
+    write_task,
+)
 
-from ai_assistant.core.errors import ClaimStopped, ConversationStoreError
+from ai_assistant.core.errors import ClaimStopped, ConversationStoreError, PlanningError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ActionRequest,
@@ -42,21 +54,28 @@ from ai_assistant.orchestration.task_scheduler import (
     LIST_TASKS,
     SCHEDULE,
     SPAWN,
+    ActivationEntry,
     Spawner,
+    TaskListing,
     decode_listing,
+    encode_listing,
     spawning,
 )
 from ai_assistant.testing import FakeConversationStore, FakeMemoryStore, FakePlanStore
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import Conversation, FrozenJson, ToolDefinition
+    from collections.abc import Sequence
+
+    from ai_assistant.core.types import ActivationEffect, Conversation, FrozenJson, ToolDefinition
 
 
 class _World:
     """A Task Manager over the fakes, with a running set and a stop a case reads."""
 
-    def __init__(self, *, limits: TaskManagerLimits = LIMITS) -> None:
-        self.plans = FakePlanStore(now=lambda: AT)
+    def __init__(
+        self, *, limits: TaskManagerLimits = LIMITS, plans: FakePlanStore | None = None
+    ) -> None:
+        self.plans = FakePlanStore(now=lambda: AT) if plans is None else plans
         self.memory = FakeMemoryStore(now=lambda: AT)
         self.running: set[str] = set()
         self.stopped: list[str] = []
@@ -479,3 +498,132 @@ async def test_a_conversation_that_cannot_be_read_stays_on_the_list() -> None:
     )
 
     assert [(one.place, one.suggested) for one in shown] == [("conversation:c-9", True)]
+
+
+# --- a replaced task's parent, and where an ended step spoke (#3449, #3445) ---------------
+
+
+async def _listing(world: _World) -> TaskListing:
+    with spawning(_spawner(activation())):
+        answer = await world.calls.run(_call(LIST_TASKS, {}))
+    assert isinstance(answer, ToolResult)
+    listing = decode_listing(answer.output)
+    assert listing is not None
+    return listing
+
+
+async def test_a_replaced_task_is_described_by_the_parent_it_inherited() -> None:
+    """§4:6, §9:4: the parent is the replaced task's, so its words are that parent's."""
+    world = _World()
+    step = activation()
+    await world.memory.add(schedule_episode(step))
+    task = await write_task(
+        world.plans, step, when=DueAt(at=AT + timedelta(hours=3)), set_in=SCHEDULE
+    )
+    replacer = activation()
+
+    answer = await _spawn(world, _spawner(replacer), replaces=task.id, delay_minutes=120)
+
+    assert isinstance(answer, ToolResult)
+    spawned = decode_listing(answer.output)
+    assert spawned is not None
+    assert spawned.spawned is not None
+    assert spawned.spawned.parent == step
+    assert spawned.spawned.parent_text.startswith("spawned by a scheduled step")
+    (listed,) = (await _listing(world)).scheduled
+    assert listed.parent == step
+    assert listed.parent_text == spawned.spawned.parent_text
+
+
+async def test_a_parents_words_tell_its_own_time_not_the_replacing_spawns() -> None:
+    """§4:6: "spawned by your message on Monday", the message the parent began with."""
+    world = _World()
+    parent = activation()
+    began = AT - timedelta(days=2)
+    await world.memory.add(
+        conversation_episode(CHAT.instance_id, f"activation:{parent}", occurred_at=began)
+    )
+    task = await write_task(world.plans, parent, when=DueAt(at=AT + timedelta(hours=3)))
+
+    await _spawn(world, _spawner(activation()), replaces=task.id, delay_minutes=120)
+
+    (listed,) = (await _listing(world)).scheduled
+    assert listed.parent == parent
+    assert listed.parent_text == (
+        "spawned by the person's message in a conversation in the hub's chat, "
+        "Tue 30 Dec 2025 00:00 (UTC)"
+    )
+
+
+class _EffectsUnread(FakePlanStore):
+    """A plan store whose effect records cannot be read."""
+
+    async def activation_effects(
+        self, activation_ids: Sequence[str], /
+    ) -> tuple[ActivationEffect, ...]:
+        del activation_ids
+        msg = "the plan store is busy"
+        raise PlanningError(msg)
+
+
+async def test_an_ended_step_says_where_its_messages_went_or_that_it_wrote_none() -> None:
+    """#3445, ADR-0350 §12:8: from the effect records, done, not known, or none."""
+    world = _World()
+    line, unknown, silent = activation(), activation(), activation()
+    for one in (line, unknown, silent):
+        await world.memory.add(schedule_episode(one))
+    await message(world.plans, line, LINE, outcome=ToolOutcome.SUCCEEDED, position=3)
+    await message(world.plans, unknown, CHAT, outcome=ToolOutcome.FAILED)
+    await message(world.plans, unknown, LINE, outcome=ToolOutcome.INDETERMINATE)
+    await message(world.plans, silent, CHAT, outcome=ToolOutcome.FAILED)
+
+    ended = {one.activation_id: one for one in (await _listing(world)).recent}
+
+    line_place = f"telegram:{LINE.instance_id}"
+    assert (ended[line].wrote_into, ended[line].may_have_written_into) == ((line_place,), ())
+    assert (ended[unknown].wrote_into, ended[unknown].may_have_written_into) == (
+        (),
+        (line_place,),
+    )
+    assert (ended[silent].wrote_into, ended[silent].may_have_written_into) == ((), ())
+
+
+async def test_where_ended_steps_spoke_is_left_unsaid_where_the_records_cannot_be_read() -> None:
+    """#3445: an unread record is no answer that a step wrote nothing."""
+    world = _World(plans=_EffectsUnread(now=lambda: AT))
+    step = activation()
+    await world.memory.add(schedule_episode(step))
+
+    (entry,) = (await _listing(world)).recent
+
+    assert entry.activation_id == step
+    assert entry.wrote_into is None
+
+
+def test_where_a_step_spoke_survives_the_listings_encoding_and_an_older_one_reads_as_unsaid() -> (
+    None
+):
+    """#3445: a listing recorded before the fields decodes with nothing said of them."""
+    entry = ActivationEntry(
+        activation_id="step",
+        started="Mon 26 Oct 2026 00:32 (UTC)",
+        place="a scheduled step, started by the Task Scheduler",
+        status="completed (returned)",
+        input=None,
+        outside=False,
+        wrote_into=("telegram:ref/42",),
+        may_have_written_into=("conversation:c-1",),
+    )
+    encoded = encode_listing(TaskListing(recent=(entry,), listed=True))
+    assert decode_listing(encoded) == TaskListing(recent=(entry,), listed=True)
+
+    assert isinstance(encoded, dict)
+    older = dict(encoded)
+    recent = [dict(one) for one in older["recent"]]
+    for one in recent:
+        del one["wrote_into"], one["may_have_written_into"]
+    older["recent"] = recent
+    decoded = decode_listing(older)
+    assert decoded is not None
+    (old,) = decoded.recent
+    assert (old.wrote_into, old.may_have_written_into) == (None, ())

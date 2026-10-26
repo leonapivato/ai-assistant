@@ -196,7 +196,7 @@ from ai_assistant.orchestration.story_calls import (
     STORY_CALL_CAPABILITIES,
     TIDY_STORY_CAPABILITY,
 )
-from ai_assistant.orchestration.task_scheduler import SPAWN_CAPABILITY
+from ai_assistant.orchestration.task_scheduler import SPAWN_CAPABILITY, place_description
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -1186,6 +1186,8 @@ _NOTHING_ANSWERED: Final = "nothing in it answered what was looked for"
 _RECALL_DIGEST: Final = "the outside memories recall found"
 _DIGESTED_RESULT: Final = "read for you by a digest, under evidence"
 _NONE_FOUND: Final = "none"
+#: An ended step of the Task Scheduler's that wrote no message anywhere (#3445).
+_WROTE_NO_MESSAGE: Final = "wrote no message"
 _STORIES_UNREADABLE: Final = "missing: the stories could not be read"
 _NO_STORIES: Final = "none: this activation belongs to no story yet"
 _NO_SUMMARY: Final = "none written yet"
@@ -1709,14 +1711,38 @@ class _Request:
         return shown
 
     def _activation(self, entry: ActivationEntry) -> dict[str, object]:
-        """A running or ended activation, as the list pull shows it (ADR-0350 §4:6-§4:7)."""
-        return {
+        """A running or ended activation, as the list pull shows it (ADR-0350 §4:6-§4:7).
+
+        An ended one says where its messages went, each place as the place list shows
+        it, or that it wrote none (#3445), where its effect records were read.
+        """
+        shown: dict[str, object] = {
             "episode": self._book.label(LabelKind.EPISODE, f"activation:{entry.activation_id}"),
             "started": entry.started,
             "place": entry.place,
             "status": entry.status,
             "input": _OUTSIDE if entry.outside or entry.input is None else entry.input,
         }
+        if entry.wrote_into is not None:
+            shown["wrote_into"] = [
+                self._listed_place(one) for one in entry.wrote_into
+            ] or _WROTE_NO_MESSAGE
+        if entry.may_have_written_into:
+            shown["may_have_written_into"] = [
+                self._listed_place(one) for one in entry.may_have_written_into
+            ]
+        return shown
+
+    def _listed_place(self, place: str) -> dict[str, object]:
+        """A place a message went into, as the place list shows it (ADR-0350 §5:10-§5:12).
+
+        By its ``L`` label and the list's description where it is on this round's place
+        list, and otherwise by what it is, saying it is not on the list.
+        """
+        for one in self._inputs.places or ():
+            if one.place == place:
+                return {"label": self._book.label(LabelKind.PLACE, place), "is": one.description}
+        return {"is": place_description(place_channel(place)), "on_your_place_list": False}
 
     def _running(self, entry: ActivationEntry) -> dict[str, object]:
         """A running activation, as the list pull's running part shows it (ADR-0349 §6:2).

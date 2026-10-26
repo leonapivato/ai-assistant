@@ -123,6 +123,8 @@ async def test_a_stop_call_without_the_users_authority_is_refused_and_stops_noth
         answer = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
     assert isinstance(answer, NotDone)
     assert "authority" in answer.reason
+    # #3452: planning's rendering says "not done" before the reason, so it never does.
+    assert not answer.reason.startswith("not done")
     assert stops.stopped == []
     assert not older.stopped
 
