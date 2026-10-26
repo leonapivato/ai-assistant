@@ -22,6 +22,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
+import pytest
 from test_matters import _running, _understood
 
 from ai_assistant.core.errors import MemoryStoreError, PlanningError
@@ -320,6 +321,41 @@ async def test_a_decline_carries_its_reason() -> None:
         "reason": "already booked",
     }
     assert newer.declined == ((_A, "already booked"),)
+
+
+@pytest.mark.parametrize(
+    ("case", "take", "as_asked"),
+    [
+        ("open", True, True),
+        ("open", False, True),
+        ("at_the_limit", True, False),
+        ("withdrawn", True, False),
+        ("withdrawn", False, False),
+        ("no_offer", True, False),
+        ("no_offer", False, False),
+    ],
+)
+async def test_an_answer_is_held_as_asked_only_where_it_came_to_what_it_asked(
+    case: str, *, take: bool, as_asked: bool
+) -> None:
+    """ADR-0352 §4:2-§4:3: a take to a take, a decline to the decline, and nothing else."""
+    older = _running("a", _A, order=1)
+    older.committed = True
+    newer = _running("a", _B, order=2)
+    matters, calls, _, _ = _wired([older, newer])
+    if case != "no_offer":
+        matters.merge(newer, _understood(newer, _A), at=_AT)
+    if case == "at_the_limit":
+        matters.held_input_limit = 1
+    if case == "withdrawn":
+        newer.stop()
+    caller = _caller(older)
+    arguments: dict[str, FrozenJson] = {"offer": _episode(_B), "take": take}
+    if not take:
+        arguments["reason"] = "not this work's"
+    with calling(caller):
+        await calls.run(_call(ANSWER_OFFER, **arguments))
+    assert caller.as_asked == ({"decision:answer_offer"} if as_asked else set())
 
 
 async def test_a_stop_whose_findings_cannot_be_read_is_still_done() -> None:
