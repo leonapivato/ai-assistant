@@ -37,6 +37,13 @@ where the entry keeps one; and, for a planning round, what changed in its reques
 since the round before. Each part has its size, a token estimate, and a copy control;
 the raw entries are one tab away.
 
+An activation also walks, a step at a time, in its own order: what arrived, each run of
+recall with what it kept, understanding's reading field by field, each planning round
+with what came back from the round before and what it proposed, authorizing's verdicts,
+acting and any digest, the end, and what the observer learned. Each step is a summary, and
+opens its calls and entries in the drawer the timeline opens. Previous and Next, or the
+arrow keys, move; the page's address names the step, as ``#<activation>/walk/<n>``.
+
 What the observer learned from an activation is in the file beside its own,
 ``<activation_id>.observer.jsonl`` (ADR-0333 §3), joined to it by name and never listed as
 an activation of its own. The activation's page shows it as a learning lane, attempt by
@@ -2559,6 +2566,708 @@ def _hub_follow_up(line: Entry, body: Mapping[str, object]) -> dict[str, object]
     }
 
 
+# --- walking one activation, a step at a time -------------------------------------------
+# The activation in its own order, one step at a time, as a debugger steps through a
+# finished run: what arrived, each phase's run with what it was given and what it decided,
+# how it ended, and what the observer learned of it. A step is a summary of the few things
+# that matter, and names the lines a click shows whole through the call view and the raw
+# entries the timeline opens (ADR-0316 §3:3). Every key read here is a hint (§5:2): a body
+# of another shape loses its summary, and its step is still walked, its entries a click
+# away. Nothing here says why recall did not keep a find: the record does not hold it.
+
+#: The phases whose given and returned entries a walk's step summarises.
+WALK_SOURCES: Final = frozenset({"recall", "understanding", "planning", "authorizing", "digesting"})
+
+#: How much of a long value a step shows: a result, a digest's evidence, a recalled item.
+WALK_CHARS: Final = 600
+
+#: How much of a recalled item's text a step shows: the hub cuts a fact shorter already.
+RECALLED_CHARS: Final = 2_000
+
+#: How much of the text a label names a step shows beside the label.
+LABEL_CHARS: Final = 200
+
+#: How deep a request's JSON is searched for the labels it shows.
+LABEL_DEPTH: Final = 8
+
+#: The keys understanding's reading carries (ADR-0276 §2); any other is named as other.
+_READING_KEYS: Final = frozenset(
+    {
+        "meaning",
+        "meaning_ground",
+        "meaning_labels",
+        "references",
+        "relationships",
+        "unresolved",
+        "story_labels",
+        "answers",
+        "continues",
+    }
+)
+
+#: The keys whose text stands for a labelled item, the first that is text.
+_LABEL_TEXT_KEYS: Final = (
+    "fact",
+    "text",
+    "summary",
+    "meaning",
+    "input",
+    "excerpt",
+    "asks",
+    "question",
+    "description",
+    "shown",
+)
+
+#: Each stage's name in a step's title, where it is not the stage's own words.
+_TITLES: Final = {
+    "recall": "Recall",
+    "understanding": "Understanding",
+    "authorizing": "Authorizing",
+    "acting": "Acting",
+    "digesting": "Digesting",
+}
+
+
+@dataclass(slots=True)
+class _Phase:
+    """One run of a stage: its controller step, where one was recorded, and its entries."""
+
+    stage: str
+    start: float
+    line: int
+    step: Entry | None = None
+    entries: list[Entry] = field(default_factory=list)
+
+
+def walk(
+    lines: Sequence[Line], learned: Sequence[Line] | None = None, *, own: bool = True
+) -> dict[str, object]:
+    """One activation's steps, in its own order, each in short (ADR-0316 §3:3).
+
+    Args:
+        lines: The activation's own file's complete lines.
+        learned: Its observer file's complete lines, where it has one.
+        own: Whether its own file is in the listing; where it is not, only what the
+            observer learned is walked (ADR-0333 §5:6).
+
+    Returns:
+        Where the activation began, and its steps: the input, each phase's run in the
+        order it began, the end, and each of the observer's attempts. Each step names
+        the lines a click shows whole.
+    """
+    built = _Timeline(lines)
+    built.build()
+    tally = Tally("")
+    for line in lines:
+        tally.feed(line)
+    steps: list[dict[str, object]] = []
+    if own:
+        phases, ended = _phases(built)
+        arrival = arrival_of(lines)
+        steps.append(
+            {
+                "phase": "input",
+                "title": "Input",
+                "start": tally.summary()["start"],
+                "step": None,
+                "arrival": arrival,
+                "links": []
+                if arrival is None
+                else [
+                    {
+                        "label": "The request it was read from",
+                        "lines": [arrival["line"]],
+                        "call": arrival["line"],
+                        "file": None,
+                    }
+                ],
+            }
+        )
+        steps += [_phase_step(built, one) for one in phases]
+        steps.append(_end_step(built, ended, tally))
+    if learned is not None:
+        steps += _learning_steps(learning_lane("", learned))
+    return {"start": tally.summary()["start"], "own": own, "steps": steps}
+
+
+def _phases(built: _Timeline) -> tuple[list[_Phase], Entry | None]:
+    """Each run of a stage, in the order it began, and the end entry, where there is one.
+
+    A controller step is a run of its stage, and holds its phase's entries written inside
+    it. An entry no step of its phase holds, because its step is still running or its
+    entry was never written (ADR-0314 §2:4), is a run of its own, its response with it,
+    so a missing entry costs its own step and never another's.
+    """
+    phases: list[_Phase] = []
+    spans: list[tuple[_Phase, float, float]] = []
+    ended: Entry | None = None
+    for entry in built.entries:
+        if entry.source != "controller" or entry.kind != "step":
+            continue
+        body = _mapping(entry.body)
+        stage = _text(body.get("stage")) or "step"
+        if stage == "end":
+            ended = entry
+            continue
+        started, finished = instant(body.get("started_at")), instant(body.get("ended_at"))
+        phase = _Phase(stage, entry.at if started is None else started, entry.line, step=entry)
+        phases.append(phase)
+        if started is not None and finished is not None:
+            spans.append((phase, started, finished))
+    answered = {back: given for given, back in built.pairs.items() if back is not None}
+    alone: dict[int, _Phase] = {}
+    for entry in built.entries:
+        if entry.source == "controller" and entry.kind == "step":
+            continue
+        host = next(
+            (
+                one
+                for one, start, end in spans
+                if one.stage == entry.source and start <= entry.at <= end
+            ),
+            None,
+        )
+        if host is None and entry.kind == "returned" and entry.line in answered:
+            host = alone.get(answered[entry.line])
+        if host is None:
+            known = entry.source in WALK_SOURCES and entry.kind in KNOWN_KINDS
+            host = _Phase(entry.source if known else lane_of(entry), entry.at, entry.line)
+            phases.append(host)
+            if entry.kind == "given":
+                alone[entry.line] = host
+        host.entries.append(entry)
+    phases.sort(key=lambda one: (one.start, one.line))
+    return phases, ended
+
+
+def _step_facts(entry: Entry | None) -> dict[str, object] | None:
+    """A controller step's rule, outcome, duration and failure, as a step's head shows them."""
+    if entry is None:
+        return None
+    body = _mapping(entry.body)
+    started, ended = instant(body.get("started_at")), instant(body.get("ended_at"))
+    return {
+        "line": entry.line,
+        "due": _text(body.get("due")),
+        "outcome": _text(body.get("outcome")),
+        "took": None if started is None or ended is None else _ms(ended - started),
+        "failure": _failure_text(body.get("failure")) if "failure" in body else None,
+    }
+
+
+def _links(built: _Timeline, phase: _Phase) -> list[dict[str, object]]:
+    """What a step's clicks open: each model call readable, other entries whole, its step."""
+    links: list[dict[str, object]] = []
+    paired = set(built.pairs.values())
+    calls = [
+        one
+        for one in phase.entries
+        if one.source in MODEL_SOURCES
+        and (one.kind == "given" or (one.kind == "returned" and one.line not in paired))
+    ]
+    for number, one in enumerate(calls, 1):
+        back = built.pairs.get(one.line) if one.kind == "given" else None
+        label = "The call, readable" if len(calls) == 1 else f"Call {number}, readable"
+        lines = [one.line] if back is None else [one.line, back]
+        links.append({"label": label, "lines": lines, "call": one.line, "file": None})
+    shown = {line for link in links for line in _sequence(link["lines"])}
+    others = [one.line for one in phase.entries if one.line not in shown]
+    if others:
+        label = "Its entry, whole" if len(others) == 1 else "Its entries, whole"
+        links.append({"label": label, "lines": others, "call": None, "file": None})
+    if phase.step is not None:
+        links.append(
+            {"label": "The step entry", "lines": [phase.step.line], "call": None, "file": None}
+        )
+    return links
+
+
+def _phase_step(built: _Timeline, phase: _Phase) -> dict[str, object]:
+    """One run of a stage as a walk's step: its head, its summary and its links."""
+    number = built.round_of(phase.start) if phase.stage in {"planning", "authorizing"} else None
+    title = _TITLES.get(phase.stage) or _words(phase.stage).capitalize()
+    if number is not None:
+        title = f"{'Planning' if phase.stage == 'planning' else 'Authorizing'} · round {number}"
+    shown: dict[str, object] = {
+        "phase": phase.stage,
+        "title": title,
+        "start": _ms(phase.start),
+        "step": _step_facts(phase.step),
+        "round": number,
+        "links": _links(built, phase),
+    }
+    if phase.stage == "recall":
+        shown |= _recall_step(built, phase)
+        run = shown.get("run")
+        if isinstance(run, str):
+            shown["title"] = f"Recall · {_words(run)} run"
+    elif phase.stage == "understanding":
+        shown |= _understanding_step(phase)
+    elif phase.stage == "planning":
+        shown |= _planning_step(phase)
+    elif phase.stage == "authorizing":
+        shown |= _authorizing_step(phase)
+    elif phase.stage == "digesting":
+        shown |= _digesting_step(built, phase)
+    return shown
+
+
+def _last(phase: _Phase, kind: str) -> Entry | None:
+    return next((one for one in reversed(phase.entries) if one.kind == kind), None)
+
+
+def _first(phase: _Phase, kind: str) -> Entry | None:
+    return next((one for one in phase.entries if one.kind == kind), None)
+
+
+def _strings(value: object) -> list[str]:
+    return [one for one in _sequence(value) if isinstance(one, str)]
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+def _cut(text: str, limit: int = WALK_CHARS) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _item_text(item: Mapping[str, object], limit: int = WALK_CHARS) -> str:
+    """What a labelled item of a request says: its text, or else its JSON, cut."""
+    for key in _LABEL_TEXT_KEYS:
+        said = _text(item.get(key))
+        if said is not None:
+            return _cut(said, limit)
+    return _cut(_pretty({key: value for key, value in item.items() if key != "label"}), limit)
+
+
+def _recall_step(built: _Timeline, phase: _Phase) -> dict[str, object]:
+    """A recall run: its cues, how many it found, and what it kept with score and band.
+
+    The text of what it kept is shown where a request after it holds it: understanding's
+    request shows the first run's kept items in recall's order, each under a label and none
+    by its id, leaving out what the request shows elsewhere and what was no longer held. So
+    the two are joined, by order, only where that request shows exactly as many as were
+    kept; else its items are listed apart, and nothing is said of which id each is.
+    """
+    given, returned = _first(phase, "given"), _last(phase, "returned")
+    asked = _mapping(None if given is None else given.body)
+    body = _mapping(None if returned is None else returned.body)
+    finds = [_mapping(one) for one in _sequence(body.get("finds"))]
+    bands: dict[str, list[str]] = {}
+    for one in finds:
+        found, band = _text(one.get("id")), _text(one.get("band"))
+        if found is not None and band is not None and band not in bands.setdefault(found, []):
+            bands[found].append(band)
+    kept: list[dict[str, object]] = [
+        {
+            "id": _text(one.get("id")),
+            "score": _number(one.get("score")),
+            "bands": bands.get(_text(one.get("id")) or "", []),
+            "found_by": _strings(one.get("found_by")),
+            "label": None,
+            "text": None,
+        }
+        for one in map(_mapping, _sequence(body.get("kept")))
+    ]
+    run = _text(asked.get("run"))
+    listed = isinstance(body.get("finds"), list)
+    return {
+        "run": run,
+        "cues": [
+            {"text": _text(cue.get("text")), "kinds": _strings(cue.get("kinds"))}
+            for cue in map(_mapping, _sequence(asked.get("cues")))
+        ],
+        "returned": returned is not None,
+        "outcome": _text(body.get("outcome")),
+        "found": len(finds) if listed else None,
+        "admitted": sum(1 for one in finds if one.get("admitted") is True) if listed else None,
+        "kept": kept,
+        "failure": _failure_text(body.get("failure")) if "failure" in body else None,
+        "shown": _recalled_shown(built, phase, run, kept),
+    }
+
+
+def _recalled_shown(
+    built: _Timeline, phase: _Phase, run: str | None, kept: list[dict[str, object]]
+) -> dict[str, object] | None:
+    """The recalled section of the first request after a run, joined to it where it can be."""
+    source = {"first": "understanding", "second": "planning"}.get(run or "")
+    if source is None:
+        return None
+    after = max((one.line for one in phase.entries), default=phase.line)
+    request = next(
+        (
+            one
+            for one in built.entries
+            if one.source == source and one.kind == "given" and one.line > after
+        ),
+        None,
+    )
+    document = None if request is None else _user_document(request.body)
+    if request is None or document is None or "recalled" not in document:
+        return None
+    section = document.get("recalled")
+    shown: dict[str, object] = {"from": source, "line": request.line, "said": None}
+    if isinstance(section, str):
+        return {**shown, "said": section, "items": [], "joined": False}
+    items = [
+        {"label": _text(one.get("label")), "text": _item_text(one, RECALLED_CHARS)}
+        for one in map(_mapping, _sequence(section))
+    ]
+    joined = (
+        source == "understanding"
+        and bool(kept)
+        and len(items) == len(kept)
+        and all(item["label"] is not None for item in items)
+    )
+    if joined:
+        for held, item in zip(kept, items, strict=True):
+            held["label"], held["text"] = item["label"], item["text"]
+    return {**shown, "items": [] if joined else items, "joined": joined}
+
+
+def reading_of(reply: str) -> dict[str, object] | None:
+    """Understanding's reply read as its reading (ADR-0276 §2), field by field.
+
+    One enclosing Markdown code fence is set aside first, as the stage sets it aside. Each
+    field is a hint (ADR-0316 §5:2): one of another shape is left out.
+
+    Args:
+        reply: The reply's text, as the returned entry keeps it.
+
+    Returns:
+        Its meaning and ground, references, relationships, unresolved matters, answers,
+        story links and the work it continues, and the keys it holds beside them; or
+        ``None`` where the reply is no JSON object.
+    """
+    body = reply.strip()
+    if body.startswith("```") and body.endswith("```") and len(body) >= 6:  # noqa: PLR2004 — two fences
+        body = body[3:-3]
+        newline = body.find("\n")
+        if newline != -1 and body[:newline].strip() in {"", "json", "JSON"}:
+            body = body[newline + 1 :]
+    value = _object_in(body)
+    if value is None:
+        return None
+    return {
+        "meaning": _text(value.get("meaning")),
+        "ground": _text(value.get("meaning_ground")),
+        "meaning_labels": _strings(value.get("meaning_labels")),
+        "references": [
+            {"phrase": _text(one.get("phrase")), "labels": _strings(one.get("labels"))}
+            for one in map(_mapping, _sequence(value.get("references")))
+        ],
+        "relationships": [
+            {
+                "statement": _text(one.get("statement")),
+                "ground": _text(one.get("ground")),
+                "labels": _strings(one.get("labels")),
+            }
+            for one in map(_mapping, _sequence(value.get("relationships")))
+        ],
+        "unresolved": [
+            {"matter": _text(one.get("matter")), "why": _text(one.get("why_it_matters"))}
+            for one in map(_mapping, _sequence(value.get("unresolved")))
+        ],
+        "story_labels": _strings(value.get("story_labels")),
+        "answers": [
+            {
+                "question": _text(one.get("question")),
+                "parts": [
+                    part
+                    for part in _sequence(one.get("parts"))
+                    if type(part) is int and abs(part) <= _SAFE_INTEGER
+                ],
+            }
+            for one in map(_mapping, _sequence(value.get("answers")))
+        ],
+        "continues": _strings(value.get("continues")),
+        "other": sorted(key for key in value if key not in _READING_KEYS),
+    }
+
+
+def _labels_used(reading: Mapping[str, object]) -> set[str]:
+    used = set(_strings(reading.get("meaning_labels")))
+    used |= set(_strings(reading.get("story_labels"))) | set(_strings(reading.get("continues")))
+    for key in ("references", "relationships"):
+        for one in map(_mapping, _sequence(reading.get(key))):
+            used |= set(_strings(one.get("labels")))
+    for one in map(_mapping, _sequence(reading.get("answers"))):
+        question = _text(one.get("question"))
+        if question is not None:
+            used.add(question)
+    return used
+
+
+def labels_in(body: object, wanted: set[str]) -> dict[str, str]:
+    """The text each wanted label names in a request: the item shown under it, in short.
+
+    Args:
+        body: A given entry's body.
+        wanted: The labels to look for.
+
+    Returns:
+        Each label found, with its item's text cut to :data:`LABEL_CHARS`; a label the
+        request does not show under that name is not there.
+    """
+    found: dict[str, str] = {}
+    document = _user_document(body)
+    pending: list[tuple[object, int]] = [] if document is None else [(document, 0)]
+    while pending and len(found) < len(wanted):
+        value, depth = pending.pop()
+        if depth > LABEL_DEPTH:
+            continue
+        if isinstance(value, dict):
+            label = _text(value.get("label"))
+            if label in wanted and label not in found:
+                found[label] = _item_text(value, LABEL_CHARS)
+            pending.extend((one, depth + 1) for one in reversed(value.values()))
+        elif isinstance(value, list):
+            pending.extend((one, depth + 1) for one in reversed(value))
+    return found
+
+
+def _understanding_step(phase: _Phase) -> dict[str, object]:
+    """Understanding's run: its reading of the input, field by field, with its labels' text."""
+    given, returned = _last(phase, "given"), _last(phase, "returned")
+    body = _mapping(None if returned is None else returned.body)
+    reply = _text(body.get("reply"))
+    reading = None if reply is None else reading_of(reply)
+    labels = (
+        {} if reading is None or given is None else labels_in(given.body, _labels_used(reading))
+    )
+    return {
+        "calls": sum(1 for one in phase.entries if one.kind == "given"),
+        "returned": returned is not None,
+        "reading": reading,
+        "reply": reply if reading is None else None,
+        "labels": labels,
+        "failure": _failure_text(body.get("failure")) if "failure" in body else None,
+    }
+
+
+def _result_in_short(value: object) -> dict[str, object] | None:
+    held = _mapping(value)
+    if not held:
+        return None
+    shown = held.get("value")
+    text = shown if isinstance(shown, str) else _pretty(shown)
+    return {"label": _text(held.get("label")), "text": _cut(text)}
+
+
+def _planning_step(phase: _Phase) -> dict[str, object]:
+    """A planning round: what came back from the round before, and what this one proposed."""
+    given, returned = _first(phase, "given"), _last(phase, "returned")
+    document = None if given is None else _user_document(given.body)
+    rounds = _sequence(_mapping(document).get("rounds"))
+    before = _mapping(rounds[-1]) if rounds else None
+    body = _mapping(None if returned is None else returned.body)
+    shown: dict[str, object] = {
+        "request": document is not None,
+        "first": document is not None and isinstance(document.get("rounds"), list) and not rounds,
+        "before": None
+        if before is None
+        else {
+            "round": before.get("round") if type(before.get("round")) is int else None,
+            "text": _text(before.get("text")),
+            "text_was": _text(before.get("text_was")),
+            "calls": [
+                {
+                    "capability": _text(one.get("capability")),
+                    "outcome": _text(one.get("outcome")),
+                    "because": _text(one.get("because")),
+                    "result": _result_in_short(one.get("result")),
+                }
+                for one in map(_mapping, _sequence(before.get("calls")))
+            ],
+        },
+        "evidence": [
+            {
+                "of": _text(one.get("digest_of")),
+                "looking_for": _text(one.get("looking_for")),
+                "digest": _cut(_pretty(one.get("digest"))),
+            }
+            for one in map(_mapping, _sequence(_mapping(document).get("evidence")))
+        ],
+        "returned": returned is not None,
+        "failure": _failure_text(body.get("failure")) if "failure" in body else None,
+        "read_as_round": body.get("read_as_round")
+        if isinstance(body.get("read_as_round"), bool)
+        else None,
+    }
+    return shown | _proposed(body)
+
+
+def _proposed(body: Mapping[str, object]) -> dict[str, object]:
+    """What a round's response proposed: its calls, its message, its notes and asks."""
+    texts: list[str] = []
+    calls: list[dict[str, object]] = []
+    notes: str | None = None
+    asks: list[str] | None = None
+    another = False
+    thinking = False
+    for part in map(_mapping, _sequence(_mapping(body.get("response")).get("parts"))):
+        kind = part.get("part_kind")
+        if kind == "text" and isinstance(part.get("content"), str):
+            texts.append(str(part["content"]))
+        elif kind == "thinking":
+            thinking = True
+        elif kind == "tool-call":
+            name = _text(part.get("tool_name")) or "?"
+            raw = part.get("args")
+            parsed = _arguments(raw)
+            if name == ROUND_TOOL:
+                held = _mapping(parsed)
+                said = held.get("notes")
+                listed = _strings(said)
+                notes = said if isinstance(said, str) else "\n".join(listed) if listed else notes
+                asked = held.get("asks")
+                asks = _strings(asked) if isinstance(asked, list) else asks
+                another = another or held.get("another_round") is True
+            else:
+                calls.append(
+                    {
+                        "name": name,
+                        "id": _text(part.get("tool_call_id")),
+                        "arguments": _arguments_text(raw, parsed),
+                    }
+                )
+    return {
+        "calls": calls,
+        "message": "".join(texts),
+        "notes": notes,
+        "asks": asks,
+        "another_round": another,
+        "thinking": thinking,
+    }
+
+
+def _authorizing_step(phase: _Phase) -> dict[str, object]:
+    """Authorizing's verdicts: each call's, and whether the round's message was allowed."""
+    returned = _last(phase, "returned")
+    body = _mapping(None if returned is None else returned.body)
+    message = _mapping(body.get("message"))
+    allowed = message.get("allowed")
+    return {
+        "returned": returned is not None,
+        "verdicts": [
+            {
+                "name": _text(one.get("name")),
+                "call_id": _text(one.get("call_id")),
+                "verdict": _text(one.get("verdict")),
+                "reason": _text(one.get("reason")),
+            }
+            for one in map(_mapping, _sequence(body.get("calls")))
+        ],
+        "message": None
+        if not message
+        else {
+            "allowed": allowed if isinstance(allowed, bool) else None,
+            "reason": _text(message.get("reason")),
+            "place": _text(message.get("place")),
+        },
+        "outside": body.get("read_outside_content") is True,
+        "failure": _failure_text(body.get("failure")) if "failure" in body else None,
+    }
+
+
+def _digesting_step(built: _Timeline, phase: _Phase) -> dict[str, object]:
+    """Digesting's parts: each question, and its evidence or why it failed."""
+    by_line = {one.line: one for one in built.entries}
+    parts: list[dict[str, object]] = []
+    used: set[int] = set()
+    for one in phase.entries:
+        if one.kind != "given":
+            continue
+        back = built.pairs.get(one.line)
+        if back is not None:
+            used.add(back)
+        parts.append(
+            _digest_part(_mapping(one.body), by_line.get(back) if back is not None else None)
+        )
+    parts += [
+        _digest_part(_mapping(one.body), one)
+        for one in phase.entries
+        if one.kind == "returned" and one.line not in used
+    ]
+    return {"parts": parts}
+
+
+def _digest_part(asked: Mapping[str, object], returned: Entry | None) -> dict[str, object]:
+    body = _mapping(None if returned is None else returned.body)
+    part, parts = asked.get("part"), asked.get("parts")
+    numbered = type(part) is int and type(parts) is int
+    reply = _text(body.get("reply"))
+    why = _failure_text(body.get("failure")) if "failure" in body else _text(body.get("reason"))
+    return {
+        "question": _text(asked.get("question")),
+        "result": _text(asked.get("result")),
+        "part": f"{part} of {parts}" if numbered else None,
+        "returned": returned is not None,
+        "failed": returned is not None and failed_digest(body),
+        "why": why,
+        "evidence": None if reply is None else _cut(_readable(reply)),
+    }
+
+
+def _end_step(built: _Timeline, ended: Entry | None, tally: Tally) -> dict[str, object]:
+    """How the activation ended: its end entry's rule, or that none was recorded."""
+    truncation = next((one for one in built.lines if isinstance(one, Truncation)), None)
+    body = _mapping(None if ended is None else ended.body)
+    return {
+        "phase": "end",
+        "title": "The end",
+        "start": None if ended is None else _ms(ended.at),
+        "step": _step_facts(ended),
+        "rule": _text(body.get("due")),
+        "recorded": ended is not None,
+        "truncated": None if truncation is None else {"at": _ms(truncation.at)},
+        "unreadable": tally.unreadable,
+        "links": []
+        if ended is None
+        else [{"label": "The end entry", "lines": [ended.line], "call": None, "file": None}],
+    }
+
+
+def _learning_steps(lane: Mapping[str, object]) -> list[dict[str, object]]:
+    """Each of the observer's attempts at the activation, as a walk's last steps."""
+    attempts = [_mapping(one) for one in _sequence(lane.get("attempts"))]
+    findings = [_mapping(one) for one in _sequence(lane.get("findings"))]
+    steps: list[dict[str, object]] = []
+    for attempt in attempts:
+        key = attempt.get("key")
+        number = attempt.get("number")
+        items = [_mapping(one) for one in _sequence(attempt.get("items"))]
+        steps.append(
+            {
+                "phase": "learning",
+                "title": "Learning" + (f" · attempt {number}" if len(attempts) > 1 else ""),
+                "start": attempt.get("start"),
+                "step": None,
+                "attempt": number,
+                "ended": attempt.get("ended"),
+                "findings": [_in_short(one) for one in findings if one.get("attempt") == key],
+                "links": [
+                    {
+                        "label": f"The {one.get('label')} call, readable"
+                        if one.get("kind") == "call"
+                        else f"The {one.get('label')} entry",
+                        "lines": one.get("lines"),
+                        "call": one.get("call"),
+                        "file": "observer",
+                    }
+                    for one in items
+                    if one.get("stage") == "scout" or one.get("kind") == "end"
+                ],
+            }
+        )
+    return steps
+
+
 # --- the server ------------------------------------------------------------------------
 
 
@@ -2695,22 +3404,49 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return
         self._json({**listed, "now": _now()})
 
-    def _activation(self, query: Mapping[str, str]) -> None:
+    def _read(
+        self, query: Mapping[str, str]
+    ) -> tuple[tuple[list[Line], str] | None, tuple[list[Line], str] | None, str] | None:
+        """An activation's own and observer files' lines, and their version.
+
+        ``None`` where it has neither file, or its version is the one the page holds: each
+        is answered here.
+        """
         activation_id = query.get("id", "")
         read = self.server.record.lines(activation_id)
         learned = self.server.record.learned_lines(activation_id)
         if read is None and learned is None:
             self._json({"error": "no such activation"}, HTTPStatus.NOT_FOUND)
-            return
+            return None
         version = "|".join("-" if one is None else one[1] for one in (read, learned))
         if query.get("v") == version:
             self._json({"version": version, "unchanged": True, "now": _now()})
+            return None
+        return read, learned, version
+
+    def _activation(self, query: Mapping[str, str]) -> None:
+        found = self._read(query)
+        if found is None:
             return
+        read, learned, version = found
+        activation_id = query.get("id", "")
         shown = timeline(activation_id, [] if read is None else read[0])
         # ADR-0333 §5:6: an activation whose own file is absent is shown with its
         # learning lane alone, saying so.
         shown["own"] = read is not None
         shown["learning"] = None if learned is None else learning_lane(activation_id, learned[0])
+        self._json({**shown, "version": version, "now": _now()})
+
+    def _walk(self, query: Mapping[str, str]) -> None:
+        found = self._read(query)
+        if found is None:
+            return
+        read, learned, version = found
+        shown = walk(
+            [] if read is None else read[0],
+            None if learned is None else learned[0],
+            own=read is not None,
+        )
         self._json({**shown, "version": version, "now": _now()})
 
     def _learning(self, query: Mapping[str, str]) -> None:
@@ -2790,6 +3526,7 @@ _ROUTES: Final[dict[str, Callable[[ViewerHandler, Mapping[str, str]], None]]] = 
     "/app.js": ViewerHandler._script,
     "/api/activations": ViewerHandler._activations,
     "/api/activation": ViewerHandler._activation,
+    "/api/walk": ViewerHandler._walk,
     "/api/learning": ViewerHandler._learning,
     "/api/entry": ViewerHandler._entry,
     "/api/call": ViewerHandler._call,
@@ -2833,6 +3570,21 @@ PAGE: Final = """<!doctype html>
       <div class="meta" id="d-meta"></div>
       <div class="badges" id="d-badges"></div>
       <p class="note own-absent" id="d-own-absent" hidden></p>
+      <nav class="modes" aria-label="How to read it">
+        <button class="view" id="mode-overview" type="button" aria-pressed="true">Overview</button>
+        <button class="view" id="mode-walk" type="button" aria-pressed="false"
+          title="Step through it phase by phase (\u2190 and \u2192 move)">Walk through</button>
+      </nav>
+      <section class="card walk" id="walk-card" aria-label="Walk through" hidden>
+        <div class="walk-bar">
+          <button class="walk-nav" id="walk-prev" type="button">\u2190 Previous</button>
+          <div class="walk-count" id="walk-count" aria-live="polite"></div>
+          <button class="walk-nav" id="walk-next" type="button">Next \u2192</button>
+        </div>
+        <ol class="walk-steps" id="walk-steps" aria-label="Steps"></ol>
+        <div class="walk-step" id="walk-step"></div>
+      </section>
+      <div id="overview">
       <div class="card" id="arrival-card" hidden>
         <div class="card-title">Input</div>
         <div id="arrival"></div>
@@ -2854,6 +3606,7 @@ PAGE: Final = """<!doctype html>
         <summary class="card-title">Every entry</summary>
         <div id="entries"></div>
       </details>
+      </div>
     </div>
   </section>
 </main>
@@ -3356,6 +4109,40 @@ details.part[open] > summary::before { content: "\u25be"; }
 .jump:hover { border-color: var(--accent); }
 .jump[disabled] { color: var(--muted); cursor: default; border-color: var(--line); }
 .elsewhere { color: var(--muted); font-size: 12px; }
+.modes { display: flex; gap: 4px; margin: 0 0 4px; }
+.walk-bar { display: flex; align-items: center; gap: 8px; }
+.walk-count {
+  flex: 1 1 auto; text-align: center; color: var(--muted); font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.walk-nav {
+  border: 1px solid var(--line); background: var(--bg); color: var(--accent); border-radius: 6px;
+  padding: 3px 12px; cursor: pointer; font-size: 13px; white-space: nowrap;
+}
+.walk-nav:hover { border-color: var(--accent); }
+.walk-nav[disabled] { color: var(--muted); cursor: default; border-color: var(--line); }
+.walk-steps {
+  list-style: none; display: flex; flex-wrap: wrap; gap: 4px; padding: 0; margin: 10px 0 4px;
+}
+.walk-pill {
+  font-size: 11px; border: 1px solid var(--line); background: none; color: var(--muted);
+  border-radius: 999px; padding: 1px 8px; cursor: pointer; max-width: 220px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; line-height: 16px;
+}
+.walk-pill[aria-current="step"] {
+  background: var(--select); color: var(--ink); border-color: var(--accent);
+}
+.walk-step { min-width: 0; }
+.walk-head h2 { font-size: 16px; margin: 12px 0 2px; }
+.walk-head .m { color: var(--muted); font-size: 12px; }
+.walk-item { border-top: 1px solid var(--line); padding: 6px 0; min-width: 0; }
+.walk-item:first-of-type { border-top: none; }
+.walk-item .m { color: var(--muted); font-size: 12px; }
+.walk-item .id { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+.walk-item .said { white-space: pre-wrap; word-break: break-word; margin-top: 2px; }
+.walk-label { display: flex; gap: 8px; align-items: baseline; margin: 3px 0; min-width: 0; }
+.walk-label .t { word-break: break-word; min-width: 0; }
+.walk-links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
 @media (max-width: 760px) {
   .learning { padding: 14px 16px 40px; height: auto; overflow: visible; }
   .views { margin-right: 0; }
@@ -3373,6 +4160,8 @@ details.part[open] > summary::before { content: "\u25be"; }
   body.show-detail .detail-pane { display: block; }
   .back { display: inline-block; }
   .tl-axis, .tl-lane { grid-template-columns: 78px 1fr; }
+  .walk-pill { max-width: 150px; }
+  .walk-nav { padding: 3px 8px; }
   .tl-label { font-size: 11px; }
   .entry-row { grid-template-columns: 70px 1fr; }
   .entry-row span:nth-child(3), .entry-row span:nth-child(4) { display: none; }
@@ -3409,6 +4198,8 @@ SCRIPT: Final = r"""
     detailVersion: null, detail: null, drawnOpen: false, listBusy: false, detailBusy: false,
     view: "activations", learningVersion: null, learning: [], learningPresent: true,
     learningBusy: false, filter: "all", search: "",
+    // Walk mode: the step shown, from 1, or null for the overview; and the steps.
+    walk: null, walkData: null, walkVersion: null, walkBusy: false,
   };
   // The hash that shows the learning overview: no activation id the hub mints is it.
   const LEARNING = "learning";
@@ -3527,12 +4318,18 @@ SCRIPT: Final = r"""
   }
 
   // --- one activation ----------------------------------------------------------------
-  function select(id) {
+  // ``walk`` is the step to show, from 1, or null for the overview; left out, a change of
+  // activation keeps the mode it is in, from its first step.
+  function select(id, walk) {
     showView("activations");
+    if (walk !== undefined) state.walk = walk;
     if (state.selected !== id) {
+      if (walk === undefined && state.walk !== null) state.walk = 1;
       state.selected = id;
       state.detailVersion = null;
       state.detail = null;
+      state.walkData = null;
+      state.walkVersion = null;
       closeDrawer();
       // The previous activation's details come down at once: nothing of one
       // activation stays clickable while another's load.
@@ -3541,8 +4338,8 @@ SCRIPT: Final = r"""
       empty.hidden = false;
       empty.textContent = "Loading\u2026";
     }
-    const hash = "#" + encodeURIComponent(id);
-    if (location.hash !== hash) history.replaceState(null, "", hash);
+    writeHash();
+    applyMode();
     document.body.classList.add("show-detail");
     renderList();
     pollDetail();
@@ -3576,6 +4373,10 @@ SCRIPT: Final = r"""
       lost();
     } finally {
       state.detailBusy = false;
+    }
+    // The walk is read from the same files: it is read again when they change.
+    if (state.walk !== null && state.detail && state.walkVersion !== state.detailVersion) {
+      pollWalk();
     }
   }
   function renderGone() {
@@ -3617,6 +4418,8 @@ SCRIPT: Final = r"""
     clear(badges);
     badgesFor(s, badges);
     state.drawnOpen = isOpen(s);
+    applyMode();
+    if (state.walk !== null && state.walkData) renderWalk();
     renderArrival();
     if (own) {
       renderTimeline();
@@ -3633,7 +4436,9 @@ SCRIPT: Final = r"""
     const root = $("arrival");
     clear(root);
     $("arrival-card").hidden = !a;
-    if (!a) return;
+    if (a) arrivalInto(root, a);
+  }
+  function arrivalInto(root, a) {
     const read = a.from === "understanding" ? "understanding's input" : "planning's place window";
     kv(root, [["where", a.received_as], ["read from", read + ", line " + a.line]]);
     const rows = a.messages || [];
@@ -4152,6 +4957,449 @@ SCRIPT: Final = r"""
     card.appendChild(box);
     return card;
   }
+
+  // --- walk mode: one activation, a step at a time ------------------------------------
+  // The activation in its own order, as a debugger steps through a finished run: each
+  // step a summary, its entries one click away in the drawer the timeline opens.
+  function writeHash() {
+    if (!state.selected) return;
+    let hash = "#" + encodeURIComponent(state.selected);
+    if (state.walk !== null) hash += "/walk/" + state.walk;
+    if (location.hash !== hash) history.replaceState(null, "", hash);
+  }
+  function applyMode() {
+    const walking = state.walk !== null;
+    $("overview").hidden = walking;
+    $("walk-card").hidden = !walking;
+    $("mode-overview").setAttribute("aria-pressed", String(!walking));
+    $("mode-walk").setAttribute("aria-pressed", String(walking));
+  }
+  function setWalk(n) {
+    const moved = n !== state.walk;
+    state.walk = n;
+    writeHash();
+    applyMode();
+    if (moved) closeDrawer();
+    if (n === null) return;
+    renderWalk();
+    if (state.walkVersion === null || state.walkVersion !== state.detailVersion) pollWalk();
+  }
+  function moveWalk(by) {
+    const steps = state.walkData ? state.walkData.steps || [] : [];
+    if (state.walk === null || !steps.length) return;
+    const n = Math.min(Math.max(state.walk + by, 1), steps.length);
+    if (n !== state.walk) setWalk(n);
+  }
+  function walkKey(event) {
+    if (state.walk === null || state.view !== "activations" || $("detail-body").hidden) return;
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    const target = event.target;
+    const tag = target && target.tagName ? target.tagName.toLowerCase() : "";
+    if (["input", "textarea", "select"].includes(tag) || (target && target.isContentEditable)) {
+      return;
+    }
+    event.preventDefault();
+    moveWalk(event.key === "ArrowLeft" ? -1 : 1);
+  }
+  async function pollWalk() {
+    if (state.walk === null || !state.selected || state.walkBusy) return;
+    state.walkBusy = true;
+    const id = state.selected;
+    try {
+      let url = "/api/walk?id=" + encodeURIComponent(id);
+      if (state.walkVersion) url += "&v=" + encodeURIComponent(state.walkVersion);
+      const data = await getJson(url);
+      if (id !== state.selected) return;
+      if (data === null) {
+        renderGone();
+        return;
+      }
+      if (!data.unchanged) {
+        state.walkData = data;
+        state.walkVersion = data.version;
+      }
+      if (state.walk !== null) renderWalk();
+    } catch (error) {
+      lost();
+    } finally {
+      state.walkBusy = false;
+    }
+  }
+  function renderWalk() {
+    const root = $("walk-step");
+    const pills = $("walk-steps");
+    clear(root);
+    clear(pills);
+    const data = state.walkData;
+    const steps = data ? data.steps || [] : [];
+    $("walk-prev").disabled = true;
+    $("walk-next").disabled = true;
+    $("walk-count").textContent = "";
+    if (!data) {
+      root.appendChild(el("p", "note", "Loading…"));
+      return;
+    }
+    if (!steps.length) {
+      root.appendChild(el("p", "note", "Nothing to walk: the record holds no entry of it yet."));
+      return;
+    }
+    const n = Math.min(Math.max(state.walk, 1), steps.length);
+    if (n !== state.walk) {
+      state.walk = n;
+      writeHash();
+    }
+    $("walk-count").textContent = "step " + n + " of " + steps.length;
+    $("walk-prev").disabled = n <= 1;
+    $("walk-next").disabled = n >= steps.length;
+    steps.forEach((one, index) => {
+      const holder = el("li");
+      const go = el("button", "walk-pill", (index + 1) + " · " + one.title);
+      go.type = "button";
+      go.title = one.title;
+      if (index + 1 === n) go.setAttribute("aria-current", "step");
+      go.addEventListener("click", () => setWalk(index + 1));
+      holder.appendChild(go);
+      pills.appendChild(holder);
+    });
+    const shown = steps[n - 1];
+    try {
+      stepInto(root, shown, data);
+    } catch (error) {
+      root.appendChild(el("p", "note",
+        "This step did not read as expected; its entries show it whole."));
+      linksInto(root, shown);
+    }
+  }
+  function stepInto(root, s, data) {
+    const head = el("div", "walk-head");
+    head.appendChild(el("h2", null, s.title));
+    const meta = [];
+    if (s.phase === "learning") {
+      meta.push(clock(s.start, true));
+    } else if (s.start !== null && s.start !== undefined && data.start !== null) {
+      meta.push("at +" + duration(s.start - data.start));
+    }
+    const st = s.step;
+    if (st) {
+      if (st.took !== null && st.took !== undefined && s.phase !== "end") {
+        meta.push("took " + duration(st.took));
+      }
+      if (st.due && s.phase !== "end") meta.push("due: " + words(st.due));
+      if (st.outcome && st.outcome !== "done") meta.push(words(st.outcome));
+    } else if (!["input", "end", "learning"].includes(s.phase)) {
+      meta.push("no step entry recorded for it");
+    }
+    head.appendChild(el("div", "m", meta.join(" · ")));
+    root.appendChild(head);
+    if (st && st.failure) root.appendChild(el("p", "fail", "the step failed: " + st.failure));
+    const walker = WALKERS[s.phase];
+    if (walker) walker(root, s);
+    else walkOther(root, s);
+    linksInto(root, s);
+  }
+  function linksInto(root, s) {
+    const links = s.links || [];
+    if (!links.length) return;
+    const row = el("div", "walk-links");
+    for (const link of links) {
+      const go = el("button", "jump", link.label);
+      go.type = "button";
+      go.addEventListener("click", () => openLines(state.selected, s.title + " · "
+        + link.label, link.lines || [], { file: link.file || null,
+        call: typeof link.call === "number" ? link.call : null }));
+      row.appendChild(go);
+    }
+    root.appendChild(row);
+  }
+  function walkItem(parent) {
+    const box = el("div", "walk-item");
+    parent.appendChild(box);
+    return box;
+  }
+  function failedInto(root, why) {
+    if (why) root.appendChild(el("p", "fail", "failed: " + why));
+  }
+  // Each label a reading names, with the text its request shows under it, where it does.
+  function labelsInto(parent, labels, known) {
+    for (const label of labels) {
+      const row = el("div", "walk-label");
+      row.appendChild(el("span", "chip", label));
+      if (known && known[label] !== undefined) row.appendChild(el("span", "t", known[label]));
+      parent.appendChild(row);
+    }
+  }
+  function walkRecall(root, s) {
+    failedInto(root, s.failure);
+    if (!s.returned) {
+      root.appendChild(el("p", "note", "No returned entry was recorded: what it found is not "
+        + "here."));
+    }
+    const found = s.found === null || s.found === undefined ? undefined
+      : plural(s.found, "find", "finds") + (s.admitted === null ? ""
+        : " · " + num(s.admitted) + " admitted");
+    kv(root, [["outcome", s.outcome ? words(s.outcome) : undefined], ["found", found],
+      ["kept", s.returned ? num(s.kept.length) : undefined]]);
+    const cues = sec(root, "Cues");
+    if (!s.cues.length) cues.appendChild(el("p", "note", "No cue recorded."));
+    for (const cue of s.cues) {
+      const one = walkItem(cues);
+      one.appendChild(el("div", "said", cue.text === null ? DASH : cue.text));
+      if (cue.kinds.length) one.appendChild(el("div", "m", cue.kinds.map(words).join(", ")));
+    }
+    const kept = sec(root, "Kept");
+    if (!s.kept.length) {
+      kept.appendChild(el("p", "note", s.returned ? "Nothing was kept." : "Not recorded."));
+    }
+    for (const k of s.kept) {
+      const one = walkItem(kept);
+      const facts = [k.score === null ? "no score" : "score " + k.score.toFixed(3)];
+      if (k.bands.length) facts.push(k.bands.map(words).join(", "));
+      if (k.found_by.length) facts.push("by " + k.found_by.map(words).join(", "));
+      const line = el("div", "walk-label");
+      if (k.label) line.appendChild(el("span", "chip", k.label));
+      line.appendChild(el("span", "id", k.id === null ? "no id" : k.id));
+      one.appendChild(line);
+      one.appendChild(el("div", "m", facts.join(" · ")));
+      if (k.text !== null) one.appendChild(el("div", "said", k.text));
+    }
+    const shown = s.shown;
+    const whose = shown ? (shown.from === "understanding" ? "Understanding" : "Planning")
+      + "\u2019s request (line " + shown.line + ")" : null;
+    if (shown && shown.joined) {
+      kept.appendChild(el("p", "note", "Each kept item\u2019s text is from " + whose
+        + ", which showed every one of them, in recall\u2019s order, under the label beside it."));
+    } else if (shown && shown.said !== null) {
+      kept.appendChild(el("p", "note", whose + " said of what was recalled: " + shown.said));
+    } else if (shown) {
+      const box = sec(root, "What " + whose + " showed as recalled");
+      box.appendChild(el("p", "note", shown.from === "planning"
+        ? "It shows what both runs kept together, by label and never by id, so its items are "
+          + "not joined to the ids above."
+        : "It shows " + plural(shown.items.length, "item", "items") + " for "
+          + plural(s.kept.length, "kept id", "kept ids") + ", by label and never by id, so "
+          + "which item is which id is not known here."));
+      if (!shown.items.length) box.appendChild(el("p", "note", "No item."));
+      for (const one of shown.items) {
+        const row = walkItem(box);
+        labelsInto(row, [one.label || "no label"], null);
+        row.appendChild(el("div", "said", one.text));
+      }
+    } else if (s.kept.length) {
+      kept.appendChild(el("p", "note", "No request after it in the record shows the text of "
+        + "what was kept."));
+    }
+    if (s.found !== null && s.found !== undefined && s.found > s.kept.length) {
+      root.appendChild(el("p", "note", "The record does not say why a find was not kept."));
+    }
+  }
+  function walkUnderstanding(root, s) {
+    failedInto(root, s.failure);
+    if (s.calls > 1) {
+      root.appendChild(el("p", "note", s.calls + " calls: the reading shown is the last "
+        + "reply\u2019s; each call is a click below."));
+    }
+    const r = s.reading;
+    if (!r) {
+      if (s.reply !== null && s.reply !== undefined) {
+        root.appendChild(el("p", "note", "The reply did not read as one JSON object; it is "
+          + "shown as written."));
+        pre(root, s.reply);
+      } else if (!s.failure) {
+        root.appendChild(el("p", "note", s.returned ? "The returned entry holds no reply."
+          : "No returned entry was recorded: what it read is not here."));
+      }
+      return;
+    }
+    const known = s.labels || {};
+    const meaning = sec(root, "Meaning");
+    meaning.appendChild(el("div", "said", r.meaning === null ? DASH : r.meaning));
+    kv(meaning, [["ground", r.ground ? words(r.ground) : null]]);
+    if (r.meaning_labels.length) {
+      meaning.appendChild(el("div", "m", "rests on"));
+      labelsInto(meaning, r.meaning_labels, known);
+    }
+    const listed = (title, rows, draw) => {
+      const box = sec(root, title);
+      if (!rows.length) box.appendChild(el("p", "note", "none"));
+      for (const row of rows) draw(walkItem(box), row);
+    };
+    listed("References", r.references, (box, one) => {
+      box.appendChild(el("div", "said", "“" + (one.phrase || DASH) + "”"));
+      labelsInto(box, one.labels, known);
+    });
+    listed("Relationships", r.relationships, (box, one) => {
+      box.appendChild(el("div", "said", one.statement || DASH));
+      if (one.ground) box.appendChild(el("div", "m", "ground: " + words(one.ground)));
+      labelsInto(box, one.labels, known);
+    });
+    listed("Unresolved", r.unresolved, (box, one) => {
+      box.appendChild(el("div", "said", one.matter || DASH));
+      if (one.why) box.appendChild(el("div", "m", "why it matters: " + one.why));
+    });
+    listed("Answers", r.answers, (box, one) => {
+      labelsInto(box, [one.question || "no question named"], known);
+      box.appendChild(el("div", "m", one.parts.length ? "parts " + one.parts.join(", ")
+        : "no parts named"));
+    });
+    listed("Story links", r.story_labels, (box, one) => labelsInto(box, [one], known));
+    listed("Continues", r.continues, (box, one) => labelsInto(box, [one], known));
+    if (r.other.length) {
+      root.appendChild(el("p", "note", "Keys the reading does not name: "
+        + r.other.join(", ")));
+    }
+  }
+  function walkPlanning(root, s) {
+    failedInto(root, s.failure);
+    const before = sec(root, s.before && s.before.round
+      ? "What came back from round " + s.before.round : "What came back from the round before");
+    if (s.before) {
+      if (s.before.text !== null) {
+        before.appendChild(el("div", "m", "its message"
+          + (s.before.text_was ? " · " + s.before.text_was : "")));
+        before.appendChild(el("div", "said", s.before.text));
+      }
+      if (!s.before.calls.length) before.appendChild(el("p", "note", "It proposed no call."));
+      for (const call of s.before.calls) {
+        const one = walkItem(before);
+        one.appendChild(el("div", "said", (call.capability || "?") + " · "
+          + (call.outcome || "no outcome shown")));
+        if (call.because) one.appendChild(el("div", "m", "because: " + call.because));
+        if (call.result) {
+          one.appendChild(el("div", "m", "result" + (call.result.label ? " "
+            + call.result.label : "")));
+          pre(one, call.result.text);
+        }
+      }
+    } else {
+      before.appendChild(el("p", "note", s.first ? "The first round: none came before it."
+        : s.request ? "Its request shows no earlier round."
+          : "No request was recorded that shows what came before it."));
+    }
+    if (s.evidence.length) {
+      const box = sec(root, "Evidence it was given");
+      for (const one of s.evidence) {
+        const row = walkItem(box);
+        row.appendChild(el("div", "m", "digest of " + (one.of || "?")
+          + (one.looking_for ? " · looking for: " + one.looking_for : "")));
+        pre(row, one.digest);
+      }
+    }
+    if (!s.returned) {
+      root.appendChild(el("p", "note", "No returned entry was recorded: what it decided is "
+        + "not here."));
+      return;
+    }
+    const calls = sec(root, "Calls it proposed");
+    if (!s.calls.length) calls.appendChild(el("p", "note", "none"));
+    for (const call of s.calls) {
+      const one = walkItem(calls);
+      one.appendChild(el("div", "said", call.name + (call.id ? " · " + call.id : "")));
+      pre(one, call.arguments);
+    }
+    const message = sec(root, "Its message");
+    message.appendChild(s.message ? el("div", "said", s.message)
+      : el("p", "note", "No message text."));
+    if (s.notes !== null) sec(root, "Episode notes").appendChild(el("div", "said", s.notes));
+    if (s.asks !== null) {
+      const chips = el("div", "chips");
+      for (const one of s.asks) chips.appendChild(el("span", "chip", one));
+      if (!s.asks.length) chips.appendChild(el("span", "note", "none"));
+      sec(root, "Asks").appendChild(chips);
+    }
+    const flags = [];
+    if (s.another_round) flags.push("it asked for another round");
+    if (s.thinking) flags.push("thinking recorded: the readable call shows it");
+    if (s.read_as_round === false) flags.push("not read as a round");
+    if (flags.length) root.appendChild(el("p", "note", flags.join(" · ")));
+  }
+  function walkAuthorizing(root, s) {
+    failedInto(root, s.failure);
+    if (!s.returned) {
+      root.appendChild(el("p", "note", "No returned entry was recorded: its verdicts are not "
+        + "here."));
+      return;
+    }
+    if (s.outside) root.appendChild(badge("outside_content", "outside content read"));
+    const calls = sec(root, "Each call\u2019s verdict");
+    if (!s.verdicts.length) calls.appendChild(el("p", "note", "No call to check."));
+    for (const v of s.verdicts) {
+      const one = walkItem(calls);
+      one.appendChild(el("span", "chip v-" + (v.verdict || "none"), (v.name || "call")
+        + " · " + (v.verdict ? words(v.verdict) : "no verdict")));
+      if (v.reason) one.appendChild(el("div", "m", v.reason));
+    }
+    const message = sec(root, "Its message");
+    const m = s.message;
+    if (!m) {
+      message.appendChild(el("p", "note", "No message to check."));
+    } else if (m.allowed) {
+      message.appendChild(el("div", "msg-note", "allowed" + (m.place ? " into " + m.place : "")
+        + " — whether it was written is not recorded"));
+    } else {
+      message.appendChild(el("div", "msg-note no", (m.allowed === false ? "not allowed"
+        : "no verdict recorded") + (m.reason ? ": " + m.reason : "")));
+    }
+  }
+  function walkActing(root) {
+    root.appendChild(el("p", "note", "Acting writes no entry of its own: which calls ran and "
+      + "whether the message was written are not recorded here."));
+  }
+  function walkDigesting(root, s) {
+    if (!s.parts.length) root.appendChild(el("p", "note", "No digest entry recorded."));
+    for (const p of s.parts) {
+      const one = walkItem(root);
+      kv(one, [["question", p.question || undefined], ["result", p.result || undefined],
+        ["part", p.part || undefined]]);
+      if (!p.returned) one.appendChild(el("p", "note", "No returned entry was recorded."));
+      else if (p.failed) failedInto(one, p.why || "no reason recorded");
+      if (p.evidence !== null) pre(one, p.evidence);
+    }
+  }
+  function walkEnd(root, s) {
+    const box = walkItem(root);
+    if (s.recorded) {
+      box.appendChild(el("div", "said", "Ended: " + (ending(s.rule) || "no rule recorded")));
+    } else {
+      const open = state.detail && isOpen(state.detail.summary);
+      box.appendChild(el("p", "note", open ? "Still running: no end is recorded yet."
+        : "No end recorded."));
+    }
+    if (s.truncated) {
+      box.appendChild(el("p", "note", "The file was truncated at " + clock(s.truncated.at)
+        + ": nothing after it was written."));
+    }
+    if (s.unreadable) {
+      box.appendChild(el("p", "note", s.unreadable + " unreadable line(s) were skipped."));
+    }
+  }
+  function walkLearning(root, s) {
+    const head = walkItem(root);
+    head.appendChild(el("span", "badge b-" + ((s.ended && s.ended.state) || "no_end"),
+      attemptEnding(s.ended)));
+    if (s.ended && s.ended.failure) head.appendChild(el("div", "fail", s.ended.failure));
+    const box = sec(root, "Findings");
+    if (!s.findings.length) box.appendChild(el("p", "note", "No finding recorded."));
+    for (const f of s.findings) box.appendChild(findingRow(state.selected, f, {}));
+  }
+  function walkInput(root, s) {
+    if (s.arrival) {
+      arrivalInto(root, s.arrival);
+      return;
+    }
+    root.appendChild(el("p", "note", "No request in the record shows the input: the record "
+      + "keeps no entry of its own for it, and reads it back from what understanding or "
+      + "planning was given."));
+  }
+  function walkOther(root, s) {
+    const st = s.step;
+    kv(root, [["stage", words(s.phase)], ["due", st && st.due ? words(st.due) : undefined],
+      ["outcome", st && st.outcome ? words(st.outcome) : undefined]]);
+  }
+  const WALKERS = {
+    input: walkInput, recall: walkRecall, understanding: walkUnderstanding,
+    planning: walkPlanning, authorizing: walkAuthorizing, acting: walkActing,
+    digesting: walkDigesting, end: walkEnd, learning: walkLearning,
+  };
 
   // --- details on click --------------------------------------------------------------
   let drawn = 0;
@@ -5028,14 +6276,22 @@ SCRIPT: Final = r"""
     "digesting.returned": digestReturned,
   };
 
+  // The hash names the learning overview, or an activation by its id and, in walk mode,
+  // its step: "#<id>/walk/<n>". An id is written encoded, so a "/" in one never splits it.
   function fromHash() {
     const raw = location.hash.slice(1);
     if (!raw) return null;
+    const [head, mode, step] = raw.split("/");
+    let id;
     try {
-      return decodeURIComponent(raw);
+      id = decodeURIComponent(head);
     } catch (error) {
       return null;
     }
+    if (!id) return null;
+    if (id === LEARNING && mode === undefined) return { learning: true };
+    const n = parseInt(step, 10);
+    return { id, walk: mode === "walk" ? (n >= 1 ? n : 1) : null };
   }
   document.addEventListener("DOMContentLoaded", () => {
     $("drawer-close").addEventListener("click", closeDrawer);
@@ -5043,21 +6299,32 @@ SCRIPT: Final = r"""
     $("tab-raw").addEventListener("click", () => showTab("raw"));
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") closeDrawer();
+      else if (event.key === "ArrowLeft" || event.key === "ArrowRight") walkKey(event);
     });
+    $("mode-overview").addEventListener("click", () => setWalk(null));
+    $("mode-walk").addEventListener("click", () => setWalk(state.walk || 1));
+    $("walk-prev").addEventListener("click", () => moveWalk(-1));
+    $("walk-next").addEventListener("click", () => moveWalk(1));
     $("back").addEventListener("click", () => {
       document.body.classList.remove("show-detail");
       closeDrawer();
     });
     window.addEventListener("hashchange", () => {
       const chosen = fromHash();
-      if (chosen === LEARNING) showView("learning");
-      else if (chosen && chosen !== state.selected) select(chosen);
-      else if (chosen) showView("activations");
+      if (!chosen) return;
+      if (chosen.learning) {
+        showView("learning");
+      } else if (chosen.id !== state.selected) {
+        select(chosen.id, chosen.walk);
+      } else {
+        showView("activations");
+        if (chosen.walk !== state.walk) setWalk(chosen.walk);
+      }
     });
     $("view-learning").addEventListener("click", () => { location.hash = "#" + LEARNING; });
     $("view-activations").addEventListener("click", () => {
       if (state.selected) {
-        history.replaceState(null, "", "#" + encodeURIComponent(state.selected));
+        writeHash();
       } else {
         history.replaceState(null, "", location.pathname);
       }
@@ -5068,8 +6335,8 @@ SCRIPT: Final = r"""
       renderLearning();
     });
     const initial = fromHash();
-    if (initial === LEARNING) showView("learning");
-    else if (initial) select(initial);
+    if (initial && initial.learning) showView("learning");
+    else if (initial) select(initial.id, initial.walk);
     pollList();
     setInterval(pollList, 2000);
     setInterval(pollDetail, 1500);
