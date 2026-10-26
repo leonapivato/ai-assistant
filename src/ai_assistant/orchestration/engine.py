@@ -7712,17 +7712,18 @@ class Engine:
         if deadline <= loop.time():
             raise ModelTimeoutError(_UNDERSTANDING_EXPIRED)
         # ADR-0332 §3:9-§3:10: the version covers the inputs held as the stage begins,
-        # each one a merge brought read beside the trigger's. ADR-0349 §5:8: the
-        # in-progress section as it stands when the call is rendered.
+        # each one a merge brought read beside the trigger's.
         held = working.inputs_held
         joined = state.joined if state is not None else ()
-        running, more = self._in_progress(state, working)
         try:
             async with asyncio.timeout_at(deadline):
                 person = await self._person_block(state, working)
                 fetched = await self._fetch_held(working, windows)
                 stories = await self._assembled_candidates(working, fetched)
                 recalled = working.recalled
+                # ADR-0349 §5:8: the in-progress section as it stands when the call is
+                # rendered, read with no await before the stage renders it.
+                running, more = self._in_progress(state, working)
                 understood = await self._understanding.understand(
                     input.text,
                     channel=input.channel,
