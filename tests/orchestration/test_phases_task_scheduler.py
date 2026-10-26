@@ -313,6 +313,7 @@ async def test_a_stop_of_a_pushed_id_with_admission_held_starts_nothing() -> Non
         await until(ended, what="the occurrence to end stopped")
         assert await harness.memory.get(f"activation:{pushed_id}") is None
         assert await _schedule_episodes(harness) == []
+        assert (await plans.export()).cascades == (), "ADR-0352 §2:2: no cascade record"
     finally:
         await harness.engine.aclose()
 
@@ -723,5 +724,122 @@ async def test_a_stop_of_an_ended_activation_awaiting_its_outcome_changes_nothin
             return bool(found) and found[0].occurrences[0].state is OccurrenceState.DONE
 
         await until(settled, what="the first step to end done")
+    finally:
+        await harness.engine.aclose()
+
+
+# --- ADR-0352 §2: a step stopped while it writes its next one --------------------------
+
+
+class _SpawnHeld(FakePlanStore):
+    """A plan store that holds a spawn's write before it reaches the store, until released."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+        self.holding = False
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def write_scheduled_task(self, *args: Any, **kwargs: Any) -> Any:
+        if self.holding:
+            self.entered.set()
+            await self.release.wait()
+        return await super().write_scheduled_task(*args, **kwargs)
+
+
+class _Step(FakeToolCallingCompleter):
+    """A scheduled step that spawns its next step in its first round.
+
+    Its second round waits on :attr:`release` once :attr:`entered` is set, so a case can
+    stop it after its next step's write has landed.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def respond(
+        self, messages: Sequence[Message], tools: Sequence[OfferedTool], **_: Any
+    ) -> RoundResponse:
+        request = _request(messages)
+        if not request["rounds"]:
+            return RoundResponse(
+                calls=(
+                    ProposedCall(
+                        call_id="spawn-1",
+                        name="spawn",
+                        arguments={"instruction": "the next step", "delay_minutes": 60},
+                    ),
+                )
+            )
+        self.entered.set()
+        await self.release.wait()
+        return RoundResponse(text="")
+
+
+async def _pushed_to(plans: FakePlanStore, task: ScheduledTask) -> str:
+    async def pushed() -> bool:
+        (held,) = await plans.scheduled_tasks([task.id])
+        return held.occurrences[0].pushed_to is not None
+
+    await until(pushed, what="the first step to be pushed")
+    (held,) = await plans.scheduled_tasks([task.id])
+    activation_id = held.occurrences[0].pushed_to
+    assert activation_id is not None
+    return activation_id
+
+
+async def test_a_step_stopped_before_its_next_steps_write_lands_writes_no_next_step() -> None:
+    """ADR-0352 §2 (ADR-0350 §3:3), §7:7: the stop record first, so the spawn is refused."""
+    plans = _SpawnHeld()
+    step = _Step()
+    harness = phases_harness(step, task_scheduler=seams(), plans=plans)
+    first = await write_task(plans, activation(), instruction="the first step")
+    plans.holding = True
+    await harness.engine.start()
+    try:
+        await asyncio.wait_for(plans.entered.wait(), 5)
+        running = await _pushed_to(plans, first)
+
+        assert await harness.engine.stop_activation(running) is ActivationStop.STOPPED
+        plans.release.set()
+        step.release.set()
+        (episode,) = await _until_scheduled(harness, 1)
+
+        assert episode.processing_record is not None
+        assert episode.processing_record.activation_id == running
+        assert await plans.spawned_tasks([running]) == (), "the spawn was refused"
+        held = await plans.export()
+        assert held.cascades == ()
+    finally:
+        await harness.engine.aclose()
+
+
+async def test_a_step_stopped_after_its_next_steps_write_landed_leaves_it_pending() -> None:
+    """ADR-0352 §2:4, §3:1, §7:7: the next step stays, and what is still live lists it."""
+    plans = _SpawnHeld()
+    step = _Step()
+    harness = phases_harness(step, task_scheduler=seams(), plans=plans)
+    first = await write_task(plans, activation(), instruction="the first step")
+    await harness.engine.start()
+    try:
+        await asyncio.wait_for(step.entered.wait(), 5)
+        running = await _pushed_to(plans, first)
+        (following,) = await plans.spawned_tasks([running])
+
+        assert await harness.engine.stop_activation(running) is ActivationStop.STOPPED
+        step.release.set()
+        await _until_scheduled(harness, 1)
+
+        (kept,) = await plans.spawned_tasks([running])
+        assert kept.id == following.id
+        assert kept.pending, "a next step whose write landed first stays"
+        manager = harness.engine.task_manager
+        assert manager is not None
+        left = await manager.still_live(running, person=OWNER_PERSON_ID, viewer=None, supply=None)
+        assert [one.task_id for one in left.tasks] == [following.id]
+        held = await plans.export()
+        assert held.cascades == ()
     finally:
         await harness.engine.aclose()
