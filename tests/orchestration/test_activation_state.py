@@ -472,3 +472,30 @@ def test_a_marked_pass_that_never_entered_the_controller_ends_with_the_stops_ent
 )
 def test_an_activation_id_is_canonical_uuid4_text(minted: object, *, canonical: bool) -> None:
     assert canonical_activation_id(minted) is canonical
+
+
+_TAKER = "7a1c2e3d-4b5f-4a6b-8c7d-9e0f1a2b3c4d"
+
+
+@pytest.mark.parametrize("taken", ["absorbed_by", "handed_to"])
+def test_a_taken_over_activation_freezes_naming_the_one_that_took_its_matter(taken: str) -> None:
+    """ADR-0352 §5:2: absorbed (ADR-0349 §7:7) or its input taken (§7:21), in its freeze."""
+    state = _admitted()
+    assert state.stop()
+    setattr(state, taken, _TAKER)
+
+    record = state.processing(_AT, None)
+
+    assert record.reason is ProcessingReason.STOPPED
+    assert record.taken_over_by == _TAKER
+
+
+def test_an_activation_a_person_stopped_freezes_naming_no_taker() -> None:
+    """ADR-0352 §5:2, §6:5: only a hand-over's stop names one; a person's names none."""
+    state = _admitted()
+    assert state.stop()
+
+    record = state.processing(_AT, None)
+
+    assert record.reason is ProcessingReason.STOPPED
+    assert record.taken_over_by is None

@@ -57,10 +57,13 @@ from phases_support import (
 )
 from task_support import AT, seams
 
+from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
+    ActivationEnding,
     ControllerRule,
     ControllerStage,
     MessageAuthor,
+    ProcessingReason,
     ProposedCall,
     RoundResponse,
 )
@@ -73,6 +76,7 @@ if TYPE_CHECKING:
     from test_engine import Harness
 
     from ai_assistant.core.types import (
+        ConversationState,
         EpisodeProcessingRecord,
         EpisodicMemory,
         Message,
@@ -144,11 +148,16 @@ class _Planner(FakeToolCallingCompleter):
         self._gates: dict[str, tuple[asyncio.Event, asyncio.Event]] = {}
         self._from: dict[str, int] = {}
         self._within: list[str] = []
+        self._pauses: dict[tuple[str, int], tuple[asyncio.Event, asyncio.Event]] = {}
         self.requests: dict[str, list[dict[str, Any]]] = {}
         self.offered: dict[str, list[list[str]]] = {}
 
     def script(self, text: str, *replies: _Reply) -> None:
         self._scripts.setdefault(text, []).extend(replies)
+
+    def pause(self, text: str, round_number: int) -> tuple[asyncio.Event, asyncio.Event]:
+        """The (entered, release) pair holding ``text``'s round ``round_number`` alone."""
+        return self._pauses.setdefault((text, round_number), (asyncio.Event(), asyncio.Event()))
 
     def route_within(self, fragment: str) -> None:
         """Route every input whose meaning holds ``fragment`` as ``fragment``.
@@ -181,6 +190,10 @@ class _Planner(FakeToolCallingCompleter):
         if gate is not None and len(self.requests[key]) >= self._from.get(key, 1):
             gate[0].set()
             await gate[1].wait()
+        paused = self._pauses.get((key, len(self.requests[key])))
+        if paused is not None:
+            paused[0].set()
+            await paused[1].wait()
         script = self._scripts.get(key) or []
         if not script:
             return RoundResponse(text=f"done: {key}")
@@ -1268,3 +1281,163 @@ async def test_a_waiting_round_is_shown_no_approved_action_and_the_round_after_i
     assert "approved_actions" not in waiting_round
     assert planner.offered[newer_text][0] == ["stop_activation"]
     assert "approved_actions" in after, "the round after the wait is shown the yes"
+
+
+# --- ADR-0352 §5: what a conversation shows after a hand-over ---------------------------
+
+
+def _fails(_request: dict[str, Any]) -> RoundResponse:
+    msg = "the model is down"
+    raise ModelError(msg)
+
+
+async def _state(harness: Harness, conversation: str) -> ConversationState:
+    digest = await harness.engine.conversation(conversation)
+    assert digest is not None
+    return digest.state
+
+
+async def _running_only(harness: Harness, conversation: str, *running: str) -> ConversationState:
+    """The state once exactly ``running`` run from ``conversation``: what ended has left."""
+
+    async def settled() -> bool:
+        return (await _state(harness, conversation)).activation_ids == running
+
+    await until(settled, what="the ended activations to leave the conversation's state")
+    return await _state(harness, conversation)
+
+
+async def _failed_first(harness: Harness, planner: _Planner, conversation: str) -> None:
+    """An activation on ``conversation`` that could not finish, so it has an ending to keep."""
+    planner.script("tell me a joke", _fails)
+    await harness.engine.write_message(conversation, message=said("z-1", "tell me a joke"))
+    await _frozen(harness, 1)
+    state = await _state(harness, conversation)
+    assert state.last_ended is ActivationEnding.COULDNT_FINISH
+
+
+async def test_a_take_within_one_conversation_never_reads_stopped_then_reads_the_takers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§5:1-§5:3, §7:7: "working…" for the taker beside the ending before, then its own."""
+    understanding, planner = _Understanding(), _Planner()
+    older_text, newer_text = "search apartments", "only two bedrooms, continues: apartments"
+    planner.script(
+        older_text,
+        RoundResponse(
+            text="Searching.",
+            calls=(
+                _call("c1", "remember", fact="Wants a flat.", why="a plan", rests_on_input=True),
+            ),
+        ),
+        RoundResponse(text="Still searching."),
+        lambda request: RoundResponse(
+            calls=(_call("c2", "answer_offer", offer=_label_of(request, older_text), take=True),)
+        ),
+        RoundResponse(text="Two-bedroom flats: three found."),
+    )
+    planner.hold(older_text, from_round=2)
+    paused = planner.pause(older_text, 4)
+    harness = _harness(understanding, planner)
+    phases = harness.engine._phases
+    assert phases is not None
+    monkeypatch.setattr(phases, "_round_limit", 6)
+    conversation = await open_conversation(harness)
+    await _failed_first(harness, planner, conversation)
+    await harness.engine.write_message(conversation, message=said("a-1", older_text))
+    await until(_has(planner, older_text, 2), what="the older to act and plan again")
+    older = await working(harness, conversation)
+    newer, task = await _beside(harness, conversation, newer_text, message_id="b-1")
+
+    async def offered() -> bool:
+        state = harness.engine._running_state(older)
+        return state is not None and bool(state.offers)
+
+    await until(offered, what="the offer to be made")
+    planner.hold(older_text)[1].set()
+    await task
+    await asyncio.wait_for(paused[0].wait(), SETTLE)
+
+    found = await frozen(harness)
+    handed = _of(found, newer)
+    assert handed.reason is ProcessingReason.STOPPED
+    assert handed.taken_over_by == older, "the freeze names the activation that took it"
+    while_taker_runs = await _running_only(harness, conversation, older)
+    assert while_taker_runs.working
+    assert while_taker_runs.last_ended is ActivationEnding.COULDNT_FINISH, (
+        "the ending it showed before, never stopped"
+    )
+    paused[1].set()
+    found = await _frozen(harness, 3)
+    assert _of(found, older).taken_over_by is None
+    after = await _running_only(harness, conversation)
+    assert not after.working
+    assert after.last_ended is ActivationEnding.DONE, "how the taker ended"
+
+
+async def test_an_absorption_across_places_keeps_the_absorbed_conversations_ending() -> None:
+    """§5:2-§5:3, §7:7, the owner's "go with a": the ending stays what it was before."""
+    understanding, planner = _Understanding(), _Planner()
+    older_text, newer_text = "book Riverside", "for two, continues: Riverside"
+    harness = _harness(understanding, planner)
+    first = await open_conversation(harness)
+    await _failed_first(harness, planner, first)
+    planner.hold(older_text)
+    await harness.engine.write_message(first, message=said("a-1", older_text))
+    older = await working(harness, first)
+    await asyncio.wait_for(planner.hold(older_text)[0].wait(), SETTLE)
+    paused = planner.pause(newer_text, 1)
+    second, newer = await _start(harness, newer_text, message_id="b-1")
+    await _understood(harness, newer)
+    planner.hold(older_text)[1].set()
+    await asyncio.wait_for(paused[0].wait(), SETTLE)
+    found = await _frozen(harness, 2)
+
+    absorbed = _of(found, older)
+    assert absorbed.reason is ProcessingReason.STOPPED
+    assert absorbed.taken_over_by == newer
+    while_absorber_runs = await _running_only(harness, first)
+    assert not while_absorber_runs.working, "working… stops for the absorbed one"
+    assert while_absorber_runs.last_ended is ActivationEnding.COULDNT_FINISH
+    assert (await _state(harness, second)).activation_ids == (newer,)
+    paused[1].set()
+    await _frozen(harness, 3)
+    await _running_only(harness, second)
+    after = await _state(harness, first)
+    assert not after.working
+    assert after.last_ended is ActivationEnding.COULDNT_FINISH, (
+        "the absorber's ending shows on its own place, not this one"
+    )
+    assert (await _state(harness, second)).last_ended is ActivationEnding.DONE
+
+
+async def test_a_burst_absorbed_in_one_conversation_never_reads_stopped() -> None:
+    """§5:1-§5:3, §7:7: each absorbed in turn, followed forward to the one that ran on."""
+    understanding, planner = _Understanding(), _Planner()
+    texts = ("plan a party", "for ten, continues: party", "on Saturday, continues: party")
+    harness = _harness(understanding, planner)
+    conversation = await open_conversation(harness)
+    planner.hold(texts[0])
+    planner.hold(texts[1])
+    paused = planner.pause(texts[2], 1)
+    await harness.engine.write_message(conversation, message=said("a-1", texts[0]))
+    first = await working(harness, conversation)
+    await asyncio.wait_for(planner.hold(texts[0])[0].wait(), SETTLE)
+    second, _ = await _beside(harness, conversation, texts[1], message_id="a-2")
+    await asyncio.wait_for(planner.hold(texts[1])[0].wait(), SETTLE)
+    third, last = await _beside(harness, conversation, texts[2], message_id="a-3")
+    await _understood(harness, third)
+    planner.hold(texts[0])[1].set()
+    planner.hold(texts[1])[1].set()
+    await asyncio.wait_for(paused[0].wait(), SETTLE)
+    found = await _frozen(harness, 2)
+
+    assert _of(found, first).taken_over_by == second
+    assert _of(found, second).taken_over_by == third
+    during = await _running_only(harness, conversation, third)
+    assert during.last_ended is None, "nothing it started has ended that is shown"
+    paused[1].set()
+    await last
+    after = await _state(harness, conversation)
+    assert after.last_ended is ActivationEnding.DONE
+    assert _of(await frozen(harness), third).taken_over_by is None

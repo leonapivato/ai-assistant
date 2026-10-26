@@ -243,7 +243,15 @@ async def conversation_state(
     engine and the canonical fake engine, so both read one state the same way:
 
     * the place's newest **ended** episode is the last activation that ended, and its
-      status says how (:func:`activation_ending`).
+      status says how (:func:`activation_ending`);
+    * **except where its matter was taken over** (ADR-0352 §5:1-§5:3): an activation
+      absorbed or whose input was taken is never the one whose ending is shown. Its
+      episode names the activation that took its matter, which is followed forward to
+      the one that took it last; where that one was started from this conversation and
+      has ended, its ending is shown, and otherwise, while it runs, where it was started
+      from another place, or where its episode is not found, the taken-over episode is
+      passed over and the next newest ended one is read the same way, so the state keeps
+      the ending it showed before the hand-over (:func:`_shown_ending`).
 
     An activation that wrote no episode — capture degraded, or forgotten — is not
     seen, and a conversation whose episodes were forgotten reads as idle: what the
@@ -255,15 +263,75 @@ async def conversation_state(
     channel = conversation_channel(conversation_id)
     held = tuple(running)
     known = [one for one in held if one is not None]
-    ended = await memory.channel_episodes(channel, limit=1)
-    last = ended.entries[-1].record if ended.entries else None
     # ADR-0349 §4:4, §10:3: every running activation started from it whose id is known,
     # since every message starts its own (§8:1).
     return ConversationState(
         working=bool(held),
         activation_ids=tuple(dict.fromkeys(known)),
-        last_ended=activation_ending(last) if isinstance(last, EpisodicMemory) else None,
+        last_ended=await _shown_ending(memory, channel),
     )
+
+
+#: How much wider each read of a conversation's newest ended episodes is than the last,
+#: while every one read was taken over, up to the read's own bound.
+_ENDING_WIDER: Final = 4
+_ENDING_BOUND: Final = 1000
+
+
+async def _shown_ending(memory: MemoryStore, channel: ChannelIdentity) -> ActivationEnding | None:
+    """How the activation a conversation shows the ending of ended (ADR-0352 §5:1-§5:3).
+
+    Its newest ended episode, read newest first, passing over each whose activation's
+    matter was taken over and whose taker, followed forward, is not this conversation's
+    own and ended. Where the taker is, it is the taker's ending. ``None`` where nothing
+    the conversation started has ended that is not passed over, among the newest the
+    read's bound reaches.
+
+    Raises:
+        MemoryStoreError: If the episodes cannot be read.
+    """
+    limit = 1
+    while True:
+        page = await memory.channel_episodes(channel, limit=limit)
+        for entry in reversed(page.entries):
+            record = entry.record
+            processing = record.processing_record
+            if processing is None or processing.taken_over_by is None:
+                return activation_ending(record)
+            taker = await _last_taker(memory, processing.taken_over_by)
+            if taker is not None and started_from(taker, channel) is not None:
+                return activation_ending(taker)
+        if len(page.entries) < limit or limit >= _ENDING_BOUND:
+            return None
+        limit = min(limit * _ENDING_WIDER, _ENDING_BOUND)
+
+
+async def _last_taker(memory: MemoryStore, taker: str) -> EpisodicMemory | None:
+    """The frozen episode of the activation that took a matter last (ADR-0352 §5:3).
+
+    Followed forward from ``taker`` through each episode that records an activation that
+    took its matter in turn. ``None`` where one along the way still runs, so its episode
+    is open, or its episode is not found.
+
+    Raises:
+        MemoryStoreError: If an episode cannot be read.
+    """
+    seen: set[str] = set()
+    at = taker
+    while at not in seen:
+        seen.add(at)
+        record = await memory.get(f"activation:{at}")
+        if not isinstance(record, EpisodicMemory) or record.processing_record is None:
+            return None
+        processing = record.processing_record
+        if processing.is_open:
+            return None
+        if processing.taken_over_by is None:
+            return record
+        at = processing.taken_over_by
+    # A chain only ever moves on to an activation running when it took the matter, so it
+    # never comes back on itself; were it to, nothing along it is shown.
+    return None
 
 
 #: The widest instant and number a recorded message can carry, so the probe below
