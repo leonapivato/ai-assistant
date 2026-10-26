@@ -1,0 +1,26 @@
+# "snooze 10 minutes" right after a task's message is a one-off task ten minutes from
+# now, with the same instruction, suggesting the place it was said in (ADR-0340 §5:4, §10:5).
+prompt = "planning"
+guards = "snooze_not_respawned"
+came_from = "2026-10-25"
+set = "development"
+samples = 2
+
+[flags]
+takes_message = true
+story_calls = false
+story_reads = false
+approved = false
+candidates = false
+reliance = false
+person = false
+suggestions = false
+spawn = true
+scheduled = false
+
+[property]
+check = "read"
+read = """The round proposes one spawn to remind them to stretch their legs, falling due ten minutes from now (delay_minutes 10, or at 2026-11-10T15:11), whose places name L1. It names no task in replaces, no rule, and cancels nothing."""
+
+[input]
+file = "snooze-is-a-one-off-with-the-same-instruction.json"

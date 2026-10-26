@@ -1,0 +1,25 @@
+# "skip it" for a one-off task shown by its label is its cancel (ADR-0340 §5:1, §10:5).
+prompt = "planning"
+guards = "skip_misread"
+came_from = "2026-10-25"
+set = "development"
+samples = 2
+
+[flags]
+takes_message = true
+story_calls = false
+story_reads = false
+approved = false
+candidates = false
+reliance = false
+person = false
+suggestions = false
+spawn = true
+scheduled = false
+
+[property]
+check = "read"
+read = """The round proposes one cancel_task naming T1, the reminder to pick up the dry cleaning. It proposes no spawn."""
+
+[input]
+file = "skip-a-one-off-is-its-cancel.json"
