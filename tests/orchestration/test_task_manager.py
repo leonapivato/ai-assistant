@@ -81,7 +81,11 @@ class _World:
     """A Task Manager over the fakes, with a running set and a stop a case reads."""
 
     def __init__(
-        self, *, limits: TaskManagerLimits = LIMITS, plans: FakePlanStore | None = None
+        self,
+        *,
+        limits: TaskManagerLimits = LIMITS,
+        plans: FakePlanStore | None = None,
+        zones: PersonZones | None = None,
     ) -> None:
         self.plans = FakePlanStore(now=lambda: AT) if plans is None else plans
         self.memory = FakeMemoryStore(now=lambda: AT)
@@ -96,7 +100,7 @@ class _World:
             starting=lambda one: one in self.starting,
             wake=self._wake,
             limits=limits,
-            zones=PersonZones(default=ZoneInfo("UTC")),
+            zones=PersonZones(default=ZoneInfo("UTC")) if zones is None else zones,
             now=lambda: AT,
         )
         self.calls = ScheduledTaskCalls(manager=self.manager, now=lambda: AT)
@@ -281,6 +285,80 @@ async def test_a_step_that_runs_and_spawns_while_the_walk_reads_is_walked_too() 
     assert plans.grandchild is not None
     assert [one.task_id for one in left.tasks] == [plans.grandchild.id]
     assert not left.nothing
+
+
+async def _advance(world: _World, child: ScheduledTask) -> ScheduledTask:
+    """``child``'s step, starting when the walk read it, spawns a grandchild and ends."""
+    (held,) = await world.plans.scheduled_tasks([child.id])
+    (started,) = held.activations
+    grandchild = await write_task(world.plans, started, when=DueAt(at=AT + timedelta(days=1)))
+    await world.plans.settle_occurrence(started, OccurrenceState.DONE)
+    world.starting.discard(started)
+    return grandchild
+
+
+async def test_a_step_that_spawns_and_ends_while_the_zone_is_read_is_walked_too() -> None:
+    """§3:1-§3:2: the zone is read before the walk, so nothing awaits between its reads."""
+    found: list[ScheduledTask] = []
+
+    class _Held(PersonZones):
+        def __init__(self) -> None:
+            super().__init__(default=ZoneInfo("UTC"))
+            self.child: ScheduledTask | None = None
+
+        async def of(self, person: str) -> ZoneInfo:
+            if self.child is not None:
+                found.append(await _advance(world, self.child))
+                self.child = None
+            return await super().of(person)
+
+    zones = _Held()
+    world = _World(zones=zones)
+    step = activation()
+    child = await write_task(world.plans, step)
+    world.starting.add(await pushed(world.plans, child))
+    zones.child = child
+
+    left = await _still_live(world, step)
+
+    (grandchild,) = found
+    assert [one.task_id for one in left.tasks] == [grandchild.id]
+    assert left.activations == ()
+
+
+async def test_a_step_that_spawns_and_ends_after_what_runs_is_read_is_walked_again() -> None:
+    """§3:1-§3:2: the schedule read after what runs moved, so the walk goes again."""
+
+    class _Moving(FakePlanStore):
+        def __init__(self) -> None:
+            super().__init__(now=lambda: AT)
+            self.reads = 0
+            self.child: ScheduledTask | None = None
+            self.grandchild: ScheduledTask | None = None
+
+        async def spawned_tasks(
+            self, activation_ids: Sequence[str], /
+        ) -> tuple[ScheduledTask, ...]:
+            self.reads += 1
+            # The fourth read is the one after what runs was read: the step had been
+            # starting, and now it has spawned and ended.
+            if self.reads == 4 and self.child is not None:
+                self.grandchild = await _advance(world, self.child)
+            return await super().spawned_tasks(activation_ids)
+
+    plans = _Moving()
+    world = _World(plans=plans)
+    step = activation()
+    plans.child = await write_task(plans, step)
+    world.starting.add(await pushed(plans, plans.child))
+    plans.reads = 0
+
+    left = await _still_live(world, step)
+
+    assert plans.grandchild is not None
+    assert [one.task_id for one in left.tasks] == [plans.grandchild.id]
+    assert left.activations == ()
+    assert plans.reads > 4, "the walk went again"
 
 
 async def test_a_marked_task_is_shown_with_its_text_withheld() -> None:
