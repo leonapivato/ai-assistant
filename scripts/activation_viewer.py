@@ -2826,9 +2826,18 @@ def _strings(value: object) -> list[str]:
 
 
 def _number(value: object) -> float | None:
+    """A number the page holds as one, or ``None``.
+
+    An integer too large for a float, as a 401-digit one is, is a hint not recognised
+    (ADR-0316 §5:2), and never a failure.
+    """
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    return float(value) if math.isfinite(value) else None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _cut(text: str, limit: int = WALK_CHARS) -> str:
@@ -3072,7 +3081,7 @@ def _planning_step(phase: _Phase) -> dict[str, object]:
         "before": None
         if before is None
         else {
-            "round": before.get("round") if type(before.get("round")) is int else None,
+            "round": _position(before.get("round")),
             "text": _text(before.get("text")),
             "text_was": _text(before.get("text_was")),
             "calls": [
@@ -4331,6 +4340,7 @@ SCRIPT: Final = r"""
       state.walkData = null;
       state.walkVersion = null;
       closeDrawer();
+      renderWalk();
       // The previous activation's details come down at once: nothing of one
       // activation stays clickable while another's load.
       $("detail-body").hidden = true;
@@ -4419,7 +4429,7 @@ SCRIPT: Final = r"""
     badgesFor(s, badges);
     state.drawnOpen = isOpen(s);
     applyMode();
-    if (state.walk !== null && state.walkData) renderWalk();
+    if (state.walk !== null) renderWalk();
     renderArrival();
     if (own) {
       renderTimeline();
@@ -5015,7 +5025,8 @@ SCRIPT: Final = r"""
         return;
       }
       if (!data.unchanged) {
-        state.walkData = data;
+        // The steps are this activation's: every link they draw opens this one's lines.
+        state.walkData = { ...data, owner: id };
         state.walkVersion = data.version;
       }
       if (state.walk !== null) renderWalk();
@@ -5026,11 +5037,14 @@ SCRIPT: Final = r"""
     }
   }
   function renderWalk() {
+    if (state.walk === null) return;
     const root = $("walk-step");
     const pills = $("walk-steps");
     clear(root);
     clear(pills);
-    const data = state.walkData;
+    // Another activation's steps are never drawn under this one's, while its own load.
+    const data = state.walkData && state.walkData.owner === state.selected
+      ? state.walkData : null;
     const steps = data ? data.steps || [] : [];
     $("walk-prev").disabled = true;
     $("walk-next").disabled = true;
@@ -5067,7 +5081,7 @@ SCRIPT: Final = r"""
     } catch (error) {
       root.appendChild(el("p", "note",
         "This step did not read as expected; its entries show it whole."));
-      linksInto(root, shown);
+      linksInto(root, shown, data.owner);
     }
   }
   function stepInto(root, s, data) {
@@ -5093,18 +5107,20 @@ SCRIPT: Final = r"""
     root.appendChild(head);
     if (st && st.failure) root.appendChild(el("p", "fail", "the step failed: " + st.failure));
     const walker = WALKERS[s.phase];
-    if (walker) walker(root, s);
+    if (walker) walker(root, s, data.owner);
     else walkOther(root, s);
-    linksInto(root, s);
+    linksInto(root, s, data.owner);
   }
-  function linksInto(root, s) {
+  // ``owner`` is the activation the step is of: a link opens its lines, whatever is
+  // selected when it is clicked.
+  function linksInto(root, s, owner) {
     const links = s.links || [];
     if (!links.length) return;
     const row = el("div", "walk-links");
     for (const link of links) {
       const go = el("button", "jump", link.label);
       go.type = "button";
-      go.addEventListener("click", () => openLines(state.selected, s.title + " · "
+      go.addEventListener("click", () => openLines(owner, s.title + " · "
         + link.label, link.lines || [], { file: link.file || null,
         call: typeof link.call === "number" ? link.call : null }));
       row.appendChild(go);
@@ -5372,14 +5388,14 @@ SCRIPT: Final = r"""
       box.appendChild(el("p", "note", s.unreadable + " unreadable line(s) were skipped."));
     }
   }
-  function walkLearning(root, s) {
+  function walkLearning(root, s, owner) {
     const head = walkItem(root);
     head.appendChild(el("span", "badge b-" + ((s.ended && s.ended.state) || "no_end"),
       attemptEnding(s.ended)));
     if (s.ended && s.ended.failure) head.appendChild(el("div", "fail", s.ended.failure));
     const box = sec(root, "Findings");
     if (!s.findings.length) box.appendChild(el("p", "note", "No finding recorded."));
-    for (const f of s.findings) box.appendChild(findingRow(state.selected, f, {}));
+    for (const f of s.findings) box.appendChild(findingRow(owner, f, {}));
   }
   function walkInput(root, s) {
     if (s.arrival) {

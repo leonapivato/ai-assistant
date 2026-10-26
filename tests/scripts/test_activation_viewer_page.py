@@ -901,3 +901,31 @@ async def test_a_deep_link_opens_its_step_and_the_overview_is_a_click_away(
             "Learning · attempt 2", timeout=_SHOWN
         )
         await expect(step.locator(".ov-finding")).to_contain_text(EVIDENCE_CLAIM)
+
+
+async def test_a_change_of_activation_never_shows_the_last_ones_walk(
+    walked: Any, gateway_browser: Browser
+) -> None:
+    released = asyncio.Event()
+
+    async def hold_act_1(route: Route) -> None:
+        if "id=act-1" in route.request.url:
+            await released.wait()
+        await route.continue_()
+
+    async with _page(gateway_browser) as page:
+        await page.route("**/api/walk?*", hold_act_1)
+        await page.goto(f"http://127.0.0.1:{walked.port}/#{WALKED}/walk/3")
+        step = page.locator("#walk-step")
+        await expect(step.locator(".walk-head h2")).to_have_text("Understanding", timeout=_SHOWN)
+        await page.evaluate("location.hash = 'act-1/walk/4'")
+        # act-1's details load while its walk is held: nothing of the walked one's shows.
+        await expect(page.locator("#d-input")).to_have_text(HOSTILE, timeout=_SHOWN)
+        await expect(step).to_have_text("Loading…")
+        await expect(page.locator(".walk-pill")).to_have_count(0)
+        released.set()
+        await expect(step.locator(".walk-head h2")).to_have_text(
+            "Authorizing · round 1", timeout=_SHOWN
+        )
+        await step.locator(".jump", has_text="Its entry, whole").click()
+        await expect(page.locator("#drawer-body")).to_contain_text("asks first")
