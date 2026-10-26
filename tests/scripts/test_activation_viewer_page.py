@@ -123,6 +123,38 @@ async def test_each_call_shows_its_own_verdict(server: Any, gateway_browser: Bro
         await expect(page.locator(".round").first).to_contain_text("marked")
 
 
+@pytest.fixture
+def scheduled(tmp_path: Path) -> Iterator[Any]:
+    """The viewer over a record with an activation whose input shows no messages."""
+    directory = write_record(tmp_path)
+    content = json.dumps(
+        {"input": {"text": "Scheduled instruction", "received_as": "scheduled work"}}
+    )
+    line = {
+        "activation_id": "scheduled",
+        "source": "understanding",
+        "kind": "given",
+        "recorded_at": iso(300_000),
+        "body": {"messages": [{"role": "user", "content": content}]},
+    }
+    (directory / "scheduled.jsonl").write_text(json.dumps(line) + "\n")
+    with serving(directory) as bound:
+        yield bound
+
+
+@pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "phone"])
+async def test_an_input_with_no_messages_shows_its_text_on_the_input_card(
+    scheduled: Any, gateway_browser: Browser, width: int
+) -> None:
+    async with _page(gateway_browser, width=width) as page:
+        await _open(page, scheduled.port, "scheduled")
+        card = page.locator("#arrival-card")
+        await expect(card).to_be_visible(timeout=_SHOWN)
+        await expect(card.locator(".arrival-text")).to_have_text("Scheduled instruction")
+        await expect(card.locator("dd").first).to_have_text("scheduled work")
+        await expect(card.locator(".arrival-message")).to_have_count(0)
+
+
 def _offered(page: Page) -> Locator:
     """The drawer's section listing the tools a planning request offered the provider."""
     heading = page.locator("h3", has_text=re.compile(r"^Offered to the provider$"))
