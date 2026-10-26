@@ -2128,8 +2128,9 @@ const chat = {
   resolveAgain: false,
   oldest: null,
   state: null,
-  // The stop this page sent for the activation the state names, or `null`: the id it
-  // named, whether its request is out, and the answer once read (`renderChatStop`).
+  // The stops this page sent for the activations the state names, or `null`: a map from
+  // each id it named to whether its request is out and the answer once read
+  // (`renderChatStop`).
   stop: null,
   devices: null,
   pending: [],
@@ -3212,53 +3213,82 @@ function renderChatState() {
   }
 }
 
-// The activation the state says is running, where it names one; `null` otherwise —
-// nothing running, or running with no id, which cannot be stopped (ADR-0297 §5's
-// residual of a failed id factory) and is offered no control.
-function runningActivation() {
-  if (chat.state === null || !chat.state.working) {
-    return null;
+// The activations the state says are running, in its order and each once; empty
+// otherwise — nothing running, or running with no id, which cannot be stopped (ADR-0297
+// §5's residual of a failed id factory) and is offered no control. The state names every
+// running activation started from the conversation (ADR-0349 §10:3), so this is a list.
+function runningActivations() {
+  if (chat.state === null || !chat.state.working || !Array.isArray(chat.state.activation_ids)) {
+    return [];
   }
-  const id = chat.state.activation_id;
-  return typeof id === "string" && id !== "" ? id : null;
+  const running = [];
+  chat.state.activation_ids.forEach((id) => {
+    if (typeof id === "string" && id !== "" && !running.includes(id)) {
+      running.push(id);
+    }
+  });
+  return running;
 }
 
-// The control and what the stop answered. **The answer is about one activation**, and is
-// shown while the state still names that one: once it ends, the state's own ending says
+// The control and what the stops answered. **Each answer is about one activation**, and
+// is kept while the state still names that one: once it ends, the state's own ending says
 // how (`CHAT_ENDINGS.stopped` for a stop that landed), and a later activation starts with
-// no answer beside it. After "stopped" the control is withdrawn, the stop having landed;
-// after either answer that wrote nothing it stays, since the state still says working.
+// no answer beside it. Once every activation the state names has answered "stopped" the
+// control is withdrawn, every stop having landed; while any has no answer, or one that
+// wrote nothing, it stays, since the state still says working.
 function renderChatStop() {
-  const running = runningActivation();
-  if (chat.stop !== null && chat.stop.id !== running) {
-    chat.stop = null;
+  const running = runningActivations();
+  if (chat.stop !== null) {
+    Array.from(chat.stop.keys()).forEach((id) => {
+      if (!running.includes(id)) {
+        chat.stop.delete(id);
+      }
+    });
   }
-  const stop = chat.stop;
-  const landed = stop !== null && stop.answer === "stopped";
-  el("chat-stop-row").hidden = running === null || landed;
-  el("chat-stop").disabled = stop !== null && stop.sending;
+  const sent = running.map((id) => (chat.stop === null ? undefined : chat.stop.get(id)));
+  const sending = sent.some((one) => one !== undefined && one.sending);
+  const landed = sent.every((one) => one !== undefined && one.answer === "stopped");
+  el("chat-stop-row").hidden = running.length === 0 || landed;
+  el("chat-stop").disabled = sending;
   let said = "";
-  if (stop !== null) {
-    if (stop.sending) {
-      said = CHAT_STOPPING;
-    } else if (Object.prototype.hasOwnProperty.call(CHAT_STOP_ANSWERS, stop.answer)) {
-      said = CHAT_STOP_ANSWERS[stop.answer];
-    } else {
-      said = CHAT_STOP_UNKNOWN;
-    }
+  if (sending) {
+    said = CHAT_STOPPING;
+  } else {
+    // One sentence per distinct answer, in the state's order: two stops that landed say
+    // so once, and one that landed beside one that wrote nothing says both.
+    const sentences = [];
+    sent.forEach((one) => {
+      if (one === undefined) {
+        return;
+      }
+      const sentence = Object.prototype.hasOwnProperty.call(CHAT_STOP_ANSWERS, one.answer)
+        ? CHAT_STOP_ANSWERS[one.answer]
+        : CHAT_STOP_UNKNOWN;
+      if (!sentences.includes(sentence)) {
+        sentences.push(sentence);
+      }
+    });
+    said = sentences.join(" ");
   }
   const slot = el("chat-stop-said");
   slot.textContent = said;
   slot.hidden = said === "";
 }
 
-// The owner pressing **Stop**: one request naming the activation the state named, and
-// its answer said beside the control (ADR-0297 §5). Nothing is decided here — whether it
-// was running, had ended or was never known is the hub's answer — and nothing is retried:
-// a refusal is on screen where `relay` put it, and the control is offered again.
-async function stopActivation() {
-  const id = runningActivation();
-  if (id === null || (chat.stop !== null && chat.stop.sending)) {
+// The owner pressing **Stop**: one request for each activation the state names that no
+// stop has yet landed on, each naming that one activation and all sent together
+// (ADR-0349 §4:3, ADR-0295 §1:1), and their answers said beside the control (ADR-0297
+// §5). Nothing is decided here — whether each was running, had ended or was never known
+// is the hub's answer — and nothing is retried: a refusal is on screen where `relay` put
+// it, and the control is offered again.
+async function stopActivations() {
+  const running = runningActivations();
+  const held = (id) => (chat.stop === null ? undefined : chat.stop.get(id));
+  if (running.some((id) => held(id) !== undefined && held(id).sending)) {
+    return;
+  }
+  const named = running.filter((id) => held(id) === undefined || held(id).answer !== "stopped");
+  if (named.length === 0) {
     return;
   }
   const half = headerHalf();
@@ -3266,17 +3296,28 @@ async function stopActivation() {
     showBootstrap();
     return;
   }
-  const era = sessionEra;
-  const mine = { id: id, sending: true, answer: null };
-  chat.stop = mine;
+  if (chat.stop === null) {
+    chat.stop = new Map();
+  }
+  const sent = chat.stop;
+  const mine = named.map((id) => ({ id: id, sending: true, answer: null }));
+  mine.forEach((one) => sent.set(one.id, one));
   renderChatStop();
+  await Promise.all(mine.map((one) => stopOne(half, sent, one)));
+}
+
+// One activation's stop, its answer kept only where nothing has replaced it since: a
+// conversation left, or an activation the state no longer names, drops what it answered.
+// Each is called before the press yields, so the era it reads is the press's own.
+async function stopOne(half, sent, mine) {
+  const era = sessionEra;
   try {
-    const body = await relay(half, "/activation/stop", { activation_id: id }, "chat");
-    if (!sameSession(half, era) || chat.stop !== mine) {
+    const body = await relay(half, "/activation/stop", { activation_id: mine.id }, "chat");
+    if (!sameSession(half, era) || chat.stop !== sent || sent.get(mine.id) !== mine) {
       return;
     }
     if (body === null) {
-      chat.stop = null;
+      sent.delete(mine.id);
     } else {
       mine.sending = false;
       mine.answer = body.stop;
@@ -3286,8 +3327,8 @@ async function stopActivation() {
     if (!sameSession(half, era)) {
       return;
     }
-    if (chat.stop === mine) {
-      chat.stop = null;
+    if (chat.stop === sent && sent.get(mine.id) === mine) {
+      sent.delete(mine.id);
       renderChatStop();
     }
     fault(GATEWAY_GONE, "chat");
@@ -7232,7 +7273,7 @@ el("chat-text").addEventListener("input", () => {
 });
 el("chat-reply-cancel").addEventListener("click", () => setReplyTo(null));
 el("chat-stop").addEventListener("click", () => {
-  void stopActivation();
+  void stopActivations();
 });
 el("chat-delete").addEventListener("click", deleteChat);
 el("chat-forget").addEventListener("click", forgetChat);

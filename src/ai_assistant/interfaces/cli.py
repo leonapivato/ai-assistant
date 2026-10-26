@@ -2905,19 +2905,26 @@ def _render_devices_full() -> None:
 
 
 def _print_stop_hint(state: ConversationState) -> None:
-    """Say how to stop the running activation, where the state names it (ADR-0297 §5:7).
+    """Say how to stop each running activation the state names (ADR-0297 §5:7).
 
-    The id is the current state's and only the current state's (ADR-0295 §1:2): this
-    command line holds no running activation of its own to name. Where the state shows
+    The ids are the current state's and only the current state's (ADR-0295 §1:2): this
+    command line holds no running activation of its own to name. The state names every
+    running activation started from the conversation (ADR-0349 §10:3), so one command is
+    offered for each, in the state's order, each naming exactly one activation as
+    ADR-0297 §5's ``assistant stop <activation-id>`` does. Where the state shows
     "working…" with no id, nothing is said — that activation cannot be stopped, which is
     ADR-0297 §5's residual of a failed id factory, and offering a command it would only
     refuse would be worse than silence.
     """
-    # ADR-0349 §1:4's step 1: the state names at most the one activation it named before;
-    # stopping every one it names is step 4's (§4:3).
-    if not state.activation_ids:
+    ids = tuple(dict.fromkeys(state.activation_ids))
+    if not ids:
         return
-    _print(f"[dim]To stop it: assistant stop {_safe(state.activation_ids[-1])}[/]")
+    if len(ids) == 1:
+        _print(f"[dim]To stop it: assistant stop {_safe(ids[0])}[/]")
+        return
+    _print("[dim]To stop them, run each of these:[/]")
+    for activation_id in ids:
+        _print(f"[dim]  assistant stop {_safe(activation_id)}[/]")
 
 
 def _print_chat_hint(conversation_id: str) -> None:

@@ -672,7 +672,7 @@ async def test_the_digest_carries_the_current_state(harness: Harness) -> None:
     _, idle = await harness.whole("POST", "/conversation", {"conversation_id": conversation})
     assert idle["conversation"]["state"] == {
         "working": False,
-        "activation_id": None,
+        "activation_ids": [],
         "last_ended": None,
     }
 
@@ -696,6 +696,32 @@ async def test_the_digest_carries_the_current_state(harness: Harness) -> None:
 
     assert working["conversation"]["state"] == {
         "working": True,
-        "activation_id": "a-7",
+        "activation_ids": ["a-7"],
         "last_ended": "interrupted",
+    }
+
+
+async def test_the_state_carries_every_running_activation_in_order(harness: Harness) -> None:
+    """ADR-0349 §10:3: every running activation crosses, in the state's order, and no old key.
+
+    The page's stop control sends a stop for each id the view carries (§4:3), so the view
+    relays the state's whole tuple and no single ``activation_id`` beside it.
+    """
+    conversation = await _started(harness)
+    held = harness.engine.conversation
+
+    async def stated(conversation_id: str) -> Any:
+        digest = await held(conversation_id)
+        assert digest is not None
+        return digest.model_copy(
+            update={"state": ConversationState(working=True, activation_ids=("a-2", "a-1"))}
+        )
+
+    harness.engine.conversation = stated  # type: ignore[method-assign]
+    _, working = await harness.whole("POST", "/conversation", {"conversation_id": conversation})
+
+    assert working["conversation"]["state"] == {
+        "working": True,
+        "activation_ids": ["a-2", "a-1"],
+        "last_ended": None,
     }

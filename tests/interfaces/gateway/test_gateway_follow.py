@@ -253,7 +253,7 @@ async def test_each_chunk_is_one_value_of_its_own_kind() -> None:
     assert state == {
         "kind": "state",
         "conversation_id": started.id,
-        "state": {"working": False, "activation_id": None, "last_ended": "done"},
+        "state": {"working": False, "activation_ids": [], "last_ended": "done"},
     }
     assert roles == {"kind": "roles", "roles": ["commands"]}
     assert alive == {"kind": "alive"}
