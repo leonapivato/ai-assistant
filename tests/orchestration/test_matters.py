@@ -673,3 +673,77 @@ def test_inputs_held_count_toward_the_limit() -> None:
         merged=(_IDS[1],),
     )
     assert state.inputs_held == 2
+
+
+# --- §7:4, §7:13, §7:17: following forward, and what a wait waits for -------------------
+
+
+def test_an_offer_follows_forward_to_the_absorber_that_has_acted() -> None:
+    """§7:4, §1:5's case: the absorbed one leads to its absorber, which is offered."""
+    oldest = _running("a", _IDS[0], order=1)
+    absorber = _running("a", _IDS[1], order=2)
+    newest = _running("a", _IDS[2], order=3, text="and a garden")
+    matters = _matters([oldest, absorber, newest])
+    matters.merge(absorber, _understood(absorber, _IDS[0]), at=_AT)
+    absorber.committed = True
+
+    decided, absorbed = matters.merge(newest, _understood(newest, _IDS[0]), at=_AT)
+
+    assert absorbed == []
+    (named,) = decided
+    assert (named.reached, named.became) == (_IDS[1], Became.OFFERED)
+    assert list(absorber.offers) == [_IDS[2]]
+
+
+def test_a_newer_input_follows_a_hand_over_to_the_activation_that_took_it() -> None:
+    """§7:4, §1:5's case: a hand-over is followed forward as an absorption is."""
+    older = _running("a", _IDS[0], order=1)
+    older.committed = True
+    offering = _running("a", _IDS[1], order=2)
+    states = [older, offering]
+    matters = _matters(states)
+    matters.merge(offering, _understood(offering, _IDS[0]), at=_AT)
+    matters.answer(older, _IDS[1], take=True, reason=None)
+    later = _running("a", _IDS[2], order=3)
+    states.append(later)
+
+    decided, _ = matters.merge(later, _understood(later, _IDS[1]), at=_AT)
+
+    (named,) = decided
+    assert named.reached == _IDS[0], "it reached the activation that took the input"
+    assert named.became is Became.OFFERED
+
+
+async def test_an_input_arriving_during_an_acts_wait_is_not_waited_for() -> None:
+    """§7:12, §1:5's case: what an act waits for is what runs when the wait begins."""
+    older = _running("a", _IDS[0], order=1)
+    newer = _running("b", _IDS[1], order=2)
+    states = [older, newer]
+    matters = _matters(states)
+    waiting = asyncio.ensure_future(
+        matters.before_act(older, asyncio.get_running_loop().time() + 5)
+    )
+    await asyncio.sleep(0.01)
+    later = _running("c", _IDS[2], order=3)
+    states.append(later)
+    _understood(newer)
+    matters.changed()
+    assert await asyncio.wait_for(waiting, 1), "it ended once the newer one settled"
+    assert not settled(later)
+
+
+def test_re_plans_for_offers_stop_once_the_limit_is_reached() -> None:
+    """§7:22, §1:5's case: each offer counts from when it is made, so they run out."""
+    older = _running("a", _IDS[0], order=1)
+    older.committed = True
+    states = [older]
+    matters = _matters(states, held=3)
+    made = []
+    for n, activation_id in enumerate(_IDS[1:], start=2):
+        newer = _running("a", activation_id, order=n)
+        states.append(newer)
+        decided, _ = matters.merge(newer, _understood(newer, _IDS[0]), at=_AT)
+        made.append(decided[0].became)
+        older.offers.clear()  # each declined, or withdrawn, at once
+    assert made == [Became.OFFERED, Became.OFFERED, Became.WAITED_ON]
+    assert older.offers_untaken == 2

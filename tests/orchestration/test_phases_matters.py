@@ -980,3 +980,56 @@ async def test_a_look_up_shows_what_running_work_has_found_so_far() -> None:
     planner.hold(older_text)[1].set()
     await _frozen(harness, 2)
     await harness.engine.aclose()
+
+
+async def test_a_stop_call_waits_and_a_newer_input_absorbs_the_stopping_one() -> None:
+    """§4:12, §7:12, §1:5's case: "never mind", then "no, keep them": nothing is stopped."""
+    understanding, planner = _Understanding(), _Planner()
+    older_text, stopper, keeper = (
+        "remind me hourly to stretch",
+        "never mind the reminders",
+        "no, keep them, continues: reminders",
+    )
+    planner.script(
+        older_text,
+        RoundResponse(
+            text="I'll remind you.",
+            calls=(_call("c1", "spawn", instruction="Remind them to stretch.", delay_minutes=60),),
+        ),
+    )
+    planner.hold(older_text, from_round=2)
+    planner.script(
+        stopper,
+        RoundResponse(calls=(_call("c1", "list_tasks"),)),
+        lambda request: RoundResponse(
+            calls=(_call("c2", "stop_activation", activation=_label_of(request, stopper)),)
+        ),
+    )
+    planner.hold(stopper, from_round=2)
+    understanding.hold(keeper)
+    harness = _harness(understanding, planner, task_scheduler=seams())
+    await harness.engine.start()
+    await open_conversation(harness)
+    _, older = await _start(harness, older_text, message_id="a-1")
+    await until(_has(planner, older_text, 2), what="the spawn to run and its next round wait")
+    _, stopping = await _start(harness, stopper, message_id="b-1")
+    await asyncio.wait_for(planner.hold(stopper)[0].wait(), SETTLE)
+    _, keeping = await _start(harness, keeper, message_id="c-1")
+    await asyncio.wait_for(understanding.hold(keeper)[0].wait(), SETTLE)
+
+    planner.hold(stopper)[1].set()
+    for _ in range(50):
+        await asyncio.sleep(0.001)
+    held = await harness.plans.export()
+    assert older not in held.stopped_activations, "the stop call waits for the newer input"
+    understanding.hold(keeper)[1].set()
+    found = await _frozen(harness, 2)
+
+    stopped(_episode(found, stopping))
+    assert [one.taken_over_from for one in _of(found, keeping).joined] == [stopping]
+    held = await harness.plans.export()
+    assert older not in held.stopped_activations, "nothing is stopped"
+    assert held.cascades == ()
+    planner.hold(older_text)[1].set()
+    await _frozen(harness, 3)
+    await harness.engine.aclose()

@@ -320,10 +320,30 @@ class MatterCalls:
         self, caller: MatterCaller, decision: str, arguments: Mapping[str, FrozenJson]
     ) -> OwnRecordsAnswer:
         """§4:6-§4:11: stop the activation named, or refuse whole and stop nothing."""
+        named = _named(arguments, ACTIVATION_ARGUMENT)
+        refused = self._refused_stop(caller, decision, named)
+        if refused is not None:
+            return refused
+        assert named is not None  # noqa: S101 — a call naming nothing is refused above
+        running = self._matters.state_of(named)
+        if running is None or running.stopped:
+            # §4:10: it has ended or been stopped since it was shown, so this call stops
+            # nothing, and its result says so.
+            _log.info("matter_stop", stage="acting", stopped="already")
+            await self._show(caller, decision, named, stopped=False)
+            return ToolResult(outcome=ToolOutcome.SUCCEEDED, output={"kind": "matter_stop"})
+        stopped = await self._matters.stop(named)
+        _log.info("matter_stop", stage="acting", stopped=stopped.value)
+        await self._show(caller, decision, named, stopped=stopped is ActivationStop.STOPPED)
+        return ToolResult(outcome=ToolOutcome.SUCCEEDED, output={"kind": "matter_stop"})
+
+    def _refused_stop(
+        self, caller: MatterCaller, decision: str, named: str | None
+    ) -> NotDone | None:
+        """§4:8-§4:9: why a stop call is refused whole, stopping nothing, or ``None``."""
         if not caller.users_authority:
             _log.info("matter_call_not_done", stage="acting", reason="no_authority")
             return NotDone(reason=_NO_AUTHORITY)
-        named = _named(arguments, ACTIVATION_ARGUMENT)
         if named is None:
             return NotDone(reason=_MALFORMED)
         if named not in caller.running:
@@ -338,10 +358,7 @@ class MatterCalls:
             _log.info("matter_call_not_done", stage="acting", reason="absorbed")
             caller.shown[decision] = PeerShown(activation_id=named, absorbed_by=absorber)
             return NotDone(reason=_ABSORBED)
-        stopped = await self._matters.stop(named)
-        _log.info("matter_stop", stage="acting", stopped=stopped.value)
-        await self._show(caller, decision, named, stopped=stopped is ActivationStop.STOPPED)
-        return ToolResult(outcome=ToolOutcome.SUCCEEDED, output={"kind": "matter_stop"})
+        return None
 
     async def _look_up(
         self, caller: MatterCaller, decision: str, arguments: Mapping[str, FrozenJson]
