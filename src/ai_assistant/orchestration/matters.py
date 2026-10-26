@@ -311,22 +311,34 @@ class HeldInput:
     place whose kind establishes the user may be the user's own, so a held input is
     waited for as that person's until its activation shows otherwise.
 
-    A message noticed while the reader read what waits may be missing from what it took
-    in, and then waits in a start wait of its own: the reader says where it moved
-    (:meth:`moved_to`), so a wait that began while it was held here waits for it there.
+    It counts the notices of the messages it holds (:meth:`noticed`). A message noticed
+    while the reader read what waits may be missing from what it took in, and then
+    waits in a start wait of its own: the reader says where such messages moved, and
+    from which notice on (:meth:`moved_to`). So a wait that began once one of them was
+    noticed waits for it there, and a wait that began before any was does not.
 
     Attributes:
         place: The place it was written in.
         activation_id: The activation it was admitted as, once it was.
         released: Whether the reader has let it go.
-        then: The held input a message held here may have moved to, where one did.
+        notices: How many notices of its messages the reader has had.
+        then: The held input the messages noticed after :attr:`moved_after` may have
+            moved to, where any did.
+        moved_after: The notices the reader had when it began the read that missed
+            them; a message noticed after that may be held by :attr:`then`.
     """
 
     place: ChannelIdentity
     activation_id: str | None = None
     released: bool = False
+    notices: int = 0
     then: HeldInput | None = None
+    moved_after: int = 0
     _matters: Matters | None = field(default=None, repr=False)
+
+    def noticed(self) -> None:
+        """The reader had one more notice of a message it holds here."""
+        self.notices += 1
 
     def admitted(self, activation_id: str) -> None:
         """The reader admitted it as ``activation_id``, whose own end now settles it."""
@@ -334,9 +346,10 @@ class HeldInput:
         if self._matters is not None:
             self._matters.changed()
 
-    def moved_to(self, successor: HeldInput) -> None:
-        """A message held here may now be held by ``successor``, which is waited for too."""
+    def moved_to(self, successor: HeldInput, *, after: int) -> None:
+        """What was noticed after its ``after``-th notice may now be ``successor``'s."""
         self.then = successor
+        self.moved_after = after
         if self._matters is not None:
             self._matters.changed()
 
@@ -735,21 +748,21 @@ class Matters:
             and (not state.committed or one.place == state.place)
         ]
 
-    def _held_out(self, held: HeldInput, state: ActivationState) -> bool:
+    def _held_out(self, held: HeldInput, seen: int, state: ActivationState) -> bool:
         """Whether a wait of ``state``'s need wait for ``held`` no longer (§7:12).
 
-        It was let go, or the activation it was admitted as is waited out as any is; and
-        so is each held input a message held by it moved to (:meth:`HeldInput.moved_to`),
-        since that message was held when the wait began.
+        It was let go, or the activation it was admitted as is waited out as any is. And
+        where the wait began having seen, in ``seen``, a notice of a message that then
+        moved (:meth:`HeldInput.moved_to`), that message was held when the wait began,
+        so the held input it moved to is waited out too. One that moved never moves
+        again: it was written before the read it moved to began, so that read took it.
         """
-        at: HeldInput | None = held
-        seen: set[int] = set()
-        while at is not None and id(at) not in seen:
-            seen.add(id(at))
-            if not self._one_held_out(at, state):
-                return False
-            at = at.then
-        return True
+        if not self._one_held_out(held, state):
+            return False
+        moved = held.then
+        if moved is None or seen <= held.moved_after:
+            return True
+        return self._one_held_out(moved, state)
 
     def _one_held_out(self, held: HeldInput, state: ActivationState) -> bool:
         """Whether ``held`` itself is let go, or its activation is waited out."""
@@ -772,11 +785,12 @@ class Matters:
             Whether each settled before the deadline.
         """
         waited = self._newer(state)
-        held = self._held_newer(state)
+        # What each held input held when the wait began: the notices it had then.
+        held = [(one, one.notices) for one in self._held_newer(state)]
         return await self._until(
             lambda: (
                 all(_waited_out(one, state) for one in waited)
-                and all(self._held_out(one, state) for one in held)
+                and all(self._held_out(one, seen, state) for one, seen in held)
             ),
             deadline,
         )

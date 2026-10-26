@@ -204,10 +204,13 @@ class _Read:
         again: Whether the conversation was noticed again since the read last looked.
         held: What the engine is told the read holds in its start wait (ADR-0349
             §7:12), until the activation it admits has ended or nothing is taken in.
+        queried: How many notices :attr:`held` had when the read last began reading
+            what waits: a message noticed after that may be missing from what it read.
     """
 
     again: bool = False
     held: HeldInput | None = None
+    queried: int = 0
 
 
 def couldnt_finish(effects: Sequence[str] = ()) -> NewMessage:
@@ -406,8 +409,12 @@ class ChatReader:
         read = self._reading.get(conversation_id)
         if read is not None:
             read.again = True
+            if read.held is not None:
+                read.held.noticed()
             return
         held = None if self._hold is None else self._hold(conversation_channel(conversation_id))
+        if held is not None:
+            held.noticed()
         read = _Read(held=held)
         self._reading[conversation_id] = read
         self._spawn(self._read(conversation_id, read))
@@ -522,6 +529,7 @@ class ChatReader:
                 if not await self._waited(conversation_id):
                     return
                 read.again = False
+                read.queried = 0 if read.held is None else read.held.notices
                 waiting = await self._conversations.untaken_messages(
                     conversation_id, limit=_WAITING_ALL
                 )
@@ -581,11 +589,12 @@ class ChatReader:
             # Noticed while what waits was read, so possibly missed by it: the message
             # is read again, by a read of its own with a start wait of its own, which
             # what this activation was handed is no part of. An act whose wait began
-            # while this read held the message waits for it there (ADR-0349 §7:12).
+            # once this read had that notice waits for it there; one whose wait began
+            # before does not (ADR-0349 §7:12).
             self.notice(conversation_id)
             successor = self._reading.get(conversation_id)
             if read.held is not None and successor is not None and successor.held is not None:
-                read.held.moved_to(successor.held)
+                read.held.moved_to(successor.held, after=read.queried)
         try:
             window = await self._window(conversation_id, waiting)
             current = self._current.setdefault(conversation_id, [])
