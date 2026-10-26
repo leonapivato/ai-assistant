@@ -152,18 +152,20 @@ refuses an instant earlier than now (ADR-0350 §4:5).
 > instant is computed in the person's zone as it stands when that occurrence is computed.
 
 > **Normative.** A rule may hold a **from**, a local date before which no occurrence falls,
-> and an **until**, the last local date on which one may fall. The hub refuses as *not done*,
-> with the reason, a rule whose from is earlier than today in its zone, whose until is
-> earlier than its from, or that yields no occurrence later than now.
+> and an **until**, the last local date on which one may fall. A from that has passed
+> constrains nothing, so a replace may keep it. The hub refuses as *not done*, with the
+> reason, a rule whose until is earlier than its from, or that yields no occurrence later
+> than now.
 
 > **Normative.** A rule's first occurrence is the first instant its rule yields that is later
 > than now and on or after its from, computed when the task is written.
 
 > **Normative.** When a pushed occurrence of a rule takes its outcome (ADR-0350 §7:6,
 > §8:1–§8:7), its next occurrence is the first instant the rule yields that is later than
-> the instant the ended one was due and later than now, computed then. The plan store writes
-> the ended one's outcome and the next pending occurrence in one step, so a rule is never
-> without a pending occurrence until it ends.
+> the instant the ended one was due, computed then, even where that instant has passed. The
+> plan store writes the ended one's outcome and the next pending occurrence in one step, so a
+> rule is never without a pending occurrence until it ends. A next occurrence that has passed
+> is a missed one, which §4:8 pushes.
 
 > **Normative.** A rule **ends** when the next instant it would yield falls after its until,
 > or when its pending occurrence ends *cancelled*, by a cancel (ADR-0350 §9:5) or by a
@@ -171,18 +173,17 @@ refuses an instant earlier than now (ADR-0350 §4:5).
 > removes the task once nothing of it is live.
 
 > **Normative.** Where the sensor finds a rule's pending occurrence missed (ADR-0350 §8:10),
-> the latest missed instant is found from the rule, between the pending occurrence's instant
-> and now. The plan store records each earlier missed occurrence *skipped* and pushes the
-> latest, in the step that marks it pushed (ADR-0350 §7:5).
+> it computes from the rule every instant the rule yields from the pending occurrence's
+> instant to now. In the step that marks the latest of them pushed (ADR-0350 §7:5), the plan
+> store records the pending occurrence and each other one *skipped*, each with the instant
+> it was due, as the sensor computed them.
 
 > **Normative.** A daylight-saving change reaches a rule's occurrences as §3:4 rules for a
 > local time.
 
-> **Normative.** A task with a rule keeps an ended occurrence only while a task the Task
-> Scheduler holds names that occurrence's activation as its parent, so the lineage and
-> ADR-0350 §7:8 can still read it. The store removes every other ended occurrence in the step
-> that writes the next one, and never reuses an occurrence's number. What ran stays in the
-> episodes (ADR-0350 §7:9).
+> **Normative.** A task with a rule keeps every occurrence while the Task Scheduler holds the
+> task, so each message one of them wrote still links to its task (ADR-0350 §9:1–§9:2), and
+> never reuses an occurrence's number. What ran stays in the episodes (ADR-0350 §7:9).
 
 "Every day at 8" means 8 wherever the person is: a rule follows their zone from the
 occurrence after the zone changes. The occurrence already pending was computed in the old
@@ -195,7 +196,8 @@ it stays in the Task Scheduler until it ends.
 
 > **Normative.** **Skipping** a rule's next occurrence, "skip tomorrow's", is a spawn
 > replacing the reminder (ADR-0350 §9:4) with the same rule, whose from is the local date
-> after the skipped occurrence's.
+> after the skipped occurrence's. Where the rule yields nothing after the skipped one before
+> its until, skipping it is a cancel (ADR-0350 §9:5).
 
 > **Normative.** Only a rule's next occurrence can be skipped. Changing one occurrence of a
 > rule, "tomorrow at 9 instead", is skipping it and a one-off reminder for the new time,
@@ -307,9 +309,9 @@ settled by ADR-0350 §8. Quiet hours are not decided here (§11): the asked time
 > **Normative.** `PlanStore` changes as follows. `PlanStore.settle_occurrence`, for a task
 > with a rule, takes the next occurrence's instant, or none where the rule has ended, and
 > writes it with the outcome in one step (§4:6). `PlanStore.mark_occurrence_pushed` takes,
-> for a missed occurrence of a rule, the latest missed instant and how many it skipped,
-> recording the skipped ones in the same step (§4:8). `PlanStore.cancel_scheduled_task` ends
-> a rule (§4:7). Ended occurrences are kept as §4:10 rules. `PlanStore.write_scheduled_task`
+> for a missed occurrence of a rule, the instants of the occurrences it records skipped and
+> of the one it pushes, written in that one step (§4:8). `PlanStore.cancel_scheduled_task`
+> ends a rule (§4:7). Occurrences are kept as §4:10 rules. `PlanStore.write_scheduled_task`
 > makes §2:5's check in its step, against the task it replaces. `PlanExport` carries the new
 > fields and its `schema_version` advances. Exact signatures are the triad's.
 
@@ -354,7 +356,10 @@ The lanes, each after this decision merges `Accepted`, held by milestone 15:
 > occurrence is computed; a skip, whose replace's from is the day after; an occurrence's
 > outcome and the next occurrence written in one step, with no instant at which the task has
 > nothing pending; a rule missed for three days, which pushes one late occurrence stating
-> that it skipped two; the fixed line on the round limit, written into each suggested place
+> that it skipped two; a restart days after a rule's pushed occurrence whose message is
+> confirmed done, which settles it and then pushes the latest missed one late; a skip of a
+> bounded rule's last occurrence, which is a cancel; "make it 9" on a rule whose from has
+> passed, which replaces it; the fixed line on the round limit, written into each suggested place
 > on the list with the effects listed, and written nowhere where every suggested place is
 > gone; a stop and a restart, which write no fixed line; and each refusal of §2:2, §2:4,
 > §2:5, §3:5, §4:1 and §4:4.
@@ -440,6 +445,10 @@ Read through and not superseded:
 - **A model call per occurrence**, as every task's (ADR-0350's Consequences). The fixed line
   costs none.
 - **One occurrence after a move may come at the old zone's time** (§4:3).
+- **A rule's record grows by one occurrence each time it falls due** while it is held
+  (§4:10). Pruning old ones would cut their messages' links to the task, which ADR-0350
+  §9:1 keeps, so it waits for a decision that supersedes that clause, if the size ever
+  matters.
 - **Only a rule's next occurrence can be skipped**, and "tomorrow at 9 instead" is two
   spawns (§5:2).
 - **A reminder must name a place**, so a reminder set where none can be suggested is
