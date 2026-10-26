@@ -118,6 +118,8 @@ __all__ = [
     "LineageStep",
     "ListedPlace",
     "Spawner",
+    "StartingEntry",
+    "StillLive",
     "TaskEntry",
     "TaskListing",
     "current_spawner",
@@ -599,6 +601,64 @@ class TaskListing:
     spawned: TaskEntry | None = None
     cancelled: TaskEntry | None = None
     listed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class StartingEntry:
+    """An activation pushed from a task and not yet admitted (ADR-0352 §3:4).
+
+    It has no episode yet, so it is shown under its task's ``T`` label, as starting.
+
+    Attributes:
+        task_id: The task whose occurrence was pushed to it.
+    """
+
+    task_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class StillLive:
+    """What an activation set up that is still live below it (ADR-0352 §3:1-§3:6).
+
+    The stop call's result shows it beside the stopped activation's finished work. *Below*
+    is the tasks the activation spawned, and the tasks those tasks' activations spawned in
+    turn, whether or not those activations have ended (§3:2).
+
+    Attributes:
+        tasks: Each task below it with an occurrence pending, in the order written, at
+            most the listing bound of them (§3:3, §3:6).
+        more_tasks: How many more such tasks there are than ``tasks`` shows.
+        activations: Each activation running or pushed from a task below it, oldest
+            first, at most the listing bound of them: a running one as the list pull's
+            running part shows it, one pushed and not yet admitted as starting (§3:4).
+        more_activations: How many more such activations there are than are shown.
+        read: Whether what is below could be read; where it could not, nothing else
+            here says anything, since the stop itself was made.
+    """
+
+    tasks: tuple[TaskEntry, ...] = ()
+    more_tasks: int = 0
+    activations: tuple[ActivationEntry | StartingEntry, ...] = ()
+    more_activations: int = 0
+    read: bool = True
+
+    @property
+    def nothing(self) -> bool:
+        """Whether nothing it set up is still live, as far as it was read (§3:1)."""
+        return (
+            self.read
+            and not self.tasks
+            and not self.activations
+            and not self.more_tasks
+            and not self.more_activations
+        )
+
+    @property
+    def running(self) -> tuple[str, ...]:
+        """Each activation it shows as running, which counts as shown running (§3:7)."""
+        return tuple(
+            one.activation_id for one in self.activations if isinstance(one, ActivationEntry)
+        )
 
 
 _LISTING_KIND: Final = "task_scheduler_listing"

@@ -36,6 +36,10 @@ Other running work you were shown by its E label, in list_tasks' running part, a
 
 $end
 $end
+$if running_work
+Stop or cancel exactly what the person's words cover: each piece of running work and each task they cover, by the labels you were shown, including those a stop's result lists. Keep the rest, and where it is unclear what the words cover, ask which.
+
+$end
 $if offers
 Newer input from the person on this place is offered to this work under offers, by its E label, with what it was understood to mean. Answer each with answer_offer in this round. Take it unless you have already done something it would change that cannot be undone, and then carry it out as part of this work. Otherwise decline it, with the reason in a few words, and it is done once this work ends.
 

@@ -266,6 +266,7 @@ from ai_assistant.orchestration.task_scheduler import (
     SPAWNING_KINDS,
     LineageStep,
     ListedPlace,
+    StillLive,
     lineage_occurrence,
     lineage_steps,
     task_input,
@@ -1953,8 +1954,9 @@ class Engine:
             task_scheduler: The Task Scheduler's settings (ADR-0350 §12:5), or ``None``,
                 the default, for an engine with no Task Scheduler. Wired, its sensor is
                 the engine's long-running task, started with the hub and stopped with it
-                (§7:1); planning is offered spawn, cancel and the list pull (§4:1); and a
-                stop cascades (§9:6). It is refused without the phases.
+                (§7:1); and planning is offered spawn, cancel and the list pull (§4:1). A
+                stop still stops only the activation it names (ADR-0352 §2:1). It is
+                refused without the phases.
 
         Raises:
             TypeError: If ``max_spoken_audio_bytes`` or ``max_payload_bytes`` is
@@ -2134,6 +2136,7 @@ class Engine:
             stop=self._stop,
             held_input_limit=held_input_limit,
             in_progress_limit=in_progress_limit,
+            set_up=self._still_live,
         )
         self._admissions = 0
         self._stories = stories
@@ -2988,20 +2991,21 @@ class Engine:
         Everything up to the mark runs before the first ``await``: the running
         activation is found and its mark set in the one synchronous step that tests
         whether it has ended.
+
+        ADR-0352 §2:1-§2:2: it stops exactly the activation it names and nothing below
+        it. It cancels no scheduled task, stops no other activation and writes no
+        cascade record: what the activation set up stays until a cancel or a stop names
+        it, and the store refuses a spawn of the stopped activation's on its stop record
+        (ADR-0350 §3:3).
         """
         running = self._running_state(activation_id)
-        cascades = self._task_manager is not None
         if running is not None:
             if not running.stop():
                 return ActivationStop.ALREADY_ENDED
-            # §3:4: only once the mark is set is the record written. ADR-0350 §9:6: a
-            # stop command first writes its cascade record, then stops the activation.
-            if cascades:
-                await self._plans.record_cascade(activation_id)
+            # §3:4: only once the mark is set is the record written.
             await self._plans.record_stop(activation_id)
-            await self._cascade(activation_id)
             return ActivationStop.STOPPED
-        if cascades and await self._stop_pushed(activation_id, cascade=True):
+        if self._task_manager is not None and await self._stop_pushed(activation_id):
             return ActivationStop.STOPPED
         episode = await self._memory.get(f"activation:{activation_id}")
         return (
@@ -3019,12 +3023,12 @@ class Engine:
             None,
         )
 
-    async def _stop_pushed(self, activation_id: str, *, cascade: bool) -> bool:
+    async def _stop_pushed(self, activation_id: str) -> bool:
         """Stop an activation the Task Scheduler pushed and has not admitted (ADR-0350 §9:10).
 
         Its stop record is written, so admission refuses it, and the sensor's admission
-        reads the mark set here first, so nothing starts. A stop command's cascade record
-        is written first (§9:6).
+        reads the mark set here first, so nothing starts. Nothing below it is reached
+        (ADR-0352 §2:1).
 
         An activation that was admitted is not one of these, though its occurrence may
         still read pushed while its outcome is written: it ran, so a stop naming it once
@@ -3042,35 +3046,35 @@ class Engine:
             return False
         if pending:
             self._pushed[activation_id] = True
-        if cascade and pending:
-            await self._plans.record_cascade(activation_id)
         pushed = await self._plans.stop_pushed_activation(activation_id)
-        if cascade and pushed and not pending:
-            await self._plans.record_cascade(activation_id)
-        if cascade and (pending or pushed):
-            await self._cascade(activation_id)
         return pending or pushed
 
-    async def _stop_one(self, activation_id: str) -> ActivationStop:
-        """Stop one running or pushed activation, as a stop does, with no cascade (§9:6).
+    async def _still_live(
+        self,
+        activation_id: str,
+        /,
+        *,
+        person: str,
+        viewer: str | None,
+        supply: TurnSupply | None,
+    ) -> StillLive | None:
+        """What ``activation_id`` set up that is still live (ADR-0352 §3:1-§3:6).
 
-        The cascade's walk stops each activation it finds below a stopped one this way:
-        the cascade record above them already keeps everything below from being pushed.
+        The Task Manager's read, for the stop call's result; ``None`` where no Task
+        Scheduler is wired, so nothing was set up.
         """
-        running = self._running_state(activation_id)
-        if running is not None:
-            if not running.stop():
-                return ActivationStop.ALREADY_ENDED
-            await self._plans.record_stop(activation_id)
-            return ActivationStop.STOPPED
-        if await self._stop_pushed(activation_id, cascade=False):
-            return ActivationStop.STOPPED
-        return ActivationStop.NO_SUCH_ACTIVATION
+        manager = self._task_manager
+        if manager is None:
+            return None
+        return await manager.still_live(activation_id, person=person, viewer=viewer, supply=supply)
 
-    async def _cascade(self, activation_id: str) -> None:
-        """The stop's walk below ``activation_id`` (ADR-0350 §9:6), where it is wired."""
-        if self._task_manager is not None:
-            await self._task_manager.cascade(activation_id)
+    def _starting(self, activation_id: str) -> bool:
+        """Whether an occurrence was pushed to ``activation_id``, to start it (ADR-0352 §3:4).
+
+        Pushed and not yet admitted, and no stop has named it meanwhile, which refuses
+        its admission (ADR-0350 §9:10).
+        """
+        return self._pushed.get(activation_id) is False
 
     async def episodes(
         self,
@@ -6725,7 +6729,7 @@ class Engine:
             running=lambda: (one.state for one in self._running if one.state is not None),
             # §7:8: a task is kept while its parent, the activation that spawned it, runs.
             is_running=lambda one: self._running_state(one) is not None,
-            stop_one=self._stop_one,
+            starting=self._starting,
             wake=self._wake_sensor,
             limits=seams.limits,
             zones=self._task_zones,

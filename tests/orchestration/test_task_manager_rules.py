@@ -19,7 +19,6 @@ from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ActionRequest,
-    ActivationStop,
     DueAfterTasks,
     DueAt,
     DueOnRule,
@@ -96,16 +95,13 @@ class _World:
             memory=self.memory,
             running=lambda: (),
             is_running=lambda _one: False,
-            stop_one=self._stop_one,
+            starting=lambda _one: False,
             wake=lambda: None,
             limits=LIMITS,
             zones=PersonZones(default=HUB, people=people),
             now=lambda: self.now,
         )
         self.calls = ScheduledTaskCalls(manager=self.manager, now=lambda: self.now)
-
-    async def _stop_one(self, _activation_id: str) -> ActivationStop:
-        return ActivationStop.STOPPED
 
     async def task(self, task_id: str) -> ScheduledTask:
         (held,) = await self.plans.scheduled_tasks([task_id])

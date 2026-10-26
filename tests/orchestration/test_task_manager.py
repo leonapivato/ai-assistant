@@ -1,7 +1,8 @@
-"""The Task Manager, its cascade and its tidying, planning's calls and the place list.
+"""The Task Manager, what a stop leaves live, its tidying, planning's calls and the place list.
 
-ADR-0350 §4, §5:8-§5:11, §7:8, §9, §10, over the canonical fakes, with the engine's
-account of what runs and its stop stood in for by a record of what was asked.
+ADR-0350 §4, §5:8-§5:11, §7:8, §9, §10, and ADR-0352 §3:1-§3:6, over the canonical fakes,
+with the engine's account of what runs and of what is starting stood in for by sets a case
+fills.
 """
 
 from __future__ import annotations
@@ -29,7 +30,6 @@ from ai_assistant.core.errors import ClaimStopped, ConversationStoreError, Plann
 from ai_assistant.core.types import (
     OWNER_PERSON_ID,
     ActionRequest,
-    ActivationStop,
     DueAfterTasks,
     DueAt,
     OccurrenceState,
@@ -56,6 +56,8 @@ from ai_assistant.orchestration.task_scheduler import (
     SPAWN,
     ActivationEntry,
     Spawner,
+    StartingEntry,
+    StillLive,
     TaskListing,
     decode_listing,
     encode_listing,
@@ -66,7 +68,13 @@ from ai_assistant.testing import FakeConversationStore, FakeMemoryStore, FakePla
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import ActivationEffect, Conversation, FrozenJson, ToolDefinition
+    from ai_assistant.core.types import (
+        ActivationEffect,
+        Conversation,
+        FrozenJson,
+        ScheduledTask,
+        ToolDefinition,
+    )
 
 
 class _World:
@@ -78,24 +86,20 @@ class _World:
         self.plans = FakePlanStore(now=lambda: AT) if plans is None else plans
         self.memory = FakeMemoryStore(now=lambda: AT)
         self.running: set[str] = set()
-        self.stopped: list[str] = []
+        self.starting: set[str] = set()
         self.woken = 0
         self.manager = TaskManager(
             plans=self.plans,
             memory=self.memory,
             running=lambda: (),
             is_running=lambda one: one in self.running,
-            stop_one=self._stop_one,
+            starting=lambda one: one in self.starting,
             wake=self._wake,
             limits=limits,
             zones=PersonZones(default=ZoneInfo("UTC")),
             now=lambda: AT,
         )
         self.calls = ScheduledTaskCalls(manager=self.manager, now=lambda: AT)
-
-    async def _stop_one(self, activation_id: str) -> ActivationStop:
-        self.stopped.append(activation_id)
-        return ActivationStop.STOPPED
 
     def _wake(self) -> None:
         self.woken += 1
@@ -134,11 +138,47 @@ async def _spawn(world: _World, spawner: Spawner, **arguments: FrozenJson) -> To
         )
 
 
-# --- the stop's cascade (§9:6) -------------------------------------------------------------
+# --- what a stop leaves live (ADR-0352 §3:1-§3:6) -------------------------------------------
 
 
-async def test_a_stop_cancels_a_grandchild_below_a_child_that_ended() -> None:
-    """§13:3: a stop of a step whose child ended after spawning a grandchild still pending."""
+async def _still_live(world: _World, activation_id: str) -> StillLive:
+    return await world.manager.still_live(
+        activation_id, person=OWNER_PERSON_ID, viewer=activation(), supply=None
+    )
+
+
+async def test_nothing_set_up_is_still_live_for_an_activation_that_spawned_nothing() -> None:
+    """§3:1: where there is none, the result says that nothing it set up is still live."""
+    world = _World()
+
+    left = await _still_live(world, activation())
+
+    assert left.nothing
+    assert left.read
+
+
+async def test_a_pending_task_it_spawned_is_still_live_and_stays_pending() -> None:
+    """§2:4, §3:3: the read cancels nothing, and shows the task with its parts."""
+    world = _World()
+    step = activation()
+    task = await write_task(
+        world.plans, step, when=DueAt(at=AT + timedelta(minutes=40)), instruction="the notes"
+    )
+
+    left = await _still_live(world, step)
+
+    (entry,) = left.tasks
+    assert entry.task_id == task.id
+    assert entry.instruction == "the notes"
+    assert entry.author == "person"
+    assert "2026" in entry.falls_due
+    assert entry.parent == step
+    assert not left.nothing
+    assert await world.held(task.id) is OccurrenceState.PENDING
+
+
+async def test_a_grandchild_below_a_child_that_ended_is_still_live() -> None:
+    """§3:2, §7:7: the walk reads the tasks of activations that have ended too."""
     world = _World()
     step = activation()
     child = await write_task(world.plans, step)
@@ -146,43 +186,85 @@ async def test_a_stop_cancels_a_grandchild_below_a_child_that_ended() -> None:
     grandchild = await write_task(world.plans, ran, when=DueAt(at=AT + timedelta(days=1)))
     await world.plans.settle_occurrence(ran, OccurrenceState.DONE)
 
-    await world.manager.cascade(step)
+    left = await _still_live(world, step)
 
-    # Cancelled, and then removed, since nothing of it or below it is live (§7:8).
-    assert await world.held(grandchild.id) is None
-    assert not await world.plans.person_scheduled_tasks(OWNER_PERSON_ID, [OccurrenceState.PENDING])
-    assert world.stopped == []
+    assert [one.task_id for one in left.tasks] == [grandchild.id]
+    assert left.activations == ()
 
 
-async def test_a_next_step_pushed_before_the_cancel_is_stopped_in_turn() -> None:
-    """§13:3, §9:6: where a push wins against the cancel, its activation is stopped."""
+async def test_an_activation_pushed_and_not_admitted_is_shown_starting_under_its_task() -> None:
+    """§3:4: pushed and not yet admitted, it is shown under its task's label as starting."""
     world = _World()
     step = activation()
     following = await write_task(world.plans, step)
     started = await pushed(world.plans, following)
+    world.starting.add(started)
 
-    await world.manager.cascade(step)
+    left = await _still_live(world, step)
 
-    assert world.stopped == [started]
+    assert left.tasks == ()
+    assert left.activations == (StartingEntry(task_id=following.id),)
+    assert left.running == ()
 
 
-async def test_after_a_cascade_record_nothing_below_is_pushed() -> None:
-    """§7:5, §13:3: a crash after the record, before the walk cancelled a pending child."""
+async def test_an_activation_that_ended_or_was_stopped_from_a_task_below_is_not_live() -> None:
+    """§3:1: only what is running or pushed is shown; one that ended is not."""
     world = _World()
-    for settled_step in (False, True):
-        top = activation()
-        if settled_step:
-            # A scheduled step whose own occurrence has already settled.
-            above = await write_task(world.plans, activation())
-            top = await pushed(world.plans, above)
-            await world.plans.settle_occurrence(top, OccurrenceState.DONE)
-        child = await write_task(world.plans, top)
-        await world.plans.record_cascade(top)
+    step = activation()
+    following = await write_task(world.plans, step)
+    await pushed(world.plans, following)
 
-        answer = await world.plans.mark_occurrence_pushed(child.id, 1, activation())
+    left = await _still_live(world, step)
 
-        assert answer.value == "cascade_cancelled"
-        assert await world.held(child.id) is OccurrenceState.CANCELLED
+    assert left.nothing
+
+
+async def test_each_part_shows_at_most_the_listing_bound_and_counts_the_rest() -> None:
+    """§3:6: tasks in the order written, and how many more there are."""
+    world = _World(limits=TaskManagerLimits(chain_limit=10, pending_limit=50, listing_bound=2))
+    step = activation()
+    written = [
+        await write_task(world.plans, step, when=DueAt(at=AT + timedelta(hours=hour)))
+        for hour in (1, 2, 3)
+    ]
+
+    left = await _still_live(world, step)
+
+    assert [one.task_id for one in left.tasks] == [one.id for one in written[:2]]
+    assert left.more_tasks == 1
+
+
+async def test_a_marked_task_is_shown_with_its_text_withheld() -> None:
+    """§3:5: a task carrying the outside-content mark shows its mark and no text."""
+    world = _World()
+    step = activation()
+    spawner = _spawner(step, read_outside_content=True)
+    spawned = await _spawn(world, spawner, delay_minutes=30)
+    assert isinstance(spawned, ToolResult)
+
+    left = await _still_live(world, step)
+
+    (entry,) = left.tasks
+    assert entry.outside
+    assert entry.instruction is None
+
+
+async def test_a_store_that_cannot_be_read_says_what_it_set_up_was_not_read() -> None:
+    """The stop stands; nothing is claimed of what it set up."""
+
+    class _Failing(FakePlanStore):
+        async def spawned_tasks(
+            self, activation_ids: Sequence[str], /
+        ) -> tuple[ScheduledTask, ...]:
+            msg = "the store is down"
+            raise PlanningError(msg)
+
+    world = _World(plans=_Failing(now=lambda: AT))
+
+    left = await _still_live(world, activation())
+
+    assert not left.read
+    assert not left.nothing
 
 
 # --- keeping the schedule (§7:8) -----------------------------------------------------------

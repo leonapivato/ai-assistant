@@ -196,7 +196,11 @@ from ai_assistant.orchestration.story_calls import (
     STORY_CALL_CAPABILITIES,
     TIDY_STORY_CAPABILITY,
 )
-from ai_assistant.orchestration.task_scheduler import SPAWN_CAPABILITY, place_description
+from ai_assistant.orchestration.task_scheduler import (
+    SPAWN_CAPABILITY,
+    StartingEntry,
+    place_description,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -228,6 +232,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.task_scheduler import (
         ActivationEntry,
         ListedPlace,
+        StillLive,
         TaskEntry,
         TaskListing,
     )
@@ -749,6 +754,9 @@ class PeerShown:
         absorbed_by: For a refused stop call, the activation that absorbed it (§4:9).
         answered: For an answer call, what it came to: ``taken``, ``declined`` or
             ``withdrawn``.
+        set_up: For a stop call, what the activation set up that is still live below it
+            (ADR-0352 §3:1-§3:6); ``None`` where nothing could have been set up, with no
+            Task Scheduler wired.
     """
 
     activation_id: str
@@ -757,6 +765,7 @@ class PeerShown:
     stopped: bool | None = None
     absorbed_by: str | None = None
     answered: str | None = None
+    set_up: StillLive | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1812,8 +1821,42 @@ class _Request:
         view = one.view
         if view is None:
             shown["work"] = _PEER_UNREAD
-            return shown
-        return shown | self._peer_work(view)
+        else:
+            shown |= self._peer_work(view)
+        if one.set_up is not None:
+            shown["set_up_still_live"] = self._set_up(one.set_up)
+        return shown
+
+    def _set_up(self, left: StillLive) -> object:
+        """What a stopped activation set up that is still live (ADR-0352 §3:1-§3:6).
+
+        Each task as the Task Scheduler's calls show one, under its ``T`` label, and each
+        activation as the list pull's running part shows one, under its ``E`` label, or,
+        pushed and not yet admitted, under its task's label as starting; each part says
+        how many more there are past the listing bound. Every label shown here counts as
+        shown (§3:7, ADR-0307 §5:3).
+        """
+        if not left.read:
+            return _SET_UP_UNREAD
+        if left.nothing:
+            return _NOTHING_SET_UP
+        shown: dict[str, object] = {
+            "scheduled": [self._task(one) for one in left.tasks] or _NONE_FOUND
+        }
+        if left.more_tasks:
+            shown["more_scheduled_not_shown"] = left.more_tasks
+        shown["running"] = [
+            {
+                "scheduled_task": self._book.label(LabelKind.SCHEDULED_TASK, one.task_id),
+                "status": _STARTING,
+            }
+            if isinstance(one, StartingEntry)
+            else self._running(one)
+            for one in left.activations
+        ] or _NONE_FOUND
+        if left.more_activations:
+            shown["more_running_not_shown"] = left.more_activations
+        return shown
 
     def _peer_work(self, view: PeerView) -> dict[str, object]:
         """What a peer view shows of an activation's own work (§6:9)."""
@@ -2535,6 +2578,12 @@ def _text(projected: ProjectedText) -> str:
 
 #: What a peer view's reader is told where the episode could not be read (§6:7).
 _PEER_UNREAD: Final = "could not be read"
+#: ADR-0352 §3:1: a stop call's result where the stopped activation set up nothing live.
+_NOTHING_SET_UP: Final = "nothing it set up is still live"
+#: Where what it set up could not be read: the stop stands, and nothing is claimed of it.
+_SET_UP_UNREAD: Final = "could not be read, so nothing is known of what it set up"
+#: ADR-0352 §3:4: an activation pushed from a task and not yet admitted.
+_STARTING: Final = "starting"
 #: What a peer's meaning is, read as provisional (ADR-0276 §4:6, ADR-0349 §6:9).
 _PROVISIONAL: Final = "provisional, as understood so far: "
 
