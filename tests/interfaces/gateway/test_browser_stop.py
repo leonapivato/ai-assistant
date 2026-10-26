@@ -12,6 +12,7 @@ the engine pushes a state that changed (ADR-0296 §4:9), and its stop on
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
@@ -60,6 +61,7 @@ class _Scripted:
         self._state = ConversationState()
         self.answer = ActivationStop.STOPPED
         self.answers: dict[str, ActivationStop] = {}
+        self.holds: dict[str, asyncio.Event] = {}
         self.stops: list[str] = []
         held = drive.engine.conversation
 
@@ -69,6 +71,8 @@ class _Scripted:
 
         async def stop_activation(activation_id: Identifier, /) -> ActivationStop:
             self.stops.append(activation_id)
+            if activation_id in self.holds:
+                await self.holds[activation_id].wait()
             return self.answers.get(activation_id, self.answer)
 
         drive.engine.conversation = conversation  # type: ignore[method-assign]
@@ -279,4 +283,37 @@ async def test_an_activation_starting_after_a_stop_is_offered_the_control(
         await expect(stop).to_be_visible(timeout=_FOLLOWED)
         await stop.click()
         await expect(stop).to_be_hidden()
+        assert scripted.stops == [_ACTIVATION, _NEXT]
+
+
+async def test_a_stop_still_out_holds_back_no_stop_for_a_newer_activation(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A newer activation the state names while one stop is out is stopped at once.
+
+    The stop out for the first is not sent again, "Stopping…" stays until it answers, and
+    the control is gone once both have landed.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        scripted = await _open(drive)
+        scripted.holds[_ACTIVATION] = asyncio.Event()
+        scripted.state = ConversationState(working=True, activation_ids=(_ACTIVATION,))
+        stop = drive.page.locator("#chat-stop")
+        said = drive.page.locator("#chat-stop-said")
+        await expect(stop).to_be_visible(timeout=_FOLLOWED)
+        await stop.click()
+        await expect(said).to_have_text("Stopping…")
+        await expect(stop).to_be_disabled()
+
+        scripted.state = ConversationState(working=True, activation_ids=(_ACTIVATION, _NEXT))
+
+        await expect(stop).to_be_enabled(timeout=_FOLLOWED)
+        await stop.click()
+        await expect(stop).to_be_disabled()
+        await expect(said).to_have_text("Stopping…")
+
+        scripted.holds[_ACTIVATION].set()
+
+        await expect(stop).to_be_hidden()
+        await expect(said).to_contain_text("Stopped. Nothing new starts in this")
         assert scripted.stops == [_ACTIVATION, _NEXT]
