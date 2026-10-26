@@ -525,15 +525,19 @@ class ChatReader:
                 waiting = await self._conversations.untaken_messages(
                     conversation_id, limit=_WAITING_ALL
                 )
-                if read.again or self._wait_end(conversation_id) > self._clock():
+                if self._wait_end(conversation_id) > self._clock():
                     # A message noticed during those reads moved the wait's end, its cap
-                    # still the first message's (ADR-0332 §5:1-§5:2); and whether or not
-                    # it did, the read may have missed it, so it reads again.
+                    # still the first message's (ADR-0332 §5:1-§5:2).
                     continue
                 handed = self._handed.get(conversation_id, set())
                 waiting = tuple(one for one in waiting if one.position not in handed)
                 if not waiting:
+                    if read.again:
+                        continue
                     return
+                # The wait is over, at its cap or with none at all, so what was read is
+                # taken in now; a message noticed during the read, which it may have
+                # missed, starts a read of its own (:meth:`_admit`).
                 await self._admit(conversation_id, read, waiting)
                 return
         except asyncio.CancelledError:
@@ -573,6 +577,11 @@ class ChatReader:
         positions = {one.position for one in waiting}
         handed = self._handed.setdefault(conversation_id, set())
         handed.update(positions)
+        if read.again:
+            # Noticed while what waits was read, so possibly missed by it: the message
+            # is read again, by a read of its own with a start wait of its own, which
+            # what this activation was handed is no part of.
+            self.notice(conversation_id)
         try:
             window = await self._window(conversation_id, waiting)
             current = self._current.setdefault(conversation_id, [])
