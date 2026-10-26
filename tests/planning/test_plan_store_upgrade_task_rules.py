@@ -11,7 +11,9 @@ again as a second try; ``t-waiting``, waiting on ``t-pending``; and ``t-cancelle
 The head opens a copy and must upgrade it in place (ADR-0326 §4:1, ADR-0340 §9:4): carry
 every record whole (§4:4), rewrite no row, and move the label to 17, and leave the file
 exactly as it found it where the open fails (§4:3). The upgraded file then holds a task
-with a rule like any other.
+with a rule like any other. The step past 17 retires the cascade record (ADR-0352 §2:6),
+which names an activation outside every lineage, so it reaches no task and the table
+goes with nothing else changed.
 """
 
 from __future__ import annotations
@@ -58,6 +60,8 @@ _TABLES = {
     "scheduled_tasks",
     "cascade_records",
 }
+#: The tables once the step past 17 retires ``cascade_records`` (ADR-0352 §6:4).
+_TABLES_AFTER = _TABLES - {"cascade_records"}
 
 
 def _now() -> datetime:
@@ -123,10 +127,9 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     finally:
         store.close()
 
-    assert _label(legacy) == "17"
-    assert export.schema_version == 25
+    assert _label(legacy) == "18"
+    assert export.schema_version == 26
     assert export.stopped_activations == ("act-before-stopped",)
-    assert export.cascades == ("act-before-cascade",)
     effects = {one.id: one for one in export.activation_effects}
     assert effects["spawn-pending"].outcome is ToolOutcome.SUCCEEDED
     assert effects["spawn-done"].outcome is None
@@ -149,11 +152,11 @@ async def test_the_previous_releases_file_is_upgraded_and_every_record_read_back
     assert tasks["t-waiting"].when == DueAfterTasks(tasks=("t-pending",))
     assert tasks["t-waiting"].occurrences[0].due_at is None
     assert [one.state for one in tasks["t-cancelled"].occurrences] == [OccurrenceState.CANCELLED]
-    # The step moves the label alone, and rewrites no row.
+    # The steps move the label and retire the cascade table, and rewrite no row.
     after = _dump(legacy)
-    assert set(after) == _TABLES
-    assert {table: after[table] for table in before if table != "meta"} == {
-        table: rows for table, rows in before.items() if table != "meta"
+    assert set(after) == _TABLES_AFTER
+    assert {table: after[table] for table in _TABLES_AFTER if table != "meta"} == {
+        table: before[table] for table in _TABLES_AFTER if table != "meta"
     }
 
 
@@ -204,7 +207,7 @@ async def test_the_upgraded_file_holds_a_rule_and_keeps_what_it_carried(legacy: 
         assert [one.id for one in carried] == ["t-done", "t-step"]
     finally:
         reopened.close()
-    assert _label(legacy) == "17"
+    assert _label(legacy) == "18"
 
 
 async def test_a_failed_upgrade_leaves_the_file_as_it_found_it(legacy: Path) -> None:

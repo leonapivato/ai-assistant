@@ -744,25 +744,6 @@ class _StopPushedActivationOp(_ScheduleOp):
         assert await store.stopped_activations(["act-B"]) == ("act-B",)
 
 
-class _RecordCascadeOp(_ScheduleOp):
-    """``record_cascade`` (§9:6)."""
-
-    name = "record_cascade"
-
-    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
-        """Record a cascade below act-spawner-A — the call that is cancelled."""
-        return store.record_cascade("act-spawner-A")
-
-    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
-        """Record one below act-B concurrently."""
-        return store.record_cascade("act-B")
-
-    async def verify(self, store: PlanStore) -> None:
-        """act-B's cascade record is held."""
-        await super().verify(store)
-        assert "act-B" in (await store.export()).cascades
-
-
 class _ConfirmMessageEffectOp(_ScheduleOp):
     """``confirm_message_effect`` (§8:11)."""
 
@@ -922,14 +903,13 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _WriteObservationOp,
     _ObservationsOp,
     _ObserverCallsSinceOp,
-    # ADR-0350 §12:3's fifteen members, each its own lock site: eight writes and
-    # seven reads.
+    # ADR-0350 §12:3's fourteen members, each its own lock site: seven writes and
+    # seven reads (ADR-0352 §6:1 removed the eighth write, ``record_cascade``).
     _WriteScheduledTaskOp,
     _CancelScheduledTaskOp,
     _MarkOccurrencePushedOp,
     _SettleOccurrenceOp,
     _StopPushedActivationOp,
-    _RecordCascadeOp,
     _ConfirmMessageEffectOp,
     _RemoveScheduledTaskOp,
     _ScheduledTasksOp,
@@ -1024,7 +1004,7 @@ class PlanStoreContract:
         await store.record_stop("act-1")
 
         export = await store.export()
-        assert export.schema_version == 25
+        assert export.schema_version == 26
         # ADR-0309 §5: the old path's sections left the document.
         assert set(export.model_dump()) == {
             "schema_version",
@@ -1032,9 +1012,9 @@ class PlanStoreContract:
             "stopped_activations",
             "activation_effects",
             "observations",
-            # ADR-0350 §12:3: the Task Scheduler's tasks and cascade records.
+            # ADR-0350 §12:3: the Task Scheduler's tasks; ADR-0352 §6:3 removed
+            # ``cascades``.
             "scheduled_tasks",
-            "cascades",
         }
         assert sorted(export.stopped_activations) == ["act-1", "act-2"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
@@ -1651,7 +1631,7 @@ class PlanStoreContract:
         await store.finish_activation_effect("e1", ToolOutcome.SUCCEEDED)
 
         export = await store.export()
-        assert export.schema_version == 25
+        assert export.schema_version == 26
         assert [one.id for one in export.activation_effects] == ["e1", "m1"]
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -1898,7 +1878,7 @@ class PlanStoreContract:
         await store.record_stop("act-stopped")
 
         export = await store.export()
-        assert export.schema_version == 25
+        assert export.schema_version == 26
         assert export.observations == (a, b)
         assert type(export).model_validate_json(export.model_dump_json()) == export
 
@@ -2460,25 +2440,23 @@ class PlanStoreContract:
         with pytest.raises(PlanningError):
             await store.mark_occurrence_pushed("t2", 0, "act-2")
 
-    async def test_a_push_below_a_cascade_record_ends_the_occurrence_cancelled(
-        self, store: PlanStore
-    ) -> None:
-        """§7:5, §9:6: its task's parent, or the parent of any task above it, refuses it."""
+    async def test_a_push_below_a_stopped_activation_is_pushed(self, store: PlanStore) -> None:
+        """ADR-0352 §2:3, §7:9: nothing in a task's lineage refuses its push.
+
+        A stop record on the task's parent, and on the parent of the task above it,
+        leaves the push as it is: what a stopped activation set up falls due as its when
+        gives (§2:4).
+        """
         await _written(store, "t1", spawner="act-0")
         await _step(store, "t1", "act-1")
         await _written(store, "t2", spawner="act-1")
-        await store.settle_occurrence("act-1", OccurrenceState.DONE)
-        await _written(store, "t3", spawner="act-unrelated")
+        await store.settle_occurrence("act-1", OccurrenceState.STOPPED)
+        await store.record_stop("act-0")
+        await store.record_stop("act-1")
 
-        await store.record_cascade("act-0")
-        await store.record_cascade("act-0")
-
-        assert await store.mark_occurrence_pushed("t2", 1, "act-2") is (
-            OccurrencePush.CASCADE_CANCELLED
-        )
-        assert await _state(store, "t2") is OccurrenceState.CANCELLED
-        assert await store.mark_occurrence_pushed("t3", 1, "act-3") is OccurrencePush.PUSHED
-        assert (await store.export()).cascades == ("act-0",)
+        assert await store.mark_occurrence_pushed("t2", 1, "act-2") is OccurrencePush.PUSHED
+        assert await _state(store, "t2") is OccurrenceState.PUSHED
+        assert await store.stopped_activations(["act-2"]) == ()
 
     @pytest.mark.parametrize(
         "outcome",
@@ -2631,21 +2609,22 @@ class PlanStoreContract:
     async def test_the_export_carries_the_schedule_and_clear_erases_it(
         self, store: PlanStore
     ) -> None:
-        """§12:3: every task in the order written, every cascade record, and clear erases both."""
+        """§12:3: every task in the order written, and clear erases them, each counted.
+
+        Two tasks and their two spawns' effect records are four; no cascade record is
+        held to count (ADR-0352 §6:3).
+        """
         await _written(store, "t2")
         await _written(store, "t1", spawner="act-2")
-        await store.record_cascade("act-9")
 
         exported = await store.export()
         removed = await store.clear()
 
-        assert exported.schema_version == 25
+        assert exported.schema_version == 26
         assert [one.id for one in exported.scheduled_tasks] == ["t2", "t1"]
-        assert exported.cascades == ("act-9",)
-        assert removed == 5
+        assert removed == 4
         cleared = await store.export()
         assert cleared.scheduled_tasks == ()
-        assert cleared.cascades == ()
 
     async def test_a_task_read_or_returned_cannot_edit_stored_state(self, store: PlanStore) -> None:
         """A returned task is a detached snapshot, as every record here is."""
@@ -2940,40 +2919,48 @@ class PlanStoreContract:
         assert settled.ended
         assert (await store.cancel_scheduled_task("t1")).reason is TaskRefusal.NOTHING_PENDING
 
-    async def test_a_cascade_at_a_rules_first_push_ends_it(self, store: PlanStore) -> None:
-        """ADR-0340 §4:7, ADR-0350 §7:5: cancelled by the cascade, with no successor written."""
+    async def test_a_stop_above_a_rule_leaves_its_first_push_and_successor(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0352 §2:5: no stop ends a rule; its first push writes what it always writes."""
         await _rule_written(store, "t1", spawner="act-0")
-        await store.record_cascade("act-0")
+        await store.record_stop("act-0")
 
         answer = await store.mark_occurrence_pushed(
             "t1", 1, "act-1", rule=RulePush(skipped=(_due(1),), latest=_due(2), successor=_due(3))
         )
 
-        assert answer is OccurrencePush.CASCADE_CANCELLED
-        (occurrence,) = (await _held(store, "t1")).occurrences
-        assert occurrence.state is OccurrenceState.CANCELLED
+        assert answer is OccurrencePush.PUSHED
+        assert [one.state for one in (await _held(store, "t1")).occurrences] == [
+            OccurrenceState.SKIPPED,
+            OccurrenceState.SKIPPED,
+            OccurrenceState.PUSHED,
+            OccurrenceState.PENDING,
+        ]
 
-    async def test_a_cascade_at_a_rules_push_again_cancels_its_successor_too(
+    async def test_a_stop_above_a_rule_leaves_its_push_again_and_successor(
         self, store: PlanStore
     ) -> None:
-        """ADR-0340 §4:7: the cascade refuses every occurrence of the task, so the rule ends.
+        """ADR-0352 §2:4-§2:5: after a restart, what is below a stop is pushed again as any is.
 
         An occurrence pushed again after a restart is pending beside its successor; a
-        cascade found at its push ends both cancelled, so nothing of the rule holds a
-        pending slot or keeps the task once it has ended.
+        stop record on the rule's parent refuses neither, so the push again lands and
+        the successor stays pending.
         """
         await _rule_written(store, "t1", spawner="act-0")
         await store.mark_occurrence_pushed("t1", 1, "act-1", rule=RulePush(successor=_due(1)))
         await store.settle_occurrence("act-1", OccurrenceState.PENDING)
-        await store.record_cascade("act-0")
+        await store.record_stop("act-0")
 
         answer = await store.mark_occurrence_pushed("t1", 1, "act-1b")
 
-        assert answer is OccurrencePush.CASCADE_CANCELLED
+        assert answer is OccurrencePush.PUSHED
         held = await _held(store, "t1")
-        assert [one.state for one in held.occurrences] == [OccurrenceState.CANCELLED] * 2
-        assert not held.pending
-        assert await store.remove_scheduled_task("t1")
+        assert [one.state for one in held.occurrences] == [
+            OccurrenceState.PUSHED,
+            OccurrenceState.PENDING,
+        ]
+        assert held.pending
 
     async def test_a_skip_while_a_rules_occurrence_runs_replaces_it(self, store: PlanStore) -> None:
         """ADR-0340 §5:1, §4:6: the pending next is there for a replace to reach.
@@ -3023,7 +3010,7 @@ class PlanStoreContract:
     async def test_the_export_carries_a_rule_whole_and_clear_erases_it(
         self, store: PlanStore
     ) -> None:
-        """ADR-0340 §9:3: every occurrence, in order, at ``schema_version`` 25."""
+        """ADR-0340 §9:3: every occurrence, in order, at ``schema_version`` 26 (ADR-0352 §6:3)."""
         await _rule_written(store, "t1")
         await store.mark_occurrence_pushed(
             "t1", 1, "act-1", rule=RulePush(skipped=(_due(1),), latest=_due(2), successor=_due(3))
@@ -3033,7 +3020,7 @@ class PlanStoreContract:
         exported = await store.export()
         await store.clear()
 
-        assert exported.schema_version == 25
+        assert exported.schema_version == 26
         assert exported.scheduled_tasks == (held,)
         assert len(exported.scheduled_tasks[0].occurrences) == 4
         assert (await store.export()).scheduled_tasks == ()

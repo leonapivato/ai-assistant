@@ -313,7 +313,6 @@ async def test_a_stop_of_a_pushed_id_with_admission_held_starts_nothing() -> Non
         await until(ended, what="the occurrence to end stopped")
         assert await harness.memory.get(f"activation:{pushed_id}") is None
         assert await _schedule_episodes(harness) == []
-        assert (await plans.export()).cascades == (), "ADR-0352 §2:2: no cascade record"
     finally:
         await harness.engine.aclose()
 
@@ -370,7 +369,6 @@ async def test_a_stop_command_leaves_what_its_activation_spawned_and_it_still_fa
         release.set()
 
         held = await harness.plans.export()
-        assert held.cascades == (), "no stop writes a cascade record (§2:2)"
         assert running in held.stopped_activations
         (kept,) = held.scheduled_tasks
         assert kept.id == reminder.id
@@ -713,7 +711,6 @@ async def test_a_stop_of_an_ended_activation_awaiting_its_outcome_changes_nothin
         assert await harness.engine.stop_activation(ended) is ActivationStop.ALREADY_ENDED
 
         held = await plans.export()
-        assert held.cascades == ()
         assert ended not in held.stopped_activations
         (following,) = [one for one in held.scheduled_tasks if one.id != first.id]
         assert following.pending
@@ -810,8 +807,6 @@ async def test_a_step_stopped_before_its_next_steps_write_lands_writes_no_next_s
         assert episode.processing_record is not None
         assert episode.processing_record.activation_id == running
         assert await plans.spawned_tasks([running]) == (), "the spawn was refused"
-        held = await plans.export()
-        assert held.cascades == ()
     finally:
         await harness.engine.aclose()
 
@@ -839,7 +834,5 @@ async def test_a_step_stopped_after_its_next_steps_write_landed_leaves_it_pendin
         assert manager is not None
         left = await manager.still_live(running, person=OWNER_PERSON_ID, viewer=None, supply=None)
         assert [one.task_id for one in left.tasks] == [following.id]
-        held = await plans.export()
-        assert held.cascades == ()
     finally:
         await harness.engine.aclose()

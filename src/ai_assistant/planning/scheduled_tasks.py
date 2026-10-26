@@ -3,8 +3,11 @@
 ADR-0350 puts the Task Scheduler's content in the plan store, because a task, the spawn's
 effect claim and the stop that refuses it are decided in one step (§3:3), and §12:3
 lists what the store decides of them: the write with its replace and its limits (§9:4,
-§9:7-§9:9), the cancel (§9:5), the push and its cascade check (§7:5), an occurrence's
-outcome (§7:6, §8), and the removal once nothing of a task or below it is live (§7:8).
+§9:7-§9:9), the cancel (§9:5), the push (§7:5), an occurrence's outcome (§7:6, §8), and
+the removal once nothing of a task or below it is live (§7:8). No push is refused below a
+stopped activation (ADR-0352 §2:3); what is left of the cascade record is the SQLite
+store's upgrade that retires it, decided here too (:func:`decide_cascade_retirement`,
+ADR-0352 §2:6).
 The decisions are written here rather than in each store, as
 :mod:`ai_assistant.planning.activation_effects` writes the claim's, because two
 statements of one rule are two places for it to drift. Each store's job is the
@@ -73,14 +76,12 @@ class Schedule:
     Attributes:
         tasks: Every task the store holds, by id, in the order written. A decision
             replaces an entry rather than mutating the frozen record.
-        cascades: The activation ids a cascade record names (ADR-0350 §9:6).
         now: The store's clock, read once for the step: when an occurrence ends.
         changed: The ids of the tasks the step wrote, new or rewritten, in order.
         removed: The ids of the tasks the step removed.
     """
 
     tasks: dict[str, ScheduledTask]
-    cascades: Collection[str]
     now: datetime
     changed: list[str] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
@@ -331,7 +332,7 @@ def _live(task: ScheduledTask) -> bool:
 
 
 def live_below(tasks: dict[str, ScheduledTask], task_id: str) -> bool:
-    """Whether a task below the named one is pending or pushed (§7:8, §9:6).
+    """Whether a task below the named one is pending or pushed (§7:8).
 
     A task the store does not hold has nothing below it.
     """
@@ -725,11 +726,11 @@ def decide_push(
     *,
     rule: RulePush | None = None,
 ) -> OccurrencePush:
-    """Decide and apply one push, with its cascade check (ADR-0350 §7:5).
+    """Decide and apply one push (ADR-0350 §7:5, ADR-0352 §2:3).
 
     For a rule's occurrence first pushed, ``rule`` gives its successor and any it skips,
-    written in the same step (ADR-0340 §4:6, §4:8, §9:3); a cascade's cancel writes
-    none of them, and so ends the rule (§4:7).
+    written in the same step (ADR-0340 §4:6, §4:8, §9:3). Nothing in the task's lineage
+    refuses it: a stop record on an activation above it leaves the push as it is.
 
     Raises:
         PlanningError: If the task holds no such occurrence, the occurrence is pending
@@ -758,13 +759,6 @@ def decide_push(
     fault = _rule_push_fault(task, occurrence, rule)
     if fault is not None:
         raise PlanningError(fault)
-    if any(one.parent in schedule.cascades for one in _above(schedule.tasks, task)):
-        # The cascade refuses every occurrence of the task, so each pending one ends
-        # cancelled now: a rule's successor beside an occurrence pushed again too, and
-        # the rule ends (ADR-0340 §4:7).
-        _cancel_pending(schedule, task)
-        _release(schedule)
-        return OccurrencePush.CASCADE_CANCELLED
     if rule is not None:
         _push_rule(schedule, task, occurrence, activation_id, rule)
         return OccurrencePush.PUSHED
@@ -868,3 +862,38 @@ def decide_removal(schedule: Schedule, task_id: str) -> bool:
         schedule.changed.remove(task_id)
     schedule.removed.append(task_id)
     return True
+
+
+def decide_cascade_retirement(schedule: Schedule, cascades: Collection[str]) -> tuple[str, ...]:
+    """Apply, once, the reach of cascade records a stop wrote before ADR-0352 (§2:6).
+
+    The SQLite plan store's upgrade that retires the cascade record decides it here.
+    Every task whose lineage carries one of ``cascades`` — the task's parent, or the
+    parent of any task above it — has each pending occurrence ended *cancelled*, as
+    ADR-0350 §7:5's push step refused it before ADR-0352 (a rule's successor among them,
+    so the rule ends); and every occurrence of such a task marked pushed, its outcome
+    unwritten, is named for a stop record, so ADR-0350 §8:1 ends it *stopped* at start
+    and never pushes it again. A task waiting on one that ends here falls due as any
+    waiting task does (§5:4).
+
+    Args:
+        schedule: The store's schedule, read in the upgrade's transaction.
+        cascades: The activation ids the store's cascade records name.
+
+    Returns:
+        The activations of the pushed occurrences below a cascade record, in the order
+        their tasks were written, each once: the stop records the upgrade writes.
+    """
+    named = frozenset(cascades)
+    stops: list[str] = []
+    for task in list(schedule.tasks.values()):
+        if not any(one.parent in named for one in _above(schedule.tasks, task)):
+            continue
+        for one in task.occurrences:
+            pushed = one.pushed_to
+            if pushed is not None and pushed not in stops:
+                stops.append(pushed)
+        if any(one.state is OccurrenceState.PENDING for one in task.occurrences):
+            _cancel_pending(schedule, task)
+    _release(schedule)
+    return tuple(stops)

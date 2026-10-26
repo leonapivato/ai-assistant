@@ -395,10 +395,8 @@ class FakePlanStore:
         # issued, which `clear` never resets.
         self._observations: dict[str, ObservationRecord] = {}
         self._issued = 0
-        # ADR-0350 §12:3: the Task Scheduler's tasks by id, in the order written, and the
-        # activation ids a stop command's cascade record names.
+        # ADR-0350 §12:3: the Task Scheduler's tasks by id, in the order written.
         self._tasks: dict[str, ScheduledTask] = {}
-        self._cascades: set[str] = set()
         self._clock = checked_clock(now, owner="FakePlanStore")
         self._resource = SuspendableResource()
 
@@ -624,7 +622,7 @@ class FakePlanStore:
 
     def _schedule(self) -> Schedule:
         """A copy of the schedule one step decides over, reading the clock once for it."""
-        return Schedule(tasks=dict(self._tasks), cascades=self._cascades, now=self._now())
+        return Schedule(tasks=dict(self._tasks), now=self._now())
 
     async def write_scheduled_task(  # noqa: PLR0913 — the Protocol's signature
         self,
@@ -714,7 +712,7 @@ class FakePlanStore:
             return tuple(one.model_copy(deep=True) for one in by_person(self._tasks, whose, wanted))
 
     async def spawned_tasks(self, activation_ids: Sequence[str], /) -> tuple[ScheduledTask, ...]:
-        """Return the tasks whose parent is any of the named activations (§9:6).
+        """Return the tasks whose parent is any of the named activations (§12:3).
 
         Raises:
             PlanningError: If ``activation_ids`` is not a sequence of encodable strings.
@@ -734,7 +732,7 @@ class FakePlanStore:
             return tuple(one.model_copy(deep=True) for one in lineage(self._tasks, named))
 
     async def live_below(self, task_id: str, /) -> bool:
-        """Whether anything below a task is pending, pushed or running (§7:8, §9:6).
+        """Whether anything below a task is pending, pushed or running (§7:8).
 
         Raises:
             PlanningError: If ``task_id`` is not an identifier.
@@ -756,7 +754,7 @@ class FakePlanStore:
     async def mark_occurrence_pushed(
         self, task_id: str, number: int, activation_id: str, /, *, rule: RulePush | None = None
     ) -> OccurrencePush:
-        """Mark a pending occurrence pushed, with its cascade check, in one step (§7:5).
+        """Mark a pending occurrence pushed, in one step (§7:5, ADR-0352 §2:3).
 
         A rule's occurrence first pushed writes its successor, and any it skips, in
         the same step (ADR-0340 §4:6, §4:8, §9:3).
@@ -821,16 +819,6 @@ class FakePlanStore:
         async with self._resource.held():
             return tuple(one for one in named if one in self._stopped)
 
-    async def record_cascade(self, activation_id: str, /) -> None:
-        """Write a cascade record naming an activation, idempotently (§9:6).
-
-        Raises:
-            PlanningError: If ``activation_id`` is not an identifier.
-        """
-        named = _revalidated_activation_id(activation_id)
-        async with self._resource.held():
-            self._cascades.add(named)
-
     async def confirm_message_effect(
         self, effect_id: str, /, *, delivered: bool, position: int | None = None
     ) -> None:
@@ -883,10 +871,8 @@ class FakePlanStore:
                     self._observations[one].model_copy(deep=True)
                     for one in sorted(self._observations)
                 ),
-                # ADR-0350 §12:3: every scheduled task, in the order written, and every
-                # cascade record.
+                # ADR-0350 §12:3: every scheduled task, in the order written.
                 scheduled_tasks=tuple(one.model_copy(deep=True) for one in self._tasks.values()),
-                cascades=tuple(sorted(self._cascades)),
             )
 
     async def clear(self) -> int:
@@ -901,13 +887,11 @@ class FakePlanStore:
                 + len(self._activation_effects)
                 + len(self._observations)
                 + len(self._tasks)
-                + len(self._cascades)
             )
             self._stopped.clear()
             self._activation_effects.clear()
             self._observations.clear()
             self._tasks.clear()
-            self._cascades.clear()
         return removed
 
 

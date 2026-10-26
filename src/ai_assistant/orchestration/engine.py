@@ -6896,11 +6896,11 @@ class Engine:
 
         The id the activation will be admitted under is minted and held here before the
         pushed mark is written, so a stop naming it meanwhile is noted; the mark is
-        written in one store step that refuses where the occurrence is no longer pending
-        or its lineage carries a cascade record, which no stop writes since ADR-0352
-        §2:2 and the plan store's upgrade retires (§2:6). Admission then refuses an id carrying a
-        stop record (§9:10), read with nothing awaited between that check and the
-        admission, so nothing starts that a stop named.
+        written in one store step that refuses only where the occurrence is no longer
+        pending or its task is no longer held, never for its lineage (ADR-0352 §2:3).
+        Admission then refuses an id carrying a stop record (§9:10), read with nothing
+        awaited between that check and the admission, so nothing starts that a stop
+        named.
         """
         if self._closing:
             return
@@ -6913,9 +6913,6 @@ class Engine:
             )
             if answer is not OccurrencePush.PUSHED:
                 self._pushed.pop(activation_id, None)
-                if answer is OccurrencePush.CASCADE_CANCELLED and self._task_manager is not None:
-                    self._wake_sensor()
-                    await self._task_manager.tidy([due.task.id])
                 return
             stopped = activation_id in await self._plans.stopped_activations([activation_id])
         except BaseException:

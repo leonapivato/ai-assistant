@@ -72,7 +72,6 @@ _RECORD_TABLES: Final = frozenset(
         "activation_effects",
         "observations",
         "scheduled_tasks",
-        "cascade_records",
     }
 )
 
@@ -102,13 +101,12 @@ _SYNC_METHODS = {
     "write_observation": "_write_observation_sync",
     "observations": "_observations_sync",
     "observer_calls_since": "_calls_since_sync",
-    # ADR-0350 §12:3's fifteen members, each its own lock site.
+    # ADR-0350 §12:3's fourteen members, each its own lock site.
     "write_scheduled_task": "_write_scheduled_task_sync",
     "cancel_scheduled_task": "_cancel_scheduled_task_sync",
     "mark_occurrence_pushed": "_mark_occurrence_pushed_sync",
     "settle_occurrence": "_settle_occurrence_sync",
     "stop_pushed_activation": "_stop_pushed_activation_sync",
-    "record_cascade": "_record_cascade_sync",
     "confirm_message_effect": "_confirm_message_effect_sync",
     "remove_scheduled_task": "_remove_scheduled_task_sync",
     "scheduled_tasks": "_scheduled_tasks_sync",
@@ -661,21 +659,22 @@ async def test_a_newer_on_disk_schema_is_refused(tmp_path: Path) -> None:
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
-async def test_a_fresh_file_is_labelled_version_16_and_holds_only_its_five_tables(
+async def test_a_fresh_file_is_labelled_version_18_and_holds_only_its_four_tables(
     tmp_path: Path,
 ) -> None:
-    """The absolute figure's home, and the shape it labels (ADR-0350 §12:3).
+    """The absolute figure's home, and the shape it labels (ADR-0352 §6:4).
 
-    Version 16 is the store ADR-0309 §5 leaves, its effect records carrying the question
+    Version 18 is the store ADR-0309 §5 leaves, its effect records carrying the question
     part ADR-0321 §4:9 promotes, with the observation records ADR-0329 §16 and ADR-0346
-    add, and the Task Scheduler's scheduled tasks and cascade records ADR-0350 adds:
-    five record tables beside ``meta``, and no table of the old path.
+    add, and the Task Scheduler's scheduled tasks ADR-0350 adds, less the cascade
+    records ADR-0352 retires: four record tables beside ``meta``, and no table of the
+    old path.
     """
     path = tmp_path / "plans.db"
     SqlitePlanStore(path=path, now=_fixed_now).close()
 
-    assert sqlite_store._SCHEMA_VERSION == 17
-    assert _meta(path, "schema_version") == "17"
+    assert sqlite_store._SCHEMA_VERSION == 18
+    assert _meta(path, "schema_version") == "18"
     assert _tables(path) == {"meta", *_RECORD_TABLES}
 
 
@@ -1828,11 +1827,12 @@ async def test_a_spawn_whose_claim_fails_after_its_replace_leaves_nothing_writte
         store.close()
 
 
-async def test_a_scheduled_task_and_a_cascade_record_survive_a_restart(tmp_path: Path) -> None:
-    """§7:8, §8:1: a pushed occurrence and a cascade record outlive the process.
+async def test_a_scheduled_task_and_a_stop_above_it_survive_a_restart(tmp_path: Path) -> None:
+    """§7:8, §8:1: a pushed occurrence and a stop record outlive the process.
 
-    After a restart the sensor settles each occurrence marked pushed, and the push step
-    still refuses every occurrence below a cascade record, so both are on disk.
+    After a restart the sensor settles each occurrence marked pushed, and what is below a
+    stop is pushed as anything else is (ADR-0352 §2:4), so the task below the stopped
+    activation is pushed after the reopen.
     """
     path = tmp_path / "plans.db"
     store = SqlitePlanStore(path=path, now=_fixed_now)
@@ -1840,7 +1840,7 @@ async def test_a_scheduled_task_and_a_cascade_record_survive_a_restart(tmp_path:
         await _spawn_into(store, "t1", spawner="act-0")
         assert await store.mark_occurrence_pushed("t1", 1, "act-1") is OccurrencePush.PUSHED
         await _spawn_into(store, "t2", spawner="act-1")
-        await store.record_cascade("act-0")
+        await store.record_stop("act-0")
         held = await store.scheduled_tasks(["t1", "t2"])
     finally:
         store.close()
@@ -1849,13 +1849,30 @@ async def test_a_scheduled_task_and_a_cascade_record_survive_a_restart(tmp_path:
     try:
         assert await reopened.scheduled_tasks(["t1", "t2"]) == held
         assert [one.id for one in await reopened.scheduled_lineage("act-1")] == ["t1"]
-        assert await reopened.mark_occurrence_pushed("t2", 1, "act-2") is (
-            OccurrencePush.CASCADE_CANCELLED
-        )
+        assert await reopened.stopped_activations(["act-0"]) == ("act-0",)
+        assert await reopened.mark_occurrence_pushed("t2", 1, "act-2") is OccurrencePush.PUSHED
         (occurrence,) = (await reopened.scheduled_tasks(["t2"]))[0].occurrences
-        assert occurrence.state is OccurrenceState.CANCELLED
+        assert occurrence.state is OccurrenceState.PUSHED
     finally:
         reopened.close()
+
+
+async def test_a_file_at_the_current_label_holding_a_cascade_table_is_refused(
+    tmp_path: Path,
+) -> None:
+    """ADR-0352 §6:4: past 17 the table is one this code does not create, so it is foreign.
+
+    Only a file at a label that held it is upgraded past it; one labelled 18 that holds
+    it again was not written by any release, and is refused rather than left with records
+    outside export and clear (ADR-0004 §6).
+    """
+    path = tmp_path / "plans.db"
+    SqlitePlanStore(path=path, now=_fixed_now).close()
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE cascade_records(activation_id TEXT PRIMARY KEY)")
+
+    with pytest.raises(PlanningError, match="cascade_records"):
+        SqlitePlanStore(path=path, now=_fixed_now)
 
 
 @pytest.mark.parametrize(
@@ -1884,22 +1901,6 @@ async def test_a_scheduled_task_whose_columns_disagree_with_its_record_is_refuse
             await store.export()
         with pytest.raises(PlanningError):
             await _spawn_into(store, "t2", spawner="act-2")
-    finally:
-        store.close()
-
-
-async def test_a_blanked_cascade_record_is_refused_as_planning_s_own_error(
-    tmp_path: Path,
-) -> None:
-    """A cascade record is an activation id, so a blanked one is corruption."""
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.record_cascade("act-1")
-        with sqlite3.connect(path) as conn:
-            conn.execute("UPDATE cascade_records SET activation_id = '  '")
-        with pytest.raises(PlanningError):
-            await store.export()
     finally:
         store.close()
 
