@@ -91,6 +91,16 @@ def test_every_store_is_written_and_read_back(written: tuple[Path, Path]) -> Non
         assert _records(snapshot, store.name), f"{store.name} reads back no record"
 
 
+def test_the_memory_writer_writes_a_record_naming_its_taker(written: tuple[Path, Path]) -> None:
+    """ADR-0352 §5:2, §6:5: a frozen record carrying ``taken_over_by``, so a later base
+    writes one and a later head reads it back."""
+    episode = _records(_snapshot(written[1]), "memory")["record/mem-episode-taken-over"]
+    assert isinstance(episode, dict)
+    record = episode["processing_record"]
+    assert isinstance(record, dict)
+    assert (record["reason"], record["taken_over_by"]) == ("stopped", "act-upgrade-2")
+
+
 def test_the_memory_writer_writes_the_shapes_adr_0332_adds(written: tuple[Path, Path]) -> None:
     """ADR-0332 §7:1 to §7:5: an episode carrying each, so a later base writes them too.
 
@@ -271,8 +281,8 @@ def test_a_memory_store_that_loses_its_vectors_fails_the_check(
         conn.execute("DELETE FROM vec_records")
     conn.close()
     problems = read(directory, snapshot)
-    # One per record with content: three memories and three episodes.
-    assert len(problems) == 6, problems
+    # One per record with content: three memories and four episodes.
+    assert len(problems) == 7, problems
     assert all(p.startswith("memory nearest/") for p in problems), problems
     assert all(p.endswith(", the head reads []") for p in problems), problems
 
