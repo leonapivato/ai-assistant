@@ -66,6 +66,8 @@ if TYPE_CHECKING:
 NOW: Final = datetime(2026, 10, 23, 13, 0, tzinfo=UTC)
 NEW_YORK: Final = ZoneInfo("America/New_York")
 HUB: Final = ZoneInfo("UTC")
+#: How a rule naming no zone is said: with the person's zone it follows, named (#3451).
+FOLLOWS: Final = " in the person's zone, which it follows (now America/New_York)"
 CHAT_PLACE: Final = f"conversation:{CHAT.instance_id}"
 LINE_PLACE: Final = f"telegram:{LINE.instance_id}"
 
@@ -265,11 +267,13 @@ async def test_a_weekdays_rule_writes_its_first_occurrence_and_says_it_back() ->
     task = await _only_task(world)
     assert task.when == DueOnRule(repeats=TaskRuleKind.WEEKDAYS, time_of_day=time(7, 0))
     assert [one.due_at for one in task.occurrences] == [datetime(2026, 10, 26, 11, 0, tzinfo=UTC)]
-    assert entry.repeats == "every weekday at 7:00 AM"
+    assert entry.repeats == f"every weekday at 7:00 AM{FOLLOWS}"
     assert entry.falls_due == (
-        "every weekday at 7:00 AM; next at Mon 26 Oct 2026 07:00 (America/New_York)"
+        f"every weekday at 7:00 AM{FOLLOWS}; next at Mon 26 Oct 2026 07:00 (America/New_York)"
     )
-    assert entry.read_back == "Every weekday at 7:00 AM; next: Monday 26 October, at 7:00 AM, here."
+    assert entry.read_back == (
+        f"Every weekday at 7:00 AM{FOLLOWS}; next: Monday 26 October, at 7:00 AM, here."
+    )
 
 
 async def test_a_daily_rule_set_before_its_time_today_falls_today() -> None:
@@ -278,7 +282,8 @@ async def test_a_daily_rule_set_before_its_time_today_falls_today() -> None:
     entry = _spawned(await _spawn(world, rule={"repeats": "daily", "time": "19:00"}))
 
     assert entry.read_back == (
-        "Every day at 7:00 PM; next: Tonight, Friday 23 October, at 7:00 PM. It suggests no place."
+        f"Every day at 7:00 PM{FOLLOWS}; next: Tonight, Friday 23 October, at 7:00 PM. "
+        "It suggests no place."
     )
 
 
@@ -291,7 +296,7 @@ async def test_a_weekly_rule_on_two_days_names_both() -> None:
         )
     )
 
-    assert entry.repeats == "every Monday and Thursday at 6:30 PM"
+    assert entry.repeats == f"every Monday and Thursday at 6:30 PM{FOLLOWS}"
     assert (await _only_task(world)).occurrences[0].due_at == datetime(
         2026, 10, 26, 22, 30, tzinfo=UTC
     )
@@ -325,7 +330,7 @@ async def test_a_rule_with_a_from_and_an_until_says_both_back() -> None:
     )
 
     assert entry.read_back == (
-        "Every day at 8:00 PM, from Tuesday 27 October, until Monday 30 November; next: "
+        f"Every day at 8:00 PM{FOLLOWS}, from Tuesday 27 October, until Monday 30 November; next: "
         "Tuesday 27 October, at 8:00 PM. It suggests no place."
     )
 
@@ -407,7 +412,7 @@ async def test_a_skip_is_a_replace_whose_from_is_the_day_after() -> None:
     assert task.id != daily.id
     assert task.occurrences[0].due_at == datetime(2026, 10, 25, 0, 0, tzinfo=UTC)
     assert entry.read_back == (
-        "Every day at 8:00 PM, from Saturday 24 October; next: Tomorrow, Saturday "
+        f"Every day at 8:00 PM{FOLLOWS}, from Saturday 24 October; next: Tomorrow, Saturday "
         "24 October, at 8:00 PM, here."
     )
 
@@ -639,7 +644,7 @@ async def test_the_list_pull_shows_a_rules_words_and_its_next_occurrence() -> No
     listing = decode_listing(listed.output)
     assert listing is not None
     (entry,) = listing.scheduled
-    assert entry.repeats == "every weekday at 7:00 AM"
+    assert entry.repeats == f"every weekday at 7:00 AM{FOLLOWS}"
     assert entry.falls_due.endswith("next at Mon 26 Oct 2026 07:00 (America/New_York)")
     assert entry.read_back is None
 
@@ -754,3 +759,26 @@ def test_spawn_when_resolves_a_rule_to_its_first_instant_in_the_zone_given() -> 
 
     assert not isinstance(stated, str)
     assert stated.first_due_at == datetime(2026, 10, 25, 14, 0, tzinfo=UTC)
+
+
+async def test_a_pending_occurrence_computed_before_a_zone_change_says_so() -> None:
+    """ADR-0340 §4:3, §6:1, §8:2, #3451: the list pull and the occurrence's input."""
+    world = await _world()
+    task = await _rule_task(world, {"repeats": "daily", "time": "07:00"})
+    (due,) = [one.due_at for one in task.occurrences]
+    assert due is not None
+    los_angeles = ZoneInfo("America/Los_Angeles")
+
+    falls_due = when_text(task, los_angeles, now=NOW)
+    told = task_input(task, due_at=due, second_try=False, zone=los_angeles, late_at=None, now=NOW)
+
+    stale = (
+        ", computed while the person's zone was an earlier one, so this one comes at "
+        "7:00 AM in that zone, and the ones after it at 7:00 AM in America/Los_Angeles"
+    )
+    assert falls_due == (
+        "every day at 7:00 AM in the person's zone, which it follows (now "
+        f"America/Los_Angeles); next at Sat 24 Oct 2026 04:00 (America/Los_Angeles){stale}"
+    )
+    assert f"due Sat 24 Oct 2026 04:00 (America/Los_Angeles){stale}" in told
+    assert "computed while" not in when_text(task, NEW_YORK, now=NOW)

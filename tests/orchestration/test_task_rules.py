@@ -8,6 +8,7 @@ checked against instants worked out by hand.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time
+from typing import Final
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -24,6 +25,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.task_rules import (
     PersonZones,
+    computed_elsewhere,
     first_occurrence,
     local_instant,
     next_occurrence,
@@ -221,15 +223,24 @@ def test_next_occurrence_is_the_one_computation_from_a_local_date() -> None:
 
 # --- the rule in words (§6:2, §8:2) ------------------------------------------------------
 
+#: How a rule naming no zone is said: with the person's zone it follows (§4:3, #3451).
+_FOLLOWS: Final = " in the person's zone, which it follows (now Europe/Lisbon)"
+
 
 @pytest.mark.parametrize(
     ("rule", "said"),
     [
-        (_rule(TaskRuleKind.DAILY, time(20, 0)), "every day at 8:00 PM"),
-        (_rule(TaskRuleKind.WEEKDAYS), "every weekday at 7:00 AM"),
+        (
+            _rule(TaskRuleKind.DAILY, time(20, 0)),
+            f"every day at 8:00 PM{_FOLLOWS}",
+        ),
+        (
+            _rule(TaskRuleKind.WEEKDAYS),
+            f"every weekday at 7:00 AM{_FOLLOWS}",
+        ),
         (
             _rule(TaskRuleKind.WEEKLY, time(12, 5), days=(RuleDay.MONDAY, RuleDay.THURSDAY)),
-            "every Monday and Thursday at 12:05 PM",
+            f"every Monday and Thursday at 12:05 PM{_FOLLOWS}",
         ),
         (
             _rule(TaskRuleKind.WEEKDAYS, time(9, 30), zone="America/New_York"),
@@ -242,16 +253,57 @@ def test_next_occurrence_is_the_one_computation_from_a_local_date() -> None:
                 from_date=date(2026, 10, 29),
                 until_date=date(2027, 1, 2),
             ),
-            "every day at 8:00 PM, from Thursday 29 October, until Saturday 2 January 2027",
+            (
+                f"every day at 8:00 PM{_FOLLOWS}, from Thursday 29 October, "
+                "until Saturday 2 January 2027"
+            ),
         ),
         (
             _rule(TaskRuleKind.DAILY, time(0, 0), from_date=date(2026, 1, 1)),
-            "every day at 12:00 AM",
+            f"every day at 12:00 AM{_FOLLOWS}",
         ),
     ],
 )
 def test_a_rule_in_words_with_its_zone_from_and_until(rule: DueOnRule, said: str) -> None:
-    assert rule_text(rule, today=date(2026, 10, 25)) == said
+    assert rule_text(rule, today=date(2026, 10, 25), zone=ZoneInfo("Europe/Lisbon")) == said
+
+
+def test_an_occurrence_computed_under_an_earlier_zone_is_found_and_one_computed_now_is_not() -> (
+    None
+):
+    """§4:3, #3451: Lisbon's 4:34 AM, read after a move to Los Angeles, is not LA's."""
+    rule = _rule(TaskRuleKind.DAILY, time(4, 34))
+    lisbon = ZoneInfo("Europe/Lisbon")
+    in_lisbon = next_occurrence(rule, lisbon, on_or_after=date(2026, 10, 27))
+    in_los_angeles = next_occurrence(rule, LOS_ANGELES, on_or_after=date(2026, 10, 27))
+    assert in_lisbon is not None
+    assert in_los_angeles is not None
+
+    assert computed_elsewhere(rule, in_lisbon, LOS_ANGELES)
+    assert not computed_elsewhere(rule, in_los_angeles, LOS_ANGELES)
+    assert not computed_elsewhere(rule, in_lisbon, lisbon)
+    # A rule naming its zone is computed in it, whatever the person's zone.
+    named = _rule(TaskRuleKind.DAILY, time(4, 34), zone="Europe/Lisbon")
+    assert not computed_elsewhere(named, in_lisbon, LOS_ANGELES)
+
+
+def test_an_occurrence_a_daylight_saving_gap_moved_is_not_taken_for_another_zones() -> None:
+    """§3:4, §4:9: 2:30 AM on the night the clocks skip resolves to the change itself."""
+    rule = _rule(TaskRuleKind.DAILY, time(2, 30))
+    moved = next_occurrence(rule, NEW_YORK, on_or_after=date(2026, 3, 8))
+    assert moved is not None
+    assert moved.astimezone(NEW_YORK).time() == time(3, 0)
+
+    assert not computed_elsewhere(rule, moved, NEW_YORK)
+
+
+def test_a_weekly_occurrence_landing_on_another_day_in_the_new_zone_is_found() -> None:
+    """§4:3: Tuesday's 1:00 AM in Lisbon is Monday evening in Los Angeles."""
+    rule = _rule(TaskRuleKind.WEEKLY, time(1, 0), days=(RuleDay.TUESDAY,))
+    due = next_occurrence(rule, ZoneInfo("Europe/Lisbon"), on_or_after=date(2026, 10, 26))
+    assert due is not None
+
+    assert computed_elsewhere(rule, due, LOS_ANGELES)
 
 
 # --- the person's zone (§3:3, ADR-0338 §3:6) ---------------------------------------------

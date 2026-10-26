@@ -78,7 +78,13 @@ from ai_assistant.orchestration.channel_kinds import (
     WindowSource,
     place_of,
 )
-from ai_assistant.orchestration.task_rules import clock_text, day_text, rule_text, task_zone
+from ai_assistant.orchestration.task_rules import (
+    clock_text,
+    computed_elsewhere,
+    day_text,
+    rule_text,
+    task_zone,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -552,6 +558,12 @@ class ActivationEntry:
         outside: Whether its input's origin is outside.
         acted: For a running one, whether it has acted (ADR-0349 §5:6, §6:2).
         origin: Who its input came from, which says why a withheld input is withheld.
+        wrote_into: For an ended one, the places its messages were written into, as
+            their effect records name them (ADR-0350 §12:8), each once; empty where it
+            wrote none. ``None`` for a running one, and where the records could not be
+            read, so nothing is said of where it spoke.
+        may_have_written_into: For an ended one, the places a message of its may have
+            gone into, whose outcome is not known; empty where none.
     """
 
     activation_id: str
@@ -562,6 +574,8 @@ class ActivationEntry:
     outside: bool
     acted: bool = False
     origin: InputOrigin = InputOrigin.USER
+    wrote_into: tuple[str, ...] | None = None
+    may_have_written_into: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -617,6 +631,8 @@ def _activation_json(entry: ActivationEntry) -> dict[str, FrozenJson]:
         "outside": entry.outside,
         "acted": entry.acted,
         "origin": entry.origin.value,
+        "wrote_into": None if entry.wrote_into is None else list(entry.wrote_into),
+        "may_have_written_into": list(entry.may_have_written_into),
     }
 
 
@@ -688,6 +704,10 @@ def _activation_of(value: object) -> ActivationEntry:
         outside=bool(held["outside"]),
         acted=bool(held.get("acted", False)),
         origin=_origin(held),
+        wrote_into=(None if held.get("wrote_into") is None else _strs(held, "wrote_into")),
+        may_have_written_into=(
+            _strs(held, "may_have_written_into") if "may_have_written_into" in held else ()
+        ),
     )
 
 
@@ -763,14 +783,31 @@ def when_text(task: ScheduledTask, zone: ZoneInfo, *, now: datetime) -> str:
         return f"at {local_time(when.at, shown)}"
     occurrence = shown_occurrence(task)
     if isinstance(when, DueOnRule):
-        words = rule_text(when, today=now.astimezone(shown).date())
+        words = rule_text(when, today=now.astimezone(shown).date(), zone=shown)
         if occurrence.state is not OccurrenceState.PENDING or occurrence.due_at is None:
             return f"{words}; nothing more of it is pending"
-        return f"{words}; next at {local_time(occurrence.due_at, shown)}"
+        next_at = occurrence.due_at
+        return f"{words}; next at {local_time(next_at, shown)}{_elsewhere(when, next_at, shown)}"
     due = occurrence.due_at
     if due is not None:
         return f"once the tasks it waits on ended, at {local_time(due, shown)}"
     return "once every task it waits on has ended"
+
+
+def _elsewhere(rule: DueOnRule, due_at: datetime, zone: ZoneInfo) -> str:
+    """What a rendering of a rule's occurrence adds where another zone computed it.
+
+    ADR-0340 §4:3: an occurrence pending when the person's zone changed keeps its
+    instant, so it comes at the rule's time in the zone it was computed in, and the
+    ones after it follow the person's zone now (#3451). Nothing where it did not.
+    """
+    if not computed_elsewhere(rule, due_at, zone):
+        return ""
+    clock = clock_text(rule.time_of_day)
+    return (
+        f", computed while the person's zone was an earlier one, so this one comes at "
+        f"{clock} in that zone, and the ones after it at {clock} in {zone.key}"
+    )
 
 
 #: Past this local hour, a time today is said to fall tonight.
@@ -838,7 +875,9 @@ def read_back(task: ScheduledTask, zone: ZoneInfo, *, now: datetime, line: bool)
     else:
         said = _moment(due, shown, now=now, named=isinstance(when, DueOnRule) and bool(when.zone))
     if isinstance(when, DueOnRule):
-        words = rule_text(when, today=now.astimezone(shown).date())
+        words = rule_text(when, today=now.astimezone(shown).date(), zone=shown)
+        if due is not None:
+            said += _elsewhere(when, due, shown)
         said = f"{words[:1].upper()}{words[1:]}; next: {said}"
     if task.places:
         places = " and ".join(_place_said(one, task.set_in) for one in task.places)
@@ -948,11 +987,15 @@ def task_input(  # noqa: PLR0913 — the task, the occurrence's two facts, the z
     facts = [
         f"set by {who} in {place_description(task.set_in)}, {local_time(task.set_at, shown)}",
     ]
-    if isinstance(task.when, DueOnRule):
+    rule = task.when if isinstance(task.when, DueOnRule) else None
+    if rule is not None:
         told = now or due_at or task.set_at
-        facts.append(f"it repeats {rule_text(task.when, today=told.astimezone(shown).date())}")
+        facts.append(
+            f"it repeats {rule_text(rule, today=told.astimezone(shown).date(), zone=shown)}"
+        )
     if due_at is not None:
-        facts.append(f"due {local_time(due_at, shown)}")
+        elsewhere = "" if rule is None else _elsewhere(rule, due_at, shown)
+        facts.append(f"due {local_time(due_at, shown)}{elsewhere}")
     if skipped:
         missed = "occurrence" if skipped == 1 else "occurrences"
         facts.append(f"it skipped {skipped} earlier {missed}, missed while it was not pushed")

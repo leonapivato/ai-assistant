@@ -20,7 +20,9 @@ included (:func:`rule_push`), are each that function, read in the zone the rule 
 computed in then. The plan store computes no instant: it writes what this module gives.
 
 **The rule in words** (§6:2, §7:1, §8:2): :func:`rule_text`, which the read-back, the list
-pull and an occurrence's input share.
+pull and an occurrence's input share. A rule naming no zone is said with the person's zone
+it follows, named, and an occurrence computed while their zone was another is found by
+:func:`computed_elsewhere`, so its renderings can say so (§4:3, #3451).
 
 It logs stage and code-owned reason only (ADR-0275 §8).
 """
@@ -45,6 +47,7 @@ if TYPE_CHECKING:
 __all__ = [
     "PersonZones",
     "clock_text",
+    "computed_elsewhere",
     "day_text",
     "first_occurrence",
     "local_instant",
@@ -290,15 +293,40 @@ def _days_text(days: tuple[RuleDay, ...]) -> str:
     return f"{', '.join(named[:-1])} and {named[-1]}"
 
 
-def rule_text(rule: DueOnRule, *, today: date) -> str:
-    """A rule in words, with its zone where it names one, and its from and until (§6:2).
+def computed_elsewhere(rule: DueOnRule, due_at: datetime, zone: ZoneInfo) -> bool:
+    """Whether an occurrence of ``rule`` due at ``due_at`` was computed in another zone.
 
-    Such as ``every weekday at 7:00 AM, until Friday 31 October``. A from on or before
-    ``today`` constrains nothing (§4:4), so it is not said.
+    Only a rule naming no zone follows the person's, and an occurrence already pending
+    when their zone changes keeps the instant it was computed in under the old one
+    (ADR-0340 §4:3). Every instant this module computes in ``zone`` is the rule's local
+    time on a date it falls on, read by :func:`local_instant`; one that is not was
+    computed elsewhere.
+
+    Args:
+        rule: The rule.
+        due_at: The occurrence's stored instant.
+        zone: The person's zone now.
+    """
+    if rule.zone is not None:
+        return False
+    day = due_at.astimezone(zone).date()
+    if not _falls_on(rule, day):
+        return True
+    return local_instant(datetime.combine(day, rule.time_of_day), zone) != due_at
+
+
+def rule_text(rule: DueOnRule, *, today: date, zone: ZoneInfo) -> str:
+    """A rule in words, with the zone it follows, and its from and until (§6:2).
+
+    Such as ``every weekday at 7:00 AM, until Friday 31 October``. A rule naming its
+    zone is said in it, and one naming none with the person's zone it follows, named
+    (§4:3, §6:1), so whose 7:00 AM it is never needs guessing (#3451). A from on or
+    before ``today`` constrains nothing (§4:4), so it is not said.
 
     Args:
         rule: The rule.
         today: The local date it is said on, in the zone it is rendered in.
+        zone: The zone it is rendered in: its own, or the person's.
     """
     if rule.repeats is TaskRuleKind.WEEKLY:
         repeats = f"every {_days_text(rule.days)}"
@@ -309,6 +337,8 @@ def rule_text(rule: DueOnRule, *, today: date) -> str:
     said = f"{repeats} at {clock_text(rule.time_of_day)}"
     if rule.zone is not None:
         said += f" {rule.zone} time"
+    else:
+        said += f" in the person's zone, which it follows (now {zone.key})"
     if rule.from_date is not None and rule.from_date > today:
         said += f", from {day_text(rule.from_date, today=today)}"
     if rule.until_date is not None:

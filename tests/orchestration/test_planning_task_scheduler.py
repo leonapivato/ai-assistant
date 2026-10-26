@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from test_planning import FLAG_ECHO, _earlier, _flags, _inputs, _sent, _stage
 
@@ -25,9 +26,11 @@ from ai_assistant.orchestration.planning import (
     PlaceWindow,
     RefusedCall,
 )
+from ai_assistant.orchestration.task_manager import spawn_when
 from ai_assistant.orchestration.task_scheduler import (
     SPAWN,
     TASK_SCHEDULER_LABEL_ARGUMENTS,
+    ActivationEntry,
     ListedPlace,
     TaskEntry,
     TaskListing,
@@ -256,3 +259,61 @@ async def test_a_listed_task_shows_its_rule_and_no_read_back() -> None:
     (task,) = shown["scheduled"]
     assert task["repeats"] == "every weekday at 7:00 AM"
     assert "read_back" not in task
+
+
+async def test_a_refused_spawn_is_said_not_done_once() -> None:
+    """#3452: the Task Manager's reason follows the outcome's own "not done", never twice."""
+    now = datetime(2026, 10, 26, 12, 0, tzinfo=UTC)
+    reason = spawn_when({"at": "2026-10-25T08:00:00+00:00"}, now=now, zone=ZoneInfo("UTC"))
+    assert isinstance(reason, str)
+    earlier = _earlier(calls=(ProposedCall(call_id="c1", name="spawn", arguments={}),))
+    outcome = CallOutcome(earlier.id, "c1", CallOutcomeKind.NOT_DONE, reason)
+    stage, completer, _ = _stage(RoundResponse(text=""))
+
+    await stage.plan(_inputs(**_scheduled(rounds=(earlier,), outcomes=(outcome,))))
+
+    shown = _sent(completer)["rounds"][0]["calls"][0]["outcome"]
+    assert shown == "not done: the instant it would fall due is earlier than now"
+
+
+def _ended(**fields: Any) -> ActivationEntry:
+    values: dict[str, Any] = {
+        "activation_id": "step",
+        "started": "Mon 26 Oct 2026 00:32 (America/New_York)",
+        "place": "a scheduled step, started by the Task Scheduler",
+        "status": "completed (returned)",
+        "input": "remind them about the bins",
+        "outside": False,
+    }
+    values.update(fields)
+    return ActivationEntry(**values)
+
+
+async def test_an_ended_step_says_where_its_messages_went_as_the_place_list_shows_places() -> None:
+    """#3445, ADR-0350 §12:8: by label and description on the list, by kind off it."""
+    gone = "conversation:deleted"
+    listing = TaskListing(
+        recent=(
+            _ended(activation_id="a", wrote_into=("telegram:ref/42",)),
+            _ended(
+                activation_id="b", wrote_into=(gone,), may_have_written_into=("conversation:c-1",)
+            ),
+            _ended(activation_id="c", wrote_into=()),
+            _ended(activation_id="d"),
+        ),
+        listed=True,
+    )
+
+    shown = await _shown(listing, "list_tasks")
+
+    told, off_the_list, silent, unread = shown["ended_lately"]
+    assert told["wrote_into"] == [{"label": "L2", "is": "the person's Telegram chat"}]
+    assert "may_have_written_into" not in told
+    assert off_the_list["wrote_into"] == [
+        {"is": "a conversation in the hub's chat", "on_your_place_list": False}
+    ]
+    assert off_the_list["may_have_written_into"] == [
+        {"label": "L1", "is": "the conversation this input came from"}
+    ]
+    assert silent["wrote_into"] == "wrote no message"
+    assert "wrote_into" not in unread

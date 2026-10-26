@@ -4182,12 +4182,22 @@ class PhasePath:
         ]
         scheduling = working.scheduling
         places: tuple[str, ...] | None = None
+        gone: tuple[str, ...] = ()
         if scheduling is not None and scheduling.speaks_by_label:
             # ADR-0350 §6:7: the place its label resolved to, checked against the list.
             places = tuple(scheduling.targets)
             named = planned.round.place
             place = None if named is None else place_of(named)
             message = None if planned.message is None else RoundMessage(planned.message, place)
+            if message is not None and place in scheduling.targets:
+                # §5:8-§5:9: a place gone since the list was built is refused by rule,
+                # so the list is read again as it stands now (#3448), inside the
+                # phase's deadline as the check itself is.
+                try:
+                    async with asyncio.timeout_at(given.deadline):
+                        gone = await self._gone_since(scheduling)
+                except TimeoutError:
+                    raise ModelTimeoutError(_AUTHORIZING_EXPIRED) from None
         else:
             target = self._target(working)
             place = None if target is None else target.place
@@ -4213,6 +4223,7 @@ class PhasePath:
             message=message,
             yes=working.yes(given.understanding),
             places=places,
+            gone=gone,
         )
         try:
             async with asyncio.timeout_at(given.deadline):
@@ -4228,6 +4239,17 @@ class PhasePath:
             and verdict.decision_id is not None
             and verdict.call_id in looking
         }
+
+    @staticmethod
+    async def _gone_since(scheduling: Scheduling) -> tuple[str, ...]:
+        """The places on the round's list that are gone as the list stands now (§5:8).
+
+        The list is built again, as it is at every round, and left as the round showed it:
+        only the check reads the new one.
+        """
+        now_listed, _ = await scheduling.build()
+        held = {one.place for one in now_listed}
+        return tuple(one for one in scheduling.targets if one not in held)
 
     async def _act(self, given: PhasePass) -> None:
         """Run the latest round's allowed calls, and write its message beside them.

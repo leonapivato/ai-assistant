@@ -206,6 +206,12 @@ _OFF_THE_LIST: Final = (
     "a message of an activation the Task Scheduler started goes only into the one place on "
     "its place list that it names by its place label"
 )
+#: ADR-0350 §5:9, §6:7: the reason such a message is refused where the place it names was
+#: on the list as built for the round and is gone when authorizing checks it (#3448).
+_GONE_SINCE: Final = (
+    "the place this message names is gone since its place list was built: a conversation "
+    "deleted, or the line disconnected, so no message goes into it"
+)
 _UNKNOWN_REPEAT: Final = (
     "a deliberate repeat of a call whose earlier outcome is unknown or not yet written "
     "needs the user's yes"
@@ -401,6 +407,8 @@ class RoundToAuthorize:
         places: For an activation the Task Scheduler started, the places on its place
             list as built for the round, which its message may go into in place of the
             place its input came from (ADR-0350 §6:7); ``None`` for every other.
+        gone: Those of ``places`` that are gone as the list stands when authorizing
+            checks the message, a place gone since the list was built (§5:8-§5:9).
 
     Raises:
         ValueError: If two calls share a call id, or a call is not one the round
@@ -417,6 +425,7 @@ class RoundToAuthorize:
     message: RoundMessage | None = None
     yes: YesContext | None = None
     places: tuple[str, ...] | None = None
+    gone: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Each call is one the round proposed, once."""
@@ -874,6 +883,7 @@ def _detached_round(given: RoundToAuthorize) -> RoundToAuthorize:
         else RoundMessage(str(message.text), None if message.place is None else str(message.place)),
         yes=_detached_yes(given.yes),
         places=None if given.places is None else tuple(str(one) for one in given.places),
+        gone=tuple(str(one) for one in given.gone),
     )
 
 
@@ -1869,6 +1879,9 @@ class AuthorizingStage:
             if message.place is None or message.place not in snapshot.places:
                 _log.info("authorizing_message_not_allowed", stage="authorizing")
                 return MessageVerdict(place=message.place, allowed=False, reason=_OFF_THE_LIST)
+            if message.place in snapshot.gone:
+                _log.info("authorizing_message_not_allowed", stage="authorizing")
+                return MessageVerdict(place=message.place, allowed=False, reason=_GONE_SINCE)
             return MessageVerdict(
                 place=message.place, allowed=True, effect_id=self._new_effect_id()
             )
