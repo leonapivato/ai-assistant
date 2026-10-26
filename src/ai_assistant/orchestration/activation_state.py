@@ -465,7 +465,18 @@ class ActivationState:
             digests=self.digests,
             joined=self.joined,
             stories_position=self.stories_position,
+            taken_over_by=self.taken_over_by if reason is ProcessingReason.STOPPED else None,
         )
+
+    @property
+    def taken_over_by(self) -> str | None:
+        """The activation that took this one's matter, where one did (ADR-0352 §5:2).
+
+        The one that absorbed it (ADR-0349 §7:7), or the one that took its offered input
+        (§7:21), as the takeover decisions set them, each in the step that set its stop
+        mark. ``None`` for every other activation, one a person stopped included.
+        """
+        return self.absorbed_by or self.handed_to
 
     def open_processing(self) -> EpisodeProcessingRecord:
         """The open record as the pass stands now (ADR-0286 §1, §3).
