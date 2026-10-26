@@ -107,6 +107,24 @@ if TYPE_CHECKING:
 
 _OWNER_ONLY = 0o600
 
+
+class _ClockFailedError(Exception):
+    """The injected clock's own failure inside the open, carried past its translation.
+
+    The upgrade past 17 reads the clock in the open's transaction (ADR-0352 §2:6), and
+    the open translates an ``OSError`` or a ``sqlite3.Error`` into ``PlanningError``. A
+    clock's own exception propagates unwrapped (ADR-0026 §2), so it rides inside this
+    one past those handlers and is raised again as itself once the connection is closed.
+
+    Attributes:
+        failure: What the clock raised.
+    """
+
+    def __init__(self, failure: Exception) -> None:
+        super().__init__(str(failure))
+        self.failure = failure
+
+
 #: The sidecars SQLite may keep beside a database file. Each holds the same pages
 #: the database does, so ADR-0004 §4 reaches them too. SQLite copies the database
 #: file's mode onto a sidecar **it creates**, which is what makes restricting the
@@ -530,6 +548,9 @@ class SqlitePlanStore:
                 # and drops them, on the tables just verified, in this transaction.
                 if held is not None and held <= _LAST_CASCADE_LABEL:
                     self._retire_cascades(conn)
+        except _ClockFailedError as carried:
+            conn.close()
+            raise carried.failure from carried.failure.__cause__
         except PlanningError:
             conn.close()  # never leak the connection when opening fails
             raise
@@ -538,9 +559,9 @@ class SqlitePlanStore:
             msg = f"failed to initialise the plan store at {self._path!r}: {exc}"
             raise PlanningError(msg) from exc
         except BaseException:
-            # The upgrade past 17 reads the injected clock (ADR-0352 §2:6), whose own
-            # failure propagates unwrapped (`checked_clock`); the open is rolled back
-            # all the same, and its connection is closed as on every other failure.
+            # A cancellation or an interrupt, the clock's among them (ADR-0026 §2),
+            # passes through; the open is rolled back all the same, and its connection
+            # is closed as on every other failure.
             conn.close()
             raise
         return conn
@@ -744,6 +765,8 @@ class SqlitePlanStore:
         Raises:
             PlanningError: If a cascade record or a scheduled task does not validate, or
                 the clock's reading is not a conforming one.
+            _ClockFailedError: Carrying what the clock itself raised, which the open raises
+                again unwrapped (ADR-0026 §2).
         """
         present = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND lower(name) = ?",
@@ -757,7 +780,13 @@ class SqlitePlanStore:
                 f"SELECT activation_id FROM {_RETIRED_CASCADES}"  # noqa: S608 — only a constant is interpolated
             ).fetchall()
         }
-        schedule = self._schedule(conn, self._now())
+        try:
+            now = self._now()
+        except PlanningError:
+            raise
+        except Exception as exc:
+            raise _ClockFailedError(exc) from exc
+        schedule = self._schedule(conn, now)
         stops = decide_cascade_retirement(schedule, cascades)
         self._persist(conn, schedule)
         for activation_id in stops:
