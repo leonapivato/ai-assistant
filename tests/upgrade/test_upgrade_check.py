@@ -139,6 +139,59 @@ def test_the_memory_writer_writes_a_pins_support(written: tuple[Path, Path]) -> 
     )
 
 
+def _occurrences(task: Json) -> list[tuple[Json, Json]]:
+    """A scheduled task's occurrences as read back, each as its number and state."""
+    assert isinstance(task, dict)
+    occurrences = task["occurrences"]
+    assert isinstance(occurrences, list)
+    return [(one["number"], one["state"]) for one in occurrences if isinstance(one, dict)]
+
+
+def test_the_plan_writer_writes_scheduled_tasks_a_rule_and_a_cascade(
+    written: tuple[Path, Path],
+) -> None:
+    """ADR-0350 §12:3, ADR-0340 §9: so a later base writes them, and its head reads them.
+
+    The base's copy of the writer is what the next pull request's check runs, so each
+    when, each occurrence state a push and a settle leave, the rule's skipped and
+    successor occurrences, and the cascade record are read back here, by this build,
+    from what it wrote.
+    """
+    plans = _records(_snapshot(written[1]), "plans")
+    tasks = {key: value for key, value in plans.items() if key.startswith("task/")}
+    assert sorted(tasks) == [
+        "task/task-upgrade-after",
+        "task/task-upgrade-at",
+        "task/task-upgrade-now",
+        "task/task-upgrade-rule",
+    ]
+    whens = {key: value["when"] for key, value in tasks.items() if isinstance(value, dict)}
+    assert {key: when["kind"] for key, when in whens.items() if isinstance(when, dict)} == {
+        "task/task-upgrade-after": "tasks_ending",
+        "task/task-upgrade-at": "instant",
+        "task/task-upgrade-now": "now",
+        "task/task-upgrade-rule": "rule",
+    }
+    assert _occurrences(tasks["task/task-upgrade-now"]) == [(1, "done")]
+    assert _occurrences(tasks["task/task-upgrade-at"]) == [(1, "pending")]
+    assert _occurrences(tasks["task/task-upgrade-after"]) == [(1, "pending")]
+    assert _occurrences(tasks["task/task-upgrade-rule"]) == [
+        (1, "skipped"),
+        (2, "skipped"),
+        (3, "pushed"),
+        (4, "pending"),
+    ]
+    rule = whens["task/task-upgrade-rule"]
+    assert isinstance(rule, dict)
+    assert {
+        "repeats": "weekly",
+        "days": ["tuesday", "thursday"],
+        "zone": "America/New_York",
+    }.items() <= (rule.items())
+    assert plans["cascade/act-upgrade-cascade"] == "act-upgrade-cascade"
+    assert all(f"effect/effect-{key.removeprefix('task/')}" in plans for key in tasks)
+
+
 def test_the_reads_leave_the_directory_as_they_found_it(
     written: tuple[Path, Path], tmp_path: Path
 ) -> None:
