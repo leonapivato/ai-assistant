@@ -161,8 +161,9 @@ refuses an instant earlier than now (ADR-0350 §4:5).
 > than now and on or after its from, computed when the task is written.
 
 > **Normative.** When a pushed occurrence of a rule takes its outcome (ADR-0350 §7:6,
-> §8:1–§8:7), its next occurrence is the first instant the rule yields that is later than
-> the instant the ended one was due, computed then, even where that instant has passed. The
+> §8:1–§8:7), its next occurrence is the **successor** of the instant it was due: the first
+> instant the rule yields on a local date later than that instant's own, both read in the
+> zone the rule is computed in then. It is computed then, even where it has passed. The
 > plan store writes the ended one's outcome and the next pending occurrence in one step, so a
 > rule is never without a pending occurrence until it ends. A next occurrence that has passed
 > is a missed one, which §4:8 pushes.
@@ -173,14 +174,17 @@ refuses an instant earlier than now (ADR-0350 §4:5).
 > removes the task once nothing of it is live.
 
 > **Normative.** Where a rule's pending occurrence that was never pushed is due, the sensor
-> takes its stored instant unchanged and computes from the rule each instant the rule yields
-> after it, up to now. Where it finds none, the pending occurrence is pushed. Where it finds
+> takes its stored instant unchanged and computes its successors in turn (§4:6), up to
+> now. Where it finds none, the pending occurrence is pushed. Where it finds
 > any, the rule missed more than one occurrence (ADR-0350 §8:10): in the step that marks the
 > latest pushed (ADR-0350 §7:5), the plan store records the pending one and each other
 > earlier one *skipped*, each with the instant it was due, as the sensor gave them. An
 > occurrence pushed again after a restart (ADR-0350 §8:5–§8:6) is pushed itself, its second
 > try and its pushes kept, and the rule reaches its successors after its outcome, by §4:6 and
 > then this clause.
+
+So no zone change gives one local day two occurrences: after a move west,
+Monday's 8:00 in New York is followed by Tuesday's 8:00 in Los Angeles.
 
 > **Normative.** A daylight-saving change reaches a rule's occurrences as §3:4 rules for a
 > local time.
