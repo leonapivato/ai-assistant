@@ -764,28 +764,24 @@ class TaskManager:
         The walk finds every activation below, level by level; the tasks they spawned
         are then read in one read over all of them, which gives the store's order of
         writing across levels (§3:6): a child step's task written before a later direct
-        spawn of the stopped activation is listed first.
+        spawn of the stopped activation is listed first. The schedule moves on while it
+        is read, so where that read shows an activation the walk had not reached, pushed
+        since and perhaps ended after spawning a step of its own, the walk goes on from
+        it and the tasks are read again, until a read shows none: nothing below that
+        was reached is missed. The store holds finitely many tasks, so it ends.
 
         Raises:
             PlanningError: If the plan store cannot be read.
         """
-        found: set[str] = set()
         walked = [activation_id]
         frontier = [activation_id]
-        while frontier:
-            below = await self._plans.spawned_tasks(frontier)
-            frontier = []
-            for task in below:
-                if task.id in found:
-                    continue
-                found.add(task.id)
-                for one in task.activations:
-                    if one not in walked:
-                        walked.append(one)
-                        frontier.append(one)
-        if not found:
-            return ()
-        return await self._plans.spawned_tasks(walked)
+        while True:
+            while frontier:
+                frontier = _unwalked(await self._plans.spawned_tasks(frontier), walked)
+            ordered = await self._plans.spawned_tasks(walked)
+            frontier = _unwalked(ordered, walked)
+            if not frontier:
+                return ordered
 
     async def parents(self, tasks: Sequence[ScheduledTask]) -> dict[str, TaskParent]:
         """Where and when each of ``tasks``' parents started, from the record (§4:6, §9:4).
@@ -1126,6 +1122,17 @@ class TaskManager:
             return
         if spawned:
             await self.tidy(one.id for one in spawned)
+
+
+def _unwalked(tasks: Iterable[ScheduledTask], walked: list[str]) -> list[str]:
+    """Each activation ``tasks`` were pushed to that ``walked`` lacks, now added to it."""
+    found: list[str] = []
+    for task in tasks:
+        for one in task.activations:
+            if one not in walked:
+                walked.append(one)
+                found.append(one)
+    return found
 
 
 def _ended_text(status: ProcessingStatus | None, reason: ProcessingReason | None) -> str:
