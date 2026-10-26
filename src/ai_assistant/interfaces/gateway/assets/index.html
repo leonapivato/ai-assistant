@@ -236,9 +236,11 @@
                 -->
                 <p class="hint" id="chat-state" aria-live="polite"></p>
                 <!--
-                  The stop control (ADR-0295 §1:2, ADR-0297 §5:7): offered while the state
-                  shows "working…" with an id, naming that activation and no other, and
-                  gone once it ends. What the stop answered is said beside it (§5:4-§5:6).
+                  The stop control (ADR-0295 §1:2, ADR-0297 §5:7, ADR-0349 §4:3): offered
+                  while the state shows "working…" with an id, sending a stop for each
+                  activation the state names and no other, and gone once every stop has
+                  landed or they end. What the stops answered is said beside it
+                  (§5:4-§5:6).
                 -->
                 <p class="choice" id="chat-stop-row" hidden>
                   <button type="button" id="chat-stop">Stop</button>

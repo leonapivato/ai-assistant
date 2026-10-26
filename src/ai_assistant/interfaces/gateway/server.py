@@ -3511,9 +3511,11 @@ class Gateway:
         """Stop one running activation, named by the browser (ADR-0297 §5, ADR-0295 §1).
 
         **The id is the browser's own argument and is relayed whole**: the page names
-        the activation its conversation's current state named while it showed
+        an activation its conversation's current state named while it showed
         "working…" (ADR-0297 §5:7), and nothing here reads a state to choose one, so
-        a page cannot be made to stop an activation it did not name. Whether the id
+        a page cannot be made to stop an activation it did not name. Where the state
+        names several, the page sends one of these for each (ADR-0349 §4:3): every
+        stop still names exactly one activation (ADR-0295 §1:1). Whether the id
         names a running activation, an ended one or nothing the hub knows is the hub's
         answer (§5:4-§5:6), relayed as its own value; none of the three is a fault.
 
@@ -5105,12 +5107,18 @@ def _state_view(state: ConversationState) -> dict[str, Any]:
     Relayed and never derived: "working…" while an activation started from the
     conversation runs (§8:2), and how the last one ended (§8:3, with ADR-0295 §3:4's
     *stopped*). The page renders it beside the transcript and never into it (§8:1).
+
+    **Every running activation the state names crosses, in the state's order**, as
+    ``activation_ids``, and the page's stop control sends a stop for each (ADR-0349
+    §4:3, §10:3). The one ``activation_id`` this view carried before is not kept beside
+    it: the page is its only reader, and this gateway serves the page with ``no-store``,
+    so every load pairs the page with this view. A page left open across an upgrade
+    finds no id under the old key and offers no stop until it is loaded again, which is
+    safer than a key that would let it stop one activation of several.
     """
-    # ADR-0349 §1:4's step 1: the page still reads the one id the state named before, so
-    # the view relays it under its own key; the page's stop for every one is step 4's.
     return {
         "working": state.working,
-        "activation_id": state.activation_ids[-1] if state.activation_ids else None,
+        "activation_ids": list(state.activation_ids),
         "last_ended": None if state.last_ended is None else state.last_ended.value,
     }
 

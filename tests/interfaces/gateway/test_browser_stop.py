@@ -1,9 +1,10 @@
-"""The chat's Stop control, driven (ADR-0297 §5, §6:4; ADR-0295 §1:2).
+"""The chat's Stop control, driven (ADR-0297 §5, §6:4; ADR-0295 §1:2; ADR-0349 §4:3).
 
 What the page does with a stop, which the bundle's text cannot say: the control is
-offered only while the open conversation's state shows "working…" with an id, it names
-that id and no other, the answer is said beside it, and once the state ends the control
-is gone and the state's own ending says *stopped*. The engine is the canonical fake;
+offered only while the open conversation's state shows "working…" with an id, it sends a
+stop for each id the state names and no other, the answers are said beside it, and once
+the state ends the control is gone and the state's own ending says *stopped*. The
+engine is the canonical fake;
 the state is scripted on its ``conversation`` read and pushed onto its change stream as
 the engine pushes a state that changed (ADR-0296 §4:9), and its stop on
 ``stop_activation``, so the page is driven against the gateway's real relay.
@@ -58,6 +59,7 @@ class _Scripted:
         self.conversation_id: str | None = None
         self._state = ConversationState()
         self.answer = ActivationStop.STOPPED
+        self.answers: dict[str, ActivationStop] = {}
         self.stops: list[str] = []
         held = drive.engine.conversation
 
@@ -67,7 +69,7 @@ class _Scripted:
 
         async def stop_activation(activation_id: Identifier, /) -> ActivationStop:
             self.stops.append(activation_id)
-            return self.answer
+            return self.answers.get(activation_id, self.answer)
 
         drive.engine.conversation = conversation  # type: ignore[method-assign]
         drive.engine.stop_activation = stop_activation  # type: ignore[method-assign]
@@ -190,6 +192,91 @@ async def test_a_later_activation_starts_with_no_answer_beside_it(
 
         await expect(stop).to_be_visible(timeout=_FOLLOWED)
         await expect(drive.page.locator("#chat-stop-said")).to_be_hidden()
+        await stop.click()
+        await expect(stop).to_be_hidden()
+        assert scripted.stops == [_ACTIVATION, _NEXT]
+
+
+@pytest.mark.parametrize("viewport", _VIEWPORTS)
+async def test_one_press_stops_every_activation_the_state_names(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """ADR-0349 §4:3: a stop for each running activation, each naming one (ADR-0295 §1:1).
+
+    "working…" shows while any of them runs, the one press sends both stops, the landed
+    answer is said once, and the control is gone once both have landed.
+    """
+    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
+        scripted = await _open(drive)
+        stop = drive.page.locator("#chat-stop")
+        scripted.state = ConversationState(working=True, activation_ids=(_ACTIVATION, _NEXT))
+
+        await expect(drive.page.locator("#chat-state")).to_contain_text(
+            "working on this", timeout=_FOLLOWED
+        )
+        await expect(stop).to_be_visible()
+        assert await drive.page.evaluate(
+            "() => document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+        )
+        await stop.click()
+
+        said = drive.page.locator("#chat-stop-said")
+        await expect(said).to_contain_text("Stopped. Nothing new starts in this")
+        assert (await said.inner_text()).count("Stopped.") == 1
+        await expect(stop).to_be_hidden()
+        assert sorted(scripted.stops) == sorted([_ACTIVATION, _NEXT])
+
+        scripted.state = ConversationState(last_ended=ActivationEnding.STOPPED)
+        await expect(drive.page.locator("#chat-state")).to_contain_text(
+            "was stopped", timeout=_FOLLOWED
+        )
+        await expect(said).to_be_hidden()
+
+
+async def test_a_stop_that_landed_beside_one_that_wrote_nothing_says_both(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Each answer is about its own activation: the control stays for the one not stopped.
+
+    Pressed again, it sends a stop only for the activation no stop has landed on.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        scripted = await _open(drive)
+        scripted.answers[_NEXT] = ActivationStop.ALREADY_ENDED
+        scripted.state = ConversationState(working=True, activation_ids=(_ACTIVATION, _NEXT))
+        stop = drive.page.locator("#chat-stop")
+        await expect(stop).to_be_visible(timeout=_FOLLOWED)
+
+        await stop.click()
+
+        said = drive.page.locator("#chat-stop-said")
+        await expect(said).to_contain_text("Stopped. Nothing new starts in this")
+        await expect(said).to_contain_text("That had already ended, so nothing was stopped.")
+        await expect(stop).to_be_visible()
+        await expect(stop).to_be_enabled()
+        assert sorted(scripted.stops) == sorted([_ACTIVATION, _NEXT])
+
+        await stop.click()
+
+        await expect(stop).to_be_enabled()
+        assert sorted(scripted.stops) == sorted([_ACTIVATION, _NEXT, _NEXT])
+
+
+async def test_an_activation_starting_after_a_stop_is_offered_the_control(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A newer running activation the state then names is stopped by the next press alone."""
+    async with driving(gateway_browser, tmp_path) as drive:
+        scripted = await _open(drive)
+        scripted.state = ConversationState(working=True, activation_ids=(_ACTIVATION,))
+        stop = drive.page.locator("#chat-stop")
+        await expect(stop).to_be_visible(timeout=_FOLLOWED)
+        await stop.click()
+        await expect(stop).to_be_hidden()
+
+        scripted.state = ConversationState(working=True, activation_ids=(_ACTIVATION, _NEXT))
+
+        await expect(stop).to_be_visible(timeout=_FOLLOWED)
         await stop.click()
         await expect(stop).to_be_hidden()
         assert scripted.stops == [_ACTIVATION, _NEXT]

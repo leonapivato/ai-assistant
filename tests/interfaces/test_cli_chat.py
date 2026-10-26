@@ -1063,6 +1063,20 @@ def test_a_new_activation_while_working_names_its_own_id(output: StringIO) -> No
     assert rendered.count("assistant stop a-2") == 1
 
 
+def test_working_names_every_activation_the_state_names(output: StringIO) -> None:
+    """ADR-0349 §4:3, §10:3: a command for each running activation, in the state's order."""
+    view = cli._ChatView("c-1", device_id="hub", cursor=0)
+
+    view.show_state(ConversationState(working=True, activation_ids=("a-1",)))
+    view.show_state(ConversationState(working=True, activation_ids=("a-1", "a-2")))
+
+    rendered = _flat(output.getvalue())
+    assert "To stop it: assistant stop a-1" in rendered
+    later = rendered[rendered.index("To stop them") :]
+    assert later.index("assistant stop a-1") < later.index("assistant stop a-2")
+    assert "To stop it:" not in later
+
+
 @pytest.mark.parametrize(
     ("ending", "said"),
     [
