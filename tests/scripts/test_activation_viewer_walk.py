@@ -325,3 +325,31 @@ def test_the_walk_names_an_activation_by_id_and_never_by_path(server: Any) -> No
         status, _headers, body = _get(server.port, f"/api/walk?id={asked}")
         assert status == 404
         assert body == {"error": "no such activation"}
+
+
+def test_a_score_too_large_for_a_number_loses_its_hint_alone(server: Any, record: Path) -> None:
+    """ADR-0316 §5:2: a 401-digit score is a hint not recognised, never the walk's failure."""
+    huge = "9" * 401
+    returned = (
+        '{"activation_id": "huge", "source": "recall", "kind": "returned", "recorded_at": "'
+        + iso(10)
+        + '", "body": {"finds": [{"id": "x", "score": '
+        + huge
+        + ', "band": "asserted"}], "kept": [{"id": "x", "score": '
+        + huge
+        + "}]}}\n"
+    )
+    (record / "huge.jsonl").write_text(returned)
+    status, _headers, walked = _get(server.port, "/api/walk?id=huge")
+    assert status == 200
+    recall = walked["steps"][1]
+    assert recall["kept"] == [
+        {
+            "id": "x",
+            "score": None,
+            "bands": ["asserted"],
+            "found_by": [],
+            "label": None,
+            "text": None,
+        }
+    ]
