@@ -2473,25 +2473,35 @@ def _position(item: PlaceItem) -> int | None:
 def _in_order(
     items: Sequence[PlaceItem], sent: Sequence[tuple[datetime, PlaceItem]]
 ) -> tuple[PlaceItem, ...]:
-    """``items`` with each of ``sent`` placed where its time, then position, puts it.
+    """``items`` with each of ``sent`` placed where the medium's order puts it.
 
-    The window keeps its own order, oldest first; each new item goes after every item
-    sent before it, or at its time but earlier in the medium, so a take brought in a
-    later round still lands among the messages it came between.
+    The window keeps its own order, oldest first. Each new item goes after every item
+    the medium holds before it: by position where both carry one, the medium's own
+    order, which a clock set back never reverses, and by the time each was sent where
+    either carries none. So a take brought in a later round still lands among the
+    messages it came between.
     """
     merged = list(items)
-    for at, item in sorted(sent, key=lambda pair: (pair[0], _position(pair[1]) or 0)):
-        position = _position(item)
+    for at, item in sorted(sent, key=lambda pair: _order_key(pair[1], pair[0])):
         index = len(merged)
-        while index > 0:
-            before = merged[index - 1]
-            if before.at is None or before.at < at:
-                break
-            if before.at == at and (position is None or (_position(before) or 0) <= position):
-                break
+        while index > 0 and _comes_after(merged[index - 1], item, at):
             index -= 1
         merged.insert(index, item)
     return tuple(merged)
+
+
+def _order_key(item: PlaceItem, at: datetime) -> tuple[int, datetime]:
+    """The order new items are placed in: by position, and by time without one."""
+    position = _position(item)
+    return (-1 if position is None else position, at)
+
+
+def _comes_after(before: PlaceItem, item: PlaceItem, at: datetime) -> bool:
+    """Whether ``before``, already in the window, belongs after ``item`` (sent ``at``)."""
+    mine, theirs = _position(item), _position(before)
+    if mine is not None and theirs is not None:
+        return theirs > mine
+    return before.at is not None and before.at > at
 
 
 def _held_back(one: _Round) -> bool:
