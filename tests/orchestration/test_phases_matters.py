@@ -732,6 +732,15 @@ async def test_an_offer_taken_ends_the_offering_one_silent_and_the_reply_covers_
     assert shown["understood_as"] == newer_text
     assert shown["input"] == newer_text
     assert "answer_offer" in planner.offered[older_text][2]
+    # §7:21: once taken, the input is the older's own, shown to its planning as input
+    # of the place, once, with when it was sent.
+    after = planner.requests[older_text][3]
+    taken = [one for one in after["place_window"] if one["text"] == newer_text]
+    assert len(taken) == 1
+    assert taken[0]["is_the_input"] is True
+    assert taken[0]["from"] == after["place_window"][0]["from"]
+    assert "at" in taken[0]
+    assert "offers" not in after, "a taken offer is no longer open"
 
 
 async def test_an_offer_declined_sends_the_newer_one_to_wait_with_the_reason(
@@ -856,7 +865,19 @@ async def test_an_offer_made_while_the_older_plans_holds_its_round_back(
                 ),
             ),
         ),
-        RoundResponse(text="Booked for Saturday."),
+        # Planned before the offer: a write and its message, both held back (§7:14).
+        RoundResponse(
+            text="Booked for Saturday.",
+            calls=(
+                _call(
+                    "c2",
+                    "remember",
+                    fact="Booked Saturday.",
+                    why="the booking",
+                    rests_on_input=True,
+                ),
+            ),
+        ),
         lambda request: RoundResponse(
             calls=(_call("c3", "answer_offer", offer=_label_of(request, older_text), take=True),)
         ),
@@ -890,7 +911,17 @@ async def test_an_offer_made_while_the_older_plans_holds_its_round_back(
     record = _of(found, older)
     assert [one.taken_over_from for one in record.joined] == [newer]
     assert "offers" not in planner.requests[older_text][1]
-    assert "offers" in planner.requests[older_text][2]
+    replanned = planner.requests[older_text][2]
+    assert "offers" in replanned
+    (withheld,) = replanned["rounds"][1]["calls"]
+    assert "offered to this work before this round acted" in withheld["outcome"]
+    assert replanned["rounds"][1]["text_was"] != "written into the place"
+    remembered = [
+        one
+        for one in await harness.plans.activation_effects([older])
+        if one.capability == "remember"
+    ]
+    assert len(remembered) == 1, "the held-back write was never claimed, by any path"
 
 
 # --- §4:6-§4:11, §6:1-§6:6: the stop call and the look-up --------------------------------

@@ -401,8 +401,19 @@ class MatterCalls:
     async def _show(
         self, caller: MatterCaller, decision: str, named: str, *, stopped: bool | None
     ) -> None:
-        """Hold the named activation's work, read fresh through the peer view (§6:7)."""
-        view = await self._matters.peer(named, owner_records=caller.owner_records)
+        """Hold the named activation's work, read fresh through the peer view (§6:7).
+
+        After a stop, a read that fails leaves the stop done, its work shown as not read:
+        what the call did happened, whatever the read after it found (§4:11). For a
+        look-up the read is the call, so its failure is the call's.
+        """
+        try:
+            view = await self._matters.peer(named, owner_records=caller.owner_records)
+        except PlanningError, MemoryStoreError:
+            if stopped is None:
+                raise
+            _log.warning("matter_stop_work_unread", stage="acting", reason="store_failed")
+            view = None
         running = self._matters.state_of(named)
         caller.shown[decision] = PeerShown(
             activation_id=named,

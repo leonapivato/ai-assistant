@@ -1081,13 +1081,24 @@ def _calls(*calls: tuple[str, dict[str, object]]) -> RoundResponse:
 
 
 def test_proposes_and_answers_offer_read_the_rounds_calls() -> None:
-    stop = _calls(("stop_activation", {"activation": "E1"}))
-    assert _round("proposes", {"capability": "stop_activation"}, stop) is None
-    assert _round("proposes", {"capability": "stop_activation"}, _calls()) is not None
-    assert _round("proposes", {"capability": "stop_activation"}, None) is not None
+    """Each names its target: a call naming another label, or none, fails."""
+    stopping: dict[str, object] = {
+        "capability": "stop_activation",
+        "argument": "activation",
+        "value": "E1",
+    }
+    assert _round("proposes", stopping, _calls(("stop_activation", {"activation": "E1"}))) is None
+    assert (
+        _round("proposes", stopping, _calls(("stop_activation", {"activation": "E9"}))) is not None
+    )
+    assert _round("proposes", stopping, _calls(("stop_activation", {}))) is not None
+    assert _round("proposes", stopping, _calls()) is not None
+    assert _round("proposes", stopping, None) is not None
     take = _calls(("answer_offer", {"offer": "E1", "take": True}))
     decline = _calls(("answer_offer", {"offer": "E1", "take": False, "reason": "sent"}))
-    assert _round("answers_offer", {"answer": "take"}, take) is None
-    assert _round("answers_offer", {"answer": "take"}, decline) is not None
-    assert _round("answers_offer", {"answer": "decline"}, decline) is None
-    assert _round("answers_offer", {"answer": "decline"}, _calls()) is not None
+    elsewhere = _calls(("answer_offer", {"offer": "E9", "take": True}))
+    assert _round("answers_offer", {"answer": "take", "offer": "E1"}, take) is None
+    assert _round("answers_offer", {"answer": "take", "offer": "E1"}, decline) is not None
+    assert _round("answers_offer", {"answer": "take", "offer": "E1"}, elsewhere) is not None
+    assert _round("answers_offer", {"answer": "decline", "offer": "E1"}, decline) is None
+    assert _round("answers_offer", {"answer": "decline", "offer": "E1"}, _calls()) is not None

@@ -26,6 +26,7 @@ earlier_work = false
 [property]
 check = "answers_offer"
 answer = "decline"
+offer = "E1"
 
 [input]
 file = "offer-declined-where-it-would-undo-what-was-sent.json"

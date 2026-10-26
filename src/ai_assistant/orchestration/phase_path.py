@@ -1886,25 +1886,32 @@ class PhaseWorking:
         """
         fresh = list(joined[self._joined_taken :])
         self._joined_taken = len(joined)
-        items: list[PlaceItem] = []
+        sent: list[tuple[datetime, PlaceItem]] = []
         for one in fresh:
             if one.taken_over_from not in taken or one.channel != place:
                 continue
             for message in one.messages:
-                items.append(
-                    PlaceItem(
-                        author=PlaceAuthor.USER,
-                        text=message.text,
-                        at=message.sent_at,
-                        is_input=True,
-                        referent_id=(
-                            None if message.position is None else f"message:{message.position}"
+                sent.append(
+                    (
+                        message.sent_at,
+                        PlaceItem(
+                            author=PlaceAuthor.USER,
+                            text=message.text,
+                            at=message.sent_at,
+                            is_input=True,
+                            referent_id=(
+                                None if message.position is None else f"message:{message.position}"
+                            ),
                         ),
                     )
                 )
                 if self.given_at is not None and message.sent_at > self.given_at:
                     self.given_at = message.sent_at
-        if items:
+        if sent:
+            # The window is oldest first, and a renewed offer brings the absorber's own
+            # input before what it absorbed, so the messages go in the order sent.
+            sent.sort(key=lambda pair: pair[0])
+            items = tuple(item for _, item in sent)
             self.place = replace(self.place, items=(*self.place.items, *items))
 
     @property

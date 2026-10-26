@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Final
 
 from test_matters import _running, _understood
 
+from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     ActionRequest,
     ActivationStop,
@@ -292,3 +293,24 @@ async def test_a_decline_carries_its_reason() -> None:
         "reason": "already booked",
     }
     assert newer.declined == ((_A, "already booked"),)
+
+
+async def test_a_stop_whose_findings_cannot_be_read_is_still_done() -> None:
+    """§4:11: what the call did happened, whatever the read after it found."""
+    older, asker = _running("a", _A, order=1), _running("b", _B, order=2)
+    matters, calls, stops, _ = _wired([older, asker])
+
+    async def unreadable(activation_id: str, *, owner_records: bool) -> None:
+        del activation_id, owner_records
+        msg = "the memory store is unavailable"
+        raise MemoryStoreError(msg)
+
+    matters.peer = unreadable  # type: ignore[method-assign]  # the read fails, once stopped
+    caller = _caller(asker, running=frozenset({_A}))
+    with calling(caller):
+        answer = await calls.run(_call(STOP_ACTIVATION, activation=_episode(_A)))
+        refused = await calls.run(_call(LOOK_UP_ACTIVATION, activation=_episode(_A)))
+    assert isinstance(answer, ToolResult)
+    assert answer.outcome is ToolOutcome.SUCCEEDED
+    assert stops.stopped == [_A]
+    assert isinstance(refused, NotDone), "a look-up is its read, so its failure is the call's"

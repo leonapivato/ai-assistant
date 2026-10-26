@@ -2219,21 +2219,26 @@ def _continues_nothing(reply: Reply, params: Mapping[str, object]) -> Judgement:
 
 
 def _proposes(reply: Reply, params: Mapping[str, object]) -> Judgement:
-    """The round proposes at least one call to the named capability."""
+    """The round proposes a call to the named capability, its named argument the value."""
     if reply.round is None:
         return "the response reads as no round"
-    if not any(one.name == params["capability"] for one in reply.round.calls):
+    called = [one for one in reply.round.calls if one.name == params["capability"]]
+    if not called:
         return "the round proposes no call to the named capability"
+    if not any(one.arguments.get(str(params["argument"])) == params["value"] for one in called):
+        return "the round's call names another value, or none"
     return None
 
 
 def _answers_offer(reply: Reply, params: Mapping[str, object]) -> Judgement:
-    """The round answers an offer once, taking it or declining it as named (ADR-0349 §7:20)."""
+    """The round answers the named offer once, taking or declining it as named (§7:20)."""
     if reply.round is None:
         return "the response reads as no round"
     answers = [one for one in reply.round.calls if one.name == "answer_offer"]
     if len(answers) != 1:
         return f"the round answers {len(answers)} offer(s)"
+    if answers[0].arguments.get("offer") != params["offer"]:
+        return "the round answers another offer"
     take = answers[0].arguments.get("take")
     if take is not (params["answer"] == "take"):
         return "the round answers the offer the other way"
@@ -2293,16 +2298,16 @@ CODE_CHECKS: Final[dict[str, CodeCheck]] = {
         ),
         CodeCheck(
             "proposes",
-            "the round proposes at least one call to the named capability",
+            "the round proposes a call to the named capability, its named argument the value",
             frozenset({PLANNING}),
-            {"capability": "string"},
+            {"capability": "string", "argument": "string", "value": "string"},
             _proposes,
         ),
         CodeCheck(
             "answers_offer",
-            "the round answers one offer, taking it or declining it as named",
+            "the round answers the named offer once, taking it or declining it as named",
             frozenset({PLANNING}),
-            {"answer": "string"},
+            {"answer": "string", "offer": "string"},
             _answers_offer,
         ),
     )

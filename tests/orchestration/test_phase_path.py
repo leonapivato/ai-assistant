@@ -532,3 +532,52 @@ async def test_a_recorder_waiting_on_an_owner_that_stopped_takes_the_appends_ove
 
     assert appended == 1
     assert (state.extending, state.extension) == (False, None)
+
+
+def test_a_taken_offers_messages_join_the_place_window_in_the_order_sent() -> None:
+    """ADR-0349 §7:21: a renewed offer brings the absorber's own input before what it
+    absorbed, and the window shows them oldest first; an absorbed input is not shown."""
+    from datetime import UTC, datetime  # noqa: PLC0415 — this case's clock alone
+
+    from ai_assistant.core.types import JoinedInput, RecordedInputMessage  # noqa: PLC0415
+
+    at = datetime(2026, 10, 21, 9, tzinfo=UTC)
+    place = conversation_channel("c1")
+    working = PhaseWorking(
+        activation_id="act",
+        place=place_window(TranscriptWindow(conversation=place, messages=())),
+        conversation_id="c1",
+        trigger_origin=None,
+        owner_records=True,
+        round_limit=2,
+    )
+
+    def joined(text: str, minute: int, position: int, came_from: str) -> JoinedInput:
+        return JoinedInput(
+            joined_at=at,
+            channel=place,
+            messages=(
+                RecordedInputMessage(
+                    text=text, sent_at=at.replace(minute=minute), position=position
+                ),
+            ),
+            taken_over_from=came_from,
+        )
+
+    working.take_joined(
+        (
+            joined("actually three bedrooms", 2, 3, "offering"),
+            joined("make it two bedrooms", 1, 2, "offering"),
+            joined("near the park", 0, 1, "absorbed-elsewhere"),
+        ),
+        place,
+        taken={"offering"},
+    )
+
+    assert [one.text for one in working.place.items] == [
+        "make it two bedrooms",
+        "actually three bedrooms",
+    ]
+    assert all(one.is_input for one in working.place.items)
+    working.take_joined((), place, taken={"offering"})
+    assert len(working.place.items) == 2, "each input is taken once"

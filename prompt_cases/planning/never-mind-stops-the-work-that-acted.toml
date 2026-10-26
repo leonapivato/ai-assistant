@@ -26,6 +26,8 @@ earlier_work = false
 [property]
 check = "proposes"
 capability = "stop_activation"
+argument = "activation"
+value = "E1"
 
 [input]
 file = "never-mind-stops-the-work-that-acted.json"
