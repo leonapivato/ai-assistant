@@ -66,15 +66,17 @@ from ai_assistant.orchestration.task_scheduler import (
 from ai_assistant.testing import FakeConversationStore, FakeMemoryStore, FakePlanStore
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.types import (
         ActivationEffect,
         Conversation,
         FrozenJson,
+        MemoryRecord,
         ScheduledTask,
         ToolDefinition,
     )
+    from ai_assistant.orchestration.activation_state import ActivationState
 
 
 class _World:
@@ -86,16 +88,18 @@ class _World:
         limits: TaskManagerLimits = LIMITS,
         plans: FakePlanStore | None = None,
         zones: PersonZones | None = None,
+        memory: FakeMemoryStore | None = None,
     ) -> None:
         self.plans = FakePlanStore(now=lambda: AT) if plans is None else plans
-        self.memory = FakeMemoryStore(now=lambda: AT)
+        self.memory = FakeMemoryStore(now=lambda: AT) if memory is None else memory
+        self.states: list[ActivationState] = []
         self.running: set[str] = set()
         self.starting: set[str] = set()
         self.woken = 0
         self.manager = TaskManager(
             plans=self.plans,
             memory=self.memory,
-            running=lambda: (),
+            running=lambda: tuple(self.states),
             is_running=lambda one: one in self.running,
             starting=lambda one: one in self.starting,
             wake=self._wake,
@@ -359,6 +363,38 @@ async def test_a_step_that_spawns_and_ends_after_what_runs_is_read_is_walked_aga
     assert [one.task_id for one in left.tasks] == [plans.grandchild.id]
     assert left.activations == ()
     assert plans.reads > 4, "the walk went again"
+
+
+async def test_what_runs_below_is_read_with_the_schedule_not_after_the_parents() -> None:
+    """§3:1-§3:4: a running step shown as running, however it moves while parents are read."""
+    from test_matters import _running  # noqa: PLC0415 — a running state, as that suite builds one
+
+    moved: list[ScheduledTask] = []
+
+    class _Moving(FakeMemoryStore):
+        async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+            if not moved:
+                # While the parents are read, the running step spawns its next and ends.
+                moved.append(
+                    await write_task(world.plans, step_id, when=DueAt(at=AT + timedelta(days=1)))
+                )
+                await world.plans.settle_occurrence(step_id, OccurrenceState.DONE)
+                state.processing(AT, None)
+            return await super().get_many(record_ids)
+
+    world = _World(memory=_Moving(now=lambda: AT))
+    stopped = activation()
+    sibling = await write_task(world.plans, stopped, when=DueAt(at=AT + timedelta(hours=1)))
+    child = await write_task(world.plans, stopped)
+    step_id = await pushed(world.plans, child)
+    state = _running("a", step_id, order=1)
+    world.states.append(state)
+
+    left = await _still_live(world, stopped)
+
+    assert moved, "the step moved while the parents were read"
+    assert [one.task_id for one in left.tasks] == [sibling.id]
+    assert left.running == (step_id,), "shown running as it was when the schedule was read"
 
 
 async def test_a_marked_task_is_shown_with_its_text_withheld() -> None:
